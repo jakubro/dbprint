@@ -6,7 +6,7 @@ baseline:
   source: committed_prints
   path: prints/production
   generated_at: '2026-05-17T22:48:01Z'
-  dbprint_version: 0.1.0
+  dbprint_version: 0.2.0
 target:
   source: live_database
   scanned_at: '2026-05-17T22:48:01Z'

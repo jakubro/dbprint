@@ -2,7 +2,7 @@ format_version: 1
 generated_at: '2026-05-17T22:48:01Z'
 connection: production
 adapter: postgres
-dbprint_version: 0.1.0
+dbprint_version: 0.2.0
 statistics_params:
   enumeration_threshold: 50
   top_n_values: 30

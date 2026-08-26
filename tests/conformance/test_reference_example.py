@@ -12,6 +12,7 @@ from typing import Any, get_args
 import pytest
 import yaml
 
+from dbprint import __version__
 from dbprint.adapters.base import Distribution
 from dbprint.conformance import validate_print
 from dbprint.spec.classification import Classification
@@ -52,6 +53,33 @@ def test_vocabulary_example_has_zero_errors() -> None:
     errors = [i for i in issues if i.severity == "error"]
     assert errors == [], "Vocabulary example must conform with zero errors. Got:\n" + "\n".join(
         f"  {e.code} at {e.path}: {e.detail}" for e in errors
+    )
+
+
+def test_committed_examples_record_the_current_producer_version() -> None:
+    """A version bump restages both examples; fail here, not in the Postgres-backed agreement."""
+
+    recorded: list[tuple[str, str]] = []
+
+    for root in (EXAMPLE, EXAMPLE_VOCABULARY):
+        for name in ("manifest.yaml", "diff.yaml"):
+            document = yaml.safe_load((root / name).read_text())
+            nested = (value for value in document.values() if isinstance(value, dict))
+
+            recorded.extend(
+                (f"{root.name}/{name}", block["dbprint_version"])
+                for block in (document, *nested)
+                if block.get("dbprint_version") is not None
+            )
+
+    assert recorded, "no committed example records a producer version"
+
+    stale = [(where, value) for where, value in recorded if value != __version__]
+
+    assert not stale, (
+        f"the committed examples record a producer other than {__version__}; "
+        "run `just example` and `just example-vocabulary`.\n"
+        + "\n".join(f"  {where}: {value}" for where, value in stale)
     )
 
 
