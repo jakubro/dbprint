@@ -1,0 +1,43 @@
+format_version: 1
+table: seedbank.germination_trial
+profiled_at: '2026-05-17T22:48:01Z'
+eligible_target: true
+refers_to:
+- column:
+  - accession_id
+  target_table: seedbank.accession
+  target_column:
+  - accession_id
+  on_delete: CASCADE
+  on_update: NO ACTION
+  detection: declared
+  constraint_name: germination_trial_accession_id_fkey
+  observed:
+    fanout_avg: 2.8125
+    target_coverage: 0.128
+    scope_compatible: true
+    fanout_max: 3
+    coherent: true
+    containment: 1.0
+    answerable_count: 117
+- column:
+  - collector_id
+  target_table: seedbank.collector
+  target_column:
+  - collector_id
+  detection: inferred
+  observed:
+    fanout_avg: 2.25
+    target_coverage: 1.0
+    scope_compatible: true
+    fanout_max: 3
+    coherent: true
+    containment: 1.0
+    answerable_count: 400
+referenced_by:
+- column:
+  - trial_id
+  referencer_table: seedbank.accession_summary
+  referencer_column:
+  - germination_trial_id
+  detection: inferred

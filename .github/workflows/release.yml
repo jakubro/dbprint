@@ -1,0 +1,41 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    if: github.event.repository.private == false
+    uses: ./.github/workflows/gate.yml
+
+  publish:
+    if: github.event.repository.private == false
+    needs: gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Build the wheel and sdist
+        run: uv build
+
+      - name: Fail if the tag and the built version disagree
+        run: |
+          built=$(ls dist/*.whl | head -1 | sed -E 's/.*dbprint-([^-]+)-.*/\1/')
+          tagged=${GITHUB_REF_NAME#v}
+          test "$built" = "$tagged" || {
+            echo "tag $GITHUB_REF_NAME builds version $built"
+            exit 1
+          }
+
+      - name: Publish
+        run: uv publish --trusted-publishing always

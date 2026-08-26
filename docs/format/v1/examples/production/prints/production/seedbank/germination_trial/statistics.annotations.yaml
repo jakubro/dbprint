@@ -1,0 +1,8 @@
+format_version: 1
+columns:
+  medium:
+    values:
+    - value: control
+      note: >-
+        No growth medium: a no-treatment control group, its germinated_count compared
+        against ambient conditions rather than a physical medium.

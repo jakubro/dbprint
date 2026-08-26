@@ -1,0 +1,9 @@
+format_version: 1
+refers_to:
+- column: [traits]
+  path: [reclassified_taxon_id]
+  target_table: seedbank.taxon
+  target_column: [taxon_id]
+  note: >-
+    traits occasionally carries a re-identification event under this key, recording a
+    taxon call that supersedes the row's own taxon_id without editing it.

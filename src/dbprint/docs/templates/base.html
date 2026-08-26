@@ -1,0 +1,58 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>dbprint catalogue</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+
+{% macro nav_group(node, conn_name, prefix, current, current_schema) %}
+  {% for leaf in node.leaves %}
+    <div class="nav-leaf{{ ' nav-current' if leaf == current else '' }}">
+      <a href="{{ url_for('table', conn=conn_name, table=leaf) }}">{{ leaf.split('.')[-1] }}</a>
+    </div>
+  {% endfor %}
+  {% for group_name, child in node.groups.items() %}
+    {% set full_prefix = prefix ~ group_name ~ '.' %}
+    {% set key = prefix ~ group_name %}
+    {% set is_schema_level = not child.groups %}
+    {% set is_current_schema = is_schema_level and key == current_schema %}
+    {% set should_open = (not is_schema_level) or is_current_schema or (current and current.startswith(full_prefix)) %}
+    <details class="nav-group"{{ ' open' if should_open else '' }}>
+      <summary class="{{ 'nav-current' if is_current_schema else '' }}">
+        {% if is_schema_level %}
+          <a href="{{ url_for('schema', conn=conn_name, schema=key) }}">{{ group_name }}</a>
+        {% else %}
+          {{ group_name }}
+        {% endif %}
+      </summary>
+      {{ nav_group(child, conn_name, full_prefix, current, current_schema) }}
+    </details>
+  {% endfor %}
+{% endmacro %}
+
+<div class="layout">
+  <button type="button" id="sidebar-toggle" class="sidebar-toggle" aria-label="Toggle sidebar" title="Toggle sidebar">&#9776;</button>
+  <nav class="sidebar">
+    <a href="/" class="sidebar-title">dbprint catalogue</a>
+    {% for conn_name, tree in (nav or {}).items() %}
+      <div class="nav-conn">{{ conn_name }}</div>
+      <div class="sidebar-root muted">{{ (conn_roots or {}).get(conn_name, '') }}</div>
+      <div class="nav-tree">
+        {{ nav_group(tree, conn_name, '', (fqn|default(none)) if (conn|default('')) == conn_name else none,
+                      (schema|default(none)) if (conn|default('')) == conn_name else none) }}
+      </div>
+    {% endfor %}
+  </nav>
+  <main>
+    {% block body %}{% endblock %}
+  </main>
+</div>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/mermaid.min.js') }}"></script>
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: "neutral",
+    securityLevel: "loose",
+    themeVariables: { clusterBkg: "transparent" },
+  });
+</script>

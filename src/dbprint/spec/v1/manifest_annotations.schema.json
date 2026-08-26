@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jakubro.github.io/dbprint/spec/v1/manifest_annotations.schema.json",
+  "title": "dbprint manifest.annotations.yaml v1",
+  "description": "Connection-grain user-authored notes. See SPEC.md section 2.7.3.",
+  "type": "object",
+  "required": ["format_version"],
+  "additionalProperties": false,
+  "properties": {
+    "format_version": {"const": 1},
+    "notes": {"type": "string"}
+  }
+}

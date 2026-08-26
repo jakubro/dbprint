@@ -1,0 +1,473 @@
+{% extends "base.html" %}
+{% block body %}
+
+{% macro col_links(cols, base_url='') %}
+  {%- for c in cols %}<a href="{{ base_url }}#col-{{ c }}">{{ c }}</a>{% if not loop.last %}, {% endif %}{% endfor -%}
+{% endmacro %}
+
+<h1>{{ fqn }} <span class="muted">{{ conn }}</span></h1>
+
+{% if missing_artifacts_notice %}
+  <div class="notice">{{ missing_artifacts_notice }}</div>
+{% endif %}
+
+<div class="cards">
+  <div class="card">
+    <div class="label">metadata</div>
+    <div class="big">{{ entry.type|capitalize }}</div>
+    <div class="muted">profiled <span class="badge badge-muted" title="{{ entry.profiled_at|dt }}">{{ entry.profiled_at|relative }}</span></div>
+  </div>
+  <div class="card">
+    <div class="label">rows</div>
+    <div class="big">{{ row_count.row_count|human }}</div>
+    {% if row_count.method %}<div class="muted">{{ row_count.method }}</div>{% endif %}
+    {% if row_count.share_pct is not none %}
+      <div class="muted">
+        scanned {{ row_count.rows_scanned|human }} ({{ row_count.share_pct }}%)
+        {% if row_count.filter %}, filter <code>{{ row_count.filter }}</code>{% endif %}
+      </div>
+      <div class="bar-track"><span class="bar-fill bar-fill-muted" style="width:{{ row_count.share_pct }}%"></span></div>
+    {% endif %}
+  </div>
+  <div class="card">
+    <div class="label">columns</div>
+    <div class="big">{{ entry.columns|human }}</div>
+    {% if skyline %}
+      <div class="skyline skyline-mini">
+        {% for s in skyline %}
+          <a href="#col-{{ s.name }}" class="skyline-col" title="{{ s.name }}">
+            <span class="skyline-track">
+              <span class="skyline-bar skyline-{{ s.bucket }}" style="--h:{{ s.height }}%; --fill:{{ s.fill }}%"></span>
+            </span>
+          </a>
+        {% endfor %}
+      </div>
+    {% endif %}
+  </div>
+  {% if cards %}
+    <div class="card">
+      <div class="label">related</div>
+      <div class="big">{{ cards.refers_to + cards.referenced_by }}</div>
+      <div class="muted">
+        {% if cards.refers_to and cards.referenced_by %}
+          {{ cards.refers_to }} table{{ 's' if cards.refers_to != 1 else '' }} out &middot; {{ cards.referenced_by }} in
+        {% elif cards.refers_to %}
+          {{ cards.refers_to }} table{{ 's' if cards.refers_to != 1 else '' }} out
+        {% elif cards.referenced_by %}
+          {{ cards.referenced_by }} table{{ 's' if cards.referenced_by != 1 else '' }} in
+        {% elif relationships.eligible_target == false %}
+          not a join target - no declared-unique column
+        {% else %}
+          no related tables
+        {% endif %}
+      </div>
+    </div>
+  {% endif %}
+  {% if grain %}
+    <div class="card">
+      <div class="label">grain</div>
+      {% if grain.key_list %}
+        <div class="big">{{ grain.key_list[0].columns|length }}</div>
+        <div class="muted">
+          {% for k in grain.key_list %}
+            ({{ col_links(k.columns) }}) - {{ k.detection }}{% if k.note %}: {{ k.note }}{% endif %}{% if not loop.last %}<br>{% endif %}
+          {% endfor %}
+        </div>
+      {% elif grain.exhausted == true %}
+        <div class="big">-</div>
+        <div class="muted">searched, none found</div>
+      {% elif grain.exhausted == false %}
+        <div class="big">-</div>
+        <div class="muted">search bounded, none found</div>
+      {% else %}
+        <div class="big">-</div>
+        <div class="muted">not determined</div>
+      {% endif %}
+    </div>
+  {% endif %}
+  {% if cards and cards.freshest %}
+    <div class="card">
+      <div class="label">data through</div>
+      <div class="big big-sm">{{ cards.freshest.max|dt }}</div>
+      <div class="muted">{{ cards.freshest.classification }} &middot; {{ cards.freshest.column }}</div>
+    </div>
+  {% endif %}
+  {% if cards %}
+    <div class="card">
+      <div class="label">sensitive</div>
+      <div class="big">{{ cards.sensitive }}</div>
+      <div class="muted">of {{ cards.n_columns }} columns</div>
+    </div>
+    <div class="card">
+      <div class="label">redacted</div>
+      <div class="big">{{ cards.redacted }}</div>
+      <div class="muted">of {{ cards.n_columns }} columns</div>
+    </div>
+  {% endif %}
+  {% if cardinality %}
+    <div class="card">
+      <div class="label">cardinality</div>
+      <div class="big">{{ cardinality.avg_pct }}%</div>
+      <div class="muted">avg across {{ cardinality.n_columns }} of {{ cardinality.n_total }} columns</div>
+      <div class="mini-bars">
+        {% for b in cardinality.bars %}
+          <a href="#col-{{ b.name }}" class="mini-bar-col" title="{{ b.name }}: {{ b.pct }}%">
+            <span class="mini-bar" style="--h:{{ b.pct }}%"></span>
+          </a>
+        {% endfor %}
+      </div>
+    </div>
+  {% endif %}
+  {% if completeness %}
+    <div class="card">
+      <div class="label">completeness</div>
+      <div class="big">{{ completeness.avg_pct }}%</div>
+      <div class="muted">avg across {{ completeness.n_columns }} columns</div>
+      <div class="stacked-bar">
+        {% for bucket, count in completeness.buckets %}
+          {% if count %}<span class="stacked-seg stacked-{{ bucket }}" style="width:{{ (100 * count / completeness.n_columns)|round(1) }}%" title="{{ bucket }}: {{ count }}"></span>{% endif %}
+        {% endfor %}
+      </div>
+    </div>
+  {% endif %}
+</div>
+
+{% set has_relationships = relationships.refers_to or relationships.referenced_by %}
+
+<div class="tabs">
+  <button class="tab-btn" data-tab="overview">Overview</button>
+  {% if columns %}<button class="tab-btn" data-tab="columns">Columns</button>{% endif %}
+  {% if has_relationships %}<button class="tab-btn" data-tab="relationships">Relationships</button>{% endif %}
+  {% if ddl %}<button class="tab-btn" data-tab="ddl">DDL</button>{% endif %}
+</div>
+
+<div data-tab-panel="overview">
+  {% if description %}
+    <h2>Description</h2>
+    <div class="md">{{ description|md }}</div>
+  {% endif %}
+
+  {% if grain %}
+    <div class="hedge-block">
+      <h2>Grain - what identifies a row</h2>
+      {% if grain.key_list %}
+        <ul>
+          {% for k in grain.key_list %}
+            <li>
+              ({{ col_links(k.columns) }}) - {{ k.detection }}
+              {% if k.note %}<div class="md muted">{{ k.note|md }}</div>{% endif %}
+            </li>
+          {% endfor %}
+        </ul>
+      {% elif grain.exhausted == true %}
+        <div class="hedge">Searched for an undeclared grain; none found.</div>
+      {% elif grain.exhausted == false %}
+        <div class="hedge">Search for an undeclared grain was bounded; none found within the cap.</div>
+      {% elif grain.search_ran %}
+        <div class="hedge">Grain search ran but reported no verdict.</div>
+      {% else %}
+        <div class="hedge">Not determined - nothing declared, and no measured search ran.</div>
+      {% endif %}
+    </div>
+  {% endif %}
+
+  {% if physical_layout %}
+    <div class="hedge-block">
+      <h2>{{ 'Clustered by' if physical_layout.mechanism == 'cluster' else 'Partitioned by' }}</h2>
+      <div class="hedge">
+        Declared, not measured - not a claim about how well this holds today.
+      </div>
+      <ol>
+        {% for k in physical_layout.key_list %}
+          <li><code>{{ k.expression }}</code>{% if k.column %} ({{ k.column }}){% endif %}</li>
+        {% endfor %}
+      </ol>
+    </div>
+  {% endif %}
+
+  {% if dependencies %}
+    <div class="hedge-block">
+      <h2>Dependencies</h2>
+      <div class="hedge">Measured over the scanned rows, not a rule the database enforces.</div>
+      <table>
+        <thead><tr><th>Determinant</th><th>Dependent</th><th class="num">Strength</th></tr></thead>
+        <tbody>
+          {% for d in dependencies %}
+            <tr>
+              <td><a href="#col-{{ d.determinant }}">{{ d.determinant }}</a></td>
+              <td><a href="#col-{{ d.dependent }}">{{ d.dependent }}</a></td>
+              <td class="num">{{ (d.strength * 100)|round(1) }}%</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+
+  {% if columns_empty_notice %}
+    <div class="notice">{{ columns_empty_notice }}</div>
+  {% elif columns %}
+    <h2>Column skyline</h2>
+    <div class="chart-panel" data-chart>
+      <button type="button" class="fs-btn" data-fs-toggle aria-label="Full screen" title="Full screen">
+        <span class="fs-icon" aria-hidden="true"></span>
+      </button>
+      <div class="skyline-wrap">
+        <div class="skyline">
+          {% for s in skyline %}
+            <a href="#col-{{ s.name }}" class="skyline-col" title="{{ s.name }}">
+              <span class="skyline-track">
+                <span class="skyline-bar skyline-{{ s.bucket }}" style="--h:{{ s.height }}%; --fill:{{ s.fill }}%"></span>
+              </span>
+              <span class="skyline-label">{{ s.name }}</span>
+            </a>
+          {% endfor %}
+        </div>
+        <div class="skyline-legend muted">
+          {% for bucket, label in skyline_legend %}
+            <span><span class="skyline-swatch skyline-{{ bucket }}"></span>{{ label }}</span>
+          {% endfor %}
+          <span>height = cardinality (log)<br>fill = completeness</span>
+        </div>
+      </div>
+    </div>
+  {% endif %}
+
+  {% if diagram %}
+    <h2>Relationships</h2>
+    <div class="chart-panel" data-chart data-zoomable>
+      <button type="button" class="fs-btn" data-fs-toggle aria-label="Full screen" title="Full screen">
+        <span class="fs-icon" aria-hidden="true"></span>
+      </button>
+      <div class="chart-zoom-area">
+        <pre class="mermaid">{{ diagram }}</pre>
+      </div>
+      <div class="chart-controls">
+        <button type="button" class="chart-ctrl" data-zoom="in" title="Zoom in" aria-label="Zoom in">+</button>
+        <button type="button" class="chart-ctrl" data-zoom="out" title="Zoom out" aria-label="Zoom out">-</button>
+        <button type="button" class="chart-ctrl" data-pan="up" title="Pan up" aria-label="Pan up">&uarr;</button>
+        <button type="button" class="chart-ctrl" data-pan="down" title="Pan down" aria-label="Pan down">&darr;</button>
+        <button type="button" class="chart-ctrl" data-pan="left" title="Pan left" aria-label="Pan left">&larr;</button>
+        <button type="button" class="chart-ctrl" data-pan="right" title="Pan right" aria-label="Pan right">&rarr;</button>
+      </div>
+    </div>
+  {% endif %}
+</div>
+
+{% if columns %}
+  <div data-tab-panel="columns">
+    <select id="group-by">
+      <option value="">no grouping</option>
+      <option value="type">group by type</option>
+      <option value="class" selected>group by classification</option>
+    </select>
+    <table data-enhance>
+      <thead>
+        <tr>
+          <th data-sort="column" class="col-fixed">Column</th>
+          <th data-sort="type">Type</th>
+          <th data-sort="class">Class</th>
+          <th data-sort="nullrate" data-sort-type="num">Null rate</th>
+          <th data-sort="cardinality" data-sort-type="num">Cardinality</th>
+          <th data-sort="distribution">Distribution</th>
+          <th>Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for col in columns %}
+          <tr id="col-{{ col.name }}" data-column="{{ col.name }}" data-type="{{ col.sql_type }}"
+              data-class="{{ col.classification }}" data-distribution="{{ col.distribution }}"
+              data-nullrate="{{ col.null_rate }}" data-cardinality="{{ col.cardinality.value if col.cardinality else '' }}">
+            <td class="col-fixed">
+              <span class="col-name">{{ col.name }}</span>
+              {% if col.collation %}<div class="muted">collation {{ col.collation }}</div>{% endif %}
+              {% if col.null_companions %}<div class="muted">null with: {{ col_links(col.null_companions) }}</div>{% endif %}
+              {% if col.annotation_note %}<div class="md muted">{{ col.annotation_note|md }}</div>{% endif %}
+              {% for value, note in col.annotation_values %}
+                <div class="muted">{{ value }}: {{ note }}</div>
+              {% endfor %}
+              {% for stat, predicate in col.annotation_claims %}
+                <div class="muted">claims {{ stat }} {{ predicate }}</div>
+              {% endfor %}
+            </td>
+            <td>{{ col.sql_type }}{% if not col.nullable %} <span class="muted">not null</span>{% endif %}</td>
+            <td>{{ col.classification|capitalize|nbsp }}</td>
+            <td>
+              <div class="bar-inline">
+                <span class="bar-track"><span class="bar-fill" style="width:{{ ((col.null_rate or 0) * 100)|round(2) }}%"></span></span>
+                <span class="num">{{ col.null_count|human }}</span>
+              </div>
+            </td>
+            <td>
+              {% if col.cardinality %}
+                <div class="bar-inline">
+                  <span class="num">{{ col.cardinality.value|human }}</span>
+                  {% if col.cardinality.approximate %}<span class="muted">(approx)</span>{% endif %}
+                  {% if col.cardinality.saturates %}<span class="muted">(= scanned rows)</span>{% endif %}
+                </div>
+              {% else %}
+                <span class="muted">n/a</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if col.distribution %}<div class="badge badge-accent">{{ col.distribution|replace('_', ' ') }}</div>{% endif %}
+              {% if col.redacted %}<div class="badge badge-redacted">redacted ({{ col.redacted }})</div>{% endif %}
+
+              {% if col.value_list %}
+                {% if col.value_list.bars %}
+                  <div class="bars">
+                    {% for v in col.value_list.bars %}
+                      <div class="bar-row">
+                        <span class="bar-label">{{ v.value }}</span>
+                        <span class="bar-track"><span class="bar-fill" style="width:{{ v.pct }}%"></span></span>
+                        <span class="bar-count muted">{{ v.count|human }}</span>
+                      </div>
+                    {% endfor %}
+                  </div>
+                {% endif %}
+                {% if col.value_list.coverage is not none %}
+                  <div class="muted">
+                    {{ (col.value_list.coverage * 100)|round(1) }}% covered
+                    {% if col.value_list.coverage_method == 'bounded' %}<span class="badge badge-muted">clamped</span>{% endif %}
+                  </div>
+                {% endif %}
+              {% endif %}
+
+              {% if col.range %}
+                {% if col.range.redacted %}
+                  <div class="muted">bounds withheld (redacted: {{ col.range.redacted }})</div>
+                {% else %}
+                  {% if col.range.box %}
+                    <div class="boxplot">
+                      <span class="whisker"></span>
+                      <span class="box" style="left:{{ col.range.box.q1 }}%; width:{{ col.range.box.q3 - col.range.box.q1 }}%"></span>
+                      <span class="median" style="left:{{ col.range.box.median }}%"></span>
+                    </div>
+                    <div class="boxplot-labels">
+                      <span style="left:0%">{{ col.range.bounds.min|dt }}</span>
+                      <span style="left:{{ col.range.box.q1 }}%">{{ col.range.box.p25_value|dt }}</span>
+                      <span style="left:{{ col.range.box.median }}%">{{ col.range.box.p50_value|dt }}</span>
+                      <span style="left:{{ col.range.box.q3 }}%">{{ col.range.box.p75_value|dt }}</span>
+                      <span style="left:100%">{{ col.range.bounds.max|dt }}</span>
+                    </div>
+                  {% endif %}
+                  {% if col.range.percentiles %}
+                    <div class="percentile-list">
+                      {% for k, v in col.range.percentiles %}<span>{{ k }} {{ v|dt }}</span>{% endfor %}
+                    </div>
+                  {% endif %}
+                {% endif %}
+                {% if col.range.unrepresentable %}
+                  <div class="muted">unrepresentable: {{ col.range.unrepresentable|join(', ') }}</div>
+                {% endif %}
+                {% if col.range.frequencies %}
+                  <div class="muted">
+                    top {{ col.range.frequencies.top|human }} &middot; bottom {{ col.range.frequencies.bottom|human }}
+                    &middot; {{ col.range.frequencies.listed }} listed of {{ col.range.frequencies.total|human }}
+                  </div>
+                {% endif %}
+                {% if col.range.freshness %}
+                  <div class="muted">{{ col.range.freshness.classification }} &middot; {{ col.range.freshness.max_age_days }}d old</div>
+                {% endif %}
+              {% endif %}
+            </td>
+            <td>
+              {{ col.notes }}
+              {% if col.sketch_available %}<span class="badge badge-sketch" title="A KMV sketch is computed for this column">sketch</span>{% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    {% if null_patterns and null_patterns.patterns %}
+      <div class="hedge-block">
+        <h2>Columns null on the same rows</h2>
+        <table>
+          <thead><tr><th class="num">Rows</th><th>Null together</th></tr></thead>
+          <tbody>
+            {% for p in null_patterns.patterns %}
+              <tr>
+                <td class="num">{{ p.count|human }}</td>
+                <td>{{ col_links(p.columns) if p.columns else '(none - fully populated)' }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% if null_patterns.coverage is not none %}
+          <div class="muted">
+            Observed over
+            {{ 'every scanned row' if null_patterns.coverage >= 1 else (null_patterns.coverage * 100)|round(1) ~ '% of scanned rows' }}.
+          </div>
+        {% endif %}
+      </div>
+    {% endif %}
+  </div>
+{% endif %}
+
+{% if has_relationships %}
+  <div data-tab-panel="relationships">
+    {% if relationships.eligible_target == false %}
+      <div class="hedge">This table declares no unique column, so nothing can ever reference it.</div>
+    {% endif %}
+    <table>
+      <thead>
+        <tr><th>Direction</th><th>Columns</th><th>Table</th><th>Columns</th><th>Detection</th><th>Detail</th></tr>
+      </thead>
+      <tbody>
+        {% for r in relationships.refers_to %}
+          <tr>
+            <td>refers to</td>
+            <td>{{ col_links(r.column) }}</td>
+            <td><a href="{{ url_for('table', conn=conn, table=r.target_table) }}">{{ r.target_table }}</a></td>
+            <td>{{ col_links(r.target_column, url_for('table', conn=conn, table=r.target_table)) }}</td>
+            <td><span class="badge {{ 'badge-declared' if r.detection == 'declared' else 'badge-inferred' }}">{{ r.detection }}</span></td>
+            <td>
+              {% if r.on_delete %}<div class="muted">on_delete={{ r.on_delete }}</div>{% endif %}
+              {% if r.constraint_name %}<div class="muted">{{ r.constraint_name }}</div>{% endif %}
+              {% if r.path %}<div class="muted">via {{ r.path|join('.') }}{% if r.target_path %} -&gt; {{ r.target_path|join('.') }}{% endif %}</div>{% endif %}
+              {% if r.observed %}
+                <div class="rel-observed">
+                  fanout avg {{ '%.1f'|format(r.observed.fanout_avg) }}{% if r.observed.fanout_max is not none %} (max {{ r.observed.fanout_max }}){% endif %},
+                  covers {{ (r.observed.target_coverage * 100)|round(1) }}% of target
+                  {% if r.observed.containment is not none %}, {{ (r.observed.containment * 100)|round(1) }}% of referencing values contained{% endif %}
+                </div>
+                {% if r.observed.coherent == false %}<div class="rel-incoherent">INCOHERENT: referencing cardinality exceeds the target's</div>{% endif %}
+              {% endif %}
+              {% if r.rejected %}<div class="rel-rejected">REJECTED by human annotation{% if r.rejected_note %}: {{ r.rejected_note }}{% endif %}</div>{% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        {% for r in relationships.referenced_by %}
+          <tr>
+            <td>referenced by</td>
+            <td>{{ col_links(r.column) }}</td>
+            <td><a href="{{ url_for('table', conn=conn, table=r.referencer_table) }}">{{ r.referencer_table }}</a></td>
+            <td>{{ col_links(r.referencer_column, url_for('table', conn=conn, table=r.referencer_table)) }}</td>
+            <td><span class="badge {{ 'badge-declared' if r.detection == 'declared' else 'badge-inferred' }}">{{ r.detection }}</span></td>
+            <td>
+              {% if r.on_delete %}<div class="muted">on_delete={{ r.on_delete }}</div>{% endif %}
+              {% if r.constraint_name %}<div class="muted">{{ r.constraint_name }}</div>{% endif %}
+              {% if r.observed %}
+                <div class="rel-observed">
+                  fanout avg {{ '%.1f'|format(r.observed.fanout_avg) }}{% if r.observed.fanout_max is not none %} (max {{ r.observed.fanout_max }}){% endif %},
+                  covers {{ (r.observed.target_coverage * 100)|round(1) }}% of target
+                  {% if r.observed.containment is not none %}, {{ (r.observed.containment * 100)|round(1) }}% of referencing values contained{% endif %}
+                </div>
+                {% if r.observed.coherent == false %}<div class="rel-incoherent">INCOHERENT: referencing cardinality exceeds the target's</div>{% endif %}
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endif %}
+
+{% if ddl %}
+  <div data-tab-panel="ddl">
+    <pre>{{ ddl }}</pre>
+  </div>
+{% endif %}
+
+{% endblock %}

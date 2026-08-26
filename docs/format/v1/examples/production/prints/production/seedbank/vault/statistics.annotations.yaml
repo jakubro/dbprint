@@ -1,0 +1,16 @@
+format_version: 1
+columns:
+  vault_id:
+    note: >-
+      Paired with shelf_code as the table's composite primary key; accession
+      references both together, never vault_id alone.
+  shelf_code:
+    note: >-
+      A single letter, unique only within a vault_id - the same letter recurs
+      across different vaults.
+  site_name:
+    note: >-
+      Flagged sensitivity: personal_name (SPEC 4.4.2) - a false positive. A
+      site name built from two capitalized words matches the same typographic
+      shape the weak-tier name detector uses; the format accepts this recall
+      bias by design rather than narrowing the check.

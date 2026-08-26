@@ -1,0 +1,20 @@
+format_version: 1
+table: seedbank.germination_by_taxon_mv
+profiled_at: '2026-05-17T22:48:01Z'
+eligible_target: false
+refers_to:
+- column:
+  - taxon_id
+  target_table: seedbank.taxon
+  target_column:
+  - taxon_id
+  detection: inferred
+  observed:
+    fanout_avg: 2.566667
+    target_coverage: 1.0
+    scope_compatible: true
+    fanout_max: 3
+    coherent: true
+    containment: 1.0
+    answerable_count: 300
+referenced_by: []

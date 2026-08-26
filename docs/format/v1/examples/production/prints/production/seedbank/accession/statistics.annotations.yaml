@@ -1,0 +1,24 @@
+format_version: 1
+columns:
+  taxon_id:
+    note: >-
+      FK to taxon.taxon_id. Physical storage location is recorded separately via
+      vault_id/shelf_code, so this column alone does not say where the material sits.
+  collector_id:
+    note: >-
+      FK to collector.collector_id. Field collectors are affiliated with a partner
+      institution; collector.institution names it.
+  vault_id:
+    note: >-
+      Paired with shelf_code as a composite reference to a single shelf in
+      vault.(vault_id, shelf_code).
+  traits:
+    note: >-
+      Opaque JSON with no fixed key set, absent on some rows.
+  field_notes:
+    note: >-
+      Free-text observation from the collecting trip, not a controlled vocabulary.
+  viability_pct:
+    note: >-
+      Measured once at intake, not re-tested on a schedule; germination_trial carries
+      any later re-tests.

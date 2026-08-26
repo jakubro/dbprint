@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block body %}
+
+<h1>{{ schema }} <span class="muted">{{ conn }}</span></h1>
+<p class="muted">{{ tables|length }} tables &middot; {{ n_edges }} intra-schema relationships</p>
+
+<table data-enhance>
+  <thead>
+    <tr>
+      <th data-sort="table">Table</th>
+      <th data-sort="type">Type</th>
+      <th data-sort="rows" data-sort-type="num" class="num">Rows</th>
+      <th data-sort="columns" data-sort-type="num" class="num">Columns</th>
+      <th data-sort="profiled">Profiled</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for fqn, e in tables.items() %}
+      <tr data-table="{{ fqn }}" data-type="{{ e.type }}" data-rows="{{ e.row_count or 0 }}"
+          data-columns="{{ e.columns or 0 }}" data-profiled="{{ e.profiled_at }}">
+        <td><a href="{{ url_for('table', conn=conn, table=fqn) }}">{{ fqn }}</a></td>
+        <td>{{ e.type|capitalize }}</td>
+        <td class="num">{{ e.row_count|human }}</td>
+        <td class="num">{{ e.columns|human }}</td>
+        <td class="muted">{{ e.profiled_at|dt }}</td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% endblock %}

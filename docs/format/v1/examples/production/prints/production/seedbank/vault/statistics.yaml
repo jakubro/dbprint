@@ -1,0 +1,208 @@
+format_version: 1
+table: seedbank.vault
+type: table
+profiled_at: '2026-05-17T22:48:01Z'
+row_count: 48
+row_count_method: exact
+grain:
+  keys:
+  - columns:
+    - vault_id
+    - shelf_code
+    detection: declared
+  - columns:
+    - site_name
+    - shelf_code
+    detection: measured
+  search:
+    exhausted: true
+dependencies:
+- determinant: opens_at
+  dependent: closes_at
+  strength: 1.0
+- determinant: closes_at
+  dependent: opens_at
+  strength: 1.0
+- determinant: vault_id
+  dependent: opens_at
+  strength: 1.0
+- determinant: vault_id
+  dependent: closes_at
+  strength: 1.0
+- determinant: site_name
+  dependent: opens_at
+  strength: 1.0
+- determinant: site_name
+  dependent: closes_at
+  strength: 1.0
+- determinant: vault_id
+  dependent: target_temperature_c
+  strength: 1.0
+- determinant: site_name
+  dependent: target_temperature_c
+  strength: 1.0
+- determinant: vault_id
+  dependent: site_name
+  strength: 1.0
+- determinant: site_name
+  dependent: vault_id
+  strength: 1.0
+columns:
+  vault_id:
+    sql_type: integer
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 8
+    cardinality_ratio: 0.166667
+    cardinality_method: exact
+    inferred:
+      looks_like: numeric_string
+      sampled: 8
+      matched: 8
+    values:
+    - value: 1
+      count: 6
+    - value: 2
+      count: 6
+    - value: 3
+      count: 6
+    - value: 4
+      count: 6
+    - value: 5
+      count: 6
+    - value: 6
+      count: 6
+    - value: 7
+      count: 6
+    - value: 8
+      count: 6
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: DcxQmm91hJsoMI/Z8qe681n1H9ApfiNtWjbe3UvqJUNvBn+JzBSGLG+15gh+sbLckYGme3VCEizXdysGdKMY1Q==
+  shelf_code:
+    sql_type: character varying(8)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 6
+    cardinality_ratio: 0.125
+    cardinality_method: exact
+    values:
+    - value: A
+      count: 8
+    - value: B
+      count: 8
+    - value: C
+      count: 8
+    - value: D
+      count: 8
+    - value: E
+      count: 8
+    - value: F
+      count: 8
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: Glk1ty6svikvgLhNFD4SV2EBQJV6+rVxhp5OHwlHEBLXPW31tQu3te325emjLpTa
+  site_name:
+    sql_type: character varying(80)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 8
+    cardinality_ratio: 0.166667
+    cardinality_method: exact
+    inferred:
+      sensitivity: personal_name
+    values:
+    - value: Cinder Bluff Store
+      count: 6
+    - value: Harbor Point Vault
+      count: 6
+    - value: Marrow Hill Vault
+      count: 6
+    - value: Northgate Cold Store
+      count: 6
+    - value: Prairie Hollow Facility
+      count: 6
+    - value: Ridgeline Cold Store
+      count: 6
+    - value: Sable Creek Facility
+      count: 6
+    - value: Willowmere Vault
+      count: 6
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: ZXfLg2JajdFxa+ntC37FIJv+eoUBFYZNn1RDoHag2iGoUBlQ4KMfptg43OGlAh4C35IO8ioGftvzcdwdAY8f6w==
+  target_temperature_c:
+    sql_type: numeric(4,1)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.0625
+    cardinality_method: exact
+    inferred:
+      looks_like: numeric_string
+      sampled: 3
+      matched: 3
+    values:
+    - value: '-19.5'
+      count: 18
+    - value: '-20.0'
+      count: 18
+    - value: '-19.0'
+      count: 12
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: RbRDhn+rBl1TFOYTWV6hpbRSpotuTwBz
+  opens_at:
+    sql_type: time without time zone
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 2
+    cardinality_ratio: 0.041667
+    cardinality_method: exact
+    values:
+    - value: 07:30:00
+      count: 24
+    - value: 08:00:00
+      count: 24
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+  closes_at:
+    sql_type: time without time zone
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 2
+    cardinality_ratio: 0.041667
+    cardinality_method: exact
+    values:
+    - value: '16:30:00'
+      count: 24
+    - value: '17:00:00'
+      count: 24
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform

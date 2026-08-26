@@ -1,0 +1,980 @@
+"""Per-table context-fragment builder for `dbprint context`.
+
+Reads the on-disk artifacts, assembles a per-table fragment in the requested format
+(md/json/yaml), applies the token-budget algorithm, and joins fragments across tables.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from . import notes_synthesis
+from .baseline import declared_artifacts, missing_artifacts, walkable_tables
+from .token_budget import Section, make_section, select, truncation_marker
+
+
+HEADER_TOKEN_OVERHEAD = 8  # conservative reserve for the multi-table document header
+NULL_PATTERN_DISPLAY_LIMIT = 8  # combinations rendered before the rest are summarised
+
+
+@dataclass(frozen=True)
+class AssemblyOptions:
+    """Per-invocation flags from the `dbprint context` command."""
+
+    format: str = "md"
+    include_ddl: bool = True
+    include_description: bool = True
+    include_annotations: bool = True
+    include_stats: bool = True
+    include_relationships: bool = True
+    budget: int | None = None  # total tokens; None = unbounded
+
+
+@dataclass
+class TableArtifacts:
+    """Bundle of on-disk artifacts for one table, post-parse."""
+
+    fqn: str
+    table_type: str
+    row_count: int | None
+    column_count: int
+    ddl: str
+    statistics: dict[str, Any] | None
+    relationships: dict[str, Any] | None
+    description: str | None
+    annotations: dict[str, dict[str, Any]] | None
+    annotated_grain: dict[str, Any] | None
+    relationship_annotations: list[dict[str, Any]] | None
+    missing: tuple[str, ...]
+
+
+@dataclass
+class AssemblyResult:
+    """Full rendered output of one assembly run."""
+
+    text: str
+    tables_included: int
+    truncated: tuple[str, ...] = field(default_factory=tuple)
+
+
+def assemble(
+    manifest: dict[str, Any],
+    print_root: Path,
+    tables: list[str],
+    options: AssemblyOptions,
+    connection_name: str | None = None,
+) -> AssemblyResult:
+    """Assemble the requested table fragments; `tables` is the caller's resolved FQN order."""
+
+    if not tables:
+        return AssemblyResult(text="", tables_included=0)
+
+    loaded = [_load_table_artifacts(manifest, print_root, fqn) for fqn in tables]
+
+    if options.format == "json":
+        return _assemble_json(loaded, options)
+    elif options.format == "yaml":
+        return _assemble_yaml(loaded, options)
+    else:
+        return _assemble_markdown(loaded, options, connection_name, print_root)
+
+
+def _assemble_markdown(
+    artifacts: list[TableArtifacts],
+    options: AssemblyOptions,
+    connection_name: str | None,
+    print_root: Path,
+) -> AssemblyResult:
+    """Markdown is the default output; supports document header + budget split.
+
+    Connection-grain notes (SPEC 2.7.3) ride the document header, and only a multi-table
+    render has one, so a single-table render drops them.
+    """
+
+    multi = len(artifacts) > 1
+    header = ""
+    header_tokens = 0
+
+    if multi and connection_name:
+        header = f"# Context for connection {connection_name} ({len(artifacts)} tables)"
+        notes = _load_connection_notes(print_root)
+
+        if notes:
+            header += "\n\n" + notes
+
+        header_tokens = max(HEADER_TOKEN_OVERHEAD, len(header) // 4)
+
+    per_table_budget: int | None = None
+
+    if options.budget is not None:
+        remaining = max(0, options.budget - header_tokens)
+        per_table_budget = remaining // len(artifacts)
+
+        if per_table_budget == 0:
+            # Budget cannot cover any table; emit the header (when present) only.
+            text = header + "\n" if header else ""
+
+            return AssemblyResult(
+                text=text,
+                tables_included=0,
+                truncated=tuple(a.fqn for a in artifacts),
+            )
+
+    fragments: list[str] = []
+    truncated: list[str] = []
+    included = 0
+
+    for a in artifacts:
+        fragment, was_truncated = _render_table_markdown(a, options, per_table_budget)
+
+        if fragment:
+            fragments.append(fragment)
+            included += 1
+
+            if was_truncated:
+                truncated.append(a.fqn)
+        else:
+            truncated.append(a.fqn)
+
+    body = "\n\n---\n\n".join(fragments)
+    text = (header + "\n\n" if header else "") + body
+
+    return AssemblyResult(
+        text=text,
+        tables_included=included,
+        truncated=tuple(truncated),
+    )
+
+
+def _render_table_markdown(
+    a: TableArtifacts,
+    options: AssemblyOptions,
+    budget: int | None,
+) -> tuple[str, bool]:
+    """Render one table; return (markdown text, was_truncated)."""
+
+    include_qualifiers = options.include_stats and bool(a.statistics)
+    sections: list[Section] = []
+    sections.append(make_section("header", _markdown_header(a, include_qualifiers)))
+
+    if options.include_ddl:
+        sections.append(make_section("ddl", _markdown_ddl(a)))
+
+    if options.include_description and a.description:
+        sections.append(make_section("description", _markdown_description(a)))
+
+    if options.include_annotations and a.annotations:
+        sections.append(make_section("annotations", _markdown_annotations(a)))
+
+    if options.include_stats and a.statistics:
+        if a.statistics.get("catalog_only") is True:
+            # SPEC 2.2.15: nothing was queried, so there is no cardinality to table - list
+            # the columns a catalog read already named, not a table of fabricated cells.
+            sections.append(make_section("columns", _markdown_catalog_only_columns(a)))
+        else:
+            if a.statistics.get("physical_layout"):
+                sections.append(make_section("physical_layout", _markdown_physical_layout(a)))
+
+            sections.append(make_section("cardinality", _markdown_cardinality_table(a)))
+
+            if a.statistics.get("null_patterns"):
+                sections.append(make_section("null_patterns", _markdown_null_patterns(a)))
+
+    if options.include_relationships and a.relationships:
+        sections.append(make_section("relationships", _markdown_relationships(a)))
+
+    selection = select(sections, budget)
+    text = "\n\n".join(s.text for s in selection.included)
+    marker = truncation_marker(selection)
+
+    # A budget too tight for even the header omits every section, so the marker is the whole
+    # return, never blank - a caller must see why, not a silent empty success.
+    if marker:
+        text = f"{text}\n\n{marker}" if text else marker
+
+    return text, selection.truncated
+
+
+def _markdown_header(a: TableArtifacts, include_qualifiers: bool) -> str:
+    """The table's identity line, then one line per table-level qualifier that applies.
+
+    The missing-artifact line rides here too, ungated by `include_qualifiers`.
+    """
+
+    parts = []
+
+    if a.row_count is not None:
+        parts.append(f"{a.row_count:,} rows")
+    parts.append(f"{a.column_count} columns")
+
+    lines = [f"# Table: {a.fqn}  ({', '.join(parts)})"]
+
+    if a.missing:
+        lines.append(_missing_summary(a.missing))
+
+    if not include_qualifiers:
+        return "\n".join(lines)
+
+    statistics = a.statistics or {}
+    qualifiers = (_scope_summary(statistics), _grain_summary(statistics, a.annotated_grain))
+    lines.extend(line for line in qualifiers if line)
+
+    return "\n".join(lines)
+
+
+def _missing_summary(missing: tuple[str, ...]) -> str:
+    """One line naming every declared kind whose file is absent from disk (SPEC 2.5)."""
+
+    return f"Missing: {', '.join(missing)} (declared but missing from disk)"
+
+
+def _scope_summary(statistics: dict[str, Any]) -> str:
+    """Which rows the statistics were computed over, when the read was narrowed (SPEC 2.2.8).
+
+    Absence of the block asserts the whole table was read, so it renders nothing. The share
+    is taken against `row_count`, since `sample` records what was asked for, not what came.
+    """
+
+    block = statistics.get("scope")
+
+    if not isinstance(block, dict):
+        return ""
+
+    rows_scanned = block.get("rows_scanned")
+
+    if not isinstance(rows_scanned, int):
+        return ""
+
+    row_count = statistics.get("row_count")
+    scanned = f"{rows_scanned:,}"
+
+    if isinstance(row_count, int) and row_count > 0:
+        share = round(100 * rows_scanned / row_count, 1)
+        scanned = f"{scanned} of {row_count:,} rows ({share}%)"
+    else:
+        scanned = f"{scanned} rows"
+
+    return f"Scanned: {scanned}{_narrowing_suffix(block)}"
+
+
+def _narrowing_suffix(scope: dict[str, Any]) -> str:
+    """How the read was narrowed, from the one of `sample`/`filter` present (SPEC 2.2.8)."""
+
+    sample = scope.get("sample")
+
+    if isinstance(sample, (int, float)) and not isinstance(sample, bool):
+        return f", sample {sample}"
+
+    row_filter = scope.get("filter")
+
+    if isinstance(row_filter, str) and row_filter.strip():
+        return f", filter `{row_filter}`"
+
+    return ""
+
+
+def _grain_summary(statistics: dict[str, Any], annotated_grain: dict[str, Any] | None) -> str:
+    """What identifies a row, one line - a table-level fact, not a per-column cell (SPEC 2.2.12).
+
+    A human-authored key (SPEC 2.7.1) rides the same list tagged `annotated`; it adds a fact,
+    never replaces the producer's measurement.
+    """
+
+    block = statistics.get("grain")
+    keys = [k for k in (block.get("keys") or []) if isinstance(k, dict)] if block else []
+    keys = keys + _annotated_grain_keys(annotated_grain)
+
+    if not keys:
+        search = block.get("search") if block else None
+        exhausted = search.get("exhausted") if isinstance(search, dict) else None
+
+        if exhausted is True:
+            return "Grain: searched, none found"
+
+        if exhausted is False:
+            return "Grain: search bounded, none found within the cap"
+
+        return "Grain: not determined"
+
+    rendered = "; ".join(
+        f"({', '.join(key.get('columns') or [])}) {key.get('detection')}"
+        + (f' - "{key["note"]}"' if key.get("note") else "")
+        for key in keys
+    )
+
+    return f"Grain: {rendered}"
+
+
+def _annotated_grain_keys(annotated_grain: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Human-authored grain keys as `{columns, detection, note}`, `note` omitted when absent."""
+
+    if not annotated_grain:
+        return []
+
+    keys = annotated_grain.get("keys")
+
+    if not isinstance(keys, list):
+        return []
+
+    result = []
+
+    for key in keys:
+        if not isinstance(key, dict):
+            continue
+
+        entry = {"columns": key.get("columns") or [], "detection": "annotated"}
+        note = key.get("note")
+
+        if isinstance(note, str) and note.strip():
+            entry["note"] = note
+
+        result.append(entry)
+
+    return result
+
+
+def _markdown_ddl(a: TableArtifacts) -> str:
+    return "## DDL\n\n```sql\n" + a.ddl.rstrip() + "\n```"
+
+
+def _markdown_description(a: TableArtifacts) -> str:
+    assert a.description is not None
+
+    return "## Description\n\n" + a.description.rstrip()
+
+
+def _markdown_annotations(a: TableArtifacts) -> str:
+    assert a.annotations is not None
+    lines = ["## Annotations"]
+
+    for name, entry in a.annotations.items():
+        note = entry.get("note")
+
+        if isinstance(note, str) and note.strip():
+            lines.append(f"- **{name}**: {note.strip()}")
+
+        claims = entry.get("claims")
+
+        if isinstance(claims, dict) and claims:
+            rendered = ", ".join(f"{stat}={predicate!r}" for stat, predicate in claims.items())
+            lines.append(f"  - claims: {rendered}")
+
+        values = entry.get("values")
+
+        if isinstance(values, list):
+            for value_entry in values:
+                if not isinstance(value_entry, dict):
+                    continue
+
+                value_note = value_entry.get("note")
+
+                if isinstance(value_note, str) and value_note.strip():
+                    lines.append(f"  - {value_entry.get('value')!r}: {value_note.strip()}")
+
+    return "\n".join(lines)
+
+
+def _markdown_catalog_only_columns(a: TableArtifacts) -> str:
+    """The column list for an object nothing was queried for (SPEC 2.2.15).
+
+    No cardinality cell to fill and no Notes column to synthesize - `sql_type` and
+    `classification` are the whole of what a catalog read supplies.
+    """
+
+    assert a.statistics is not None
+    columns = a.statistics.get("columns") or {}
+
+    lines = [
+        "## Columns (not queried)",
+        "",
+        "| Column | Type | Classification |",
+        "|---|---|---|",
+    ]
+
+    for name in _ordered_column_names(columns):
+        col = columns[name]
+        lines.append(f"| {name} | {col.get('sql_type', '?')} | {col.get('classification', '?')} |")
+
+    return "\n".join(lines)
+
+
+def _markdown_cardinality_table(a: TableArtifacts) -> str:
+    assert a.statistics is not None
+    columns = a.statistics.get("columns") or {}
+    row_count = a.statistics.get("row_count")
+    fk_targets = _build_fk_target_map(a.relationships or {})
+
+    lines = [
+        "## Cardinality & key columns",
+        "",
+        "| Column | Cardinality | Notes |",
+        "|---|---|---|",
+    ]
+
+    ordered = _ordered_column_names(columns)
+
+    for name in ordered:
+        col = columns[name]
+        cardinality = _format_cardinality_cell(col, row_count)
+        notes = notes_synthesis.synthesize(col, fk_targets.get(name))
+        lines.append(f"| {name} | {cardinality} | {notes} |")
+
+    return "\n".join(lines)
+
+
+def _markdown_physical_layout(a: TableArtifacts) -> str:
+    """The declared clustering/partitioning key - a schema fact, never a claim about pruning."""
+
+    assert a.statistics is not None
+    block = a.statistics.get("physical_layout") or {}
+    keys = [k for k in (block.get("keys") or []) if isinstance(k, dict)]
+    label = "Clustered by" if block.get("mechanism") == "cluster" else "Partitioned by"
+    expressions = ", ".join(k.get("expression", "") for k in keys)
+
+    return f"## Physical layout\n\n{label}: {expressions}"
+
+
+def _markdown_null_patterns(a: TableArtifacts) -> str:
+    """Which columns are null on the same rows, as an ordered table.
+
+    Worded as an observation throughout: SPEC 2.2.10 makes a pattern a measurement over
+    the rows read, not a constraint a reader can write a query against.
+    """
+
+    assert a.statistics is not None
+    block = a.statistics.get("null_patterns") or {}
+    patterns = [p for p in (block.get("patterns") or []) if isinstance(p, dict)]
+    lines = [
+        "## Columns null on the same rows",
+        "",
+        "| Rows | Null together |",
+        "|---|---|",
+    ]
+
+    for entry in patterns[:NULL_PATTERN_DISPLAY_LIMIT]:
+        names = ", ".join(entry.get("columns") or []) or "(none - fully populated)"
+        lines.append(f"| {int(entry.get('count') or 0):,} | {names} |")
+
+    remainder = len(patterns) - NULL_PATTERN_DISPLAY_LIMIT
+
+    if remainder > 0:
+        lines.append(f"| ... | {remainder} further combinations |")
+
+    coverage = block.get("coverage")
+
+    if isinstance(coverage, (int, float)) and not isinstance(coverage, bool):
+        share = (
+            "every scanned row" if coverage >= 1 else f"{round(coverage * 100, 1)}% of scanned rows"
+        )
+        lines.append("")
+        lines.append(f"Observed over {share}.")
+
+    return "\n".join(lines)
+
+
+def _markdown_relationships(a: TableArtifacts) -> str:
+    assert a.relationships is not None
+    lines = ["## Relationships"]
+    refers_to = a.relationships.get("refers_to") or []
+    referenced_by = a.relationships.get("referenced_by") or []
+    rejected = _rejected_edges(a.relationship_annotations)
+
+    if not refers_to and not referenced_by:
+        lines.append("- (none)")
+
+        return "\n".join(lines)
+
+    for entry in refers_to:
+        cols = ", ".join(entry.get("column", []))
+        tgt_table = entry.get("target_table", "?")
+        tgt_cols = ", ".join(entry.get("target_column", []))
+        detection = _edge_detection(entry)
+        # Absent on an inferred edge (SPEC 2.3.8) - never invent a referential action.
+        on_delete = entry.get("on_delete")
+        suffix = f", on_delete={on_delete}" if on_delete is not None else ""
+        lines.append(f"- -> {tgt_table}.{tgt_cols} (via {cols}, {detection}{suffix})")
+        lines.extend(_rejection_line(rejected.get(_edge_key(entry))))
+        lines.extend(_observed_lines(entry))
+
+    for entry in referenced_by:
+        ref_table = entry.get("referencer_table", "?")
+        ref_cols = ", ".join(entry.get("referencer_column", []))
+        detection = _edge_detection(entry)
+        on_delete = entry.get("on_delete")
+        suffix = f", on_delete={on_delete}" if on_delete is not None else ""
+        lines.append(f"- <- {ref_table}.{ref_cols} ({detection}{suffix})")
+        lines.extend(_observed_lines(entry))
+
+    return "\n".join(lines)
+
+
+def _observed_lines(entry: dict[str, Any]) -> list[str]:
+    """SPEC 2.3.10: what joining across this edge costs, beside its declared shape.
+
+    Nothing renders when the block is absent or `scope_compatible: false` left the two
+    sides incomparable, carrying no ratio to show.
+    """
+
+    observed = entry.get("observed")
+
+    if not isinstance(observed, dict) or observed.get("scope_compatible") is False:
+        return []
+
+    fanout_avg = observed.get("fanout_avg")
+    target_coverage = observed.get("target_coverage")
+
+    if fanout_avg is None or target_coverage is None:
+        return []
+
+    text = f"  observed: fanout avg {fanout_avg:,.1f}"
+    fanout_max = observed.get("fanout_max")
+
+    if fanout_max is not None:
+        text += f" (max {fanout_max:,})"
+
+    text += f", covers {target_coverage:.1%} of target"
+    containment = observed.get("containment")
+
+    if containment is not None:
+        text += f", {containment:.1%} of the referencing values are contained"
+
+    lines = [text]
+
+    if observed.get("coherent") is False:
+        lines.append("  **[INCOHERENT: referencing cardinality exceeds the target's]**")
+
+    return lines
+
+
+def _rejected_edges(
+    relationship_annotations: list[dict[str, Any]] | None,
+) -> dict[tuple[Any, ...], dict[str, Any]]:
+    """Rejected refers_to entries from relationships.annotations.yaml, keyed by address.
+
+    Keyed by the same triplet the base artifact addresses an edge by (SPEC 2.7.2), so the
+    renderer can pull the note beside the verdict.
+    """
+
+    if not relationship_annotations:
+        return {}
+
+    return {
+        _edge_key(entry): entry
+        for entry in relationship_annotations
+        if entry.get("verdict") == "rejected"
+    }
+
+
+def _edge_key(entry: dict[str, Any]) -> tuple[Any, ...]:
+    """The (column, target_table, target_column) triplet an edge is addressed by."""
+
+    return (
+        tuple(entry.get("column") or ()),
+        entry.get("target_table"),
+        tuple(entry.get("target_column") or ()),
+    )
+
+
+def _rejection_line(entry: dict[str, Any] | None) -> list[str]:
+    """A one-line marker when a human rejected this edge, else nothing.
+
+    The graph itself is unchanged (SPEC 2.7.2); this only reports the overrule.
+    """
+
+    if entry is None:
+        return []
+
+    note = entry.get("note")
+    suffix = f": {note}" if isinstance(note, str) and note.strip() else ""
+
+    return [f"  **[REJECTED by human annotation{suffix}]**"]
+
+
+def _edge_detection(entry: dict[str, Any]) -> str:
+    """`detection` as SPEC 2.3 requires it on every edge; absence reads as the weaker claim.
+
+    A hand-edited artifact can drop the field, and defaulting to `inferred` never
+    overstates the edge (SPEC 2.3: a consumer MUST NOT treat a guess as a constraint).
+    """
+
+    return entry.get("detection") or "inferred"
+
+
+def _format_cardinality_cell(col: dict[str, Any], row_count: int | None) -> str:
+    """The distinct count, whether it saturates the set it was measured over, and how counted.
+
+    A scoped column counts distinct over `rows_scanned` (SPEC 2.2.8), so the cue names which
+    population it compared. Neither fires at zero: a read that matched no rows saturates
+    nothing. `cardinality_method: approximate` marks an estimate; exact is unmarked.
+    """
+
+    cardinality = col.get("cardinality")
+
+    if cardinality is None:
+        return "n/a"
+
+    text = f"{cardinality:,}"
+    rows_scanned = col.get("rows_scanned")
+
+    if isinstance(rows_scanned, int):
+        text += " (= scanned rows)" if rows_scanned and cardinality == rows_scanned else ""
+    elif row_count and cardinality == row_count:
+        text += " (= row count)"
+
+    if col.get("cardinality_method") == "approximate":
+        text += " (approx)"
+
+    return text
+
+
+_COLUMN_ORDER_PRIORITY = {
+    "foreign_key_candidate": 0,
+    "categorical": 1,
+    "temporal": 2,
+    "numeric": 3,
+    "boolean": 4,
+    "text": 5,
+    "json": 6,
+    "unsupported": 7,
+}
+
+
+def _ordered_column_names(columns: dict[str, Any]) -> list[str]:
+    """Stable ordering for the cardinality table: `_COLUMN_ORDER_PRIORITY`, then YAML order."""
+
+    def key(name_col: tuple[str, dict[str, Any]]) -> tuple[int, int]:
+        name, col = name_col
+        classification = col.get("classification", "unsupported")
+        priority = _COLUMN_ORDER_PRIORITY.get(classification, 8)
+
+        return priority, list(columns.keys()).index(name)
+
+    return [n for n, _ in sorted(columns.items(), key=key)]
+
+
+def _build_fk_target_map(relationships: dict[str, Any]) -> dict[str, str]:
+    """Map source column -> '<target>.<column> (<detection>)' for every `refers_to` entry.
+
+    The Notes cell renders this verbatim, so the detection qualifier is baked in here
+    (SPEC 2.3: a consumer MUST NOT treat an inferred edge as a constraint).
+    """
+
+    out: dict[str, str] = {}
+
+    for entry in relationships.get("refers_to") or []:
+        cols = entry.get("column") or []
+        tgt_cols = entry.get("target_column") or []
+        tgt_table = entry.get("target_table") or ""
+        detection = _edge_detection(entry)
+
+        if len(cols) == 1 and len(tgt_cols) == 1:
+            out[cols[0]] = f"{tgt_table}.{tgt_cols[0]} ({detection})"
+        elif cols:
+            joined_src = ",".join(cols)
+            joined_tgt = ",".join(tgt_cols) if tgt_cols else "?"
+            out[joined_src] = f"{tgt_table}.({joined_tgt}) ({detection})"
+
+    return out
+
+
+def _artifact_mapping(path: Path) -> dict[str, Any] | None:
+    """One per-table artifact, or None when it is missing, unparseable or misshapen.
+
+    A corrupt file costs its own section, not the context of every table beside it.
+    """
+
+    if not path.is_file():
+        return None
+
+    try:
+        data = yaml.safe_load(path.read_text())
+    except yaml.YAMLError:
+        return None
+
+    return data if isinstance(data, dict) else None
+
+
+def _load_connection_notes(print_root: Path) -> str | None:
+    """`manifest.annotations.yaml`'s `notes` field (SPEC 2.7.3), or None when absent/empty."""
+
+    mapping = _artifact_mapping(print_root / "manifest.annotations.yaml")
+
+    if mapping is None:
+        return None
+
+    notes = mapping.get("notes")
+
+    return notes.strip() if isinstance(notes, str) and notes.strip() else None
+
+
+def _annotation_columns(mapping: dict[str, Any] | None) -> dict[str, dict[str, Any]] | None:
+    """The `columns` sub-mapping of a parsed `statistics.annotations.yaml`, or None.
+
+    Each entry is `{note, claims, values}`, all optional (SPEC 2.7.1); an entry that is
+    not a mapping is dropped rather than failing the table's whole annotation set.
+    """
+
+    if mapping is None:
+        return None
+
+    columns = mapping.get("columns")
+
+    if not isinstance(columns, dict):
+        return None
+
+    return {name: entry for name, entry in columns.items() if isinstance(entry, dict)}
+
+
+def _annotated_grain(mapping: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The `grain` block of a parsed `statistics.annotations.yaml`, or None (SPEC 2.7.1)."""
+
+    if mapping is None:
+        return None
+
+    grain = mapping.get("grain")
+
+    return grain if isinstance(grain, dict) else None
+
+
+def _relationship_annotation_entries(
+    mapping: dict[str, Any] | None,
+) -> list[dict[str, Any]] | None:
+    """`refers_to` from a parsed `relationships.annotations.yaml`, None if absent (SPEC 2.7.2)."""
+
+    if mapping is None:
+        return None
+
+    entries = mapping.get("refers_to")
+
+    if not isinstance(entries, list):
+        return None
+
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
+def _load_table_artifacts(manifest: dict[str, Any], print_root: Path, fqn: str) -> TableArtifacts:
+    """Read every available per-table artifact off disk; tolerate missing optional pieces."""
+
+    entry = walkable_tables(manifest).get(fqn) or {}
+    table_path = print_root / entry.get("path", fqn.replace(".", "/"))
+    artifacts = declared_artifacts(entry)
+
+    ddl_path = table_path / artifacts.get("ddl", "ddl.sql")
+    ddl = ddl_path.read_text() if ddl_path.is_file() else ""
+
+    statistics = None
+
+    if "statistics" in artifacts:
+        statistics = _artifact_mapping(table_path / artifacts["statistics"])
+
+    relationships = None
+
+    if "relationships" in artifacts:
+        relationships = _artifact_mapping(table_path / artifacts["relationships"])
+
+    description = None
+
+    if "description" in artifacts:
+        desc_path = table_path / artifacts["description"]
+
+        if desc_path.is_file():
+            description = desc_path.read_text()
+
+    annotations = None
+    annotated_grain = None
+
+    if "statistics_annotations" in artifacts:
+        stats_ann = _artifact_mapping(table_path / artifacts["statistics_annotations"])
+        annotations = _annotation_columns(stats_ann)
+        annotated_grain = _annotated_grain(stats_ann)
+
+        # A key naming a column no longer in the table is stale (SPEC 2.7.1). `statistics` is
+        # None only for an artifact predating the columns map, where such keys stand as-is.
+        if annotations and statistics is not None:
+            known_columns = statistics.get("columns") or {}
+            annotations = {
+                name: entry for name, entry in annotations.items() if name in known_columns
+            }
+
+    relationship_annotations = None
+
+    if "relationships_annotations" in artifacts:
+        relationship_annotations = _relationship_annotation_entries(
+            _artifact_mapping(table_path / artifacts["relationships_annotations"]),
+        )
+
+    return TableArtifacts(
+        fqn=fqn,
+        table_type=entry.get("type", "table"),
+        row_count=entry.get("row_count"),
+        column_count=int(entry.get("columns") or 0),
+        ddl=ddl,
+        statistics=statistics,
+        relationships=relationships,
+        description=description,
+        annotations=annotations,
+        annotated_grain=annotated_grain,
+        relationship_annotations=relationship_annotations,
+        missing=missing_artifacts(table_path, artifacts),
+    )
+
+
+def assemble_structured(
+    manifest: dict[str, Any],
+    print_root: Path,
+    table: str,
+    options: AssemblyOptions,
+) -> dict[str, Any]:
+    """The single-table structured object `format: json` / `format: yaml` describe.
+
+    For MCP's `get_table_context`, built by the same builder the CLI's json/yaml paths use,
+    so `budget_tokens` and `--budget` mean the same thing regardless of caller.
+    """
+
+    a = _load_table_artifacts(manifest, print_root, table)
+
+    return _budgeted_structured_payload(a, options, options.budget)
+
+
+def _budgeted_structured_payload(
+    a: TableArtifacts,
+    options: AssemblyOptions,
+    budget: int | None,
+) -> dict[str, Any]:
+    """One table's structured payload under a budget; the identity fields never drop."""
+
+    header: dict[str, Any] = {"table": a.fqn, "type": a.table_type, "columns_count": a.column_count}
+
+    if a.row_count is not None:
+        header["row_count"] = a.row_count
+
+    if a.missing:
+        header["_missing"] = list(a.missing)
+
+    candidates: list[tuple[str, Any]] = []
+
+    if options.include_ddl:
+        candidates.append(("ddl", a.ddl))
+
+    if options.include_description and a.description is not None:
+        candidates.append(("description", a.description))
+
+    if options.include_annotations and a.annotations:
+        candidates.append(("annotations", a.annotations))
+
+    if options.include_annotations and a.annotated_grain:
+        candidates.append(("grain_annotations", a.annotated_grain))
+
+    if options.include_stats and a.statistics is not None:
+        candidates.append(("statistics", _stripped_statistics(a.statistics)))
+
+    if options.include_relationships and a.relationships is not None:
+        candidates.append(("relationships", a.relationships))
+
+    if options.include_relationships and a.relationship_annotations:
+        candidates.append(("relationship_annotations", a.relationship_annotations))
+
+    sections = [make_section(name, _measure_for_budget(value)) for name, value in candidates]
+    selection = select(sections, budget)
+    included_names = {s.name for s in selection.included}
+
+    payload = dict(header)
+
+    for name, value in candidates:
+        if name in included_names:
+            payload[name] = value
+
+    if selection.truncated:
+        payload["_truncated"] = [name for name, _ in candidates if name not in included_names]
+
+    return payload
+
+
+def _stripped_statistics(statistics: dict[str, Any]) -> dict[str, Any]:
+    """`statistics` with each column's `sketch` removed - a copy, never mutated in place.
+
+    The sketch payload is 42% of the reference example's statistics bytes and no surface on
+    this path decodes it. The resource endpoint still serves the file verbatim, so stripping
+    must not touch `a.statistics` itself, which the md path also reads.
+    """
+
+    columns = statistics.get("columns")
+
+    if not isinstance(columns, dict):
+        return statistics
+
+    stripped_columns = {
+        name: {k: v for k, v in col.items() if k != "sketch"} if isinstance(col, dict) else col
+        for name, col in columns.items()
+    }
+
+    return {**statistics, "columns": stripped_columns}
+
+
+def _measure_for_budget(value: Any) -> str:
+    """Text whose length approximates `value`'s token cost - never emitted itself."""
+
+    return value if isinstance(value, str) else json.dumps(value, default=str)
+
+
+def _assemble_json(artifacts: list[TableArtifacts], options: AssemblyOptions) -> AssemblyResult:
+    """JSON output: array of per-table objects (single object if exactly one)."""
+
+    payloads, included, truncated = _budgeted_structured_payloads(artifacts, options)
+    body: Any = payloads[0] if len(payloads) == 1 else payloads
+    text = json.dumps(body, indent=2, default=str, sort_keys=False)
+
+    return AssemblyResult(
+        text=text + "\n",
+        tables_included=included,
+        truncated=truncated,
+    )
+
+
+def _assemble_yaml(artifacts: list[TableArtifacts], options: AssemblyOptions) -> AssemblyResult:
+    """YAML output: multi-document stream, one document per table."""
+
+    payloads, included, truncated = _budgeted_structured_payloads(artifacts, options)
+    text = yaml.safe_dump_all(payloads, sort_keys=False, default_flow_style=False)
+
+    return AssemblyResult(
+        text=text,
+        tables_included=included,
+        truncated=truncated,
+    )
+
+
+def _budgeted_structured_payloads(
+    artifacts: list[TableArtifacts],
+    options: AssemblyOptions,
+) -> tuple[list[dict[str, Any]], int, tuple[str, ...]]:
+    """Per-table payloads under an even split of the total budget.
+
+    These formats carry no document header, so the split is `budget // len(artifacts)`; a
+    split that floors to zero excludes every table from `tables_included`.
+    """
+
+    if options.budget is None:
+        payloads = [_budgeted_structured_payload(a, options, None) for a in artifacts]
+
+        return payloads, len(artifacts), ()
+
+    per_table_budget = options.budget // len(artifacts)
+    payloads = []
+    truncated: list[str] = []
+
+    for a in artifacts:
+        payload = _budgeted_structured_payload(a, options, per_table_budget)
+        payloads.append(payload)
+
+        if "_truncated" in payload:
+            truncated.append(a.fqn)
+
+    included = len(artifacts) if per_table_budget > 0 else 0
+
+    return payloads, included, tuple(truncated)

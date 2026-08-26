@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jakubro.github.io/dbprint/spec/v1/relationships_annotations.schema.json",
+  "title": "dbprint relationships.annotations.yaml v1",
+  "description": "Per-table user-authored edge notes and rejections. See SPEC.md section 2.7.2.",
+  "type": "object",
+  "required": [
+    "format_version",
+    "refers_to"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "format_version": {
+      "const": 1
+    },
+    "refers_to": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/AnnotatedRefersTo"
+      }
+    }
+  },
+  "$defs": {
+    "ColumnArray": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 1
+    },
+    "AnnotatedRefersTo": {
+      "type": "object",
+      "required": [
+        "column",
+        "target_table",
+        "target_column"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "column": {
+          "$ref": "#/$defs/ColumnArray"
+        },
+        "path": {
+          "$ref": "#/$defs/ColumnArray"
+        },
+        "target_table": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target_column": {
+          "$ref": "#/$defs/ColumnArray"
+        },
+        "target_path": {
+          "$ref": "#/$defs/ColumnArray"
+        },
+        "note": {
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "rejected"
+          ]
+        },
+        "claims": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    }
+  }
+}

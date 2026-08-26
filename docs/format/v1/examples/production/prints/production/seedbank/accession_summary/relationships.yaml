@@ -1,0 +1,18 @@
+format_version: 1
+table: seedbank.accession_summary
+profiled_at: '2026-05-17T22:48:01Z'
+eligible_target: false
+refers_to:
+- column:
+  - accession_id
+  target_table: seedbank.accession
+  target_column:
+  - accession_id
+  detection: inferred
+- column:
+  - germination_trial_id
+  target_table: seedbank.germination_trial
+  target_column:
+  - trial_id
+  detection: inferred
+referenced_by: []

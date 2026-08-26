@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jakubro.github.io/dbprint/spec/v1/manifest.schema.json",
+  "title": "dbprint manifest.yaml v1",
+  "description": "Per-connection table index. See SPEC.md section 2.5.",
+  "type": "object",
+  "required": [
+    "format_version",
+    "generated_at",
+    "connection",
+    "adapter",
+    "dbprint_version",
+    "statistics_params",
+    "selectors",
+    "redaction_rules_configured",
+    "default_collation",
+    "tables"
+  ],
+  "properties": {
+    "format_version": {"const": 1},
+    "generated_at": {"$ref": "#/$defs/UtcIso8601"},
+    "connection": {"type": "string", "minLength": 1},
+    "adapter": {"enum": ["snowflake", "postgres", "mysql"]},
+    "dbprint_version": {"type": "string", "minLength": 1},
+    "statistics_params": {"$ref": "#/$defs/StatisticsParams"},
+    "selectors": {"$ref": "#/$defs/Selectors"},
+    "redaction_rules_configured": {"type": "integer", "minimum": 0},
+    "default_collation": {"type": "string", "minLength": 1},
+    "manifest_annotations": {"const": "manifest.annotations.yaml"},
+    "tables": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/TableEntry"}
+    }
+  },
+  "$defs": {
+    "UtcIso8601": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"
+    },
+    "StatisticsParams": {
+      "type": "object",
+      "properties": {
+        "enumeration_threshold": {"type": "integer", "minimum": 1},
+        "top_n_values": {"type": "integer", "minimum": 1},
+        "top_n_null_patterns": {"type": "integer", "minimum": 1},
+        "looks_like_sample_size": {"type": "integer", "minimum": 1},
+        "percentiles": {
+          "type": "array",
+          "items": {"type": "integer", "minimum": 1, "maximum": 99}
+        }
+      }
+    },
+    "Selectors": {
+      "type": "object",
+      "required": ["include", "exclude"],
+      "properties": {
+        "include": {"type": "array", "items": {"type": "string"}},
+        "exclude": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "TableEntry": {
+      "type": "object",
+      "required": ["type", "path", "artifacts", "columns", "profiled_at"],
+      "properties": {
+        "type": {"enum": ["table", "view", "matview"]},
+        "path": {"type": "string", "minLength": 1},
+        "artifacts": {"$ref": "#/$defs/Artifacts"},
+        "row_count": {"type": "integer", "minimum": 0},
+        "columns": {"type": "integer", "minimum": 0},
+        "profiled_at": {"$ref": "#/$defs/UtcIso8601"},
+        "max_age_days": {"type": "integer", "minimum": 0},
+        "statistics_params": {"$ref": "#/$defs/StatisticsParams"}
+      }
+    },
+    "Artifacts": {
+      "type": "object",
+      "required": ["ddl"],
+      "properties": {
+        "ddl": {"const": "ddl.sql"},
+        "statistics": {"const": "statistics.yaml"},
+        "relationships": {"const": "relationships.yaml"},
+        "description": {"const": "description.md"},
+        "statistics_annotations": {"const": "statistics.annotations.yaml"},
+        "relationships_annotations": {"const": "relationships.annotations.yaml"}
+      }
+    }
+  }
+}

@@ -1,0 +1,80 @@
+# Reference project config exercising the v1 schema.
+#
+# Shape: top-level defaults cascade into per-connection blocks; per-connection
+# values override defaults. Every key dbprint reads appears below. The two that
+# would narrow the read are commented out.
+#
+# Every key, with types and defaults: ../../../../CONFIG.md
+
+defaults:
+  max_age_days: 7
+  statistics:
+    enumeration_threshold: 50
+    top_n_values: 20
+    looks_like_sample_size: 1000
+    percentiles: [1, 25, 50, 75, 99]
+  diff:
+    stat_change_threshold:
+      cardinality_ratio: 0.02
+      percentile_pct: 0.05
+      values_coverage: 0.05
+      default: 0.01
+
+  # Withhold the literals of anything detected as personal data, project-wide.
+  # Keyed on the category rather than on a column glob: the glob is the escape
+  # hatch for a column detection misses, while the category covers the columns a
+  # schema has not grown yet. Entries here are walked before a connection's own,
+  # and the last matching rule decides the primitive - so a connection can change
+  # what this sets, never remove it.
+  redact:
+    - sensitivity: [contact]
+      with: mask
+    - sensitivity: [online_identifier]
+      with: mask
+
+connections:
+  production:
+    adapter: postgres
+    auto: true
+    output: prints
+    include:
+      - "seedbank.*"
+      - "fixture.*"
+    exclude:
+      - "seedbank.audit_*"
+    max_age_days: 1
+    statistics:
+      top_n_values: 30
+
+    # Per-table overrides. Every matching entry applies in order; later wins.
+    # A rule narrows by a predicate or by a fraction, never both.
+    rules:
+      # The matview is expensive to profile, so it is refreshed monthly rather
+      # than daily. Its manifest entry records the 30 it resolved to, while
+      # every other table records the connection's 1.
+      - include: ["seedbank.germination_by_taxon_mv"]
+        max_age_days: 30
+
+#      - include: ["seedbank.events*"]
+#        sample: 0.01
+#      - include: ["seedbank.accession"]
+#        filter: "collected_on >= current_date - interval '30 days'"
+
+    # Two more redaction primitives on top of the project-wide `mask` above,
+    # each demonstrating the other way a rule can target a column: `columns`
+    # globs over `<fqn>.<column>` rather than a detected category. This is
+    # the escape hatch for a column detection misses, per CONFIG.md.
+    redact:
+      - columns: ["seedbank.collector.institution"]
+        with: hash
+      - columns: ["seedbank.collector.street_address"]
+        with: drop
+
+#    # Data-quality checks evaluated by `dbprint check`, in the grammar at
+#    # ../../../../ASSERTIONS.md.
+#    assertions:
+#      tables:
+#        seedbank.collector:
+#          columns:
+#            email:
+#              null_rate: 0

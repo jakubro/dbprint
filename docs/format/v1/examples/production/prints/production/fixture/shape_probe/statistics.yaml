@@ -1,0 +1,224 @@
+format_version: 1
+table: fixture.shape_probe
+type: table
+profiled_at: '2026-05-17T22:48:01Z'
+row_count: 50
+row_count_method: exact
+grain:
+  keys:
+  - columns:
+    - probe_id
+    detection: declared
+dependencies: []
+columns:
+  probe_id:
+    sql_type: integer
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 50
+    cardinality_ratio: 1.0
+    cardinality_method: exact
+    inferred:
+      looks_like: numeric_string
+      sampled: 50
+      matched: 50
+      candidate_key: true
+    values:
+    - value: 1
+      count: 1
+    - value: 10
+      count: 1
+    - value: 11
+      count: 1
+    - value: 12
+      count: 1
+    - value: 13
+      count: 1
+    - value: 14
+      count: 1
+    - value: 15
+      count: 1
+    - value: 16
+      count: 1
+    - value: 17
+      count: 1
+    - value: 18
+      count: 1
+    - value: 19
+      count: 1
+    - value: 2
+      count: 1
+    - value: 20
+      count: 1
+    - value: 21
+      count: 1
+    - value: 22
+      count: 1
+    - value: 23
+      count: 1
+    - value: 24
+      count: 1
+    - value: 25
+      count: 1
+    - value: 26
+      count: 1
+    - value: 27
+      count: 1
+    - value: 28
+      count: 1
+    - value: 29
+      count: 1
+    - value: 3
+      count: 1
+    - value: 30
+      count: 1
+    - value: 31
+      count: 1
+    - value: 32
+      count: 1
+    - value: 33
+      count: 1
+    - value: 34
+      count: 1
+    - value: 35
+      count: 1
+    - value: 36
+      count: 1
+    values_coverage: 0.6
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: DbXkuX/CrzkNzFCab3WEmxP0KUOIHGVfGOzuRxRacsAZCURAwxfiGygwj9nyp7rzKqNT4nh5EzwsmQsKgmUtyi4OsT1YXkwiO+gHmlx00HlEqp1brel7r0iBtT4eGxi2UHys2OLyrvxZ9R/QKX4jbVo23t1L6iVDXYe4x9i5qs1o0TjytP3W8G8Gf4nMFIYsb2ButSX/3FZvfNnf0OXeqm+15gh+sbLccN7QX1o78+x1XTjm0WPoIHVoe+YQajuEdaGkpuG5dw97u+0Oyj/i4IzfStIpn20jkYGme3VCEiyW08i9H48v85eVxEJja1X7nc+NO1xuCwGkSw5YhmgMuaTRvA4XQsCLqiegyZv/ZxCzj8jShy8exrUCk63+y3sYuxhkze5NPW7XdysGdKMY1dhGEGP0rFim2Vg8NP01bvXb68KskSgwP965X8WEzZZd4MqaFbYVNnfh7Q/2E/VjveOxOWgxqDmP5p81EDkVIYnqGvxRx8atJu/Jb0AnW9wK90Ofj/q9/8T6dIq22a8/1w==
+  logger_ipv4:
+    sql_type: character varying(45)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 10
+    cardinality_ratio: 0.2
+    cardinality_method: exact
+    redacted: mask
+    inferred:
+      looks_like: ip
+      sampled: 10
+      matched: 10
+      sensitivity: online_identifier
+    values:
+    - value: '[redacted]'
+      count: 5
+    - value: '[redacted]'
+      count: 5
+    - value: '[redacted]'
+      count: 5
+    - value: '[redacted]'
+      count: 5
+    - value: '[redacted]'
+      count: 5
+    - value: '[redacted]'
+      count: 5
+    - value: '[redacted]'
+      count: 5
+    - value: '[redacted]'
+      count: 5
+    - value: '[redacted]'
+      count: 5
+    - value: '[redacted]'
+      count: 5
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+  json_text:
+    sql_type: text
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 50
+    cardinality_ratio: 1.0
+    cardinality_method: exact
+    inferred:
+      looks_like: json
+      sampled: 50
+      matched: 50
+      candidate_key: true
+    values:
+    - value: '{"reading": 11.01, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 12.02, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 13.03, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 14.04, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 15.05, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 16.06, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 17.07, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 18.08, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 19.09, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 20.10, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 21.11, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 22.12, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 23.13, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 24.14, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 25.15, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 26.16, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 27.17, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 28.18, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 29.19, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 30.20, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 31.21, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 32.22, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 33.23, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 34.24, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 35.25, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 36.26, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 37.27, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 38.28, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 39.29, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 40.30, "unit": "C", "ok": true}'
+      count: 1
+    values_coverage: 0.6
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: BS3YNZqYWRkFeYDnycqRhhRgqZeOZhDrForIiWlC0PMXt1YEa41jWSNijS3BFUgENjjM/BxpsZc5Hy5I/RJoEjldXz9xYAGWPOxXsKYnKMA+thbc6i1sKEV4yVnPODmjR7vZntDiIHdJY6M6SzL1bU8bCVGmEG9UUpaJoIgLzq9WEOkIYSbvFGGOknfbWhBMbIvhiYJCABx0ztrI1NTHAID0UADPoMdshWkPCi9Ov5GH73q67w+Bf4y2vfG8ph9VjY8+yyyRFBqUjSFy73U+T5bHFf+UdnMPmaUKE6io7XWbU38xW+Qg6qbnOhMCXTwPrHzXj2X7fx+wk1tunqA457JSnlMlm6IOsqKzAjuGl9KzVfkBNxMYYrjc4Yg/DfQXu6bwpGLXG03BxTAela5gI8eTmENUaa+h05hEjYCUvBXXJpk5x4LVa+ITaEy8HA6T4sYGjFGiw8fllCiDXCorLfDCLwUtufop8xShUYj537/1uJFXQdB6K/X6whBJUEo6+UmBbqptB97+yvGnpqFyhw==
+  payload_bytes:
+    sql_type: bytea
+    nullable: true
+    null_count: 0
+    null_rate: 0.0
+    classification: unsupported
+  tag_list:
+    sql_type: text[]
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: unsupported

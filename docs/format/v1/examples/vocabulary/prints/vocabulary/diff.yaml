@@ -1,0 +1,36 @@
+format_version: 1
+generated_at: '2026-05-17T22:48:01Z'
+connection: vocabulary
+adapter: postgres
+baseline:
+  source: committed_prints
+  path: prints/vocabulary
+  generated_at: null
+  dbprint_version: null
+target:
+  source: live_database
+  scanned_at: '2026-05-17T22:48:01Z'
+  selectors:
+    include:
+    - '*'
+    exclude: []
+  tables_scanned: 1
+summary:
+  tables_added: 1
+  tables_removed: 0
+  tables_modified: 0
+  columns_added: 0
+  columns_removed: 0
+  columns_type_changed: 0
+  columns_nullable_changed: 0
+  columns_default_changed: 0
+  statistics_drifted: 0
+  relationships_changed: 0
+  indexes_changed: 0
+  comments_changed: 0
+  unchanged_tables: 0
+  unevaluated_tables: 0
+changes:
+- kind: table_added
+  table: public.shapes
+  type: table

@@ -1,0 +1,183 @@
+format_version: 1
+table: seedbank.germination_by_taxon_mv
+type: matview
+profiled_at: '2026-05-17T22:48:01Z'
+row_count: 770
+row_count_method: exact
+grain:
+  keys:
+  - columns:
+    - taxon_id
+    - trial_year
+    detection: declared
+  - columns:
+    - taxon_id
+    - total_sown
+    detection: measured
+  - columns:
+    - taxon_id
+    - total_germinated
+    detection: measured
+  search:
+    exhausted: true
+dependencies: []
+columns:
+  taxon_id:
+    sql_type: integer
+    nullable: true
+    null_count: 0
+    null_rate: 0.0
+    classification: foreign_key_candidate
+    cardinality: 300
+    cardinality_ratio: 0.38961
+    cardinality_method: exact
+    inferred:
+      looks_like: numeric_string
+      sampled: 300
+      matched: 300
+    values:
+    - value: 100
+      count: 3
+    - value: 101
+      count: 3
+    - value: 102
+      count: 3
+    - value: 103
+      count: 3
+    - value: 104
+      count: 3
+    - value: 105
+      count: 3
+    - value: 106
+      count: 3
+    - value: 107
+      count: 3
+    - value: 108
+      count: 3
+    - value: 109
+      count: 3
+    - value: 110
+      count: 3
+    - value: 111
+      count: 3
+    - value: 112
+      count: 3
+    - value: 113
+      count: 3
+    - value: 114
+      count: 3
+    - value: 115
+      count: 3
+    - value: 116
+      count: 3
+    - value: 117
+      count: 3
+    - value: 118
+      count: 3
+    - value: 119
+      count: 3
+    - value: 120
+      count: 3
+    - value: 121
+      count: 3
+    - value: 122
+      count: 3
+    - value: 123
+      count: 3
+    - value: 124
+      count: 3
+    - value: 125
+      count: 3
+    - value: 126
+      count: 3
+    - value: 127
+      count: 3
+    - value: 128
+      count: 3
+    - value: 129
+      count: 3
+    values_coverage: 0.116883
+    distribution: long_tail
+    sketch:
+      method: kmv_md5_lo64
+      values: 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
+  trial_year:
+    sql_type: date
+    nullable: true
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.003896
+    cardinality_method: exact
+    inferred:
+      looks_like: iso8601_date
+      sampled: 3
+      matched: 3
+    values:
+    - value: '2020-01-01'
+      count: 300
+    - value: '2021-01-01'
+      count: 300
+    - value: '2022-01-01'
+      count: 170
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: J48xQDhNS9lodrAd9MH++oUwmbEXLoCs
+  total_sown:
+    sql_type: bigint
+    nullable: true
+    null_count: 0
+    null_rate: 0.0
+    classification: numeric
+    cardinality: 100
+    cardinality_ratio: 0.12987
+    cardinality_method: exact
+    distribution: uniform
+    frequencies:
+      top: 13
+      bottom: 11
+      listed: 30
+      total: 353
+    range:
+      min: 20
+      max: 138
+    percentiles:
+      p01: 20.0
+      p25: 36.0
+      p50: 54.0
+      p75: 72.75
+      p99: 134.0
+    sketch:
+      method: kmv_md5_lo64
+      values: A7sZ8tjZUk0Fp+IoqJw3mQdrHFcipGqiB9OqPZmOUTULfUjFkbj0MBP0KUOIHGVfF7YiVCEWkbUY7O5HFFpywBkJREDDF+IbJMfSWDvmklEl+Fl4NPqDpCaCKRUcm94RKU3/3D5GOQQqo1PieHkTPC4OsT1YXkwiOv5XwuAIvIw76AeaXHTQeT8UJEnQNwKNQrbTvq2YqSNGyQd+u141w0eOx2pwTptSSGcyUuSQ9zZIgbU+HhsYtlB8rNji8q78UM3xsg3m9GZS7T2JoUa0RVYkCy/wEAveV2qP1MnsaZdXrmQ56Hm7Klv414YiJ3xOXYe4x9i5qs1eBpcTr5+mymjROPK0/dbwbD9niBm24FhswIeccbXbXGzpMrlXtvMybrHh+Mvhg7lvfNnf0OXeqnDe0F9aO/PsdHv6Lxtfh9t0qBTskje27HVoe+YQajuEdaGkpuG5dw93MoaolbyENnrfNLHXfojXe7vtDso/4uCAQkdxg7esP4Yj42vU48fFjvTGKOugJZGP+VzPqUzr2ZPuipv4rn0LlkMUFedwxt2Y1doQ/mbyHZpqF77wKTMcmqJL6UsxnSGbKWOXhsti75s2leDLbN5/m741VKT99vudz407XG4LAaLfEz8HMJXdpEsOWIZoDLmk0bwOF0LAi6gzUXxF0xBwqEXhwuinYr2yN080K+ntRLOPyNKHLx7GtGktNN6GM8S1ApOt/st7GLsYZM3uTT1uu6Aooh7TgEa+/lWHlrmVhMBfPYq2WMVRx4x1vR4G8hXHyZal7lOnD8nUO79bvof7ykZEadLPnz7Rl+rNd6zOXtM8NrG1/Cyx1mVFPPsuVfDYRhBj9KxYptlYPDT9NW7127Cn1JQTLuXb68KskSgwP9whJwj3IbeI3b0GlKTpvcjeuV/FhM2WXd+FJ1mfpiZC4HkCslTfrRDgypoVthU2d+D/LsGbNxUU4e0P9hP1Y73jsTloMag5j+afNRA5FSGJ6hXRUq3QcpTvyW9AJ1vcCvJphi6nc5Pd9bXDADlGxI/5e6bOkr9a3fp0irbZrz/X/3B3knPpWqY=
+  total_germinated:
+    sql_type: bigint
+    nullable: true
+    null_count: 0
+    null_rate: 0.0
+    classification: numeric
+    cardinality: 76
+    cardinality_ratio: 0.098701
+    cardinality_method: exact
+    distribution: uniform
+    frequencies:
+      top: 24
+      bottom: 12
+      listed: 30
+      total: 460
+    range:
+      min: 6
+      max: 110
+    percentiles:
+      p01: 6.0
+      p25: 16.0
+      p50: 34.0
+      p75: 56.0
+      p99: 104.0
+    sketch:
+      method: kmv_md5_lo64
+      values: BafiKKicN5kHaxxXIqRqog215Ll/wq85E/QpQ4gcZV8Y7O5HFFpywCX4WXg0+oOkJoIpFRyb3hEpTf/cPkY5BCqjU+J4eRM8LJkLCoJlLcouDrE9WF5MIjr+V8LgCLyMO+gHmlx00Hk/FCRJ0DcCjUSqnVut6XuvRskHfrteNcNHjsdqcE6bUkiBtT4eGxi2UM3xsg3m9GZWJAsv8BAL3ln1H9ApfiNtWjbe3UvqJUNdh7jH2LmqzV4GlxOvn6bKaNE48rT91vBsP2eIGbbgWG9gbrUl/9xWb3zZ39Dl3qpvteYIfrGy3HADuD3UdVKUcN7QX1o78+x0e/ovG1+H23VdOObRY+ggdWh75hBqO4R3MoaolbyENnu77Q7KP+LgjN9K0imfbSOO9MYo66AlkY/5XM+pTOvZltPIvR+PL/OXlcRCY2tV+5jV2hD+ZvIdmmoXvvApMxybNpXgy2zef5u+NVSk/fb7nc+NO1xuCwGkSw5YhmgMuaTRvA4XQsCLqDNRfEXTEHCqJ6DJm/9nELI3TzQr6e1Es4/I0ocvHsa1ApOt/st7GLsYZM3uTT1uvv5Vh5a5lYTAXz2KtljFUceMdb0eBvIVykZEadLPnz7TPDaxtfwssdZlRTz7LlXw2EYQY/SsWKbZWDw0/TVu9dvrwqyRKDA/3CEnCPcht4jdvQaUpOm9yN65X8WEzZZd4MqaFbYVNnfhY0Z8na5SG+HtD/YT9WO947E5aDGoOY/mnzUQORUhieoV0VKt0HKU6hr8UcfGrSbvyW9AJ1vcCvdDn4/6vf/E+nSKttmvP9c=

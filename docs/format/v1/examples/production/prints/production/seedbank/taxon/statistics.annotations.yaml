@@ -1,0 +1,16 @@
+format_version: 1
+columns:
+  parent_taxon_id:
+    note: >-
+      Self-referential FK, declared. NULL for the four family-rank rows; every
+      genus and species row has one.
+  rank:
+    note: >-
+      One of family, genus, species - not a foreign key to a separate ranks
+      table, just a fixed vocabulary.
+  vernacular_name:
+    note: >-
+      Flagged sensitivity: personal_name (SPEC 4.4.2) - a false positive. A
+      common plant name built from two capitalized words matches the same
+      typographic shape the weak-tier name detector uses; the format accepts
+      this recall bias by design rather than narrowing the check.

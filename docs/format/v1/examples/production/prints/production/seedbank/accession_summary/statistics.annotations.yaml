@@ -1,0 +1,9 @@
+format_version: 1
+columns:
+  vernacular_name:
+    note: >-
+      Common name from taxon.vernacular_name; not unique, unlike scientific_name.
+  collector_name:
+    note: >-
+      Full name of the field collector, joined from collector.full_name. The view
+      carries the collector's name but not their institution or contact details.

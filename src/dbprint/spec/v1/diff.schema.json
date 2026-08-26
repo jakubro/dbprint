@@ -1,0 +1,382 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jakubro.github.io/dbprint/spec/v1/diff.schema.json",
+  "title": "dbprint diff.yaml v1",
+  "description": "Structured change-event stream. See SPEC.md section 2.6.",
+  "type": "object",
+  "required": ["format_version", "generated_at", "connection", "adapter", "baseline", "target", "summary", "changes"],
+  "properties": {
+    "format_version": {"const": 1},
+    "generated_at": {"$ref": "#/$defs/UtcIso8601"},
+    "connection": {"type": "string", "minLength": 1},
+    "adapter": {"enum": ["snowflake", "postgres", "mysql"]},
+    "baseline": {"$ref": "#/$defs/Baseline"},
+    "target": {"$ref": "#/$defs/Target"},
+    "summary": {"$ref": "#/$defs/Summary"},
+    "changes": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/Change"}
+    }
+  },
+  "$defs": {
+    "UtcIso8601": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"
+    },
+    "ReferentialAction": {
+      "enum": ["NO ACTION", "CASCADE", "SET NULL", "SET DEFAULT", "RESTRICT"]
+    },
+    "Baseline": {
+      "type": "object",
+      "required": ["source", "path", "generated_at", "dbprint_version"],
+      "properties": {
+        "source": {"const": "committed_prints"},
+        "path": {"type": "string", "minLength": 1},
+        "generated_at": {"oneOf": [{"$ref": "#/$defs/UtcIso8601"}, {"type": "null"}]},
+        "dbprint_version": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "null"}]}
+      }
+    },
+    "Target": {
+      "type": "object",
+      "required": ["source", "scanned_at", "selectors", "tables_scanned"],
+      "properties": {
+        "source": {"const": "live_database"},
+        "scanned_at": {"$ref": "#/$defs/UtcIso8601"},
+        "selectors": {
+          "type": "object",
+          "required": ["include"],
+          "properties": {
+            "include": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+            "exclude": {"type": "array", "items": {"type": "string"}}
+          }
+        },
+        "tables_scanned": {"type": "integer", "minimum": 0}
+      }
+    },
+    "Summary": {
+      "type": "object",
+      "required": [
+        "tables_added", "tables_removed", "tables_modified",
+        "columns_added", "columns_removed", "columns_type_changed",
+        "columns_nullable_changed", "columns_default_changed",
+        "statistics_drifted", "relationships_changed",
+        "indexes_changed", "comments_changed", "unchanged_tables", "unevaluated_tables"
+      ],
+      "properties": {
+        "tables_added": {"type": "integer", "minimum": 0},
+        "tables_removed": {"type": "integer", "minimum": 0},
+        "tables_modified": {"type": "integer", "minimum": 0},
+        "columns_added": {"type": "integer", "minimum": 0},
+        "columns_removed": {"type": "integer", "minimum": 0},
+        "columns_type_changed": {"type": "integer", "minimum": 0},
+        "columns_nullable_changed": {"type": "integer", "minimum": 0},
+        "columns_default_changed": {"type": "integer", "minimum": 0},
+        "statistics_drifted": {"type": "integer", "minimum": 0},
+        "relationships_changed": {"type": "integer", "minimum": 0},
+        "indexes_changed": {"type": "integer", "minimum": 0},
+        "comments_changed": {"type": "integer", "minimum": 0},
+        "unchanged_tables": {"type": "integer", "minimum": 0},
+        "unevaluated_tables": {"type": "integer", "minimum": 0}
+      }
+    },
+    "Kind": {
+      "enum": [
+        "table_added", "table_removed",
+        "column_added", "column_removed", "column_type_changed", "column_nullable_changed", "column_default_changed",
+        "statistic_changed", "table_row_count_changed", "grain_changed", "physical_layout_changed",
+        "relationship_added", "relationship_removed", "relationship_modified",
+        "index_added", "index_removed", "index_modified",
+        "comment_changed"
+      ]
+    },
+    "Change": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": {"$ref": "#/$defs/Kind"}
+      },
+      "oneOf": [
+        {"$ref": "#/$defs/TableAdded"},
+        {"$ref": "#/$defs/TableRemoved"},
+        {"$ref": "#/$defs/ColumnAdded"},
+        {"$ref": "#/$defs/ColumnRemoved"},
+        {"$ref": "#/$defs/ColumnTypeChanged"},
+        {"$ref": "#/$defs/ColumnNullableChanged"},
+        {"$ref": "#/$defs/ColumnDefaultChanged"},
+        {"$ref": "#/$defs/StatisticChanged"},
+        {"$ref": "#/$defs/TableRowCountChanged"},
+        {"$ref": "#/$defs/GrainChanged"},
+        {"$ref": "#/$defs/PhysicalLayoutChanged"},
+        {"$ref": "#/$defs/RelationshipAdded"},
+        {"$ref": "#/$defs/RelationshipRemoved"},
+        {"$ref": "#/$defs/RelationshipModified"},
+        {"$ref": "#/$defs/IndexAdded"},
+        {"$ref": "#/$defs/IndexRemoved"},
+        {"$ref": "#/$defs/IndexModified"},
+        {"$ref": "#/$defs/CommentChanged"}
+      ]
+    },
+    "TableAdded": {
+      "properties": {"kind": {"const": "table_added"}},
+      "required": ["kind", "table", "type"],
+      "type": "object"
+    },
+    "TableRemoved": {
+      "properties": {"kind": {"const": "table_removed"}},
+      "required": ["kind", "table"],
+      "type": "object"
+    },
+    "ColumnAdded": {
+      "properties": {
+        "kind": {"const": "column_added"},
+        "sql_type": {"type": "string"},
+        "nullable": {"type": "boolean"}
+      },
+      "required": ["kind", "table", "column", "sql_type", "nullable"],
+      "type": "object"
+    },
+    "ColumnRemoved": {
+      "properties": {"kind": {"const": "column_removed"}},
+      "required": ["kind", "table", "column"],
+      "type": "object"
+    },
+    "ColumnTypeChanged": {
+      "properties": {
+        "kind": {"const": "column_type_changed"},
+        "before": {"type": "string"},
+        "after": {"type": "string"}
+      },
+      "required": ["kind", "table", "column", "before", "after"],
+      "type": "object"
+    },
+    "ColumnNullableChanged": {
+      "properties": {
+        "kind": {"const": "column_nullable_changed"},
+        "before": {"type": "boolean"},
+        "after": {"type": "boolean"}
+      },
+      "required": ["kind", "table", "column", "before", "after"],
+      "type": "object"
+    },
+    "ColumnDefaultChanged": {
+      "properties": {
+        "kind": {"const": "column_default_changed"},
+        "before": {},
+        "after": {}
+      },
+      "required": ["kind", "table", "column", "before", "after"],
+      "type": "object"
+    },
+    "StatisticChanged": {
+      "properties": {
+        "kind": {"const": "statistic_changed"},
+        "stat": {"type": "string"},
+        "before": {},
+        "after": {},
+        "delta": {"type": "number"},
+        "delta_pct": {"type": "number"}
+      },
+      "required": ["kind", "table", "column", "stat", "before", "after"],
+      "type": "object"
+    },
+    "TableRowCountChanged": {
+      "properties": {
+        "kind": {"const": "table_row_count_changed"},
+        "table": {"type": "string"},
+        "before": {"type": "integer", "minimum": 0},
+        "after": {"type": "integer", "minimum": 0},
+        "delta": {"type": "integer"},
+        "before_method": {"enum": ["exact", "approximate"]},
+        "after_method": {"enum": ["exact", "approximate"]}
+      },
+      "required": ["kind", "table", "before", "after", "delta", "before_method", "after_method"],
+      "type": "object"
+    },
+    "GrainState": {
+      "type": "object",
+      "required": ["keys"],
+      "properties": {
+        "keys": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["columns", "detection"],
+            "properties": {
+              "columns": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+              "detection": {"enum": ["declared", "measured"]}
+            }
+          }
+        },
+        "search": {
+          "type": "object",
+          "required": ["exhausted"],
+          "properties": {"exhausted": {"type": "boolean"}}
+        }
+      }
+    },
+    "GrainChanged": {
+      "properties": {
+        "kind": {"const": "grain_changed"},
+        "table": {"type": "string"},
+        "before": {"$ref": "#/$defs/GrainState"},
+        "after": {"$ref": "#/$defs/GrainState"}
+      },
+      "required": ["kind", "table", "before", "after"],
+      "type": "object"
+    },
+    "PhysicalLayoutState": {
+      "type": "object",
+      "required": ["mechanism", "keys"],
+      "properties": {
+        "mechanism": {"enum": ["cluster", "partition"]},
+        "keys": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["expression"],
+            "properties": {
+              "expression": {"type": "string"},
+              "column": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "PhysicalLayoutChanged": {
+      "properties": {
+        "kind": {"const": "physical_layout_changed"},
+        "table": {"type": "string"},
+        "before": {"oneOf": [{"$ref": "#/$defs/PhysicalLayoutState"}, {"type": "null"}]},
+        "after": {"oneOf": [{"$ref": "#/$defs/PhysicalLayoutState"}, {"type": "null"}]}
+      },
+      "required": ["kind", "table", "before", "after"],
+      "type": "object"
+    },
+    "RelationshipAdded": {
+      "properties": {
+        "kind": {"const": "relationship_added"},
+        "source_table": {"type": "string"},
+        "source_column": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "target_table": {"type": "string"},
+        "target_column": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "on_delete": {"$ref": "#/$defs/ReferentialAction"},
+        "on_update": {"$ref": "#/$defs/ReferentialAction"},
+        "detection": {"enum": ["declared", "inferred"]}
+      },
+      "required": ["kind", "source_table", "source_column", "target_table", "target_column", "on_delete", "on_update", "detection"],
+      "type": "object"
+    },
+    "RelationshipRemoved": {
+      "properties": {
+        "kind": {"const": "relationship_removed"},
+        "source_table": {"type": "string"},
+        "source_column": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "target_table": {"type": "string"},
+        "target_column": {"type": "array", "items": {"type": "string"}, "minItems": 1}
+      },
+      "required": ["kind", "source_table", "source_column", "target_table", "target_column"],
+      "type": "object"
+    },
+    "RelationshipModified": {
+      "properties": {
+        "kind": {"const": "relationship_modified"},
+        "source_table": {"type": "string"},
+        "source_column": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "target_table": {"type": "string"},
+        "target_column": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "on_delete": {
+          "type": "object",
+          "required": ["before", "after"],
+          "properties": {
+            "before": {"$ref": "#/$defs/ReferentialAction"},
+            "after": {"$ref": "#/$defs/ReferentialAction"}
+          }
+        },
+        "on_update": {
+          "type": "object",
+          "required": ["before", "after"],
+          "properties": {
+            "before": {"$ref": "#/$defs/ReferentialAction"},
+            "after": {"$ref": "#/$defs/ReferentialAction"}
+          }
+        }
+      },
+      "required": ["kind", "source_table", "source_column", "target_table", "target_column"],
+      "anyOf": [
+        {"required": ["on_delete"]},
+        {"required": ["on_update"]}
+      ],
+      "type": "object"
+    },
+    "IndexAdded": {
+      "properties": {
+        "kind": {"const": "index_added"},
+        "table": {"type": "string"},
+        "index_name": {"type": "string"},
+        "columns": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "unique": {"type": "boolean"},
+        "type": {"type": "string"}
+      },
+      "required": ["kind", "table", "index_name", "columns", "unique", "type"],
+      "type": "object"
+    },
+    "IndexRemoved": {
+      "properties": {
+        "kind": {"const": "index_removed"},
+        "table": {"type": "string"},
+        "index_name": {"type": "string"}
+      },
+      "required": ["kind", "table", "index_name"],
+      "type": "object"
+    },
+    "IndexModified": {
+      "properties": {
+        "kind": {"const": "index_modified"},
+        "table": {"type": "string"},
+        "index_name": {"type": "string"},
+        "before": {
+          "type": "object",
+          "required": ["columns", "unique", "type"],
+          "properties": {
+            "columns": {"type": "array", "items": {"type": "string"}},
+            "unique": {"type": "boolean"},
+            "type": {"type": "string"}
+          }
+        },
+        "after": {
+          "type": "object",
+          "required": ["columns", "unique", "type"],
+          "properties": {
+            "columns": {"type": "array", "items": {"type": "string"}},
+            "unique": {"type": "boolean"},
+            "type": {"type": "string"}
+          }
+        }
+      },
+      "required": ["kind", "table", "index_name", "before", "after"],
+      "type": "object"
+    },
+    "CommentChanged": {
+      "properties": {
+        "kind": {"const": "comment_changed"},
+        "table": {"type": "string"},
+        "target": {"enum": ["table", "column"]},
+        "column": {"type": "string"},
+        "before": {"oneOf": [{"type": "string"}, {"type": "null"}]},
+        "after": {"oneOf": [{"type": "string"}, {"type": "null"}]}
+      },
+      "required": ["kind", "table", "target", "before", "after"],
+      "allOf": [
+        {
+          "if": {"properties": {"target": {"const": "column"}}, "required": ["target"]},
+          "then": {"required": ["column"]}
+        },
+        {
+          "if": {"properties": {"target": {"const": "table"}}, "required": ["target"]},
+          "then": {"not": {"required": ["column"]}}
+        }
+      ],
+      "type": "object"
+    }
+  }
+}

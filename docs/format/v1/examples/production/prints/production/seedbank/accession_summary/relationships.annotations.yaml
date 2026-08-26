@@ -1,0 +1,9 @@
+format_version: 1
+refers_to:
+- column: [germination_trial_id]
+  target_table: seedbank.germination_trial
+  target_column: [trial_id]
+  verdict: rejected
+  note: >-
+    germination_trial_id holds a protocol-catalog reference number, not a key into
+    germination_trial.

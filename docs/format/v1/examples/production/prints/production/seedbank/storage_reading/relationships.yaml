@@ -1,0 +1,17 @@
+format_version: 1
+table: seedbank.storage_reading
+profiled_at: '2026-05-17T22:48:01Z'
+eligible_target: false
+refers_to:
+- column:
+  - vault_id
+  - shelf_code
+  target_table: seedbank.vault
+  target_column:
+  - vault_id
+  - shelf_code
+  on_delete: RESTRICT
+  on_update: NO ACTION
+  detection: declared
+  constraint_name: storage_reading_vault_shelf_fkey
+referenced_by: []

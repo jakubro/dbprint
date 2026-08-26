@@ -1,0 +1,52 @@
+name: gate
+
+on:
+  push:
+  pull_request:
+  workflow_call:
+
+jobs:
+  check:
+    if: github.event.repository.private == false
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:24.04
+      options: --user root
+    env:
+      LANG: en_US.UTF-8
+      LC_ALL: en_US.UTF-8
+    steps:
+      - name: Install what the recipes assume is present
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git locales \
+            postgresql postgresql-client mariadb-server mariadb-client
+          curl -LsSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
+          curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+          locale-gen en_US.UTF-8
+
+      - uses: actions/checkout@v4
+
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install dependencies
+        run: just install
+
+      - name: Fail if the resolution did not match the committed lockfile
+        run: git diff --exit-code uv.lock
+
+      - name: Lint, type-check and test
+        run: just check
+
+      - name: Upload the gate's own logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-logs
+          path: |
+            /tmp/dbprint--install.log
+            /tmp/dbprint--test.log
+            /tmp/dbprint--lint.log
+          if-no-files-found: error

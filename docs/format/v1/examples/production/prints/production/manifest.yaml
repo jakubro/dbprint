@@ -1,0 +1,147 @@
+format_version: 1
+generated_at: '2026-05-17T22:48:01Z'
+connection: production
+adapter: postgres
+dbprint_version: 0.1.0
+statistics_params:
+  enumeration_threshold: 50
+  top_n_values: 30
+  top_n_null_patterns: 20
+  looks_like_sample_size: 1000
+  percentiles:
+  - 1
+  - 25
+  - 50
+  - 75
+  - 99
+selectors:
+  include:
+  - seedbank.*
+  - fixture.*
+  exclude:
+  - seedbank.audit_*
+redaction_rules_configured: 4
+default_collation: en_US.UTF-8
+manifest_annotations: manifest.annotations.yaml
+tables:
+  fixture.shape_probe:
+    type: table
+    path: fixture/shape_probe
+    artifacts:
+      ddl: ddl.sql
+      statistics: statistics.yaml
+      relationships: relationships.yaml
+    columns: 5
+    profiled_at: '2026-05-17T22:48:01Z'
+    row_count: 50
+    max_age_days: 1
+  seedbank.accession:
+    type: table
+    path: seedbank/accession
+    artifacts:
+      ddl: ddl.sql
+      statistics: statistics.yaml
+      relationships: relationships.yaml
+      description: description.md
+      statistics_annotations: statistics.annotations.yaml
+      relationships_annotations: relationships.annotations.yaml
+    columns: 16
+    profiled_at: '2026-05-17T22:48:01Z'
+    row_count: 2500
+    max_age_days: 1
+  seedbank.accession_summary:
+    type: view
+    path: seedbank/accession_summary
+    artifacts:
+      ddl: ddl.sql
+      statistics: statistics.yaml
+      relationships: relationships.yaml
+      statistics_annotations: statistics.annotations.yaml
+      relationships_annotations: relationships.annotations.yaml
+    columns: 8
+    profiled_at: '2026-05-17T22:48:01Z'
+    max_age_days: 1
+  seedbank.collector:
+    type: table
+    path: seedbank/collector
+    artifacts:
+      ddl: ddl.sql
+      statistics: statistics.yaml
+      relationships: relationships.yaml
+      description: description.md
+    columns: 10
+    profiled_at: '2026-05-17T22:48:01Z'
+    row_count: 400
+    max_age_days: 1
+  seedbank.germination_by_taxon_mv:
+    type: matview
+    path: seedbank/germination_by_taxon_mv
+    artifacts:
+      ddl: ddl.sql
+      statistics: statistics.yaml
+      relationships: relationships.yaml
+      statistics_annotations: statistics.annotations.yaml
+    columns: 4
+    profiled_at: '2026-05-17T22:48:01Z'
+    row_count: 770
+    max_age_days: 30
+  seedbank.germination_trial:
+    type: table
+    path: seedbank/germination_trial
+    artifacts:
+      ddl: ddl.sql
+      statistics: statistics.yaml
+      relationships: relationships.yaml
+      description: description.md
+      statistics_annotations: statistics.annotations.yaml
+    columns: 8
+    profiled_at: '2026-05-17T22:48:01Z'
+    row_count: 900
+    max_age_days: 1
+  seedbank.specimen_image:
+    type: table
+    path: seedbank/specimen_image
+    artifacts:
+      ddl: ddl.sql
+      statistics: statistics.yaml
+      relationships: relationships.yaml
+    columns: 8
+    profiled_at: '2026-05-17T22:48:01Z'
+    row_count: 700
+    max_age_days: 1
+  seedbank.storage_reading:
+    type: table
+    path: seedbank/storage_reading
+    artifacts:
+      ddl: ddl.sql
+      statistics: statistics.yaml
+      relationships: relationships.yaml
+    columns: 5
+    profiled_at: '2026-05-17T22:48:01Z'
+    row_count: 0
+    max_age_days: 1
+  seedbank.taxon:
+    type: table
+    path: seedbank/taxon
+    artifacts:
+      ddl: ddl.sql
+      statistics: statistics.yaml
+      relationships: relationships.yaml
+      description: description.md
+      statistics_annotations: statistics.annotations.yaml
+    columns: 8
+    profiled_at: '2026-05-17T22:48:01Z'
+    row_count: 300
+    max_age_days: 1
+  seedbank.vault:
+    type: table
+    path: seedbank/vault
+    artifacts:
+      ddl: ddl.sql
+      statistics: statistics.yaml
+      relationships: relationships.yaml
+      statistics_annotations: statistics.annotations.yaml
+    columns: 6
+    profiled_at: '2026-05-17T22:48:01Z'
+    row_count: 48
+    max_age_days: 1

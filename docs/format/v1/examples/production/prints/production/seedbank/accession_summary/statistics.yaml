@@ -1,0 +1,40 @@
+format_version: 1
+table: seedbank.accession_summary
+type: view
+profiled_at: '2026-05-17T22:48:01Z'
+catalog_only: true
+grain:
+  keys: []
+columns:
+  accession_id:
+    sql_type: bigint
+    nullable: true
+    classification: foreign_key_candidate
+  accession_code:
+    sql_type: character varying(24)
+    nullable: true
+    classification: text
+  scientific_name:
+    sql_type: character varying(120)
+    nullable: true
+    classification: text
+  vernacular_name:
+    sql_type: character varying(120)
+    nullable: true
+    classification: text
+  collector_name:
+    sql_type: character varying(120)
+    nullable: true
+    classification: text
+  collected_on:
+    sql_type: date
+    nullable: true
+    classification: temporal
+  viability_pct:
+    sql_type: numeric(5,2)
+    nullable: true
+    classification: numeric
+  germination_trial_id:
+    sql_type: bigint
+    nullable: true
+    classification: foreign_key_candidate

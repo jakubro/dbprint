@@ -1,0 +1,23 @@
+format_version: 1
+table: seedbank.specimen_image
+profiled_at: '2026-05-17T22:48:01Z'
+eligible_target: true
+refers_to:
+- column:
+  - accession_id
+  target_table: seedbank.accession
+  target_column:
+  - accession_id
+  on_delete: CASCADE
+  on_update: NO ACTION
+  detection: declared
+  constraint_name: specimen_image_accession_id_fkey
+  observed:
+    fanout_avg: 12.5
+    target_coverage: 0.0224
+    scope_compatible: true
+    fanout_max: 13
+    coherent: true
+    containment: 1.0
+    answerable_count: 25
+referenced_by: []

@@ -1,0 +1,28 @@
+format_version: 1
+table: seedbank.vault
+profiled_at: '2026-05-17T22:48:01Z'
+eligible_target: false
+refers_to: []
+referenced_by:
+- column:
+  - vault_id
+  - shelf_code
+  referencer_table: seedbank.accession
+  referencer_column:
+  - vault_id
+  - shelf_code
+  on_delete: RESTRICT
+  on_update: NO ACTION
+  detection: declared
+  constraint_name: accession_vault_shelf_fkey
+- column:
+  - vault_id
+  - shelf_code
+  referencer_table: seedbank.storage_reading
+  referencer_column:
+  - vault_id
+  - shelf_code
+  on_delete: RESTRICT
+  on_update: NO ACTION
+  detection: declared
+  constraint_name: storage_reading_vault_shelf_fkey

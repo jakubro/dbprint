@@ -1,0 +1,8 @@
+format_version: 1
+notes: |
+  This print is regenerated on demand, not on a schedule - a stale-looking `profiled_at`
+  does not mean the underlying table changed, only that nobody has re-run `generate` since.
+
+  `fixture.shape_probe` is a synthetic table carrying value shapes the `seedbank` schema has
+  no natural column for (format-coverage only); every other table under `seedbank` reflects
+  the collection as currently held.

@@ -1,0 +1,40 @@
+format_version: 1
+generated_at: '2026-05-17T22:48:01Z'
+connection: production
+adapter: postgres
+baseline:
+  source: committed_prints
+  path: prints/production
+  generated_at: '2026-05-17T22:48:01Z'
+  dbprint_version: 0.1.0
+target:
+  source: live_database
+  scanned_at: '2026-05-17T22:48:01Z'
+  selectors:
+    include:
+    - seedbank.*
+    - fixture.*
+    exclude:
+    - seedbank.audit_*
+  tables_scanned: 10
+summary:
+  tables_added: 0
+  tables_removed: 0
+  tables_modified: 1
+  columns_added: 1
+  columns_removed: 0
+  columns_type_changed: 0
+  columns_nullable_changed: 0
+  columns_default_changed: 0
+  statistics_drifted: 0
+  relationships_changed: 0
+  indexes_changed: 0
+  comments_changed: 0
+  unchanged_tables: 8
+  unevaluated_tables: 1
+changes:
+- kind: column_added
+  table: seedbank.accession
+  column: storage_temperature_c
+  sql_type: numeric(4,1)
+  nullable: true

@@ -1,0 +1,1505 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jakubro.github.io/dbprint/spec/v1/statistics.schema.json",
+  "title": "dbprint statistics.yaml v1",
+  "description": "Per-table column statistics. See SPEC.md section 2.2.",
+  "type": "object",
+  "required": [
+    "format_version",
+    "table",
+    "type",
+    "profiled_at",
+    "grain",
+    "columns"
+  ],
+  "allOf": [
+    {
+      "$ref": "#/$defs/CatalogOnlyRowCount"
+    },
+    {
+      "$ref": "#/$defs/CatalogOnlyColumns"
+    }
+  ],
+  "properties": {
+    "format_version": {
+      "const": 1
+    },
+    "table": {
+      "type": "string",
+      "minLength": 1
+    },
+    "type": {
+      "enum": [
+        "table",
+        "matview",
+        "view"
+      ]
+    },
+    "profiled_at": {
+      "$ref": "#/$defs/UtcIso8601"
+    },
+    "row_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "row_count_method": {
+      "enum": [
+        "exact",
+        "approximate"
+      ]
+    },
+    "catalog_only": {
+      "const": true
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rows_scanned"
+      ],
+      "not": {
+        "required": [
+          "sample",
+          "filter"
+        ]
+      },
+      "properties": {
+        "rows_scanned": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sample": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "filter": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "null_patterns": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "coverage",
+        "patterns"
+      ],
+      "properties": {
+        "coverage": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "coverage_method": {
+          "enum": [
+            "measured",
+            "bounded"
+          ]
+        },
+        "patterns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NullPattern"
+          }
+        }
+      }
+    },
+    "physical_layout": {
+      "$ref": "#/$defs/PhysicalLayout"
+    },
+    "grain": {
+      "$ref": "#/$defs/Grain"
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Dependency"
+      }
+    },
+    "columns": {
+      "type": "object"
+    }
+  },
+  "$defs": {
+    "CatalogOnlyColumns": {
+      "description": "columns.* under catalog_only: sql_type/classification only, nothing a query would have measured. See SPEC.md section 2.2.15.",
+      "if": {
+        "type": "object",
+        "required": [
+          "catalog_only"
+        ]
+      },
+      "then": {
+        "properties": {
+          "columns": {
+            "additionalProperties": {
+              "$ref": "#/$defs/CatalogOnlyColumn"
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "columns": {
+            "additionalProperties": {
+              "$ref": "#/$defs/Column"
+            }
+          }
+        }
+      }
+    },
+    "CatalogOnlyRowCount": {
+      "description": "row_count/row_count_method require a query; catalog_only states none was issued for this object at all. See SPEC.md section 2.2.15.",
+      "if": {
+        "type": "object",
+        "required": [
+          "catalog_only"
+        ]
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "row_count"
+              ]
+            },
+            {
+              "required": [
+                "row_count_method"
+              ]
+            }
+          ]
+        }
+      },
+      "else": {
+        "required": [
+          "row_count",
+          "row_count_method"
+        ]
+      }
+    },
+    "PhysicalLayout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mechanism",
+        "keys"
+      ],
+      "properties": {
+        "mechanism": {
+          "enum": [
+            "cluster",
+            "partition"
+          ]
+        },
+        "keys": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/PhysicalLayoutKey"
+          }
+        }
+      }
+    },
+    "PhysicalLayoutKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expression"
+      ],
+      "properties": {
+        "expression": {
+          "type": "string",
+          "minLength": 1
+        },
+        "column": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "Grain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "keys"
+      ],
+      "properties": {
+        "keys": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GrainKey"
+          }
+        },
+        "search": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "exhausted"
+          ],
+          "properties": {
+            "exhausted": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "GrainKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "columns",
+        "detection"
+      ],
+      "properties": {
+        "columns": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "detection": {
+          "enum": [
+            "declared",
+            "measured"
+          ]
+        }
+      }
+    },
+    "Dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "determinant",
+        "dependent",
+        "strength"
+      ],
+      "properties": {
+        "determinant": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dependent": {
+          "type": "string",
+          "minLength": 1
+        },
+        "strength": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "NullPattern": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "columns",
+        "count"
+      ],
+      "properties": {
+        "columns": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "UtcIso8601": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"
+    },
+    "Classification": {
+      "enum": [
+        "boolean",
+        "json",
+        "foreign_key_candidate",
+        "categorical",
+        "temporal",
+        "numeric",
+        "text",
+        "unsupported"
+      ]
+    },
+    "LooksLike": {
+      "enum": [
+        "uuid",
+        "email",
+        "url",
+        "urn",
+        "content_type",
+        "path",
+        "ip",
+        "mac_address",
+        "country_code",
+        "currency_code",
+        "postal_code",
+        "isbn",
+        "ean",
+        "imei",
+        "card_number",
+        "iban",
+        "bic",
+        "phone",
+        "timezone",
+        "json",
+        "hex",
+        "jwt",
+        "vin",
+        "base64",
+        "latlon",
+        "iso8601_duration",
+        "iso8601_date",
+        "iso8601_datetime",
+        "numeric_string",
+        "semver",
+        "filename",
+        "prose"
+      ]
+    },
+    "Distribution": {
+      "enum": [
+        "uniform",
+        "imbalanced",
+        "dominant_value",
+        "long_tail"
+      ]
+    },
+    "Method": {
+      "enum": [
+        "exact",
+        "approximate"
+      ]
+    },
+    "ValuesCoverageMethod": {
+      "enum": [
+        "measured",
+        "bounded"
+      ]
+    },
+    "ValueEntry": {
+      "type": "object",
+      "required": [
+        "count"
+      ],
+      "properties": {
+        "value": {},
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "SketchMethod": {
+      "enum": [
+        "kmv_md5_lo64"
+      ]
+    },
+    "Sketch": {
+      "type": "object",
+      "required": [
+        "method",
+        "values"
+      ],
+      "properties": {
+        "method": {
+          "$ref": "#/$defs/SketchMethod"
+        },
+        "values": {
+          "type": "string",
+          "contentEncoding": "base64"
+        }
+      }
+    },
+    "Range": {
+      "type": "object",
+      "required": [
+        "min",
+        "max"
+      ],
+      "properties": {
+        "min": {},
+        "max": {},
+        "span_days": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "Percentiles": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "pattern": "^p[0-9]{2}$"
+      }
+    },
+    "Frequencies": {
+      "type": "object",
+      "required": [
+        "top",
+        "bottom",
+        "listed",
+        "total"
+      ],
+      "properties": {
+        "top": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bottom": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "listed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "Freshness": {
+      "type": "object",
+      "required": [
+        "max_age_days",
+        "classification"
+      ],
+      "properties": {
+        "max_age_days": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "classification": {
+          "enum": [
+            "live",
+            "stale",
+            "dormant"
+          ]
+        }
+      }
+    },
+    "Inferred": {
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "looks_like": {
+          "$ref": "#/$defs/LooksLike"
+        },
+        "sampled": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "matched": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "candidate_key": {
+          "const": true
+        },
+        "candidate_key_exception": {
+          "$ref": "#/$defs/CandidateKeyException"
+        },
+        "fk_candidate": {
+          "type": "object"
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/Sensitivity"
+        },
+        "epoch_unit": {
+          "$ref": "#/$defs/EpochUnit"
+        }
+      }
+    },
+    "CatalogOnlyColumn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sql_type",
+        "classification"
+      ],
+      "properties": {
+        "sql_type": {
+          "type": "string"
+        },
+        "nullable": {
+          "type": "boolean"
+        },
+        "classification": {
+          "$ref": "#/$defs/Classification"
+        },
+        "physical_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "collation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "physical_layout_key": {
+          "const": true
+        }
+      }
+    },
+    "Column": {
+      "type": "object",
+      "required": [
+        "sql_type",
+        "classification"
+      ],
+      "properties": {
+        "sql_type": {
+          "type": "string"
+        },
+        "nullable": {
+          "type": "boolean"
+        },
+        "null_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "null_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "cardinality": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cardinality_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "cardinality_method": {
+          "$ref": "#/$defs/Method"
+        },
+        "classification": {
+          "$ref": "#/$defs/Classification"
+        },
+        "physical_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "collation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "physical_layout_key": {
+          "const": true
+        },
+        "rows_scanned": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "inferred": {
+          "$ref": "#/$defs/Inferred"
+        },
+        "values": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ValueEntry"
+          }
+        },
+        "values_coverage": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "values_coverage_method": {
+          "$ref": "#/$defs/ValuesCoverageMethod"
+        },
+        "distribution": {
+          "$ref": "#/$defs/Distribution"
+        },
+        "frequencies": {
+          "$ref": "#/$defs/Frequencies"
+        },
+        "range": {
+          "$ref": "#/$defs/Range"
+        },
+        "percentiles": {
+          "$ref": "#/$defs/Percentiles"
+        },
+        "freshness": {
+          "$ref": "#/$defs/Freshness"
+        },
+        "unrepresentable": {
+          "$ref": "#/$defs/Unrepresentable"
+        },
+        "redacted": {
+          "$ref": "#/$defs/Redaction"
+        },
+        "sketch": {
+          "$ref": "#/$defs/Sketch"
+        }
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/BooleanRules"
+        },
+        {
+          "$ref": "#/$defs/JsonRules"
+        },
+        {
+          "$ref": "#/$defs/ForeignKeyCandidateRules"
+        },
+        {
+          "$ref": "#/$defs/CategoricalRules"
+        },
+        {
+          "$ref": "#/$defs/TemporalRules"
+        },
+        {
+          "$ref": "#/$defs/NumericRules"
+        },
+        {
+          "$ref": "#/$defs/TextRules"
+        },
+        {
+          "$ref": "#/$defs/UnsupportedRules"
+        }
+      ]
+    },
+    "BooleanRules": {
+      "properties": {
+        "classification": {
+          "const": "boolean"
+        }
+      },
+      "required": [
+        "classification",
+        "sql_type",
+        "nullable",
+        "null_count",
+        "null_rate",
+        "cardinality",
+        "cardinality_ratio",
+        "cardinality_method",
+        "values",
+        "values_coverage"
+      ],
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "distribution"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "frequencies"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "range"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "percentiles"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "freshness"
+            ]
+          }
+        },
+        {
+          "$ref": "#/$defs/SensitivityOnlyInferred"
+        },
+        {
+          "not": {
+            "required": [
+              "unrepresentable"
+            ]
+          }
+        }
+      ]
+    },
+    "JsonRules": {
+      "properties": {
+        "classification": {
+          "const": "json"
+        }
+      },
+      "required": [
+        "classification",
+        "sql_type",
+        "nullable",
+        "null_count",
+        "null_rate",
+        "cardinality",
+        "cardinality_ratio",
+        "cardinality_method"
+      ],
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "values_coverage"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "values_coverage_method"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "values"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "distribution"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "frequencies"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "range"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "percentiles"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "freshness"
+            ]
+          }
+        },
+        {
+          "$ref": "#/$defs/SensitivityOnlyInferred"
+        },
+        {
+          "not": {
+            "required": [
+              "redacted"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "unrepresentable"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "sketch"
+            ]
+          }
+        }
+      ]
+    },
+    "ForeignKeyCandidateRules": {
+      "properties": {
+        "classification": {
+          "const": "foreign_key_candidate"
+        }
+      },
+      "required": [
+        "classification",
+        "sql_type",
+        "nullable",
+        "null_count",
+        "null_rate",
+        "cardinality",
+        "cardinality_ratio",
+        "cardinality_method",
+        "distribution",
+        "values",
+        "values_coverage"
+      ],
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "range"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "percentiles"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "freshness"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "unrepresentable"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "frequencies"
+            ]
+          }
+        }
+      ]
+    },
+    "CategoricalRules": {
+      "properties": {
+        "classification": {
+          "const": "categorical"
+        }
+      },
+      "required": [
+        "classification",
+        "sql_type",
+        "nullable",
+        "null_count",
+        "null_rate",
+        "cardinality",
+        "cardinality_ratio",
+        "cardinality_method",
+        "distribution",
+        "values",
+        "values_coverage"
+      ],
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "range"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "percentiles"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "freshness"
+            ]
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "fk_candidate"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "unrepresentable"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "frequencies"
+            ]
+          }
+        }
+      ]
+    },
+    "BoundsUnlessDropped": {
+      "description": "range and percentiles are cell values, so a column declaring redacted: drop emits neither; every other column of these classifications emits both. See SPEC.md section 2.2.9.",
+      "if": {
+        "type": "object",
+        "required": [
+          "redacted"
+        ],
+        "properties": {
+          "redacted": {
+            "const": "drop"
+          }
+        }
+      },
+      "then": {
+        "allOf": [
+          {
+            "not": {
+              "required": [
+                "range"
+              ]
+            }
+          },
+          {
+            "not": {
+              "required": [
+                "percentiles"
+              ]
+            }
+          }
+        ]
+      },
+      "else": {
+        "required": [
+          "range",
+          "percentiles"
+        ]
+      }
+    },
+    "TemporalRules": {
+      "properties": {
+        "classification": {
+          "const": "temporal"
+        }
+      },
+      "required": [
+        "classification",
+        "sql_type",
+        "nullable",
+        "null_count",
+        "null_rate",
+        "cardinality",
+        "cardinality_ratio",
+        "cardinality_method",
+        "freshness",
+        "distribution",
+        "frequencies"
+      ],
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "values_coverage"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "values_coverage_method"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "values"
+            ]
+          }
+        },
+        {
+          "$ref": "#/$defs/SensitivityOnlyInferred"
+        },
+        {
+          "$ref": "#/$defs/BoundsUnlessDropped"
+        }
+      ]
+    },
+    "NumericRules": {
+      "properties": {
+        "classification": {
+          "const": "numeric"
+        }
+      },
+      "required": [
+        "classification",
+        "sql_type",
+        "nullable",
+        "null_count",
+        "null_rate",
+        "cardinality",
+        "cardinality_ratio",
+        "cardinality_method",
+        "distribution",
+        "frequencies"
+      ],
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "values_coverage"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "values_coverage_method"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "values"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "freshness"
+            ]
+          }
+        },
+        {
+          "$ref": "#/$defs/SensitivityAndEpochUnitInferred"
+        },
+        {
+          "$ref": "#/$defs/BoundsUnlessDropped"
+        },
+        {
+          "properties": {
+            "range": {
+              "not": {
+                "required": [
+                  "span_days"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "unrepresentable"
+            ]
+          }
+        }
+      ]
+    },
+    "ValueListUnlessProse": {
+      "description": "A text column whose inferred.looks_like is prose emits no values, no values_coverage and no distribution, since that field is derived from the list; every other text column emits all three. See SPEC.md section 2.2.3.",
+      "if": {
+        "type": "object",
+        "required": [
+          "inferred"
+        ],
+        "properties": {
+          "inferred": {
+            "type": "object",
+            "required": [
+              "looks_like"
+            ],
+            "properties": {
+              "looks_like": {
+                "const": "prose"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "allOf": [
+          {
+            "not": {
+              "required": [
+                "values"
+              ]
+            }
+          },
+          {
+            "not": {
+              "required": [
+                "values_coverage"
+              ]
+            }
+          },
+          {
+            "not": {
+              "required": [
+                "values_coverage_method"
+              ]
+            }
+          },
+          {
+            "not": {
+              "required": [
+                "distribution"
+              ]
+            }
+          }
+        ]
+      },
+      "else": {
+        "required": [
+          "values",
+          "values_coverage",
+          "distribution"
+        ]
+      }
+    },
+    "TextRules": {
+      "properties": {
+        "classification": {
+          "const": "text"
+        }
+      },
+      "required": [
+        "classification",
+        "sql_type",
+        "nullable",
+        "null_count",
+        "null_rate",
+        "cardinality",
+        "cardinality_ratio",
+        "cardinality_method"
+      ],
+      "allOf": [
+        {
+          "$ref": "#/$defs/ValueListUnlessProse"
+        },
+        {
+          "not": {
+            "required": [
+              "range"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "percentiles"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "freshness"
+            ]
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "fk_candidate"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "unrepresentable"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "frequencies"
+            ]
+          }
+        }
+      ]
+    },
+    "UnsupportedRules": {
+      "properties": {
+        "classification": {
+          "const": "unsupported"
+        }
+      },
+      "required": [
+        "classification",
+        "sql_type",
+        "nullable",
+        "null_count",
+        "null_rate"
+      ],
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "values_coverage"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "values_coverage_method"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "values"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "cardinality"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "cardinality_ratio"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "cardinality_method"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "distribution"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "range"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "percentiles"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "freshness"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "inferred"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "redacted"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "unrepresentable"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "frequencies"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "sketch"
+            ]
+          }
+        }
+      ]
+    },
+    "SensitivityOnlyInferred": {
+      "description": "The SPEC 2.2.3 row where `inferred.sensitivity` (plus the classification-independent `candidate_key`/`candidate_key_exception`, SPEC 4.2) is the only detection a classification may carry (boolean, json, temporal). The container stays optional; `Inferred`'s minProperties keeps an empty one unrepresentable.",
+      "properties": {
+        "inferred": {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "looks_like"
+                ]
+              }
+            },
+            {
+              "not": {
+                "required": [
+                  "sampled"
+                ]
+              }
+            },
+            {
+              "not": {
+                "required": [
+                  "matched"
+                ]
+              }
+            },
+            {
+              "not": {
+                "required": [
+                  "fk_candidate"
+                ]
+              }
+            },
+            {
+              "not": {
+                "required": [
+                  "epoch_unit"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    "SensitivityAndEpochUnitInferred": {
+      "description": "The SPEC 2.2.3 row where `inferred.sensitivity` and `inferred.epoch_unit` (plus the classification-independent `candidate_key`/`candidate_key_exception`, SPEC 4.2) are the only detection a classification may carry (numeric only - SPEC 4.5's bounds rule). The container stays optional; `Inferred`'s minProperties keeps an empty one unrepresentable.",
+      "properties": {
+        "inferred": {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "looks_like"
+                ]
+              }
+            },
+            {
+              "not": {
+                "required": [
+                  "sampled"
+                ]
+              }
+            },
+            {
+              "not": {
+                "required": [
+                  "matched"
+                ]
+              }
+            },
+            {
+              "not": {
+                "required": [
+                  "fk_candidate"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    "CandidateKeyException": {
+      "enum": [
+        "measured_duplicates",
+        "estimated"
+      ]
+    },
+    "Sensitivity": {
+      "enum": [
+        "personal_name",
+        "postal_address",
+        "geolocation",
+        "date_of_birth",
+        "national_id",
+        "financial_account",
+        "credential",
+        "health",
+        "demographic",
+        "employment",
+        "contact",
+        "online_identifier"
+      ]
+    },
+    "EpochUnit": {
+      "enum": [
+        "seconds",
+        "milliseconds"
+      ]
+    },
+    "Redaction": {
+      "enum": [
+        "mask",
+        "drop",
+        "hash"
+      ]
+    },
+    "Unrepresentable": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^(min|max|p[0-9]{2})$"
+      }
+    }
+  }
+}

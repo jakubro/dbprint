@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jakubro.github.io/dbprint/spec/v1/relationships.schema.json",
+  "title": "dbprint relationships.yaml v1",
+  "description": "Per-table FK graph. See SPEC.md section 2.3.",
+  "type": "object",
+  "required": ["format_version", "table", "profiled_at", "refers_to", "referenced_by"],
+  "properties": {
+    "format_version": {"const": 1},
+    "table": {"type": "string", "minLength": 1},
+    "profiled_at": {"$ref": "#/$defs/UtcIso8601"},
+    "eligible_target": {"type": "boolean"},
+    "refers_to": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/RefersTo"}
+    },
+    "referenced_by": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/ReferencedBy"}
+    }
+  },
+  "$defs": {
+    "UtcIso8601": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"
+    },
+    "ColumnArray": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "minItems": 1
+    },
+    "ReferentialAction": {
+      "enum": ["NO ACTION", "CASCADE", "SET NULL", "SET DEFAULT", "RESTRICT"]
+    },
+    "Detection": {
+      "enum": ["declared", "inferred"]
+    },
+    "Observed": {
+      "type": "object",
+      "required": ["scope_compatible"],
+      "if": {
+        "properties": {"scope_compatible": {"const": true}}
+      },
+      "then": {
+        "required": ["fanout_avg", "target_coverage"]
+      },
+      "else": {
+        "allOf": [
+          {"not": {"required": ["fanout_avg"]}},
+          {"not": {"required": ["fanout_max"]}},
+          {"not": {"required": ["target_coverage"]}},
+          {"not": {"required": ["containment"]}},
+          {"not": {"required": ["coherent"]}},
+          {"not": {"required": ["answerable_count"]}}
+        ]
+      },
+      "properties": {
+        "fanout_avg": {"type": "number", "minimum": 0},
+        "fanout_max": {"type": "number", "minimum": 0},
+        "target_coverage": {"type": "number", "minimum": 0, "maximum": 1},
+        "containment": {"type": "number", "minimum": 0, "maximum": 1},
+        "coherent": {"type": "boolean"},
+        "answerable_count": {"type": "integer", "minimum": 0},
+        "scope_compatible": {"type": "boolean"}
+      }
+    },
+    "RefersTo": {
+      "type": "object",
+      "required": ["column", "target_table", "target_column", "detection"],
+      "if": {
+        "properties": {"detection": {"const": "declared"}}
+      },
+      "then": {
+        "required": ["on_delete", "on_update"]
+      },
+      "properties": {
+        "column": {"$ref": "#/$defs/ColumnArray"},
+        "path": {"$ref": "#/$defs/ColumnArray"},
+        "target_table": {"type": "string", "minLength": 1},
+        "target_column": {"$ref": "#/$defs/ColumnArray"},
+        "target_path": {"$ref": "#/$defs/ColumnArray"},
+        "on_delete": {"$ref": "#/$defs/ReferentialAction"},
+        "on_update": {"$ref": "#/$defs/ReferentialAction"},
+        "detection": {"$ref": "#/$defs/Detection"},
+        "constraint_name": {"type": "string"},
+        "observed": {"$ref": "#/$defs/Observed"}
+      }
+    },
+    "ReferencedBy": {
+      "type": "object",
+      "required": ["column", "referencer_table", "referencer_column", "detection"],
+      "if": {
+        "properties": {"detection": {"const": "declared"}}
+      },
+      "then": {
+        "required": ["on_delete", "on_update"]
+      },
+      "properties": {
+        "column": {"$ref": "#/$defs/ColumnArray"},
+        "referencer_table": {"type": "string", "minLength": 1},
+        "referencer_column": {"$ref": "#/$defs/ColumnArray"},
+        "on_delete": {"$ref": "#/$defs/ReferentialAction"},
+        "on_update": {"$ref": "#/$defs/ReferentialAction"},
+        "detection": {"$ref": "#/$defs/Detection"},
+        "constraint_name": {"type": "string"},
+        "observed": {"$ref": "#/$defs/Observed"}
+      }
+    }
+  }
+}

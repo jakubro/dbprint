@@ -1,0 +1,1574 @@
+format_version: 1
+table: public.shapes
+type: table
+profiled_at: '2026-05-17T22:48:01Z'
+row_count: 40
+row_count_method: exact
+grain:
+  keys:
+  - columns:
+    - row_id
+    detection: declared
+dependencies:
+- determinant: pan
+  dependent: iban_value
+  strength: 1.0
+- determinant: iban_value
+  dependent: pan
+  strength: 1.0
+- determinant: pan
+  dependent: bic_value
+  strength: 1.0
+- determinant: bic_value
+  dependent: pan
+  strength: 1.0
+- determinant: pan
+  dependent: digest
+  strength: 1.0
+- determinant: digest
+  dependent: pan
+  strength: 1.0
+- determinant: pan
+  dependent: mac_address
+  strength: 1.0
+- determinant: mac_address
+  dependent: pan
+  strength: 1.0
+- determinant: pan
+  dependent: coordinates
+  strength: 1.0
+- determinant: coordinates
+  dependent: pan
+  strength: 1.0
+- determinant: pan
+  dependent: resource_urn
+  strength: 1.0
+- determinant: resource_urn
+  dependent: pan
+  strength: 1.0
+- determinant: pan
+  dependent: duration
+  strength: 1.0
+- determinant: duration
+  dependent: pan
+  strength: 1.0
+- determinant: pan
+  dependent: tz_name
+  strength: 1.0
+- determinant: tz_name
+  dependent: pan
+  strength: 1.0
+- determinant: pan
+  dependent: currency
+  strength: 1.0
+- determinant: currency
+  dependent: pan
+  strength: 1.0
+- determinant: pan
+  dependent: bearer_token
+  strength: 1.0
+- determinant: bearer_token
+  dependent: pan
+  strength: 1.0
+- determinant: pan
+  dependent: package_version
+  strength: 1.0
+- determinant: package_version
+  dependent: pan
+  strength: 1.0
+- determinant: pan
+  dependent: book_code
+  strength: 1.0
+- determinant: book_code
+  dependent: pan
+  strength: 1.0
+- determinant: pan
+  dependent: barcode
+  strength: 1.0
+- determinant: barcode
+  dependent: pan
+  strength: 1.0
+- determinant: pan
+  dependent: vehicle_id
+  strength: 1.0
+- determinant: vehicle_id
+  dependent: pan
+  strength: 1.0
+- determinant: pan
+  dependent: device_id
+  strength: 1.0
+- determinant: device_id
+  dependent: pan
+  strength: 1.0
+- determinant: pan
+  dependent: event_timestamp
+  strength: 1.0
+- determinant: event_timestamp
+  dependent: pan
+  strength: 1.0
+- determinant: pan
+  dependent: logged_at
+  strength: 1.0
+- determinant: logged_at
+  dependent: pan
+  strength: 1.0
+- determinant: pan
+  dependent: tax_id
+  strength: 1.0
+- determinant: tax_id
+  dependent: pan
+  strength: 1.0
+- determinant: pan
+  dependent: date_of_birth
+  strength: 1.0
+- determinant: date_of_birth
+  dependent: pan
+  strength: 1.0
+- determinant: pan
+  dependent: blood_type
+  strength: 1.0
+- determinant: blood_type
+  dependent: pan
+  strength: 1.0
+- determinant: pan
+  dependent: ethnicity
+  strength: 1.0
+- determinant: ethnicity
+  dependent: pan
+  strength: 1.0
+- determinant: pan
+  dependent: annual_salary
+  strength: 1.0
+- determinant: annual_salary
+  dependent: pan
+  strength: 1.0
+- determinant: iban_value
+  dependent: bic_value
+  strength: 1.0
+- determinant: bic_value
+  dependent: iban_value
+  strength: 1.0
+- determinant: iban_value
+  dependent: digest
+  strength: 1.0
+- determinant: digest
+  dependent: iban_value
+  strength: 1.0
+- determinant: iban_value
+  dependent: mac_address
+  strength: 1.0
+- determinant: mac_address
+  dependent: iban_value
+  strength: 1.0
+- determinant: iban_value
+  dependent: coordinates
+  strength: 1.0
+- determinant: coordinates
+  dependent: iban_value
+  strength: 1.0
+- determinant: iban_value
+  dependent: resource_urn
+  strength: 1.0
+- determinant: resource_urn
+  dependent: iban_value
+  strength: 1.0
+- determinant: iban_value
+  dependent: duration
+  strength: 1.0
+- determinant: duration
+  dependent: iban_value
+  strength: 1.0
+- determinant: iban_value
+  dependent: tz_name
+  strength: 1.0
+- determinant: tz_name
+  dependent: iban_value
+  strength: 1.0
+- determinant: iban_value
+  dependent: currency
+  strength: 1.0
+- determinant: currency
+  dependent: iban_value
+  strength: 1.0
+- determinant: iban_value
+  dependent: bearer_token
+  strength: 1.0
+- determinant: bearer_token
+  dependent: iban_value
+  strength: 1.0
+- determinant: iban_value
+  dependent: package_version
+  strength: 1.0
+- determinant: package_version
+  dependent: iban_value
+  strength: 1.0
+- determinant: iban_value
+  dependent: book_code
+  strength: 1.0
+- determinant: book_code
+  dependent: iban_value
+  strength: 1.0
+- determinant: iban_value
+  dependent: barcode
+  strength: 1.0
+- determinant: barcode
+  dependent: iban_value
+  strength: 1.0
+- determinant: iban_value
+  dependent: vehicle_id
+  strength: 1.0
+- determinant: vehicle_id
+  dependent: iban_value
+  strength: 1.0
+- determinant: iban_value
+  dependent: device_id
+  strength: 1.0
+- determinant: device_id
+  dependent: iban_value
+  strength: 1.0
+- determinant: iban_value
+  dependent: event_timestamp
+  strength: 1.0
+- determinant: event_timestamp
+  dependent: iban_value
+  strength: 1.0
+- determinant: iban_value
+  dependent: logged_at
+  strength: 1.0
+- determinant: logged_at
+  dependent: iban_value
+  strength: 1.0
+- determinant: iban_value
+  dependent: tax_id
+  strength: 1.0
+- determinant: tax_id
+  dependent: iban_value
+  strength: 1.0
+- determinant: iban_value
+  dependent: date_of_birth
+  strength: 1.0
+- determinant: date_of_birth
+  dependent: iban_value
+  strength: 1.0
+- determinant: iban_value
+  dependent: blood_type
+  strength: 1.0
+- determinant: blood_type
+  dependent: iban_value
+  strength: 1.0
+- determinant: iban_value
+  dependent: ethnicity
+  strength: 1.0
+- determinant: ethnicity
+  dependent: iban_value
+  strength: 1.0
+- determinant: iban_value
+  dependent: annual_salary
+  strength: 1.0
+- determinant: annual_salary
+  dependent: iban_value
+  strength: 1.0
+- determinant: bic_value
+  dependent: digest
+  strength: 1.0
+- determinant: digest
+  dependent: bic_value
+  strength: 1.0
+- determinant: bic_value
+  dependent: mac_address
+  strength: 1.0
+- determinant: mac_address
+  dependent: bic_value
+  strength: 1.0
+- determinant: bic_value
+  dependent: coordinates
+  strength: 1.0
+- determinant: coordinates
+  dependent: bic_value
+  strength: 1.0
+- determinant: bic_value
+  dependent: resource_urn
+  strength: 1.0
+- determinant: resource_urn
+  dependent: bic_value
+  strength: 1.0
+- determinant: bic_value
+  dependent: duration
+  strength: 1.0
+- determinant: duration
+  dependent: bic_value
+  strength: 1.0
+- determinant: bic_value
+  dependent: tz_name
+  strength: 1.0
+- determinant: tz_name
+  dependent: bic_value
+  strength: 1.0
+- determinant: bic_value
+  dependent: currency
+  strength: 1.0
+- determinant: currency
+  dependent: bic_value
+  strength: 1.0
+- determinant: bic_value
+  dependent: bearer_token
+  strength: 1.0
+- determinant: bearer_token
+  dependent: bic_value
+  strength: 1.0
+- determinant: bic_value
+  dependent: package_version
+  strength: 1.0
+- determinant: package_version
+  dependent: bic_value
+  strength: 1.0
+- determinant: bic_value
+  dependent: book_code
+  strength: 1.0
+- determinant: book_code
+  dependent: bic_value
+  strength: 1.0
+- determinant: bic_value
+  dependent: barcode
+  strength: 1.0
+- determinant: barcode
+  dependent: bic_value
+  strength: 1.0
+- determinant: bic_value
+  dependent: vehicle_id
+  strength: 1.0
+- determinant: vehicle_id
+  dependent: bic_value
+  strength: 1.0
+- determinant: bic_value
+  dependent: device_id
+  strength: 1.0
+- determinant: device_id
+  dependent: bic_value
+  strength: 1.0
+- determinant: bic_value
+  dependent: event_timestamp
+  strength: 1.0
+- determinant: event_timestamp
+  dependent: bic_value
+  strength: 1.0
+- determinant: bic_value
+  dependent: logged_at
+  strength: 1.0
+- determinant: logged_at
+  dependent: bic_value
+  strength: 1.0
+- determinant: bic_value
+  dependent: tax_id
+  strength: 1.0
+- determinant: tax_id
+  dependent: bic_value
+  strength: 1.0
+- determinant: bic_value
+  dependent: date_of_birth
+  strength: 1.0
+- determinant: date_of_birth
+  dependent: bic_value
+  strength: 1.0
+- determinant: bic_value
+  dependent: blood_type
+  strength: 1.0
+- determinant: blood_type
+  dependent: bic_value
+  strength: 1.0
+- determinant: bic_value
+  dependent: ethnicity
+  strength: 1.0
+- determinant: ethnicity
+  dependent: bic_value
+  strength: 1.0
+- determinant: bic_value
+  dependent: annual_salary
+  strength: 1.0
+- determinant: annual_salary
+  dependent: bic_value
+  strength: 1.0
+- determinant: digest
+  dependent: mac_address
+  strength: 1.0
+- determinant: mac_address
+  dependent: digest
+  strength: 1.0
+- determinant: digest
+  dependent: coordinates
+  strength: 1.0
+- determinant: coordinates
+  dependent: digest
+  strength: 1.0
+- determinant: digest
+  dependent: resource_urn
+  strength: 1.0
+- determinant: resource_urn
+  dependent: digest
+  strength: 1.0
+- determinant: digest
+  dependent: duration
+  strength: 1.0
+- determinant: duration
+  dependent: digest
+  strength: 1.0
+- determinant: digest
+  dependent: tz_name
+  strength: 1.0
+- determinant: tz_name
+  dependent: digest
+  strength: 1.0
+- determinant: digest
+  dependent: currency
+  strength: 1.0
+- determinant: currency
+  dependent: digest
+  strength: 1.0
+- determinant: digest
+  dependent: bearer_token
+  strength: 1.0
+- determinant: bearer_token
+  dependent: digest
+  strength: 1.0
+- determinant: digest
+  dependent: package_version
+  strength: 1.0
+- determinant: package_version
+  dependent: digest
+  strength: 1.0
+- determinant: digest
+  dependent: book_code
+  strength: 1.0
+- determinant: book_code
+  dependent: digest
+  strength: 1.0
+- determinant: digest
+  dependent: barcode
+  strength: 1.0
+- determinant: barcode
+  dependent: digest
+  strength: 1.0
+- determinant: digest
+  dependent: vehicle_id
+  strength: 1.0
+- determinant: vehicle_id
+  dependent: digest
+  strength: 1.0
+- determinant: digest
+  dependent: device_id
+  strength: 1.0
+- determinant: device_id
+  dependent: digest
+  strength: 1.0
+- determinant: digest
+  dependent: event_timestamp
+  strength: 1.0
+- determinant: event_timestamp
+  dependent: digest
+  strength: 1.0
+- determinant: digest
+  dependent: logged_at
+  strength: 1.0
+- determinant: logged_at
+  dependent: digest
+  strength: 1.0
+- determinant: digest
+  dependent: tax_id
+  strength: 1.0
+- determinant: tax_id
+  dependent: digest
+  strength: 1.0
+- determinant: digest
+  dependent: date_of_birth
+  strength: 1.0
+- determinant: date_of_birth
+  dependent: digest
+  strength: 1.0
+- determinant: digest
+  dependent: blood_type
+  strength: 1.0
+- determinant: blood_type
+  dependent: digest
+  strength: 1.0
+- determinant: digest
+  dependent: ethnicity
+  strength: 1.0
+- determinant: ethnicity
+  dependent: digest
+  strength: 1.0
+- determinant: digest
+  dependent: annual_salary
+  strength: 1.0
+- determinant: annual_salary
+  dependent: digest
+  strength: 1.0
+- determinant: mac_address
+  dependent: coordinates
+  strength: 1.0
+- determinant: coordinates
+  dependent: mac_address
+  strength: 1.0
+- determinant: mac_address
+  dependent: resource_urn
+  strength: 1.0
+- determinant: resource_urn
+  dependent: mac_address
+  strength: 1.0
+- determinant: mac_address
+  dependent: duration
+  strength: 1.0
+- determinant: duration
+  dependent: mac_address
+  strength: 1.0
+- determinant: mac_address
+  dependent: tz_name
+  strength: 1.0
+- determinant: tz_name
+  dependent: mac_address
+  strength: 1.0
+- determinant: mac_address
+  dependent: currency
+  strength: 1.0
+- determinant: currency
+  dependent: mac_address
+  strength: 1.0
+- determinant: mac_address
+  dependent: bearer_token
+  strength: 1.0
+- determinant: bearer_token
+  dependent: mac_address
+  strength: 1.0
+- determinant: mac_address
+  dependent: package_version
+  strength: 1.0
+- determinant: package_version
+  dependent: mac_address
+  strength: 1.0
+- determinant: mac_address
+  dependent: book_code
+  strength: 1.0
+- determinant: book_code
+  dependent: mac_address
+  strength: 1.0
+- determinant: mac_address
+  dependent: barcode
+  strength: 1.0
+- determinant: barcode
+  dependent: mac_address
+  strength: 1.0
+- determinant: mac_address
+  dependent: vehicle_id
+  strength: 1.0
+- determinant: vehicle_id
+  dependent: mac_address
+  strength: 1.0
+- determinant: mac_address
+  dependent: device_id
+  strength: 1.0
+- determinant: device_id
+  dependent: mac_address
+  strength: 1.0
+- determinant: mac_address
+  dependent: event_timestamp
+  strength: 1.0
+- determinant: event_timestamp
+  dependent: mac_address
+  strength: 1.0
+- determinant: mac_address
+  dependent: logged_at
+  strength: 1.0
+- determinant: logged_at
+  dependent: mac_address
+  strength: 1.0
+- determinant: mac_address
+  dependent: tax_id
+  strength: 1.0
+- determinant: tax_id
+  dependent: mac_address
+  strength: 1.0
+- determinant: mac_address
+  dependent: date_of_birth
+  strength: 1.0
+- determinant: date_of_birth
+  dependent: mac_address
+  strength: 1.0
+- determinant: mac_address
+  dependent: blood_type
+  strength: 1.0
+- determinant: blood_type
+  dependent: mac_address
+  strength: 1.0
+- determinant: mac_address
+  dependent: ethnicity
+  strength: 1.0
+- determinant: ethnicity
+  dependent: mac_address
+  strength: 1.0
+- determinant: mac_address
+  dependent: annual_salary
+  strength: 1.0
+- determinant: annual_salary
+  dependent: mac_address
+  strength: 1.0
+- determinant: coordinates
+  dependent: resource_urn
+  strength: 1.0
+- determinant: resource_urn
+  dependent: coordinates
+  strength: 1.0
+- determinant: coordinates
+  dependent: duration
+  strength: 1.0
+- determinant: duration
+  dependent: coordinates
+  strength: 1.0
+- determinant: coordinates
+  dependent: tz_name
+  strength: 1.0
+- determinant: tz_name
+  dependent: coordinates
+  strength: 1.0
+- determinant: coordinates
+  dependent: currency
+  strength: 1.0
+- determinant: currency
+  dependent: coordinates
+  strength: 1.0
+- determinant: coordinates
+  dependent: bearer_token
+  strength: 1.0
+- determinant: bearer_token
+  dependent: coordinates
+  strength: 1.0
+- determinant: coordinates
+  dependent: package_version
+  strength: 1.0
+- determinant: package_version
+  dependent: coordinates
+  strength: 1.0
+- determinant: coordinates
+  dependent: book_code
+  strength: 1.0
+- determinant: book_code
+  dependent: coordinates
+  strength: 1.0
+- determinant: coordinates
+  dependent: barcode
+  strength: 1.0
+- determinant: barcode
+  dependent: coordinates
+  strength: 1.0
+- determinant: coordinates
+  dependent: vehicle_id
+  strength: 1.0
+- determinant: vehicle_id
+  dependent: coordinates
+  strength: 1.0
+- determinant: coordinates
+  dependent: device_id
+  strength: 1.0
+- determinant: device_id
+  dependent: coordinates
+  strength: 1.0
+- determinant: coordinates
+  dependent: event_timestamp
+  strength: 1.0
+- determinant: event_timestamp
+  dependent: coordinates
+  strength: 1.0
+- determinant: coordinates
+  dependent: logged_at
+  strength: 1.0
+- determinant: logged_at
+  dependent: coordinates
+  strength: 1.0
+- determinant: coordinates
+  dependent: tax_id
+  strength: 1.0
+- determinant: tax_id
+  dependent: coordinates
+  strength: 1.0
+- determinant: coordinates
+  dependent: date_of_birth
+  strength: 1.0
+- determinant: date_of_birth
+  dependent: coordinates
+  strength: 1.0
+- determinant: coordinates
+  dependent: blood_type
+  strength: 1.0
+- determinant: blood_type
+  dependent: coordinates
+  strength: 1.0
+- determinant: coordinates
+  dependent: ethnicity
+  strength: 1.0
+- determinant: ethnicity
+  dependent: coordinates
+  strength: 1.0
+- determinant: coordinates
+  dependent: annual_salary
+  strength: 1.0
+- determinant: annual_salary
+  dependent: coordinates
+  strength: 1.0
+- determinant: resource_urn
+  dependent: duration
+  strength: 1.0
+- determinant: duration
+  dependent: resource_urn
+  strength: 1.0
+- determinant: resource_urn
+  dependent: tz_name
+  strength: 1.0
+- determinant: tz_name
+  dependent: resource_urn
+  strength: 1.0
+- determinant: resource_urn
+  dependent: currency
+  strength: 1.0
+- determinant: currency
+  dependent: resource_urn
+  strength: 1.0
+- determinant: resource_urn
+  dependent: bearer_token
+  strength: 1.0
+- determinant: bearer_token
+  dependent: resource_urn
+  strength: 1.0
+- determinant: resource_urn
+  dependent: package_version
+  strength: 1.0
+- determinant: package_version
+  dependent: resource_urn
+  strength: 1.0
+- determinant: resource_urn
+  dependent: book_code
+  strength: 1.0
+- determinant: book_code
+  dependent: resource_urn
+  strength: 1.0
+- determinant: resource_urn
+  dependent: barcode
+  strength: 1.0
+- determinant: barcode
+  dependent: resource_urn
+  strength: 1.0
+- determinant: resource_urn
+  dependent: vehicle_id
+  strength: 1.0
+- determinant: vehicle_id
+  dependent: resource_urn
+  strength: 1.0
+- determinant: resource_urn
+  dependent: device_id
+  strength: 1.0
+- determinant: device_id
+  dependent: resource_urn
+  strength: 1.0
+- determinant: resource_urn
+  dependent: event_timestamp
+  strength: 1.0
+- determinant: event_timestamp
+  dependent: resource_urn
+  strength: 1.0
+- determinant: resource_urn
+  dependent: logged_at
+  strength: 1.0
+- determinant: logged_at
+  dependent: resource_urn
+  strength: 1.0
+- determinant: resource_urn
+  dependent: tax_id
+  strength: 1.0
+- determinant: tax_id
+  dependent: resource_urn
+  strength: 1.0
+- determinant: resource_urn
+  dependent: date_of_birth
+  strength: 1.0
+- determinant: date_of_birth
+  dependent: resource_urn
+  strength: 1.0
+- determinant: resource_urn
+  dependent: blood_type
+  strength: 1.0
+- determinant: blood_type
+  dependent: resource_urn
+  strength: 1.0
+- determinant: resource_urn
+  dependent: ethnicity
+  strength: 1.0
+- determinant: ethnicity
+  dependent: resource_urn
+  strength: 1.0
+- determinant: resource_urn
+  dependent: annual_salary
+  strength: 1.0
+- determinant: annual_salary
+  dependent: resource_urn
+  strength: 1.0
+- determinant: duration
+  dependent: tz_name
+  strength: 1.0
+- determinant: tz_name
+  dependent: duration
+  strength: 1.0
+- determinant: duration
+  dependent: currency
+  strength: 1.0
+- determinant: currency
+  dependent: duration
+  strength: 1.0
+- determinant: duration
+  dependent: bearer_token
+  strength: 1.0
+- determinant: bearer_token
+  dependent: duration
+  strength: 1.0
+- determinant: duration
+  dependent: package_version
+  strength: 1.0
+- determinant: package_version
+  dependent: duration
+  strength: 1.0
+- determinant: duration
+  dependent: book_code
+  strength: 1.0
+- determinant: book_code
+  dependent: duration
+  strength: 1.0
+- determinant: duration
+  dependent: barcode
+  strength: 1.0
+- determinant: barcode
+  dependent: duration
+  strength: 1.0
+- determinant: duration
+  dependent: vehicle_id
+  strength: 1.0
+- determinant: vehicle_id
+  dependent: duration
+  strength: 1.0
+- determinant: duration
+  dependent: device_id
+  strength: 1.0
+- determinant: device_id
+  dependent: duration
+  strength: 1.0
+- determinant: duration
+  dependent: event_timestamp
+  strength: 1.0
+- determinant: event_timestamp
+  dependent: duration
+  strength: 1.0
+- determinant: duration
+  dependent: logged_at
+  strength: 1.0
+- determinant: logged_at
+  dependent: duration
+  strength: 1.0
+- determinant: duration
+  dependent: tax_id
+  strength: 1.0
+- determinant: tax_id
+  dependent: duration
+  strength: 1.0
+- determinant: duration
+  dependent: date_of_birth
+  strength: 1.0
+- determinant: date_of_birth
+  dependent: duration
+  strength: 1.0
+- determinant: duration
+  dependent: blood_type
+  strength: 1.0
+- determinant: blood_type
+  dependent: duration
+  strength: 1.0
+- determinant: duration
+  dependent: ethnicity
+  strength: 1.0
+- determinant: ethnicity
+  dependent: duration
+  strength: 1.0
+- determinant: duration
+  dependent: annual_salary
+  strength: 1.0
+- determinant: annual_salary
+  dependent: duration
+  strength: 1.0
+- determinant: tz_name
+  dependent: currency
+  strength: 1.0
+- determinant: currency
+  dependent: tz_name
+  strength: 1.0
+- determinant: tz_name
+  dependent: bearer_token
+  strength: 1.0
+- determinant: bearer_token
+  dependent: tz_name
+  strength: 1.0
+columns:
+  row_id:
+    sql_type: integer
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 40
+    cardinality_ratio: 1.0
+    cardinality_method: exact
+    inferred:
+      looks_like: numeric_string
+      sampled: 40
+      matched: 40
+      candidate_key: true
+    values:
+    - value: 1
+      count: 1
+    - value: 10
+      count: 1
+    - value: 11
+      count: 1
+    - value: 12
+      count: 1
+    - value: 13
+      count: 1
+    - value: 14
+      count: 1
+    - value: 15
+      count: 1
+    - value: 16
+      count: 1
+    - value: 17
+      count: 1
+    - value: 18
+      count: 1
+    - value: 19
+      count: 1
+    - value: 2
+      count: 1
+    - value: 20
+      count: 1
+    - value: 21
+      count: 1
+    - value: 22
+      count: 1
+    - value: 23
+      count: 1
+    - value: 24
+      count: 1
+    - value: 25
+      count: 1
+    - value: 26
+      count: 1
+    - value: 27
+      count: 1
+    values_coverage: 0.5
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: DbXkuX/CrzkNzFCab3WEmxP0KUOIHGVfGQlEQMMX4hsoMI/Z8qe68yqjU+J4eRM8LJkLCoJlLcouDrE9WF5MIjvoB5pcdNB5RKqdW63pe69Z9R/QKX4jbVo23t1L6iVDXYe4x9i5qs1o0TjytP3W8G8Gf4nMFIYsb2ButSX/3FZvfNnf0OXeqm+15gh+sbLccN7QX1o78+x1XTjm0WPoIHVoe+YQajuEe7vtDso/4uCM30rSKZ9tI5GBpnt1QhIsltPIvR+PL/OXlcRCY2tV+53PjTtcbgsBpEsOWIZoDLmqJ6DJm/9nELUCk63+y3sYuxhkze5NPW7XdysGdKMY1dlYPDT9NW712+vCrJEoMD/euV/FhM2WXeDKmhW2FTZ34e0P9hP1Y73mnzUQORUhieoa/FHHxq0m90Ofj/q9/8Q=
+  pan:
+    sql_type: character varying(24)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.075
+    cardinality_method: exact
+    inferred:
+      looks_like: card_number
+      sampled: 3
+      matched: 3
+      sensitivity: financial_account
+    values:
+    - value: '5500005555555559'
+      count: 14
+    - value: '378282246310005'
+      count: 13
+    - value: '4111111111111111'
+      count: 13
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: aSDORMAhDjN+M3N0iSMw6Jr9PczHQePO
+  iban_value:
+    sql_type: character varying(34)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.075
+    cardinality_method: exact
+    inferred:
+      looks_like: iban
+      sampled: 3
+      matched: 3
+      sensitivity: financial_account
+    values:
+    - value: GB82WEST12345698765432
+      count: 14
+    - value: DE89370400440532013000
+      count: 13
+    - value: FR1420041010050500013M02606
+      count: 13
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: JHJiPIxKy/l4pATE8onAH4U/s6TK7jf0
+  bic_value:
+    sql_type: character varying(11)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.075
+    cardinality_method: exact
+    inferred:
+      looks_like: bic
+      sampled: 3
+      matched: 3
+    values:
+    - value: DEUTDEFF
+      count: 14
+    - value: DEUTDEFF500
+      count: 13
+    - value: SEEDGB2L
+      count: 13
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: Dq3lm8jnFFSC4j2i6YftvYR9Fr7tiyxn
+  digest:
+    sql_type: character varying(10)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.075
+    cardinality_method: exact
+    inferred:
+      looks_like: hex
+      sampled: 3
+      matched: 3
+    values:
+    - value: '#1A2B3C'
+      count: 14
+    - value: '#FF5733'
+      count: 13
+    - value: a3f9c2e
+      count: 13
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: YUos4/aXKn5iy+8CinTtz3qqs1e6veqG
+  mac_address:
+    sql_type: character varying(20)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.075
+    cardinality_method: exact
+    inferred:
+      looks_like: mac_address
+      sampled: 3
+      matched: 3
+      sensitivity: online_identifier
+    values:
+    - value: 02:00:00:00:00:02
+      count: 14
+    - value: 02-00-00-00-00-03
+      count: 13
+    - value: 02:00:00:00:00:01
+      count: 13
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: Zj6tCMZ84E6OLlSGlvac2KlF8pvcQ4cA
+  coordinates:
+    sql_type: character varying(32)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.075
+    cardinality_method: exact
+    inferred:
+      looks_like: latlon
+      sampled: 3
+      matched: 3
+      sensitivity: geolocation
+    values:
+    - value: -40.1234,120.9876
+      count: 14
+    - value: 0.0,0.0
+      count: 13
+    - value: 12.3456,-65.4321
+      count: 13
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: JLP9BEld+rs3H/X+FPw1c0AiOssSSxO3
+  resource_urn:
+    sql_type: character varying(64)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.075
+    cardinality_method: exact
+    inferred:
+      looks_like: urn
+      sampled: 3
+      matched: 3
+    values:
+    - value: urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6
+      count: 14
+    - value: urn:example:resource
+      count: 13
+    - value: urn:isbn:0451450523
+      count: 13
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: IkK06A/EVOiffkNYUvSavsZm5LT+8frM
+  duration:
+    sql_type: character varying(24)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.075
+    cardinality_method: exact
+    inferred:
+      looks_like: iso8601_duration
+      sampled: 3
+      matched: 3
+    values:
+    - value: PT30M
+      count: 14
+    - value: P1Y2M3DT4H5M6S
+      count: 13
+    - value: P4W
+      count: 13
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: ZYTRWGJrGqOhXV1GcnNBmKrLYT2AoM27
+  tz_name:
+    sql_type: character varying(40)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.075
+    cardinality_method: exact
+    inferred:
+      looks_like: timezone
+      sampled: 3
+      matched: 3
+    values:
+    - value: America/New_York
+      count: 14
+    - value: Europe/London
+      count: 13
+    - value: UTC
+      count: 13
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: JNy17Zhqvee1fYA6klt5Ydpv3IsuP6Ph
+  currency:
+    sql_type: character varying(4)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.075
+    cardinality_method: exact
+    inferred:
+      looks_like: currency_code
+      sampled: 3
+      matched: 3
+    values:
+    - value: USD
+      count: 14
+    - value: EUR
+      count: 13
+    - value: JPY
+      count: 13
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: SDGpQ1RbCBCpzGgDZzCBGNN9r/4JfSFu
+  bearer_token:
+    sql_type: character varying(256)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.075
+    cardinality_method: exact
+    inferred:
+      looks_like: jwt
+      sampled: 3
+      matched: 3
+      sensitivity: credential
+    values:
+    - value: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI3Iiwicm9sZSI6ImFkbWluIn0.QqZ1M2xW0hK9pR3sT7uV2yA5bC8dE1fG4hJ6kL9mN0o
+      count: 14
+    - value: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiIsInJvbGUiOiJ1c2VyIn0.dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk
+      count: 13
+    - value: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMDAwIiwicm9sZSI6Imd1ZXN0In0.Zx9Yw8Vu7Ts6Rr5Qq4Pp3Oo2Nn1Mm0Ll9Kk8Jj7Ii6Hh
+      count: 13
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: OTRWgxxoMy1FtODNnBpZuXAsOlsBuqYi
+  package_version:
+    sql_type: character varying(24)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.075
+    cardinality_method: exact
+    inferred:
+      looks_like: semver
+      sampled: 3
+      matched: 3
+    values:
+    - value: 3.0.0-rc.2
+      count: 14
+    - value: 1.0.0-alpha.beta
+      count: 13
+    - value: v2.4.1
+      count: 13
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: eH4CwErtsROQlopwdTeoJdmuJi+NC0h7
+  book_code:
+    sql_type: character varying(17)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.075
+    cardinality_method: exact
+    inferred:
+      looks_like: isbn
+      sampled: 3
+      matched: 3
+    values:
+    - value: '0132350882'
+      count: 14
+    - value: 080442957X
+      count: 13
+    - value: '9780306406157'
+      count: 13
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: OOMepMiqtMVf4dU8Kt3BjLCbwICxwosk
+  barcode:
+    sql_type: character varying(14)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.075
+    cardinality_method: exact
+    inferred:
+      looks_like: ean
+      sampled: 3
+      matched: 3
+    values:
+    - value: '5901234123457'
+      count: 14
+    - value: '036000291452'
+      count: 13
+    - value: '4006381333931'
+      count: 13
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: Nmfx2O8nWRhdQ86kUDTHd/rLRS2AudUP
+  vehicle_id:
+    sql_type: character varying(17)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.075
+    cardinality_method: exact
+    inferred:
+      looks_like: vin
+      sampled: 3
+      matched: 3
+    values:
+    - value: JH4TB2H26CC000000
+      count: 14
+    - value: 1HGCM82633A004352
+      count: 13
+    - value: 1M8GDM9AXKP042788
+      count: 13
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: Kf6C2r7T3bZD34neJ6Dj+IWZqMzBIdqA
+  device_id:
+    sql_type: character varying(15)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.075
+    cardinality_method: exact
+    inferred:
+      looks_like: imei
+      sampled: 3
+      matched: 3
+      sensitivity: online_identifier
+    values:
+    - value: '490154203237518'
+      count: 14
+    - value: '352099001761481'
+      count: 13
+    - value: '356938035643809'
+      count: 13
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: vwwCTgAT3qHRcSA7DQQtftFze7IQF/m2
+  event_timestamp:
+    sql_type: character varying(10)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.075
+    cardinality_method: exact
+    inferred:
+      looks_like: numeric_string
+      sampled: 3
+      matched: 3
+      epoch_unit: seconds
+    values:
+    - value: '1704067202'
+      count: 14
+    - value: '1704067201'
+      count: 13
+    - value: '1704067203'
+      count: 13
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: gIqoeOXBdvCAv9oZt/InyOs/QwoC3wyu
+  logged_at:
+    sql_type: character varying(20)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.075
+    cardinality_method: exact
+    inferred:
+      looks_like: iso8601_datetime
+      sampled: 3
+      matched: 3
+    values:
+    - value: '2026-03-14T23:59:59'
+      count: 14
+    - value: '2026-01-01T08:15:30'
+      count: 13
+    - value: '2026-07-04T00:00:00'
+      count: 13
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: nFFU4ZoJeybLS9NDqFKsvu9D/RyaFqa9
+  tax_id:
+    sql_type: character varying(20)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.075
+    cardinality_method: exact
+    inferred:
+      sensitivity: national_id
+    values:
+    - value: XX9876543210
+      count: 14
+    - value: XX1234567890
+      count: 13
+    - value: XX5555555555
+      count: 13
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: YbR+9JqaWtbju/jskajZzewabmfyPEvT
+  date_of_birth:
+    sql_type: character varying(10)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.075
+    cardinality_method: exact
+    inferred:
+      looks_like: iso8601_date
+      sampled: 3
+      matched: 3
+      sensitivity: date_of_birth
+    values:
+    - value: '1990-11-02'
+      count: 14
+    - value: '1975-03-14'
+      count: 13
+    - value: '2001-07-23'
+      count: 13
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: BWOjbTdfBfyQo5LMNFfoJfDE+VL36pDm
+  blood_type:
+    sql_type: character varying(3)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.075
+    cardinality_method: exact
+    inferred:
+      sensitivity: health
+    values:
+    - value: O-
+      count: 14
+    - value: A+
+      count: 13
+    - value: B+
+      count: 13
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: Z4pH/DgfPTlxwoVUI3KeDNU2XmXLnzc/
+  ethnicity:
+    sql_type: character varying(24)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.075
+    cardinality_method: exact
+    inferred:
+      sensitivity: demographic
+    values:
+    - value: Group B
+      count: 14
+    - value: Group A
+      count: 13
+    - value: Group C
+      count: 13
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: Sx47TNviKz96M7gckpFWfbNtouVYI1Eg
+  annual_salary:
+    sql_type: character varying(10)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.075
+    cardinality_method: exact
+    inferred:
+      looks_like: numeric_string
+      sampled: 3
+      matched: 3
+      sensitivity: employment
+    values:
+    - value: '68500'
+      count: 14
+    - value: '52000'
+      count: 13
+    - value: '81250'
+      count: 13
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: Bc3Q0FdiBB/DfoSyQ8LIN+QJbjcQM0mW

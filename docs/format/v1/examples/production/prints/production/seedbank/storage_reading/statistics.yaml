@@ -1,0 +1,100 @@
+format_version: 1
+table: seedbank.storage_reading
+type: table
+profiled_at: '2026-05-17T22:48:01Z'
+row_count: 0
+row_count_method: exact
+physical_layout:
+  mechanism: partition
+  keys:
+  - expression: reading_date
+    column: reading_date
+grain:
+  keys:
+  - columns:
+    - reading_id
+    - reading_date
+    detection: declared
+dependencies: []
+columns:
+  reading_id:
+    sql_type: bigint
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 0
+    cardinality_ratio: 0.0
+    cardinality_method: exact
+    values: []
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: ''
+  vault_id:
+    sql_type: integer
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: foreign_key_candidate
+    cardinality: 0
+    cardinality_ratio: 0.0
+    cardinality_method: exact
+    values: []
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: ''
+  shelf_code:
+    sql_type: character varying(8)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: foreign_key_candidate
+    cardinality: 0
+    cardinality_ratio: 0.0
+    cardinality_method: exact
+    values: []
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: ''
+  reading_date:
+    sql_type: date
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 0
+    cardinality_ratio: 0.0
+    cardinality_method: exact
+    physical_layout_key: true
+    values: []
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: ''
+  temperature_c:
+    sql_type: numeric(4,1)
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 0
+    cardinality_ratio: 0.0
+    cardinality_method: exact
+    values: []
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    sketch:
+      method: kmv_md5_lo64
+      values: ''

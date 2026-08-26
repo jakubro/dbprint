@@ -1,0 +1,33 @@
+line-length = 100
+indent-width = 4
+target-version = "py313"
+
+[format]
+line-ending = "lf"
+# docs/CLI.md is generated from --help and golden-compared, so formatting it here would fail
+# the golden on a formatting difference rather than real drift; every other .md is hand-typed.
+exclude = ["docs/CLI.md"]
+
+[lint]
+extend-select = [
+  "I",
+  "RUF001",
+  "RUF002",
+  "RUF003",
+  "COM812",
+]
+
+[lint.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[lint.isort]
+case-sensitive = true
+no-lines-before = ["local-folder"]
+relative-imports-order = "closest-to-furthest"
+lines-after-imports = 2
+required-imports = [
+  "from __future__ import annotations",
+]
+known-first-party = [
+  "dbprint",
+]

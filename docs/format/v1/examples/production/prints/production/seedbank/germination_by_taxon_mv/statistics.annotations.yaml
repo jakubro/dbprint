@@ -1,0 +1,11 @@
+format_version: 1
+columns:
+  total_sown:
+    note: >-
+      Summed across every trial for the taxon-year, not per trial; compare
+      against germination_trial.sown_count for a single attempt.
+  total_germinated:
+    note: >-
+      Refreshed only when the matview is refreshed - can lag the underlying
+      germination_trial rows. The connection's per-table freshness rule (30
+      days) reflects that lag tolerance.

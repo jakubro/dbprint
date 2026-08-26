@@ -1,0 +1,5 @@
+[src]
+respect-ignore-files = true
+
+[terminal]
+error-on-warning = true

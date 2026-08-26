@@ -1,0 +1,10 @@
+# Vocabulary-example project config: one table demonstrating the
+# looks_like values the production example's seed-bank domain has no
+# honest column for. See README.md in this directory.
+
+connections:
+  vocabulary:
+    adapter: postgres
+    auto: true
+    output: prints
+    max_age_days: 1
