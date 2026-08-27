@@ -69,6 +69,91 @@ class TestEmptyDiff:
         assert "Run `dbprint generate` to refresh" in text
 
 
+class TestHeadline:
+    """SPEC 2.6.4: what was compared, and the artifact's own totals, before the sections."""
+
+    def test_appears_before_the_event_sections(self) -> None:
+        text = render_human_text(_empty_diff(), _options())
+        assert text.index("Summary:") < text.index("Modified (DDL):")
+
+    def test_non_zero_counters_render_in_fixed_order(self) -> None:
+        diff = {
+            **_empty_diff(),
+            "summary": {
+                "tables_added": 0,
+                "columns_added": 3,
+                "statistics_drifted": 5,
+                "unchanged_tables": 10,
+            },
+        }
+        line = render_human_text(diff, _options()).splitlines()[5]
+        assert line == "Summary: columns_added=3, statistics_drifted=5, unchanged_tables=10"
+
+    def test_a_clean_diff_states_so_instead_of_an_empty_line(self) -> None:
+        diff = {**_empty_diff(), "summary": {"unchanged_tables": 0}}
+        text = render_human_text(diff, _options())
+        assert "Summary: no changes" in text
+
+    def test_the_summary_is_read_from_the_artifact_not_recomputed_from_rendered_events(
+        self,
+    ) -> None:
+        """A threshold-elided event still counts in the headline (SPEC 2.6.9's own split)."""
+
+        diff = {
+            **_diff_with(
+                [
+                    {
+                        "kind": "statistic_changed",
+                        "table": "t",
+                        "column": "x",
+                        "stat": "cardinality_ratio",
+                        "before": 1.0,
+                        "after": 1.0001,
+                        "delta": 0.0001,
+                        "delta_pct": 0.0001,
+                    },
+                ],
+            ),
+            "summary": {"statistics_drifted": 5},
+        }
+        text = render_human_text(diff, _options())
+        assert "statistics_drifted=5" in text
+        assert "(1 change elided below threshold)" in text
+
+    def test_baseline_states_path_generation_and_version(self) -> None:
+        diff = {
+            **_empty_diff(),
+            "baseline": {
+                "path": "prints/primary",
+                "generated_at": "2026-01-01T00:00:00Z",
+                "dbprint_version": "0.4.2",
+            },
+        }
+        line = render_human_text(diff, _options()).splitlines()[3]
+        assert line == "Baseline: prints/primary, generated 2026-01-01T00:00:00Z, dbprint 0.4.2"
+
+    def test_target_states_scan_time_and_table_count(self) -> None:
+        diff = {
+            **_empty_diff(),
+            "target": {"scanned_at": "2026-08-26T12:00:00Z", "tables_scanned": 12},
+        }
+        line = render_human_text(diff, _options()).splitlines()[4]
+        assert line == "Target: live database, scanned 2026-08-26T12:00:00Z, 12 tables scanned"
+
+    def test_a_narrowed_comparison_states_its_selectors(self) -> None:
+        diff = {
+            **_empty_diff(),
+            "target": {"selectors": {"include": ["public.*"], "exclude": ["public.tmp_*"]}},
+        }
+        text = render_human_text(diff, _options())
+        assert "selectors include=['public.*'] exclude=['public.tmp_*']" in text
+
+    def test_an_unnarrowed_comparison_states_no_selectors(self) -> None:
+        diff = {**_empty_diff(), "target": {"selectors": {"include": [], "exclude": []}}}
+        text = render_human_text(diff, _options())
+        assert "selectors" not in text
+
+
 class TestDdlSection:
     def test_column_added_event_rendered(self) -> None:
         diff = _diff_with(
@@ -291,6 +376,44 @@ class TestStatisticsThreshold:
         text = render_human_text(diff, _options(threshold_override=0.0))
         assert "id cardinality_ratio" in text
 
+    def test_sub_threshold_elision_is_disclosed(self) -> None:
+        """A table whose only change is sub-threshold must not silently vanish."""
+
+        diff = _diff_with(
+            [
+                {
+                    "kind": "statistic_changed",
+                    "table": "public.curator",
+                    "column": "id",
+                    "stat": "cardinality_ratio",
+                    "before": 1.0,
+                    "after": 1.005,
+                    "delta": 0.005,
+                    "delta_pct": 0.005,  # below 0.02 threshold for cardinality_ratio
+                },
+            ],
+        )
+        text = render_human_text(diff, _options())
+        assert "1 change elided below threshold" in text
+
+    def test_no_elision_note_when_nothing_was_filtered(self) -> None:
+        diff = _diff_with(
+            [
+                {
+                    "kind": "statistic_changed",
+                    "table": "public.curator",
+                    "column": "id",
+                    "stat": "cardinality_ratio",
+                    "before": 1.0,
+                    "after": 0.95,
+                    "delta": -0.05,
+                    "delta_pct": -0.05,
+                },
+            ],
+        )
+        text = render_human_text(diff, _options())
+        assert "elided" not in text
+
     def test_event_without_delta_pct_always_rendered(self) -> None:
         diff = _diff_with(
             [
@@ -366,6 +489,54 @@ class TestIndexesSection:
         assert "+ curator_email_idx" in text
         assert "(email)" in text
         assert "unique=True" in text
+        assert "type=btree" in text
+
+    def test_index_modified_states_a_uniqueness_flip(self) -> None:
+        """A unique index becoming non-unique must not render as an identity change."""
+
+        diff = _diff_with(
+            [
+                {
+                    "kind": "index_modified",
+                    "table": "public.curator",
+                    "index_name": "curator_email_idx",
+                    "before": {"columns": ["email"], "unique": True, "type": "btree"},
+                    "after": {"columns": ["email"], "unique": False, "type": "btree"},
+                },
+            ],
+        )
+        text = render_human_text(diff, _options())
+        assert "unique True -> False" in text
+
+    def test_index_modified_states_a_type_change(self) -> None:
+        diff = _diff_with(
+            [
+                {
+                    "kind": "index_modified",
+                    "table": "public.curator",
+                    "index_name": "curator_email_idx",
+                    "before": {"columns": ["email"], "unique": True, "type": "btree"},
+                    "after": {"columns": ["email"], "unique": True, "type": "hash"},
+                },
+            ],
+        )
+        text = render_human_text(diff, _options())
+        assert "type btree -> hash" in text
+
+    def test_index_modified_columns_only_carries_no_stray_detail(self) -> None:
+        diff = _diff_with(
+            [
+                {
+                    "kind": "index_modified",
+                    "table": "public.curator",
+                    "index_name": "curator_email_idx",
+                    "before": {"columns": ["email"], "unique": True, "type": "btree"},
+                    "after": {"columns": ["email", "id"], "unique": True, "type": "btree"},
+                },
+            ],
+        )
+        text = render_human_text(diff, _options())
+        assert "unique" not in text.split("Modified (indexes):")[1].split("Added:")[0]
 
 
 class TestAddedRemovedSections:

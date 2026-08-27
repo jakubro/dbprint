@@ -46,7 +46,9 @@ connections:                    # REQUIRED; at least one
     include: ["<PATTERN>"]
     exclude: ["<PATTERN>"]
     max_age_days: 7
+    max_rows_scanned: <INT>       # absent by default
     infer_relationships: true
+    materialize_sample: true
     sketch_all_columns: false
     statistics: { ... }
     rules: [ ... ]
@@ -71,7 +73,7 @@ entries are appended to the ones from `defaults`, which is what makes a connecti
 | `max_age_days` | int ≥ 0 | `7` | A print younger than this is left alone by `generate`, and passes `check`'s freshness gate. A `rules` entry can override it per table, and can condition that override on the table's size. `0` re-profiles on every run — see below. A negative value is refused at load |
 | `max_rows_scanned` | int ≥ 1 | absent | A row-count ceiling covering every table this connection profiles; `defaults` and `rules` may also carry it. See below |
 | `infer_relationships` | bool | `true` | Derive the foreign keys the catalog does not declare, from column naming — see below |
-| `materialize_sample` | bool | `true` | Draw a sampled table's rows once into a temporary table, so every statistic for that table describes the same rows. Requires `CREATE TEMPORARY TABLE` — see below |
+| `materialize_sample` | bool | `true` | Draw a sampled table's rows once into a temporary table, so every statistic for that table describes the same rows. Takes a temporary-table privilege on PostgreSQL and MySQL, none on Snowflake — see below |
 | `sketch_all_columns` | bool | `false` | Sketch every sketchable-type column, not only the smaller required set — see below |
 | `statistics` | map | see below | What gets measured per column, and how much of it |
 | `rules` | list | `[]` | Per-table overrides of the keys above, plus the two that narrow what is read |
@@ -96,9 +98,12 @@ table is read by many statements, and a sampling construct re-evaluated per stat
 fresh set of rows each time — so a column's listed value counts and the non-null figure they are a
 share of come from different reads, and the two disagree on a table nobody wrote to. With the key
 on, the producer copies the draw into a temporary table once and every statement for that table
-reads that instead. What the write costs you: the connection needs `CREATE TEMPORARY TABLE` where
-the copy is made — the session's own temporary space on PostgreSQL and MySQL, the profiled table's
-own schema on Snowflake — the object holds the sampled fraction only rather than the whole table,
+reads that instead. What the write costs you: a temporary-table privilege where the copy is made,
+spelled differently per engine — `TEMPORARY` on the database for PostgreSQL, `CREATE TEMPORARY
+TABLES` on the database for MySQL, and nothing at all on Snowflake, which exempts temporary tables
+from the schema's `CREATE TABLE` privilege. The copy lands in the session's own temporary space on
+PostgreSQL and MySQL and in the profiled table's own schema on Snowflake. The object holds the
+sampled fraction only rather than the whole table,
 and its lifetime is the session, so it is gone when the run ends whether the run succeeded or not.
 Where the privilege is absent the run does **not** fail: it falls back to sampling per statement,
 warns on stderr, and the incoherence above is back. Turning the key off chooses that fallback
@@ -116,6 +121,13 @@ sketched, whether or not it fits one of those four categories, at the cost of on
 per newly-sketched column. A KMV sketch is an unsalted hash of real cell values, so turning
 this on widens that surface to every column redaction did not withhold, on top of whatever
 the required set already carries.
+
+The key has no effect on a table that carries a `scope` block, or on a plain view: neither is
+sketched at all, whatever this is set to. A sketch answers set-overlap questions between two
+columns, which needs a reproducible read of the whole column — a narrowed read cannot give
+one, and a view is never queried. Since a large warehouse is also where sampling gets turned
+on, expect the two settings to meet: a table narrowed by `sample`, `filter` or
+`max_rows_scanned` publishes no sketches regardless.
 
 **`max_age_days: 0` means the print is stale the moment it is written.** `generate`
 re-extracts it every run, and `check`'s freshness gate cannot pass at `0` whatever order the
@@ -207,11 +219,15 @@ rules:
   the artifact, and its own draw composes with the sample fraction rather than replacing it -
   so honouring `sample` costs no extra rows. Composition is population-level only on MySQL and
   Snowflake, which take no seed on this sub-draw; only Postgres coheres row for row.
-- **A sampled table reads one row set, and the same one next run.** One table's profile
-  issues many statements against the same narrowed source, so an unseeded fraction would
-  describe different rows per field on a table nobody wrote to, and a drift-reporting
-  consumer would see movement every run forever. All three adapters seed the fraction from
-  the table's own name, so neither happens. The exception is the extra draw
+- **A sampled table reads one row set within a run, and on PostgreSQL the same one next run.**
+  One table's profile issues many statements against the same narrowed source, so an unseeded
+  fraction would describe different rows per field on a table nobody wrote to. What prevents
+  that is the materialized copy, not the seed. All three adapters also seed the fraction from
+  the table's own name, but only PostgreSQL's `TABLESAMPLE ... REPEATABLE` documents a stable
+  draw across runs: MySQL's seeded predicate holds only while scan order does, and Snowflake
+  does not document two evaluations of one seeded expression reading the same rows — which is
+  precisely why the copy exists. A drift-gating consumer should not read run-to-run stability
+  as a guarantee off PostgreSQL. The exception is the extra draw
   `inferred.looks_like` takes on top of that row set, which takes no seed on MySQL or
   Snowflake — so on those two the shape claim agrees with the rest of the profile at the
   population level rather than row for row.
@@ -236,8 +252,9 @@ rules:
   fall either side of it between runs. When the catalog has no number at all the rule does
   **not** apply — sampling degrades the artifact, so an unknown size takes the un-narrowed
   path, and the run says so on stderr rather than deciding silently.
-- **A config with no `min_rows` anywhere costs nothing.** No estimate is fetched and the run
-  issues exactly the statements it issued before the key existed.
+- **A config with neither `min_rows` nor `max_rows_scanned` anywhere costs nothing.** No estimate
+  is fetched and the run issues exactly the statements it issued before the keys existed. Either
+  key, at any level, turns the pre-flight on — a ceiling needs the estimate to derive its fraction.
 - A narrowed run takes the table's `row_count` from the catalog rather than counting it, so
   `row_count_method` reports `approximate`, and the emitted `statistics.yaml` carries the
   `scope` block naming `rows_scanned` with every ratio computed against it. A table crossing
@@ -268,13 +285,17 @@ rules:
 #### `max_rows_scanned`
 
 A row-count ceiling states the cost an operator can afford directly, in rows, rather than as a
-fraction — the engine derives the fraction from the catalog estimate it already fetches for
-`min_rows`.
+fraction — the engine derives the fraction from a catalog estimate, fetched for this key as it is
+for `min_rows`.
 
 - **A ceiling is a different policy from a fraction, not another way to spell one.** `sample`
-  reads a fixed share regardless of table size, so its cost grows with the table; a ceiling
-  reads at most a fixed number of rows, so a table under it is read whole and every table over
-  it costs the same regardless of how far over. Migrating a `min_rows`/`sample` ladder built to
+  reads a fixed share regardless of table size; a ceiling caps the rows the draw *returns*, so a
+  table under it is read whole and every table over it yields the same number of rows regardless
+  of how far over. What a ceiling bounds is the downstream work — the rows aggregated, `rows_scanned`,
+  and on Snowflake the warehouse time, since `SAMPLE SYSTEM` prunes at block level. It does not
+  bound what leaves the disk on PostgreSQL or MySQL: `TABLESAMPLE BERNOULLI` tests rows
+  individually and a `RAND() < p` predicate is unindexable, so both scan the whole table however
+  small the fraction. Migrating a `min_rows`/`sample` ladder built to
   approximate a cost curve to one `max_rows_scanned` value changes what gets read at the low
   end — a table just over the ceiling is now read whole rather than sampled — and that is the
   intended difference, not a bug.
@@ -348,13 +369,17 @@ connections:
   column — `mask` to `hash` — but cannot lift the coverage, because no primitive means "not
   redacted". A connection that must stay unredacted is one whose rule does not belong in
   `defaults`.
-- **Only cell values change.** `null_count`, `null_rate`, `cardinality`, `cardinality_ratio`,
-  the value counts, `values_coverage` and `distribution` are identical to an unredacted run.
-  `range` bounds and `percentiles` are cell values and receive the same primitive; under `drop`
-  they are omitted entirely.
+- **Counts do not change; cell values and two derived day counts do.** `null_count`, `null_rate`,
+  `cardinality`, `cardinality_ratio`, the value counts, `values_coverage` and `distribution` are
+  identical to an unredacted run. `range` bounds and `percentiles` are cell values and receive the
+  same primitive; under `drop` they are omitted entirely, along with `unrepresentable`. The two
+  exceptions are derived rather than measured: `range.span_days` and `freshness.max_age_days` are
+  floored to the nearest 90 days under **every** primitive, `drop` included, since an exact age
+  narrows the values it was computed from.
 - **The column declares it** with a `redacted` marker naming the primitive, so a consumer can
-  tell a measurement from a substitution. A `check` predicate over `accepted_values`, `range`
-  or `percentiles` on a redacted column is refused rather than evaluated against placeholders.
+  tell a measurement from a substitution. A `check` predicate over `accepted_values`, `range`,
+  `percentiles` or `freshness.max_age_days` on a redacted column is refused rather than evaluated
+  against placeholders or against a coarsened figure.
   A column a rule covers but that publishes no cell value at all carries no marker, because
   nothing was withheld from it — whether that is because its classification never carries one
   (`json`, `unsupported`) or because a `text` column detected as prose published
@@ -404,6 +429,30 @@ specified in [ASSERTIONS.md](ASSERTIONS.md).
 
 ---
 
+## `--project` locators
+
+Every command except `init` accepts `--project`, pointing it at a project without a `cd`; `init`
+scaffolds in the current directory only. Local by default: a
+directory whose direct child is `.dbprint.yaml`, or that file itself - never an upward walk,
+never a downward scan.
+
+`--project` also accepts a git address, so a project committed to a repository can be read
+without cloning it by hand first:
+
+| Form | Resolves to |
+|---|---|
+| `https://github.com/<owner>/<repo>` | `.dbprint.yaml` at the repository root, default branch |
+| `git@github.com:<owner>/<repo>.git` | Same, over SSH |
+| `https://github.com/<owner>/<repo>/blob/<ref>/<path>/` | `<path>/.dbprint.yaml` at `<ref>` |
+| `https://github.com/<owner>/<repo>/blob/<ref>/<path>/.dbprint.yaml` | The same file, named directly |
+| `<git-url>#<ref>:<subpath>` | Explicit form - any git URL, any ref, any subpath |
+
+GitLab (`/-/blob/<ref>/<path>`) and Bitbucket (`/src/<ref>/<path>`) web URLs parse the same way.
+A bare remote always means the repository root at its default branch - a `.dbprint.yaml` nested
+under one is never discovered from the bare form.
+
+---
+
 ## `~/.dbprint/connections.yaml`
 
 Keyed by connection name, matching `.dbprint.yaml`. Never commit it.
@@ -421,9 +470,9 @@ production:
 
 | Adapter | Required | Optional |
 |---|---|---|
-| PostgreSQL | `host`, `port`, `database`, `user`, `password` | — |
-| MySQL | `host`, `port`, `database`, `user`, `password` | — |
-| Snowflake | `account`, `user`, `warehouse`, `database`, `role` | `password`, `private_key_file`, `private_key_file_pwd`, `schema` |
+| PostgreSQL | `host`, `port`, `database`, `user`, `password` | `redaction_salt` |
+| MySQL | `host`, `port`, `database`, `user`, `password` | `redaction_salt` |
+| Snowflake | `account`, `user`, `warehouse`, `database`, `role` | `password`, `private_key_file`, `private_key_file_pwd`, `schema`, `redaction_salt` |
 
 Snowflake takes **exactly one** of `password` or `private_key_file`; supplying both, or
 neither, is an error. `private_key_file_pwd` decrypts an encrypted key.

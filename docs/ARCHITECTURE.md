@@ -32,15 +32,19 @@ change. Treat a mismatch as a bug in this document, not in the code.
 │   │   ├── adapter_registry.py             #   adapter-name -> adapter class lookup
 │   │   ├── engine_setup.py                 #   credentials -> adapter -> Engine, for one connection
 │   │   ├── thresholds.py                   #   per-table freshness thresholds without a database
+│   │   ├── options.py                      #   the shared --project locator + remote helpers
+│   │   ├── run_log.py                      #   per-run log under ~/.dbprint/logs/, 3 kept
 │   │   └── resolution.py                   #   implicit connection resolution
 │   ├── config/                             # On-disk configuration loaders
 │   │   ├── project.py                      #   .dbprint.yaml schema + discovery
 │   │   ├── connections.py                  #   ~/.dbprint/connections.yaml + env + .env
+│   │   ├── remote.py                       #   git-address --project: parse, then clone into a cache
 │   │   └── selectors.py                    #   fnmatch-based include/exclude matching
 │   ├── adapters/                           # Database adapters
 │   │   ├── base.py                         #   Adapter ABC + intermediate dataclass types
 │   │   ├── errors.py                       #   QueryFailed - statement + params on failure
 │   │   ├── dialect.py                      #   per-adapter SQL dialect declarations
+│   │   ├── trace_context.py                #   per-statement SQL tracing into the run log
 │   │   ├── mock.py                         #   deterministic in-memory adapter (for tests)
 │   │   ├── postgres/                       #   concrete adapter package
 │   │   ├── mysql/                          #   concrete adapter package
@@ -57,6 +61,7 @@ change. Treat a mismatch as a bug in this document, not in the code.
 │   │   ├── context_assembler.py            # per-table fragment builder for `dbprint context`
 │   │   ├── token_budget.py                 #   char/4 token approximation + section-priority selector
 │   │   ├── notes_synthesis.py              #   per-classification Notes templates
+│   │   ├── reading_guide.py                #   the reading.md written into every print
 │   │   ├── yaml_dumper.py                  #   deterministic YAML emission
 │   │   └── result.py                       #   request/result dataclasses + exit-code vocabulary
 │   ├── assertions/                         # `dbprint check` assertion DSL
@@ -78,10 +83,12 @@ change. Treat a mismatch as a bug in this document, not in the code.
 │   │   ├── diff.py                         #   diff invariants + summary counts
 │   │   ├── ddl.py                          #   ddl.sql sanity checks
 │   │   ├── column_annotations.py           # statistics.annotations.yaml invariants + stale-key check
-│   │   └── relationship_annotations.py     # relationships.annotations.yaml invariants
+│   │   ├── relationship_annotations.py     # relationships.annotations.yaml invariants
+│   │   └── progress.py                     #   per-pass validation progress events
 │   ├── mcp/                                # MCP server (gated on the [mcp] extra)
 │   │   ├── state.py                        #   served-connection resolution
 │   │   ├── resources.py                    #   resource URI handlers (pure)
+│   │   ├── reference.py                    #   packaged specification lookup, backing get_reference
 │   │   ├── tools.py                        #   tool handlers (pure)
 │   │   ├── server.py                       #   the only module importing the MCP SDK
 │   │   └── errors.py                       #   McpError + JSON-RPC code mapping
@@ -90,11 +97,21 @@ change. Treat a mismatch as a bug in this document, not in the code.
 │   │   ├── looks_like.py                   #   the SPEC looks_like detectors
 │   │   ├── sensitivity.py                  #   the SPEC must-not-leave-the-database category detector
 │   │   ├── redaction.py                    #   the SPEC cell-value redaction primitives
+│   │   ├── statistics_matrix.py            #   required/forbidden fields per classification
+│   │   ├── coverage.py                     #   values_coverage arithmetic + its markers
+│   │   ├── distribution.py                 #   the SPEC distribution verdicts
+│   │   ├── temporal_range.py               #   temporal range bounds + span
+│   │   ├── temporal_age.py                 #   freshness age against the artifact's own clock
+│   │   ├── epoch.py                        #   epoch-encoded integer detection + unit
+│   │   ├── sketch.py                       #   KMV sketch construction + containment
 │   │   └── v1/                             #   Packaged JSON Schemas (shipped with the wheel)
 │   │       ├── statistics.schema.json
 │   │       ├── relationships.schema.json
 │   │       ├── manifest.schema.json
-│   │       └── diff.schema.json
+│   │       ├── diff.schema.json
+│   │       ├── statistics_annotations.schema.json
+│   │       ├── relationships_annotations.schema.json
+│   │       └── manifest_annotations.schema.json
 │   └── docs/                               # Browsable HTML site (gated on the [docs] extra)
 │       ├── catalogue.py                    #   pure reader: connections, tables, artifacts off disk
 │       ├── view.py                         #   pure presentation: view models for every page
@@ -112,6 +129,9 @@ change. Treat a mismatch as a bug in this document, not in the code.
     ├── cli/
     ├── mcp/
     ├── spec/
+    ├── docs/
+    ├── consumer/                           # the surface register every consumer surface registers in
+    ├── fixtures/                           # shared print fixtures
     ├── integration/                        # end-to-end against an ephemeral local cluster
     └── live/                               # environment-gated; skipped without live credentials
 ```
@@ -236,7 +256,47 @@ class Adapter(ABC):
     ) -> list[Any]: ...
 
     def execute_query(self, sql: str) -> list[tuple[Any, ...]]: ...
+
+    def default_collation(self) -> str: ...
+
+    def introspect_physical_layout(self, fqn: str) -> PhysicalLayout | None: ...
+
+    def compute_null_patterns(
+        self,
+        fqn: str,
+        columns: list[ColumnMeta],
+        config: StatisticsConfig,
+        counts: TableCounts,
+        base: dict[str, BaseStats],
+        scope: TableScope | None = None,
+    ) -> NullPatterns | None: ...
+
+    def probe_grain(
+        self,
+        fqn: str,
+        columns: list[ColumnMeta],
+        counts: TableCounts,
+        candidates: tuple[tuple[str, str], ...],
+        scope: TableScope | None = None,
+    ) -> tuple[tuple[str, str], ...]: ...
+
+    def probe_dependencies(
+        self,
+        fqn: str,
+        columns: list[ColumnMeta],
+        counts: TableCounts,
+        base: dict[str, BaseStats],
+        candidates: tuple[tuple[str, str], ...],
+        scope: TableScope | None = None,
+    ) -> dict[tuple[str, str], float]: ...
+
+    def compute_key_sketch(
+        self, fqn: str, column: str, sql_type: str, kind: SketchKind, k: int
+    ) -> tuple[int, ...]: ...
 ```
+
+All twenty are abstract: a subclass missing any one of them fails at instantiation, not at the
+call site.
 
 **Statistics come in two calls, and the engine works between them.** Phase A is
 one batched query yielding the table's counts plus each column's `null_count`
@@ -498,7 +558,7 @@ sequenceDiagram
     Adapter-->>Engine: naming-inference inventory (skipped objects included)
 
     loop For each table (sequential, fault-isolated)
-        Engine->>Adapter: estimate_row_count (only when a rule carries min_rows)
+        Engine->>Adapter: estimate_row_count (only when min_rows or max_rows_scanned is set)
         Engine->>Config: settings_for(fqn, estimate)
         Engine->>Engine: skip if fresh vs max_age and not --force
         Engine->>Adapter: extract_ddl + introspect_* + compute_base_statistics
@@ -565,8 +625,10 @@ sequenceDiagram
    each object's columns from this inventory rather than asking the catalog a
    second time.
 7. **Per-table loop** (sequential, fault-isolated):
-   - **Size pre-flight**, only when some rule in the cascade carries
-     `min_rows`. Read `Adapter.estimate_row_count` and pass it to
+   - **Size pre-flight**, only when the cascade carries `min_rows` or
+     `max_rows_scanned` anywhere — the ceiling is legal at connection and
+     `defaults` level too, and needs the estimate to derive its fraction.
+     Read `Adapter.estimate_row_count` and pass it to
      `settings_for`, which needs it to decide whether a size-conditioned rule
      governs this table. It runs before the freshness skip because the
      condition gates every key a rule carries, `max_age_days` among them. A
@@ -817,10 +879,11 @@ Selectors are stdlib fnmatch globs (`*` matches any run of characters
 including dot separators; `?` matches a single character). Matching is
 case-sensitive against the lowercased FQN that the adapter emits.
 
-A pattern of `garden.*` matches every table under the `analytics`
-namespace at any depth (`garden.seedbank.accession`, `garden.fieldwork.x`,
-…). Tighter scoping uses fully-qualified patterns like
-`garden.seedbank.*` or exact names like `garden.seedbank.accession`.
+A pattern of `arboretum.*` matches every table under the `arboretum`
+namespace at any depth (`arboretum.seedbank.accession`,
+`arboretum.fieldwork.x`, …). Tighter scoping uses fully-qualified
+patterns like `arboretum.seedbank.*` or exact names like
+`arboretum.seedbank.accession`.
 
 ### Sources of selectors
 
@@ -856,7 +919,7 @@ flowchart LR
 ### Intersection vs union — why asymmetric
 
 Include is intersection: when the project config restricts to
-`garden.*`, a CLI `--include marketing.*` cannot reach outside the
+`arboretum.*`, a CLI `--include marketing.*` cannot reach outside the
 project scope. The project config is the contract; the CLI is a per-run
 narrower.
 
@@ -874,6 +937,33 @@ honoured.
 for `.dbprint.yaml`. The first hit wins; the directory containing it
 becomes the project root. The loader fails with a clear error message if
 no config is found before reaching the filesystem root.
+
+### Remote project locators
+
+`--project` also accepts a git address, which `config.remote` resolves to a
+local checkout before the loader above is given a path at all.
+`parse_address` is pure string matching - no network call, no forge API - so
+a local path is never mistaken for a remote one; `materialize` is the impure
+half.
+
+dbprint shells out to `git` - clone once, `git pull --ff-only` to refresh -
+so credentials are git's own: an SSH agent or a credential helper already
+configured on the machine. dbprint holds none of its own, and `git` must be
+on `PATH`, behind the same `shutil.which` guard the postgres adapter puts in
+front of `pg_dump`.
+
+Clones land under `CACHE_ROOT` (`~/.dbprint/cache/`), keyed by remote and
+ref, and are reused for `CACHE_TTL_SECONDS` - 15 minutes - before the next
+command refreshes them. The TTL is fixed: no override, no `--refresh` flag.
+A long-lived process (`dbprint serve`, `dbprint docs serve`) calls
+`keep_fresh` once at startup, which refreshes its clone in the background on
+that schedule rather than fetching per request.
+
+A remote locator can only be read. `refuse_if_remote` runs before any clone,
+so `dbprint generate`, `dbprint diff` and `dbprint check --online` - the
+three that connect live to a database - fail on the address alone rather
+than on whatever a clone would have produced. Every other command works
+against a remote exactly as it does against a local directory.
 
 ### Per-key precedence
 
@@ -1016,8 +1106,8 @@ Inside the CLI, rendering is dispatched on TTY detection:
 
 | Mode | Trigger | Output |
 |---|---|---|
-| TTY | `sys.stdout.isatty()` is true (or `--tui`) | Rich progress: one panel per connection with running per-table bars; final summary panel |
-| Piped | `sys.stdout.isatty()` is false (or `--no-tui`) | Fixed-format lines on stdout, one per table + one summary; warnings and errors on stderr |
+| TTY | `sys.stdout.isatty()` is true (or `--tui`) | A two-line footer (overall bar plus the in-flight table or object) pinned to the bottom, no panel widget; completed tables stream into scrollback above it as a connection/schema tree. One connection processed at a time |
+| Piped | `sys.stdout.isatty()` is false (or `--no-tui`) | Tab-separated lines on stdout: one per table, one per catalogued schema, one per sketched table, plus one summary per connection; warnings and errors on stderr |
 
 The renderer takes the same `GenerateResult`. The CLI does not branch
 deeper than the renderer selection.
@@ -1216,7 +1306,8 @@ src/dbprint/mcp/
 ├── errors.py         # McpError + constructors per MCP.md §8
 ├── state.py          # ServedConnections + multi-conn default resolution
 ├── resources.py      # URI parse + per-artifact handlers (pure)
-├── tools.py          # 5 tool implementations (pure)
+├── reference.py      # packaged specification lookup, backing get_reference
+├── tools.py          # 6 tool implementations (pure)
 └── server.py         # SDK adapter: wires handlers into mcp.server.Server
 ```
 
@@ -1236,7 +1327,7 @@ dbprint://<connection>/<rest>
 `<rest>` is `manifest`, `diff`, or `<fqn>/<kind>` where `<kind>` is one
 of `ddl` / `statistics` / `relationships` / `description` / `statistics_annotations` /
 `relationships_annotations`.
-`<fqn>` is the dotted form (e.g. `garden.seedbank.accession`), not the slash-delimited
+`<fqn>` is the dotted form (e.g. `arboretum.seedbank.accession`), not the slash-delimited
 filesystem path. Per MCP.md §3, the server enumerates every resource for
 every served connection at `resources/list` and re-reads from disk on
 every `resources/read` call.
@@ -1249,6 +1340,7 @@ implicit connection resolution:
 | Invocation | Served | Default |
 |---|---|---|
 | single connection in config | the single | the single |
+| `auto: true` on exactly 1 of >= 2 connections | that one | that one |
 | `auto: true` on >= 2 connections | every auto | None |
 | `dbprint serve <name>` | just `<name>` | `<name>` |
 | no auto + >= 2 connections | (CLI rejects at startup) | n/a |
@@ -1259,8 +1351,9 @@ MCP.md §5.2.
 
 ### Tools
 
-`tools.dispatch(state, name, arguments)` routes to one of five pure
-handlers. `get_table_context` reuses `engine.context_assembler` (§3) so
+`tools.dispatch(state, name, arguments)` routes to one of six pure
+handlers — `get_table_context`, `list_tables`, `search_columns`,
+`get_manifest`, `get_diff` and `get_reference`. `get_table_context` reuses `engine.context_assembler` (§3) so
 the MCP `get_table_context` and the CLI `dbprint context` always emit
 the same fragment shape per the same options.
 

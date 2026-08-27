@@ -1,6 +1,6 @@
 # dbprint format v1 — reference example
 
-This directory holds two example print directories. `production/` is a complete example, produced by `scripts/gen_reference_example.py` against a real PostgreSQL database and regenerated with `just example`. `vocabulary/` is a smaller, second example produced by `scripts/gen_vocabulary_example.py` and regenerated with `just example-vocabulary`, carrying the `looks_like` shapes `production/`'s seed-bank domain has no honest column for — see [`vocabulary/README.md`](vocabulary/README.md). The rest of this file describes `production/`.
+This directory holds two example print directories. `production/` is a complete example, produced by `scripts/gen_reference_example.py` against a PostgreSQL database seeded from `scripts/sql/`, and regenerated with `just example`. `vocabulary/` is a smaller, second example produced by `scripts/gen_vocabulary_example.py` and regenerated with `just example-vocabulary`, carrying the `looks_like` shapes `production/`'s seed-bank domain has no honest column for — see [`vocabulary/README.md`](vocabulary/README.md). The rest of this file describes `production/`.
 
 The producer wrote every artifact in it; the files it did not write are `description.md`, `statistics.annotations.yaml` and `relationships.annotations.yaml`, all user content the generator places before the runs so the manifest records them. `tests/conformance/test_reference_example.py::TestProducerAgreement` regenerates the tree and compares it against the committed one, so what is here is what the producer emits.
 

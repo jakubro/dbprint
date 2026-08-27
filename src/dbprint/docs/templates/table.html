@@ -5,10 +5,14 @@
   {%- for c in cols %}<a href="{{ base_url }}#col-{{ c }}">{{ c }}</a>{% if not loop.last %}, {% endif %}{% endfor -%}
 {% endmacro %}
 
-<h1>{{ fqn }} <span class="muted">{{ conn }}</span></h1>
+<h1>{{ fqn }} <span class="muted">{{ conn }}{% if adapter %} &middot; {{ adapter }}{% endif %}</span></h1>
 
 {% if missing_artifacts_notice %}
   <div class="notice">{{ missing_artifacts_notice }}</div>
+{% endif %}
+
+{% if catalog_only_notice %}
+  <div class="notice">{{ catalog_only_notice }}</div>
 {% endif %}
 
 <div class="cards">
@@ -427,12 +431,17 @@
               {% if r.constraint_name %}<div class="muted">{{ r.constraint_name }}</div>{% endif %}
               {% if r.path %}<div class="muted">via {{ r.path|join('.') }}{% if r.target_path %} -&gt; {{ r.target_path|join('.') }}{% endif %}</div>{% endif %}
               {% if r.observed %}
-                <div class="rel-observed">
-                  fanout avg {{ '%.1f'|format(r.observed.fanout_avg) }}{% if r.observed.fanout_max is not none %} (max {{ r.observed.fanout_max }}){% endif %},
-                  covers {{ (r.observed.target_coverage * 100)|round(1) }}% of target
-                  {% if r.observed.containment is not none %}, {{ (r.observed.containment * 100)|round(1) }}% of referencing values contained{% endif %}
-                </div>
-                {% if r.observed.coherent == false %}<div class="rel-incoherent">INCOHERENT: referencing cardinality exceeds the target's</div>{% endif %}
+                {% if r.observed.scope_compatible == false %}
+                  <div class="rel-observed muted">scopes not comparable</div>
+                {% else %}
+                  <div class="rel-observed">
+                    fanout avg {{ '%.1f'|format(r.observed.fanout_avg) }}{% if r.observed.fanout_max is not none %} (max {{ r.observed.fanout_max }}){% endif %},
+                    covers {{ (r.observed.target_coverage * 100)|round(1) }}% of target
+                    {% if r.observed.containment is not none %}, {{ (r.observed.containment * 100)|round(1) }}% of referencing values contained{% endif %}
+                    {% if r.observed.containment is not none and r.observed.answerable_count is not none %}({{ r.observed.answerable_count }} answerable){% endif %}
+                  </div>
+                  {% if r.observed.coherent == false %}<div class="rel-incoherent">INCOHERENT: referencing cardinality exceeds the target's</div>{% endif %}
+                {% endif %}
               {% endif %}
               {% if r.rejected %}<div class="rel-rejected">REJECTED by human annotation{% if r.rejected_note %}: {{ r.rejected_note }}{% endif %}</div>{% endif %}
             </td>
@@ -449,12 +458,17 @@
               {% if r.on_delete %}<div class="muted">on_delete={{ r.on_delete }}</div>{% endif %}
               {% if r.constraint_name %}<div class="muted">{{ r.constraint_name }}</div>{% endif %}
               {% if r.observed %}
-                <div class="rel-observed">
-                  fanout avg {{ '%.1f'|format(r.observed.fanout_avg) }}{% if r.observed.fanout_max is not none %} (max {{ r.observed.fanout_max }}){% endif %},
-                  covers {{ (r.observed.target_coverage * 100)|round(1) }}% of target
-                  {% if r.observed.containment is not none %}, {{ (r.observed.containment * 100)|round(1) }}% of referencing values contained{% endif %}
-                </div>
-                {% if r.observed.coherent == false %}<div class="rel-incoherent">INCOHERENT: referencing cardinality exceeds the target's</div>{% endif %}
+                {% if r.observed.scope_compatible == false %}
+                  <div class="rel-observed muted">scopes not comparable</div>
+                {% else %}
+                  <div class="rel-observed">
+                    fanout avg {{ '%.1f'|format(r.observed.fanout_avg) }}{% if r.observed.fanout_max is not none %} (max {{ r.observed.fanout_max }}){% endif %},
+                    covers {{ (r.observed.target_coverage * 100)|round(1) }}% of target
+                    {% if r.observed.containment is not none %}, {{ (r.observed.containment * 100)|round(1) }}% of referencing values contained{% endif %}
+                    {% if r.observed.containment is not none and r.observed.answerable_count is not none %}({{ r.observed.answerable_count }} answerable){% endif %}
+                  </div>
+                  {% if r.observed.coherent == false %}<div class="rel-incoherent">INCOHERENT: referencing cardinality exceeds the target's</div>{% endif %}
+                {% endif %}
               {% endif %}
             </td>
           </tr>

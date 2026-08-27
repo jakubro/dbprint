@@ -13,6 +13,7 @@ from dbprint.spec import sketch as sketch_module
 from dbprint.spec.sketch import (
     answerable_count,
     answerable_subset_containment,
+    contains_value,
     decode_sketch,
     estimate_intersection,
     low64_md5,
@@ -203,3 +204,33 @@ class TestAnswerableCount:
             _ratio, count = result
 
             assert answerable_count(child, parent) == count
+
+
+class TestContainsValue:
+    """SPEC 2.2.14's membership predicate - exact below k, refuses rather than guesses at it."""
+
+    def test_exact_membership_uses_the_published_test_vectors(self) -> None:
+        """42's hash is packed in; -7's published hash is not, so it reads as absent."""
+
+        encoded = pack_sketch([15584161582054922406])
+
+        assert contains_value(encoded, 42, "integer") is True
+        assert contains_value(encoded, -7, "integer") is False
+
+    def test_truncated_sketch_refuses_rather_than_guesses(self) -> None:
+        with patch.object(sketch_module, "K", 2):
+            encoded = pack_sketch([1, 2])
+
+            assert contains_value(encoded, 42, "integer") is None
+
+    def test_a_decoded_length_of_exactly_k_reads_as_truncated(self) -> None:
+        """The same boundary `_theta` already resolves conservatively (SPEC 2.2.14)."""
+
+        with patch.object(sketch_module, "K", 1):
+            encoded = pack_sketch([15584161582054922406])
+
+            assert contains_value(encoded, 42, "integer") is None
+
+    def test_a_malformed_payload_raises_rather_than_reading_as_unanswerable(self) -> None:
+        with pytest.raises(ValueError):
+            contains_value("not valid base64!!!", 42, "integer")

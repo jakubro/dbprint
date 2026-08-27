@@ -94,6 +94,8 @@ def _as_integral(value: object) -> int | None:
     if isinstance(value, str):
         s = value.removeprefix("-")
 
-        return int(value) if s.isdigit() else None
+        # isdecimal(), not isdigit(): a superscript/subscript digit passes isdigit() and
+        # raises ValueError out of int() - the guard must describe what int() accepts.
+        return int(value) if s.isdecimal() else None
 
     return None

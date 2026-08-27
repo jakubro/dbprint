@@ -18,7 +18,10 @@ ProgressPhase = Literal[
     "extract",
     "statistics",
     "write",
+    "sketch",
     "finalizing",
+    "validate",
+    "assertions",
 ]
 ProgressStatus = Literal["start", "done", "failed", "skipped"]
 
@@ -31,6 +34,7 @@ class ProgressEvent:
     `index`/`total` are scoped to the connection. `inventory` fires once per object in the
     relationship pre-pass, not per table re-profiled, so feeding it into the per-table tracker
     makes a wide connection's bar appear to restart. `fqn` is None for connection-wide phases.
+    `pass_name`/`findings` are `validate`-phase only; `findings` is set on the closing tick alone.
     """
 
     connection: str
@@ -45,6 +49,8 @@ class ProgressEvent:
     elapsed_ms: int | None = None
     row_count: int | None = None
     error: str | None = None
+    pass_name: str | None = None
+    findings: int | None = None
 
 
 ProgressCallback = Callable[[ProgressEvent], None]

@@ -2446,7 +2446,9 @@ class TestASchemaIssueNamesItsField:
     def test_a_nested_enum_violation_names_the_column_and_field(self, print_dir: Path) -> None:
         target = print_dir / "seedbank/accession/statistics.yaml"
         data = _load_yaml_file(target)
-        data["columns"]["taxon_id"]["inferred"]["sensitivity"] = "not_a_sensitivity"
+        # `taxon_id` may carry no `inferred` block at all (SPEC 4.1.5 withholds `numeric_string`
+        # on this numeric-typed FK column) - inject the field regardless.
+        data["columns"]["taxon_id"].setdefault("inferred", {})["sensitivity"] = "not_a_sensitivity"
         _write_yaml_file(target, data)
         paths = {i.path for i in validate_print(print_dir)}
 

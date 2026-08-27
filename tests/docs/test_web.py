@@ -129,20 +129,20 @@ class TestRoutes:
     ) -> None:
         client = web.create_app([companion_conn]).test_client()
 
-        body = client.get("/t/primary/seedbank.botanists").data.decode()
+        body = client.get("/t/primary/seedbank.botanist").data.decode()
 
         assert "null with:" in body
         assert "Columns null on the same rows" in body
 
-    def test_singular_mention_links_to_plural_table(
+    def test_plural_mention_links_to_singular_table(
         self,
         companion_conn: ConnectionConfig,
     ) -> None:
         client = web.create_app([companion_conn]).test_client()
 
-        body = client.get("/t/primary/seedbank.botanists").data.decode()
+        body = client.get("/t/primary/seedbank.botanist").data.decode()
 
-        assert '<a href="/t/primary/seedbank.botanists">botanist</a>' in body
+        assert '<a href="/t/primary/seedbank.botanist">botanists</a>' in body
 
     def test_sidebar_toggle_button_present(self, rich_conn: ConnectionConfig) -> None:
         client = web.create_app([rich_conn]).test_client()

@@ -687,7 +687,7 @@ class TestTopLevelHandler:
         runner = CliRunner()
 
         with patch(
-            "dbprint.cli.commands.list_cmd.load_project",
+            "dbprint.cli.commands.list_cmd.resolve_project",
             side_effect=RuntimeError("kaboom"),
         ):
             result = runner.invoke(main, ["list"])
@@ -699,7 +699,7 @@ class TestTopLevelHandler:
         runner = CliRunner()
 
         with patch(
-            "dbprint.cli.commands.list_cmd.load_project",
+            "dbprint.cli.commands.list_cmd.resolve_project",
             side_effect=RuntimeError("kaboom"),
         ):
             result = runner.invoke(main, ["--debug", "list"])

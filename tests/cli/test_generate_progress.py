@@ -20,6 +20,7 @@ from dbprint.cli.rendering.progress import (
     LiveProgressRenderer,
     StreamingProgressRenderer,
     _eta_seconds,
+    _fresh_eta_durations,
     build_progress_renderer,
     install_log_handler,
     remove_log_handler,
@@ -166,7 +167,7 @@ class TestStreamingRenderer:
 
         assert buf.getvalue() == "acme\tsummary\t149 ok / 1 failed / 0 skipped\t94500ms\n"
 
-    def test_prepass_phases_reach_the_piped_stream(self) -> None:
+    def test_prepass_bracket_phases_reach_the_piped_stream(self) -> None:
         buf = StringIO()
 
         with StreamingProgressRenderer(buf) as r:
@@ -174,7 +175,8 @@ class TestStreamingRenderer:
             r.on_event(_event("connecting", "done"))
             r.on_event(_event("listing", "start"))
             r.on_event(_event("listing", "done"))
-            r.on_event(_event("inventory", "start"))
+            r.on_event(ProgressEvent(connection="acme", phase="inventory", status="start", total=1))
+            r.on_event(ProgressEvent(connection="acme", phase="inventory", status="done", total=1))
 
         lines = buf.getvalue().splitlines()
 
@@ -182,7 +184,119 @@ class TestStreamingRenderer:
         assert "acme\tconnecting\tdone" in lines
         assert "acme\tlisting\tstart" in lines
         assert "acme\tlisting\tdone" in lines
-        assert "acme\tinventory\tstart\t1/1" in lines
+        assert "acme\tinventory\tstart" in lines
+        assert "acme\tinventory\tdone" in lines
+
+    def test_inventory_collapses_to_one_schema_line_not_one_per_object(self) -> None:
+        buf = StringIO()
+
+        with StreamingProgressRenderer(buf) as r:
+            r.on_event(ProgressEvent(connection="acme", phase="inventory", status="start", total=3))
+            r.on_event(
+                ProgressEvent(
+                    connection="acme",
+                    phase="inventory",
+                    status="start",
+                    index=1,
+                    total=3,
+                    fqn="seedbank.a",
+                ),
+            )
+            r.on_event(
+                ProgressEvent(
+                    connection="acme",
+                    phase="inventory",
+                    status="start",
+                    index=2,
+                    total=3,
+                    fqn="seedbank.b",
+                ),
+            )
+            # seedbank closes here - its schema differs from fieldwork's, one object late.
+            r.on_event(
+                ProgressEvent(
+                    connection="acme",
+                    phase="inventory",
+                    status="start",
+                    index=3,
+                    total=3,
+                    fqn="fieldwork.c",
+                ),
+            )
+            # fieldwork closes only on the phase's own "done".
+            r.on_event(ProgressEvent(connection="acme", phase="inventory", status="done", total=3))
+
+        lines = buf.getvalue().splitlines()
+        schema_lines = [line for line in lines if "\tinventory\tschema\t" in line]
+
+        assert len(schema_lines) == 2  # one per schema, not one of the three ticks
+        seedbank_line = next(line for line in schema_lines if "\tseedbank\t" in line)
+        fieldwork_line = next(line for line in schema_lines if "\tfieldwork\t" in line)
+        assert "2 objects" in seedbank_line
+        assert "1 objects" in fieldwork_line
+
+    def test_sketch_pass_emits_one_line_per_table_not_per_column(self) -> None:
+        buf = StringIO()
+
+        with StreamingProgressRenderer(buf) as r:
+            r.on_event(ProgressEvent(connection="acme", phase="sketch", status="start", total=1))
+            r.on_event(
+                ProgressEvent(
+                    connection="acme",
+                    phase="sketch",
+                    status="start",
+                    index=1,
+                    total=1,
+                    fqn="s.t",
+                ),
+            )
+            r.on_event(
+                ProgressEvent(
+                    connection="acme",
+                    phase="sketch",
+                    status="start",
+                    index=1,
+                    total=1,
+                    fqn="s.t",
+                    column="id",
+                    column_index=1,
+                    column_total=1,
+                ),
+            )
+            r.on_event(
+                ProgressEvent(
+                    connection="acme",
+                    phase="sketch",
+                    status="done",
+                    index=1,
+                    total=1,
+                    fqn="s.t",
+                    elapsed_ms=1500,
+                ),
+            )
+
+        lines = buf.getvalue().splitlines()
+
+        assert "acme\ts.t\tsketched\t1.5s" in lines
+        assert not any("id" in line for line in lines)  # the column tick stays silent
+
+    def test_sketch_table_failure_reaches_the_piped_stream(self) -> None:
+        buf = StringIO()
+
+        with StreamingProgressRenderer(buf) as r:
+            r.on_event(
+                ProgressEvent(
+                    connection="acme",
+                    phase="sketch",
+                    status="failed",
+                    index=1,
+                    total=1,
+                    fqn="s.t",
+                    error="boom",
+                ),
+            )
+
+        assert buf.getvalue() == "acme\ts.t\tsketch_failed\tboom\n"
 
     def test_finish_writes_nothing(self) -> None:
         buf = StringIO()
@@ -254,7 +368,7 @@ class TestLiveRenderer:
         assert "(skipped)" in out
         assert "boom detail" in out
 
-    def test_prepass_advances_the_label_without_moving_the_bar(self) -> None:
+    def test_prepass_advances_the_catalogue_bar_then_hands_it_to_profiling(self) -> None:
         buf = StringIO()
         console = Console(file=buf, force_terminal=True, width=80, color_system=None)
 
@@ -266,6 +380,10 @@ class TestLiveRenderer:
             r.on_event(
                 ProgressEvent(connection="acme", phase="inventory", status="start", total=40),
             )
+            assert r._bar_label == "Cataloguing"
+            assert r._index == 0
+            assert r._total == 40
+
             r.on_event(
                 ProgressEvent(
                     connection="acme",
@@ -273,17 +391,161 @@ class TestLiveRenderer:
                     status="start",
                     index=7,
                     total=40,
+                    fqn="seedbank.accession",
                 ),
             )
-            # `index` stays bound to the table loop, not the pre-pass object count.
-            assert r._index == 0
+            assert r._index == 7
             assert r._total == 40
-            assert "inventory" in r._inflight_line().plain
-            assert "7/40" in r._inflight_line().plain
+            assert "seedbank" in r._inflight_line().plain
 
+            r.on_event(
+                ProgressEvent(connection="acme", phase="inventory", status="done", total=40),
+            )
+
+            # The label change is what marks the new pass - an index restart alone reads
+            # exactly like a crash and retry.
             r.on_event(_event("extract", "start", fqn="s.t"))
+            assert r._bar_label == "Profiling"
             assert r._index == 1
             assert r._fqn == "s.t"
+
+    def test_prepass_closes_a_schema_row_when_the_schema_changes(self) -> None:
+        buf = StringIO()
+        console = Console(file=buf, force_terminal=True, width=80, color_system=None)
+
+        with LiveProgressRenderer(console) as r:
+            r.on_event(
+                ProgressEvent(connection="acme", phase="inventory", status="start", total=3),
+            )
+            r.on_event(
+                ProgressEvent(
+                    connection="acme",
+                    phase="inventory",
+                    status="start",
+                    index=1,
+                    total=3,
+                    fqn="seedbank.a",
+                ),
+            )
+            r.on_event(
+                ProgressEvent(
+                    connection="acme",
+                    phase="inventory",
+                    status="start",
+                    index=2,
+                    total=3,
+                    fqn="seedbank.b",
+                ),
+            )
+            # seedbank closes here - two objects seen before fieldwork's first tick.
+            r.on_event(
+                ProgressEvent(
+                    connection="acme",
+                    phase="inventory",
+                    status="start",
+                    index=3,
+                    total=3,
+                    fqn="fieldwork.c",
+                ),
+            )
+            # fieldwork closes only on the phase's own "done" - never one tick behind.
+            r.on_event(
+                ProgressEvent(connection="acme", phase="inventory", status="done", total=3),
+            )
+
+        out = buf.getvalue()
+
+        assert "seedbank" in out
+        assert "2 objects" in out
+        assert "fieldwork" in out
+        assert "1 objects" in out
+
+    def test_sketch_pass_takes_the_bar_and_banners_the_scrollback(self) -> None:
+        buf = StringIO()
+        console = Console(file=buf, force_terminal=True, width=80, color_system=None)
+
+        with LiveProgressRenderer(console) as r:
+            r.on_event(
+                _event("write", "done", fqn="seedbank.accession", elapsed_ms=10, row_count=1),
+            )
+            assert r._bar_label == "Profiling"
+
+            r.on_event(
+                ProgressEvent(connection="acme", phase="sketch", status="start", total=1),
+            )
+            assert r._bar_label == "Sketching"
+            assert r._index == 0
+            assert r._total == 1
+
+            r.on_event(
+                ProgressEvent(
+                    connection="acme",
+                    phase="sketch",
+                    status="start",
+                    index=1,
+                    total=1,
+                    fqn="seedbank.accession",
+                ),
+            )
+            r.on_event(
+                ProgressEvent(
+                    connection="acme",
+                    phase="sketch",
+                    status="start",
+                    index=1,
+                    total=1,
+                    fqn="seedbank.accession",
+                    column="id",
+                    column_index=1,
+                    column_total=2,
+                ),
+            )
+            assert "sketch" in r._inflight_line().plain
+            assert "1/2" in r._inflight_line().plain
+            assert "id" in r._inflight_line().plain
+
+            r.on_event(
+                ProgressEvent(
+                    connection="acme",
+                    phase="sketch",
+                    status="done",
+                    index=1,
+                    total=1,
+                    fqn="seedbank.accession",
+                    elapsed_ms=500,
+                ),
+            )
+
+        out = buf.getvalue()
+
+        assert "Sketching" in out  # the section banner
+        # `_printed_path` resets when the sketch pass starts, so the schema header the
+        # Profiling row already printed comes back a second time for the Sketching row.
+        assert out.count("seedbank") == 2
+        assert out.count("accession") == 2
+
+    def test_a_run_with_no_sketch_event_never_shows_sketching(self) -> None:
+        """`dbprint diff` shares this renderer but never emits a `sketch` event, so the label
+        change and banner must stay conditioned on that event actually arriving.
+        """
+
+        buf = StringIO()
+        console = Console(file=buf, force_terminal=True, width=80, color_system=None)
+
+        with LiveProgressRenderer(console) as r:
+            r.on_event(ProgressEvent(connection="acme", phase="connecting", status="start"))
+            r.on_event(ProgressEvent(connection="acme", phase="connecting", status="done"))
+            r.on_event(
+                _event("write", "done", fqn="seedbank.accession", elapsed_ms=10, row_count=1),
+            )
+            assert r._bar_label == "Profiling"
+
+            r.on_event(ProgressEvent(connection="acme", phase="finalizing", status="start"))
+            r.on_event(ProgressEvent(connection="acme", phase="finalizing", status="done"))
+            assert r._bar_label == "Profiling"
+            r.finish()
+
+        assert "Sketching" not in buf.getvalue()
 
     def test_summary_lists_failed_tables(self) -> None:
         buf = StringIO()
@@ -465,6 +727,29 @@ class TestETA:
             r.on_event(_event("write", "done", fqn="s.t", elapsed_ms=10, row_count=1))
 
         assert "ETA" not in buf.getvalue()
+
+    def test_a_connections_own_start_resets_the_accumulator(self) -> None:
+        """One renderer serves every connection in sequence - a prior connection's sketch-sized
+        durations must not poison the next connection's first Profiling estimate.
+        """
+
+        console = Console(file=StringIO(), force_terminal=True, width=80, color_system=None)
+
+        with LiveProgressRenderer(console) as r:
+            # A sketch-sized duration, as the prior connection's Sketching pass would leave.
+            r.on_event(_terminal_event("sketch", "done", 1, 1, 50_000))
+            assert r._durations["done"]
+
+            r.on_event(ProgressEvent(connection="second", phase="connecting", status="start"))
+
+            assert r._durations == _fresh_eta_durations()
+            assert r._terminal_counts == {"done": 0, "skipped": 0, "failed": 0}
+
+            # The next connection's own (much smaller) table duration drives the ETA alone.
+            r.on_event(_terminal_event("write", "done", 1, 2, 1_000))
+            eta = _eta_seconds(r._terminal_counts, r._durations, 1)
+
+            assert eta == pytest.approx(1.0)
 
 
 class TestLogRouting:
@@ -721,6 +1006,96 @@ class TestPipedStreamingThroughCli:
             result = runner.invoke(main, ["generate", "--no-tui"])
 
         assert "1 table failed: RuntimeError: boom" in result.output
+
+
+class TestQuiet:
+    """`-q`/`--quiet` silences generate's own stdout progress; it has no other stdout content."""
+
+    @staticmethod
+    def _invoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, *args: str):
+        # A fresh project per call - two invocations sharing one tree would have the second
+        # see the first's committed prints and skip re-profiling on freshness, not on quiet.
+        project_root = tmp_path / name
+        project_root.mkdir()
+        (project_root / ".dbprint.yaml").write_text(PROJECT_YAML)
+        monkeypatch.chdir(project_root)
+
+        for k, v in _credential_env().items():
+            monkeypatch.setenv(k, v)
+
+        with patch.dict(
+            "dbprint.cli.adapter_registry.ADAPTERS",
+            {"postgres": _MockPostgresAdapter},
+            clear=True,
+        ):
+            return CliRunner().invoke(main, ["generate", *args])
+
+    def test_quiet_leaves_stdout_empty(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        result = self._invoke(tmp_path, monkeypatch, "a", "--no-tui", "--quiet")
+
+        assert result.stdout == ""
+
+    def test_short_form_matches_the_long_one(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        result = self._invoke(tmp_path, monkeypatch, "a", "--no-tui", "-q")
+
+        assert result.stdout == ""
+
+    def test_exit_code_is_unaffected(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        loud = self._invoke(tmp_path, monkeypatch, "loud", "--no-tui")
+        quiet = self._invoke(tmp_path, monkeypatch, "quiet", "--no-tui", "--quiet")
+
+        assert quiet.exit_code == loud.exit_code
+
+    def test_quiet_with_tui_prints_no_not_a_tty_warning(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        result = self._invoke(tmp_path, monkeypatch, "a", "--quiet", "--tui")
+
+        assert "not a TTY" not in result.stderr
+
+    def test_a_failure_still_reaches_stderr_under_quiet(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        (tmp_path / ".dbprint.yaml").write_text(PROJECT_YAML)
+        monkeypatch.chdir(tmp_path)
+
+        for k, v in _credential_env().items():
+            monkeypatch.setenv(k, v)
+
+        class _BrokenAdapter(MockAdapter):
+            REQUIRED_KEYS = ("host", "port", "database", "user", "password")
+
+            def __init__(self, _credentials: dict[str, str]) -> None:
+                super().__init__({"public.a": _table("public", "a")})
+
+            def compute_column_statistics(self, fqn: str, *args: object, **kwargs: object):
+                raise RuntimeError("boom")
+
+        with patch.dict(
+            "dbprint.cli.adapter_registry.ADAPTERS",
+            {"postgres": _BrokenAdapter},
+            clear=True,
+        ):
+            result = CliRunner().invoke(main, ["generate", "--no-tui", "--quiet"])
+
+        assert result.stdout == ""
+        assert "1 table failed: RuntimeError: boom" in result.stderr
 
 
 class _RecordingRenderer:

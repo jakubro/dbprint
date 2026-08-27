@@ -108,7 +108,7 @@ class TestStdioInvocation:
         fake_serve.assert_called_once()
 
 
-class TestProjectDir:
+class TestProject:
     @staticmethod
     def _project_and_elsewhere(tmp_path: Path) -> tuple[Path, Path]:
         """Return a project directory holding `warehouse`, and an unrelated sibling."""
@@ -131,7 +131,7 @@ class TestProjectDir:
         monkeypatch.chdir(elsewhere)
 
         with patch("dbprint.mcp.serve_stdio") as fake_serve:
-            result = CliRunner().invoke(main, ["serve", "warehouse", "--project-dir", str(project)])
+            result = CliRunner().invoke(main, ["serve", "warehouse", "--project", str(project)])
 
         assert result.exit_code == 0
         fake_serve.assert_called_once()
@@ -148,7 +148,7 @@ class TestProjectDir:
 
         assert result.exit_code == EXIT_GENERIC
 
-    def test_accepts_a_subdirectory_and_walks_up(
+    def test_the_config_file_itself_is_accepted(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -159,11 +159,29 @@ class TestProjectDir:
         with patch("dbprint.mcp.serve_stdio") as fake_serve:
             result = CliRunner().invoke(
                 main,
-                ["serve", "warehouse", "--project-dir", str(project / "prints")],
+                ["serve", "warehouse", "--project", str(project / ".dbprint.yaml")],
             )
 
         assert result.exit_code == 0
         fake_serve.assert_called_once()
+
+    def test_a_non_direct_child_is_refused_not_walked_up_to(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """`--project` is exact - a subdirectory of the project does not resolve it."""
+
+        project, elsewhere = self._project_and_elsewhere(tmp_path)
+        monkeypatch.chdir(elsewhere)
+
+        result = CliRunner().invoke(
+            main,
+            ["serve", "warehouse", "--project", str(project / "prints")],
+        )
+
+        assert result.exit_code == EXIT_GENERIC
+        assert str(project / "prints") in result.output
 
     def test_directory_holding_no_project_exits_one_naming_it(
         self,
@@ -173,32 +191,32 @@ class TestProjectDir:
         project, elsewhere = self._project_and_elsewhere(tmp_path)
         monkeypatch.chdir(project)
 
-        result = CliRunner().invoke(main, ["serve", "--project-dir", str(elsewhere)])
+        result = CliRunner().invoke(main, ["serve", "--project", str(elsewhere)])
 
         assert result.exit_code == EXIT_GENERIC
         assert str(elsewhere) in result.output
 
-    def test_rejects_a_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        project, _ = self._project_and_elsewhere(tmp_path)
-        monkeypatch.chdir(project)
-
-        result = CliRunner().invoke(
-            main,
-            ["serve", "--project-dir", str(project / ".dbprint.yaml")],
-        )
-
-        assert result.exit_code == 2
-        assert "--project-dir" in result.output
-
-    def test_rejects_a_path_that_does_not_exist(
+    def test_a_path_that_does_not_exist_names_itself(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """`--project` is a plain string, so an absent path fails as `ConfigError`, not exit 2."""
+
+        project, _ = self._project_and_elsewhere(tmp_path)
+        monkeypatch.chdir(project)
+        absent = tmp_path / "absent"
+
+        result = CliRunner().invoke(main, ["serve", "--project", str(absent)])
+
+        assert result.exit_code == EXIT_GENERIC
+        assert str(absent) in result.output
+
+    def test_the_old_flag_is_gone(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         project, _ = self._project_and_elsewhere(tmp_path)
         monkeypatch.chdir(project)
 
-        result = CliRunner().invoke(main, ["serve", "--project-dir", str(tmp_path / "absent")])
+        result = CliRunner().invoke(main, ["serve", "--project-dir", str(project)])
 
         assert result.exit_code == 2
-        assert "--project-dir" in result.output
+        assert "no such option" in result.output.lower()

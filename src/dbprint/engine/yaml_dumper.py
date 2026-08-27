@@ -135,3 +135,21 @@ def dump_yaml(payload: Any) -> str:
         sort_keys=False,
         allow_unicode=True,
     )
+
+
+def spell_inline(value: Any) -> str:
+    """Spell one value the way an artifact would, on a single line (flow style).
+
+    Reuses `dump_yaml`'s representer set, so a value rendered into a prompt agrees with the
+    artifact's own spelling; PyYAML's `...` marker and the trailing newline are stripped.
+    """
+
+    text = yaml.dump(
+        value,
+        Dumper=ArtifactDumper,
+        default_flow_style=True,
+        sort_keys=False,
+        allow_unicode=True,
+    )
+
+    return text.removesuffix("\n...\n").removesuffix("\n")

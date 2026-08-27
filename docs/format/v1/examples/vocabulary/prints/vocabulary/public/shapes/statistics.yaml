@@ -921,9 +921,6 @@ columns:
     cardinality_ratio: 1.0
     cardinality_method: exact
     inferred:
-      looks_like: numeric_string
-      sampled: 40
-      matched: 40
       candidate_key: true
     values:
     - value: 1

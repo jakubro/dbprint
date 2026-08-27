@@ -1,5 +1,6 @@
 *.egg-info/
 *.pyc
+.astro/
 .coverage
 .coverage.*
 .pytest_cache/
@@ -10,3 +11,6 @@ build/
 coverage/
 dist/
 htmlcov/
+node_modules/
+site/dist/
+site/public/spec/

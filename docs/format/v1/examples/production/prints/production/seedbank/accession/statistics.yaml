@@ -140,10 +140,6 @@ columns:
     cardinality: 300
     cardinality_ratio: 0.12
     cardinality_method: exact
-    inferred:
-      looks_like: numeric_string
-      sampled: 300
-      matched: 300
     values:
     - value: 10
       count: 9
@@ -298,10 +294,6 @@ columns:
     cardinality: 8
     cardinality_ratio: 0.0032
     cardinality_method: exact
-    inferred:
-      looks_like: numeric_string
-      sampled: 8
-      matched: 8
     values:
     - value: 1
       count: 316

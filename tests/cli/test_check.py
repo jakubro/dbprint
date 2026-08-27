@@ -703,7 +703,8 @@ class TestFormats:
         monkeypatch.chdir(tmp_path)
         result = CliRunner().invoke(main, ["check", "--format", "yaml"])
         assert result.exit_code == 0
-        docs = list(yaml.safe_load_all(result.output))
+        # Progress rides stderr; `result.output` interleaves both streams under click 8.2+.
+        docs = list(yaml.safe_load_all(result.stdout))
         assert docs[0]["connection"] == "primary"
 
 

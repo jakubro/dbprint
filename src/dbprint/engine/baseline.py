@@ -81,6 +81,18 @@ def walkable_tables(manifest: dict[str, Any] | None) -> dict[str, dict[str, Any]
     return out
 
 
+def table_directory(print_root: Path, fqn: str, entry: dict[str, Any]) -> Path:
+    """One table's on-disk directory: its declared `path`, or the FQN's own slash form.
+
+    The FQN fallback covers a manifest predating the field, or an entry omitting it - never
+    the connection root.
+    """
+
+    path = entry.get("path")
+
+    return print_root / (path if isinstance(path, str) and path else fqn.replace(".", "/"))
+
+
 def declared_artifacts(entry: dict[str, Any]) -> dict[str, Any]:
     """The artifact filenames a reader can open from one manifest entry; non-strings drop."""
 

@@ -17,6 +17,7 @@ from dbprint.assertions.predicate import parse as parse_predicate
 from dbprint.assertions.predicate import resolve as resolve_stat
 from .issue import Issue
 from .layout import declared_artifacts, walkable_tables
+from .progress import TableSink
 from .yaml_utils import load_yaml
 
 
@@ -31,7 +32,12 @@ def check_entry(data: Any, path: str, tbl_fqn: str) -> list[Issue]:
     return []
 
 
-def check_stale_keys(print_root: Path, manifest_data: dict) -> list[Issue]:
+def check_stale_keys(
+    print_root: Path,
+    manifest_data: dict,
+    *,
+    on_table: TableSink | None = None,
+) -> list[Issue]:
     """Warn on an annotation key naming a column the table's statistics do not have.
 
     Own pass, since it needs both sibling artifacts. A view's `statistics.yaml` (SPEC 2.2.15)
@@ -39,8 +45,13 @@ def check_stale_keys(print_root: Path, manifest_data: dict) -> list[Issue]:
     """
 
     issues: list[Issue] = []
+    tables = walkable_tables(manifest_data)
+    total = len(tables)
 
-    for tbl_entry in walkable_tables(manifest_data).values():
+    for i, (tbl_fqn, tbl_entry) in enumerate(tables.items(), start=1):
+        if on_table is not None:
+            on_table(tbl_fqn, i, total)
+
         artifacts = declared_artifacts(tbl_entry)
 
         if "statistics_annotations" not in artifacts or "statistics" not in artifacts:
@@ -86,7 +97,12 @@ def check_stale_keys(print_root: Path, manifest_data: dict) -> list[Issue]:
     return issues
 
 
-def check_grain_annotations(print_root: Path, manifest_data: dict) -> list[Issue]:
+def check_grain_annotations(
+    print_root: Path,
+    manifest_data: dict,
+    *,
+    on_table: TableSink | None = None,
+) -> list[Issue]:
     """Warn on a human-authored grain key naming a column the table's statistics do not have.
 
     A grain key addresses a SET of columns, not one - any single unknown column in the tuple
@@ -94,8 +110,13 @@ def check_grain_annotations(print_root: Path, manifest_data: dict) -> list[Issue
     """
 
     issues: list[Issue] = []
+    tables = walkable_tables(manifest_data)
+    total = len(tables)
 
-    for tbl_entry in walkable_tables(manifest_data).values():
+    for i, (tbl_fqn, tbl_entry) in enumerate(tables.items(), start=1):
+        if on_table is not None:
+            on_table(tbl_fqn, i, total)
+
         artifacts = declared_artifacts(tbl_entry)
 
         if "statistics_annotations" not in artifacts or "statistics" not in artifacts:
@@ -156,7 +177,12 @@ def check_grain_annotations(print_root: Path, manifest_data: dict) -> list[Issue
     return issues
 
 
-def check_claims(print_root: Path, manifest_data: dict) -> list[Issue]:
+def check_claims(
+    print_root: Path,
+    manifest_data: dict,
+    *,
+    on_table: TableSink | None = None,
+) -> list[Issue]:
     """Warn when a checkable annotation claim contradicts its column's own statistic.
 
     Needs both sibling artifacts. A view's catalog-only columns (SPEC 2.2.15) emit no measured
@@ -165,8 +191,13 @@ def check_claims(print_root: Path, manifest_data: dict) -> list[Issue]:
     """
 
     issues: list[Issue] = []
+    tables = walkable_tables(manifest_data)
+    total = len(tables)
 
-    for tbl_entry in walkable_tables(manifest_data).values():
+    for i, (tbl_fqn, tbl_entry) in enumerate(tables.items(), start=1):
+        if on_table is not None:
+            on_table(tbl_fqn, i, total)
+
         artifacts = declared_artifacts(tbl_entry)
 
         if "statistics_annotations" not in artifacts or "statistics" not in artifacts:
@@ -267,7 +298,12 @@ def _unassertable(path: str, reason: str) -> Issue:
     return Issue(path, "annotations.claim-unassertable", "warning", reason, "§2.7.1")
 
 
-def check_value_notes(print_root: Path, manifest_data: dict) -> list[Issue]:
+def check_value_notes(
+    print_root: Path,
+    manifest_data: dict,
+    *,
+    on_table: TableSink | None = None,
+) -> list[Issue]:
     """Cross-check value-grain notes against the column's own published values.
 
     A note is stale only under an exhaustive `values` list (`values_coverage == 1.0`); a
@@ -276,8 +312,13 @@ def check_value_notes(print_root: Path, manifest_data: dict) -> list[Issue]:
     """
 
     issues: list[Issue] = []
+    tables = walkable_tables(manifest_data)
+    total = len(tables)
 
-    for tbl_entry in walkable_tables(manifest_data).values():
+    for i, (tbl_fqn, tbl_entry) in enumerate(tables.items(), start=1):
+        if on_table is not None:
+            on_table(tbl_fqn, i, total)
+
         artifacts = declared_artifacts(tbl_entry)
 
         if "statistics_annotations" not in artifacts or "statistics" not in artifacts:

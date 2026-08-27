@@ -145,11 +145,13 @@ def remove_log_handler(handler: logging.Handler) -> None:
 class StreamingProgressRenderer:
     """Plain one-line-per-table streaming for pipes / non-TTY / `--no-tui`.
 
-    Only a table's `start` and terminal events emit; statistics/write/finalizing do not.
+    A table's `start` and terminal events emit; statistics/write/finalizing do not. The
+    catalogue pre-pass emits one line per schema, the sketch pass one per table.
     """
 
     def __init__(self, out: TextIO) -> None:
         self._out = out
+        self._prepass_tracker = _PrepassSchemaTracker()
 
     def __enter__(self) -> Self:
         return self
@@ -160,6 +162,11 @@ class StreamingProgressRenderer:
     def on_event(self, event: ProgressEvent) -> None:
         if event.phase in ("connecting", "listing", "inventory"):
             self._write_prepass(event)
+
+            return
+
+        if event.phase == "sketch":
+            self._write_sketch(event)
 
             return
 
@@ -207,14 +214,46 @@ class StreamingProgressRenderer:
         print(text, file=sys.stderr, flush=True)
 
     def _write_prepass(self, event: ProgressEvent) -> None:
-        """One line per connection-wide phase event, with `inventory`'s count once known."""
+        """Bracket lines for `connecting`/`listing`/`inventory`; `inventory` also closes a
+        schema line on each schema change and on the phase's own "done".
+        """
 
-        if event.phase == "inventory" and event.total:
+        if event.phase != "inventory":
+            self._write(f"{event.connection}\t{event.phase}\t{event.status}")
+
+            return
+
+        if event.fqn is None:
+            self._write(f"{event.connection}\tinventory\t{event.status}")
+
+            if event.status == "done":
+                self._write_prepass_schema(event.connection, self._prepass_tracker.close())
+
+            return
+
+        self._write_prepass_schema(event.connection, self._prepass_tracker.tick(event.fqn))
+
+    def _write_prepass_schema(self, connection: str, closed: _ClosedSchema | None) -> None:
+        if closed is None:
+            return
+
+        self._write(
+            f"{connection}\tinventory\tschema\t{closed.schema_key}\t"
+            f"{tree.objects_text(closed.count)}\t{tree.secs_text(closed.elapsed_ms)}",
+        )
+
+    def _write_sketch(self, event: ProgressEvent) -> None:
+        """One line per table, on its terminal event only - column ticks stay silent."""
+
+        if event.fqn is None or event.status not in ("done", "failed"):
+            return
+
+        if event.status == "done":
             self._write(
-                f"{event.connection}\tinventory\t{event.status}\t{event.index}/{event.total}",
+                f"{event.connection}\t{event.fqn}\tsketched\t{tree.secs_text(event.elapsed_ms)}",
             )
         else:
-            self._write(f"{event.connection}\t{event.phase}\t{event.status}")
+            self._write(f"{event.connection}\t{event.fqn}\tsketch_failed\t{event.error or ''}")
 
     def _write(self, line: str) -> None:
         self._out.write(line + "\n")
@@ -241,18 +280,23 @@ class LiveProgressRenderer:
         self._index = 0
         self._total = 0
         self._fqn = ""
+        # The in-flight line's own target - separate from `_fqn` so the catalogue pass can name
+        # its schema without `_fqn` (the warning-routing switch) believing a table is in flight.
+        self._display = ""
         self._phase_label = ""
+        self._bar_label = "Profiling"
         self._started = 0.0
         self._printed_path: tuple[str, ...] = ()
         self._any_failed = False
         self._finished = False
         # Per-state moving average (last N) feeding the ETA; `_terminal_counts` is unwindowed.
-        self._durations: dict[ProgressStatus, deque[int]] = {
-            "done": deque(maxlen=_ETA_WINDOW_DEFAULT),
-            "skipped": deque(maxlen=_ETA_WINDOW_DEFAULT),
-            "failed": deque(maxlen=_ETA_WINDOW_DEFAULT),
-        }
+        # Reset per connection and per phase, so an outsized duration never poisons the next.
+        self._durations: dict[ProgressStatus, deque[int]] = _fresh_eta_durations()
         self._terminal_counts: dict[ProgressStatus, int] = {"done": 0, "skipped": 0, "failed": 0}
+        # Wall-clock start of the catalogue phase - its own ETA extrapolates from this and
+        # the index alone, since `inventory_tick` carries no per-object duration to average.
+        self._prepass_started: float | None = None
+        self._prepass_tracker = _PrepassSchemaTracker()
         # A warning raised while `_fqn` names a table waits for that table's leaf line;
         # one raised with no table in flight waits for the connection summary.
         self._pending_table_warnings: list[str] = []
@@ -278,8 +322,28 @@ class LiveProgressRenderer:
 
             return
 
+        if event.phase in ("validate", "assertions"):
+            self._handle_validation(event)
+            self._live.update(self._footer())
+
+            return
+
         self._index = event.index
         self._total = event.total
+        self._display = ""
+
+        if event.phase == "sketch":
+            self._bar_label = "Sketching"
+
+            if event.fqn is None and event.status == "start":
+                # Fresh header path so a schema the table loop just closed re-prints its header.
+                self._reset_phase_eta()
+                self._printed_path = ()
+                cap = tree.resolve_cap(self._console.width)
+                self._console.print()
+                self._console.print(Text(tree.banner_line("Sketching", cap=cap), style="bold"))
+        elif event.phase != "finalizing":
+            self._bar_label = "Profiling"
 
         if event.status in ("done", "failed", "skipped"):
             if event.fqn is not None:
@@ -299,37 +363,147 @@ class LiveProgressRenderer:
             self._phase_label = (
                 f"statistics  column {event.column_index}/{event.column_total} ({event.column})"
             )
+        elif event.phase == "sketch" and event.column is not None:
+            self._fqn = event.fqn or ""
+            self._phase_label = (
+                f"sketch  column {event.column_index}/{event.column_total} ({event.column})"
+            )
         elif event.phase == "write":
             self._fqn = event.fqn or ""
             self._phase_label = "writing"
+        elif event.phase == "sketch":
+            self._fqn = event.fqn or ""
+            self._phase_label = "sketching"
         else:
             self._fqn = event.fqn or ""
             self._phase_label = "extract ddl"
 
         self._live.update(self._footer())
 
+    def _reset_phase_eta(self) -> None:
+        self._durations = _fresh_eta_durations()
+        self._terminal_counts = {"done": 0, "skipped": 0, "failed": 0}
+
     def _accumulate_duration(self, status: ProgressStatus, elapsed_ms: int) -> None:
         self._terminal_counts[status] += 1
         self._durations[status].append(elapsed_ms)
 
     def _handle_prepass(self, event: ProgressEvent) -> None:
-        """Advance the in-flight label without moving the bar's own index.
-
-        A connection-wide phase sets `total` once known but never `index`, so the bar does
-        not appear to restart when the table loop's own events begin.
+        """`connecting`/`listing` only set the label and, once known, `total` - the bar isn't
+        real yet, so `index` never moves. `inventory` drives its own `Cataloguing` bar and
+        closes a scrollback row on each schema change.
         """
 
         self._fqn = ""
-
-        if event.total:
-            self._total = event.total
+        self._display = ""
 
         if event.phase == "connecting":
+            if event.status == "start":
+                # One shared renderer serves every connection, sequentially (ARCHITECTURE.md's
+                # rendering split), so the prior connection's durations would poison this ETA.
+                self._reset_phase_eta()
+
+            if event.total:
+                self._total = event.total
+
             self._phase_label = "connecting"
-        elif event.phase == "listing":
+
+            return
+
+        if event.phase == "listing":
+            if event.total:
+                self._total = event.total
+
             self._phase_label = "listing objects"
-        else:
-            self._phase_label = f"inventory  object {event.index}/{event.total}"
+
+            return
+
+        # inventory: `fqn` is None for the phase's own start/done bracket, set on each tick.
+        if event.fqn is None:
+            if event.status == "start":
+                self._bar_label = "Cataloguing"
+                self._index = 0
+                self._total = event.total
+                self._prepass_started = time.monotonic()
+            else:
+                self._print_prepass_schema(self._prepass_tracker.close())
+
+            return
+
+        self._print_prepass_schema(self._prepass_tracker.tick(event.fqn))
+        self._index = event.index
+        self._total = event.total
+        self._display = self._prepass_tracker.current or ""
+        self._phase_label = "cataloguing"
+
+    def _handle_validation(self, event: ProgressEvent) -> None:
+        """`check`'s offline passes: one bar spanning every one, named by `event.pass_name`.
+
+        Two shapes share it: `validate` advances on every tick but prints a leaf only on the one
+        carrying `findings`; `assertions` prints a row/duration leaf on every tick.
+        """
+
+        label = "Validating" if event.phase == "validate" else "Checking assertions"
+
+        if self._bar_label != label:
+            self._reset_phase_eta()
+            self._printed_path = ()
+            cap = tree.resolve_cap(self._console.width)
+            self._console.print()
+            self._console.print(Text(tree.banner_line(label, cap=cap), style="bold"))
+
+        self._bar_label = label
+        self._index = event.index
+        self._total = event.total
+        self._display = ""
+        self._fqn = event.fqn or ""
+        self._phase_label = event.pass_name or ""
+
+        if event.phase == "assertions":
+            if event.fqn is not None:
+                self._print_table_line(event)
+
+            if event.elapsed_ms is not None:
+                self._accumulate_duration(event.status, event.elapsed_ms)
+
+            self._fqn = ""
+            self._phase_label = ""
+
+            return
+
+        findings = event.findings
+
+        if findings is None:
+            return
+
+        if event.fqn is not None:
+            self._print_validation_line(event.fqn, findings)
+
+        if event.elapsed_ms is not None:
+            self._accumulate_duration("done", event.elapsed_ms)
+
+        self._fqn = ""
+        self._phase_label = ""
+
+    def _print_prepass_schema(self, closed: _ClosedSchema | None) -> None:
+        if closed is None:
+            return
+
+        cap = tree.resolve_cap(self._console.width)
+        path = tree.header_path(self._connection, closed.schema_key)
+
+        for depth, name in tree.divergent_headers(self._printed_path, path):
+            self._console.print(Text(tree.header_line(depth, name, cap=cap), style="bold"))
+
+        self._printed_path = path
+        line = tree.leaf_metrics(
+            len(path),
+            tree.leaf_name(closed.schema_key),
+            cap=cap,
+            rows=tree.objects_text(closed.count),
+            elapsed=tree.duration_text(closed.elapsed_ms),
+        )
+        self._console.print(Text(line, style=_TERMINAL_STYLE["done"]))
 
     def connection_summary(self, result: GenerateResult | ConnectionSummary) -> None:
         s = result.summary
@@ -412,10 +586,11 @@ class LiveProgressRenderer:
     def _bar_line(
         self,
         *,
-        label: str = "Profiling",
+        label: str | None = None,
         style: str = "bold",
         show_eta: bool = True,
     ) -> Text:
+        label = self._bar_label if label is None else label
         elapsed = _clock(time.monotonic() - self._started)
         pct = int(100 * self._index / self._total) if self._total else 0
         filled = int(_BAR_WIDTH * self._index / self._total) if self._total else 0
@@ -424,19 +599,49 @@ class LiveProgressRenderer:
 
         if show_eta:
             remaining = max(self._total - self._index, 0)
-            eta = _eta_seconds(self._terminal_counts, self._durations, remaining)
+            eta = (
+                self._prepass_eta_seconds(remaining)
+                if label == "Cataloguing"
+                else _eta_seconds(self._terminal_counts, self._durations, remaining)
+            )
             text += f"  ETA {'--:--' if eta is None else _clock(eta)}"
 
         return Text(text, style=style, no_wrap=True, overflow="ellipsis")
 
+    def _prepass_eta_seconds(self, remaining: int) -> float | None:
+        """Wall-clock extrapolation - the catalogue pass has no per-object duration to average."""
+
+        if self._prepass_started is None or self._index <= 0:
+            return None
+
+        phase_elapsed = time.monotonic() - self._prepass_started
+
+        return phase_elapsed / self._index * remaining
+
     def _inflight_line(self) -> Text:
-        if not self._fqn and not self._phase_label:
+        if not self._display and not self._fqn and not self._phase_label:
             return Text("")
 
-        target = self._fqn or self._connection
+        target = self._display or self._fqn or self._connection
         text = f"  {target}   {self._phase_label}".rstrip()
 
         return Text(text, style="cyan", no_wrap=True, overflow="ellipsis")
+
+    def _print_validation_line(self, fqn: str, findings: int) -> None:
+        cap = tree.resolve_cap(self._console.width)
+        path = tree.header_path(self._connection, fqn)
+
+        for depth, name in tree.divergent_headers(self._printed_path, path):
+            self._console.print(Text(tree.header_line(depth, name, cap=cap), style="bold"))
+
+        self._printed_path = path
+        leaf_depth = len(path)
+        leaf = tree.leaf_name(fqn)
+        line = tree.leaf_findings(leaf_depth, leaf, cap=cap, findings=findings)
+        self._console.print(
+            Text(line, style=_TERMINAL_STYLE["done"], no_wrap=True, overflow="ellipsis"),
+        )
+        self._flush_table_warnings(leaf_depth, cap=cap)
 
     def _print_table_line(self, event: ProgressEvent) -> None:
         fqn = event.fqn or ""
@@ -491,6 +696,14 @@ def _clock(seconds: float) -> str:
     return f"{total // 3600}:{(total % 3600) // 60:02d}:{total % 60:02d}"
 
 
+def _fresh_eta_durations() -> dict[ProgressStatus, deque[int]]:
+    return {
+        "done": deque(maxlen=_ETA_WINDOW_DEFAULT),
+        "skipped": deque(maxlen=_ETA_WINDOW_DEFAULT),
+        "failed": deque(maxlen=_ETA_WINDOW_DEFAULT),
+    }
+
+
 def _eta_seconds(
     counts: dict[ProgressStatus, int],
     durations: dict[ProgressStatus, deque[int]],
@@ -514,6 +727,55 @@ def _eta_seconds(
     )
 
     return max(remaining, 0) * weighted_ms / 1000
+
+
+@dataclass(frozen=True)
+class _ClosedSchema:
+    schema_key: str
+    count: int
+    elapsed_ms: int
+
+
+@dataclass
+class _PrepassSchemaTracker:
+    """A tick fires before the object is read, so the schema derived from fqn changes one
+    object late; closing on the change keeps count and elapsed attached to the right schema.
+    """
+
+    current: str | None = None
+    count: int = 0
+    started: float = 0.0
+
+    def tick(self, fqn: str) -> _ClosedSchema | None:
+        """Returns the previous schema's tally when `fqn` starts a new one."""
+
+        schema_key = fqn.rsplit(".", 1)[0] if "." in fqn else fqn
+        closed = None
+
+        if schema_key != self.current:
+            closed = self.close()
+            self.current = schema_key
+            self.started = time.monotonic()
+
+        self.count += 1
+
+        return closed
+
+    def close(self) -> _ClosedSchema | None:
+        """Return the open schema's tally and clear it; None when nothing is open."""
+
+        if self.current is None:
+            return None
+
+        closed = _ClosedSchema(
+            schema_key=self.current,
+            count=self.count,
+            elapsed_ms=int((time.monotonic() - self.started) * 1000),
+        )
+        self.current = None
+        self.count = 0
+
+        return closed
 
 
 _TERMINAL_STYLE = {"done": "green", "failed": "red", "skipped": "yellow", "note": "dim"}

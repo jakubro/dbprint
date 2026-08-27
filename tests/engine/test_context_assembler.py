@@ -13,6 +13,7 @@ from dbprint.engine import AssemblyOptions, assemble_context, assemble_structure
 from dbprint.engine.context_assembler import (
     TableArtifacts,
     _build_fk_target_map,
+    _markdown_null_patterns,
     _markdown_relationships,
     _stripped_statistics,
 )
@@ -175,6 +176,60 @@ class TestMarkdown:
         assert "<!-- truncated:" in result.text
 
 
+class TestCorruptArtifact:
+    """A present-but-unparseable artifact must not read as never-profiled (SPEC 2.5)."""
+
+    def test_malformed_yaml_states_unreadable_not_absent(self, tmp_path: Path) -> None:
+        print_root = _seed_print(tmp_path)
+        stats_path = print_root / "herbarium" / "public" / "collector" / "statistics.yaml"
+        stats_path.write_text("row_count: [1, 2\n")  # unterminated flow sequence
+
+        result = assemble_context(
+            MANIFEST,
+            print_root,
+            ["herbarium.public.collector"],
+            AssemblyOptions(),
+            "primary",
+        )
+
+        assert "Unreadable: statistics (present on disk, failed to parse)" in result.text
+        assert "## Cardinality & key columns" not in result.text
+        assert "Missing:" not in result.text
+
+    def test_wrong_shaped_yaml_states_unreadable_too(self, tmp_path: Path) -> None:
+        """Valid YAML that parses to a list, not a mapping, is misshapen, not absent."""
+
+        print_root = _seed_print(tmp_path)
+        stats_path = print_root / "herbarium" / "public" / "collector" / "statistics.yaml"
+        stats_path.write_text("- a\n- b\n")
+
+        result = assemble_context(
+            MANIFEST,
+            print_root,
+            ["herbarium.public.collector"],
+            AssemblyOptions(),
+            "primary",
+        )
+
+        assert "Unreadable: statistics" in result.text
+
+    def test_a_genuinely_absent_file_still_reports_missing(self, tmp_path: Path) -> None:
+        print_root = _seed_print(tmp_path)
+        stats_path = print_root / "herbarium" / "public" / "collector" / "statistics.yaml"
+        stats_path.unlink()
+
+        result = assemble_context(
+            MANIFEST,
+            print_root,
+            ["herbarium.public.collector"],
+            AssemblyOptions(),
+            "primary",
+        )
+
+        assert "Missing: statistics (declared but missing from disk)" in result.text
+        assert "Unreadable:" not in result.text
+
+
 TWO_TABLE_MANIFEST: dict[str, object] = {
     "format_version": 1,
     "generated_at": "2026-06-09T00:00:00Z",
@@ -278,6 +333,150 @@ class TestConnectionNotes:
         assert "Warehouse-wide fact." not in result.text
 
 
+FULL_PROVENANCE_MANIFEST: dict[str, object] = {
+    "format_version": 1,
+    "generated_at": "2026-06-09T00:00:00Z",
+    "connection": "primary",
+    "adapter": "postgres",
+    "dbprint_version": "0.1.0",
+    "default_collation": "en_US.utf8",
+    "redaction_rules_configured": 2,
+    "selectors": {"include": ["herbarium.public.*"], "exclude": []},
+    "statistics_params": {"percentiles": [5, 25, 75, 95]},
+    "tables": {
+        **MANIFEST["tables"],
+        "herbarium.public.specimen_loan": {
+            "type": "table",
+            "path": "herbarium/public/specimen_loan",
+            "artifacts": {"ddl": "ddl.sql", "statistics": "statistics.yaml"},
+            "row_count": 5,
+            "columns": 1,
+            "profiled_at": "2026-06-09T00:00:00Z",
+        },
+    },
+}
+
+
+def _seed_full_provenance_print(tmp_path: Path) -> Path:
+    print_root = _seed_print(tmp_path)
+    (print_root / "manifest.yaml").write_text(yaml.safe_dump(FULL_PROVENANCE_MANIFEST))
+    specimen_loan_dir = print_root / "herbarium" / "public" / "specimen_loan"
+    specimen_loan_dir.mkdir(parents=True)
+    (specimen_loan_dir / "ddl.sql").write_text("CREATE TABLE specimen_loan (id int PRIMARY KEY);\n")
+    (specimen_loan_dir / "statistics.yaml").write_text(yaml.safe_dump(SPECIMEN_LOAN_STATS))
+
+    return print_root
+
+
+class TestProvenance:
+    """SPEC 2.5: the manifest parameters that decided what was measured."""
+
+    def test_multi_table_render_carries_the_provenance_block_once(self, tmp_path: Path) -> None:
+        print_root = _seed_full_provenance_print(tmp_path)
+        result = assemble_context(
+            FULL_PROVENANCE_MANIFEST,
+            print_root,
+            ["herbarium.public.collector", "herbarium.public.specimen_loan"],
+            AssemblyOptions(),
+            "primary",
+        )
+
+        assert result.text.count("## Provenance") == 1
+        assert "- Adapter: postgres" in result.text
+        assert "- dbprint version: 0.1.0" in result.text
+        assert "- Default collation: en_US.utf8" in result.text
+        assert "- Redaction configured: 2 rules" in result.text
+        assert "- Selectors narrow this print: include herbarium.public.*" in result.text
+        assert "- Percentiles configured: p5, p25, p75, p95" in result.text
+
+    def test_single_table_render_carries_no_provenance_block(self, tmp_path: Path) -> None:
+        """It gets its own adapter line instead."""
+
+        print_root = _seed_full_provenance_print(tmp_path)
+        result = assemble_context(
+            FULL_PROVENANCE_MANIFEST,
+            print_root,
+            ["herbarium.public.collector"],
+            AssemblyOptions(),
+            "primary",
+        )
+
+        assert "## Provenance" not in result.text
+
+    def test_single_table_render_still_states_its_adapter(self, tmp_path: Path) -> None:
+        print_root = _seed_full_provenance_print(tmp_path)
+        result = assemble_context(
+            FULL_PROVENANCE_MANIFEST,
+            print_root,
+            ["herbarium.public.collector"],
+            AssemblyOptions(),
+            "primary",
+        )
+
+        assert "Adapter: postgres" in result.text
+
+    def test_connection_name_mismatch_is_stated(self, tmp_path: Path) -> None:
+        print_root = _seed_full_provenance_print(tmp_path)
+        result = assemble_context(
+            FULL_PROVENANCE_MANIFEST,
+            print_root,
+            ["herbarium.public.collector", "herbarium.public.specimen_loan"],
+            AssemblyOptions(),
+            "not-primary",
+        )
+
+        assert "Connection name mismatch" in result.text
+
+    def test_no_selectors_or_redaction_renders_no_line_for_them(self, tmp_path: Path) -> None:
+        print_root = _seed_two_table_print(tmp_path)
+        result = assemble_context(
+            TWO_TABLE_MANIFEST,
+            print_root,
+            ["herbarium.public.collector", "herbarium.public.specimen_loan"],
+            AssemblyOptions(),
+            "primary",
+        )
+
+        assert "Selectors narrow" not in result.text
+        assert "Redaction configured" not in result.text
+
+
+class TestStatisticsParamsOverride:
+    """A table-level `statistics_params` override is never silently applied."""
+
+    def test_a_differing_table_override_is_stated_on_that_table(self, tmp_path: Path) -> None:
+        manifest: dict[str, Any] = copy.deepcopy(FULL_PROVENANCE_MANIFEST)
+        manifest["statistics_params"] = {"top_n_values": 10}
+        manifest["tables"]["herbarium.public.collector"]["statistics_params"] = {"top_n_values": 3}
+        print_root = _seed_full_provenance_print(tmp_path)
+        (print_root / "manifest.yaml").write_text(yaml.safe_dump(manifest))
+        result = assemble_context(
+            manifest,
+            print_root,
+            ["herbarium.public.collector"],
+            AssemblyOptions(),
+            "primary",
+        )
+
+        assert "Statistics params override: top_n_values=3" in result.text
+
+    def test_an_identical_override_states_nothing(self, tmp_path: Path) -> None:
+        manifest: dict[str, Any] = copy.deepcopy(FULL_PROVENANCE_MANIFEST)
+        manifest["statistics_params"] = {"top_n_values": 10}
+        manifest["tables"]["herbarium.public.collector"]["statistics_params"] = {"top_n_values": 10}
+        print_root = _seed_full_provenance_print(tmp_path)
+        (print_root / "manifest.yaml").write_text(yaml.safe_dump(manifest))
+        result = assemble_context(
+            manifest,
+            print_root,
+            ["herbarium.public.collector"],
+            AssemblyOptions(),
+            "primary",
+        )
+
+        assert "Statistics params override" not in result.text
+
+
 SCOPED_MANIFEST: dict[str, object] = {
     "format_version": 1,
     "connection": "primary",
@@ -372,6 +571,18 @@ class TestScopeQualifier:
         root = _seed_scoped_print(tmp_path, {"rows_scanned": 400_000, "sample": 0.1})
 
         assert "sample 0.1" in _render_scoped(root)
+
+    def test_a_precise_fraction_is_rounded_to_4_significant_digits(self, tmp_path: Path) -> None:
+        """SPEC 2.2.8: `sample` records what was asked for - not at sixteen digits of it."""
+
+        root = _seed_scoped_print(
+            tmp_path,
+            {"rows_scanned": 1_000_000, "sample": 0.1234567890123456},
+        )
+        text = _render_scoped(root)
+
+        assert "sample 0.1235" in text
+        assert "0.1234567890123456" not in text
 
     def test_a_filtered_read_carries_the_predicate_verbatim(self, tmp_path: Path) -> None:
         predicate = "created_at >= '2024-01-01'"
@@ -524,6 +735,8 @@ class TestRelationshipsMarkdown:
             annotated_grain=None,
             relationship_annotations=relationship_annotations,
             missing=(),
+            corrupted=(),
+            statistics_params_override=None,
         )
 
     def test_a_declared_refers_to_edge_states_its_detection_and_action(self) -> None:
@@ -635,6 +848,21 @@ class TestRelationshipsMarkdown:
         assert "inferred" in line
         assert "declared" not in line
 
+    def test_no_relationships_at_all_reads_as_the_generic_none(self) -> None:
+        relationships = {"refers_to": [], "referenced_by": []}
+        line = _markdown_relationships(self._artifacts(relationships))
+
+        assert "- (none)" in line
+        assert "join target" not in line
+
+    def test_an_ineligible_target_states_why_nothing_references_it(self) -> None:
+        """SPEC 2.3.8: `eligible_target: false` is a stronger claim than a bare "(none)"."""
+
+        relationships = {"refers_to": [], "referenced_by": [], "eligible_target": False}
+        line = _markdown_relationships(self._artifacts(relationships))
+
+        assert "- (none - not a join target, no declared-unique column)" in line
+
 
 class TestObservedRendering:
     """SPEC 2.3.10: what an edge costs rides beside its declared shape, never replacing it."""
@@ -654,6 +882,8 @@ class TestObservedRendering:
             annotated_grain=None,
             relationship_annotations=None,
             missing=(),
+            corrupted=(),
+            statistics_params_override=None,
         )
 
     def _refers_to(self, observed: dict[str, Any] | None) -> dict[str, Any]:
@@ -699,17 +929,81 @@ class TestObservedRendering:
 
         assert "**[INCOHERENT: referencing cardinality exceeds the target's]**" in line
 
-    def test_scope_incompatible_publishes_no_ratio(self) -> None:
+    def test_scope_incompatible_states_the_scopes_were_compared(self) -> None:
+        """Distinct from `no_observed_block_renders_nothing_extra` below: this edge WAS
+        measured, and found incomparable - it must not read as merely unmeasured."""
+
         line = _markdown_relationships(
             self._artifacts(self._refers_to({"scope_compatible": False})),
         )
 
-        assert "observed" not in line
+        assert "observed: scopes not comparable" in line
+        assert "covers" not in line
 
     def test_no_observed_block_renders_nothing_extra(self) -> None:
         line = _markdown_relationships(self._artifacts(self._refers_to(None)))
 
         assert "observed" not in line
+
+    def test_containment_carries_its_answerable_count(self) -> None:
+        observed = {
+            "fanout_avg": 1.0,
+            "target_coverage": 1.0,
+            "containment": 0.6,
+            "answerable_count": 42,
+            "scope_compatible": True,
+        }
+        line = _markdown_relationships(self._artifacts(self._refers_to(observed)))
+
+        assert "60.0% of the referencing values are contained (42 answerable)" in line
+
+    def test_containment_with_no_answerable_count_renders_the_ratio_alone(self) -> None:
+        observed = {
+            "fanout_avg": 1.0,
+            "target_coverage": 1.0,
+            "containment": 0.6,
+            "scope_compatible": True,
+        }
+        line = _markdown_relationships(self._artifacts(self._refers_to(observed)))
+
+        assert "60.0% of the referencing values are contained" in line
+        assert "answerable" not in line
+
+
+class TestNullPatternsMarkdown:
+    """SPEC 2.2.10: the table-level coverage line states when its own share is a clamp."""
+
+    @staticmethod
+    def _artifacts(null_patterns: dict[str, Any]) -> TableArtifacts:
+        return TableArtifacts(
+            fqn="public.t",
+            table_type="table",
+            row_count=10,
+            column_count=1,
+            ddl="",
+            statistics={"null_patterns": null_patterns},
+            relationships=None,
+            description=None,
+            annotations=None,
+            annotated_grain=None,
+            relationship_annotations=None,
+            missing=(),
+            corrupted=(),
+            statistics_params_override=None,
+        )
+
+    def test_measured_coverage_carries_no_hedge(self) -> None:
+        a = self._artifacts({"patterns": [], "coverage": 0.972, "coverage_method": "measured"})
+        line = _markdown_null_patterns(a)
+
+        assert "Observed over 97.2% of scanned rows." in line
+        assert "bounded" not in line
+
+    def test_bounded_coverage_states_the_clamp(self) -> None:
+        a = self._artifacts({"patterns": [], "coverage": 0.972, "coverage_method": "bounded"})
+        line = _markdown_null_patterns(a)
+
+        assert "Observed over 97.2% of scanned rows (bounded)." in line
 
 
 class TestFkTargetMap:
@@ -1192,6 +1486,184 @@ class TestAnnotations:
         )
         assert "## Annotations" not in result.text
         assert "## Description" in result.text
+
+    @staticmethod
+    def _seed_annotations(tmp_path: Path, columns: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
+        print_root = _seed_print(tmp_path)
+        manifest_path = print_root / "manifest.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text())
+        manifest["tables"]["herbarium.public.collector"]["artifacts"]["statistics_annotations"] = (
+            "statistics.annotations.yaml"
+        )
+        manifest_path.write_text(yaml.safe_dump(manifest))
+        table_dir = print_root / "herbarium" / "public" / "collector"
+        (table_dir / "statistics.annotations.yaml").write_text(
+            yaml.safe_dump({"format_version": 1, "columns": columns}),
+        )
+
+        return print_root, manifest
+
+    def test_a_claims_only_entry_still_names_its_column(self, tmp_path: Path) -> None:
+        """SPEC 2.7.1: a note-less entry still needs a header naming which column it is."""
+
+        print_root, manifest = self._seed_annotations(
+            tmp_path,
+            {"rank": {"claims": {"candidate_key": True}}},
+        )
+        result = assemble_context(
+            manifest,
+            print_root,
+            ["herbarium.public.collector"],
+            AssemblyOptions(),
+            "primary",
+        )
+
+        assert "- **rank**\n" in result.text
+        assert "- **rank**:" not in result.text
+        assert "claims: candidate_key: true" in result.text
+
+    def test_a_values_only_entry_still_names_its_column(self, tmp_path: Path) -> None:
+        print_root, manifest = self._seed_annotations(
+            tmp_path,
+            {"rank": {"values": [{"value": "field", "note": "the pre-digitization scheme"}]}},
+        )
+        result = assemble_context(
+            manifest,
+            print_root,
+            ["herbarium.public.collector"],
+            AssemblyOptions(),
+            "primary",
+        )
+
+        assert "- **rank**\n" in result.text
+        assert "- **rank**:" not in result.text
+        assert "the pre-digitization scheme" in result.text
+
+    def test_a_note_only_entry_still_carries_its_colon(self, tmp_path: Path) -> None:
+        print_root, manifest = self._seed_annotations(
+            tmp_path,
+            {"rank": {"note": "Derived from the collector's field rank."}},
+        )
+        result = assemble_context(
+            manifest,
+            print_root,
+            ["herbarium.public.collector"],
+            AssemblyOptions(),
+            "primary",
+        )
+
+        assert "- **rank**: Derived from the collector's field rank." in result.text
+
+    def test_a_list_predicate_renders_inline(self, tmp_path: Path) -> None:
+        print_root, manifest = self._seed_annotations(
+            tmp_path,
+            {"rank": {"claims": {"accepted_values": ["a", "b"]}}},
+        )
+        result = assemble_context(
+            manifest,
+            print_root,
+            ["herbarium.public.collector"],
+            AssemblyOptions(),
+            "primary",
+        )
+
+        assert "claims: accepted_values: [a, b]" in result.text
+
+    def test_a_range_predicate_renders_as_the_grammars_own_shape(self, tmp_path: Path) -> None:
+        print_root, manifest = self._seed_annotations(
+            tmp_path,
+            {"rank": {"claims": {"null_rate": {"max": 0.01}}}},
+        )
+        result = assemble_context(
+            manifest,
+            print_root,
+            ["herbarium.public.collector"],
+            AssemblyOptions(),
+            "primary",
+        )
+
+        assert "claims: null_rate: {max: 0.01}" in result.text
+
+    def test_two_predicates_render_joined_in_file_order(self, tmp_path: Path) -> None:
+        print_root, manifest = self._seed_annotations(
+            tmp_path,
+            {"rank": {"claims": {"candidate_key": True, "cardinality": 100}}},
+        )
+        result = assemble_context(
+            manifest,
+            print_root,
+            ["herbarium.public.collector"],
+            AssemblyOptions(),
+            "primary",
+        )
+
+        assert "claims: candidate_key: true, cardinality: 100" in result.text
+
+    def test_a_boolean_value_note_renders_lowercase(self, tmp_path: Path) -> None:
+        """Not Python's `True` - the annotation grammar's own spelling of the same value."""
+
+        print_root, manifest = self._seed_annotations(
+            tmp_path,
+            {"rank": {"values": [{"value": True, "note": "a legacy sentinel"}]}},
+        )
+        result = assemble_context(
+            manifest,
+            print_root,
+            ["herbarium.public.collector"],
+            AssemblyOptions(),
+            "primary",
+        )
+
+        assert "- true: a legacy sentinel" in result.text
+        assert "True" not in result.text
+
+    def test_a_numeric_looking_string_value_note_stays_quoted(self, tmp_path: Path) -> None:
+        """Correct YAML, not `repr` - unquoted `0` would read back as an integer."""
+
+        print_root, manifest = self._seed_annotations(
+            tmp_path,
+            {"rank": {"values": [{"value": "0", "note": "the unranked sentinel"}]}},
+        )
+        result = assemble_context(
+            manifest,
+            print_root,
+            ["herbarium.public.collector"],
+            AssemblyOptions(),
+            "primary",
+        )
+
+        assert "- '0': the unranked sentinel" in result.text
+
+    def test_a_null_value_note_renders_the_word_null(self, tmp_path: Path) -> None:
+        """The same word every redaction and null-value surface in this codebase spells."""
+
+        print_root, manifest = self._seed_annotations(
+            tmp_path,
+            {"rank": {"values": [{"value": None, "note": "never recorded"}]}},
+        )
+        result = assemble_context(
+            manifest,
+            print_root,
+            ["herbarium.public.collector"],
+            AssemblyOptions(),
+            "primary",
+        )
+
+        assert "- NULL: never recorded" in result.text
+
+    def test_an_entry_with_nothing_omits_the_whole_section(self, tmp_path: Path) -> None:
+        """SPEC 2.7.1 permits an empty entry; it must not earn the section a header."""
+
+        print_root, manifest = self._seed_annotations(tmp_path, {"rank": {}})
+        result = assemble_context(
+            manifest,
+            print_root,
+            ["herbarium.public.collector"],
+            AssemblyOptions(),
+            "primary",
+        )
+
+        assert "## Annotations" not in result.text
 
     def test_grain_key_note_reaches_the_markdown_grain_line(self, tmp_path: Path) -> None:
         print_root = _seed_print(tmp_path)

@@ -176,7 +176,7 @@ class TestNullCompanions:
         self,
         companion_conn: ConnectionConfig,
     ) -> None:
-        statistics = _statistics(companion_conn, "seedbank.botanists")
+        statistics = _statistics(companion_conn, "seedbank.botanist")
         patterns = view.null_patterns_view(statistics)
 
         assert view.null_companions(patterns, "email") == ["phone"]
@@ -241,6 +241,27 @@ class TestColumnsEmptyNotice:
         assert view.columns_empty_notice(None) is None
 
 
+class TestCatalogOnlyNotice:
+    def test_catalog_only_carries_a_notice(
+        self,
+        catalog_only_conn: ConnectionConfig,
+    ) -> None:
+        statistics = _statistics(catalog_only_conn, "public.active_curators_v")
+
+        notice = view.catalog_only_notice(statistics)
+
+        assert notice is not None
+        assert "not" in notice.lower()
+
+    def test_a_measured_table_has_no_notice(self, rich_conn: ConnectionConfig) -> None:
+        statistics = _statistics(rich_conn, "seedbank.batch")
+
+        assert view.catalog_only_notice(statistics) is None
+
+    def test_none_statistics_has_no_notice(self) -> None:
+        assert view.catalog_only_notice(None) is None
+
+
 class TestSummaryCards:
     def test_counts_sensitive_and_redacted(self, rich_conn: ConnectionConfig) -> None:
         found = catalogue.load_connections([rich_conn])[0]
@@ -260,7 +281,7 @@ class TestSummaryCards:
 class TestCardinalityView:
     def test_averages_the_null_adjusted_ratio(self, companion_conn: ConnectionConfig) -> None:
         # 100/100, 75/(100-25), 40/(100-20) -> avg 83.3%; the raw ratio would give 71.7%.
-        statistics = _statistics(companion_conn, "seedbank.botanists")
+        statistics = _statistics(companion_conn, "seedbank.botanist")
 
         cardinality = view.cardinality_view(statistics["columns"], statistics["row_count"])
 
@@ -294,8 +315,8 @@ class TestCardinalityView:
 
 class TestCompletenessView:
     def test_averages_and_buckets_by_completeness(self, companion_conn: ConnectionConfig) -> None:
-        # contributor_id 1.0 (full), email 0.75 (mid), phone 0.8 (mid) -> avg 85.0%
-        statistics = _statistics(companion_conn, "seedbank.botanists")
+        # botanist_id 1.0 (full), email 0.75 (mid), phone 0.8 (mid) -> avg 85.0%
+        statistics = _statistics(companion_conn, "seedbank.botanist")
 
         completeness = view.completeness_view(statistics["columns"])
 
@@ -372,6 +393,16 @@ class TestValuesView:
 
     def test_no_values_no_coverage_is_none(self) -> None:
         assert view.values_view({}) is None
+
+    def test_a_null_value_renders_null_not_withheld(self) -> None:
+        """`(withheld)` is redaction vocabulary; a genuine SQL null was never redacted."""
+
+        col = {"values": [{"value": None, "count": 3}]}
+
+        result = view.values_view(col)
+
+        assert result is not None
+        assert result["bars"][0]["value"] == "NULL"
 
 
 class TestRangeView:
@@ -540,7 +571,7 @@ class TestColumnView:
         companion_conn: ConnectionConfig,
     ) -> None:
         # `phone` carries no hint, and its other facts all have dedicated cells.
-        col = _column(companion_conn, "seedbank.botanists", "phone")
+        col = _column(companion_conn, "seedbank.botanist", "phone")
 
         rendered = view.column_view("phone", col, 100, None, {}, {})
 
@@ -554,9 +585,9 @@ class TestColumnView:
         assert "physical_name" not in rendered
 
     def test_null_companions_wired_through(self, companion_conn: ConnectionConfig) -> None:
-        statistics = _statistics(companion_conn, "seedbank.botanists")
+        statistics = _statistics(companion_conn, "seedbank.botanist")
         patterns = view.null_patterns_view(statistics)
-        col = _column(companion_conn, "seedbank.botanists", "email")
+        col = _column(companion_conn, "seedbank.botanist", "email")
 
         rendered = view.column_view("email", col, 100, None, {}, {}, patterns)
 
@@ -658,7 +689,10 @@ class TestRelationshipRows:
 
         assert rows["refers_to"][0]["observed"]["fanout_avg"] == 7.5
 
-    def test_observed_suppressed_when_scope_incompatible(self) -> None:
+    def test_observed_states_the_scopes_were_compared_when_incompatible(self) -> None:
+        """Distinct from `test_observed_is_none_when_never_measured` below: this edge WAS
+        measured, and found incomparable - it must not collapse into the same None."""
+
         relationships = {
             "refers_to": [
                 {
@@ -674,7 +708,48 @@ class TestRelationshipRows:
 
         rows = view.relationship_rows(relationships, None)
 
+        assert rows["refers_to"][0]["observed"] == {"scope_compatible": False}
+
+    def test_observed_is_none_when_never_measured(self) -> None:
+        relationships = {
+            "refers_to": [
+                {
+                    "column": ["a"],
+                    "target_table": "t",
+                    "target_column": ["b"],
+                    "detection": "declared",
+                },
+            ],
+            "referenced_by": [],
+        }
+
+        rows = view.relationship_rows(relationships, None)
+
         assert rows["refers_to"][0]["observed"] is None
+
+    def test_observed_carries_its_answerable_count(self) -> None:
+        relationships = {
+            "refers_to": [
+                {
+                    "column": ["a"],
+                    "target_table": "t",
+                    "target_column": ["b"],
+                    "detection": "declared",
+                    "observed": {
+                        "fanout_avg": 1.0,
+                        "target_coverage": 1.0,
+                        "containment": 0.5,
+                        "answerable_count": 7,
+                        "scope_compatible": True,
+                    },
+                },
+            ],
+            "referenced_by": [],
+        }
+
+        rows = view.relationship_rows(relationships, None)
+
+        assert rows["refers_to"][0]["observed"]["answerable_count"] == 7
 
     def test_rejected_edge_carries_a_true_flag_and_its_note(
         self,
@@ -747,6 +822,7 @@ class TestBuildTableView:
         page = view.build_table_view(found, artifacts)
 
         assert page["fqn"] == "seedbank.batch"
+        assert page["adapter"] == "postgres"
         assert page["grain"] is not None
         assert page["null_patterns"] is not None
         assert page["physical_layout"] is not None
@@ -757,18 +833,18 @@ class TestBuildTableView:
         assert page["cardinality"] is not None
         assert page["completeness"] is not None
 
-    def test_singular_mention_links_to_the_plural_table_name(
+    def test_plural_mention_links_to_the_singular_table_name(
         self,
         companion_conn: ConnectionConfig,
     ) -> None:
         found = catalogue.load_connections([companion_conn])[0]
-        artifacts = catalogue.load_table(found, "seedbank.botanists")
+        artifacts = catalogue.load_table(found, "seedbank.botanist")
         assert artifacts is not None
 
         page = view.build_table_view(found, artifacts)
 
-        # "botanist" is no real table/column name, only the aliased singular of "botanists".
-        assert "[botanist](/t/primary/seedbank.botanists)" in page["description"]
+        # "botanists" is no real table/column name, only the aliased plural of "botanist".
+        assert "[botanists](/t/primary/seedbank.botanist)" in page["description"]
 
     def test_empty_columns_table_composes_the_notice_instead_of_a_skyline(
         self,
@@ -791,7 +867,7 @@ class TestBuildTableView:
         """SPEC 2.2.15: the table-wide aggregates would fabricate a measurement, so none render."""
 
         found = catalogue.load_connections([catalog_only_conn])[0]
-        artifacts = catalogue.load_table(found, "public.active_contributors_v")
+        artifacts = catalogue.load_table(found, "public.active_curators_v")
         assert artifacts is not None
 
         page = view.build_table_view(found, artifacts)
@@ -802,6 +878,19 @@ class TestBuildTableView:
         assert page["skyline"] == []
         assert len(page["columns"]) == 2
         assert page["columns_empty_notice"] is None
+        assert page["catalog_only_notice"] is not None
+
+    def test_a_measured_table_carries_no_catalog_only_notice(
+        self,
+        rich_conn: ConnectionConfig,
+    ) -> None:
+        found = catalogue.load_connections([rich_conn])[0]
+        artifacts = catalogue.load_table(found, "seedbank.batch")
+        assert artifacts is not None
+
+        page = view.build_table_view(found, artifacts)
+
+        assert page["catalog_only_notice"] is None
 
 
 class TestBuildSchemaView:

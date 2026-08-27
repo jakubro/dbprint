@@ -79,7 +79,7 @@ def _list_and_read(conn: ConnectionConfig, uri: str) -> tuple[str | None, str]:
 def _stdio_params(server: StdioServer) -> StdioServerParameters:
     return StdioServerParameters(
         command=server.command,
-        args=["serve", server.conn_name, "--project-dir", str(server.project_dir)],
+        args=["serve", server.conn_name, "--project", str(server.project_dir)],
     )
 
 

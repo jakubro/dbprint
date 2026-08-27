@@ -124,7 +124,8 @@ def _seed_clean_print(tmp_path: Path, committed_print: Path) -> Path:
                 "values_coverage": 1.0,
                 "values_coverage_method": "measured",
                 "distribution": "uniform",
-                "inferred": {"candidate_key": True, "looks_like": "numeric_string"},
+                # No `looks_like`: an integer column withholds `numeric_string` (SPEC 4.1.5).
+                "inferred": {"candidate_key": True},
             },
             "logger_ipv4": {
                 "sql_type": "character varying(45)",
@@ -646,8 +647,14 @@ def _seed_print_with_cardinality(tmp_path: Path, committed_print: Path, cardinal
     data["columns"]["probe_id"]["cardinality"] = cardinality
     data["columns"]["probe_id"]["cardinality_ratio"] = round(cardinality / row_count, 6)
     # The lowered ratio no longer clears the SPEC 4.2 candidate-key threshold; the marker goes.
-    data["columns"]["probe_id"]["inferred"].pop("candidate_key", None)
-    data["columns"]["probe_id"]["inferred"].pop("candidate_key_exception", None)
+    inferred = data["columns"]["probe_id"]["inferred"]
+    inferred.pop("candidate_key", None)
+    inferred.pop("candidate_key_exception", None)
+
+    # `Inferred`'s minProperties: a producer omits the key rather than emit an empty one.
+    if not inferred:
+        del data["columns"]["probe_id"]["inferred"]
+
     stats_path.write_text(yaml.safe_dump(data))
 
     return prints
@@ -1352,7 +1359,8 @@ def _seed_two_table_print(tmp_path: Path, committed_print: Path) -> Path:
                 "values_coverage": 1.0,
                 "values_coverage_method": "measured",
                 "distribution": "uniform",
-                "inferred": {"candidate_key": True, "looks_like": "numeric_string"},
+                # No `looks_like`: an integer column withholds `numeric_string` (SPEC 4.1.5).
+                "inferred": {"candidate_key": True},
             },
             "shelf_code": {
                 "sql_type": "character varying(8)",

@@ -7,6 +7,7 @@ Reads the on-disk artifacts, assembles a per-table fragment in the requested for
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -14,8 +15,9 @@ from typing import Any
 import yaml
 
 from . import notes_synthesis
-from .baseline import declared_artifacts, missing_artifacts, walkable_tables
+from .baseline import declared_artifacts, missing_artifacts, table_directory, walkable_tables
 from .token_budget import Section, make_section, select, truncation_marker
+from .yaml_dumper import spell_inline
 
 
 HEADER_TOKEN_OVERHEAD = 8  # conservative reserve for the multi-table document header
@@ -51,6 +53,8 @@ class TableArtifacts:
     annotated_grain: dict[str, Any] | None
     relationship_annotations: list[dict[str, Any]] | None
     missing: tuple[str, ...]
+    corrupted: tuple[str, ...]
+    statistics_params_override: dict[str, Any] | None
 
 
 @dataclass
@@ -81,7 +85,7 @@ def assemble(
     elif options.format == "yaml":
         return _assemble_yaml(loaded, options)
     else:
-        return _assemble_markdown(loaded, options, connection_name, print_root)
+        return _assemble_markdown(loaded, options, connection_name, print_root, manifest)
 
 
 def _assemble_markdown(
@@ -89,11 +93,10 @@ def _assemble_markdown(
     options: AssemblyOptions,
     connection_name: str | None,
     print_root: Path,
+    manifest: dict[str, Any],
 ) -> AssemblyResult:
-    """Markdown is the default output; supports document header + budget split.
-
-    Connection-grain notes (SPEC 2.7.3) ride the document header, and only a multi-table
-    render has one, so a single-table render drops them.
+    """Connection notes (SPEC 2.7.3) and provenance ride the document header, which only a
+    multi-table render has; a single-table fragment states its own dialect instead (SPEC 2.5).
     """
 
     multi = len(artifacts) > 1
@@ -106,6 +109,11 @@ def _assemble_markdown(
 
         if notes:
             header += "\n\n" + notes
+
+        provenance = _provenance_block(manifest, connection_name)
+
+        if provenance:
+            header += "\n\n" + provenance
 
         header_tokens = max(HEADER_TOKEN_OVERHEAD, len(header) // 4)
 
@@ -129,8 +137,18 @@ def _assemble_markdown(
     truncated: list[str] = []
     included = 0
 
+    connection_statistics_params = manifest.get("statistics_params") or {}
+    adapter = manifest.get("adapter")
+    adapter = adapter if isinstance(adapter, str) and adapter else None
+
     for a in artifacts:
-        fragment, was_truncated = _render_table_markdown(a, options, per_table_budget)
+        fragment, was_truncated = _render_table_markdown(
+            a,
+            options,
+            per_table_budget,
+            connection_statistics_params,
+            adapter,
+        )
 
         if fragment:
             fragments.append(fragment)
@@ -155,12 +173,19 @@ def _render_table_markdown(
     a: TableArtifacts,
     options: AssemblyOptions,
     budget: int | None,
+    connection_statistics_params: dict[str, Any],
+    adapter: str | None,
 ) -> tuple[str, bool]:
     """Render one table; return (markdown text, was_truncated)."""
 
     include_qualifiers = options.include_stats and bool(a.statistics)
     sections: list[Section] = []
-    sections.append(make_section("header", _markdown_header(a, include_qualifiers)))
+    sections.append(
+        make_section(
+            "header",
+            _markdown_header(a, include_qualifiers, connection_statistics_params, adapter),
+        ),
+    )
 
     if options.include_ddl:
         sections.append(make_section("ddl", _markdown_ddl(a)))
@@ -168,7 +193,7 @@ def _render_table_markdown(
     if options.include_description and a.description:
         sections.append(make_section("description", _markdown_description(a)))
 
-    if options.include_annotations and a.annotations:
+    if options.include_annotations and a.annotations and _has_rendered_annotations(a.annotations):
         sections.append(make_section("annotations", _markdown_annotations(a)))
 
     if options.include_stats and a.statistics:
@@ -180,7 +205,13 @@ def _render_table_markdown(
             if a.statistics.get("physical_layout"):
                 sections.append(make_section("physical_layout", _markdown_physical_layout(a)))
 
-            sections.append(make_section("cardinality", _markdown_cardinality_table(a)))
+            effective_params = {
+                **connection_statistics_params,
+                **(a.statistics_params_override or {}),
+            }
+            sections.append(
+                make_section("cardinality", _markdown_cardinality_table(a, effective_params)),
+            )
 
             if a.statistics.get("null_patterns"):
                 sections.append(make_section("null_patterns", _markdown_null_patterns(a)))
@@ -200,10 +231,16 @@ def _render_table_markdown(
     return text, selection.truncated
 
 
-def _markdown_header(a: TableArtifacts, include_qualifiers: bool) -> str:
-    """The table's identity line, then one line per table-level qualifier that applies.
+def _markdown_header(
+    a: TableArtifacts,
+    include_qualifiers: bool,
+    connection_statistics_params: dict[str, Any],
+    adapter: str | None,
+) -> str:
+    """The identity line, then one line per table-level qualifier that applies.
 
-    The missing-artifact line rides here too, ungated by `include_qualifiers`.
+    Missing-artifact and adapter lines are ungated by `include_qualifiers` - every fragment
+    states its own SQL dialect (SPEC 2.5).
     """
 
     parts = []
@@ -214,23 +251,63 @@ def _markdown_header(a: TableArtifacts, include_qualifiers: bool) -> str:
 
     lines = [f"# Table: {a.fqn}  ({', '.join(parts)})"]
 
+    if adapter:
+        lines.append(f"Adapter: {adapter}")
+
     if a.missing:
         lines.append(_missing_summary(a.missing))
+
+    if a.corrupted:
+        lines.append(_corrupted_summary(a.corrupted))
 
     if not include_qualifiers:
         return "\n".join(lines)
 
     statistics = a.statistics or {}
-    qualifiers = (_scope_summary(statistics), _grain_summary(statistics, a.annotated_grain))
+    qualifiers = (
+        _scope_summary(statistics),
+        _grain_summary(statistics, a.annotated_grain),
+        _statistics_params_override_summary(
+            connection_statistics_params,
+            a.statistics_params_override,
+        ),
+    )
     lines.extend(line for line in qualifiers if line)
 
     return "\n".join(lines)
+
+
+def _statistics_params_override_summary(
+    connection_defaults: dict[str, Any],
+    table_override: dict[str, Any] | None,
+) -> str:
+    """Stated so a table-level override is never applied silently."""
+
+    if not table_override:
+        return ""
+
+    differing = {
+        key: value for key, value in table_override.items() if value != connection_defaults.get(key)
+    }
+
+    if not differing:
+        return ""
+
+    rendered = ", ".join(f"{key}={value}" for key, value in sorted(differing.items()))
+
+    return f"Statistics params override: {rendered}"
 
 
 def _missing_summary(missing: tuple[str, ...]) -> str:
     """One line naming every declared kind whose file is absent from disk (SPEC 2.5)."""
 
     return f"Missing: {', '.join(missing)} (declared but missing from disk)"
+
+
+def _corrupted_summary(corrupted: tuple[str, ...]) -> str:
+    """One line naming every declared kind present on disk but unreadable (SPEC 2.5)."""
+
+    return f"Unreadable: {', '.join(corrupted)} (present on disk, failed to parse)"
 
 
 def _scope_summary(statistics: dict[str, Any]) -> str:
@@ -268,7 +345,7 @@ def _narrowing_suffix(scope: dict[str, Any]) -> str:
     sample = scope.get("sample")
 
     if isinstance(sample, (int, float)) and not isinstance(sample, bool):
-        return f", sample {sample}"
+        return f", sample {_significant_digits(sample, 4)}"
 
     row_filter = scope.get("filter")
 
@@ -276,6 +353,19 @@ def _narrowing_suffix(scope: dict[str, Any]) -> str:
         return f", filter `{row_filter}`"
 
     return ""
+
+
+def _significant_digits(value: float, digits: int) -> str:
+    """Trailing zeros and the trailing point are stripped."""
+
+    if value == 0:
+        return "0"
+
+    exponent = math.floor(math.log10(abs(value)))
+    decimals = max(digits - 1 - exponent, 0)
+    text = f"{value:.{decimals}f}"
+
+    return text.rstrip("0").rstrip(".") if "." in text else text
 
 
 def _grain_summary(statistics: dict[str, Any], annotated_grain: dict[str, Any] | None) -> str:
@@ -338,6 +428,79 @@ def _annotated_grain_keys(annotated_grain: dict[str, Any] | None) -> list[dict[s
     return result
 
 
+def _provenance_block(manifest: dict[str, Any], connection_name: str) -> str:
+    """The manifest-level parameters that decided what was measured (SPEC 2.5).
+
+    A field the manifest never populated renders nothing.
+    """
+
+    lines: list[str] = []
+    adapter = manifest.get("adapter")
+
+    if isinstance(adapter, str) and adapter:
+        lines.append(f"- Adapter: {adapter}")
+
+    dbprint_version = manifest.get("dbprint_version")
+
+    if isinstance(dbprint_version, str) and dbprint_version:
+        lines.append(f"- dbprint version: {dbprint_version}")
+
+    generated_at = manifest.get("generated_at")
+
+    if isinstance(generated_at, str) and generated_at:
+        lines.append(f"- Generated: {generated_at}")
+
+    manifest_connection = manifest.get("connection")
+
+    if (
+        isinstance(manifest_connection, str)
+        and manifest_connection
+        and manifest_connection != connection_name
+    ):
+        lines.append(
+            f"- Connection name mismatch: manifest declares {manifest_connection!r}, "
+            f"resolved as {connection_name!r}",
+        )
+
+    collation = manifest.get("default_collation")
+
+    if isinstance(collation, str) and collation:
+        lines.append(f"- Default collation: {collation}")
+
+    selectors = manifest.get("selectors") or {}
+    include = [s for s in (selectors.get("include") or []) if isinstance(s, str)]
+    exclude = [s for s in (selectors.get("exclude") or []) if isinstance(s, str)]
+
+    if include or exclude:
+        parts = []
+
+        if include:
+            parts.append(f"include {', '.join(include)}")
+
+        if exclude:
+            parts.append(f"exclude {', '.join(exclude)}")
+
+        lines.append(f"- Selectors narrow this print: {'; '.join(parts)}")
+
+    redaction_count = manifest.get("redaction_rules_configured")
+
+    if (
+        isinstance(redaction_count, int)
+        and not isinstance(redaction_count, bool)
+        and redaction_count
+    ):
+        rule_word = "rule" if redaction_count == 1 else "rules"
+        lines.append(f"- Redaction configured: {redaction_count} {rule_word}")
+
+    percentiles = (manifest.get("statistics_params") or {}).get("percentiles")
+
+    if isinstance(percentiles, list) and percentiles:
+        rendered = ", ".join(f"p{p}" for p in percentiles)
+        lines.append(f"- Percentiles configured: {rendered}")
+
+    return "## Provenance\n\n" + "\n".join(lines) if lines else ""
+
+
 def _markdown_ddl(a: TableArtifacts) -> str:
     return "## DDL\n\n```sql\n" + a.ddl.rstrip() + "\n```"
 
@@ -353,15 +516,24 @@ def _markdown_annotations(a: TableArtifacts) -> str:
     lines = ["## Annotations"]
 
     for name, entry in a.annotations.items():
+        if not _annotation_entry_has_content(entry):
+            continue
+
         note = entry.get("note")
 
+        # A colon promises text that is not coming - a note-less header names the column and stops.
         if isinstance(note, str) and note.strip():
             lines.append(f"- **{name}**: {note.strip()}")
+        else:
+            lines.append(f"- **{name}**")
 
         claims = entry.get("claims")
 
         if isinstance(claims, dict) and claims:
-            rendered = ", ".join(f"{stat}={predicate!r}" for stat, predicate in claims.items())
+            # The assertion grammar's own YAML (ASSERTIONS.md 2.1), not Python's repr.
+            rendered = ", ".join(
+                f"{stat}: {spell_inline(predicate)}" for stat, predicate in claims.items()
+            )
             lines.append(f"  - claims: {rendered}")
 
         values = entry.get("values")
@@ -374,9 +546,46 @@ def _markdown_annotations(a: TableArtifacts) -> str:
                 value_note = value_entry.get("note")
 
                 if isinstance(value_note, str) and value_note.strip():
-                    lines.append(f"  - {value_entry.get('value')!r}: {value_note.strip()}")
+                    value = value_entry.get("value")
+                    spelled = "NULL" if value is None else spell_inline(value)
+                    lines.append(f"  - {spelled}: {value_note.strip()}")
 
     return "\n".join(lines)
+
+
+def _annotation_entry_has_content(entry: dict[str, Any]) -> bool:
+    """Whether an entry (SPEC 2.7.1) renders anything at all - a note, a claim, or a value note.
+
+    Mirrors `_markdown_annotations` exactly, so the gate and the body it wraps cannot disagree.
+    """
+
+    note = entry.get("note")
+
+    if isinstance(note, str) and note.strip():
+        return True
+
+    claims = entry.get("claims")
+
+    if isinstance(claims, dict) and claims:
+        return True
+
+    values = entry.get("values")
+
+    if isinstance(values, list):
+        for value_entry in values:
+            if isinstance(value_entry, dict):
+                value_note = value_entry.get("note")
+
+                if isinstance(value_note, str) and value_note.strip():
+                    return True
+
+    return False
+
+
+def _has_rendered_annotations(annotations: dict[str, dict[str, Any]]) -> bool:
+    """Gates the whole `## Annotations` section."""
+
+    return any(_annotation_entry_has_content(entry) for entry in annotations.values())
 
 
 def _markdown_catalog_only_columns(a: TableArtifacts) -> str:
@@ -403,7 +612,7 @@ def _markdown_catalog_only_columns(a: TableArtifacts) -> str:
     return "\n".join(lines)
 
 
-def _markdown_cardinality_table(a: TableArtifacts) -> str:
+def _markdown_cardinality_table(a: TableArtifacts, statistics_params: dict[str, Any]) -> str:
     assert a.statistics is not None
     columns = a.statistics.get("columns") or {}
     row_count = a.statistics.get("row_count")
@@ -421,7 +630,11 @@ def _markdown_cardinality_table(a: TableArtifacts) -> str:
     for name in ordered:
         col = columns[name]
         cardinality = _format_cardinality_cell(col, row_count)
-        notes = notes_synthesis.synthesize(col, fk_targets.get(name))
+        notes = notes_synthesis.synthesize(
+            col,
+            fk_targets.get(name),
+            statistics_params=statistics_params,
+        )
         lines.append(f"| {name} | {cardinality} | {notes} |")
 
     return "\n".join(lines)
@@ -471,8 +684,10 @@ def _markdown_null_patterns(a: TableArtifacts) -> str:
         share = (
             "every scanned row" if coverage >= 1 else f"{round(coverage * 100, 1)}% of scanned rows"
         )
+        # Silent on `measured` - matches the per-column coverage hedge (notes_synthesis.py).
+        hedge = " (bounded)" if block.get("coverage_method") == "bounded" else ""
         lines.append("")
-        lines.append(f"Observed over {share}.")
+        lines.append(f"Observed over {share}{hedge}.")
 
     return "\n".join(lines)
 
@@ -485,7 +700,12 @@ def _markdown_relationships(a: TableArtifacts) -> str:
     rejected = _rejected_edges(a.relationship_annotations)
 
     if not refers_to and not referenced_by:
-        lines.append("- (none)")
+        # `eligible_target: false` (SPEC 2.3.8) says nothing COULD reference this object, not
+        # merely that nothing does - a bare "(none)" collapses that into the weaker claim.
+        if a.relationships.get("eligible_target") is False:
+            lines.append("- (none - not a join target, no declared-unique column)")
+        else:
+            lines.append("- (none)")
 
         return "\n".join(lines)
 
@@ -516,14 +736,17 @@ def _markdown_relationships(a: TableArtifacts) -> str:
 def _observed_lines(entry: dict[str, Any]) -> list[str]:
     """SPEC 2.3.10: what joining across this edge costs, beside its declared shape.
 
-    Nothing renders when the block is absent or `scope_compatible: false` left the two
-    sides incomparable, carrying no ratio to show.
+    An absent block renders nothing; `scope_compatible: false` is itself a measurement and
+    gets its own line rather than the same silence.
     """
 
     observed = entry.get("observed")
 
-    if not isinstance(observed, dict) or observed.get("scope_compatible") is False:
+    if not isinstance(observed, dict):
         return []
+
+    if observed.get("scope_compatible") is False:
+        return ["  observed: scopes not comparable"]
 
     fanout_avg = observed.get("fanout_avg")
     target_coverage = observed.get("target_coverage")
@@ -542,6 +765,12 @@ def _observed_lines(entry: dict[str, Any]) -> list[str]:
 
     if containment is not None:
         text += f", {containment:.1%} of the referencing values are contained"
+        answerable = observed.get("answerable_count")
+
+        # SPEC 2.3.10: a containment ratio needs the margin its denominator implies - the same
+        # evidence-before-verdict idiom as `looks_like`'s sampled/matched pair.
+        if isinstance(answerable, int) and not isinstance(answerable, bool):
+            text += f" ({answerable:,} answerable)"
 
     lines = [text]
 
@@ -682,21 +911,26 @@ def _build_fk_target_map(relationships: dict[str, Any]) -> dict[str, str]:
     return out
 
 
-def _artifact_mapping(path: Path) -> dict[str, Any] | None:
-    """One per-table artifact, or None when it is missing, unparseable or misshapen.
-
-    A corrupt file costs its own section, not the context of every table beside it.
+def _load_artifact(path: Path) -> tuple[dict[str, Any] | None, bool]:
+    """`(None, False)` covers both "never declared" and "declared but missing"; `(None, True)`
+    is a declared file that exists and does not parse as a mapping.
     """
 
     if not path.is_file():
-        return None
+        return None, False
 
     try:
         data = yaml.safe_load(path.read_text())
     except yaml.YAMLError:
-        return None
+        return None, True
 
-    return data if isinstance(data, dict) else None
+    return (data, False) if isinstance(data, dict) else (None, True)
+
+
+def _artifact_mapping(path: Path) -> dict[str, Any] | None:
+    """None when the file is missing, unparseable or misshapen."""
+
+    return _load_artifact(path)[0]
 
 
 def _load_connection_notes(print_root: Path) -> str | None:
@@ -761,21 +995,28 @@ def _load_table_artifacts(manifest: dict[str, Any], print_root: Path, fqn: str) 
     """Read every available per-table artifact off disk; tolerate missing optional pieces."""
 
     entry = walkable_tables(manifest).get(fqn) or {}
-    table_path = print_root / entry.get("path", fqn.replace(".", "/"))
+    table_path = table_directory(print_root, fqn, entry)
     artifacts = declared_artifacts(entry)
 
     ddl_path = table_path / artifacts.get("ddl", "ddl.sql")
     ddl = ddl_path.read_text() if ddl_path.is_file() else ""
 
     statistics = None
+    corrupted: list[str] = []
 
     if "statistics" in artifacts:
-        statistics = _artifact_mapping(table_path / artifacts["statistics"])
+        statistics, stats_corrupted = _load_artifact(table_path / artifacts["statistics"])
+
+        if stats_corrupted:
+            corrupted.append("statistics")
 
     relationships = None
 
     if "relationships" in artifacts:
-        relationships = _artifact_mapping(table_path / artifacts["relationships"])
+        relationships, rel_corrupted = _load_artifact(table_path / artifacts["relationships"])
+
+        if rel_corrupted:
+            corrupted.append("relationships")
 
     description = None
 
@@ -808,6 +1049,8 @@ def _load_table_artifacts(manifest: dict[str, Any], print_root: Path, fqn: str) 
             _artifact_mapping(table_path / artifacts["relationships_annotations"]),
         )
 
+    table_params = entry.get("statistics_params")
+
     return TableArtifacts(
         fqn=fqn,
         table_type=entry.get("type", "table"),
@@ -821,6 +1064,8 @@ def _load_table_artifacts(manifest: dict[str, Any], print_root: Path, fqn: str) 
         annotated_grain=annotated_grain,
         relationship_annotations=relationship_annotations,
         missing=missing_artifacts(table_path, artifacts),
+        corrupted=tuple(corrupted),
+        statistics_params_override=table_params if isinstance(table_params, dict) else None,
     )
 
 
@@ -898,9 +1143,7 @@ def _budgeted_structured_payload(
 def _stripped_statistics(statistics: dict[str, Any]) -> dict[str, Any]:
     """`statistics` with each column's `sketch` removed - a copy, never mutated in place.
 
-    The sketch payload is 42% of the reference example's statistics bytes and no surface on
-    this path decodes it. The resource endpoint still serves the file verbatim, so stripping
-    must not touch `a.statistics` itself, which the md path also reads.
+    No surface on this path decodes a sketch; the resource endpoint still serves it verbatim.
     """
 
     columns = statistics.get("columns")

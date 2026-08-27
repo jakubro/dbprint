@@ -7,7 +7,7 @@ import yaml
 
 from dbprint.config import ConnectionConfig
 from dbprint.mcp import McpError, ServedConnections, enumerate_for, parse_uri, read
-from dbprint.mcp.resources import ResourceRef
+from dbprint.mcp.resources import ReferenceRef, ResourceRef
 
 
 class TestParseUri:
@@ -33,19 +33,23 @@ class TestParseUri:
 
     def test_per_table_statistics(self) -> None:
         ref = parse_uri("dbprint://primary/arboretum.seedbank.accession/statistics")
+        assert isinstance(ref, ResourceRef)
         assert ref.kind == "statistics"
         assert ref.fqn == "arboretum.seedbank.accession"
 
     def test_per_table_description(self) -> None:
         ref = parse_uri("dbprint://primary/public.curator/description")
+        assert isinstance(ref, ResourceRef)
         assert ref.kind == "description"
 
     def test_per_table_annotations(self) -> None:
         ref = parse_uri("dbprint://primary/public.curator/statistics_annotations")
+        assert isinstance(ref, ResourceRef)
         assert ref.kind == "statistics_annotations"
 
     def test_per_table_relationship_annotations(self) -> None:
         ref = parse_uri("dbprint://primary/public.curator/relationships_annotations")
+        assert isinstance(ref, ResourceRef)
         assert ref.kind == "relationships_annotations"
 
     def test_malformed_scheme(self) -> None:
@@ -55,6 +59,30 @@ class TestParseUri:
     def test_unknown_kind(self) -> None:
         with pytest.raises(McpError):
             parse_uri("dbprint://primary/public.curator/unknownkind")
+
+    def test_empty_authority_reference(self) -> None:
+        ref = parse_uri("dbprint:///reference/spec")
+        assert ref == ReferenceRef(document="spec")
+
+    def test_empty_authority_other_document(self) -> None:
+        ref = parse_uri("dbprint:///reference/assertions")
+        assert ref == ReferenceRef(document="assertions")
+
+    def test_empty_authority_unknown_document_is_malformed(self) -> None:
+        with pytest.raises(McpError):
+            parse_uri("dbprint:///reference/readme")
+
+    def test_empty_authority_not_reference_is_malformed(self) -> None:
+        """A connection literally named `""` cannot smuggle a table read through here."""
+
+        with pytest.raises(McpError):
+            parse_uri("dbprint:///public.curator/ddl")
+
+    def test_a_connection_literally_named_reference_is_unambiguous(self) -> None:
+        """`dbprint://reference/manifest` has a non-empty authority - a real connection name."""
+
+        ref = parse_uri("dbprint://reference/manifest")
+        assert ref == ResourceRef(connection="reference", kind="manifest", fqn=None)
 
 
 class TestEnumerate:
@@ -166,6 +194,33 @@ class TestEnumerate:
         entries = enumerate_for(state)
         uris = {e.uri for e in entries}
         assert "dbprint://production/manifest_annotations" in uris
+
+    def test_the_two_reference_documents_are_listed_exactly_once_each(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        state = ServedConnections(served={"production": primary_conn}, default="production")
+        entries = enumerate_for(state)
+        uris = [e.uri for e in entries]
+
+        assert uris.count("dbprint:///reference/spec") == 1
+        assert uris.count("dbprint:///reference/assertions") == 1
+
+    def test_the_two_reference_documents_lead_the_enumeration(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        state = ServedConnections(served={"production": primary_conn}, default="production")
+        uris = [e.uri for e in enumerate_for(state)]
+
+        assert uris[0] == "dbprint:///reference/spec"
+        assert uris[1] == "dbprint:///reference/assertions"
+
+    def test_reference_documents_are_listed_even_with_no_served_connection(self) -> None:
+        state = ServedConnections(served={}, default=None)
+        uris = {e.uri for e in enumerate_for(state)}
+
+        assert uris == {"dbprint:///reference/spec", "dbprint:///reference/assertions"}
 
 
 class TestRead:
@@ -381,6 +436,23 @@ class TestRead:
         second = read(state, "dbprint://production/seedbank.collector/ddl")
         assert first.content != second.content
         assert "different" in second.content
+
+    def test_read_reference_document_needs_no_connection(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """`_read` is monkeypatched past the editable-install packaging gap, so this proves
+        `read()`'s dispatch rather than the packaging lookup."""
+
+        from dbprint.mcp import reference as reference_module
+
+        monkeypatch.setattr(reference_module, "_read", lambda document: f"# {document} body\n")
+
+        state = ServedConnections(served={}, default=None)
+        result = read(state, "dbprint:///reference/spec")
+
+        assert result.mime_type == "text/markdown"
+        assert result.content == "# spec body\n"
 
 
 class TestAWronglyShapedManifestIsAnErrorNotACrash:

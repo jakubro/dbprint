@@ -11,8 +11,9 @@ from types import ModuleType
 
 import rich_click as click
 
-from dbprint.config import ConnectionConfig, load_project
+from dbprint.config import ConnectionConfig
 from dbprint.engine import EXIT_GENERIC, EXIT_OK
+from ..options import keep_fresh, project_option, resolve_project
 from ..resolution import ConnectionResolutionError
 from ..resolution import resolve as resolve_connections
 
@@ -35,6 +36,7 @@ def docs_group() -> None:
 
 @docs_group.command(name="serve")
 @click.argument("conn", required=False)
+@project_option
 @click.option("--all", "select_all", is_flag=True, default=False, help="Serve every connection.")
 @click.option(
     "--host",
@@ -53,6 +55,7 @@ def docs_group() -> None:
 def serve_command(
     ctx: click.Context,
     conn: str | None,
+    project: str | None,
     select_all: bool,
     host: str,
     port: int,
@@ -83,13 +86,15 @@ def serve_command(
         ctx.exit(EXIT_GENERIC)
 
     docs_pkg = _import_docs(ctx)
-    connections = _resolve(ctx, conn, select_all)
+    connections = _resolve(ctx, conn, project, select_all)
+    keep_fresh(project)
 
     docs_pkg.serve(connections, host, port)
 
 
 @docs_group.command(name="build")
 @click.argument("conn", required=False)
+@project_option
 @click.option("--all", "select_all", is_flag=True, default=False, help="Build every connection.")
 @click.option(
     "--output",
@@ -109,6 +114,7 @@ def serve_command(
 def build_command(
     ctx: click.Context,
     conn: str | None,
+    project: str | None,
     select_all: bool,
     output_path: Path,
     force: bool,
@@ -137,7 +143,7 @@ def build_command(
     """
 
     docs_pkg = _import_docs(ctx)
-    connections = _resolve(ctx, conn, select_all)
+    connections = _resolve(ctx, conn, project, select_all)
 
     try:
         result = docs_pkg.build_site(connections, output_path, force=force)
@@ -164,6 +170,7 @@ def _import_docs(ctx: click.Context) -> ModuleType:
 def _resolve(
     ctx: click.Context,
     conn: str | None,
+    project: str | None,
     select_all: bool,
 ) -> list[ConnectionConfig]:
     """Every connection to render: `--all` widens past `resolve()`'s auto-set/single default."""
@@ -172,7 +179,7 @@ def _resolve(
         click.echo("Pass either CONN or --all, not both.", err=True)
         ctx.exit(EXIT_GENERIC)
 
-    project_config = load_project()
+    project_config = resolve_project(project)
 
     if select_all:
         return list(project_config.connections.values())

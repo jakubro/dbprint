@@ -65,7 +65,7 @@ Per-adapter hierarchy:
 
 | Adapter | Path shape | Example |
 |---|---|---|
-| Snowflake | `<database>/<schema>/` | `garden/seedbank/` |
+| Snowflake | `<database>/<schema>/` | `arboretum/seedbank/` |
 | PostgreSQL | `<schema>/` | `public/` |
 | MySQL | `<database>/` | `analytics/` |
 
@@ -148,7 +148,7 @@ Long total paths may exceed Windows' default 260-char path limit. Documented as 
 **Reject + `exclude:` selectors as the escape hatch**:
 
 - Preserves the 1:1 bijection between SQL identifier and filesystem path (modulo case folding)
-- Forces the user to make an explicit choice ("this table exists but we won't profile it")
+- Forces the user to make an explicit choice ("this table exists; leave it unprofiled")
 - Preserves human readability and greppability
 - Real-world rare — production warehouses almost never have weird identifiers
 - Error message is actionable: rename in DB, OR add an `exclude:` pattern
@@ -834,7 +834,7 @@ Composite keys sketch per member column — there is no joint sketch for a multi
 
 **The error bound is a function of what is actually comparable, not a flat percentage.** Two sketches agree only below the tighter of their two retained thresholds — the count of hashes genuinely answerable is that intersection's size, not `k`, and it varies per edge. A truncated sketch's estimate carries roughly `1/sqrt(answerable count)`; a published overlap is not a data-quality signal until it is read against that edge's own margin, and a small answerable count widens the margin sharply. Only an edge where **both** sketches are exhaustive needs no such margin — neither side truncated, so the shared hashes are the whole comparable set, not a sample of it. An exhaustive sketch measured against a truncated one still measures over a sample: the truncated side's own retained threshold, not the exhaustive side's completeness, decides how much of it was comparable, and the same margin applies to that measurement as to any other truncated one. `observed.answerable_count` (§2.3.10) publishes that count on every sketch-measured edge, so a consumer computes the margin from the print alone rather than reading it as a stated bound.
 
-**Membership, not overlap alone, is what a sketch does not buy.** It cannot decide membership for an arbitrary single value, since only a value whose hash happens to fall below the retained threshold is answerable from the sketch at all. A consumer wanting to test one specific value against a column needs a Bloom filter, which this field is not.
+**Membership is answerable per sketch, not per field.** A sketch whose decoded `values` length is below `k` is exhaustive, so hashing a candidate value's canonical bytes and testing it against the retained set answers membership exactly — absence is proof, presence is certain up to a 64-bit collision. A decoded length of `k` or more is truncated, the same test the encoding rule above already draws that line with, and membership for a value the sketch does not itself hold is not answerable at all: only a value whose hash falls below the retained threshold is checkable from the sketch. A consumer wanting to test a value against a truncated sketch needs a Bloom filter, which this field is not. The candidate value is canonicalized per this section's encoding and matched on the same collation terms §2.2.2 gives the column — a case- or accent-folded miss reads as a real absence, not evidence either way. Membership is as of `profiled_at`, the same staleness every other statistic in this file carries; it is not a live check against the column.
 
 **Not a privacy leak on its own terms, but not nothing either.** §4.4's sensitivity detection and its redaction requirement above are the boundary; nothing else in this section changes what §4.4 already requires.
 
@@ -1414,7 +1414,7 @@ Detection of secondary indexes is best-effort: baseline indexes are parsed from 
 Events are emitted only for tables in `target.selectors` scope. Tables outside the selectors are NOT reported as added / removed / modified — they're unknown to this diff.
 
 - For full-scope runs (no CLI `--include` / `--exclude` overrides), `target.selectors` mirrors `.dbprint.yaml`; the diff covers all configured tables.
-- For partial runs (e.g., `--include garden.fieldwork.*`), only matching tables produce events; unrelated tables are not in this diff (even if their committed prints differ from live).
+- For partial runs (e.g., `--include arboretum.fieldwork.*`), only matching tables produce events; unrelated tables are not in this diff (even if their committed prints differ from live).
 
 Consumers reading a partial diff understand: "this is what changed within the scope listed in `target.selectors`; the rest is unknown to this artifact."
 
@@ -1788,6 +1788,8 @@ Producers MUST NOT run `looks_like` on columns classified as:
 - `json` — the column IS JSON; `looks_like: json` would be tautological
 - `unsupported` — opaque by definition
 
+**A `numeric_string` verdict is additionally withheld on a numeric SQL type, even on a classification that runs detection.** A `categorical` or `foreign_key_candidate` column whose SQL type belongs to the same `numeric` type family §3.2 classifies on (a numeric-typed column reaches either classification via a declared key or a low cardinality, independent of its type) restates its own declared type by construction if `numeric_string` is allowed to publish there — the same cost the classification-level exclusion above pays, paid here for a numeric-typed column that classifies elsewhere. Producers MUST withhold `numeric_string` in that case, along with the `sampled`/`matched` evidence pair that would have qualified it (§4.1.3); every other `looks_like` pattern remains eligible on the same column, detection still runs, and only this one verdict is suppressed.
+
 **This exclusion is known to hide value shapes the SQL type does not convey, on `numeric` alone.** For `boolean` and `temporal` the rationale is complete: a boolean sample can match nothing new, and every textual pattern `looks_like` defines is either the tautological ISO rendering of the column's own type (§4.1) or undecidable from the values (§4.4.1's `national_id` paragraph). A `numeric` column is different — `BIGINT` conveys "an integer this wide" and says nothing about whether the integer is a quantity, a card number, an epoch, or a national id, so the exclusion trades a real detection gap (a card number in a `BIGINT` is permanently unreachable by `looks_like`) for the certainty of never publishing `looks_like: numeric_string` on the overwhelming majority of `numeric` columns, which hold ordinary quantities and would report it on every one by construction. The trade is deliberate, not an oversight: widening costs one `sample_values` query per newly-eligible column per run, and the recall the axis needs is available more cheaply on `sensitivity` (§4.4.3), which already reads the column name for free on these two classifications.
 
 #### 4.1.6 `looks_like` reserves
@@ -1984,7 +1986,7 @@ Each issue emitted by the conformance suite has the structure:
 ```yaml
 - code: <stable_identifier>          # e.g., "manifest.missing-artifact"
   severity: error | warning
-  path: <relative_path>              # from print root, e.g., "garden/seedbank/accession/statistics.yaml"
+  path: <relative_path>              # from print root, e.g., "arboretum/seedbank/accession/statistics.yaml"
   detail: <human_readable>           # explanation including specific values
   spec_ref: <SPEC_section>           # e.g., "§2.5"
 ```
@@ -2238,7 +2240,7 @@ Every field the §2.2.3 matrix marks anything but **R** on at least one classifi
 | `physical_name` | The catalog's own spelling is the map key already (§2.2.4) | nothing further — the absence is the statement |
 | `collation` | The column sets no explicit collation, or sets one identical to the connection default (§2.2.4) | not distinguishable, and the answer is the same either way: `default_collation` (§2.5) |
 | `physical_layout_key` | The column is not named in this file's `physical_layout.keys` (§2.2.11) | that list; the two surfaces agree or the file contradicts itself |
-| `inferred.looks_like` | Detection ran and no pattern reached the threshold (§4.1.3) — or never runs on this classification (§4.1.5) | `classification` |
+| `inferred.looks_like` | Detection ran and no pattern reached the threshold (§4.1.3) — or never runs on this classification (§4.1.5) — or the winning pattern was `numeric_string` and the column's own SQL type is already numeric (§4.1.5) | `classification`, then `sql_type` for the third cause |
 | `inferred.sampled`, `inferred.matched` | `looks_like` is absent; the pair describes that verdict alone and is emitted only beside it (§2.2.4, §4.1.3) | `inferred.looks_like` |
 | `inferred.sensitivity` | Nothing was detected. Never that the column is safe to publish (§4.4.2) | not distinguishable, and not intended to be |
 | `inferred.epoch_unit` | Neither bounds nor sampled values fell inside one window (§4.5.1) — or no evidence rule reaches this classification (§4.5.2) | `classification` |

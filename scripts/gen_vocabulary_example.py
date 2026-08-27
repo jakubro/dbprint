@@ -1,4 +1,4 @@
-"""Regenerate the v1 vocabulary example from the producer, against a real Postgres.
+"""Regenerate the v1 vocabulary example from the producer, against a throwaway Postgres.
 
 A small second print alongside `docs/format/v1/examples/production/`, covering the
 `looks_like` values the seed-bank domain has no honest column for. Run via
@@ -38,7 +38,7 @@ SEED_SQL = (SQL_DIR / "vocabulary_seed.sql").read_text()
 
 
 def build_example(credentials: dict[str, str], target: Path) -> None:
-    """Generate the whole example tree into `target` from a live database.
+    """Generate the whole example tree into `target` from a database seeded by `scripts/sql/`.
 
     Creates the schema in the caller's own database, so it must be one the caller can lose.
     """

@@ -51,18 +51,28 @@ fix:
     done
     PYTHONPATH= {{ UV_RUN }} ty check --fix 2>&1 | tee -a /tmp/dbprint--fix.log
 
-# Regenerate docs/CLI.md, docs/MCP.md's tool schemas, the consumer guide, and the two
-# array-entry annotation schemas; all golden-tested
+# Regenerate every generated document (CLI, MCP schemas, conformance index, guide); golden-tested
 docs:
-    {{ UV_RUN }} python scripts/gen_cli_docs.py
-    {{ UV_RUN }} python scripts/gen_mcp_docs.py
-    {{ UV_RUN }} python scripts/gen_reading_guide.py
-    {{ UV_RUN }} python scripts/gen_annotation_schemas.py
+    rm -f /tmp/dbprint--docs.log
+    {{ UV_RUN }} python scripts/gen_cli_docs.py 2>&1 | tee -a /tmp/dbprint--docs.log
+    {{ UV_RUN }} python scripts/gen_mcp_docs.py 2>&1 | tee -a /tmp/dbprint--docs.log
+    {{ UV_RUN }} python scripts/gen_conformance_index.py 2>&1 | tee -a /tmp/dbprint--docs.log
+    {{ UV_RUN }} python scripts/gen_reading_guide.py 2>&1 | tee -a /tmp/dbprint--docs.log
+    {{ UV_RUN }} python scripts/gen_annotation_schemas.py 2>&1 | tee -a /tmp/dbprint--docs.log
 
-# Regenerate the v1 reference example from a real Postgres run; golden-tested by check
+# Regenerate the v1 reference example against a throwaway Postgres; golden-tested by check
 example:
-    {{ UV_RUN }} python scripts/gen_reference_example.py
+    {{ UV_RUN }} python scripts/gen_reference_example.py 2>&1 | tee /tmp/dbprint--example.log
 
 # Regenerate the v1 vocabulary example (looks_like values the reference example has no home for)
 example-vocabulary:
-    {{ UV_RUN }} python scripts/gen_vocabulary_example.py
+    {{ UV_RUN }} python scripts/gen_vocabulary_example.py 2>&1 | tee /tmp/dbprint--example-vocabulary.log
+
+# Build the documentation site (Astro + Starlight over docs/); its own job, not part of check
+site:
+    cd site && npm ci 2>&1 | tee /tmp/dbprint--site.log
+    cd site && npm run build 2>&1 | tee -a /tmp/dbprint--site.log
+
+# Serve docs/ with live reload at the configured base; HOST=0.0.0.0 to reach it from outside
+preview HOST="127.0.0.1" PORT="4321":
+    cd site && npm run dev -- --host {{ HOST }} --port {{ PORT }}

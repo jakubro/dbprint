@@ -49,10 +49,6 @@ columns:
     cardinality: 56
     cardinality_ratio: 0.08
     cardinality_method: exact
-    inferred:
-      looks_like: numeric_string
-      sampled: 56
-      matched: 56
     values:
     - value: 101
       count: 13

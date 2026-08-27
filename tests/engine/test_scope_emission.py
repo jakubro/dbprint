@@ -62,7 +62,7 @@ def _emit(
 
     return yaml.safe_load(
         _serialize_statistics(
-            "seedbank.vault",
+            "public.t",
             "table",
             "2026-07-31T13:00:00Z",
             counts,
@@ -125,7 +125,7 @@ class TestNarrowedRead:
     )
     def test_the_emitted_block_is_conformant(self, scope: TableScope) -> None:
         payload = _emit(100, scope)
-        codes = {i.code for i in check(payload, "statistics.yaml", "seedbank.vault")}
+        codes = {i.code for i in check(payload, "statistics.yaml", "public.t")}
 
         assert not {c for c in codes if c.startswith("stats.scope-")}, codes
 
@@ -159,21 +159,21 @@ class TestPopulationMarker:
     def test_a_scoped_column_missing_the_marker_is_flagged(self) -> None:
         payload = _emit(100, TableScope(filter="bucket = 0"))
         del payload["columns"]["bucket"]["rows_scanned"]
-        codes = {i.code for i in check(payload, "statistics.yaml", "seedbank.vault")}
+        codes = {i.code for i in check(payload, "statistics.yaml", "public.t")}
 
         assert "stats.population-marker-mismatch" in codes
 
     def test_a_scoped_column_disagreeing_with_scope_is_flagged(self) -> None:
         payload = _emit(100, TableScope(filter="bucket = 0"))
         payload["columns"]["bucket"]["rows_scanned"] = 99
-        codes = {i.code for i in check(payload, "statistics.yaml", "seedbank.vault")}
+        codes = {i.code for i in check(payload, "statistics.yaml", "public.t")}
 
         assert "stats.population-marker-mismatch" in codes
 
     def test_an_unscoped_column_carrying_the_marker_is_flagged(self) -> None:
         payload = _emit(1000, None)
         payload["columns"]["bucket"]["rows_scanned"] = 1000
-        codes = {i.code for i in check(payload, "statistics.yaml", "seedbank.vault")}
+        codes = {i.code for i in check(payload, "statistics.yaml", "public.t")}
 
         assert "stats.population-marker-mismatch" in codes
 
@@ -206,7 +206,7 @@ class TestScannedExceedingCountIsBoundedByTheMethod:
 
     def test_an_estimate_that_undershot_is_accepted(self) -> None:
         payload = _emit(500, TableScope(sample=0.5), row_count=400, method="approximate")
-        codes = {i.code for i in check(payload, "statistics.yaml", "seedbank.vault")}
+        codes = {i.code for i in check(payload, "statistics.yaml", "public.t")}
 
         assert "stats.scope-rows-scanned-exceeds-row-count" not in codes
 
@@ -214,7 +214,7 @@ class TestScannedExceedingCountIsBoundedByTheMethod:
         """A counted number cannot undershoot, so stamping `exact` narrows the exception."""
 
         payload = _emit(500, TableScope(sample=0.5), row_count=400, method="exact")
-        codes = {i.code for i in check(payload, "statistics.yaml", "seedbank.vault")}
+        codes = {i.code for i in check(payload, "statistics.yaml", "public.t")}
 
         assert "stats.scope-rows-scanned-exceeds-row-count" in codes
 
@@ -265,7 +265,7 @@ def _generate(tmp_path: Path, rows_scanned: int, method: RowCountMethod) -> dict
     Engine(MockAdapter(_narrowed_fixture(rows_scanned, method)), conn, tmp_path).generate()
 
     return yaml.safe_load(
-        (tmp_path / "primary" / "seedbank" / "vault" / "statistics.yaml").read_text(),
+        (tmp_path / "primary" / "public" / "t" / "statistics.yaml").read_text(),
     )
 
 
@@ -273,10 +273,10 @@ def _narrowed_fixture(rows_scanned: int, method: RowCountMethod) -> dict[str, Mo
     """A thousand-row table whose statistics were measured over a quarter of it."""
 
     return {
-        "seedbank.vault": MockTable(
+        "public.t": MockTable(
             type="table",
-            namespace_path=("seedbank", "vault"),
-            ddl="CREATE TABLE seedbank.vault (bucket integer);\n",
+            namespace_path=("public", "t"),
+            ddl="CREATE TABLE public.t (bucket integer);\n",
             columns=[
                 ColumnMeta(
                     name="bucket",
@@ -322,8 +322,8 @@ class TestResolution:
         assert _table_scope(settings) is None
 
     def test_a_matching_rule_produces_a_scope(self) -> None:
-        conn = _conn(RuleConfig(include=("seedbank.*",), filter="a > 1"))
-        scope = _table_scope(conn.settings_for("seedbank.vault"))
+        conn = _conn(RuleConfig(include=("public.*",), filter="a > 1"))
+        scope = _table_scope(conn.settings_for("public.t"))
 
         assert scope is not None
         assert scope.filter == "a > 1"
@@ -331,7 +331,7 @@ class TestResolution:
     def test_a_non_matching_rule_leaves_the_table_unscoped(self) -> None:
         conn = _conn(RuleConfig(include=("other.*",), filter="a > 1"))
 
-        assert _table_scope(conn.settings_for("seedbank.vault")) is None
+        assert _table_scope(conn.settings_for("public.t")) is None
 
     def test_a_rule_matching_everything_samples_every_table(self) -> None:
         conn = _conn(RuleConfig(sample=0.1))
@@ -343,9 +343,9 @@ class TestResolution:
     def test_a_later_rule_replaces_an_earlier_predicate(self) -> None:
         conn = _conn(
             RuleConfig(filter="everything"),
-            RuleConfig(include=("seedbank.*",), filter="narrow"),
+            RuleConfig(include=("public.*",), filter="narrow"),
         )
-        scope = _table_scope(conn.settings_for("seedbank.vault"))
+        scope = _table_scope(conn.settings_for("public.t"))
 
         assert scope is not None
         assert scope.filter == "narrow"

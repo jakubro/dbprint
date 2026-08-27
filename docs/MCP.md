@@ -103,6 +103,14 @@ dbprint://<connection>/<rest>
 
 where `<connection>` is a connection name from `.dbprint.yaml` and `<rest>` identifies the artifact. The URI scheme `dbprint://` is reserved for this server.
 
+A second form carries an empty authority:
+
+```
+dbprint:///reference/<document>
+```
+
+This addresses a server-global resource that belongs to no connection - §3.2's two reference documents. An empty authority MUST NOT be read as a zero-length connection name: a connection name is never empty in practice, and this form is checked ahead of any connection-scoped one, so it can never collide with one. Do not "simplify" it into a reserved connection name (e.g. a connection literally named `reference`) - the empty authority is what guarantees no collision is possible, a reserved name would not.
+
 ### 3.2 Per-artifact resource list
 
 The server MUST expose the following resources for every served connection:
@@ -120,7 +128,16 @@ The server MUST expose the following resources for every served connection:
 | `dbprint://<conn>/<fqn>/statistics_annotations` | `application/yaml` | per-table `statistics.annotations.yaml` (present only when authored) |
 | `dbprint://<conn>/<fqn>/relationships_annotations` | `application/yaml` | per-table `relationships.annotations.yaml` (present only when authored) |
 
-`<fqn>` is the dotted fully-qualified name (`garden.seedbank.accession`), NOT the slash-delimited filesystem path. Agents already know FQNs from prompts; the URI keeps that mental model intact.
+`<fqn>` is the dotted fully-qualified name (`arboretum.seedbank.accession`), NOT the slash-delimited filesystem path. Agents already know FQNs from prompts; the URI keeps that mental model intact.
+
+The server MUST also expose these two server-global resources, one per document, regardless of which or how many connections are served:
+
+| URI pattern | mimeType | Source |
+|---|---|---|
+| `dbprint:///reference/spec` | `text/markdown` | the packaged format specification, whole |
+| `dbprint:///reference/assertions` | `text/markdown` | the packaged assertion DSL specification, whole |
+
+§4.6's `get_reference` tool addresses a section of either document directly; these two resources exist for browsing the whole thing.
 
 ### 3.3 Enumeration
 
@@ -130,8 +147,9 @@ The server MUST expose the following resources for every served connection:
 - `manifest_annotations` is listed ONLY when `manifest.annotations.yaml` is present at the connection root (§2.7.3 of the format spec).
 - Per-table resources for every table in each connection's `manifest.yaml` `tables` map.
 - `description`, `statistics_annotations` and `relationships_annotations` resources are listed ONLY when the corresponding per-table file (`description.md` / `statistics.annotations.yaml` / `relationships.annotations.yaml`) is present.
+- The two reference resources are listed exactly once each - server-global, never once per connection, and present even when the resolved connection set is empty.
 
-Resource entries returned by `resources/list` include `uri`, `name` (human-readable label), `description` (one-line summary), and `mimeType`. Ordering MUST be deterministic: by connection name, then by FQN, then by artifact name (`ddl` -> `statistics` -> `relationships` -> `description` -> `statistics_annotations` -> `relationships_annotations`).
+Resource entries returned by `resources/list` include `uri`, `name` (human-readable label), `description` (one-line summary), and `mimeType`. Ordering MUST be deterministic: the two reference resources first (`spec` then `assertions`), then by connection name, then by FQN, then by artifact name (`ddl` -> `statistics` -> `relationships` -> `description` -> `statistics_annotations` -> `relationships_annotations`).
 
 ### 3.4 Reading
 
@@ -200,7 +218,7 @@ Returns the FQNs of tables matching a pattern.
 }
 ```
 
-Return: `{ "tables": ["garden.seedbank.accession", "garden.seedbank.germination_trial", ...] }`. Sorted lexicographically; deterministic across calls.
+Return: `{ "tables": ["arboretum.seedbank.accession", "arboretum.seedbank.germination_trial", ...] }`. Sorted lexicographically; deterministic across calls.
 
 `detail: true` returns `{ "tables": [{ "fqn": ..., "type": ..., "row_count": ..., "columns": ..., "profiled_at": ... }, ...] }` instead - the manifest entry's own fields, projected alongside the FQN, still sorted lexicographically by FQN. `row_count` is absent for a plain view, the same as in the manifest itself.
 
@@ -234,7 +252,7 @@ Return:
 {
   "matches": [
     {
-      "table_fqn": "garden.seedbank.accession",
+      "table_fqn": "arboretum.seedbank.accession",
       "column": "email",
       "sql_type": "VARCHAR(320)",
       "classification": "text",
@@ -243,6 +261,9 @@ Return:
       "looks_like": "email",
       "sampled": 250,
       "matched": 248,
+      "sensitivity": "contact",
+      "redacted": "hash",
+      "candidate_key": true,
       "annotation": "Always lowercased on write."
     }
   ]
@@ -251,7 +272,7 @@ Return:
 
 `annotation` is present only when the column has one in `statistics.annotations.yaml`; `sql_type` and `classification` are empty strings for a column known only through its annotation (a view with no `statistics.yaml`). Matches are ordered by (table FQN, column name) lexicographic.
 
-`row_count` and `rows_scanned` are present whenever the manifest/column carry them - `rows_scanned` only when the table's file carries a `scope` block (SPEC 2.2.8), so its absence beside a present `row_count` means the column's own count already covers the whole table. `looks_like`/`sampled`/`matched` ride together, only on a column carrying a `looks_like` verdict (SPEC 4.1.3) - a verdict drawn from two values reads identically to one drawn from ten thousand without the draw size beside it.
+`row_count` and `rows_scanned` are present whenever the manifest/column carry them - `rows_scanned` only when the table's file carries a `scope` block (SPEC 2.2.8), so its absence beside a present `row_count` means the column's own count already covers the whole table. `looks_like`/`sampled`/`matched` ride together, only on a column carrying a `looks_like` verdict (SPEC 4.1.3) - a verdict drawn from two values reads identically to one drawn from ten thousand without the draw size beside it. `sensitivity`, `redacted` and `candidate_key` (with `candidate_key_exception` when the ratio falls short of 1.0) ride the same way: only on a column carrying the field, so a caller filtering on any of these four sees the matched category, not just the column name.
 
 `limit` caps the number of matches (tables are walked in FQN order, columns within a table in name order, so which matches survive a cap is deterministic); a capped response carries `truncated: true`. A glob matching no real value (e.g. `classification: "nope"`) returns an empty match list, never an error - the enumerated values in each filter's description are the format's own, not a validated allowlist.
 
@@ -293,6 +314,33 @@ Returns the parsed `diff.yaml` content as a JSON object - a per-column reliabili
 
 Return: the parsed diff dict per [SPEC §2.6](format/v1/SPEC.md#26-diffyaml). The diff is the one produced by the last successful `dbprint generate` for the connection.
 
+### 4.6 `get_reference`
+
+Returns a slice of the format spec or the assertion DSL spec, addressed by section number. Depends on no connection and no print; `conn` is not a parameter.
+
+```json
+{
+  "name": "get_reference",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "document": { "enum": ["assertions", "spec"], "description": "Which specification - the format spec, or the assertion DSL" },
+      "section": { "type": "string", "description": "A section number in the document's own scheme (e.g. '3', '2.2.4'), or a spec_ref citation copied verbatim from a finding ('\u00a72.2.4', 'ASSERTIONS.md \u00a71.4') - any heading depth. Omit for the table of contents." }
+    },
+    "required": ["document"]
+  }
+}
+```
+
+Return: a markdown string.
+
+- With `section`, the matching heading and everything up to the next heading at the same or a shallower level - one rule for every depth, `##`/`###`/`####` alike.
+- Without `section`, the document's heading tree instead of the whole document.
+- `section` MUST accept the document's own bare numbering scheme (`"3"`, `"2.2.4"`) AND a `spec_ref` citation copied verbatim from a finding (`"§2.2.4"`, `"ASSERTIONS.md §1.4"`, per conformance/issue.py's own convention) - a caller never strips the citation prefix by hand.
+- `section` naming a number no heading in that document carries MUST fail (`isError: true`, §8.2), detail naming the section numbers that document actually has.
+
+`document` is a closed enum of exactly two values; a third document is a decision for a future revision of this spec, not an extension point a server infers.
+
 ---
 
 ## 5. Multi-connection model
@@ -304,6 +352,7 @@ Return: the parsed diff dict per [SPEC §2.6](format/v1/SPEC.md#26-diffyaml). Th
 | Invocation | Served connections | Default for tool calls |
 |---|---|---|
 | `dbprint serve` with single connection in `.dbprint.yaml` | The single connection | The single connection |
+| `dbprint serve` with `auto: true` set on exactly one of >= 2 connections | That connection | That connection |
 | `dbprint serve` with `auto: true` set on >= 2 connections | Every `auto: true` connection | None — tool calls without `conn?` MUST return an error |
 | `dbprint serve <name>` | `<name>` | `<name>` |
 | `dbprint serve` with no `auto: true` and >= 2 connections | (rejected at startup) | Server exits code 1 with hint listing valid names |
@@ -378,11 +427,11 @@ Two channels, not one. `resources/read` failures are genuine JSON-RPC protocol e
 
 | Trigger | JSON-RPC code | Detail format example |
 |---|---|---|
-| Reading an absent optional file (e.g., missing `description.md` / `statistics.annotations.yaml`) | `-32602 InvalidParams` | `"description.md is optional and not authored for table 'garden.seedbank.accession'."` |
+| Reading an absent optional file (e.g., missing `description.md` / `statistics.annotations.yaml`) | `-32602 InvalidParams` | `"description.md is optional and not authored for table 'arboretum.seedbank.accession'."` |
 | Reading a resource for an unconfigured connection | `-32602 InvalidParams` | `"connection 'bar' not in .dbprint.yaml. Configured: ['a', 'b', 'c']"` |
 | Reading a resource for a connection configured but not served by this server instance | `-32602 InvalidParams` | `"connection 'staging' is configured but not served by this instance. Served: ['analytics']. Restart the server naming it to serve it."` |
 | Reading a resource for an unknown table | `-32602 InvalidParams` | `"table 'foo' not found in connection 'bar'. Run dbprint list bar for valid names."` |
-| Reading a kind the manifest never declares for that table (e.g. `relationships` for a plain view declaring none) | `-32602 InvalidParams` | `"relationships is not declared for table 'garden.seedbank.v' - check the object's type before requesting it; the manifest does not declare every kind for every object."` |
+| Reading a kind the manifest never declares for that table (e.g. `relationships` for a plain view declaring none) | `-32602 InvalidParams` | `"relationships is not declared for table 'arboretum.seedbank.v' - check the object's type before requesting it; the manifest does not declare every kind for every object."` |
 | Manifest references a file that is absent on disk | `-32603 InternalError` | `"manifest references statistics.yaml but file is absent at <path>. Re-run dbprint generate."` |
 | Manifest parses as YAML but is not the shape every reader below it walks | `-32603 InternalError` | `"<path>: <reason the shape is wrong>"` |
 | YAML parse error in a print file (any YAML-typed artifact, not manifest.yaml alone) | `-32603 InternalError` | `"<path>: YAML parse error: <message>"` |
@@ -398,7 +447,7 @@ Two channels, not one. `resources/read` failures are genuine JSON-RPC protocol e
 | Unknown `conn` | `"connection 'bar' not in .dbprint.yaml. Configured: ['a', 'b', 'c']"` |
 | `conn` configured but not served by this server instance | `"connection 'staging' is configured but not served by this instance. Served: ['analytics']. Restart the server naming it to serve it."` |
 | `get_table_context` called with an empty `table` | `"table '' must be a non-empty string."` |
-| `get_table_context` called with `format` outside its declared enum | `"format 'yml' must be one of ['json', 'md', 'yaml']."` |
+| `get_table_context` called with `format` outside its declared enum | `"format 'yml' must be one of ['md', 'json', 'yaml']."` |
 | `get_table_context` called with `budget_tokens` below its declared minimum | `"budget_tokens 0 must be an integer >= 1."` |
 | `search_columns` called with an empty `pattern` | `"pattern '' is malformed fnmatch."` |
 | No `conn` given when no default exists | `"no default connection; pass conn explicitly. Configured: ['a', 'b', 'c']"` |
@@ -407,6 +456,8 @@ Two channels, not one. `resources/read` failures are genuine JSON-RPC protocol e
 | Manifest parses as YAML but is not the shape every reader below it walks | `"<path>: <reason the shape is wrong>"` |
 | YAML parse error in a print file | `"<path>: YAML parse error: <message>"` |
 | Tool requested with unknown name | `"unknown tool 'foo'. Available: ['get_diff', 'get_manifest', ...]"` |
+| `get_reference` called with `document` outside its declared enum | `"document 'readme' must be one of ['assertions', 'spec']."` |
+| `get_reference` called with a `section` no heading in that document carries | `"section '9.9' not found in spec. Available: ['0', '0.1', '0.2', ...]"` |
 
 ### 8.3 Error responses are not exceptions
 
@@ -432,4 +483,3 @@ The tool set and resource URI patterns MAY grow in MINOR releases (additive only
 
 - [`format/v1/SPEC.md`](format/v1/SPEC.md) — format specification for `manifest.yaml`, `diff.yaml`, and per-table artifacts
 - [`ASSERTIONS.md`](ASSERTIONS.md) — assertion DSL specification for `dbprint check --online`
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — internal architecture reference

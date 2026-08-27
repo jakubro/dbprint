@@ -54,7 +54,7 @@ APPROXIMATE_THRESHOLD = 1_000_000
 # pg_stats.n_distinct is a stored planner statistic of unbounded staleness, not a live sketch.
 _EXACT_PROBE_RATIO = 0.85
 
-# Range the sampling seed reduces into; Postgres bounds the seed nowhere, so this width is ours.
+# Range the sampling seed reduces into; Postgres bounds the seed nowhere, so dbprint sets it.
 SEED_MODULUS = 2**31
 
 _NUMERIC_TYPES = (

@@ -17,6 +17,7 @@ from dbprint.spec.sketch import (
 )
 from .issue import Issue
 from .layout import declared_artifacts, walkable_tables
+from .progress import TableSink
 from .yaml_utils import load_yaml
 
 
@@ -115,14 +116,24 @@ def _check_ineligible_target(data: dict, path: str) -> list[Issue]:
     ]
 
 
-def check_reciprocity(print_root: Path, manifest_data: dict) -> list[Issue]:
+def check_reciprocity(
+    print_root: Path,
+    manifest_data: dict,
+    *,
+    on_table: TableSink | None = None,
+) -> list[Issue]:
     """Verify that every referenced_by entry has a matching refers_to in the source table."""
 
     issues: list[Issue] = []
     refers_index: dict[str, list[tuple[str, list, list]]] = {}
     referenced_index: dict[str, list[tuple[str, str, list, list]]] = {}
+    tables = walkable_tables(manifest_data)
+    total = len(tables)
 
-    for tbl_fqn, tbl_entry in walkable_tables(manifest_data).items():
+    for i, (tbl_fqn, tbl_entry) in enumerate(tables.items(), start=1):
+        if on_table is not None:
+            on_table(tbl_fqn, i, total)
+
         artifacts = declared_artifacts(tbl_entry)
 
         if "relationships" not in artifacts:
@@ -192,7 +203,12 @@ def check_reciprocity(print_root: Path, manifest_data: dict) -> list[Issue]:
     return issues
 
 
-def check_observed_arithmetic(print_root: Path, manifest_data: dict) -> list[Issue]:
+def check_observed_arithmetic(
+    print_root: Path,
+    manifest_data: dict,
+    *,
+    on_table: TableSink | None = None,
+) -> list[Issue]:
     """SPEC 2.3.10: an `observed` block must recompute to what its two endpoints measured.
 
     Walks `refers_to` only, since `referenced_by`'s mirror entry states the same physical
@@ -202,8 +218,12 @@ def check_observed_arithmetic(print_root: Path, manifest_data: dict) -> list[Iss
 
     issues: list[Issue] = []
     tables = walkable_tables(manifest_data)
+    total = len(tables)
 
-    for tbl_entry in tables.values():
+    for i, (tbl_fqn, tbl_entry) in enumerate(tables.items(), start=1):
+        if on_table is not None:
+            on_table(tbl_fqn, i, total)
+
         artifacts = declared_artifacts(tbl_entry)
 
         if "relationships" not in artifacts or "statistics" not in artifacts:

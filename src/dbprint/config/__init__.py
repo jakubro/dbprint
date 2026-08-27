@@ -1,8 +1,7 @@
 """dbprint configuration - project config, connection credentials, selectors.
 
-`ProjectConfig` and its members are the typed view of `.dbprint.yaml`, which `load_project`
-discovers and loads; `resolve_connection` resolves adapter-required credentials per SPEC
-precedence (env > connections.yaml > .env); `match`/`expand` are fnmatch table selectors.
+`load_project` walks up from a directory; `load_project_at` resolves a `--project` locator with
+no walk. `resolve_connection` follows SPEC credential precedence (env > connections.yaml > .env).
 """
 
 from __future__ import annotations
@@ -17,6 +16,7 @@ from .project import (
     StatisticsConfig,
     TableSettings,
     load_project,
+    load_project_at,
 )
 from .selectors import expand, match
 
@@ -31,6 +31,7 @@ __all__ = [
     "TableSettings",
     "expand",
     "load_project",
+    "load_project_at",
     "match",
     "resolve_connection",
 ]

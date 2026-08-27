@@ -7,12 +7,16 @@ conformance error, not stale. Top-level exit code = max across every evaluated c
 
 from __future__ import annotations
 
+import contextlib
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 import rich_click as click
 import yaml
+from rich.console import Console
 
 from dbprint.adapters import trace_context
 from dbprint.assertions import (
@@ -23,8 +27,8 @@ from dbprint.assertions import (
     evaluate_statistic_assertions,
     parse_block,
 )
-from dbprint.config import ConfigError, ConnectionConfig, load_project
-from dbprint.conformance import Issue, validate_print
+from dbprint.config import ConfigError, ConnectionConfig
+from dbprint.conformance import Issue, ValidationProgress, ValidationTick, validate_print
 from dbprint.engine import (
     EXIT_ASSERTION,
     EXIT_CONNECTION,
@@ -34,6 +38,9 @@ from dbprint.engine import (
     EXIT_PARTIAL,
     EXIT_STALENESS,
     DiffRequest,
+    ProgressEvent,
+    SummaryCounts,
+    TableResult,
 )
 from dbprint.engine.baseline import declared_artifacts, manifest_shape_error, walkable_tables
 from dbprint.engine.diff import DATA_CHANGE_KINDS
@@ -41,22 +48,19 @@ from dbprint.engine.freshness import DurationError, evaluate, parse_duration
 from dbprint.engine.result import DiffResult
 from .. import thresholds
 from ..engine_setup import ConnectionSetupError, build_engine
+from ..options import project_option, refuse_if_remote, resolve_project
+from ..rendering import build_progress_renderer, install_log_handler, remove_log_handler
 from ..rendering.check_data import CheckResult, NotRun, render_data
 from ..rendering.check_tty import render_human
 from ..rendering.errors import emit_error
+from ..rendering.progress import ConnectionSummary, ProgressRenderer
 from ..resolution import ConnectionResolutionError, resolve
-from ..run_log import (
-    close_run_log,
-    install_stderr_warning_handler,
-    log_run_header,
-    log_run_summary,
-    open_run_log,
-    remove_stderr_warning_handler,
-)
+from ..run_log import close_run_log, log_run_header, log_run_summary, open_run_log
 
 
 @click.command(name="check")
 @click.argument("conn", required=False)
+@project_option
 @click.option(
     "--max-age",
     "max_age",
@@ -82,13 +86,28 @@ from ..run_log import (
     show_default=True,
     help="Output format.",
 )
+@click.option(
+    "--tui/--no-tui",
+    default=None,
+    help="Force TTY (Rich) or piped (plain-text) progress rendering, on stderr.",
+)
+@click.option(
+    "-q",
+    "--quiet",
+    is_flag=True,
+    default=False,
+    help="Silence stderr progress (footer / tree / streaming / summary); stdout payload unaffected.",
+)
 @click.pass_context
 def check_command(
     ctx: click.Context,
     conn: str | None,
+    project: str | None,
     max_age: str | None,
     online: bool,
     fmt: str,
+    tui: bool | None,
+    quiet: bool,
 ) -> None:
     """Verify committed prints are well-formed, fresh, and meet assertions.
 
@@ -131,7 +150,10 @@ def check_command(
     - `dbprint check --online`: add live drift + SQL assertions
     """
 
-    project_config = load_project()
+    if online:
+        refuse_if_remote(project, "check --online")
+
+    project_config = resolve_project(project)
 
     try:
         connections = resolve(project_config, conn)
@@ -140,8 +162,29 @@ def check_command(
         ctx.exit(EXIT_GENERIC)
 
     run_log = open_run_log(project_config.project_root, "check") if online else None
-    # No progress renderer here, and the file sink's handler stops logging.lastResort firing.
-    stderr_handler = install_stderr_warning_handler() if online else None
+
+    # Progress goes to stderr so stdout stays a clean result envelope; TTY-detect follows suit.
+    err_console = Console(stderr=True)
+
+    if not quiet and tui is True and not err_console.is_terminal:
+        click.echo("warning: --tui requested but stderr is not a TTY; using plain output", err=True)
+
+    renderer = (
+        None
+        if quiet
+        else build_progress_renderer(
+            live=_progress_live(tui, err_console),
+            console=err_console,
+            out=click.get_text_stream("stderr"),
+        )
+    )
+    # A renderer always exists (or is explicitly None under --quiet), and
+    # `install_log_handler` twice on the same logger would print every warning twice.
+    log_handler = install_log_handler(renderer)
+
+    # Stderr causes are deferred until the live footer stops and prints its final frame -
+    # nothing else may share the screen while it is up. Order is preserved.
+    deferred: list[str] = []
 
     try:
         if online:
@@ -149,10 +192,29 @@ def check_command(
 
         results: list[CheckResult] = []
 
-        for conn_config in connections:
-            results.append(
-                _check_one(conn_config, max_age, online, project_config.project_root, ctx),
-            )
+        with renderer if renderer is not None else contextlib.nullcontext():
+            for conn_config in connections:
+                try:
+                    results.append(
+                        _check_one(
+                            conn_config,
+                            max_age,
+                            online,
+                            project_config.project_root,
+                            ctx,
+                            renderer=renderer,
+                            deferred=deferred,
+                        ),
+                    )
+                finally:
+                    if renderer is not None:
+                        renderer.flush_warnings()
+
+            if renderer is not None:
+                renderer.finish()
+
+        for text in deferred:
+            emit_error(text)
 
         stream = click.get_text_stream("stdout")
         fmt_lower = fmt.lower()
@@ -169,10 +231,19 @@ def check_command(
 
         ctx.exit(top)
     finally:
-        if stderr_handler is not None:
-            remove_stderr_warning_handler(stderr_handler)
-
+        remove_log_handler(log_handler)
         close_run_log(run_log)
+
+
+def _progress_live(tui: bool | None, console: Console) -> bool:
+    """Detects on the stderr console."""
+
+    if tui is True:
+        return True
+    elif tui is False:
+        return False
+    else:
+        return console.is_terminal
 
 
 def _check_one(
@@ -181,6 +252,9 @@ def _check_one(
     online: bool,
     project_root: Path,
     ctx: click.Context,
+    *,
+    renderer: ProgressRenderer | None,
+    deferred: list[str],
 ) -> CheckResult:
     """Run offline checks + optional online checks for one connection."""
 
@@ -205,7 +279,12 @@ def _check_one(
             exit_code=EXIT_GENERIC,
         )
 
-    issues = tuple(validate_print(print_root))
+    issues = tuple(
+        validate_print(
+            print_root,
+            on_table=_validation_progress_adapter(renderer, conn_config.name),
+        ),
+    )
     has_errors = any(i.severity == "error" for i in issues)
 
     manifest = _load_manifest(print_root)
@@ -217,7 +296,7 @@ def _check_one(
 
     # Under an override no rule supplies the threshold, so the size-gate warning would be false.
     if override is None and resolved.size_gated:
-        click.echo(thresholds.size_gate_warning(conn_config.name, resolved.size_gated), err=True)
+        deferred.append(thresholds.size_gate_warning(conn_config.name, resolved.size_gated))
 
     # An explicit override governs every table directly and reads no rule, including a
     # refused one; only the unflagged path narrows to tables a threshold resolved for.
@@ -249,6 +328,7 @@ def _check_one(
         conn_config,
         print_root,
         manifest or {},
+        on_table=_assertions_progress_adapter(renderer, conn_config.name),
     )
 
     online_drift: tuple[Issue, ...] = ()
@@ -257,17 +337,19 @@ def _check_one(
     connection_failed = False
     config_refused = False
     partial_scan = False
+    diff_result: DiffResult | None = None
 
     # An offline assertion error does not suppress the online phase - the print is still
     # well-formed and fresh; only `offline_blocks_online` means there is nothing to compare.
     if online and not offline_blocks_online:
-        outcome = _run_online(conn_config, project_root)
+        outcome = _run_online(conn_config, project_root, renderer)
         online_drift = outcome.drift
         online_assertion_issues = outcome.statistic + outcome.sql
         connection_failed = outcome.connection_failed
         config_refused = outcome.config_refused
         partial_scan = outcome.partial
         drift_present = bool(outcome.drift)
+        diff_result = outcome.diff_result
 
         # A table the offline resolver refused can also fail inside the engine; the engine's
         # cause comes from the extraction that ran, so it replaces the offline entry.
@@ -277,7 +359,7 @@ def _check_one(
     # Causes go to stderr as well: a pipeline log watcher does not read the stdout envelope.
     for entry in not_run:
         subject = "" if entry.subject == conn_config.name else f"{entry.subject}: "
-        emit_error(f"{conn_config.name}: {subject}{entry.cause}")
+        deferred.append(f"{conn_config.name}: {subject}{entry.cause}")
 
     combined_assertions = assertion_issues + online_assertion_issues
     has_assertion_error = any(i.severity == "error" for i in combined_assertions)
@@ -302,7 +384,7 @@ def _check_one(
     if has_assertion_error:
         exit_code = max(exit_code, EXIT_ASSERTION)
 
-    return CheckResult(
+    result = CheckResult(
         connection_name=conn_config.name,
         manifest_present=True,
         issues=issues,
@@ -313,6 +395,11 @@ def _check_one(
         assertion_issues=combined_assertions,
         not_run=not_run,
     )
+
+    if renderer is not None:
+        renderer.connection_summary(_summary_view(result, manifest, diff_result))
+
+    return result
 
 
 def _not_run_from(
@@ -382,6 +469,8 @@ def _evaluate_offline_statistic_assertions(
     conn_config: ConnectionConfig,
     print_root: Path,
     manifest: dict[str, Any],
+    *,
+    on_table: Callable[[str, int, int], None] | None = None,
 ) -> tuple[Issue, ...]:
     """Evaluate statistic assertion predicates against committed statistics.yaml."""
 
@@ -403,7 +492,7 @@ def _evaluate_offline_statistic_assertions(
     if not assertion_set.tables:
         return fault_issues
 
-    stats_by_fqn = _load_committed_statistics(print_root, manifest)
+    stats_by_fqn = _load_committed_statistics(print_root, manifest, on_table=on_table)
     stat_issues = evaluate_statistic_assertions(assertion_set, conn_config.name, stats_by_fqn)
 
     return tuple(sorted(fault_issues + tuple(stat_issues)))
@@ -412,12 +501,19 @@ def _evaluate_offline_statistic_assertions(
 def _load_committed_statistics(
     print_root: Path,
     manifest: dict[str, Any],
+    *,
+    on_table: Callable[[str, int, int], None] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Read every table's committed statistics.yaml into the statistic assertion input shape."""
 
     out: dict[str, dict[str, Any]] = {}
+    tables = walkable_tables(manifest)
+    total = len(tables)
 
-    for fqn, entry in walkable_tables(manifest).items():
+    for i, (fqn, entry) in enumerate(tables.items(), start=1):
+        if on_table is not None:
+            on_table(fqn, i, total)
+
         entry_path = entry.get("path") or fqn.replace(".", "/")
         artifacts = declared_artifacts(entry)
 
@@ -456,9 +552,14 @@ class _OnlineOutcome:
     config_refused: bool = False
     partial: bool = False
     not_run: tuple[NotRun, ...] = ()
+    diff_result: DiffResult | None = None
 
 
-def _run_online(conn_config: ConnectionConfig, project_root: Path) -> _OnlineOutcome:
+def _run_online(
+    conn_config: ConnectionConfig,
+    project_root: Path,
+    renderer: ProgressRenderer | None,
+) -> _OnlineOutcome:
     """Run drift detection, live statistic assertions and SQL assertions against the live DB."""
 
     try:
@@ -472,7 +573,8 @@ def _run_online(conn_config: ConnectionConfig, project_root: Path) -> _OnlineOut
         return _OnlineOutcome(not_run=_not_run(conn_config.name, str(exc)), config_refused=True)
 
     adapter = setup.adapter
-    diff_result: DiffResult = setup.engine.compute_diff(DiffRequest())
+    on_progress = renderer.on_event if renderer is not None else None
+    diff_result: DiffResult = setup.engine.compute_diff(DiffRequest(on_progress=on_progress))
 
     # An unreachable target is reported by a returned result, not a raise, and produces no
     # change events - reading the change list alone would call a scan that never ran clean.
@@ -531,6 +633,7 @@ def _run_online(conn_config: ConnectionConfig, project_root: Path) -> _OnlineOut
                 not_run=partial_not_run + _not_run(conn_config.name, str(exc)),
                 connection_failed=True,
                 partial=partial,
+                diff_result=diff_result,
             )
 
         # Tags the operator's own SQL the same way the engine tags every statement it sends.
@@ -554,6 +657,7 @@ def _run_online(conn_config: ConnectionConfig, project_root: Path) -> _OnlineOut
         sql=sql_issues,
         not_run=partial_not_run,
         partial=partial,
+        diff_result=diff_result,
     )
 
 
@@ -618,3 +722,96 @@ def _load_manifest(print_root: Path) -> dict[str, Any] | None:
 
 def _print_root(conn: ConnectionConfig) -> Path:
     return conn.output / conn.name
+
+
+def _assertions_progress_adapter(
+    renderer: ProgressRenderer | None,
+    connection_name: str,
+) -> Callable[[str, int, int], None] | None:
+    """Adapt the assertions walk's bare (fqn, index, total) callback into a `ProgressEvent`.
+
+    The translation lives here because `conformance` never imports `engine` or `cli`.
+    """
+
+    if renderer is None:
+        return None
+
+    def on_table(fqn: str, index: int, total: int) -> None:
+        renderer.on_event(
+            ProgressEvent(
+                connection=connection_name,
+                phase="assertions",
+                status="done",
+                index=index,
+                total=total,
+                fqn=fqn,
+            ),
+        )
+
+    return on_table
+
+
+def _validation_progress_adapter(
+    renderer: ProgressRenderer | None,
+    connection_name: str,
+) -> ValidationProgress | None:
+    """Adapt `validate_print`'s per-pass `ValidationTick` into one whole-command `ProgressEvent`.
+
+    The bar spans every pass, so the global index/total are recomputed from the tick's own pass
+    identity; `elapsed_ms` is the delta since the previous tick, which lets the ETA resolve.
+    """
+
+    if renderer is None:
+        return None
+
+    last = time.monotonic()
+
+    def on_tick(tick: ValidationTick) -> None:
+        nonlocal last
+        now = time.monotonic()
+        elapsed_ms = int((now - last) * 1000)
+        last = now
+        renderer.on_event(
+            ProgressEvent(
+                connection=connection_name,
+                phase="validate",
+                status="done",
+                index=(tick.pass_index - 1) * tick.total + tick.index,
+                total=tick.pass_total * tick.total,
+                fqn=tick.fqn,
+                pass_name=tick.pass_name,
+                findings=tick.findings,
+                elapsed_ms=elapsed_ms,
+            ),
+        )
+
+    return on_tick
+
+
+def _summary_view(
+    result: CheckResult,
+    manifest: dict[str, Any] | None,
+    diff_result: DiffResult | None,
+) -> ConnectionSummary:
+    """Project one connection's check outcome into the renderer's summary shape.
+
+    `CheckResult` carries no per-table status, so `not_run` stands in and the rest count ok.
+    """
+
+    total = len(walkable_tables(manifest)) if manifest else 0
+    not_run_count = len(result.not_run)
+    elapsed_ms = diff_result.elapsed_ms if diff_result is not None else 0
+
+    return ConnectionSummary(
+        connection_name=result.connection_name,
+        summary=SummaryCounts(
+            ok=max(total - not_run_count, 0),
+            skipped=not_run_count,
+            failed=0,
+        ),
+        elapsed_ms=elapsed_ms,
+        tables=tuple(
+            TableResult(fqn=entry.subject, status="skipped", error=entry.cause, elapsed_ms=0)
+            for entry in result.not_run
+        ),
+    )

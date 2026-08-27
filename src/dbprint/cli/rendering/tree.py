@@ -1,9 +1,6 @@
-"""Pure layout helpers for the `dbprint generate`/`dbprint diff` TTY scrollback tree.
+"""Pure layout helpers for the `generate`/`diff`/`check` TTY scrollback tree.
 
-Each completed table streams into scrollback as a leaf under a connection/schema (and, for
-three-part FQNs, database) header path, with a fixed right-anchored rows + elapsed block so
-those columns line up across every leaf. `cap` is the line-width budget of
-`min(120, terminal width)`; a name exceeding its field is tail-truncated so the
+`cap` is the line-width budget, `min(120, terminal width)`. A name is tail-truncated so its
 distinguishing end survives, error text head-truncated so the exception kind does.
 """
 
@@ -73,6 +70,14 @@ def leaf_metrics(depth: int, name: str, *, cap: int, rows: str, elapsed: str) ->
     return _leaf_with_right_block(depth, name, block, cap=cap)
 
 
+def leaf_findings(depth: int, name: str, *, cap: int, findings: int) -> str:
+    """Render a validated leaf: indented name plus a right-anchored findings count."""
+
+    block = f"{findings_text(findings):>{_RIGHT_BLOCK_WIDTH}}"
+
+    return _leaf_with_right_block(depth, name, block, cap=cap)
+
+
 def leaf_note(depth: int, name: str, note: str, *, cap: int) -> str:
     """Render a skipped leaf: indented name plus a right-anchored note (`(skipped)`)."""
 
@@ -102,16 +107,61 @@ def warning_line(depth: int, text: str, *, cap: int) -> str:
     return " " * indent + _truncate_head(text, max(_MIN_NAME, cap - indent))
 
 
+def banner_line(text: str, *, cap: int) -> str:
+    """`-- <text> ` filled with dashes to `cap`; matches `^-- .+ -+$` when it fits.
+
+    The caller prints a blank line first - no tree header or leaf carries fill characters.
+    """
+
+    prefix = f"-- {text} "
+
+    if len(prefix) >= cap:
+        return _truncate_head(prefix, cap)
+
+    return prefix + "-" * (cap - len(prefix))
+
+
 def rows_text(n: int | None) -> str:
-    """Format a row count with thousands separators, or a dash when unknown."""
+    """Thousands separators, or a dash when unknown."""
 
     return f"{n:,} rows" if n is not None else "- rows"
 
 
 def secs_text(ms: int | None) -> str:
-    """Format an elapsed millisecond span as seconds, or a dash when unknown."""
+    """Seconds to one decimal, or a dash when unknown."""
 
     return f"{ms / 1000:.1f}s" if ms is not None else "-"
+
+
+def findings_text(n: int) -> str:
+    """`N findings`, or `no findings` for zero - never `- rows`, which is `generate`'s idiom."""
+
+    return "no findings" if n == 0 else f"{n:,} finding{'s' if n != 1 else ''}"
+
+
+def objects_text(n: int | None) -> str:
+    """Thousands separators, or a dash when unknown."""
+
+    return f"{n:,} objects" if n is not None else "- objects"
+
+
+def duration_text(ms: int | None) -> str:
+    """`Xm Ys`, or `Hh MMm` at an hour or more.
+
+    Unlike `secs_text`, stays readable past an hour - its bare `3600.0s` does not.
+    """
+
+    if ms is None:
+        return "-"
+
+    total_seconds = ms // 1000
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+
+    return f"{minutes}m {seconds:02d}s"
 
 
 def _leaf_with_right_block(depth: int, name: str, block: str, *, cap: int) -> str:

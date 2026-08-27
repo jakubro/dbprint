@@ -114,7 +114,9 @@ def build_table_view(
     return {
         "fqn": artifacts.fqn,
         "entry": artifacts.entry,
+        "adapter": conn.manifest.get("adapter"),
         "missing_artifacts_notice": missing_artifacts_notice(artifacts.missing),
+        "catalog_only_notice": catalog_only_notice(statistics),
         "row_count": row_count_view(artifacts.entry, statistics),
         "grain": grain_view(statistics, artifacts.statistics_annotations) if statistics else None,
         "null_patterns": null_patterns,
@@ -324,6 +326,18 @@ def columns_empty_notice(statistics: dict[str, Any] | None) -> str | None:
         return "No columns were read - the scoped read that produced this print matched no rows."
 
     return None
+
+
+def catalog_only_notice(statistics: dict[str, Any] | None) -> str | None:
+    """Why the cardinality, completeness and sensitivity cards are absent (SPEC 2.2.15).
+
+    Without it the page cannot tell "not queried" from "no statistics at all".
+    """
+
+    if not statistics or statistics.get("catalog_only") is not True:
+        return None
+
+    return "Catalog read only - no rows were queried, so cardinality is not measured here."
 
 
 def summary_cards(
@@ -811,12 +825,19 @@ def _edge_key(entry: dict[str, Any]) -> tuple[Any, ...]:
 
 
 def _observed_view(entry: dict[str, Any]) -> dict[str, Any] | None:
-    """Join cost for one edge (SPEC 2.3.10); absent when incompatible or unmeasured."""
+    """Join cost for one edge (SPEC 2.3.10); None means "not measured", never any other reason.
+
+    `scope_compatible: false` is itself a measurement, so it returns a dict naming that
+    rather than the same None.
+    """
 
     observed = entry.get("observed")
 
-    if not isinstance(observed, dict) or observed.get("scope_compatible") is False:
+    if not isinstance(observed, dict):
         return None
+
+    if observed.get("scope_compatible") is False:
+        return {"scope_compatible": False}
 
     fanout_avg = observed.get("fanout_avg")
     target_coverage = observed.get("target_coverage")
@@ -829,6 +850,7 @@ def _observed_view(entry: dict[str, Any]) -> dict[str, Any] | None:
         "fanout_max": observed.get("fanout_max"),
         "target_coverage": target_coverage,
         "containment": observed.get("containment"),
+        "answerable_count": observed.get("answerable_count"),
         "coherent": observed.get("coherent"),
     }
 
@@ -867,8 +889,14 @@ def _redaction_marker(col: dict[str, Any]) -> str | None:
 
 
 def _format_value(value: Any) -> str:
+    """A `values[]` entry's literal, or `NULL` for a genuine SQL null.
+
+    An absent `value` key is a distinct state the schema permits but no producer emits, so it
+    is conflated with null here.
+    """
+
     if value is None:
-        return "(withheld)"
+        return "NULL"
 
     return str(value)
 

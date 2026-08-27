@@ -10,7 +10,7 @@ import yaml
 from dbprint.config import ConnectionConfig
 from dbprint.engine import AssemblyOptions, assemble_context
 from dbprint.mcp import McpError, ServedConnections, dispatch
-from dbprint.mcp.tools import TOOL_NAMES
+from dbprint.mcp.tools import TOOL_DEFINITIONS, TOOL_NAMES
 
 
 def _state_for(conn: ConnectionConfig) -> ServedConnections:
@@ -101,6 +101,19 @@ class TestGetTableContext:
         )
 
         assert served == assembled.text
+
+    def test_md_names_its_own_sql_dialect(self, primary_conn: ConnectionConfig) -> None:
+        """A single-table MCP fragment never reaches a document-level provenance block."""
+
+        state = _state_for(primary_conn)
+        result = dispatch(
+            state,
+            "get_table_context",
+            {"table": "seedbank.collector", "format": "md"},
+        )
+
+        assert isinstance(result, str)
+        assert "Adapter: postgres" in result
 
     def test_unknown_table_raises(self, primary_conn: ConnectionConfig) -> None:
         state = _state_for(primary_conn)
@@ -322,6 +335,36 @@ class TestSearchColumns:
         result = _dict_result(state, "search_columns", {"pattern": "*"})
         cols = {m["column"] for m in result["matches"]}
         assert {"collector_id", "email"}.issubset(cols)
+
+    def test_match_carries_the_fields_it_was_filtered_on(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        """A sensitivity/redacted/candidate_key sweep must return the matched category, not
+        just a bare column name - the same evidence-carrying pattern `looks_like` already has."""
+
+        state = _state_for(primary_conn)
+        result = _dict_result(state, "search_columns", {"pattern": "email"})
+        match = next(m for m in result["matches"] if m["column"] == "email")
+
+        assert match["sensitivity"] == "contact"
+        assert match["redacted"] == "mask"
+        assert match["candidate_key"] is True
+
+    def test_a_missing_path_key_still_resolves_the_table(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        manifest_path = primary_conn.output / primary_conn.name / "manifest.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text())
+        del manifest["tables"]["seedbank.collector"]["path"]
+        manifest_path.write_text(yaml.safe_dump(manifest))
+
+        state = _state_for(primary_conn)
+        result = _dict_result(state, "search_columns", {"pattern": "email"})
+
+        assert any(m["column"] == "email" for m in result["matches"])
+        assert "seedbank.collector" not in result.get("unreadable_tables", [])
 
     def test_an_annotated_column_carries_its_annotation(
         self,
@@ -676,3 +719,92 @@ class TestRedactedColumnParity:
         ).text
 
         assert tool_text == command_text
+
+
+class TestGetReference:
+    """Depends on no connection or print - `_state_for` is never called here."""
+
+    _EMPTY_STATE = ServedConnections(served={}, default=None)
+
+    def test_listed_in_tool_names_and_definitions(self) -> None:
+        assert "get_reference" in TOOL_NAMES
+        names = {t.name for t in TOOL_DEFINITIONS}
+        assert "get_reference" in names
+
+    def test_document_is_required(self) -> None:
+        tool = next(t for t in TOOL_DEFINITIONS if t.name == "get_reference")
+        assert tool.input_schema["required"] == ["document"]
+
+    def test_unknown_document_raises(self) -> None:
+        with pytest.raises(McpError):
+            dispatch(self._EMPTY_STATE, "get_reference", {"document": "readme"})
+
+    def test_missing_document_raises(self) -> None:
+        with pytest.raises(McpError):
+            dispatch(self._EMPTY_STATE, "get_reference", {})
+
+    def test_no_section_and_a_section_both_resolve(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`_read` monkeypatched past the editable-install packaging gap; dispatch runs for real."""
+
+        from dbprint.mcp import reference as reference_module
+
+        monkeypatch.setattr(
+            reference_module,
+            "_read",
+            lambda document: "## 1. One\n\nBody one.\n\n## 2. Two\n\nBody two.\n",
+        )
+
+        tree = dispatch(self._EMPTY_STATE, "get_reference", {"document": "spec"})
+        assert isinstance(tree, str)
+        assert "Body one." not in tree
+        assert "1. One" in tree
+        assert "2. Two" in tree
+
+        section = dispatch(
+            self._EMPTY_STATE,
+            "get_reference",
+            {"document": "spec", "section": "1"},
+        )
+        assert isinstance(section, str)
+        assert "Body one." in section
+        assert "Body two." not in section
+
+    def test_unknown_section_raises_naming_the_available_ones(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from dbprint.mcp import reference as reference_module
+
+        monkeypatch.setattr(reference_module, "_read", lambda document: "## 1. One\n\nBody.\n")
+
+        with pytest.raises(McpError) as excinfo:
+            dispatch(self._EMPTY_STATE, "get_reference", {"document": "spec", "section": "9.9"})
+
+        assert "9.9" in str(excinfo.value)
+
+    def test_a_verbatim_spec_ref_citation_resolves_through_dispatch(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A `section` copied straight off a finding's `spec_ref` resolves through `dispatch`."""
+
+        from dbprint.mcp import reference as reference_module
+
+        monkeypatch.setattr(reference_module, "_read", lambda document: "## 1. One\n\nBody.\n")
+
+        section = dispatch(
+            self._EMPTY_STATE,
+            "get_reference",
+            {"document": "spec", "section": "§1"},
+        )
+        assert "Body." in section
+
+    def test_empty_string_section_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Distinct from omitting `section`, which means the heading tree: `""` is malformed."""
+
+        from dbprint.mcp import reference as reference_module
+
+        monkeypatch.setattr(reference_module, "_read", lambda document: "## 1. One\n\nBody.\n")
+
+        with pytest.raises(McpError):
+            dispatch(self._EMPTY_STATE, "get_reference", {"document": "spec", "section": ""})

@@ -140,7 +140,8 @@ def rich_conn(tmp_path: Path) -> ConnectionConfig:
                 "cardinality_ratio": 0.1333,
                 "cardinality_method": "exact",
                 "classification": "foreign_key_candidate",
-                "inferred": {"looks_like": "numeric_string", "sampled": 40, "matched": 40},
+                # No `inferred`: an integer column withholds `numeric_string` (SPEC 4.1.5),
+                # and nothing else detects here.
                 "values": [{"value": 1, "count": 8}, {"value": 2, "count": 7}],
                 "values_coverage": 0.05,
                 "distribution": "long_tail",
@@ -585,9 +586,9 @@ def catalog_only_conn(tmp_path: Path) -> ConnectionConfig:
         "adapter": "postgres",
         "dbprint_version": "0.2.0",
         "tables": {
-            "public.active_contributors_v": {
+            "public.active_curators_v": {
                 "type": "view",
-                "path": "public/active_contributors_v",
+                "path": "public/active_curators_v",
                 "artifacts": {"ddl": "ddl.sql", "statistics": "statistics.yaml"},
                 "columns": 2,
                 "profiled_at": WHEN,
@@ -596,7 +597,7 @@ def catalog_only_conn(tmp_path: Path) -> ConnectionConfig:
     }
     statistics = {
         "format_version": 1,
-        "table": "public.active_contributors_v",
+        "table": "public.active_curators_v",
         "type": "view",
         "profiled_at": WHEN,
         "catalog_only": True,
@@ -608,9 +609,9 @@ def catalog_only_conn(tmp_path: Path) -> ConnectionConfig:
     }
 
     _write(root / "manifest.yaml", manifest)
-    _write(root / "public" / "active_contributors_v" / "statistics.yaml", statistics)
-    (root / "public" / "active_contributors_v" / "ddl.sql").write_text(
-        "CREATE VIEW public.active_contributors_v AS SELECT id, name FROM contributor;\n",
+    _write(root / "public" / "active_curators_v" / "statistics.yaml", statistics)
+    (root / "public" / "active_curators_v" / "ddl.sql").write_text(
+        "CREATE VIEW public.active_curators_v AS SELECT id, name FROM curator;\n",
     )
 
     return _connection(tmp_path)
@@ -689,10 +690,10 @@ def grain_note_conn(tmp_path: Path) -> ConnectionConfig:
 
 @pytest.fixture
 def companion_conn(tmp_path: Path) -> ConnectionConfig:
-    """A plural-named table with a genuine multi-column `null_patterns` entry.
+    """A table with a genuine multi-column `null_patterns` entry.
 
     `rich_conn`'s only pattern is single-column, so this covers two columns null on the same
-    rows (SPEC 2.2.10). The plural name also covers linking a singular mention to it.
+    rows (SPEC 2.2.10); its description also covers linking a plural mention.
     """
 
     root = tmp_path / "prints" / "primary"
@@ -704,9 +705,9 @@ def companion_conn(tmp_path: Path) -> ConnectionConfig:
         "adapter": "postgres",
         "dbprint_version": "0.2.0",
         "tables": {
-            "seedbank.botanists": {
+            "seedbank.botanist": {
                 "type": "table",
-                "path": "seedbank/botanists",
+                "path": "seedbank/botanist",
                 "artifacts": {
                     "ddl": "ddl.sql",
                     "statistics": "statistics.yaml",
@@ -720,7 +721,7 @@ def companion_conn(tmp_path: Path) -> ConnectionConfig:
     }
     statistics = {
         "format_version": 1,
-        "table": "seedbank.botanists",
+        "table": "seedbank.botanist",
         "type": "table",
         "profiled_at": WHEN,
         "row_count": 100,
@@ -773,12 +774,13 @@ def companion_conn(tmp_path: Path) -> ConnectionConfig:
     }
 
     _write(root / "manifest.yaml", manifest)
-    _write(root / "seedbank" / "botanists" / "statistics.yaml", statistics)
-    (root / "seedbank" / "botanists" / "ddl.sql").write_text(
-        "CREATE TABLE seedbank.botanists (botanist_id bigint, email text, phone text);\n",
+    _write(root / "seedbank" / "botanist" / "statistics.yaml", statistics)
+    (root / "seedbank" / "botanist" / "ddl.sql").write_text(
+        "CREATE TABLE seedbank.botanist (botanist_id bigint, email text, phone text);\n",
     )
-    (root / "seedbank" / "botanists" / "description.md").write_text(
-        "# botanists\n\nOne row per botanist. Contact fields may be null.\n",
+    (root / "seedbank" / "botanist" / "description.md").write_text(
+        "# botanist\n\nOne row per botanist, drawn from a wider census of botanists. "
+        "Contact fields may be null.\n",
     )
 
     return _connection(tmp_path)

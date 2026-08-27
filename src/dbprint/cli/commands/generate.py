@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 
 import rich_click as click
 from rich.console import Console
 
-from dbprint.config import ConfigError, ConnectionConfig, load_project
+from dbprint.config import ConfigError, ConnectionConfig
 from dbprint.engine import (
     EXIT_CONNECTION,
     EXIT_GENERIC,
@@ -19,6 +20,7 @@ from dbprint.engine import (
 )
 from dbprint.engine.result import DiffSummary, SummaryCounts
 from ..engine_setup import ConnectionSetupError, build_engine
+from ..options import project_option, refuse_if_remote, resolve_project
 from ..rendering import (
     build_progress_renderer,
     install_log_handler,
@@ -37,6 +39,7 @@ from ..run_log import close_run_log, log_run_header, log_run_summary, open_run_l
 
 @click.command(name="generate")
 @click.argument("conn", required=False)
+@project_option
 @click.option(
     "--force",
     is_flag=True,
@@ -75,16 +78,26 @@ from ..run_log import close_run_log, log_run_header, log_run_summary, open_run_l
     default=None,
     help="Force TTY (Rich) or piped (plain-text) rendering.",
 )
+@click.option(
+    "-q",
+    "--quiet",
+    is_flag=True,
+    default=False,
+    help="Silence stdout progress (footer / tree / streaming / summary) - generate writes "
+    "nothing else to stdout.",
+)
 @click.pass_context
 def generate_command(
     ctx: click.Context,
     conn: str | None,
+    project: str | None,
     force: bool,
     dry_run: bool,
     include_patterns: tuple[str, ...],
     exclude_patterns: tuple[str, ...],
     fail_fast: bool,
     tui: bool | None,
+    quiet: bool,
 ) -> None:
     """Profile the live database; write prints and a structured diff.
 
@@ -97,7 +110,8 @@ def generate_command(
     `~/.dbprint/logs/<project-slug>/`, keeping the 3 most recent.
 
     Selector patterns are fnmatch globs over lowercased FQNs (`*` spans dots,
-    `?` matches one character); `--include` narrows, `--exclude` widens.
+    `?` matches one character); `--include` intersects and `--exclude` unions, so both only
+    ever narrow scope.
 
     **Arguments:**
 
@@ -126,7 +140,8 @@ def generate_command(
     - `dbprint generate --fail-fast`: stop at the first table failure
     """
 
-    project_config = load_project()
+    refuse_if_remote(project, "generate")
+    project_config = resolve_project(project)
 
     try:
         connections = resolve(project_config, conn)
@@ -137,10 +152,13 @@ def generate_command(
     mode = resolve_render_mode(tui)
     console = Console()
 
-    if tui is True and not console.is_terminal:
+    if not quiet and tui is True and not console.is_terminal:
         click.echo("warning: --tui requested but stdout is not a TTY; using plain output", err=True)
 
     out = click.get_text_stream("stdout")
+    renderer = (
+        None if quiet else build_progress_renderer(live=mode == "tty", console=console, out=out)
+    )
     exit_codes: list[int] = []
     # Every stderr cause is deferred until the live footer stops printing.
     deferred: list[str] = []
@@ -150,10 +168,11 @@ def generate_command(
     try:
         log_run_header(project_config.project_root, [c.name for c in connections])
 
-        with build_progress_renderer(live=mode == "tty", console=console, out=out) as renderer:
-            log_handler = install_log_handler(renderer)
+        # quiet still installs a handler (an explicit swallow) - see install_log_handler.
+        log_handler = install_log_handler(renderer)
 
-            try:
+        try:
+            with renderer if renderer is not None else contextlib.nullcontext():
                 for conn_config in connections:
                     # try/finally makes the flush structural, so a branch added here inherits it.
                     try:
@@ -165,9 +184,11 @@ def generate_command(
                             cli_include=include_patterns,
                             cli_exclude=exclude_patterns,
                             fail_fast=fail_fast,
-                            on_progress=renderer.on_event,
+                            on_progress=renderer.on_event if renderer is not None else None,
                         )
-                        renderer.connection_summary(result)
+
+                        if renderer is not None:
+                            renderer.connection_summary(result)
 
                         if result.error is not None:
                             deferred.append(
@@ -202,11 +223,13 @@ def generate_command(
                             )
                         exit_codes.append(result.exit_code)
                     finally:
-                        renderer.flush_warnings()
+                        if renderer is not None:
+                            renderer.flush_warnings()
 
-                renderer.finish()
-            finally:
-                remove_log_handler(log_handler)
+                if renderer is not None:
+                    renderer.finish()
+        finally:
+            remove_log_handler(log_handler)
 
         for text in deferred:
             emit_error(text)

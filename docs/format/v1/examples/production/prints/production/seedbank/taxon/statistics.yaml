@@ -61,10 +61,6 @@ columns:
     cardinality: 12
     cardinality_ratio: 0.04
     cardinality_method: exact
-    inferred:
-      looks_like: numeric_string
-      sampled: 12
-      matched: 12
     values:
     - value: 10
       count: 36

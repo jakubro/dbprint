@@ -10,7 +10,7 @@ import pytest
 import yaml
 import yaml.representer
 
-from dbprint.engine.yaml_dumper import dump_yaml
+from dbprint.engine.yaml_dumper import dump_yaml, spell_inline
 
 
 class TestDriverScalars:
@@ -150,3 +150,41 @@ class TestYaml12QuotedScalars:
         """`_represent_float` owns Python floats; this representer never sees one."""
 
         assert dump_yaml({"v": 0.000123}).strip() == "v: 0.000123"
+
+
+class TestSpellInline:
+    """One value, flow style, one line - the form a reader would type, not Python's repr."""
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (True, "true"),
+            (False, "false"),
+            (None, "null"),
+            (100, "100"),
+            (["a", "b"], "[a, b]"),
+            ({"max": 0.01}, "{max: 0.01}"),
+            ("0", "'0'"),
+            ("plain", "plain"),
+            (decimal.Decimal("1.500"), "'1.500'"),
+        ],
+        ids=[
+            "true",
+            "false",
+            "null",
+            "int",
+            "list",
+            "dict",
+            "numeric-looking-string-quoted",
+            "ordinary-string-unquoted",
+            "decimal-keeps-trailing-zeros-and-quotes-to-round-trip-as-a-string",
+        ],
+    )
+    def test_shapes(self, value: object, expected: str) -> None:
+        assert spell_inline(value) == expected
+
+    def test_carries_no_document_end_marker(self) -> None:
+        """A bare scalar document normally gets PyYAML's own `...` end-of-document line."""
+
+        assert "\n" not in spell_inline(True)
+        assert "..." not in spell_inline(True)

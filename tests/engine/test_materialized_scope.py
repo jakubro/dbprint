@@ -135,7 +135,7 @@ class TestASampledTableIsCopied:
         """
 
         _run(tmp_path, RuleConfig(sample=0.25))
-        text = (tmp_path / "w" / "seedbank" / "vault" / "statistics.yaml").read_text()
+        text = (tmp_path / "w" / "public" / "t" / "statistics.yaml").read_text()
 
         assert yaml.safe_load(text)["scope"] == {"rows_scanned": 250, "sample": 0.25}
         assert COPY not in text
@@ -182,7 +182,7 @@ class TestARefusedWriteDegrades:
 
         assert seen, "the run gave up on the table instead of falling back"
         assert all(scope is not None and scope.materialized is None for scope in seen)
-        assert (tmp_path / "w" / "seedbank" / "vault" / "statistics.yaml").is_file()
+        assert (tmp_path / "w" / "public" / "t" / "statistics.yaml").is_file()
 
     def test_nothing_is_released_that_was_never_created(self, tmp_path: Path) -> None:
         adapter = _run(tmp_path, RuleConfig(sample=0.25), refuse=True)
@@ -200,7 +200,7 @@ class TestARefusedWriteDegrades:
             _run(tmp_path, RuleConfig(sample=0.25), refuse=True)
 
         warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-        about_the_copy = [m for m in warnings if "seedbank.vault" in m and "materialize" in m]
+        about_the_copy = [m for m in warnings if "public.t" in m and "materialize" in m]
 
         assert about_the_copy, f"no warning named the table whose copy was refused: {warnings}"
         assert "denied" in about_the_copy[0], "the warning drops the reason the write failed"
@@ -231,10 +231,10 @@ def _fixture() -> dict[str, MockTable]:
     """A thousand-row table whose statistics were measured over a quarter of it."""
 
     return {
-        "seedbank.vault": MockTable(
+        "public.t": MockTable(
             type="table",
-            namespace_path=("seedbank", "vault"),
-            ddl="CREATE TABLE seedbank.vault (bucket integer);\n",
+            namespace_path=("public", "t"),
+            ddl="CREATE TABLE public.t (bucket integer);\n",
             columns=[
                 ColumnMeta(
                     name="bucket",

@@ -1,8 +1,6 @@
 """Every specification a failure cites is one the wheel carries.
 
-`check` prints a `spec_ref` on every issue, in the spelling SPEC 6.2 and ASSERTIONS.md 5.1
-require. Those citations name a document, so the document has to be in the package a reader
-installed - the citations are read here rather than listed, so a new one is covered too.
+A citation names a document, so the wheel has to carry it; the citations are read, not listed.
 """
 
 from __future__ import annotations
@@ -17,9 +15,9 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 SOURCES = sorted((REPO / "src/dbprint").rglob("*.py"))
 
-# Three spelt forms of a `spec_ref`: a bare section marker, which SPEC 6.2 reads as its own
-# document; one prefixed `SPEC`; one prefixed with a document name (ASSERTIONS.md 5.1).
-_SPEC_REF_RE = re.compile(r'"(?:(?P<doc>[A-Za-z_]+\.md|SPEC) )?§[0-9][0-9.]*"')
+# Two spelt forms of a `spec_ref`: a bare section marker, which SPEC 6.2 reads as its own
+# document; one prefixed with a document name (ASSERTIONS.md 5.1).
+_SPEC_REF_RE = re.compile(r'"(?:(?P<doc>[A-Za-z_]+\.md) )?§[0-9][0-9.]*"')
 
 
 def force_included() -> dict[str, Path]:
@@ -39,7 +37,7 @@ def cited_documents() -> set[str]:
     for source in SOURCES:
         for match in _SPEC_REF_RE.finditer(source.read_text()):
             named = match.group("doc")
-            cited.add("SPEC.md" if named in (None, "SPEC") else named)
+            cited.add("SPEC.md" if named is None else named)
 
     return cited
 

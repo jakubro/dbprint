@@ -49,10 +49,6 @@ columns:
     cardinality: 320
     cardinality_ratio: 0.355556
     cardinality_method: exact
-    inferred:
-      looks_like: numeric_string
-      sampled: 320
-      matched: 320
     values:
     - value: 10
       count: 3

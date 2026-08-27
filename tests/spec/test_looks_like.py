@@ -704,6 +704,22 @@ class TestBarcodes:
         assert detect(_repeat("123-45-6789")) is None
 
 
+# isdigit()-true, isdecimal()-false: a superscript, a subscript, and a circled digit.
+_HOSTILE_DIGITS = ("\u00b9", "\u2081", "\u2460")
+
+
+class TestHostileCharacters:
+    """isdigit()-true, isdecimal()-false codepoints must not reach `int()` and raise."""
+
+    @pytest.mark.parametrize("digit", _HOSTILE_DIGITS)
+    def test_a_hostile_digit_at_isbn10_length_does_not_raise(self, digit: str) -> None:
+        assert detect(_repeat(f"030640615{digit}")) is None
+
+    @pytest.mark.parametrize("digit", _HOSTILE_DIGITS)
+    def test_a_hostile_digit_at_gtin13_length_does_not_raise(self, digit: str) -> None:
+        assert detect(_repeat(f"400638133393{digit}")) is None
+
+
 class TestVin:
     """17 chars, alphabet A-Z/0-9 minus I/O/Q, check digit at position 9 (49 C.F.R. 565.15)."""
 

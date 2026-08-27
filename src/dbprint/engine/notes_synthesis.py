@@ -17,6 +17,7 @@ def synthesize(
     fk_target: str | None = None,
     *,
     hints_only: bool = False,
+    statistics_params: dict[str, Any] | None = None,
 ) -> str:
     """Return the Notes cell for one column.
 
@@ -25,26 +26,33 @@ def synthesize(
 
     `hints_only` keeps only the FK target and the suffixes - candidate key, cluster key,
     shape, sensitivity, epoch unit - for a caller whose own cells already carry the rest.
+
+    `statistics_params` carries the manifest's own shaping limits (SPEC 2.5).
     """
 
     classification = column_stats.get("classification", "unsupported")
+    params = statistics_params or {}
 
     if hints_only:
         base = _fk_note(classification, fk_target)
     else:
         redaction = _redaction_primitive(column_stats)
-        base = _base_template(classification, column_stats, fk_target, redaction)
+        base = _base_template(classification, column_stats, fk_target, redaction, params)
 
     suffix = (
         _candidate_key_suffix(column_stats)
         + _physical_layout_key_suffix(column_stats)
-        + _looks_like_suffix(column_stats)
+        + _looks_like_suffix(column_stats, params)
         + _sensitivity_suffix(column_stats)
         + _epoch_unit_suffix(column_stats)
     )
 
     if not hints_only:
-        suffix += _unrepresentable_suffix(column_stats) + _null_rate_suffix(column_stats)
+        suffix += (
+            _unrepresentable_suffix(column_stats)
+            + _null_rate_suffix(column_stats)
+            + _coverage_method_suffix(column_stats)
+        )
 
     result = base + suffix
 
@@ -56,6 +64,7 @@ def _base_template(
     stats: dict[str, Any],
     fk_target: str | None,
     redaction: str | None,
+    params: dict[str, Any],
 ) -> str:
     """Dispatch on classification; the branches that render literals also read the marker.
 
@@ -68,10 +77,10 @@ def _base_template(
         return _boolean_notes(stats, redaction)
 
     if classification == "categorical":
-        return _categorical_notes(stats, redaction)
+        return _categorical_notes(stats, redaction, params)
 
     if classification == "foreign_key_candidate":
-        return _fk_note(classification, fk_target)
+        return _fk_note(classification, fk_target, stats.get("distribution"))
 
     if classification == "temporal":
         return _temporal_notes(stats, redaction)
@@ -80,7 +89,7 @@ def _base_template(
         return _numeric_notes(stats, redaction)
 
     if classification == "text":
-        return _text_notes(stats, redaction)
+        return _text_notes(stats, redaction, params)
 
     if classification == "json":
         return "json"
@@ -89,13 +98,23 @@ def _base_template(
     return stats.get("sql_type", "unsupported")
 
 
-def _fk_note(classification: str, fk_target: str | None) -> str:
-    """The FK branch, shared between the full template and `hints_only` (SPEC 2.3)."""
+def _fk_note(
+    classification: str,
+    fk_target: str | None,
+    distribution: str | None = None,
+) -> str:
+    """The FK branch (SPEC 2.3).
+
+    `distribution` is the one word the full template adds beside the target; a caller that
+    renders its own badge passes none, so the fact is never stated twice.
+    """
 
     if classification != "foreign_key_candidate":
         return ""
 
-    return f"FK -> {fk_target}" if fk_target else "FK candidate"
+    base = f"FK -> {fk_target}" if fk_target else "FK candidate"
+
+    return f"{base}, {distribution}" if distribution else base
 
 
 def _boolean_notes(stats: dict[str, Any], redaction: str | None) -> str:
@@ -119,28 +138,39 @@ def _boolean_notes(stats: dict[str, Any], redaction: str | None) -> str:
     return f"{n_true} true / {n_false} false"
 
 
-def _categorical_notes(stats: dict[str, Any], redaction: str | None = None) -> str:
+def _categorical_notes(
+    stats: dict[str, Any],
+    redaction: str | None = None,
+    params: dict[str, Any] | None = None,
+) -> str:
     cardinality = stats.get("cardinality") or 0
     entries = _value_entries(stats)
+    distribution = _distribution_suffix(stats)
 
     # The distinct count is a measurement, not a label, so redaction drops only the values.
     if redaction is not None:
-        return f"{cardinality} distinct, {_redacted_label(redaction)}"
+        return f"{cardinality} distinct, {_redacted_label(redaction)}{distribution}"
 
     if not entries:
-        return f"{cardinality} distinct"
+        return f"{cardinality} distinct{distribution}"
 
     if _is_exhaustive(stats):
         keys = [_format_value(value) for value, _ in entries]
 
-        return f"{cardinality} distinct: " + " / ".join(keys)
+        return f"{cardinality} distinct: " + " / ".join(keys) + distribution
 
     total = _non_null_total(stats, entries)
     parts = [
         f"{_format_value(value)} ({round(100 * count / total)}%)" for value, count in entries[:3]
     ]
 
-    return f"{cardinality} distinct: " + ", ".join(parts) + f"... ({cardinality} total)"
+    return (
+        f"{cardinality} distinct: "
+        + ", ".join(parts)
+        + f"... ({cardinality} total)"
+        + distribution
+        + _top_n_values_suffix(params)
+    )
 
 
 def _temporal_notes(stats: dict[str, Any], redaction: str | None = None) -> str:
@@ -210,28 +240,55 @@ def _numeric_notes(stats: dict[str, Any], redaction: str | None = None) -> str:
     return ", ".join(bits) if bits else "numeric"
 
 
-def _text_notes(stats: dict[str, Any], redaction: str | None = None) -> str:
+def _text_notes(
+    stats: dict[str, Any],
+    redaction: str | None = None,
+    params: dict[str, Any] | None = None,
+) -> str:
     cardinality = stats.get("cardinality") or 0
     entries = _value_entries(stats)
+    distribution = _distribution_suffix(stats)
 
     if not entries:
-        return "text"
+        return f"text{distribution}"
 
     if redaction is not None:
         counts = ", ".join(str(count) for _, count in entries[:TEXT_TOP_VALUES_LIMIT])
 
-        return f"{_redacted_label(redaction)}, top counts {counts}"
+        return f"{_redacted_label(redaction)}, top counts {counts}{distribution}"
 
     if _is_exhaustive(stats):
         keys = [_format_value(value) for value, _ in entries]
 
-        return f"{cardinality} distinct: " + " / ".join(keys)
+        return f"{cardinality} distinct: " + " / ".join(keys) + distribution
 
     parts = [
         f"{_format_value(value)} ({count})" for value, count in entries[:TEXT_TOP_VALUES_LIMIT]
     ]
 
-    return "top: " + ", ".join(parts)
+    return "top: " + ", ".join(parts) + distribution + _top_n_values_suffix(params)
+
+
+def _top_n_values_suffix(params: dict[str, Any] | None) -> str:
+    """The configured `top_n_values` limit, beside a value list truncated at it (SPEC 2.5)."""
+
+    top_n = (params or {}).get("top_n_values")
+
+    if isinstance(top_n, int) and not isinstance(top_n, bool):
+        return f" (top {top_n} configured)"
+
+    return ""
+
+
+def _distribution_suffix(stats: dict[str, Any]) -> str:
+    """The shape verdict (SPEC 2.2.5), schema-required on every classification that has it.
+
+    Survives every redaction primitive - a measurement over shape, not a bound on a value.
+    """
+
+    distribution = stats.get("distribution")
+
+    return f", {distribution}" if distribution else ""
 
 
 def _redaction_primitive(stats: dict[str, Any]) -> str | None:
@@ -277,12 +334,39 @@ def _physical_layout_key_suffix(stats: dict[str, Any]) -> str:
     return ", cluster/partition key" if stats.get("physical_layout_key") else ""
 
 
-def _looks_like_suffix(stats: dict[str, Any]) -> str:
-    """A suffix: the detected shape (SPEC 4.1), present only where SPEC 4.1.5 samples for it."""
+def _looks_like_suffix(stats: dict[str, Any], params: dict[str, Any] | None = None) -> str:
+    """A suffix: the detected shape (SPEC 4.1), present only where SPEC 4.1.5 samples for it.
 
-    pattern = (stats.get("inferred") or {}).get("looks_like")
+    `inferred.sampled`/`.matched` (SPEC 4.1.5) are the draw the verdict rests on;
+    `looks_like_sample_size` (SPEC 2.5) is the configured cap that draw can fall short of.
+    """
 
-    return f", looks like {pattern}" if pattern else ""
+    inferred = stats.get("inferred") or {}
+    pattern = inferred.get("looks_like")
+
+    if not pattern:
+        return ""
+
+    sampled, matched = inferred.get("sampled"), inferred.get("matched")
+    has_evidence = (
+        isinstance(sampled, int)
+        and isinstance(matched, int)
+        and not isinstance(sampled, bool)
+        and not isinstance(matched, bool)
+    )
+    sample_size = (params or {}).get("looks_like_sample_size")
+    has_configured = isinstance(sample_size, int) and not isinstance(sample_size, bool)
+
+    if has_evidence and has_configured:
+        return f", looks like {pattern} ({matched} of {sampled} sampled, {sample_size} configured)"
+
+    if has_evidence:
+        return f", looks like {pattern} ({matched} of {sampled} sampled)"
+
+    if has_configured:
+        return f", looks like {pattern} (drawn {sample_size})"
+
+    return f", looks like {pattern}"
 
 
 def _sensitivity_suffix(stats: dict[str, Any]) -> str:
@@ -310,13 +394,19 @@ def _unrepresentable_suffix(stats: dict[str, Any]) -> str:
 
 
 def _null_rate_suffix(stats: dict[str, Any]) -> str:
+    """The observed null share, or a bare `nullable` marker when the rate falls under display.
+
+    A sub-threshold rate is suppressed; the schema's own nullability is not, or the column
+    would read identically to a `NOT NULL` one.
+    """
+
     null_rate = stats.get("null_rate", 0.0)
 
     if not isinstance(null_rate, (int, float)):
         return ""
 
     if null_rate < NULL_RATE_DISPLAY_THRESHOLD:
-        return ""
+        return ", nullable" if stats.get("nullable") else ""
 
     pct = round(null_rate * 100, 1)
 
@@ -324,6 +414,15 @@ def _null_rate_suffix(stats: dict[str, Any]) -> str:
         pct = int(pct)
 
     return f", {pct}% null"
+
+
+def _coverage_method_suffix(stats: dict[str, Any]) -> str:
+    """A suffix: `bounded` means the coverage figure itself is a clamp, not a raw measurement.
+
+    Silent on `measured`, exactly as `cardinality_method` stays silent on `exact` (SPEC 2.2.4).
+    """
+
+    return ", coverage bounded" if stats.get("values_coverage_method") == "bounded" else ""
 
 
 def _is_exhaustive(stats: dict[str, Any]) -> bool:

@@ -13,10 +13,10 @@ import rich_click as click
 import yaml
 from rich.console import Console
 
-from dbprint.config import load_project
 from dbprint.engine import EXIT_GENERIC, EXIT_OK
 from dbprint.engine.baseline import manifest_shape_error, walkable_tables
 from .. import thresholds
+from ..options import project_option, resolve_project
 from ..rendering import resolve_render_mode
 from ..rendering.errors import emit_error
 from ..rendering.list_data import render_data, render_not_run_data
@@ -26,13 +26,19 @@ from ..resolution import ConnectionResolutionError, resolve
 
 @click.command(name="list")
 @click.argument("conn", required=False)
+@project_option
 @click.option(
     "--tui/--no-tui",
     default=None,
     help="Force TTY (Rich) or piped (plain-text) rendering.",
 )
 @click.pass_context
-def list_command(ctx: click.Context, conn: str | None, tui: bool | None) -> None:
+def list_command(
+    ctx: click.Context,
+    conn: str | None,
+    project: str | None,
+    tui: bool | None,
+) -> None:
     """Summarise committed prints offline (no database connection).
 
     Reads `prints/<conn>/manifest.yaml` and reports connection metadata, table
@@ -58,7 +64,7 @@ def list_command(ctx: click.Context, conn: str | None, tui: bool | None) -> None
     - `dbprint list warehouse`: one connection
     """
 
-    project_config = load_project()
+    project_config = resolve_project(project)
 
     try:
         connections = resolve(project_config, conn)

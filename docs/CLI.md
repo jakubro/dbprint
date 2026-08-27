@@ -82,7 +82,7 @@ after changing a command's docstring, options, or help sections.
  ~/.dbprint/logs/<project-slug>/, keeping the 3 most recent.
 
  Selector patterns are fnmatch globs over lowercased FQNs (* spans dots, ? matches one character);
- --include narrows, --exclude widens.
+ --include intersects and --exclude unions, so both only ever narrow scope.
 
  Arguments:
 
@@ -110,17 +110,24 @@ after changing a command's docstring, options, or help sections.
   • dbprint generate --fail-fast: stop at the first table failure
 
 ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
-│ --force               Re-profile every matched table, bypassing the freshness skip.              │
-│ --dry-run             Compute everything; write nothing to disk.                                 │
-│ --include       TEXT  Narrow scope to tables also matching PATTERN (intersects config include);  │
-│                       repeatable. e.g. --include 'public.*'                                      │
-│ --exclude       TEXT  Also drop tables matching PATTERN (unions config exclude); repeatable.     │
-│                       e.g. --exclude '*.audit_*'                                                 │
-│ --fail-fast           Stop at the first table failure instead of profiling the rest. Use when a  │
-│                       target is failing systemically, to avoid repeating one doomed query per    │
-│                       table.                                                                     │
-│ --tui/--no-tui        Force TTY (Rich) or piped (plain-text) rendering.                          │
-│ --help                Show this message and exit.                                                │
+│ --project           TEXT  Exact project locator: a directory whose direct child is               │
+│                           .dbprint.yaml, that .dbprint.yaml file itself, or a git address (a     │
+│                           forge URL, an SSH remote, or <git-url>#<ref>:<subpath>). No upward     │
+│                           walk, no downward scan. Omit it to walk up from the working directory  │
+│                           instead.                                                               │
+│ --force                   Re-profile every matched table, bypassing the freshness skip.          │
+│ --dry-run                 Compute everything; write nothing to disk.                             │
+│ --include           TEXT  Narrow scope to tables also matching PATTERN (intersects config        │
+│                           include); repeatable. e.g. --include 'public.*'                        │
+│ --exclude           TEXT  Also drop tables matching PATTERN (unions config exclude); repeatable. │
+│                           e.g. --exclude '*.audit_*'                                             │
+│ --fail-fast               Stop at the first table failure instead of profiling the rest. Use     │
+│                           when a target is failing systemically, to avoid repeating one doomed   │
+│                           query per table.                                                       │
+│ --tui/--no-tui            Force TTY (Rich) or piped (plain-text) rendering.                      │
+│ --quiet         -q        Silence stdout progress (footer / tree / streaming / summary) -        │
+│                           generate writes nothing else to stdout.                                │
+│ --help                    Show this message and exit.                                            │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -137,8 +144,8 @@ after changing a command's docstring, options, or help sections.
  ~/.dbprint/logs/<project-slug>/, keeping the 3 most recent, unaffected by --quiet (which silences
  stderr progress only).
 
- Selector patterns are fnmatch globs over lowercased FQNs (* spans dots); --include narrows,
- --exclude widens.
+ Selector patterns are fnmatch globs over lowercased FQNs (* spans dots); --include intersects and
+ --exclude unions, so both only ever narrow scope.
 
  Arguments:
 
@@ -159,6 +166,12 @@ after changing a command's docstring, options, or help sections.
   • dbprint diff --threshold 0.05: ignore statistic moves under 5%
 
 ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ --project           TEXT               Exact project locator: a directory whose direct child is  │
+│                                        .dbprint.yaml, that .dbprint.yaml file itself, or a git   │
+│                                        address (a forge URL, an SSH remote, or                   │
+│                                        <git-url>#<ref>:<subpath>). No upward walk, no downward   │
+│                                        scan. Omit it to walk up from the working directory       │
+│                                        instead.                                                  │
 │ --include           TEXT               Narrow scope to tables also matching PATTERN (intersects  │
 │                                        config include); repeatable. e.g. --include 'public.*'    │
 │ --exclude           TEXT               Also drop tables matching PATTERN (unions config          │
@@ -205,8 +218,12 @@ after changing a command's docstring, options, or help sections.
   • dbprint list warehouse: one connection
 
 ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
-│ --tui/--no-tui  Force TTY (Rich) or piped (plain-text) rendering.                                │
-│ --help          Show this message and exit.                                                      │
+│ --project       TEXT  Exact project locator: a directory whose direct child is .dbprint.yaml,    │
+│                       that .dbprint.yaml file itself, or a git address (a forge URL, an SSH      │
+│                       remote, or <git-url>#<ref>:<subpath>). No upward walk, no downward scan.   │
+│                       Omit it to walk up from the working directory instead.                     │
+│ --tui/--no-tui        Force TTY (Rich) or piped (plain-text) rendering.                          │
+│ --help                Show this message and exit.                                                │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -251,16 +268,27 @@ after changing a command's docstring, options, or help sections.
   • dbprint check --online: add live drift + SQL assertions
 
 ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
-│ --max-age  TEXT               Max staleness before a print is stale (exit 2), applied to every   │
-│                               table. Duration Nd/Nh/Nm/Ns - e.g. 7d, 12h, 30m; no compound forms │
-│                               like 1d12h. Default: the threshold each table's own print records, │
-│                               falling back to what its rules resolve to for a print that records │
-│                               none - offline, only rules matching by name apply.                 │
-│ --online                      Verify against the live database: schema and statistics drift +    │
-│                               SQL assertions.                                                    │
-│ --format   [human|json|yaml]  Output format.                                                     │
-│                               [default: human]                                                   │
-│ --help                        Show this message and exit.                                        │
+│ --project           TEXT               Exact project locator: a directory whose direct child is  │
+│                                        .dbprint.yaml, that .dbprint.yaml file itself, or a git   │
+│                                        address (a forge URL, an SSH remote, or                   │
+│                                        <git-url>#<ref>:<subpath>). No upward walk, no downward   │
+│                                        scan. Omit it to walk up from the working directory       │
+│                                        instead.                                                  │
+│ --max-age           TEXT               Max staleness before a print is stale (exit 2), applied   │
+│                                        to every table. Duration Nd/Nh/Nm/Ns - e.g. 7d, 12h, 30m; │
+│                                        no compound forms like 1d12h. Default: the threshold each │
+│                                        table's own print records, falling back to what its rules │
+│                                        resolve to for a print that records none - offline, only  │
+│                                        rules matching by name apply.                             │
+│ --online                               Verify against the live database: schema and statistics   │
+│                                        drift + SQL assertions.                                   │
+│ --format            [human|json|yaml]  Output format.                                            │
+│                                        [default: human]                                          │
+│ --tui/--no-tui                         Force TTY (Rich) or piped (plain-text) progress           │
+│                                        rendering, on stderr.                                     │
+│ --quiet         -q                     Silence stderr progress (footer / tree / streaming /      │
+│                                        summary); stdout payload unaffected.                      │
+│ --help                                 Show this message and exit.                               │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -277,8 +305,8 @@ after changing a command's docstring, options, or help sections.
 
  Arguments:
 
-  • TARGET: table FQN (e.g. garden.seedbank.accession), an fnmatch pattern (e.g. public.*), or omit
-    and pass --all for every table.
+  • TARGET: table FQN (e.g. arboretum.seedbank.accession), an fnmatch pattern (e.g. public.*), or
+    omit and pass --all for every table.
   • CONN: connection scope; resolved from .dbprint.yaml when omitted (the auto: true set, or the
     sole connection).
 
@@ -289,12 +317,17 @@ after changing a command's docstring, options, or help sections.
 
  Examples:
 
-  • dbprint context garden.seedbank.accession: one table, full Markdown
+  • dbprint context arboretum.seedbank.accession: one table, full Markdown
   • dbprint context 'public.*': every public table (pattern)
   • dbprint context --all --no-ddl: every table, skip DDL
   • dbprint context users --budget 4000: cap output near 4000 tokens
 
 ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ --project           TEXT            Exact project locator: a directory whose direct child is     │
+│                                     .dbprint.yaml, that .dbprint.yaml file itself, or a git      │
+│                                     address (a forge URL, an SSH remote, or                      │
+│                                     <git-url>#<ref>:<subpath>). No upward walk, no downward      │
+│                                     scan. Omit it to walk up from the working directory instead. │
 │ --all                               Render every table in the manifest.                          │
 │ --format            [md|json|yaml]  Output format. json and yaml omit each column's sketch       │
 │                                     payload; the table's own statistics.yaml carries it.         │
@@ -321,7 +354,7 @@ after changing a command's docstring, options, or help sections.
  integration. Requires the [mcp] extra (pip install dbprint[mcp]); exits 1 with an install hint
  when it is missing. Serves the resolved connection set read-only - no database connection. stdio
  transport by default; HTTP binds to loopback only. The project resolves from the working directory
- unless --project-dir names another.
+ unless --project names another.
 
  Arguments:
 
@@ -337,12 +370,15 @@ after changing a command's docstring, options, or help sections.
 
   • dbprint serve: stdio (editor / agent)
   • dbprint serve --transport http --port 8765: loopback HTTP server
-  • dbprint serve --project-dir /srv/analytics: a project outside the working directory
+  • dbprint serve --project /srv/analytics: a project outside the working directory
 
 ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
-│ --project-dir               DIRECTORY     Directory to resolve .dbprint.yaml from, for a client  │
-│                                           that starts the server outside the project. Defaults   │
-│                                           to the working directory.                              │
+│ --project                   TEXT          Exact project locator: a directory whose direct child  │
+│                                           is .dbprint.yaml, that .dbprint.yaml file itself, or a │
+│                                           git address (a forge URL, an SSH remote, or            │
+│                                           <git-url>#<ref>:<subpath>). No upward walk, no         │
+│                                           downward scan. Omit it to walk up from the working     │
+│                                           directory instead.                                     │
 │ --transport                 [stdio|http]  Wire transport. stdio for editor/agent integration;    │
 │                                           http for local sockets.                                │
 │                                           [default: stdio]                                       │
@@ -402,12 +438,16 @@ after changing a command's docstring, options, or help sections.
   • dbprint docs serve --all --port 9000: every connection, custom port
 
 ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
-│ --all            Serve every connection.                                                         │
-│ --host  TEXT     Bind address. Must be loopback (127.0.0.1, ::1, or localhost).                  │
-│                  [default: 127.0.0.1]                                                            │
-│ --port  INTEGER  TCP port to bind.                                                               │
-│                  [default: 8765]                                                                 │
-│ --help           Show this message and exit.                                                     │
+│ --project  TEXT     Exact project locator: a directory whose direct child is .dbprint.yaml, that │
+│                     .dbprint.yaml file itself, or a git address (a forge URL, an SSH remote, or  │
+│                     <git-url>#<ref>:<subpath>). No upward walk, no downward scan. Omit it to     │
+│                     walk up from the working directory instead.                                  │
+│ --all               Serve every connection.                                                      │
+│ --host     TEXT     Bind address. Must be loopback (127.0.0.1, ::1, or localhost).               │
+│                     [default: 127.0.0.1]                                                         │
+│ --port     INTEGER  TCP port to bind.                                                            │
+│                     [default: 8765]                                                              │
+│ --help              Show this message and exit.                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -437,10 +477,14 @@ after changing a command's docstring, options, or help sections.
   • dbprint docs build --all --output /tmp/site: every connection to a chosen path
 
 ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
-│ --all                Build every connection.                                                     │
-│ --output  DIRECTORY  Output directory. Recreated from scratch each run.                          │
-│                      [default: dbprint-docs]                                                     │
-│ --force              Recreate --output even if it exists without a prior build's marker.         │
-│ --help               Show this message and exit.                                                 │
+│ --project  TEXT       Exact project locator: a directory whose direct child is .dbprint.yaml,    │
+│                       that .dbprint.yaml file itself, or a git address (a forge URL, an SSH      │
+│                       remote, or <git-url>#<ref>:<subpath>). No upward walk, no downward scan.   │
+│                       Omit it to walk up from the working directory instead.                     │
+│ --all                 Build every connection.                                                    │
+│ --output   DIRECTORY  Output directory. Recreated from scratch each run.                         │
+│                       [default: dbprint-docs]                                                    │
+│ --force               Recreate --output even if it exists without a prior build's marker.        │
+│ --help                Show this message and exit.                                                │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```

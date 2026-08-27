@@ -169,3 +169,12 @@ def invalid_minimum_argument(field: str, value: object, minimum: int) -> McpErro
     """An argument's value is below its tool's own advertised `inputSchema` minimum."""
 
     return McpError(-32602, f"{field} {value!r} must be an integer >= {minimum}.")
+
+
+def unknown_section(document: str, section: str, available: list[str]) -> McpError:
+    """The caller named a section number no heading in the document carries."""
+
+    return McpError(
+        -32602,
+        f"section {section!r} not found in {document}. Available: {sorted(available)}",
+    )

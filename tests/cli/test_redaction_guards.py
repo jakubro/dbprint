@@ -538,7 +538,7 @@ class TestARedactedColumnRefusesEveryValueBearingPredicate:
             config=config,
             adapter=_AccessionAdapter,
         )
-        codes = _issue_codes(result.output)
+        codes = _issue_codes(result.stdout)
 
         assert "assertion.redacted-stat" in codes
         assert "assertion.malformed-predicate" not in codes
@@ -591,7 +591,7 @@ class TestARedactedColumnRefusesEveryValueBearingPredicate:
         _credentials(monkeypatch)
         _seed_baseline(tmp_path, monkeypatch, config)
         result = _run(tmp_path, monkeypatch, *command, "--format", "json", config=config)
-        codes = _issue_codes(result.output)
+        codes = _issue_codes(result.stdout)
 
         assert "assertion.redacted-stat" in codes
         assert "assertion.accepted-values-violated" not in codes
@@ -641,7 +641,7 @@ class TestARedactedColumnRefusesEveryValueBearingPredicate:
             config=config,
             adapter=_AccessionAdapter,
         )
-        codes = _issue_codes(result.output)
+        codes = _issue_codes(result.stdout)
 
         assert result.exit_code == EXIT_OK, result.output
         assert "assertion.redacted-stat" in codes
@@ -676,7 +676,7 @@ class TestARedactedColumnRefusesEveryValueBearingPredicate:
         )
 
         assert result.exit_code == EXIT_OK, result.output
-        assert "assertion.redacted-stat" not in _issue_codes(result.output)
+        assert "assertion.redacted-stat" not in _issue_codes(result.stdout)
 
     def test_the_two_modes_answer_from_the_same_evidence(
         self,
@@ -708,7 +708,7 @@ class TestARedactedColumnRefusesEveryValueBearingPredicate:
             adapter=_AccessionAdapter,
         )
 
-        assert _issue_codes(offline.output) == _issue_codes(online.output)
+        assert _issue_codes(offline.stdout) == _issue_codes(online.stdout)
         assert offline.exit_code == online.exit_code
 
 

@@ -24,6 +24,7 @@ from dbprint.adapters import (
 from dbprint.adapters.base import ColumnProgress
 from dbprint.config.project import ConnectionConfig, DiffConfig
 from dbprint.engine import DiffRequest, Engine, GenerateRequest, ProgressEvent
+from dbprint.spec.sketch import SketchKind
 
 
 def _conn_config(tmp_path: Path) -> ConnectionConfig:
@@ -333,6 +334,137 @@ class TestTerminalStatuses:
         assert events[-1].phase == "finalizing"
 
 
+class TestSketchPass:
+    """`_write_key_sketches`'s own emission - `_two_real_tables()`'s candidate_key and
+    low-cardinality columns are eligible under SPEC 2.2.14's MAY-set without any FK.
+    """
+
+    def test_sketch_phase_brackets_the_pass_with_no_fqn(self, tmp_path: Path) -> None:
+        events = _collect(tmp_path, _two_real_tables())
+        sketch = [e for e in events if e.phase == "sketch"]
+
+        assert sketch, "fixture has eligible columns; expected at least one sketch event"
+        assert sketch[0].status == "start"
+        assert sketch[0].fqn is None
+        assert sketch[-1].status in ("done", "failed")
+        assert sketch[-1].fqn is None
+
+    def test_sketch_tables_visit_in_sorted_fqn_order(self, tmp_path: Path) -> None:
+        events = _collect(tmp_path, _two_real_tables())
+        table_starts = [
+            e.fqn
+            for e in events
+            if e.phase == "sketch" and e.status == "start" and e.fqn is not None
+        ]
+
+        assert table_starts
+        assert table_starts == sorted(table_starts)
+
+    def test_sketch_column_events_share_their_tables_index_and_total(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The bar must not stutter within a table - every column event it carries stays
+        pinned to that table's own (index, total), never the column's own count.
+        """
+
+        events = _collect(tmp_path, _two_real_tables())
+        by_fqn: dict[str, set[tuple[int, int]]] = {}
+
+        for e in events:
+            if e.phase == "sketch" and e.fqn is not None:
+                by_fqn.setdefault(e.fqn, set()).add((e.index, e.total))
+
+        assert by_fqn
+        for fqn, pairs in by_fqn.items():
+            assert len(pairs) == 1, f"{fqn}: (index, total) moved within one table's events"
+
+    def test_sketch_column_index_increments_from_one_per_table(self, tmp_path: Path) -> None:
+        events = _collect(tmp_path, _two_real_tables())
+        by_fqn: dict[str, list[int]] = {}
+
+        for e in events:
+            if e.phase == "sketch" and e.column is not None and e.fqn is not None:
+                assert e.column_index is not None  # always paired with `column` by the emitter
+                by_fqn.setdefault(e.fqn, []).append(e.column_index)
+
+        assert by_fqn, "expected at least one column-level sketch event"
+
+        for fqn, indices in by_fqn.items():
+            assert indices == list(range(1, len(indices) + 1)), fqn
+
+    def test_sketch_table_terminal_event_carries_elapsed_ms(self, tmp_path: Path) -> None:
+        events = _collect(tmp_path, _two_real_tables())
+        terminals = [
+            e
+            for e in events
+            if e.phase == "sketch" and e.fqn is not None and e.status in ("done", "failed")
+        ]
+
+        assert terminals
+        assert all(e.elapsed_ms is not None for e in terminals)
+
+    def test_no_eligible_column_emits_no_sketch_event(self, tmp_path: Path) -> None:
+        """A high-cardinality, non-key, non-FK column is not sketch-eligible at all."""
+
+        fixture = {
+            "public.wide": MockTable(
+                type="table",
+                namespace_path=("public", "wide"),
+                ddl="CREATE TABLE public.wide (payload text);\n",
+                columns=[
+                    ColumnMeta(
+                        name="payload",
+                        sql_type="text",
+                        nullable=True,
+                        default=None,
+                        ordinal=1,
+                    ),
+                ],
+                relationships=[],
+                indexes=[],
+                comments=CommentsMeta(table=None, columns={}),
+                stats={
+                    "payload": ColumnStats(
+                        sql_type="text",
+                        nullable=True,
+                        null_count=0,
+                        null_rate=0.0,
+                        cardinality=2000,
+                        # Below 1.0 on purpose - a ratio of 1.0 is itself a candidate-key signal
+                        # the engine infers independently, making this column eligible anyway.
+                        cardinality_ratio=0.4,
+                        cardinality_method="exact",
+                    ),
+                },
+                samples={"payload": ["x"]},
+                row_count=5000,
+            ),
+        }
+        events = _collect(tmp_path, fixture)
+
+        assert not any(e.phase == "sketch" for e in events)
+
+    def test_a_failed_sketch_query_fails_only_its_own_table(self, tmp_path: Path) -> None:
+        """Run-all-then-report: one column's query failure does not stop the other table."""
+
+        fixture = _two_real_tables()
+        adapter = _SketchRaisingAdapter(fixture, "seedbank.taxon", "taxon_id")
+        events: list[ProgressEvent] = []
+        Engine(adapter, _conn_config(tmp_path), tmp_path).generate(
+            GenerateRequest(force=True, on_progress=events.append),
+        )
+
+        terminals = {
+            e.fqn: e.status
+            for e in events
+            if e.phase == "sketch" and e.fqn is not None and e.status in ("done", "failed")
+        }
+
+        assert terminals.get("seedbank.taxon") == "failed"
+        assert terminals.get("seedbank.vault") == "done"
+
+
 class TestSafetyAndEdges:
     def test_throwing_callback_never_aborts_extraction(self, tmp_path: Path) -> None:
         def boom(_event: ProgressEvent) -> None:
@@ -399,6 +531,20 @@ class TestComputeDiffProgress:
         assert silent.exit_code == observed.exit_code
         assert silent.target_scanned_tables == observed.target_scanned_tables
 
+    def test_diff_never_emits_a_sketch_event(self, tmp_path: Path) -> None:
+        """`compute_diff` shares the catalogue pre-pass but never writes artifacts, so it must
+        never reach the key-sketch pass - even on a fixture with eligible columns.
+        """
+
+        fixture = _two_real_tables()
+        engine = _engine(tmp_path, fixture)
+        engine.generate(GenerateRequest(force=True))  # seed the baseline manifest
+
+        events: list[ProgressEvent] = []
+        engine.compute_diff(DiffRequest(on_progress=events.append))
+
+        assert not any(e.phase == "sketch" for e in events)
+
 
 class _RaisingAdapter(MockAdapter):
     """MockAdapter that raises in compute_column_statistics (Phase B) for one FQN.
@@ -437,3 +583,25 @@ class _RaisingAdapter(MockAdapter):
             on_column=on_column,
             scope=scope,
         )
+
+
+class _SketchRaisingAdapter(MockAdapter):
+    """Raises for one table's one column."""
+
+    def __init__(self, fixture: dict[str, MockTable], bad_fqn: str, bad_column: str) -> None:
+        super().__init__(fixture)
+        self._bad_fqn = bad_fqn
+        self._bad_column = bad_column
+
+    def compute_key_sketch(
+        self,
+        fqn: str,
+        column: str,
+        sql_type: str,
+        kind: SketchKind,
+        k: int,
+    ) -> tuple[int, ...]:
+        if fqn == self._bad_fqn and column == self._bad_column:
+            raise RuntimeError("sketch boom")
+
+        return super().compute_key_sketch(fqn, column, sql_type, kind, k)

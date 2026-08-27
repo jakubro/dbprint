@@ -8,6 +8,7 @@ import yaml
 
 from .issue import Issue
 from .layout import CANONICAL_ARTIFACTS, declared_artifacts, walkable_tables
+from .progress import TableSink
 from .yaml_utils import load_yaml
 
 
@@ -43,16 +44,25 @@ def check_manifest_annotations_presence(print_root: Path, manifest_data: dict) -
     ]
 
 
-def check(print_root: Path, manifest_data: dict) -> list[Issue]:
+def check(
+    print_root: Path,
+    manifest_data: dict,
+    *,
+    on_table: TableSink | None = None,
+) -> list[Issue]:
     """Cross-check manifest entries against the artifacts actually on disk."""
 
     issues: list[Issue] = []
     tables = walkable_tables(manifest_data)
+    total = len(tables)
     # Table dir -> the canonical filenames its entry declares; the second pass flags a file
     # on disk absent from this set as `manifest.orphaned-artifact`.
     declared_files: dict[Path, set[str]] = {}
 
-    for tbl_fqn, tbl_entry in tables.items():
+    for i, (tbl_fqn, tbl_entry) in enumerate(tables.items(), start=1):
+        if on_table is not None:
+            on_table(tbl_fqn, i, total)
+
         tbl_path_str = tbl_entry.get("path", "")
         tbl_dir = print_root / tbl_path_str
         artifacts = declared_artifacts(tbl_entry)

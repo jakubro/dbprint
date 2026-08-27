@@ -216,7 +216,8 @@ def _seed_baseline(tmp_path: Path, connection: str) -> None:
                         "cardinality_ratio": 1.0,
                         "cardinality_method": "exact",
                         "classification": "categorical",
-                        "inferred": {"candidate_key": True, "looks_like": "numeric_string"},
+                        # An integer column withholds `numeric_string` (SPEC 4.1.5).
+                        "inferred": {"candidate_key": True},
                     },
                     "logger_ipv4": {
                         "sql_type": "character varying(45)",

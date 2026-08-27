@@ -1,0 +1,23 @@
+/* Two adjustments to Starlight's three-column layout, both driven by --dbprint-toc-width.
+   Unlayered on purpose - an unlayered declaration outranks Starlight's `starlight.core` layer. */
+
+:root {
+  --dbprint-toc-width: 24rem;
+}
+
+@media (min-width: 72rem) {
+  .right-sidebar-container {
+    width: min(var(--dbprint-toc-width), 33%);
+  }
+
+  /* Starlight sizes this from --sl-sidebar-width too; filling the content box tracks the rail. */
+  .right-sidebar-panel .sl-container {
+    width: 100%;
+  }
+
+  [data-has-sidebar][data-has-toc] .main-pane {
+    --sl-content-margin-inline: auto;
+
+    width: calc(100% - min(var(--dbprint-toc-width), 33%));
+  }
+}

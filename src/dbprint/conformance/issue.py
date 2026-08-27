@@ -17,4 +17,5 @@ class Issue:
     code: str
     severity: Literal["error", "warning"]
     detail: str
+    # A bare section marker cites the format spec; any other document names itself first.
     spec_ref: str

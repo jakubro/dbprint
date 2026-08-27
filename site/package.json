@@ -1,0 +1,17 @@
+{
+  "name": "dbprint-site",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prebuild": "node scripts/copy-schemas.mjs",
+    "build": "astro build",
+    "postbuild": "node scripts/check-links.mjs",
+    "dev": "astro dev",
+    "preview": "astro preview"
+  },
+  "dependencies": {
+    "astro": "7.2.8",
+    "@astrojs/starlight": "0.41.9",
+    "unist-util-visit": "5.1.0"
+  }
+}

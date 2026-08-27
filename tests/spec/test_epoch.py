@@ -7,8 +7,14 @@ import json
 from decimal import Decimal
 from typing import get_args
 
+import pytest
+
 from dbprint.spec.epoch import EpochUnit, bounds_epoch_unit, sample_epoch_unit
 from dbprint.spec.looks_like import MATCH_THRESHOLD
+
+
+# isdigit()-true, isdecimal()-false: a superscript, a subscript, and a circled digit.
+_HOSTILE_DIGITS = ("\u00b9", "\u2081", "\u2460")
 
 
 class TestEnumAgreement:
@@ -127,6 +133,20 @@ class TestPerValueRule:
 
     def test_an_ordinary_digit_string_column_is_not_detected(self) -> None:
         assert sample_epoch_unit([str(i) for i in range(30)]) is None
+
+
+class TestHostileCharacters:
+    """isdigit()-true, isdecimal()-false codepoints must not reach `int()` and raise."""
+
+    @pytest.mark.parametrize("digit", _HOSTILE_DIGITS)
+    def test_a_hostile_digit_in_the_sample_does_not_raise(self, digit: str) -> None:
+        values = [f"19{digit}1949"] * 30
+
+        assert sample_epoch_unit(values) is None
+
+    @pytest.mark.parametrize("digit", _HOSTILE_DIGITS)
+    def test_a_hostile_digit_in_a_bound_does_not_raise(self, digit: str) -> None:
+        assert bounds_epoch_unit(f"19{digit}1949", 1786492800) is None
 
 
 class TestTheTwoRulesAreDisjointByConstruction:

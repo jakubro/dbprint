@@ -354,6 +354,35 @@ def load_project(start: Path | None = None) -> ProjectConfig:
             f"Run `dbprint init` in the project root to create one.",
         )
 
+    return _load_project_from(config_path)
+
+
+def load_project_at(locator: str | Path) -> ProjectConfig:
+    """Load .dbprint.yaml at an exact location - the file itself or its direct parent directory.
+
+    Never walks up or scans down; raises `ConfigError` naming the exact path checked.
+    """
+
+    path = Path(locator).expanduser()
+
+    if not path.is_absolute():
+        path = path.resolve()
+
+    config_path = path if path.name == ".dbprint.yaml" else path / ".dbprint.yaml"
+
+    if not config_path.is_file():
+        raise ConfigError(
+            f"no .dbprint.yaml at {config_path}. --project names an exact location - the "
+            f"config file itself, or the directory that directly contains it. No upward walk, "
+            f"no downward scan.",
+        )
+
+    return _load_project_from(config_path)
+
+
+def _load_project_from(config_path: Path) -> ProjectConfig:
+    """Parse one resolved `.dbprint.yaml` path into a `ProjectConfig`."""
+
     raw = _load_yaml(config_path)
     project_root = config_path.parent
 

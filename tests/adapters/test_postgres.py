@@ -1280,21 +1280,21 @@ class TestPartitionChildExclusion:
     ) -> None:
         with self._connect(postgres_test_db) as conn:
             conn.execute(
-                "CREATE TABLE public.batches (id int, logged_at date) PARTITION BY RANGE (logged_at)",
+                "CREATE TABLE public.batch (id int, logged_at date) PARTITION BY RANGE (logged_at)",
             )
             conn.execute(
-                "CREATE TABLE public.batches_2024 PARTITION OF public.batches "
+                "CREATE TABLE public.batch_2024 PARTITION OF public.batch "
                 "FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')",
             )
-            conn.execute("ALTER TABLE public.batches DETACH PARTITION public.batches_2024")
+            conn.execute("ALTER TABLE public.batch DETACH PARTITION public.batch_2024")
 
         adapter = PostgresAdapter(postgres_test_db)
         adapter.connect()
 
         try:
             fqns = {t.fqn for t in adapter.list_tables(include=["*"], exclude=[])}
-            assert "public.batches" in fqns
-            assert "public.batches_2024" in fqns
+            assert "public.batch" in fqns
+            assert "public.batch_2024" in fqns
         finally:
             adapter.close()
 

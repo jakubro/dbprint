@@ -541,7 +541,7 @@ def _match_isbn(s: str) -> bool:
     stripped = s.replace("-", "").replace(" ", "").upper()
 
     if len(stripped) == 13:
-        if not (stripped.isdigit() and stripped.startswith(("978", "979"))):
+        if not (stripped.isdecimal() and stripped.startswith(("978", "979"))):
             return False
 
         return _gs1_mod10_valid(stripped)
@@ -558,7 +558,7 @@ def _isbn10_check_valid(s: str) -> bool:
     for i, ch in enumerate(s):
         if ch == "X" and i == 9:
             value = 10
-        elif ch.isdigit():
+        elif ch.isdecimal():
             value = int(ch)
         else:
             return False
@@ -571,7 +571,7 @@ def _isbn10_check_valid(s: str) -> bool:
 def _match_ean(s: str) -> bool:
     """GTIN of 8, 12, 13 or 14 digits, GS1 mod-10 valid; no prefix table, unlike `isbn`."""
 
-    return len(s) in (8, 12, 13, 14) and s.isdigit() and _gs1_mod10_valid(s)
+    return len(s) in (8, 12, 13, 14) and s.isdecimal() and _gs1_mod10_valid(s)
 
 
 def _gs1_mod10_valid(digits: str) -> bool:

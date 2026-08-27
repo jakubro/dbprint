@@ -994,10 +994,10 @@ def _mysql_exec_many(port: int, db_name: str, statements: list[str]) -> None:
 
 
 REFERENCE_FIXTURE: dict[str, MockTable] = {
-    "garden.seedbank.accession": MockTable(
+    "garden.seedbank.curator": MockTable(
         type="table",
-        namespace_path=("garden", "seedbank", "accession"),
-        ddl="CREATE TABLE garden.seedbank.accession (id uuid PRIMARY KEY, email varchar(255));\n",
+        namespace_path=("garden", "seedbank", "curator"),
+        ddl="CREATE TABLE garden.seedbank.curator (id uuid PRIMARY KEY, email varchar(255));\n",
         columns=[
             ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1),
             ColumnMeta(
@@ -1039,7 +1039,7 @@ REFERENCE_FIXTURE: dict[str, MockTable] = {
         relationships=[
             ForeignKeyMeta(
                 column=("herbarium_id",),
-                target_table="garden.seedbank.collector",
+                target_table="garden.seedbank.herbarium",
                 target_column=("id",),
                 on_delete="CASCADE",
                 on_update="NO ACTION",
@@ -1059,7 +1059,7 @@ REFERENCE_FIXTURE: dict[str, MockTable] = {
                 nullable=False,
                 null_count=0,
                 null_rate=0.0,
-                cardinality=280421,
+                cardinality=250_000,
                 cardinality_ratio=1.0,
                 cardinality_method="exact",
                 inferred=Inferred(looks_like="uuid", candidate_key=True),
@@ -1069,7 +1069,7 @@ REFERENCE_FIXTURE: dict[str, MockTable] = {
                 nullable=False,
                 null_count=0,
                 null_rate=0.0,
-                cardinality=280421,
+                cardinality=250_000,
                 cardinality_ratio=1.0,
                 cardinality_method="exact",
                 inferred=Inferred(looks_like="email", candidate_key=True),
@@ -1078,15 +1078,15 @@ REFERENCE_FIXTURE: dict[str, MockTable] = {
                 sql_type="uuid",
                 nullable=True,
                 null_count=120,
-                null_rate=0.000428,
-                cardinality=11892,
-                cardinality_ratio=0.042406,
+                null_rate=0.00048,
+                cardinality=12_000,
+                cardinality_ratio=0.048,
                 cardinality_method="exact",
                 values=(
                     ValueCount(value="00000000-0000-7000-8000-000000000001", count=523),
                     ValueCount(value="00000000-0000-7000-8000-000000000002", count=420),
                 ),
-                values_coverage=0.003364,
+                values_coverage=0.003774,
                 distribution="long_tail",
             ),
             "is_active": ColumnStats(
@@ -1095,11 +1095,11 @@ REFERENCE_FIXTURE: dict[str, MockTable] = {
                 null_count=0,
                 null_rate=0.0,
                 cardinality=2,
-                cardinality_ratio=0.000007,
+                cardinality_ratio=0.000008,
                 cardinality_method="exact",
                 values=(
-                    ValueCount(value=True, count=270000),
-                    ValueCount(value=False, count=10421),
+                    ValueCount(value=True, count=240000),
+                    ValueCount(value=False, count=10000),
                 ),
                 values_coverage=1.0,
             ),
@@ -1108,7 +1108,7 @@ REFERENCE_FIXTURE: dict[str, MockTable] = {
                 nullable=False,
                 null_count=0,
                 null_rate=0.0,
-                cardinality=280421,
+                cardinality=250_000,
                 cardinality_ratio=1.0,
                 cardinality_method="exact",
                 range=Range(
@@ -1129,9 +1129,9 @@ REFERENCE_FIXTURE: dict[str, MockTable] = {
                 sql_type="integer",
                 nullable=True,
                 null_count=4200,
-                null_rate=0.014977,
+                null_rate=0.0168,
                 cardinality=120,
-                cardinality_ratio=0.000428,
+                cardinality_ratio=0.00048,
                 cardinality_method="exact",
                 range=Range(min=18, max=137, span_days=None),
                 percentiles={"p01": 19, "p25": 28, "p50": 41, "p75": 56, "p99": 89},
@@ -1142,18 +1142,18 @@ REFERENCE_FIXTURE: dict[str, MockTable] = {
             "email": [f"user{i}@example.com" for i in range(50)],
             "id": [f"00000000-0000-7000-8000-{i:012d}" for i in range(50)],
         },
-        row_count=280421,
-        row_count_estimate=280421,
+        row_count=250_000,
+        row_count_estimate=250_000,
         unique_keys=[
             UniqueKeyMeta(columns=("id",), primary=True),
             UniqueKeyMeta(columns=("email",)),
         ],
     ),
-    "garden.seedbank.collector": MockTable(
+    "garden.seedbank.herbarium": MockTable(
         type="table",
-        namespace_path=("garden", "seedbank", "collector"),
+        namespace_path=("garden", "seedbank", "herbarium"),
         ddl=(
-            "CREATE TABLE garden.seedbank.collector "
+            "CREATE TABLE garden.seedbank.herbarium "
             "(id uuid PRIMARY KEY, code varchar(16) NOT NULL);\n"
         ),
         columns=[
@@ -1176,7 +1176,7 @@ REFERENCE_FIXTURE: dict[str, MockTable] = {
                 nullable=False,
                 null_count=0,
                 null_rate=0.0,
-                cardinality=11892,
+                cardinality=12_000,
                 cardinality_ratio=1.0,
                 cardinality_method="exact",
                 inferred=Inferred(looks_like="uuid", candidate_key=True),
@@ -1186,14 +1186,14 @@ REFERENCE_FIXTURE: dict[str, MockTable] = {
                 nullable=False,
                 null_count=0,
                 null_rate=0.0,
-                cardinality=11892,
+                cardinality=12_000,
                 cardinality_ratio=1.0,
                 cardinality_method="exact",
                 inferred=Inferred(candidate_key=True),
             ),
         },
         samples={},
-        row_count=11892,
+        row_count=12_000,
         unique_keys=[
             UniqueKeyMeta(columns=("id",), primary=True),
             UniqueKeyMeta(columns=("code",)),

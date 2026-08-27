@@ -1,4 +1,4 @@
-"""Regenerate the v1 reference example from the producer, against a real Postgres.
+"""Regenerate the v1 reference example from the producer, against a throwaway Postgres.
 
 Everything under docs/format/v1/examples/ is what the code and database actually said, not
 hand-authored: timestamps are frozen post-run and user-authored files are seeded before it.
@@ -56,7 +56,7 @@ DRIFT_SQL = (SQL_DIR / "drift.sql").read_text()
 
 
 def build_example(credentials: dict[str, str], target: Path) -> None:
-    """Generate the whole example tree into `target` from a live database.
+    """Generate the whole example tree into `target` from a database seeded by `scripts/sql/`.
 
     Creates the schema in the caller's database, so it must be one they can afford to lose.
     """

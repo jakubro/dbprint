@@ -217,13 +217,24 @@ An MCP client launches the server itself, so it — not you — picks the workin
   "mcpServers": {
     "dbprint": {
       "command": "uvx",
-      "args": ["--from", "dbprint[mcp]", "dbprint", "serve", "--project-dir", "/srv/analytics"]
+      "args": ["--from", "dbprint[mcp]", "dbprint", "serve", "--project", "/srv/analytics"]
     }
   }
 }
 ```
 
 The server reads the committed print and never connects to a database, so the client needs no credentials.
+
+## Reading a remote project
+
+`--project` also accepts a git address, so a print committed to someone else's repository reads without cloning it by hand first:
+
+```bash
+dbprint list --project https://github.com/acme/demo
+dbprint context seedbank.accession --project git@github.com:acme/demo.git#main:srv/analytics
+```
+
+dbprint clones it for you and asks for no credentials of its own — your existing SSH agent or credential helper covers a private repository. It's read-only: commands that write or connect live to a database (`generate`, `diff`, `check --online`) refuse a remote locator; every other command works against it exactly as it does locally.
 
 ## Beyond the basics
 

@@ -102,6 +102,23 @@ class TestCategorical:
 
         assert synthesize(s) == "0 distinct"
 
+    def test_top_n_values_configured_limit_rides_the_truncated_list(self) -> None:
+        values = [{"value": f"v{i}", "count": 10 - i} for i in range(10)]
+        s = _stats("categorical", cardinality=10, values=values, values_coverage=0.42)
+        out = synthesize(s, statistics_params={"top_n_values": 3})
+
+        assert "... (10 total) (top 3 configured)" in out
+
+    def test_no_top_n_values_note_when_the_list_is_exhaustive(self) -> None:
+        s = _stats(
+            "categorical",
+            cardinality=2,
+            values=[{"value": "a", "count": 1}, {"value": "b", "count": 1}],
+            values_coverage=1.0,
+        )
+
+        assert "configured" not in synthesize(s, statistics_params={"top_n_values": 3})
+
 
 class TestForeignKeyCandidate:
     def test_uses_supplied_target(self) -> None:
@@ -177,6 +194,16 @@ class TestText:
 
         assert synthesize(_stats("text", values=[], values_coverage=1.0)) == "text"
 
+    def test_top_n_values_configured_limit_rides_the_truncated_list(self) -> None:
+        s = _stats(
+            "text",
+            values=[{"value": "a", "count": 200}, {"value": "b", "count": 150}],
+            values_coverage=0.86,
+        )
+        out = synthesize(s, statistics_params={"top_n_values": 2})
+
+        assert out == "top: a (200), b (150) (top 2 configured)"
+
 
 class TestJson:
     def test_label_only(self) -> None:
@@ -199,9 +226,44 @@ class TestNullRateSuffix:
         assert ", null" not in synthesize(s)
         assert "% null" not in synthesize(s)
 
+    def test_a_nullable_column_below_threshold_states_nullable(self) -> None:
+        """A suppressed rate must not read identically to a `NOT NULL` column."""
+
+        s = _stats(
+            "numeric",
+            range={"min": 0, "max": 1},
+            percentiles={"p50": 0},
+            null_rate=0.001,
+            nullable=True,
+        )
+        assert synthesize(s).endswith(", nullable")
+
+    def test_a_not_null_column_below_threshold_carries_no_suffix(self) -> None:
+        s = _stats(
+            "numeric",
+            range={"min": 0, "max": 1},
+            percentiles={"p50": 0},
+            null_rate=0.001,
+            nullable=False,
+        )
+        assert "nullable" not in synthesize(s)
+
+    def test_at_threshold_the_rate_alone_is_enough(self) -> None:
+        """`X% null` already states nullability; `nullable` beside it would be noise."""
+
+        s = _stats(
+            "numeric",
+            range={"min": 0, "max": 1},
+            percentiles={"p50": 0},
+            null_rate=0.123,
+            nullable=True,
+        )
+        assert synthesize(s).endswith(", 12.3% null")
+        assert "nullable" not in synthesize(s)
+
 
 class TestDistribution:
-    """`distribution` (SPEC 2.2.5) reaches numeric and temporal cells, redacted or not."""
+    """`distribution` (SPEC 2.2.5) reaches every cell schema-required to carry it, redacted or not."""
 
     def test_numeric_carries_the_shape_word(self) -> None:
         s = _stats(
@@ -238,6 +300,82 @@ class TestDistribution:
         assert "dominant_value" in out
         assert out.endswith("dominant_value")
 
+    def test_categorical_carries_the_shape_word(self) -> None:
+        s = _stats(
+            "categorical",
+            cardinality=2,
+            values=[{"value": "a", "count": 1}, {"value": "b", "count": 1}],
+            values_coverage=1.0,
+            distribution="imbalanced",
+        )
+        assert synthesize(s) == "2 distinct: a / b, imbalanced"
+
+    def test_categorical_absent_when_not_measured(self) -> None:
+        s = _stats(
+            "categorical",
+            cardinality=2,
+            values=[{"value": "a", "count": 1}, {"value": "b", "count": 1}],
+            values_coverage=1.0,
+        )
+        assert "imbalanced" not in synthesize(s)
+
+    def test_categorical_survives_redaction(self) -> None:
+        s = _stats(
+            "categorical",
+            cardinality=2,
+            values=[{"value": "a", "count": 1}, {"value": "b", "count": 1}],
+            values_coverage=1.0,
+            distribution="uniform",
+            redacted="mask",
+        )
+        assert synthesize(s) == "2 distinct, redacted (mask), uniform"
+
+    def test_text_carries_the_shape_word(self) -> None:
+        s = _stats(
+            "text",
+            values=[{"value": "a", "count": 200}, {"value": "b", "count": 150}],
+            values_coverage=0.86,
+            distribution="long_tail",
+        )
+        assert synthesize(s) == "top: a (200), b (150), long_tail"
+
+    def test_text_absent_when_not_measured(self) -> None:
+        s = _stats(
+            "text",
+            values=[{"value": "a", "count": 200}, {"value": "b", "count": 150}],
+            values_coverage=0.86,
+        )
+        assert "long_tail" not in synthesize(s)
+
+    def test_text_survives_redaction(self) -> None:
+        s = _stats(
+            "text",
+            values=[{"value": "a", "count": 200}, {"value": "b", "count": 150}],
+            values_coverage=0.86,
+            distribution="imbalanced",
+            redacted="drop",
+        )
+        assert synthesize(s) == "redacted (drop), top counts 200, 150, imbalanced"
+
+    def test_fk_candidate_carries_only_the_shape_word(self) -> None:
+        """The one word beside the target, not the full categorical treatment."""
+
+        s = _stats("foreign_key_candidate", distribution="imbalanced")
+        assert synthesize(s, fk_target="public.a.id") == "FK -> public.a.id, imbalanced"
+
+    def test_fk_candidate_absent_when_not_measured(self) -> None:
+        s = _stats("foreign_key_candidate")
+        assert synthesize(s, fk_target="public.a.id") == "FK -> public.a.id"
+
+    def test_fk_candidate_hints_only_mode_is_unaffected(self) -> None:
+        """The docs site already renders `distribution` as its own badge - not repeated here."""
+
+        s = _stats("foreign_key_candidate", distribution="imbalanced")
+        out = synthesize(s, fk_target="public.a.id", hints_only=True)
+
+        assert "imbalanced" not in out
+        assert out == "FK -> public.a.id"
+
 
 class TestLooksLikeSuffix:
     def test_appended_when_detected(self) -> None:
@@ -262,6 +400,99 @@ class TestLooksLikeSuffix:
             redacted="drop",
         )
         assert "looks like email" in synthesize(s)
+
+    def test_looks_like_sample_size_rides_the_verdict(self) -> None:
+        s = _stats(
+            "text",
+            values=[{"value": "a@b.com", "count": 1}],
+            inferred={"looks_like": "email"},
+        )
+        out = synthesize(s, statistics_params={"looks_like_sample_size": 500})
+
+        assert out.endswith(", looks like email (drawn 500)")
+
+    def test_no_sample_size_note_without_configured_params(self) -> None:
+        s = _stats(
+            "text",
+            values=[{"value": "a@b.com", "count": 1}],
+            inferred={"looks_like": "email"},
+        )
+        assert synthesize(s).endswith(", looks like email")
+
+    def test_the_evidence_a_verdict_rests_on_rides_beside_it(self) -> None:
+        """The same `sampled`/`matched` pair `search_columns` already carries (SPEC 4.1.5)."""
+
+        s = _stats(
+            "text",
+            values=[{"value": "a@b.com", "count": 1}],
+            inferred={"looks_like": "email", "sampled": 1000, "matched": 998},
+        )
+        assert synthesize(s).endswith(", looks like email (998 of 1000 sampled)")
+
+    def test_a_weak_verdict_is_distinguishable_from_a_strong_one(self) -> None:
+        weak = _stats(
+            "text",
+            values=[{"value": "a@b.com", "count": 1}],
+            inferred={"looks_like": "email", "sampled": 1000, "matched": 3},
+        )
+        strong = _stats(
+            "text",
+            values=[{"value": "a@b.com", "count": 1}],
+            inferred={"looks_like": "email", "sampled": 1000, "matched": 998},
+        )
+        assert "3 of 1000 sampled" in synthesize(weak)
+        assert "998 of 1000 sampled" in synthesize(strong)
+        assert synthesize(weak) != synthesize(strong)
+
+    def test_evidence_and_the_configured_cap_ride_together(self) -> None:
+        s = _stats(
+            "text",
+            values=[{"value": "a@b.com", "count": 1}],
+            inferred={"looks_like": "email", "sampled": 500, "matched": 480},
+        )
+        out = synthesize(s, statistics_params={"looks_like_sample_size": 500})
+
+        assert out.endswith(", looks like email (480 of 500 sampled, 500 configured)")
+
+
+class TestCoverageMethodSuffix:
+    """SPEC 2.2.4: `bounded` means the coverage figure is a clamp, not a raw measurement."""
+
+    def test_bounded_is_stated(self) -> None:
+        s = _stats(
+            "categorical",
+            cardinality=2,
+            values=[{"value": "a", "count": 1}, {"value": "b", "count": 1}],
+            values_coverage=1.0,
+            values_coverage_method="bounded",
+        )
+        assert synthesize(s).endswith(", coverage bounded")
+
+    def test_measured_is_silent(self) -> None:
+        s = _stats(
+            "categorical",
+            cardinality=2,
+            values=[{"value": "a", "count": 1}, {"value": "b", "count": 1}],
+            values_coverage=1.0,
+            values_coverage_method="measured",
+        )
+        assert "bounded" not in synthesize(s)
+
+    def test_dropped_in_hints_only_mode(self) -> None:
+        """The docs site carries its own `coverage_method` badge; notes should not repeat it."""
+
+        s = _stats(
+            "categorical",
+            cardinality=2,
+            values=[{"value": "a", "count": 1}, {"value": "b", "count": 1}],
+            values_coverage=1.0,
+            values_coverage_method="bounded",
+            inferred={"candidate_key": True},
+        )
+        out = synthesize(s, hints_only=True)
+
+        assert "candidate key" in out
+        assert "bounded" not in out
 
 
 class TestSensitivitySuffix:

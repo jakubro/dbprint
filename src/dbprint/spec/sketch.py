@@ -120,6 +120,24 @@ def decode_sketch(encoded: str) -> list[int] | None:
     return [int.from_bytes(raw[i : i + 8], "big") for i in range(0, len(raw), 8)]
 
 
+def contains_value(encoded: str, value: object, kind: SketchKind) -> bool | None:
+    """SPEC 2.2.14: whether `value` is a member of the sketched column's distinct set.
+
+    Exact only below the sketch's retained size (`K`); at or above it membership is not
+    answerable and this returns None. Raises ValueError on a malformed payload.
+    """
+
+    hashes = decode_sketch(encoded)
+
+    if hashes is None:
+        raise ValueError(f"not a valid sketch payload: {encoded!r}")
+
+    if len(hashes) >= K:
+        return None
+
+    return low64_md5(canonical_form(value, kind)) in set(hashes)
+
+
 _HASH_SPACE = 2**64  # sketch values are unsigned 64-bit hashes
 
 

@@ -5,18 +5,24 @@ from __future__ import annotations
 import fnmatch
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, get_args
+from typing import Any, cast, get_args
 
 import yaml
 
 from dbprint.config import ConnectionConfig
 from dbprint.engine import AssemblyOptions, assemble_context, assemble_structured_context
-from dbprint.engine.baseline import declared_artifacts, manifest_shape_error, walkable_tables
+from dbprint.engine.baseline import (
+    declared_artifacts,
+    manifest_shape_error,
+    table_directory,
+    walkable_tables,
+)
 from dbprint.spec.classification import Classification
 from dbprint.spec.looks_like import LooksLike
 from dbprint.spec.redaction import Primitive as RedactionPrimitive
 from dbprint.spec.sensitivity import Sensitivity
-from . import errors
+from . import errors, reference
+from .reference import ReferenceDocument
 from .state import ServedConnections
 
 
@@ -26,6 +32,7 @@ TOOL_NAMES = (
     "search_columns",
     "get_manifest",
     "get_diff",
+    "get_reference",
 )
 
 
@@ -139,7 +146,10 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
             "rows_scanned/row_count so a caller can tell a scanned-set number from a "
             "table-wide one; a match carrying a looks_like verdict carries the "
             "sampled/matched draw behind it, since a verdict from two values reads "
-            "identically to one from ten thousand otherwise. `limit` caps the result, "
+            "identically to one from ten thousand otherwise. A match carries "
+            "sensitivity/redacted/candidate_key (and candidate_key_exception where the "
+            "ratio falls short of 1.0) whenever the column does, so filtering on any of "
+            "them returns the matched category, not just a bare column name. `limit` caps the result, "
             "must be a positive integer, and the response says so when it caps. A "
             "result carries `unreadable_tables` only when a table's own statistics or "
             "annotations failed to parse: a statistics failure drops that table's "
@@ -240,6 +250,33 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
             },
         },
     ),
+    ToolDef(
+        name="get_reference",
+        description=(
+            "Return a slice of the format spec or the assertion DSL spec, by section "
+            "number - what a finding's own spec_ref names. Omit section for the heading "
+            "tree instead of the whole document. Depends on no connection or print."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "document": {
+                    "enum": ["assertions", "spec"],
+                    "description": "Which specification - the format spec, or the assertion DSL",
+                },
+                "section": {
+                    "type": "string",
+                    "description": (
+                        "A section number in the document's own scheme (e.g. '3', '2.2.4'), or "
+                        "a spec_ref citation copied verbatim from a finding ('§2.2.4', "
+                        "'ASSERTIONS.md §1.4') - any heading depth. Omit for the table of "
+                        "contents."
+                    ),
+                },
+            },
+            "required": ["document"],
+        },
+    ),
 )
 
 
@@ -264,6 +301,9 @@ def dispatch(
 
     if name == "get_diff":
         return _tool_get_diff(state, arguments)
+
+    if name == "get_reference":
+        return _tool_get_reference(arguments)
 
     raise errors.unknown_tool(name, list(TOOL_NAMES))
 
@@ -297,7 +337,7 @@ def _tool_get_table_context(
         budget=budget,
     )
 
-    table_dir = _print_root(conn) / (entry.get("path") or table.replace(".", "/"))
+    table_dir = table_directory(_print_root(conn), table, entry)
     declared = declared_artifacts(entry)
     corrupted = _corrupted_artifacts(table_dir, declared)
 
@@ -472,6 +512,22 @@ def _search_match(
             if inferred.get(key) is not None:
                 match[key] = inferred[key]
 
+    # The remaining predicates `_column_matches` filters on - a match needs its category.
+    if "sensitivity" in inferred:
+        match["sensitivity"] = inferred["sensitivity"]
+
+    redacted = col.get("redacted")
+
+    if isinstance(redacted, str) and redacted:
+        match["redacted"] = redacted
+
+    if inferred.get("candidate_key"):
+        match["candidate_key"] = True
+        exception = inferred.get("candidate_key_exception")
+
+        if exception is not None:
+            match["candidate_key_exception"] = exception
+
     note = annotation.get("note")
 
     if isinstance(note, str) and note.strip():
@@ -500,7 +556,7 @@ def _tool_search_columns(state: ServedConnections, arguments: dict[str, Any]) ->
     # named (MCP.md 4.3) - only match COLLECTION stops once `limit` is reached.
     for fqn, entry in sorted(walkable_tables(manifest).items()):
         artifacts = declared_artifacts(entry)
-        table_dir = print_root / (entry.get("path") or "")
+        table_dir = table_directory(print_root, fqn, entry)
         stats_columns, stats_error = _load_statistics_columns(table_dir, artifacts)
         annotation_columns, annotation_error = _load_annotation_columns(table_dir, artifacts)
 
@@ -572,6 +628,36 @@ def _tool_get_diff(state: ServedConnections, arguments: dict[str, Any]) -> dict[
         raise errors.yaml_parse_error(str(diff_path), str(exc)) from exc
 
     return data if isinstance(data, dict) else {}
+
+
+def _tool_get_reference(arguments: dict[str, Any]) -> str:
+    """No `conn` - the two reference documents depend on no connection or print."""
+
+    document = arguments.get("document")
+    allowed = _tool_schema("get_reference")["document"]["enum"]
+
+    if document not in allowed:
+        raise errors.invalid_enum_argument("document", document, allowed)
+
+    document_ = cast(ReferenceDocument, document)
+    section_number = arguments.get("section")
+
+    if section_number is None:
+        return reference.heading_tree(document_)
+
+    if not isinstance(section_number, str) or not section_number:
+        raise errors.invalid_enum_argument("section", section_number, ["a non-empty string"])
+
+    result = reference.section(document_, section_number)
+
+    if result is None:
+        raise errors.unknown_section(
+            document_,
+            section_number,
+            reference.section_numbers(document_),
+        )
+
+    return result
 
 
 # Helpers.

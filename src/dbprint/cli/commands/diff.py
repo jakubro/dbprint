@@ -14,7 +14,7 @@ from typing import Any
 import rich_click as click
 from rich.console import Console
 
-from dbprint.config import ConfigError, ConnectionConfig, load_project
+from dbprint.config import ConfigError, ConnectionConfig
 from dbprint.engine import (
     EXIT_CONNECTION,
     EXIT_GENERIC,
@@ -27,6 +27,7 @@ from dbprint.engine import (
 )
 from dbprint.engine.result import DiffResult
 from ..engine_setup import ConnectionSetupError, build_engine
+from ..options import project_option, refuse_if_remote, resolve_project
 from ..rendering import (
     build_progress_renderer,
     install_log_handler,
@@ -43,6 +44,7 @@ from ..run_log import close_run_log, log_run_header, log_run_summary, open_run_l
 
 @click.command(name="diff")
 @click.argument("conn", required=False)
+@project_option
 @click.option(
     "--include",
     "include_patterns",
@@ -95,6 +97,7 @@ from ..run_log import close_run_log, log_run_header, log_run_summary, open_run_l
 def diff_command(
     ctx: click.Context,
     conn: str | None,
+    project: str | None,
     include_patterns: tuple[str, ...],
     exclude_patterns: tuple[str, ...],
     fmt: str,
@@ -114,7 +117,7 @@ def diff_command(
     `--quiet` (which silences stderr progress only).
 
     Selector patterns are fnmatch globs over lowercased FQNs (`*` spans dots);
-    `--include` narrows, `--exclude` widens.
+    `--include` intersects and `--exclude` unions, so both only ever narrow scope.
 
     **Arguments:**
 
@@ -135,7 +138,8 @@ def diff_command(
     - `dbprint diff --threshold 0.05`: ignore statistic moves under 5%
     """
 
-    project_config = load_project()
+    refuse_if_remote(project, "diff")
+    project_config = resolve_project(project)
 
     try:
         connections = resolve(project_config, conn)

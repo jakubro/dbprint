@@ -13,6 +13,7 @@ from dbprint.assertions.predicate import parse as parse_predicate
 from dbprint.assertions.predicate import resolve as resolve_stat
 from .issue import Issue
 from .layout import declared_artifacts, walkable_tables
+from .progress import TableSink
 from .relationships import check_path_endpoint
 from .yaml_utils import load_yaml
 
@@ -38,7 +39,12 @@ def check_entry(data: Any, path: str, tbl_fqn: str) -> list[Issue]:
     return issues
 
 
-def check_verdicts(print_root: Path, manifest_data: dict) -> list[Issue]:
+def check_verdicts(
+    print_root: Path,
+    manifest_data: dict,
+    *,
+    on_table: TableSink | None = None,
+) -> list[Issue]:
     """Cross-check each annotated edge against its source table's own relationships.yaml.
 
     An entry addresses an edge by (column, target_table, target_column): a `verdict` on an
@@ -47,8 +53,13 @@ def check_verdicts(print_root: Path, manifest_data: dict) -> list[Issue]:
     """
 
     issues: list[Issue] = []
+    tables = walkable_tables(manifest_data)
+    total = len(tables)
 
-    for tbl_entry in walkable_tables(manifest_data).values():
+    for i, (tbl_fqn, tbl_entry) in enumerate(tables.items(), start=1):
+        if on_table is not None:
+            on_table(tbl_fqn, i, total)
+
         artifacts = declared_artifacts(tbl_entry)
 
         if "relationships_annotations" not in artifacts or "relationships" not in artifacts:
@@ -87,7 +98,12 @@ def check_verdicts(print_root: Path, manifest_data: dict) -> list[Issue]:
     return issues
 
 
-def check_claims(print_root: Path, manifest_data: dict) -> list[Issue]:
+def check_claims(
+    print_root: Path,
+    manifest_data: dict,
+    *,
+    on_table: TableSink | None = None,
+) -> list[Issue]:
     """Warn when a checkable edge claim (SPEC 2.7.2) contradicts its edge's own `observed`.
 
     Mirrors `column_annotations.check_claims` against `relationships.yaml`, differing only in
@@ -97,8 +113,13 @@ def check_claims(print_root: Path, manifest_data: dict) -> list[Issue]:
     """
 
     issues: list[Issue] = []
+    tables = walkable_tables(manifest_data)
+    total = len(tables)
 
-    for tbl_entry in walkable_tables(manifest_data).values():
+    for i, (tbl_fqn, tbl_entry) in enumerate(tables.items(), start=1):
+        if on_table is not None:
+            on_table(tbl_fqn, i, total)
+
         artifacts = declared_artifacts(tbl_entry)
 
         if "relationships_annotations" not in artifacts or "relationships" not in artifacts:

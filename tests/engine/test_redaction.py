@@ -642,7 +642,7 @@ def _redacted_print_errors(
 
 def _shapes_payload(tmp_path: Path) -> dict[str, Any]:
     return yaml.safe_load(
-        (tmp_path / "primary" / "fixture" / "shape_probe" / "statistics.yaml").read_text(),
+        (tmp_path / "primary" / "fixture" / "contact_probe" / "statistics.yaml").read_text(),
     )
 
 
@@ -654,10 +654,10 @@ def _valueless_fixture() -> dict[str, MockTable]:
     """
 
     return {
-        "fixture.shape_probe": MockTable(
+        "fixture.contact_probe": MockTable(
             type="table",
-            namespace_path=("fixture", "shape_probe"),
-            ddl="CREATE TABLE fixture.shape_probe (phone bigint, payload jsonb, field_photo bytea);\n",
+            namespace_path=("fixture", "contact_probe"),
+            ddl="CREATE TABLE fixture.contact_probe (phone bigint, payload jsonb, field_photo bytea);\n",
             columns=[
                 ColumnMeta(
                     name="phone",

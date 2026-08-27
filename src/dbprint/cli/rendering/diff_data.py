@@ -24,6 +24,24 @@ _STAT_PATH_TO_THRESHOLD_KEY = {
     "values_coverage": "values_coverage",
 }
 
+# SPEC 2.6.4's fixed counter order - matches `engine.diff._summarize`'s own dict order.
+_SUMMARY_ORDER = (
+    "tables_added",
+    "tables_removed",
+    "tables_modified",
+    "columns_added",
+    "columns_removed",
+    "columns_type_changed",
+    "columns_nullable_changed",
+    "columns_default_changed",
+    "statistics_drifted",
+    "relationships_changed",
+    "indexes_changed",
+    "comments_changed",
+    "unchanged_tables",
+    "unevaluated_tables",
+)
+
 
 @dataclass(frozen=True)
 class DiffRenderOptions:
@@ -40,6 +58,9 @@ def render_human_text(diff_dict: dict[str, Any], options: DiffRenderOptions) -> 
     conn_name = diff_dict.get("connection") or "(unknown)"
     buf.write(f"Connection: {conn_name}\n")
     buf.write("Comparing committed prints against live DB...\n\n")
+    buf.write(_baseline_line(diff_dict.get("baseline") or {}) + "\n")
+    buf.write(_target_line(diff_dict.get("target") or {}) + "\n")
+    buf.write(_summary_line(diff_dict.get("summary") or {}) + "\n\n")
 
     changes = diff_dict.get("changes") or []
 
@@ -47,7 +68,13 @@ def render_human_text(diff_dict: dict[str, Any], options: DiffRenderOptions) -> 
     _emit_section(buf, "Modified (row count)", _row_count_lines_by_table(changes))
     _emit_section(buf, "Modified (grain)", _grain_lines_by_table(changes))
     _emit_section(buf, "Modified (physical layout)", _physical_layout_lines_by_table(changes))
-    _emit_section(buf, "Modified (statistics)", _statistics_lines_by_table(changes, options))
+    statistics_by_table, elided = _statistics_lines_by_table(changes, options)
+    _emit_section(buf, "Modified (statistics)", statistics_by_table)
+
+    if elided:
+        plural = "" if elided == 1 else "s"
+        buf.write(f"({elided} change{plural} elided below threshold)\n\n")
+
     _emit_section(buf, "Modified (relationships)", _relationship_lines_by_table(changes))
     _emit_section(buf, "Modified (indexes)", _index_lines_by_table(changes))
     _emit_simple_section(buf, "Added", _added_lines(changes))
@@ -73,6 +100,74 @@ def render_data(diff_dicts: list[dict[str, Any]], fmt: str, stream: TextIO) -> N
     else:
         json.dump(diff_dicts, stream, indent=2, default=str, sort_keys=False)
         stream.write("\n")
+
+
+# Headline helpers.
+
+
+def _baseline_line(baseline: dict[str, Any]) -> str:
+    """What the live database was compared against (SPEC 2.6.4)."""
+
+    path = baseline.get("path") or "(unknown)"
+    bits = [f"Baseline: {path}"]
+    generated_at = baseline.get("generated_at")
+
+    if generated_at is not None:
+        bits.append(f"generated {generated_at}")
+
+    version = baseline.get("dbprint_version")
+
+    if version is not None:
+        bits.append(f"dbprint {version}")
+
+    return ", ".join(bits)
+
+
+def _target_line(target: dict[str, Any]) -> str:
+    """What was scanned and under which selectors (SPEC 2.6.4).
+
+    `selectors` renders only when it actually narrows.
+    """
+
+    bits = ["Target: live database"]
+    scanned_at = target.get("scanned_at")
+
+    if scanned_at is not None:
+        bits.append(f"scanned {scanned_at}")
+
+    tables_scanned = target.get("tables_scanned")
+
+    if tables_scanned is not None:
+        plural = "" if tables_scanned == 1 else "s"
+        bits.append(f"{tables_scanned} table{plural} scanned")
+
+    selectors = target.get("selectors") or {}
+    include, exclude = selectors.get("include") or [], selectors.get("exclude") or []
+
+    if include or exclude:
+        clause = "selectors"
+
+        if include:
+            clause += f" include={include}"
+
+        if exclude:
+            clause += f" exclude={exclude}"
+
+        bits.append(clause)
+
+    return ", ".join(bits)
+
+
+def _summary_line(summary: dict[str, Any]) -> str:
+    """Non-zero counters only, in the artifact's own fixed order (SPEC 2.6.4).
+
+    Read from the artifact, never recomputed from the rendered sections - those are
+    threshold-filtered, so the headline would agree with the body and disagree with the data.
+    """
+
+    parts = [f"{key}={summary[key]}" for key in _SUMMARY_ORDER if summary.get(key)]
+
+    return "Summary: " + (", ".join(parts) if parts else "no changes")
 
 
 # Section helpers.
@@ -251,14 +346,23 @@ def _format_physical_layout_side(block: dict[str, Any] | None) -> str:
 def _statistics_lines_by_table(
     changes: list[dict[str, Any]],
     options: DiffRenderOptions,
-) -> dict[str, list[str]]:
+) -> tuple[dict[str, list[str]], int]:
+    """Rendered lines per table, plus how many `statistic_changed` events fell below threshold.
+
+    `--format json`/`yaml` stay unfiltered; the count is what was missing, so a table whose
+    only change is sub-threshold does not silently vanish.
+    """
+
     out: dict[str, list[str]] = {}
+    elided = 0
 
     for ev in changes:
         if ev.get("kind") != "statistic_changed":
             continue
 
         if not _statistic_passes_threshold(ev, options):
+            elided += 1
+
             continue
 
         fqn = ev.get("table") or ""
@@ -267,7 +371,7 @@ def _statistics_lines_by_table(
     for values in out.values():
         values.sort()
 
-    return out
+    return out, elided
 
 
 def _statistic_passes_threshold(ev: dict[str, Any], options: DiffRenderOptions) -> bool:
@@ -411,8 +515,9 @@ def _format_index_event(ev: dict[str, Any]) -> str:
     if kind == "index_added":
         cols = _format_columns(ev.get("columns"))
         unique = ev.get("unique")
+        idx_type = ev.get("type")
 
-        return f"+ {name}: ({cols}) unique={unique}"
+        return f"+ {name}: ({cols}) unique={unique} type={idx_type}"
     elif kind == "index_removed":
         return f"- {name}"
     elif kind == "index_modified":
@@ -420,8 +525,16 @@ def _format_index_event(ev: dict[str, Any]) -> str:
         after = ev.get("after") or {}
         b_cols = _format_columns(before.get("columns"))
         a_cols = _format_columns(after.get("columns"))
+        line = f"~ {name}: ({b_cols}) -> ({a_cols})"
+        details = []
 
-        return f"~ {name}: ({b_cols}) -> ({a_cols})"
+        if before.get("unique") != after.get("unique"):
+            details.append(f"unique {before.get('unique')} -> {after.get('unique')}")
+
+        if before.get("type") != after.get("type"):
+            details.append(f"type {before.get('type')} -> {after.get('type')}")
+
+        return f"{line}   {', '.join(details)}" if details else line
     else:
         return f"~ {name}"
 

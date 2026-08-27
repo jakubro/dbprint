@@ -31,10 +31,6 @@ columns:
     cardinality: 300
     cardinality_ratio: 0.38961
     cardinality_method: exact
-    inferred:
-      looks_like: numeric_string
-      sampled: 300
-      matched: 300
     values:
     - value: 100
       count: 3

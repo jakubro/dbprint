@@ -193,6 +193,165 @@ def _curator_fixture() -> dict[str, MockTable]:
     }
 
 
+def _numeric_looks_like_fixture() -> dict[str, MockTable]:
+    """Four numeric-typed columns reaching `looks_like` through different classifications,
+    plus one text control - the suppression keys on SQL type, not on classification.
+    """
+
+    return {
+        "fixture.probe_target": MockTable(
+            type="table",
+            namespace_path=("fixture", "probe_target"),
+            ddl="CREATE TABLE fixture.probe_target (id integer PRIMARY KEY);\n",
+            columns=[
+                ColumnMeta(name="id", sql_type="integer", nullable=False, default=None, ordinal=1),
+            ],
+            relationships=[],
+            indexes=[],
+            comments=CommentsMeta(table=None, columns={}),
+            stats={
+                "id": ColumnStats(
+                    sql_type="integer",
+                    nullable=False,
+                    null_count=0,
+                    null_rate=0.0,
+                    cardinality=20,
+                    cardinality_ratio=1.0,
+                    cardinality_method="exact",
+                    values=tuple(ValueCount(value=1000 + i, count=1) for i in range(20)),
+                    values_coverage=1.0,
+                    distribution="uniform",
+                    inferred=Inferred(candidate_key=True),
+                ),
+            },
+            samples={"id": [str(1000 + i) for i in range(20)]},
+            row_count=20,
+        ),
+        "fixture.type_probe": MockTable(
+            type="table",
+            namespace_path=("fixture", "type_probe"),
+            ddl=(
+                "CREATE TABLE fixture.type_probe (\n"
+                "    target_id integer NOT NULL,\n"
+                "    status_code integer NOT NULL,\n"
+                "    serial_label character varying(20) NOT NULL,\n"
+                "    device_imei bigint NOT NULL\n"
+                ");\n"
+            ),
+            columns=[
+                ColumnMeta(
+                    name="target_id",
+                    sql_type="integer",
+                    nullable=False,
+                    default=None,
+                    ordinal=1,
+                ),
+                ColumnMeta(
+                    name="status_code",
+                    sql_type="integer",
+                    nullable=False,
+                    default=None,
+                    ordinal=2,
+                ),
+                ColumnMeta(
+                    name="serial_label",
+                    sql_type="character varying(20)",
+                    nullable=False,
+                    default=None,
+                    ordinal=3,
+                ),
+                ColumnMeta(
+                    name="device_imei",
+                    sql_type="bigint",
+                    nullable=False,
+                    default=None,
+                    ordinal=4,
+                ),
+            ],
+            relationships=[
+                ForeignKeyMeta(
+                    column=("target_id",),
+                    target_table="fixture.probe_target",
+                    target_column=("id",),
+                    on_delete="CASCADE",
+                    on_update="NO ACTION",
+                    constraint_name="type_probe_target_fk",
+                ),
+            ],
+            indexes=[],
+            comments=CommentsMeta(table=None, columns={}),
+            stats={
+                # Declared FK -> foreign_key_candidate. Digit-shaped samples would otherwise
+                # publish numeric_string on a column whose own type already says "integer".
+                "target_id": ColumnStats(
+                    sql_type="integer",
+                    nullable=False,
+                    null_count=0,
+                    null_rate=0.0,
+                    cardinality=20,
+                    cardinality_ratio=0.2,
+                    cardinality_method="exact",
+                    values=tuple(ValueCount(value=1000 + i, count=5) for i in range(20)),
+                    values_coverage=0.2,
+                    distribution="uniform",
+                ),
+                # cardinality 3 <= enumeration_threshold(50) -> categorical.
+                "status_code": ColumnStats(
+                    sql_type="integer",
+                    nullable=False,
+                    null_count=0,
+                    null_rate=0.0,
+                    cardinality=3,
+                    cardinality_ratio=0.03,
+                    cardinality_method="exact",
+                    values=(
+                        ValueCount(value=1, count=40),
+                        ValueCount(value=2, count=35),
+                        ValueCount(value=3, count=25),
+                    ),
+                    values_coverage=1.0,
+                    distribution="uniform",
+                ),
+                # cardinality above enumeration_threshold(50) -> text: the control case, where
+                # a digit-shaped sample on a non-numeric type must still publish the verdict.
+                "serial_label": ColumnStats(
+                    sql_type="character varying(20)",
+                    nullable=False,
+                    null_count=0,
+                    null_rate=0.0,
+                    cardinality=60,
+                    cardinality_ratio=0.6,
+                    cardinality_method="exact",
+                    values=tuple(ValueCount(value=str(9000 + i), count=1) for i in range(60)),
+                    values_coverage=0.6,
+                    distribution="uniform",
+                ),
+                # cardinality 1 <= enumeration_threshold -> categorical, but its samples are a
+                # valid IMEI - a pattern that outranks numeric_string, so suppression skips it.
+                "device_imei": ColumnStats(
+                    sql_type="bigint",
+                    nullable=False,
+                    null_count=0,
+                    null_rate=0.0,
+                    cardinality=1,
+                    cardinality_ratio=0.01,
+                    cardinality_method="exact",
+                    values=(ValueCount(value=352099001761481, count=100),),
+                    values_coverage=1.0,
+                    distribution="uniform",
+                ),
+            },
+            samples={
+                "target_id": [str(1000 + i) for i in range(20)],
+                "status_code": ["1", "2", "3"] * 20,
+                "serial_label": [str(9000 + i) for i in range(60)],
+                "device_imei": ["352099001761481"] * 20,
+            },
+            row_count=100,
+        ),
+    }
+
+
 def _build_engine(tmp_path: Path, fixture: dict[str, MockTable]) -> Engine:
     adapter = MockAdapter(fixture)
     conn = _conn_config(tmp_path)
@@ -583,6 +742,71 @@ class TestClassification:
         assert (
             stats["columns"]["id"]["inferred"]["candidate_key_exception"] == "measured_duplicates"
         )
+
+
+class TestNumericStringSuppressedOnNumericType:
+    """SPEC 4.1.5: `numeric_string` is withheld where the column's own SQL type is already
+    numeric, on every classification that would otherwise publish it."""
+
+    def test_a_numeric_fk_source_carries_no_looks_like(self, tmp_path: Path) -> None:
+        _build_engine(tmp_path, _numeric_looks_like_fixture()).generate()
+        stats = yaml.safe_load(
+            (tmp_path / "primary" / "fixture" / "type_probe" / "statistics.yaml").read_text(),
+        )
+        inferred = stats["columns"]["target_id"].get("inferred") or {}
+
+        assert stats["columns"]["target_id"]["classification"] == "foreign_key_candidate"
+        assert "looks_like" not in inferred
+        assert "sampled" not in inferred
+        assert "matched" not in inferred
+
+    def test_a_numeric_categorical_column_carries_no_looks_like(self, tmp_path: Path) -> None:
+        _build_engine(tmp_path, _numeric_looks_like_fixture()).generate()
+        stats = yaml.safe_load(
+            (tmp_path / "primary" / "fixture" / "type_probe" / "statistics.yaml").read_text(),
+        )
+        inferred = stats["columns"]["status_code"].get("inferred") or {}
+
+        assert stats["columns"]["status_code"]["classification"] == "categorical"
+        assert "looks_like" not in inferred
+        assert "sampled" not in inferred
+        assert "matched" not in inferred
+
+    def test_a_text_column_of_digit_strings_still_publishes_the_verdict(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The control case: the exclusion is type-aware, not classification-aware alone."""
+
+        _build_engine(tmp_path, _numeric_looks_like_fixture()).generate()
+        stats = yaml.safe_load(
+            (tmp_path / "primary" / "fixture" / "type_probe" / "statistics.yaml").read_text(),
+        )
+
+        assert stats["columns"]["serial_label"]["classification"] == "text"
+        assert stats["columns"]["serial_label"]["inferred"]["looks_like"] == "numeric_string"
+
+    def test_a_numeric_column_matching_a_higher_priority_pattern_still_publishes_it(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Suppression, not fall-through: `imei` already outranks `numeric_string`."""
+
+        _build_engine(tmp_path, _numeric_looks_like_fixture()).generate()
+        stats = yaml.safe_load(
+            (tmp_path / "primary" / "fixture" / "type_probe" / "statistics.yaml").read_text(),
+        )
+
+        assert stats["columns"]["device_imei"]["classification"] == "categorical"
+        assert stats["columns"]["device_imei"]["inferred"]["looks_like"] == "imei"
+
+    def test_the_print_conforms(self, tmp_path: Path) -> None:
+        """Absence of `looks_like` on a numeric column is licensed, not a conformance finding."""
+
+        _build_engine(tmp_path, _numeric_looks_like_fixture()).generate()
+        issues = validate_print(tmp_path / "primary")
+        errors = [i for i in issues if i.severity == "error"]
+        assert errors == [], "Conformance violations:\n" + "\n".join(str(e) for e in errors)
 
 
 class TestUnsupportedFallthroughFollowsMeasurement:
@@ -1165,6 +1389,96 @@ class TestFaultIsolation:
         failure = next(t for t in result.tables if t.status == "failed")
         assert "rules[0]" in (failure.error or "")
         assert "rules[1]" in (failure.error or "")
+
+
+class TestClassifierFaultIsolation:
+    """A classifier fault costs one column's verdict, never the table (run-all-then-report)."""
+
+    @staticmethod
+    def _stats(tmp_path: Path, table: str) -> dict[str, Any]:
+        return yaml.safe_load(
+            (tmp_path / "primary" / "public" / table / "statistics.yaml").read_text(),
+        )
+
+    def test_a_raising_looks_like_detector_still_completes_the_table(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            orchestrator,
+            "detect_with_evidence",
+            lambda values: (_ for _ in ()).throw(ValueError("hostile value")),
+        )
+        result = _build_engine(tmp_path, _curator_fixture()).generate()
+
+        statuses = {t.fqn: t.status for t in result.tables}
+        assert statuses == {"public.curator": "ok", "public.herbarium": "ok"}
+        assert result.summary.failed == 0
+
+        curator_id = self._stats(tmp_path, "curator")["columns"]["id"]
+        assert "looks_like" not in (curator_id.get("inferred") or {})
+        # candidate_key does not depend on the raising detector and must survive.
+        assert curator_id["inferred"]["candidate_key"] is True
+
+    def test_a_raising_sensitivity_detector_still_completes_the_table(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            orchestrator,
+            "detect_sensitivity",
+            lambda physical_name, samples, looks_like: (_ for _ in ()).throw(
+                ValueError("hostile value"),
+            ),
+        )
+        result = _build_engine(tmp_path, _curator_fixture()).generate()
+
+        statuses = {t.fqn: t.status for t in result.tables}
+        assert statuses == {"public.curator": "ok", "public.herbarium": "ok"}
+        assert result.summary.failed == 0
+
+    def test_a_raising_bounds_epoch_unit_does_not_raise_out_of_assemble_stats(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The second seam: reached from `_assemble_stats` after Phase B, not `_detect_columns` -
+        it cannot move earlier because it reads Phase B's own `range`."""
+
+        monkeypatch.setattr(
+            orchestrator,
+            "bounds_epoch_unit",
+            lambda lo, hi: (_ for _ in ()).throw(ValueError("hostile value")),
+        )
+        columns = [
+            ColumnMeta(name="ts", sql_type="bigint", nullable=False, default=None, ordinal=1),
+        ]
+        stats = {
+            "ts": ColumnStats(
+                sql_type="bigint",
+                nullable=False,
+                null_count=0,
+                null_rate=0.0,
+                cardinality=100,
+                cardinality_ratio=1.0,
+                cardinality_method="exact",
+                range=Range(min=1704067200, max=1786492800),
+            ),
+        }
+        detected = {"ts": orchestrator._ColumnDetection(classification="numeric", inferred=None)}
+
+        enriched = orchestrator._assemble_stats(
+            "public.t",
+            columns,
+            stats,
+            detected,
+            frozenset(),
+            "2026-01-01T00:00:00Z",
+        )
+
+        assert "ts" in enriched
+        assert enriched["ts"].inferred is None
 
 
 class TestFreshness:
@@ -1760,10 +2074,10 @@ class TestRecordedFreshnessThreshold:
 
     @staticmethod
     def _with_a_view(fixture: dict[str, MockTable]) -> dict[str, MockTable]:
-        fixture["public.active_curator_v"] = MockTable(
+        fixture["public.active_curators_v"] = MockTable(
             type="view",
-            namespace_path=("public", "active_curator_v"),
-            ddl="CREATE VIEW public.active_curator_v AS SELECT id FROM public.curator;\n",
+            namespace_path=("public", "active_curators_v"),
+            ddl="CREATE VIEW public.active_curators_v AS SELECT id FROM public.curator;\n",
             columns=[
                 ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1),
             ],
@@ -1794,7 +2108,7 @@ class TestRecordedFreshnessThreshold:
         engine = _build_engine(tmp_path, self._with_a_view(_curator_fixture()))
         engine.generate()
 
-        assert _thresholds(tmp_path / "primary" / "manifest.yaml")["public.active_curator_v"] == 7
+        assert _thresholds(tmp_path / "primary" / "manifest.yaml")["public.active_curators_v"] == 7
 
     def test_a_skipped_table_records_the_freshly_resolved_threshold(self, tmp_path: Path) -> None:
         """The skip read the new number, so the entry advertising the old one would disagree."""
@@ -1913,11 +2227,11 @@ class TestCatalogOnlyViewStatistics:
     @staticmethod
     def _view_fixture() -> dict[str, MockTable]:
         fixture = _curator_fixture()
-        fixture["public.active_curator_v"] = MockTable(
+        fixture["public.active_curators_v"] = MockTable(
             type="view",
-            namespace_path=("public", "active_curator_v"),
+            namespace_path=("public", "active_curators_v"),
             ddl=(
-                "CREATE VIEW public.active_curator_v AS SELECT id, herbarium_id, "
+                "CREATE VIEW public.active_curators_v AS SELECT id, herbarium_id, "
                 "display_name, matures_at FROM public.curator;\n"
             ),
             columns=[
@@ -1952,7 +2266,7 @@ class TestCatalogOnlyViewStatistics:
                     target_column=("id",),
                     on_delete="CASCADE",
                     on_update="NO ACTION",
-                    constraint_name="active_curator_v_herbarium_fk",
+                    constraint_name="active_curators_v_herbarium_fk",
                 ),
             ],
             indexes=[],
@@ -1964,12 +2278,12 @@ class TestCatalogOnlyViewStatistics:
         return fixture
 
     def _statistics(self, tmp_path: Path) -> dict[str, Any]:
-        path = tmp_path / "primary" / "public" / "active_curator_v" / "statistics.yaml"
+        path = tmp_path / "primary" / "public" / "active_curators_v" / "statistics.yaml"
 
         return yaml.safe_load(path.read_text())
 
     def test_the_marker_and_column_classifications(self, tmp_path: Path) -> None:
-        adapter = _NoQueryAgainstTheViewAdapter(self._view_fixture(), "public.active_curator_v")
+        adapter = _NoQueryAgainstTheViewAdapter(self._view_fixture(), "public.active_curators_v")
         Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
 
         statistics = self._statistics(tmp_path)
@@ -1987,7 +2301,7 @@ class TestCatalogOnlyViewStatistics:
         assert columns["matures_at"]["classification"] == "temporal"
 
     def test_no_column_carries_a_measured_field(self, tmp_path: Path) -> None:
-        adapter = _NoQueryAgainstTheViewAdapter(self._view_fixture(), "public.active_curator_v")
+        adapter = _NoQueryAgainstTheViewAdapter(self._view_fixture(), "public.active_curators_v")
         Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
 
         allowed = {"sql_type", "nullable", "classification", "physical_name", "collation"}
@@ -1998,7 +2312,7 @@ class TestCatalogOnlyViewStatistics:
     def test_zero_queries_issued_against_the_view(self, tmp_path: Path) -> None:
         """The adapter raises if a measurement reaches the view; a clean run proves none did."""
 
-        adapter = _NoQueryAgainstTheViewAdapter(self._view_fixture(), "public.active_curator_v")
+        adapter = _NoQueryAgainstTheViewAdapter(self._view_fixture(), "public.active_curators_v")
         result = Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
 
         assert result.summary.failed == 0
@@ -2007,7 +2321,7 @@ class TestCatalogOnlyViewStatistics:
         _build_engine(tmp_path, self._view_fixture()).generate()
 
         manifest = yaml.safe_load((tmp_path / "primary" / "manifest.yaml").read_text())
-        entry = manifest["tables"]["public.active_curator_v"]
+        entry = manifest["tables"]["public.active_curators_v"]
 
         assert entry["columns"] == len(self._statistics(tmp_path)["columns"])
         assert "statistics" in entry["artifacts"]
@@ -2021,7 +2335,7 @@ class TestCatalogOnlyViewStatistics:
         assert errors == []
 
     def _engine(self, tmp_path: Path) -> Engine:
-        adapter = _NoQueryAgainstTheViewAdapter(self._view_fixture(), "public.active_curator_v")
+        adapter = _NoQueryAgainstTheViewAdapter(self._view_fixture(), "public.active_curators_v")
 
         return Engine(adapter, _conn_config(tmp_path), tmp_path)
 
@@ -2031,7 +2345,7 @@ class TestCatalogOnlyViewStatistics:
 
         diff_path = tmp_path / "primary" / "diff.yaml"
         diff = yaml.safe_load(diff_path.read_text())
-        view_events = [c for c in diff["changes"] if c.get("table") == "public.active_curator_v"]
+        view_events = [c for c in diff["changes"] if c.get("table") == "public.active_curators_v"]
 
         assert view_events == []
         assert result.summary.failed == 0
@@ -2045,10 +2359,10 @@ class TestAViewsRelationshipsAreAlwaysDeclared:
     @staticmethod
     def _edgeless_view_fixture() -> dict[str, MockTable]:
         fixture = _curator_fixture()
-        fixture["public.active_curator_v"] = MockTable(
+        fixture["public.active_curators_v"] = MockTable(
             type="view",
-            namespace_path=("public", "active_curator_v"),
-            ddl="CREATE VIEW public.active_curator_v AS SELECT id FROM public.curator;\n",
+            namespace_path=("public", "active_curators_v"),
+            ddl="CREATE VIEW public.active_curators_v AS SELECT id FROM public.curator;\n",
             columns=[
                 ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1),
             ],
@@ -2068,7 +2382,7 @@ class TestAViewsRelationshipsAreAlwaysDeclared:
         _build_engine(tmp_path, self._edgeless_view_fixture()).generate()
 
         manifest = yaml.safe_load((tmp_path / "primary" / "manifest.yaml").read_text())
-        entry = manifest["tables"]["public.active_curator_v"]
+        entry = manifest["tables"]["public.active_curators_v"]
 
         assert "relationships" in entry["artifacts"]
         assert (tmp_path / "primary" / entry["path"] / "relationships.yaml").is_file()
@@ -2078,7 +2392,7 @@ class TestAViewsRelationshipsAreAlwaysDeclared:
 
         _build_engine(tmp_path, self._edgeless_view_fixture()).generate()
         print_root = tmp_path / "primary"
-        rel_path = print_root / "public" / "active_curator_v" / "relationships.yaml"
+        rel_path = print_root / "public" / "active_curators_v" / "relationships.yaml"
 
         assert not any(i.code == "schema.invalid-yaml" for i in validate_print(print_root))
 
@@ -2087,7 +2401,7 @@ class TestAViewsRelationshipsAreAlwaysDeclared:
         issues = validate_print(print_root)
         assert any(
             i.code == "schema.invalid-yaml"
-            and i.path == "public/active_curator_v/relationships.yaml"
+            and i.path == "public/active_curators_v/relationships.yaml"
             for i in issues
         )
 

@@ -50,3 +50,27 @@ jobs:
             /tmp/dbprint--test.log
             /tmp/dbprint--lint.log
           if-no-files-found: error
+
+  site:
+    if: github.event.repository.private == false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install just
+        run: curl -LsSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
+
+      - name: Build the site
+        run: just site
+
+      - name: Upload the site build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: site-log
+          path: /tmp/dbprint--site.log
+          if-no-files-found: error

@@ -442,7 +442,7 @@ class TestRowCountSentinels:
         assert row_count_or_none(0) == 0
 
     def test_a_float_reading_narrows_to_int(self) -> None:
-        assert row_count_or_none(280421.0) == 280421
+        assert row_count_or_none(250000.0) == 250_000
 
 
 class TestStatistics:

@@ -85,11 +85,11 @@ A shape violating this section - `assertions:` itself not a mapping, `tables:` n
 
 ### 1.3 FQN matching
 
-Each key under `tables:` is a fully-qualified table name matching the FQN convention from the adapter's namespace path (per [SPEC §1.3](format/v1/SPEC.md#13-namespace-path)). Evaluators MUST match assertion FQNs against produced table FQNs exactly: lowercase, dotted (e.g., `garden.seedbank.accession`).
+Each key under `tables:` is a fully-qualified table name matching the FQN convention from the adapter's namespace path (per [SPEC §1.3](format/v1/SPEC.md#13-namespace-path)). Evaluators MUST match assertion FQNs against produced table FQNs exactly: lowercase, dotted (e.g., `arboretum.seedbank.accession`).
 
 ### 1.4 Unknown FQNs and columns
 
-If an assertion references an FQN not present in the connection's manifest, evaluators MUST emit `assertion.unknown-table` as a warning and skip every predicate under that FQN.
+If an assertion references an FQN whose committed statistics the evaluator cannot read, it MUST emit `assertion.unknown-table` as a warning and skip every predicate under that FQN. Four distinct causes reach this code, and a reader diagnosing one should check all four: the FQN is absent from the manifest; it is present but declares no `statistics` artifact; the declared file is missing from disk; or the file does not parse as YAML. Only the first is literally "unknown table", so the detail string is a starting point rather than a diagnosis.
 
 If a predicate references a column not present in the table's `statistics.yaml`, evaluators MUST emit `assertion.unknown-column` as a warning and skip that column's predicates.
 
@@ -260,7 +260,7 @@ SQL assertions are written in the adapter's native SQL dialect. Producers MUST N
 | Snowflake | Standard SQL; identifiers UPPERCASE unless quoted; warehouse selection inherited from connection config |
 | MySQL | Standard SQL; identifiers lowercase on Linux, case-insensitive on Windows/macOS depending on `lower_case_table_names` |
 
-Queries MUST be read-only. Evaluators MUST run them in a read-only session where the adapter supports one (e.g., Snowflake `USE ROLE` with read-only role; PostgreSQL `SET TRANSACTION READ ONLY`). Write operations (INSERT, UPDATE, DELETE, DDL) are out of scope for assertions.
+Queries MUST be read-only. Evaluators MUST run them in a read-only session where the adapter supports one; the reference implementation does so on PostgreSQL (`SET TRANSACTION READ ONLY`) and not on MySQL or Snowflake, where the query runs on the same session the profile used and read-only is the operator's responsibility — a read-only role or grant. Write operations (INSERT, UPDATE, DELETE, DDL) are out of scope for assertions, and on those two adapters nothing mechanically prevents one.
 
 ### 3.5 Edge cases
 
@@ -318,7 +318,7 @@ class Issue:
 | `code` | One of the `assertion.*` or `drift.*` values in §5.2 |
 | `severity` | `error` or `warning` per §4 |
 | `detail` | Human-readable explanation; MUST include expected and actual values where applicable |
-| `spec_ref` | The section that defines the rule, named with the document it lives in: `ASSERTIONS.md §<N>` for everything this document specifies, and `SPEC §<N>` of [`format/v1/SPEC.md`](format/v1/SPEC.md) where it does not. `assertion.redacted-stat` carries `SPEC §2.2.9`, the redaction contract, which lives in the format spec. A bare section number would leave a consumer holding the Issue unable to tell which document to open |
+| `spec_ref` | The section that defines the rule. A bare `§<N>` cites [`format/v1/SPEC.md`](format/v1/SPEC.md); any other document names itself first, `ASSERTIONS.md §<N>` for everything this document specifies. `assertion.redacted-stat` carries bare `§2.2.9`, the redaction contract, which lives in the format spec |
 
 ### 5.2 Code catalog
 
@@ -341,7 +341,7 @@ class Issue:
 | `assertion.accepted-values-violated` | error | `accepted_values` set predicate failed |
 | `assertion.looks-like-mismatch` | error | `looks_like` predicate failed |
 | `assertion.candidate-key-mismatch` | error | `candidate_key` predicate failed |
-| `assertion.sql-type-mismatch` | error | `sql_type` predicate failed |
+| `assertion.sql-type-mismatch` | error | a `sql_type` predicate failed, **or** an `expect: 0` query returned a non-numeric first value |
 | `assertion.nullable-mismatch` | error | `nullable` predicate failed |
 | `assertion.range-out-of-bounds` | error | `range.min` / `range.max` predicate failed |
 | `assertion.percentile-mismatch` | error | `percentiles.<key>` predicate failed |
@@ -420,4 +420,3 @@ The statistic assertion vocabulary and the SQL assertion `expect:` value set MAY
 ## Cross-references
 
 - [`format/v1/SPEC.md`](format/v1/SPEC.md) - format specification for `statistics.yaml`, `relationships.yaml`, `manifest.yaml`, `diff.yaml`
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) - internal architecture reference

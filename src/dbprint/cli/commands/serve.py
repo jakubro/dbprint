@@ -1,18 +1,14 @@
 """`dbprint serve` - launch the MCP server over stdio or HTTP.
 
-Gates on the `[mcp]` install extra at invocation time, exiting 1 with the documented hint
-(MCP.md 1) when missing. The served connection set resolves by the CLI's usual rules, rooted
-at `--project-dir` when given rather than at the working directory.
+Gates on the `[mcp]` extra at invocation time, exiting 1 with the documented hint (MCP.md 1).
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import rich_click as click
 
-from dbprint.config import load_project
 from dbprint.engine import EXIT_GENERIC
+from ..options import keep_fresh, project_option, resolve_project
 from ..resolution import ConnectionResolutionError
 from ..resolution import resolve as resolve_connections
 
@@ -22,13 +18,7 @@ _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 @click.command(name="serve")
 @click.argument("conn", required=False)
-@click.option(
-    "--project-dir",
-    type=click.Path(exists=True, file_okay=False, path_type=Path),
-    default=None,
-    help="Directory to resolve .dbprint.yaml from, for a client that starts the server "
-    "outside the project. Defaults to the working directory.",
-)
+@project_option
 @click.option(
     "--transport",
     type=click.Choice(["stdio", "http"], case_sensitive=False),
@@ -59,7 +49,7 @@ _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 def serve_command(
     ctx: click.Context,
     conn: str | None,
-    project_dir: Path | None,
+    project: str | None,
     transport: str,
     host: str,
     port: int | None,
@@ -72,7 +62,7 @@ def serve_command(
     (`pip install dbprint[mcp]`); exits 1 with an install hint when it is
     missing. Serves the resolved connection set read-only - no database
     connection. stdio transport by default; HTTP binds to loopback only.
-    The project resolves from the working directory unless `--project-dir`
+    The project resolves from the working directory unless `--project`
     names another.
 
     **Arguments:**
@@ -89,7 +79,7 @@ def serve_command(
 
     - `dbprint serve`: stdio (editor / agent)
     - `dbprint serve --transport http --port 8765`: loopback HTTP server
-    - `dbprint serve --project-dir /srv/analytics`: a project outside the working directory
+    - `dbprint serve --project /srv/analytics`: a project outside the working directory
     """
 
     if not read_only:
@@ -119,7 +109,8 @@ def serve_command(
             )
             ctx.exit(EXIT_GENERIC)
 
-    project_config = load_project(start=project_dir)
+    project_config = resolve_project(project)
+    keep_fresh(project)
 
     try:
         connections = resolve_connections(project_config, conn)

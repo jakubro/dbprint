@@ -68,10 +68,13 @@ def test_every_spec_classification_gets_a_vocabulary_sentence() -> None:
 
 def test_the_sketch_signal_names_the_decoder_and_carries_no_percentage() -> None:
     text = gen.build_document()
+    signals = text.split("## Signals nobody points at")[1]
 
     assert "`sketch`" in text
     assert "`dbprint.spec.sketch`" in text
-    assert "%" not in text.split("## Signals nobody points at")[1]
+    assert "%" not in signals
+    assert "exhaustive" in signals
+    assert "membership" in signals
 
 
 def test_the_skill_is_a_layout_protocol_not_a_guide_copy() -> None:

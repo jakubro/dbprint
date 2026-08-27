@@ -43,8 +43,14 @@ from dbprint.adapters.base import (
 )
 from dbprint.adapters.errors import QueryFailed
 from dbprint.config import ConfigError, ConnectionConfig, StatisticsConfig, TableSettings, selectors
+
+# Private names: SPEC 4.1.5's numeric-type suppression below reads the classifier's own type
+# membership test directly, rather than hold a second list of numeric SQL types to drift.
 from dbprint.spec.classification import (
+    _NUMERIC_TYPES,
     Classification,
+    _matches,
+    base_type,
     classify,
     compute_candidate_key_exception,
     compute_cardinality_ratio,
@@ -58,6 +64,7 @@ from dbprint.spec.sensitivity import detect as detect_sensitivity
 from dbprint.spec.sketch import METHOD as SKETCH_METHOD
 from dbprint.spec.sketch import K as SKETCH_K
 from dbprint.spec.sketch import (
+    SketchKind,
     answerable_count,
     answerable_subset_containment,
     decode_sketch,
@@ -516,7 +523,7 @@ class Engine:
         sketch_failures: tuple[SketchFailure, ...] = ()
 
         if write_artifacts and not not_attempted:
-            sketch_failures = self._write_key_sketches(per_table_meta)
+            sketch_failures = self._write_key_sketches(per_table_meta, emitter=emitter)
             self._write_relationships_artifacts(prints_root, per_table_meta, baseline_states)
 
         diff_dict = _compute_diff_dict(
@@ -846,7 +853,7 @@ class Engine:
         finally:
             self._release_scope(tbl.fqn, read_scope)
 
-        enriched = _assemble_stats(columns, stats, detected, suppressed, generated_at)
+        enriched = _assemble_stats(tbl.fqn, columns, stats, detected, suppressed, generated_at)
         _stamp_values_coverage_method(tbl.fqn, counts.rows_scanned, enriched)
         statistics_yaml = _serialize_statistics(
             tbl.fqn,
@@ -911,7 +918,7 @@ class Engine:
 
         for index, tbl in enumerate(tables, start=1):
             if emitter is not None:
-                emitter.inventory_tick(index, total)
+                emitter.inventory_tick(index, total, tbl.fqn)
 
             # Read by exec_query's own trace record; scoped to this table alone.
             fqn_token = trace_context.fqn.set(tbl.fqn)
@@ -1064,23 +1071,44 @@ class Engine:
                         scope,
                     )
 
-                match = detect_with_evidence(samples)
-                looks_like_value = match.pattern
-                epoch_unit_value = sample_epoch_unit(samples)
+                try:
+                    match = detect_with_evidence(samples)
+                    looks_like_value = match.pattern
+                    epoch_unit_value = sample_epoch_unit(samples)
+                except Exception as exc:  # noqa: BLE001 - contain to this column, not the table
+                    _LOG.warning(
+                        "looks_like/epoch_unit detection failed for %s.%s: %s",
+                        fqn,
+                        col.name,
+                        exc,
+                    )
+                else:
+                    # SPEC 4.1.5: `numeric_string` on a numeric-typed column restates the type
+                    # it already carries, so it is withheld whatever the classification.
+                    if looks_like_value == "numeric_string" and _matches(
+                        base_type(col.sql_type),
+                        _NUMERIC_TYPES,
+                    ):
+                        looks_like_value = None
 
-                # Evidence rides only beside a published verdict - a column that cleared
-                # nothing stays silent (SPEC 4.1.3).
-                if looks_like_value is not None:
-                    looks_like_sampled = match.sampled
-                    looks_like_matched = match.matched
+                    # Evidence rides only beside a published verdict (SPEC 4.1.3).
+                    if looks_like_value is not None:
+                        looks_like_sampled = match.sampled
+                        looks_like_matched = match.matched
 
             # Detection runs against the catalog's own spelling (SPEC 4.4.3), never the
             # lowercased map key - a token-boundary detector reads `firstName`.
-            sensitivity = (
-                detect_sensitivity(col.physical_name or col.name, samples, looks_like_value)
-                if classification != "unsupported"
-                else None
-            )
+            sensitivity = None
+
+            if classification != "unsupported":
+                try:
+                    sensitivity = detect_sensitivity(
+                        col.physical_name or col.name,
+                        samples,
+                        looks_like_value,
+                    )
+                except Exception as exc:  # noqa: BLE001 - contain to this column, not the table
+                    _LOG.warning("sensitivity detection failed for %s.%s: %s", fqn, col.name, exc)
             # `candidate_key` rides the measured ratio alone (SPEC 4.2), independent of
             # `classification`; its exception marker is meaningful only in that same band.
             candidate_key = cardinality_ratio is not None and is_candidate_key(
@@ -1262,14 +1290,18 @@ class Engine:
     def _write_key_sketches(
         self,
         per_table_meta: dict[str, _PerTableContext],
+        *,
+        emitter: _ProgressEmitter | None = None,
     ) -> tuple[SketchFailure, ...]:
         """SPEC 2.2.14: sketch every join-key column and every likely edge-naming one.
 
         Patches `statistics.yaml` in place after phase 1, once the full edge set is known; a
         carried table is never touched, since a sketch needs a fresh read. An empty result means
-        cardinality 0 - a declining adapter or a failed query writes no `sketch` key.
+        cardinality 0; the eligible work list is computed up front, so a table with nothing
+        eligible consumes no bar slot.
         """
 
+        emitter = emitter or _ProgressEmitter(None, self._conn.name)
         failures: list[SketchFailure] = []
         candidates: dict[str, set[str]] = {}
 
@@ -1300,6 +1332,8 @@ class Engine:
             if widened:
                 candidates.setdefault(ctx.fqn, set()).update(widened)
 
+        eligible: dict[str, list[tuple[str, str, SketchKind]]] = {}
+
         for fqn, columns in candidates.items():
             ctx = per_table_meta.get(fqn)
 
@@ -1323,9 +1357,9 @@ class Engine:
                 continue
 
             sql_types = {c.name: c.sql_type for c in ctx.columns}
-            changed = False
+            eligible_columns: list[tuple[str, str, SketchKind]] = []
 
-            for column in columns:
+            for column in sorted(columns):
                 col_payload = cols_payload.get(column)
 
                 if not isinstance(col_payload, dict) or col_payload.get("redacted") is not None:
@@ -1341,6 +1375,48 @@ class Engine:
                 if kind is None:
                     continue
 
+                eligible_columns.append((column, sql_type, kind))
+
+            if eligible_columns:
+                eligible[fqn] = eligible_columns
+
+        sorted_fqns = sorted(eligible)
+        table_total = len(sorted_fqns)
+
+        if table_total == 0:
+            # No eligible column anywhere - the pass never starts, so the renderer sees no bar
+            # switch, no banner and no sketch event at all.
+            return tuple(failures)
+
+        emitter.sketch_phase("start", table_total)
+
+        for table_index, fqn in enumerate(sorted_fqns, start=1):
+            ctx = per_table_meta[fqn]
+            payload = ctx.statistics_payload
+            cols_payload = payload.get("columns")
+
+            if not isinstance(cols_payload, dict):
+                continue  # already proven true by the eligibility pass; narrows the type
+
+            columns = eligible[fqn]
+            column_total = len(columns)
+            changed = False
+            table_error: str | None = None
+            started = time.monotonic()
+
+            emitter.sketch_table("start", table_index, table_total, fqn)
+
+            for column_index, (column, sql_type, kind) in enumerate(columns, start=1):
+                emitter.sketch_column(
+                    table_index,
+                    table_total,
+                    fqn,
+                    column,
+                    column_index,
+                    column_total,
+                )
+                col_payload = cols_payload[column]
+
                 try:
                     with _operation("compute_key_sketch"):
                         hashes = self._adapter.compute_key_sketch(
@@ -1352,7 +1428,9 @@ class Engine:
                         )
                 except Exception as exc:  # noqa: BLE001 - run-all-then-report; this column only
                     cause = exc.cause if isinstance(exc, _OperationFailed) else exc
-                    failures.append(SketchFailure(table=fqn, column=column, error=_one_line(cause)))
+                    error_text = _one_line(cause)
+                    failures.append(SketchFailure(table=fqn, column=column, error=error_text))
+                    table_error = table_error or error_text
                     continue
 
                 if not hashes and col_payload.get("cardinality") != 0:
@@ -1364,9 +1442,21 @@ class Engine:
                 }
                 changed = True
 
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            emitter.sketch_table(
+                "failed" if table_error is not None else "done",
+                table_index,
+                table_total,
+                fqn,
+                elapsed_ms=elapsed_ms,
+                error=table_error,
+            )
+
             if changed:
                 ctx.statistics_yaml = _dump_yaml(payload)
                 write_atomic(ctx.tbl_dir, {"statistics.yaml": ctx.statistics_yaml})
+
+        emitter.sketch_phase("done", table_total)
 
         return tuple(failures)
 
@@ -1572,10 +1662,10 @@ class _ProgressEmitter:
 
         self._emit("inventory", status, 0, total, None)
 
-    def inventory_tick(self, index: int, total: int) -> None:
+    def inventory_tick(self, index: int, total: int, fqn: str | None = None) -> None:
         """One object read within the pre-pass - the signal a wide connection needs."""
 
-        self._emit("inventory", "start", index, total, None)
+        self._emit("inventory", "start", index, total, fqn)
 
     def table_start(self, index: int, total: int, fqn: str) -> None:
         self._emit("extract", "start", index, total, fqn)
@@ -1621,6 +1711,43 @@ class _ProgressEmitter:
 
     def finalizing(self, status: ProgressStatus, total: int) -> None:
         self._emit("finalizing", status, total, total, None)
+
+    def sketch_phase(self, status: ProgressStatus, total: int) -> None:
+        self._emit("sketch", status, 0, total, None)
+
+    def sketch_table(
+        self,
+        status: ProgressStatus,
+        index: int,
+        total: int,
+        fqn: str,
+        *,
+        elapsed_ms: int | None = None,
+        error: str | None = None,
+    ) -> None:
+        self._emit("sketch", status, index, total, fqn, elapsed_ms=elapsed_ms, error=error)
+
+    def sketch_column(
+        self,
+        index: int,
+        total: int,
+        fqn: str,
+        column: str,
+        column_index: int,
+        column_total: int,
+    ) -> None:
+        """`index`/`total` stay table-scoped."""
+
+        self._emit(
+            "sketch",
+            "start",
+            index,
+            total,
+            fqn,
+            column=column,
+            column_index=column_index,
+            column_total=column_total,
+        )
 
     def _emit(
         self,
@@ -1788,6 +1915,7 @@ def _suppressed_columns(detected: dict[str, _ColumnDetection]) -> frozenset[str]
 
 
 def _assemble_stats(
+    fqn: str,
     columns: list[ColumnMeta],
     stats: dict[str, ColumnStats],
     detected: dict[str, _ColumnDetection],
@@ -1822,7 +1950,11 @@ def _assemble_stats(
         # The bounds rule reads Phase B's own range, so it cannot run in `_detect_columns`.
         # `drop` removes `range` only at serialization, so a dropped column still reports it.
         if detection.classification == "numeric" and column_stats.range is not None:
-            epoch_unit_value = bounds_epoch_unit(column_stats.range.min, column_stats.range.max)
+            try:
+                epoch_unit_value = bounds_epoch_unit(column_stats.range.min, column_stats.range.max)
+            except Exception as exc:  # noqa: BLE001 - contain to this column, not the table
+                _LOG.warning("bounds_epoch_unit failed for %s.%s: %s", fqn, col.name, exc)
+                epoch_unit_value = None
 
             if epoch_unit_value is not None:
                 inferred = (

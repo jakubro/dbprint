@@ -1,5 +1,8 @@
 # dbprint Guidelines
 
+> **Audience**: engineers working on this codebase. Not end users — nothing here describes
+> how to use dbprint, and nothing here is part of its public contract.
+>
 > **Purpose**: Coding conventions, style rules, and development commands. For how the
 > pieces fit together at runtime, see [ARCHITECTURE.md](ARCHITECTURE.md). For the on-disk
 > format contract, see [format/v1/SPEC.md](format/v1/SPEC.md) (normative).
@@ -47,8 +50,9 @@ just fix         # auto-fix: ruff check --fix + ruff format + ty check --fix
 just lint        # ruff check + ruff format --check + ty check
 just test [ARGS] # pytest, no coverage; ARGS narrows (just test tests/engine -k diff)
 just test-cov    # pytest with coverage (term-missing); what `check` runs
-just docs        # regenerate docs/CLI.md from --help
-just install     # uv sync --extra dev --extra mcp
+just docs        # regenerate every generated document: CLI.md, MCP.md's tool schemas,
+                 # reference/conformance.md, the reading guide, the annotation schemas
+just install     # uv sync --extra dev --extra mcp --extra docs
 ```
 
 - **Python 3.13+.** Linting and formatting: `ruff` (line length 100, isort enabled). Type
@@ -66,10 +70,10 @@ just install     # uv sync --extra dev --extra mcp
   worth a second run before it is trusted as a regression.** Re-run `test-cov` once more on
   the same tree; only a repeat disagreement is real. A single run's number is not
   self-certifying — coverage.py's own run-to-run stability on this suite has not been proven.
-- **Optional extras**: `mcp` (the `serve` command + MCP SDK), `snowflake`
-  (`snowflake-connector-python`), `mysql` (`mysql-connector-python`). `dev` pulls the test +
-  lint toolchain. Vendor connectors are imported lazily so a base install never pays for them
-  (see §1, Imports).
+- **Optional extras**: `postgres` (`psycopg[binary]`), `mysql` (`mysql-connector-python`),
+  `snowflake` (`snowflake-connector-python`), `mcp` (the `serve` command + MCP SDK), `docs`
+  (the `dbprint docs` site: Flask, Markdown, inflect). `dev` pulls the test + lint toolchain.
+  Vendor connectors are imported lazily so a base install never pays for them (see §1, Imports).
 - **Virtualenv**: the `justfile` auto-routes `uv` to a container-local venv under `/tmp` when
   it detects a container; otherwise it uses `.venv/` in the working directory. Do not run
   `uv sync` directly inside a container — go through `just`.
@@ -449,10 +453,11 @@ the test fail? If not, it is not earning its keep.
   `seedbank.specimen_image`, `seedbank.storage_reading`, `fixture.shape_probe` — and the same
   domain already covers `curator`, `herbarium`, `herbarium_sheet`, `viability_check`,
   `botanist`, `curation_event`, `active_curators`, `garden`, `cultivar`, `fieldwork`,
-  `sowing_trial`, `germination_reading`, `curator_profile`, `curator_note`, `batch` and
-  `fixture.staging`. `arboretum` is the vocabulary's word for the database-level segment of
-  a three-part FQN, a tier none of the above names. Two things stay: the schema names a
-  database itself supplies (`public`,
+  `sowing_trial`, `germination_reading`, `curator_profile`, `curator_note`, `batch`,
+  `fixture.staging`, `fixture.contact_probe`, `fixture.probe_target` and
+  `fixture.type_probe`. `arboretum` is the vocabulary's word for
+  the database-level segment of a three-part FQN, a tier none of the above names. Two
+  things stay: the schema names a database itself supplies (`public`,
   `information_schema`, `pg_catalog`, `mysql`, `sys`), and structural placeholders carrying
   no domain at all (`public.t`, `a`/`b`/`c`, `wide`, `narrow`). `loan` is excluded, not
   sanctioned — a specimen loan is real vocabulary here, but the word reads as financial on
@@ -460,6 +465,14 @@ the test fail? If not, it is not earning its keep.
   here as a fixture needs it — add the word in the same commit that uses it. `field_site`,
   `field_log`, `field_round` and `sample` are further structural table names, carrying no
   fixed shape of their own.
+- **A view suffixes the object it reads: `_v`, or `_mv` when materialized.** `active_curators_v`,
+  `specimen_loan_v`, `germination_by_taxon_mv`. The stem stays a sanctioned name, so the suffix
+  adds a shape rather than inventing vocabulary.
+- **A pluralized object name is a divergence everywhere except where the plural is the subject.**
+  Fixtures are singular (`seedbank.taxon`, `seedbank.botanist`), because a plural reads as a
+  different object from the one the vocabulary sanctions. The one exception is
+  `tests/engine/test_inference.py`'s `public.curators`, where the foreign-key stem rule under
+  test is what strips the `s` — renaming it would delete the case.
 - **A column is named by the role a fixture needs it to play**, so a rename cannot silently
   move a test's subject: a foreign-key-shaped id is `herbarium_id`; a low-cardinality
   categorical is `rank`; a nullable integer is `seed_count`; a nullable timestamp is

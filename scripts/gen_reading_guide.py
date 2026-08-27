@@ -281,6 +281,28 @@ _TRAPS = (
         "as inconsistent for, not an absence licensed by the classification or object type "
         "(SPEC 2.5, 7.3)."
     ),
+    (
+        "**`values_coverage_method: bounded` means the coverage figure is a clamp, not a "
+        "measurement.** The value list and the population it is measured against were not "
+        "read at the same instant, so an exhaustive-looking `values_coverage: 1.0` under "
+        "`bounded` is not the same claim as one with no hedge at all - `measured` states the "
+        "two agreed, `bounded` states a producer caught them disagreeing (SPEC 2.2.4)."
+    ),
+    (
+        "**`numeric`/`temporal` carry no `values` list; `frequencies` is the substitute, "
+        "not an omission.** Its four counts - `top`, `bottom`, `listed`, `total` - reproduce "
+        "the same top-N fetch `distribution` is computed from, published because these two "
+        "classifications carry no `values` list for a validator to recompute the verdict "
+        "against (SPEC 2.2.4). None of the four is a share; recompute any ratio against "
+        "`non_null`/`cardinality` before trusting a rounded one."
+    ),
+    (
+        "**`unrepresentable` changes how a bound must be read, not just which fields are "
+        "absent.** A temporal `min`/`max`/percentile outside the years 0001-9999 (proleptic "
+        "Gregorian) is still emitted as text - the database's own rendering - but named here "
+        "so a consumer feeding it to a typed parser degrades deliberately instead of "
+        "crashing (SPEC 2.2.4). The marker says nothing about whether the value is correct."
+    ),
 )
 
 
@@ -335,6 +357,39 @@ def _check_trap_anchors() -> None:
         "consumers SHOULD treat the print as inconsistent",
         "SPEC's manifest-disagreement sentence moved",
     )
+    _require_contains(
+        SPEC_PATH,
+        "the value list and the population it is measured against were not read at the "
+        "same instant",
+        "SPEC's values_coverage_method clamp sentence moved",
+    )
+    _require_contains(
+        SPEC_PATH,
+        "these two classifications carry no `values` list for a validator to recompute "
+        "the verdict against",
+        "SPEC's frequencies-substitute sentence moved",
+    )
+    _require_contains(
+        SPEC_PATH,
+        "lets a consumer feeding that value to a typed parser degrade deliberately "
+        "instead of crashing",
+        "SPEC's unrepresentable-degrade sentence moved",
+    )
+    _require_contains(
+        SPEC_PATH,
+        "Absence means not clustered, never not checked.",
+        "SPEC's physical_layout absence sentence moved",
+    )
+    _require_contains(
+        SPEC_PATH,
+        "arithmetically impossible for a real containment",
+        "SPEC's observed.coherent sentence moved",
+    )
+    _require_contains(
+        SPEC_PATH,
+        "no ratio is ever published across a mismatched pair",
+        "SPEC's observed.scope_compatible sentence moved",
+    )
 
 
 _READING_STRATEGY = """\
@@ -359,6 +414,12 @@ predicate narrowed it, or a sample bounded the cost. Every count in it except
 `row_count` is over `rows_scanned`, not the table (SPEC 2.2.8) - a `boolean`'s exact
 split and a `values_coverage: 1.0` are both exhaustive over that narrower set only,
 never wider than what was actually read.
+
+A `physical_layout` block declares a clustering or partitioning key: `mechanism`
+(`cluster` or `partition`) names the mechanism, not a judgment; `keys` is ordered,
+its first component pruning far more than its last; each key's `column` is what a
+predicate matches against, `expression` what was actually declared. Absence means
+the table is not clustered or partitioned, never that nobody checked (SPEC 2.2.11).
 
 A column carrying a `redacted` marker (`mask`, `drop`, `hash`) withholds literals, not
 measurements - `cardinality`, `null_rate`, `values_coverage` and `distribution` stay
@@ -395,8 +456,17 @@ A column's `sketch` exists for a computation the producer deliberately does not 
 whether its distinct values overlap another column's, across tables or across prints,
 with no second query against either database. `dbprint.spec.sketch` decodes it and
 estimates that overlap; `observed.containment`/`target_coverage` are that same estimate
-already computed wherever both endpoints of an edge sit in one print (SPEC 2.3.10). It
-cannot answer whether one specific value is present - only overlap between two sets.
+already computed wherever both endpoints of an edge sit in one print (SPEC 2.3.10),
+alongside `fanout_avg`/`fanout_max` (average and worst-case rows per distinct
+referencing key) and `coherent` (`false` when the child's cardinality exceeds the
+parent's - arithmetically impossible for a real containment). `answerable_count` is
+the denominator a containment ratio must be read against, not a headline number of
+its own - the margin narrows as it grows, and a small one widens it sharply.
+`scope_compatible: false` means the two endpoints could not be compared on equal
+terms at all; every other field in the block is then absent, never zero, and no
+ratio is published across a mismatched pair. A sketch below its own retained size is
+exhaustive and answers single-value membership exactly; at or above it, membership
+is not answerable at all.
 """
 
 

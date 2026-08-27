@@ -9,10 +9,21 @@ from typing import Literal, cast
 import yaml
 
 from dbprint.config import ConnectionConfig
-from dbprint.engine.baseline import declared_artifacts, manifest_shape_error, walkable_tables
+from dbprint.engine.baseline import (
+    declared_artifacts,
+    manifest_shape_error,
+    table_directory,
+    walkable_tables,
+)
 from dbprint.engine.reading_guide import READING_GUIDE_FILENAME
 from . import errors
+from .reference import ReferenceDocument, read_document
 from .state import ServedConnections
+
+
+# The two server-global reference resources (MCP.md 3.2) - never per-connection.
+_REFERENCE_DOCUMENTS: tuple[ReferenceDocument, ...] = ("spec", "assertions")
+_REFERENCE_MIME = "text/markdown"
 
 
 # Artifact kinds the server exposes; matches MCP.md 3.2 table.
@@ -78,6 +89,16 @@ class ResourceRef:
 
 
 @dataclass(frozen=True)
+class ReferenceRef:
+    """Identifies a server-global reference document - `dbprint:///reference/<document>`.
+
+    Carries no connection: `parse_uri` checks the empty-authority form before any other.
+    """
+
+    document: ReferenceDocument
+
+
+@dataclass(frozen=True)
 class ResourceEntry:
     """One row of `resources/list`."""
 
@@ -95,8 +116,11 @@ class ReadResult:
     mime_type: str
 
 
-def parse_uri(uri: str) -> ResourceRef:
-    """Parse a `dbprint://<conn>/<rest>` URI per MCP.md 3.1-3.2; raises McpError otherwise."""
+def parse_uri(uri: str) -> ResourceRef | ReferenceRef:
+    """Parse a `dbprint://<conn>/<rest>` URI per MCP.md 3.1-3.2; raises McpError otherwise.
+
+    The empty-authority form carries no connection; no kind vocabulary below contains `reference`.
+    """
 
     if not uri.startswith("dbprint://"):
         raise errors.malformed_uri(uri)
@@ -105,6 +129,12 @@ def parse_uri(uri: str) -> ResourceRef:
     parts = remainder.split("/") if remainder else []
 
     if not parts:
+        raise errors.malformed_uri(uri)
+
+    if parts[0] == "":
+        if len(parts) == 3 and parts[1] == "reference" and parts[2] in _REFERENCE_DOCUMENTS:
+            return ReferenceRef(document=parts[2])
+
         raise errors.malformed_uri(uri)
 
     connection = parts[0]
@@ -123,9 +153,20 @@ def parse_uri(uri: str) -> ResourceRef:
 
 
 def enumerate_for(state: ServedConnections) -> list[ResourceEntry]:
-    """Deterministic resource list across every served connection, ordered per MCP.md 3.3."""
+    """Deterministic resource list across every served connection, ordered per MCP.md 3.3.
 
-    entries: list[ResourceEntry] = []
+    The reference documents are server-global - listed once each, ahead of every connection.
+    """
+
+    entries: list[ResourceEntry] = [
+        ResourceEntry(
+            uri=f"dbprint:///reference/{document}",
+            name=f"{document} reference",
+            description=f"The {document} specification, whole - MCP.md 4.6 slices it by section",
+            mime_type=_REFERENCE_MIME,
+        )
+        for document in _REFERENCE_DOCUMENTS
+    ]
 
     for conn_name in sorted(state.served):
         conn = state.served[conn_name]
@@ -135,9 +176,12 @@ def enumerate_for(state: ServedConnections) -> list[ResourceEntry]:
 
 
 def read(state: ServedConnections, uri: str) -> ReadResult:
-    """Resolve `uri` to a connection + path; return content + mimeType."""
+    """Resolve `uri` to a connection + path, or a server-global reference document."""
 
     ref = parse_uri(uri)
+
+    if isinstance(ref, ReferenceRef):
+        return ReadResult(content=read_document(ref.document), mime_type=_REFERENCE_MIME)
 
     if ref.connection not in state.served:
         configured = state.configured or frozenset(state.served)
@@ -203,7 +247,6 @@ def read(state: ServedConnections, uri: str) -> ReadResult:
         raise errors.unknown_table(ref.fqn, conn.name)
 
     artifacts = declared_artifacts(entry)
-    path = entry.get("path") or ref.fqn.replace(".", "/")
     file_name = artifacts.get(ref.kind)
 
     if file_name is None:
@@ -214,7 +257,7 @@ def read(state: ServedConnections, uri: str) -> ReadResult:
         # against this object's type, not an inconsistency to repair (SPEC 2.3).
         raise errors.undeclared_artifact_kind(ref.kind, ref.fqn)
 
-    file_path = print_root / path / file_name
+    file_path = table_directory(print_root, ref.fqn, entry) / file_name
 
     if not file_path.is_file():
         # Declared, regardless of `_OPTIONAL_ARTIFACT_KINDS` - a broken promise, the same
@@ -274,7 +317,7 @@ def _enumerate_connection(conn: ConnectionConfig) -> list[ResourceEntry]:
     for fqn in sorted(tables):
         entry = tables[fqn]
         artifacts = declared_artifacts(entry)
-        path = entry.get("path") or fqn.replace(".", "/")
+        table_dir = table_directory(print_root, fqn, entry)
 
         for kind in (
             "ddl",
@@ -290,7 +333,7 @@ def _enumerate_connection(conn: ConnectionConfig) -> list[ResourceEntry]:
             file_name = artifacts[kind]
 
             if kind in _OPTIONAL_ARTIFACT_KINDS:
-                artifact_path = print_root / path / file_name
+                artifact_path = table_dir / file_name
 
                 if not artifact_path.is_file():
                     continue

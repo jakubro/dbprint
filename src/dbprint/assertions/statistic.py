@@ -134,7 +134,7 @@ def _check_column_predicate(
                     f"{stat!r} cannot be evaluated: this column is redacted "
                     f"({col_stats['redacted']}), so its emitted values are not its real ones"
                 ),
-                spec_ref="SPEC §2.2.9",
+                spec_ref="§2.2.9",
             ),
         ]
 

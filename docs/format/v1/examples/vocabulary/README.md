@@ -1,7 +1,8 @@
 # dbprint format v1 — vocabulary example
 
 A second, small print directory alongside [`../production/`](../README.md), produced by
-`scripts/gen_vocabulary_example.py` against a real PostgreSQL database and regenerated
+`scripts/gen_vocabulary_example.py` against a PostgreSQL database seeded from `scripts/sql/`,
+and regenerated
 with `just example-vocabulary`. It exists for one reason: seventeen `looks_like` patterns have
 no honest column in the seed-bank domain `production/` demonstrates — a bank card number,
 an IBAN, a MAC address are not things a seed bank's schema would ever hold — so this tree

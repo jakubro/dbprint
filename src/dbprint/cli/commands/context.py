@@ -10,15 +10,17 @@ from typing import Any
 import rich_click as click
 import yaml
 
-from dbprint.config import ConnectionConfig, load_project
+from dbprint.config import ConnectionConfig
 from dbprint.engine import EXIT_GENERIC, EXIT_OK, AssemblyOptions, assemble_context
 from dbprint.engine.baseline import manifest_shape_error
+from ..options import project_option, resolve_project
 from ..resolution import ConnectionResolutionError, resolve
 
 
 @click.command(name="context")
 @click.argument("target", required=False)
 @click.argument("conn", required=False)
+@project_option
 @click.option(
     "--all",
     "select_all",
@@ -70,6 +72,7 @@ def context_command(
     ctx: click.Context,
     target: str | None,
     conn: str | None,
+    project: str | None,
     select_all: bool,
     fmt: str,
     no_ddl: bool,
@@ -92,7 +95,7 @@ def context_command(
 
     **Arguments:**
 
-    - `TARGET`: table FQN (e.g. `garden.seedbank.accession`), an fnmatch pattern
+    - `TARGET`: table FQN (e.g. `arboretum.seedbank.accession`), an fnmatch pattern
       (e.g. `public.*`), or omit and pass `--all` for every table.
     - `CONN`: connection scope; resolved from `.dbprint.yaml` when omitted (the
       `auto: true` set, or the sole connection).
@@ -104,7 +107,7 @@ def context_command(
 
     **Examples:**
 
-    - `dbprint context garden.seedbank.accession`: one table, full Markdown
+    - `dbprint context arboretum.seedbank.accession`: one table, full Markdown
     - `dbprint context 'public.*'`: every public table (pattern)
     - `dbprint context --all --no-ddl`: every table, skip DDL
     - `dbprint context users --budget 4000`: cap output near 4000 tokens
@@ -121,7 +124,7 @@ def context_command(
         )
         ctx.exit(EXIT_GENERIC)
 
-    project_config = load_project()
+    project_config = resolve_project(project)
 
     try:
         connections = resolve(project_config, conn)

@@ -14,6 +14,7 @@ from dbprint.config import (
     ProjectConfig,
     StatisticsConfig,
     load_project,
+    load_project_at,
 )
 from dbprint.spec.looks_like import LooksLike
 from dbprint.spec.sensitivity import Sensitivity
@@ -60,6 +61,98 @@ connections:
     def test_missing_config_raises_clear_error(self, tmp_path: Path) -> None:
         with pytest.raises(ConfigError, match="no .dbprint.yaml found"):
             load_project(tmp_path)
+
+
+class TestExactResolution:
+    """`load_project_at` - the `--project` locator's own loader, no walk in either direction."""
+
+    def test_loads_from_the_directory(self, tmp_path: Path) -> None:
+        _write_config(
+            tmp_path,
+            """
+connections:
+  primary:
+    adapter: postgres
+""",
+        )
+        cfg = load_project_at(tmp_path)
+        assert cfg.project_root == tmp_path.resolve()
+        assert "primary" in cfg.connections
+
+    def test_loads_from_the_config_file_itself(self, tmp_path: Path) -> None:
+        _write_config(
+            tmp_path,
+            """
+connections:
+  primary:
+    adapter: postgres
+""",
+        )
+        cfg = load_project_at(tmp_path / ".dbprint.yaml")
+        assert cfg.project_root == tmp_path.resolve()
+
+    def test_never_walks_up_from_a_non_direct_child(self, tmp_path: Path) -> None:
+        _write_config(
+            tmp_path,
+            """
+connections:
+  primary:
+    adapter: postgres
+""",
+        )
+        deep = tmp_path / "a" / "b" / "c"
+        deep.mkdir(parents=True)
+
+        with pytest.raises(ConfigError, match="no .dbprint.yaml at"):
+            load_project_at(deep)
+
+    def test_never_scans_downward(self, tmp_path: Path) -> None:
+        nested = tmp_path / "nested"
+        nested.mkdir()
+        _write_config(
+            nested,
+            """
+connections:
+  primary:
+    adapter: postgres
+""",
+        )
+
+        with pytest.raises(ConfigError, match="no .dbprint.yaml at"):
+            load_project_at(tmp_path)
+
+    def test_missing_config_names_the_exact_path_checked(self, tmp_path: Path) -> None:
+        absent = tmp_path / "absent"
+
+        with pytest.raises(ConfigError, match=str(absent / ".dbprint.yaml")):
+            load_project_at(absent)
+
+    def test_accepts_a_relative_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _write_config(
+            tmp_path,
+            """
+connections:
+  primary:
+    adapter: postgres
+""",
+        )
+        monkeypatch.chdir(tmp_path.parent)
+        cfg = load_project_at(tmp_path.name)
+        assert cfg.project_root == tmp_path.resolve()
+
+    def test_accepts_a_string_locator(self, tmp_path: Path) -> None:
+        """The CLI hands this a bare string, never a Path."""
+
+        _write_config(
+            tmp_path,
+            """
+connections:
+  primary:
+    adapter: postgres
+""",
+        )
+        cfg = load_project_at(str(tmp_path))
+        assert cfg.project_root == tmp_path.resolve()
 
 
 class TestParsing:

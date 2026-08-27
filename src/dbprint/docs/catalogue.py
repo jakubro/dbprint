@@ -16,6 +16,7 @@ from dbprint.engine.baseline import (
     declared_artifacts,
     manifest_shape_error,
     missing_artifacts,
+    table_directory,
     walkable_tables,
 )
 
@@ -94,7 +95,7 @@ def load_table(conn: PrintConnection, fqn: str) -> TableArtifacts | None:
     if entry is None:
         return None
 
-    table_dir = conn.root / entry.get("path", fqn.replace(".", "/"))
+    table_dir = table_directory(conn.root, fqn, entry)
     artifacts = declared_artifacts(entry)
 
     return TableArtifacts(
@@ -118,7 +119,7 @@ def load_relationships(conn: PrintConnection, fqn: str) -> dict[str, Any] | None
     if entry is None:
         return None
 
-    table_dir = conn.root / entry.get("path", fqn.replace(".", "/"))
+    table_dir = table_directory(conn.root, fqn, entry)
     artifacts = declared_artifacts(entry)
 
     return _read_yaml(table_dir, artifacts, "relationships")
