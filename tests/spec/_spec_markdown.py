@@ -23,7 +23,7 @@ def section(start: str, end: str) -> str:
 def section_of(path: Path, start: str, end: str) -> str:
     """The text between two headings, each of which must occur exactly once in `path`."""
 
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
 
     for marker in (start, end):
         found = text.count(marker)

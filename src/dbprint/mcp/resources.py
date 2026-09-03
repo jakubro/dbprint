@@ -268,34 +268,33 @@ def read(state: ServedConnections, uri: str) -> ReadResult:
 
 
 def _enumerate_connection(conn: ConnectionConfig) -> list[ResourceEntry]:
-    """One connection's resource entries; defensive on missing manifest."""
+    """One connection's resource entries per MCP.md 3.3 - the producer-written kinds are listed
+    unconditionally, so a run that skipped one still has a URI whose `read()` names the reason.
+
+    `manifest_annotations` is the one conditional kind, human-authored and often absent.
+    """
 
     print_root = conn.output / conn.name
-    out: list[ResourceEntry] = []
-    out.append(
+    out: list[ResourceEntry] = [
         ResourceEntry(
             uri=f"dbprint://{conn.name}/manifest",
             name=f"{conn.name} manifest",
             description=f"Manifest for connection {conn.name}",
             mime_type=_KIND_MIME["manifest"],
         ),
-    )
-    out.append(
         ResourceEntry(
             uri=f"dbprint://{conn.name}/diff",
             name=f"{conn.name} diff",
             description=f"Last computed diff for connection {conn.name}",
             mime_type=_KIND_MIME["diff"],
         ),
-    )
-    out.append(
         ResourceEntry(
             uri=f"dbprint://{conn.name}/reading",
             name=f"{conn.name} reading guide",
             description="How to read this connection's print - vocabulary, traps, strategy",
             mime_type=_KIND_MIME["reading"],
         ),
-    )
+    ]
 
     if (print_root / _CONNECTION_LEVEL_FILE["manifest_annotations"]).is_file():
         out.append(
@@ -354,7 +353,7 @@ def _read_text(path: Path, mime_type: str) -> ReadResult:
     if not path.is_file():
         raise errors.manifest_references_missing_file(path.name, str(path))
 
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
 
     # A YAML artifact is served verbatim either way - this is a parseability check, not a
     # transform - but MCP.md 3 requires a parse failure to surface as -32603.
@@ -374,7 +373,7 @@ def _load_manifest_or_none(print_root: Path) -> dict | None:
         return None
 
     try:
-        data = yaml.safe_load(manifest_path.read_text())
+        data = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
         raise errors.yaml_parse_error(str(manifest_path), str(exc)) from exc
 

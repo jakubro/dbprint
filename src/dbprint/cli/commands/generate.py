@@ -26,6 +26,7 @@ from ..rendering import (
     install_log_handler,
     remove_log_handler,
     resolve_render_mode,
+    supports_live,
 )
 from ..rendering.errors import (
     connection_error_text,
@@ -83,8 +84,8 @@ from ..run_log import close_run_log, log_run_header, log_run_summary, open_run_l
     "--quiet",
     is_flag=True,
     default=False,
-    help="Silence stdout progress (footer / tree / streaming / summary) - generate writes "
-    "nothing else to stdout.",
+    help="Silence stderr progress (footer / tree / streaming / summary) - generate writes "
+    "nothing to stdout.",
 )
 @click.pass_context
 def generate_command(
@@ -149,13 +150,19 @@ def generate_command(
         click.echo(str(exc), err=True)
         ctx.exit(EXIT_GENERIC)
 
-    mode = resolve_render_mode(tui)
-    console = Console()
+    # Progress goes to stderr, matching `check` and `diff` - stdout carries no payload of its
+    # own, so a redirected `dbprint generate | tee log` never mixes progress into it.
+    console = Console(stderr=True)
+    mode = resolve_render_mode(tui, console)
 
-    if not quiet and tui is True and not console.is_terminal:
-        click.echo("warning: --tui requested but stdout is not a TTY; using plain output", err=True)
+    if not quiet and tui is True and not supports_live(console):
+        click.echo(
+            "warning: --tui requested but stderr does not support the live view; "
+            "using plain output",
+            err=True,
+        )
 
-    out = click.get_text_stream("stdout")
+    out = click.get_text_stream("stderr")
     renderer = (
         None if quiet else build_progress_renderer(live=mode == "tty", console=console, out=out)
     )

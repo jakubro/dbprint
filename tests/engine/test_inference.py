@@ -1,5 +1,5 @@
-"""The naming rule for inferred foreign keys, a pure function over a catalog inventory: every
-condition it imposes refuses an edge it cannot corroborate.
+"""The naming rule for inferred foreign keys, a pure function over a catalog inventory -
+`TestValueDerivedEdges` covers the second kind, proposing from measured value containment.
 """
 
 from __future__ import annotations
@@ -7,7 +7,14 @@ from __future__ import annotations
 import pytest
 
 from dbprint.adapters.base import ColumnMeta, ForeignKeyMeta, TableType, UniqueKeyMeta
-from dbprint.engine.inference import TableInventory, can_be_target, infer_foreign_keys
+from dbprint.engine.inference import (
+    SketchCandidate,
+    TableInventory,
+    can_be_target,
+    infer_foreign_keys,
+    infer_value_derived_edges,
+)
+from dbprint.spec.sketch import K as SKETCH_K
 
 
 def _col(name: str, sql_type: str = "uuid") -> ColumnMeta:
@@ -592,3 +599,168 @@ class TestPluralTargets:
         record = _table("public.record", [_col("genus_id")])
 
         assert infer_foreign_keys(record, _inventory(record, genera), []) == []
+
+
+def _candidate(
+    fqn: str,
+    column: str,
+    sketch: tuple[int, ...],
+    *,
+    sql_type: str = "integer",
+    cardinality: int | None = None,
+) -> SketchCandidate:
+    return SketchCandidate(
+        fqn=fqn,
+        column=column,
+        sql_type=sql_type,
+        cardinality=cardinality if cardinality is not None else len(sketch),
+        sketch=sketch,
+    )
+
+
+class TestValueDerivedEdges:
+    """SPEC 2.3.11: an edge proposed from measured containment, independent of either name."""
+
+    def test_a_strict_exhaustive_subset_is_proposed(self) -> None:
+        child = _candidate("public.a", "linked_ref", (2, 3))
+        parent = _candidate("public.b", "id", (1, 2, 3, 4, 5))
+
+        out = infer_value_derived_edges([child], [parent], frozenset())
+
+        assert out == {
+            "public.a": [
+                ForeignKeyMeta(
+                    column=("linked_ref",),
+                    target_table="public.b",
+                    target_column=("id",),
+                    on_delete="NO ACTION",
+                    on_update="NO ACTION",
+                    constraint_name=None,
+                    detection="measured",
+                ),
+            ],
+        }
+
+    def test_a_coincidental_partial_overlap_is_not_proposed(self) -> None:
+        """Both exhaustive, but containment falls short of the exact 1.0 the floor demands."""
+
+        child = _candidate("public.a", "stray_code", (1, 2, 3))
+        parent = _candidate("public.b", "serial", (1, 99, 999))
+
+        assert infer_value_derived_edges([child], [parent], frozenset()) == {}
+
+    def test_mismatched_canonical_kinds_are_never_compared(self) -> None:
+        child = _candidate("public.a", "linked_ref", (2, 3), sql_type="integer")
+        parent = _candidate("public.b", "id", (1, 2, 3, 4, 5), sql_type="text")
+
+        assert infer_value_derived_edges([child], [parent], frozenset()) == {}
+
+    def test_a_column_is_never_proposed_against_itself(self) -> None:
+        same = _candidate("public.a", "id", (1, 2, 3))
+
+        assert infer_value_derived_edges([same], [same], frozenset()) == {}
+
+    def test_a_pair_already_asserted_is_not_proposed_twice(self) -> None:
+        child = _candidate("public.a", "linked_ref", (2, 3))
+        parent = _candidate("public.b", "id", (1, 2, 3, 4, 5))
+        existing = frozenset({("public.a", "linked_ref", "public.b", "id")})
+
+        assert infer_value_derived_edges([child], [parent], existing) == {}
+
+    def test_several_parents_are_ordered_by_table_then_column(self) -> None:
+        child = _candidate("public.a", "linked_ref", (2, 3))
+        parents = [
+            _candidate("public.z", "id", (1, 2, 3)),
+            _candidate("public.b", "z_id", (1, 2, 3)),
+            _candidate("public.b", "a_id", (1, 2, 3)),
+        ]
+
+        out = infer_value_derived_edges([child], parents, frozenset())
+
+        assert [fk.target_table + "." + fk.target_column[0] for fk in out["public.a"]] == [
+            "public.b.a_id",
+            "public.b.z_id",
+            "public.z.id",
+        ]
+
+    def test_two_eligible_children_of_one_table_both_publish_their_edges(self) -> None:
+        """The storage line a single-element `children` list cannot exercise - a second qualifying
+        column of the same table must not overwrite the first's entry.
+        """
+
+        first_child = _candidate("public.a", "linked_ref", (2, 3))
+        second_child = _candidate("public.a", "other_ref", (10, 20))
+        first_parent = _candidate("public.b", "id", (1, 2, 3, 4, 5))
+        second_parent = _candidate("public.c", "id", (10, 20, 30))
+
+        out = infer_value_derived_edges(
+            [first_child, second_child],
+            [first_parent, second_parent],
+            frozenset(),
+        )
+
+        assert [(fk.column, fk.target_table) for fk in out["public.a"]] == [
+            (("linked_ref",), "public.b"),
+            (("other_ref",), "public.c"),
+        ]
+
+    def test_a_second_column_proposing_nothing_does_not_erase_the_first(self) -> None:
+        """The second column's empty proposal list must not overwrite - it never assigns."""
+
+        qualifying_child = _candidate("public.a", "linked_ref", (2, 3))
+        empty_child = _candidate("public.a", "stray_code", (5000, 5001))
+        parent = _candidate("public.b", "id", (1, 2, 3, 4, 5))
+        unrelated_parent = _candidate("public.b", "serial", (99, 999))
+
+        out = infer_value_derived_edges(
+            [qualifying_child, empty_child],
+            [parent, unrelated_parent],
+            frozenset(),
+        )
+
+        assert [fk.column for fk in out["public.a"]] == [("linked_ref",)]
+
+    def test_a_truncated_pair_above_both_floors_is_proposed(self) -> None:
+        """Neither side exhaustive; the softer answerable_count/containment floor governs.
+
+        The parent's cardinality is the larger, since SPEC 2.3.11 rejects an equal pair outright.
+        """
+
+        child = _candidate("public.a", "linked_ref", tuple(range(SKETCH_K)))
+        parent = _candidate("public.b", "id", tuple(range(SKETCH_K)), cardinality=SKETCH_K * 2)
+
+        out = infer_value_derived_edges([child], [parent], frozenset())
+
+        assert "public.a" in out
+
+    def test_a_truncated_pair_with_no_real_overlap_is_not_proposed(self) -> None:
+        child = _candidate("public.a", "linked_ref", tuple(range(SKETCH_K)))
+        parent = _candidate("public.b", "id", tuple(range(SKETCH_K, 2 * SKETCH_K)))
+
+        assert infer_value_derived_edges([child], [parent], frozenset()) == {}
+
+    def test_a_truncated_pair_in_the_wrong_direction_is_not_proposed(self) -> None:
+        """SPEC 2.3.11: the parent's cardinality MUST be the larger of the two - the estimator
+        branch needs the check spelled out, where the exhaustive one gets it from subset math.
+        """
+
+        child = _candidate(
+            "public.a",
+            "linked_ref",
+            tuple(range(SKETCH_K)),
+            cardinality=SKETCH_K + 1,
+        )
+        parent = _candidate("public.b", "id", tuple(range(SKETCH_K)), cardinality=SKETCH_K)
+
+        assert infer_value_derived_edges([child], [parent], frozenset()) == {}
+
+    def test_an_equal_cardinality_pair_proposes_no_edge_in_either_direction(self) -> None:
+        """SPEC 2.3.11 requires the parent's cardinality to be the larger, and equal makes neither -
+        accepting it would license the same column pair as an edge in both directions.
+        """
+
+        left = _candidate("public.a", "left_col", tuple(range(SKETCH_K)), cardinality=SKETCH_K)
+        right = _candidate("public.a", "right_col", tuple(range(SKETCH_K)), cardinality=SKETCH_K)
+
+        assert infer_value_derived_edges([left], [right], frozenset()) == {}
+        assert infer_value_derived_edges([right], [left], frozenset()) == {}

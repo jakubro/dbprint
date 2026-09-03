@@ -104,3 +104,25 @@ def test_findings_count_matches_the_tables_own_returned_issues(print_dir: Path) 
     assert collector_findings is not None
     assert collector_findings >= 1
     assert "relationships.broken-reciprocity" in {i.code for i in issues}
+
+
+def test_severity_names_the_worst_finding_and_is_none_when_clean(print_dir: Path) -> None:
+    """A renderer cannot pick a leaf colour from a bare count - error must outrank a table's
+    own warnings, and a table with zero findings must carry no severity at all.
+    """
+
+    _break_reciprocity(print_dir)
+
+    ticks: list[ValidationTick] = []
+    validate_print(print_dir, on_table=ticks.append)
+
+    last_pass_index = len(VALIDATION_PASSES)
+    final_ticks = {t.fqn: t for t in ticks if t.pass_index == last_pass_index}
+
+    broken = final_ticks["seedbank.collector"]
+    assert broken.findings is not None
+    assert broken.findings >= 1
+    assert broken.severity == "error"
+
+    clean = next(t for t in final_ticks.values() if t.findings == 0)
+    assert clean.severity is None

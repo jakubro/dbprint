@@ -22,6 +22,271 @@ grain:
     - scientific_name
     detection: declared
 dependencies: []
+timeline:
+  column: created_at
+  unit: month
+  buckets:
+  - start: '2012-01-01T00:00:00Z'
+    count: 1
+  - start: '2012-02-01T00:00:00Z'
+    count: 2
+  - start: '2012-03-01T00:00:00Z'
+    count: 3
+  - start: '2012-04-01T00:00:00Z'
+    count: 3
+  - start: '2012-05-01T00:00:00Z'
+    count: 3
+  - start: '2012-06-01T00:00:00Z'
+    count: 2
+  - start: '2012-07-01T00:00:00Z'
+    count: 1
+  - start: '2012-08-01T00:00:00Z'
+    count: 3
+  - start: '2012-09-01T00:00:00Z'
+    count: 3
+  - start: '2012-10-01T00:00:00Z'
+    count: 3
+  - start: '2012-11-01T00:00:00Z'
+    count: 3
+  - start: '2012-12-01T00:00:00Z'
+    count: 1
+  - start: '2013-01-01T00:00:00Z'
+    count: 2
+  - start: '2013-02-01T00:00:00Z'
+    count: 3
+  - start: '2013-03-01T00:00:00Z'
+    count: 3
+  - start: '2013-04-01T00:00:00Z'
+    count: 3
+  - start: '2013-05-01T00:00:00Z'
+    count: 2
+  - start: '2013-06-01T00:00:00Z'
+    count: 1
+  - start: '2013-07-01T00:00:00Z'
+    count: 3
+  - start: '2013-08-01T00:00:00Z'
+    count: 3
+  - start: '2013-09-01T00:00:00Z'
+    count: 3
+  - start: '2013-10-01T00:00:00Z'
+    count: 3
+  - start: '2013-11-01T00:00:00Z'
+    count: 2
+  - start: '2013-12-01T00:00:00Z'
+    count: 1
+  - start: '2014-01-01T00:00:00Z'
+    count: 3
+  - start: '2014-02-01T00:00:00Z'
+    count: 3
+  - start: '2014-03-01T00:00:00Z'
+    count: 3
+  - start: '2014-04-01T00:00:00Z'
+    count: 2
+  - start: '2014-05-01T00:00:00Z'
+    count: 2
+  - start: '2014-06-01T00:00:00Z'
+    count: 2
+  - start: '2014-07-01T00:00:00Z'
+    count: 3
+  - start: '2014-08-01T00:00:00Z'
+    count: 3
+  - start: '2014-09-01T00:00:00Z'
+    count: 3
+  - start: '2014-10-01T00:00:00Z'
+    count: 2
+  - start: '2014-11-01T00:00:00Z'
+    count: 1
+  - start: '2014-12-01T00:00:00Z'
+    count: 3
+  - start: '2015-01-01T00:00:00Z'
+    count: 3
+  - start: '2015-02-01T00:00:00Z'
+    count: 3
+  - start: '2015-03-01T00:00:00Z'
+    count: 3
+  - start: '2015-04-01T00:00:00Z'
+    count: 1
+  - start: '2015-05-01T00:00:00Z'
+    count: 2
+  - start: '2015-06-01T00:00:00Z'
+    count: 3
+  - start: '2015-07-01T00:00:00Z'
+    count: 3
+  - start: '2015-08-01T00:00:00Z'
+    count: 3
+  - start: '2015-09-01T00:00:00Z'
+    count: 2
+  - start: '2015-10-01T00:00:00Z'
+    count: 2
+  - start: '2015-11-01T00:00:00Z'
+    count: 2
+  - start: '2015-12-01T00:00:00Z'
+    count: 3
+  - start: '2016-01-01T00:00:00Z'
+    count: 3
+  - start: '2016-02-01T00:00:00Z'
+    count: 3
+  - start: '2016-03-01T00:00:00Z'
+    count: 2
+  - start: '2016-04-01T00:00:00Z'
+    count: 1
+  - start: '2016-05-01T00:00:00Z'
+    count: 3
+  - start: '2016-06-01T00:00:00Z'
+    count: 3
+  - start: '2016-07-01T00:00:00Z'
+    count: 3
+  - start: '2016-08-01T00:00:00Z'
+    count: 3
+  - start: '2016-09-01T00:00:00Z'
+    count: 1
+  - start: '2016-10-01T00:00:00Z'
+    count: 2
+  - start: '2016-11-01T00:00:00Z'
+    count: 3
+  - start: '2016-12-01T00:00:00Z'
+    count: 3
+  - start: '2017-01-01T00:00:00Z'
+    count: 3
+  - start: '2017-02-01T00:00:00Z'
+    count: 2
+  - start: '2017-03-01T00:00:00Z'
+    count: 2
+  - start: '2017-04-01T00:00:00Z'
+    count: 2
+  - start: '2017-05-01T00:00:00Z'
+    count: 3
+  - start: '2017-06-01T00:00:00Z'
+    count: 3
+  - start: '2017-07-01T00:00:00Z'
+    count: 3
+  - start: '2017-08-01T00:00:00Z'
+    count: 2
+  - start: '2017-09-01T00:00:00Z'
+    count: 1
+  - start: '2017-10-01T00:00:00Z'
+    count: 3
+  - start: '2017-11-01T00:00:00Z'
+    count: 3
+  - start: '2017-12-01T00:00:00Z'
+    count: 3
+  - start: '2018-01-01T00:00:00Z'
+    count: 3
+  - start: '2018-02-01T00:00:00Z'
+    count: 1
+  - start: '2018-03-01T00:00:00Z'
+    count: 2
+  - start: '2018-04-01T00:00:00Z'
+    count: 3
+  - start: '2018-05-01T00:00:00Z'
+    count: 3
+  - start: '2018-06-01T00:00:00Z'
+    count: 3
+  - start: '2018-07-01T00:00:00Z'
+    count: 2
+  - start: '2018-08-01T00:00:00Z'
+    count: 2
+  - start: '2018-09-01T00:00:00Z'
+    count: 2
+  - start: '2018-10-01T00:00:00Z'
+    count: 3
+  - start: '2018-11-01T00:00:00Z'
+    count: 3
+  - start: '2018-12-01T00:00:00Z'
+    count: 3
+  - start: '2019-01-01T00:00:00Z'
+    count: 2
+  - start: '2019-02-01T00:00:00Z'
+    count: 1
+  - start: '2019-03-01T00:00:00Z'
+    count: 3
+  - start: '2019-04-01T00:00:00Z'
+    count: 3
+  - start: '2019-05-01T00:00:00Z'
+    count: 3
+  - start: '2019-06-01T00:00:00Z'
+    count: 2
+  - start: '2019-07-01T00:00:00Z'
+    count: 2
+  - start: '2019-08-01T00:00:00Z'
+    count: 2
+  - start: '2019-09-01T00:00:00Z'
+    count: 3
+  - start: '2019-10-01T00:00:00Z'
+    count: 3
+  - start: '2019-11-01T00:00:00Z'
+    count: 3
+  - start: '2019-12-01T00:00:00Z'
+    count: 2
+  - start: '2020-01-01T00:00:00Z'
+    count: 2
+  - start: '2020-02-01T00:00:00Z'
+    count: 2
+  - start: '2020-03-01T00:00:00Z'
+    count: 3
+  - start: '2020-04-01T00:00:00Z'
+    count: 3
+  - start: '2020-05-01T00:00:00Z'
+    count: 3
+  - start: '2020-06-01T00:00:00Z'
+    count: 1
+  - start: '2020-07-01T00:00:00Z'
+    count: 2
+  - start: '2020-08-01T00:00:00Z'
+    count: 2
+  - start: '2020-09-01T00:00:00Z'
+    count: 2
+  - start: '2020-10-01T00:00:00Z'
+    count: 2
+  - start: '2020-11-01T00:00:00Z'
+    count: 2
+  - start: '2021-01-01T00:00:00Z'
+    count: 2
+  - start: '2021-02-01T00:00:00Z'
+    count: 2
+  - start: '2021-03-01T00:00:00Z'
+    count: 2
+  - start: '2021-04-01T00:00:00Z'
+    count: 2
+  - start: '2021-05-01T00:00:00Z'
+    count: 1
+  - start: '2021-06-01T00:00:00Z'
+    count: 1
+  - start: '2021-07-01T00:00:00Z'
+    count: 2
+  - start: '2021-08-01T00:00:00Z'
+    count: 2
+  - start: '2021-09-01T00:00:00Z'
+    count: 2
+  - start: '2021-10-01T00:00:00Z'
+    count: 2
+  - start: '2021-12-01T00:00:00Z'
+    count: 2
+  - start: '2022-01-01T00:00:00Z'
+    count: 2
+  - start: '2022-02-01T00:00:00Z'
+    count: 2
+  - start: '2022-03-01T00:00:00Z'
+    count: 2
+  - start: '2022-04-01T00:00:00Z'
+    count: 1
+  - start: '2022-05-01T00:00:00Z'
+    count: 1
+  - start: '2022-06-01T00:00:00Z'
+    count: 2
+  - start: '2022-07-01T00:00:00Z'
+    count: 2
+  - start: '2022-08-01T00:00:00Z'
+    count: 2
+  - start: '2022-09-01T00:00:00Z'
+    count: 2
+  - start: '2022-10-01T00:00:00Z'
+    count: 1
+  - start: '2022-11-01T00:00:00Z'
+    count: 1
+  - start: '2022-12-01T00:00:00Z'
+    count: 2
+  coverage: 1.0
 columns:
   taxon_id:
     sql_type: integer
@@ -34,6 +299,67 @@ columns:
     cardinality_method: exact
     inferred:
       candidate_key: true
+    values:
+    - value: 1
+      count: 1
+    - value: 10
+      count: 1
+    - value: 100
+      count: 1
+    - value: 101
+      count: 1
+    - value: 102
+      count: 1
+    - value: 103
+      count: 1
+    - value: 104
+      count: 1
+    - value: 105
+      count: 1
+    - value: 106
+      count: 1
+    - value: 107
+      count: 1
+    - value: 108
+      count: 1
+    - value: 109
+      count: 1
+    - value: 11
+      count: 1
+    - value: 110
+      count: 1
+    - value: 111
+      count: 1
+    - value: 112
+      count: 1
+    - value: 113
+      count: 1
+    - value: 114
+      count: 1
+    - value: 115
+      count: 1
+    - value: 116
+      count: 1
+    - value: 117
+      count: 1
+    - value: 118
+      count: 1
+    - value: 119
+      count: 1
+    - value: 12
+      count: 1
+    - value: 120
+      count: 1
+    - value: 121
+      count: 1
+    - value: 122
+      count: 1
+    - value: 123
+      count: 1
+    - value: 124
+      count: 1
+    - value: 125
+      count: 1
     distribution: long_tail
     frequencies:
       top: 1
@@ -49,6 +375,11 @@ columns:
       p50: 150.5
       p75: 225.25
       p99: 297.01
+    mean: 150.5
+    sum: 45150
+    zero_count: 0
+    negative_count: 0
+    quantized_count: 300
     sketch:
       method: kmv_md5_lo64
       values: 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
@@ -61,6 +392,9 @@ columns:
     cardinality: 12
     cardinality_ratio: 0.04
     cardinality_method: exact
+    populated:
+      from: '2012-01-30T00:00:00Z'
+      to: '2022-12-10T00:00:00Z'
     values:
     - value: 10
       count: 36
@@ -166,9 +500,16 @@ columns:
       count: 1
     values_coverage: 0.1
     distribution: long_tail
+    length:
+      min: 13
+      max: 22
+      avg: 16.283333
+      p95: 19.0
+    empty_count: 0
     sketch:
       method: kmv_md5_lo64
       values: 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
+    normalized_cardinality: 300
   rank:
     sql_type: character varying(16)
     nullable: false
@@ -188,6 +529,11 @@ columns:
     values_coverage: 1.0
     values_coverage_method: measured
     distribution: dominant_value
+    length:
+      min: 5
+      max: 7
+      avg: 6.933333
+      p95: 7.0
     sketch:
       method: kmv_md5_lo64
       values: WoEPQFqfz7KDMrZ/4Dp45uCc3z7sunmZ
@@ -265,6 +611,12 @@ columns:
       count: 2
     values_coverage: 0.2
     distribution: long_tail
+    length:
+      min: 11
+      max: 17
+      avg: 13.35
+      p95: 16.0
+    empty_count: 0
     sketch:
       method: kmv_md5_lo64
       values: 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
@@ -281,6 +633,12 @@ columns:
       looks_like: prose
       sampled: 250
       matched: 250
+    length:
+      min: 156
+      max: 182
+      avg: 165.566667
+      p95: 174.0
+    empty_count: 0
     sketch:
       method: kmv_md5_lo64
       values: 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
@@ -314,6 +672,67 @@ columns:
     cardinality_method: exact
     inferred:
       candidate_key: true
+    values:
+    - value: '2012-01-30T00:00:00Z'
+      count: 1
+    - value: '2012-02-03T00:00:00Z'
+      count: 1
+    - value: '2012-02-07T00:00:00Z'
+      count: 1
+    - value: '2012-03-07T00:00:00Z'
+      count: 1
+    - value: '2012-03-11T00:00:00Z'
+      count: 1
+    - value: '2012-03-15T00:00:00Z'
+      count: 1
+    - value: '2012-04-13T00:00:00Z'
+      count: 1
+    - value: '2012-04-17T00:00:00Z'
+      count: 1
+    - value: '2012-04-21T00:00:00Z'
+      count: 1
+    - value: '2012-05-20T00:00:00Z'
+      count: 1
+    - value: '2012-05-24T00:00:00Z'
+      count: 1
+    - value: '2012-05-28T00:00:00Z'
+      count: 1
+    - value: '2012-06-26T00:00:00Z'
+      count: 1
+    - value: '2012-06-30T00:00:00Z'
+      count: 1
+    - value: '2012-07-04T00:00:00Z'
+      count: 1
+    - value: '2012-08-02T00:00:00Z'
+      count: 1
+    - value: '2012-08-06T00:00:00Z'
+      count: 1
+    - value: '2012-08-10T00:00:00Z'
+      count: 1
+    - value: '2012-09-08T00:00:00Z'
+      count: 1
+    - value: '2012-09-12T00:00:00Z'
+      count: 1
+    - value: '2012-09-16T00:00:00Z'
+      count: 1
+    - value: '2012-10-15T00:00:00Z'
+      count: 1
+    - value: '2012-10-19T00:00:00Z'
+      count: 1
+    - value: '2012-10-23T00:00:00Z'
+      count: 1
+    - value: '2012-11-21T00:00:00Z'
+      count: 1
+    - value: '2012-11-25T00:00:00Z'
+      count: 1
+    - value: '2012-11-29T00:00:00Z'
+      count: 1
+    - value: '2012-12-28T00:00:00Z'
+      count: 1
+    - value: '2013-01-01T00:00:00Z'
+      count: 1
+    - value: '2013-01-05T00:00:00Z'
+      count: 1
     distribution: long_tail
     frequencies:
       top: 1
@@ -330,6 +749,7 @@ columns:
       p50: '2017-01-24T00:00:00Z'
       p75: '2019-08-07T00:00:00Z'
       p99: '2022-10-30T00:00:00Z'
+    quantized_count: 300
     freshness:
       max_age_days: 1254
       classification: dormant

@@ -14,11 +14,15 @@ import pytest
 from dbprint.adapters import (
     Adapter,
     BaseStats,
+    BigqueryAdapter,
+    ClickhouseAdapter,
     ColumnMeta,
     ColumnStats,
     CommentsMeta,
+    DatabricksAdapter,
     ForeignKeyMeta,
     IndexMeta,
+    RedshiftAdapter,
     SnowflakeAdapter,
     StatisticsConfig,
     TableCounts,
@@ -27,9 +31,13 @@ from dbprint.adapters import (
     ValueCount,
 )
 from dbprint.adapters.base import row_count_or_none
+from dbprint.spec.classification import classify
+from dbprint.spec.statistics_matrix import FORBIDDEN_FIELDS, REQUIRED_FIELDS
 from dbprint.spec.temporal_age import parse_instant
 from tests.adapters.conftest import (
+    WIDE_DISTINCT,
     WIDE_FUTURE_MAX,
+    WIDE_ROW_COUNT,
     WIDE_TEMPORAL_MAX,
     WIDE_TEMPORAL_SPAN_DAYS,
 )
@@ -48,15 +56,19 @@ ABSTRACT_METHODS = {
     "introspect_indexes",
     "introspect_unique_keys",
     "introspect_physical_layout",
+    "introspect_view_dependencies",
     "extract_comments",
     "estimate_row_count",
     "compute_base_statistics",
     "compute_column_statistics",
     "compute_null_patterns",
     "probe_grain",
+    "probe_timeline",
+    "compute_populated_windows",
     "probe_dependencies",
     "sample_values",
     "compute_key_sketch",
+    "compute_normalized_cardinality",
     "execute_query",
 }
 
@@ -116,8 +128,18 @@ class TestListTables:
 
 
 class TestExtractDdl:
+    """Databricks and BigQuery are excluded: both statements are real on the vendor but absent
+    from the local substrate (measured), leaving real DDL extraction to the live tier.
+    """
+
     def test_returns_non_empty_string(self, adapter_factory: Callable[[], Adapter]) -> None:
         adapter = adapter_factory()
+
+        if isinstance(adapter, DatabricksAdapter):
+            pytest.skip("OSS Delta refuses SHOW CREATE TABLE outright; see class docstring.")
+
+        if isinstance(adapter, BigqueryAdapter):
+            pytest.skip("The emulator's COLUMNS carries no ddl field; see class docstring.")
 
         for t in adapter.list_tables(include=["*"], exclude=[]):
             ddl = adapter.extract_ddl(t.fqn)
@@ -126,6 +148,12 @@ class TestExtractDdl:
 
     def test_trailing_newline_per_spec(self, adapter_factory: Callable[[], Adapter]) -> None:
         adapter = adapter_factory()
+
+        if isinstance(adapter, DatabricksAdapter):
+            pytest.skip("OSS Delta refuses SHOW CREATE TABLE outright; see class docstring.")
+
+        if isinstance(adapter, BigqueryAdapter):
+            pytest.skip("The emulator's COLUMNS carries no ddl field; see class docstring.")
 
         for t in adapter.list_tables(include=["*"], exclude=[]):
             ddl = adapter.extract_ddl(t.fqn)
@@ -154,6 +182,12 @@ class TestIntrospect:
     ) -> None:
         adapter = adapter_factory()
 
+        if isinstance(adapter, BigqueryAdapter):
+            pytest.skip(
+                "TABLE_CONSTRAINTS/KEY_COLUMN_USAGE are absent from the emulator (measured); "
+                "left to the environment-gated live tier.",
+            )
+
         for t in adapter.list_tables(include=["*"], exclude=[]):
             for fk in adapter.introspect_relationships(t.fqn):
                 assert isinstance(fk, ForeignKeyMeta)
@@ -168,6 +202,12 @@ class TestIntrospect:
     ) -> None:
         adapter = adapter_factory()
         valid = {"NO ACTION", "CASCADE", "SET NULL", "SET DEFAULT", "RESTRICT"}
+
+        if isinstance(adapter, BigqueryAdapter):
+            pytest.skip(
+                "TABLE_CONSTRAINTS/KEY_COLUMN_USAGE are absent from the emulator (measured); "
+                "left to the environment-gated live tier.",
+            )
 
         for t in adapter.list_tables(include=["*"], exclude=[]):
             for fk in adapter.introspect_relationships(t.fqn):
@@ -193,10 +233,8 @@ class TestIntrospect:
 
 
 class TestUniqueKeys:
-    """Declared PRIMARY KEY / UNIQUE groups - the schema's own statement, not a measurement.
-
-    The fixtures disagree on `email`: Postgres and Snowflake declare it UNIQUE, MySQL
-    declares a non-unique key on it, so only what every substrate declares is asserted here.
+    """Declared PRIMARY KEY / UNIQUE groups, not a measurement - only what every substrate
+    declares is asserted, since some lack either the primitive or a catalog to read it back.
     """
 
     def test_a_declared_primary_key_is_reported(
@@ -204,6 +242,22 @@ class TestUniqueKeys:
         adapter_factory: Callable[[], Adapter],
     ) -> None:
         adapter = adapter_factory()
+
+        if isinstance(adapter, ClickhouseAdapter):
+            pytest.skip(
+                "ClickHouse's PRIMARY KEY is not a uniqueness constraint; see class docstring.",
+            )
+
+        if isinstance(adapter, DatabricksAdapter):
+            pytest.skip(
+                "Databricks declares no PRIMARY KEY on this substrate; see class docstring.",
+            )
+
+        if isinstance(adapter, BigqueryAdapter):
+            pytest.skip(
+                "TABLE_CONSTRAINTS/KEY_COLUMN_USAGE are absent from the emulator; see class "
+                "docstring.",
+            )
 
         for table in _tables_with_columns(adapter):
             groups = [g.columns for g in adapter.introspect_unique_keys(table.fqn)]
@@ -219,6 +273,22 @@ class TestUniqueKeys:
 
         adapter = adapter_factory()
 
+        if isinstance(adapter, ClickhouseAdapter):
+            pytest.skip(
+                "ClickHouse's PRIMARY KEY is not a uniqueness constraint; see class docstring.",
+            )
+
+        if isinstance(adapter, DatabricksAdapter):
+            pytest.skip(
+                "Databricks declares no PRIMARY KEY on this substrate; see class docstring.",
+            )
+
+        if isinstance(adapter, BigqueryAdapter):
+            pytest.skip(
+                "TABLE_CONSTRAINTS/KEY_COLUMN_USAGE are absent from the emulator; see class "
+                "docstring.",
+            )
+
         for table in _tables_with_columns(adapter):
             primary = [g.columns for g in adapter.introspect_unique_keys(table.fqn) if g.primary]
             assert primary == [("id",)], f"{table.fqn} reported primary keys {primary}"
@@ -228,6 +298,12 @@ class TestUniqueKeys:
         adapter_factory: Callable[[], Adapter],
     ) -> None:
         adapter = adapter_factory()
+
+        if isinstance(adapter, BigqueryAdapter):
+            pytest.skip(
+                "TABLE_CONSTRAINTS/KEY_COLUMN_USAGE are absent from the emulator; see class "
+                "docstring.",
+            )
 
         for table in _tables_with_columns(adapter):
             names = {c.name for c in adapter.introspect_columns(table.fqn)}
@@ -260,7 +336,7 @@ class TestProbeGrain:
     ) -> None:
         _, factory = sql_adapter_factory
         adapter = factory()
-        fqn, columns, counts = _users_probe_context(adapter, empty_stats_config)
+        fqn, columns, counts = _curator_probe_context(adapter, empty_stats_config)
 
         found = adapter.probe_grain(fqn, columns, counts, (("herbarium_id", "email"),))
 
@@ -273,7 +349,7 @@ class TestProbeGrain:
     ) -> None:
         _, factory = sql_adapter_factory
         adapter = factory()
-        fqn, columns, counts = _users_probe_context(adapter, empty_stats_config)
+        fqn, columns, counts = _curator_probe_context(adapter, empty_stats_config)
 
         found = adapter.probe_grain(fqn, columns, counts, (("herbarium_id", "is_active"),))
 
@@ -288,7 +364,7 @@ class TestProbeGrain:
         verdicts: dict[str, tuple[tuple[str, str], ...]] = {}
 
         for vendor, adapter in all_sql_adapters.items():
-            fqn, columns, counts = _users_probe_context(adapter, empty_stats_config)
+            fqn, columns, counts = _curator_probe_context(adapter, empty_stats_config)
             verdicts[vendor] = adapter.probe_grain(fqn, columns, counts, candidates)
 
         assert len(set(verdicts.values())) == 1, verdicts
@@ -300,9 +376,105 @@ class TestProbeGrain:
     ) -> None:
         _, factory = sql_adapter_factory
         adapter = factory()
-        fqn, columns, counts = _users_probe_context(adapter, empty_stats_config)
+        fqn, columns, counts = _curator_probe_context(adapter, empty_stats_config)
 
         assert adapter.probe_grain(fqn, columns, counts, ()) == ()
+
+
+class TestProbeTimeline:
+    """SPEC 2.2.16's grouped bucket statement - `observed_at` takes `WIDE_DISTINCT` consecutive
+    daily values, so a day-grain probe returns exactly that many buckets summing to the rows.
+    """
+
+    def test_day_grain_returns_one_bucket_per_distinct_day(
+        self,
+        sql_adapter_factory: tuple[str, Callable[[], Adapter]],
+        empty_stats_config: StatisticsConfig,
+    ) -> None:
+        _, factory = sql_adapter_factory
+        adapter = factory()
+        fqn, columns, counts = _viability_check_probe_context(adapter, empty_stats_config)
+
+        buckets = adapter.probe_timeline(fqn, columns, counts, "observed_at", "day")
+
+        assert len(buckets) == WIDE_DISTINCT
+        assert sum(count for _, count in buckets) == WIDE_ROW_COUNT
+        starts = [start for start, _ in buckets]
+        assert starts == sorted(starts), starts
+
+    def test_every_real_adapter_agrees_on_bucket_count(
+        self,
+        all_sql_adapters: dict[str, Adapter],
+        empty_stats_config: StatisticsConfig,
+    ) -> None:
+        verdicts: dict[str, int] = {}
+
+        for vendor, adapter in all_sql_adapters.items():
+            fqn, columns, counts = _viability_check_probe_context(adapter, empty_stats_config)
+            buckets = adapter.probe_timeline(fqn, columns, counts, "observed_at", "day")
+            verdicts[vendor] = len(buckets)
+
+        assert len(set(verdicts.values())) == 1, verdicts
+
+
+class TestPopulatedWindows:
+    """SPEC 2.2.4's grouped MIN/MAX statement - `label` is never null in the wide fixture, so
+    its window over the `observed_at` anchor degenerates to that anchor's own full range.
+    """
+
+    def test_a_never_null_subject_windows_to_the_anchors_own_range(
+        self,
+        sql_adapter_factory: tuple[str, Callable[[], Adapter]],
+        empty_stats_config: StatisticsConfig,
+    ) -> None:
+        _, factory = sql_adapter_factory
+        adapter = factory()
+        fqn, columns, counts = _viability_check_probe_context(adapter, empty_stats_config)
+
+        windows = adapter.compute_populated_windows(
+            fqn,
+            columns,
+            counts,
+            "observed_at",
+            ("label",),
+        )
+
+        assert "label" in windows
+        _, to_text = windows["label"]
+        parsed_to = parse_instant(to_text)
+        assert parsed_to is not None, to_text
+        assert parsed_to == WIDE_TEMPORAL_MAX["observed_at"].replace(tzinfo=UTC), to_text
+
+    def test_no_subject_columns_returns_empty_without_a_statement(
+        self,
+        sql_adapter_factory: tuple[str, Callable[[], Adapter]],
+        empty_stats_config: StatisticsConfig,
+    ) -> None:
+        _, factory = sql_adapter_factory
+        adapter = factory()
+        fqn, columns, counts = _viability_check_probe_context(adapter, empty_stats_config)
+
+        assert adapter.compute_populated_windows(fqn, columns, counts, "observed_at", ()) == {}
+
+    def test_every_real_adapter_agrees(
+        self,
+        all_sql_adapters: dict[str, Adapter],
+        empty_stats_config: StatisticsConfig,
+    ) -> None:
+        verdicts: dict[str, datetime | None] = {}
+
+        for vendor, adapter in all_sql_adapters.items():
+            fqn, columns, counts = _viability_check_probe_context(adapter, empty_stats_config)
+            windows = adapter.compute_populated_windows(
+                fqn,
+                columns,
+                counts,
+                "observed_at",
+                ("label",),
+            )
+            verdicts[vendor] = parse_instant(windows["label"][1])
+
+        assert len(set(verdicts.values())) == 1, verdicts
 
 
 class TestProbeDependencies:
@@ -319,7 +491,7 @@ class TestProbeDependencies:
     ) -> None:
         _, factory = sql_adapter_factory
         adapter = factory()
-        fqn, columns, counts, base = _users_dependency_context(adapter, empty_stats_config)
+        fqn, columns, counts, base = _curator_dependency_context(adapter, empty_stats_config)
 
         strengths = adapter.probe_dependencies(
             fqn,
@@ -338,7 +510,10 @@ class TestProbeDependencies:
     ) -> None:
         _, factory = sql_adapter_factory
         adapter = factory()
-        fqn, columns, counts, base = _metrics_dependency_context(adapter, empty_stats_config)
+        fqn, columns, counts, base = _viability_check_dependency_context(
+            adapter,
+            empty_stats_config,
+        )
 
         strengths = adapter.probe_dependencies(fqn, columns, counts, base, (("rank", "id"),))
 
@@ -353,7 +528,7 @@ class TestProbeDependencies:
         verdicts: dict[str, dict[tuple[str, str], float]] = {}
 
         for vendor, adapter in all_sql_adapters.items():
-            fqn, columns, counts, base = _users_dependency_context(adapter, empty_stats_config)
+            fqn, columns, counts, base = _curator_dependency_context(adapter, empty_stats_config)
             verdicts[vendor] = adapter.probe_dependencies(fqn, columns, counts, base, candidates)
 
         assert len({frozenset(v.items()) for v in verdicts.values()}) == 1, verdicts
@@ -365,18 +540,14 @@ class TestProbeDependencies:
     ) -> None:
         _, factory = sql_adapter_factory
         adapter = factory()
-        fqn, columns, counts, base = _users_dependency_context(adapter, empty_stats_config)
+        fqn, columns, counts, base = _curator_dependency_context(adapter, empty_stats_config)
 
         assert adapter.probe_dependencies(fqn, columns, counts, base, ()) == {}
 
 
 class TestBareUniqueIndexAgreement:
-    """A bare `CREATE UNIQUE INDEX` backing no named constraint.
-
-    `herbarium.code` is declared unique through an index alone: MySQL's `UNIQUE KEY` is its
-    only declaration form, and Postgres/duckdb leave no `pg_constraint` row behind it. Both
-    engines must agree, and neither may also report it as an index. Snowflake and the mock are
-    excluded: neither has the unique-index primitive to exercise.
+    """A bare `CREATE UNIQUE INDEX` backing no named constraint - `herbarium.code` is unique
+    through an index alone, so engines with that primitive must agree and report no index.
     """
 
     def test_every_adapter_declares_it_unique(
@@ -389,7 +560,19 @@ class TestBareUniqueIndexAgreement:
         if isinstance(adapter, SnowflakeAdapter):
             pytest.skip("Snowflake has no unique-index primitive; see class docstring.")
 
-        fqn = _organizations_fqn(adapter)
+        if isinstance(adapter, ClickhouseAdapter):
+            pytest.skip("ClickHouse has no uniqueness primitive; see class docstring.")
+
+        if isinstance(adapter, RedshiftAdapter):
+            pytest.skip("Redshift has no CREATE INDEX at all; see class docstring.")
+
+        if isinstance(adapter, DatabricksAdapter):
+            pytest.skip("Databricks has no CREATE INDEX at all; see class docstring.")
+
+        if isinstance(adapter, BigqueryAdapter):
+            pytest.skip("BigQuery has no CREATE INDEX at all; see class docstring.")
+
+        fqn = _herbarium_fqn(adapter)
         groups = {g.columns for g in adapter.introspect_unique_keys(fqn)}
 
         assert ("code",) in groups, f"{fqn} did not declare `code` unique"
@@ -404,7 +587,7 @@ class TestBareUniqueIndexAgreement:
         if isinstance(adapter, SnowflakeAdapter):
             pytest.skip("Snowflake has no unique-index primitive; see class docstring.")
 
-        fqn = _organizations_fqn(adapter)
+        fqn = _herbarium_fqn(adapter)
         index_columns = {idx.columns for idx in adapter.introspect_indexes(fqn)}
 
         assert ("code",) not in index_columns, f"{fqn} double-reported `code` as an index"
@@ -475,6 +658,31 @@ class TestStatistics:
             for s in stats.values():
                 assert getattr(s, "classification", None) is None
 
+    def test_no_column_emits_a_field_its_own_resulting_classification_forbids(
+        self,
+        adapter_factory: Callable[[], Adapter],
+        empty_stats_config: StatisticsConfig,
+    ) -> None:
+        """The general form of the `_drop_forbidden_fields` backstop: an ordinary run must never
+        trip it - a field its classification forbids (SPEC 2.2.3) is an adapter bug, not routine.
+        """
+
+        adapter = adapter_factory()
+
+        for t in _tables_with_columns(adapter):
+            cols = adapter.introspect_columns(t.fqn)
+
+            for name, s in adapter.compute_statistics(t.fqn, cols, empty_stats_config, frozenset())[
+                1
+            ].items():
+                classification = _classification_of(s, empty_stats_config)
+
+                for field in FORBIDDEN_FIELDS[classification]:
+                    assert getattr(s, field, None) is None, (
+                        f"{t.fqn}.{name}: {classification} forbids {field!r}, but the "
+                        f"column carries a value for it"
+                    )
+
     def test_null_count_and_rate_against_seeded_literal(
         self,
         sql_adapter_factory: tuple[str, Callable[[], Adapter]],
@@ -487,7 +695,7 @@ class TestStatistics:
         """
 
         _, factory = sql_adapter_factory
-        stats = _users_stats(factory(), empty_stats_config)
+        stats = _curator_stats(factory(), empty_stats_config)
 
         seed_count = stats["seed_count"]
         assert seed_count.null_count == 1
@@ -514,6 +722,37 @@ class TestStatistics:
                 if s.cardinality_ratio is not None:
                     assert 0.0 <= s.cardinality_ratio <= 1.0
 
+    def test_internal_and_emitted_cardinality_method_agree(
+        self,
+        adapter_factory: Callable[[], Adapter],
+        empty_stats_config: StatisticsConfig,
+    ) -> None:
+        """`BaseStats.cardinality_method` decides `candidate_key_exception` (SPEC 4.2); the emitted
+        `ColumnStats.cardinality_method` is what conformance recomputes it from, so both must agree.
+        """
+
+        adapter = adapter_factory()
+
+        for t in _tables_with_columns(adapter):
+            cols = adapter.introspect_columns(t.fqn)
+            counts, base = adapter.compute_base_statistics(t.fqn, cols, empty_stats_config)
+            stats = adapter.compute_column_statistics(
+                t.fqn,
+                cols,
+                empty_stats_config,
+                counts,
+                base,
+                frozenset(),
+            )
+
+            for name, b in base.items():
+                emitted = stats[name].cardinality_method
+
+                if emitted is None:
+                    continue  # unsupported column - no cardinality on either side
+
+                assert b.cardinality_method == emitted, (t.fqn, name, b.cardinality_method, emitted)
+
     def test_values_descending_by_count(
         self,
         adapter_factory: Callable[[], Adapter],
@@ -524,10 +763,16 @@ class TestStatistics:
         for t in _tables_with_columns(adapter):
             cols = adapter.introspect_columns(t.fqn)
 
-            for s in adapter.compute_statistics(t.fqn, cols, empty_stats_config, frozenset())[
+            for name, s in adapter.compute_statistics(t.fqn, cols, empty_stats_config, frozenset())[
                 1
-            ].values():
+            ].items():
                 if s.values is None:
+                    classification = _classification_of(s, empty_stats_config)
+                    assert "values" not in REQUIRED_FIELDS[classification], (
+                        f"{t.fqn}.{name}: {classification} requires `values`, but the "
+                        f"column carries none"
+                    )
+
                     continue
 
                 counts = [v.count for v in s.values]
@@ -556,6 +801,21 @@ class TestStatistics:
 
             for name, s in stats.items():
                 if s.values is None:
+                    classification = _classification_of(s, empty_stats_config)
+                    assert "values" not in REQUIRED_FIELDS[classification], (
+                        f"{t.fqn}.{name}: {classification} requires `values`, but the "
+                        f"column carries none"
+                    )
+
+                    continue
+
+                # `numeric`/`temporal` never carry `values_coverage` (SPEC 2.2.3);
+                # `range`/`percentiles` is the proxy, since ColumnStats carries no classification.
+                if s.range is not None or s.percentiles is not None:
+                    assert s.values_coverage is None, (
+                        f"{t.fqn}.{name}: numeric/temporal must not carry values_coverage"
+                    )
+
                     continue
 
                 assert s.values_coverage is not None, (
@@ -595,7 +855,16 @@ class TestStatistics:
             )
 
             for name, s in stats.items():
-                if s.values is None or s.cardinality is None:
+                if s.values is None:
+                    classification = _classification_of(s, empty_stats_config)
+                    assert "values" not in REQUIRED_FIELDS[classification], (
+                        f"{t.fqn}.{name}: {classification} requires `values`, but the "
+                        f"column carries none"
+                    )
+
+                    continue
+
+                if s.cardinality is None:
                     continue
 
                 if s.cardinality <= empty_stats_config.top_n_values and counts.rows_scanned:
@@ -617,10 +886,16 @@ class TestStatistics:
         for t in _tables_with_columns(adapter):
             cols = adapter.introspect_columns(t.fqn)
 
-            for s in adapter.compute_statistics(t.fqn, cols, empty_stats_config, frozenset())[
+            for name, s in adapter.compute_statistics(t.fqn, cols, empty_stats_config, frozenset())[
                 1
-            ].values():
+            ].items():
                 if s.values is None:
+                    classification = _classification_of(s, empty_stats_config)
+                    assert "values" not in REQUIRED_FIELDS[classification], (
+                        f"{t.fqn}.{name}: {classification} requires `values`, but the "
+                        f"column carries none"
+                    )
+
                     continue
 
                 # Within each run of equal counts, values must ascend lexicographically.
@@ -652,7 +927,7 @@ class TestEmptyDrawOverANonEmptyTable:
         _, factory = sql_adapter_factory
         adapter = factory()
         fqn = next(
-            t.fqn for t in adapter.list_tables(include=["*"], exclude=[]) if _is_users(t.fqn)
+            t.fqn for t in adapter.list_tables(include=["*"], exclude=[]) if _is_curator(t.fqn)
         )
         columns = adapter.introspect_columns(fqn)
         scope = TableScope(filter="1 = 0")
@@ -676,7 +951,7 @@ class TestEmptyDrawOverANonEmptyTable:
         _, factory = sql_adapter_factory
         adapter = factory()
         fqn = next(
-            t.fqn for t in adapter.list_tables(include=["*"], exclude=[]) if _is_users(t.fqn)
+            t.fqn for t in adapter.list_tables(include=["*"], exclude=[]) if _is_curator(t.fqn)
         )
         columns = adapter.introspect_columns(fqn)
         scope = TableScope(filter="1 = 1")
@@ -717,6 +992,21 @@ def _tables_with_columns(adapter: Adapter) -> list[TableMeta]:
     return out
 
 
+def _classification_of(s: ColumnStats, config: StatisticsConfig) -> str:
+    """The SPEC 3.2 classification `s`'s own fields resolve to.
+
+    `ColumnStats` carries no classification, so it is recomputed here from the same inputs
+    `classify()` takes; `has_declared_fk=False` is safe, the two arms sharing one required set.
+    """
+
+    return classify(
+        sql_type=s.sql_type,
+        cardinality=s.cardinality,
+        has_declared_fk=False,
+        enumeration_threshold=config.enumeration_threshold,
+    )
+
+
 class TestDayCounts:
     """`span_days` counts whole elapsed days (SPEC 2.2.4), not calendar-date boundaries.
 
@@ -731,7 +1021,7 @@ class TestDayCounts:
         empty_stats_config: StatisticsConfig,
     ) -> None:
         _, factory = sql_adapter_factory
-        stats = _metrics_stats(factory(), empty_stats_config)
+        stats = _viability_check_stats(factory(), empty_stats_config)
         actual: dict[str, int | None] = {}
 
         for name in WIDE_TEMPORAL_SPAN_DAYS:
@@ -749,7 +1039,7 @@ class TestDayCounts:
         """No adapter derives `max_age_days` - it reports the true maximum and stops."""
 
         _, factory = sql_adapter_factory
-        stats = _metrics_stats(factory(), empty_stats_config)
+        stats = _viability_check_stats(factory(), empty_stats_config)
 
         for name, maximum in WIDE_TEMPORAL_MAX.items():
             rng = stats[name].range
@@ -769,83 +1059,102 @@ class TestDayCounts:
         """Without this the assertion above could pass on absent statistics."""
 
         _, factory = sql_adapter_factory
-        stats = _metrics_stats(factory(), empty_stats_config)
+        stats = _viability_check_stats(factory(), empty_stats_config)
 
         for name in WIDE_TEMPORAL_MAX:
             assert stats[name].range is not None, f"{name} produced no range"
 
 
-def _metrics_stats(adapter: Adapter, config: StatisticsConfig) -> dict[str, ColumnStats]:
+def _viability_check_stats(adapter: Adapter, config: StatisticsConfig) -> dict[str, ColumnStats]:
     """Per-column statistics for the wide fixture table on any substrate."""
 
-    fqn = next(t.fqn for t in adapter.list_tables(include=["*"], exclude=[]) if _is_metrics(t.fqn))
+    fqn = next(
+        t.fqn for t in adapter.list_tables(include=["*"], exclude=[]) if _is_viability_check(t.fqn)
+    )
     columns = adapter.introspect_columns(fqn)
     _, stats = adapter.compute_statistics(fqn, columns, config, frozenset())
 
     return stats
 
 
-def _is_metrics(fqn: str) -> bool:
+def _is_viability_check(fqn: str) -> bool:
     return fqn.rsplit(".", 1)[-1] == "viability_check"
 
 
-def _organizations_fqn(adapter: Adapter) -> str:
+def _herbarium_fqn(adapter: Adapter) -> str:
     return next(
-        t.fqn for t in adapter.list_tables(include=["*"], exclude=[]) if _is_organizations(t.fqn)
+        t.fqn for t in adapter.list_tables(include=["*"], exclude=[]) if _is_herbarium(t.fqn)
     )
 
 
-def _is_organizations(fqn: str) -> bool:
+def _is_herbarium(fqn: str) -> bool:
     return fqn.rsplit(".", 1)[-1] == "herbarium"
 
 
-def _users_stats(adapter: Adapter, config: StatisticsConfig) -> dict[str, ColumnStats]:
+def _curator_stats(adapter: Adapter, config: StatisticsConfig) -> dict[str, ColumnStats]:
     """Per-column statistics for the null-bearing fixture table on any substrate."""
 
-    fqn = next(t.fqn for t in adapter.list_tables(include=["*"], exclude=[]) if _is_users(t.fqn))
+    fqn = next(t.fqn for t in adapter.list_tables(include=["*"], exclude=[]) if _is_curator(t.fqn))
     columns = adapter.introspect_columns(fqn)
     _, stats = adapter.compute_statistics(fqn, columns, config, frozenset())
 
     return stats
 
 
-def _is_users(fqn: str) -> bool:
+def _is_curator(fqn: str) -> bool:
     return fqn.rsplit(".", 1)[-1] == "curator"
 
 
-def _users_probe_context(
+def _curator_probe_context(
     adapter: Adapter,
     config: StatisticsConfig,
 ) -> tuple[str, list[ColumnMeta], TableCounts]:
     """The `curator` FQN, its columns, and Phase A counts - what `probe_grain` needs to run."""
 
-    fqn = next(t.fqn for t in adapter.list_tables(include=["*"], exclude=[]) if _is_users(t.fqn))
+    fqn = next(t.fqn for t in adapter.list_tables(include=["*"], exclude=[]) if _is_curator(t.fqn))
     columns = adapter.introspect_columns(fqn)
     counts, _ = adapter.compute_base_statistics(fqn, columns, config)
 
     return fqn, columns, counts
 
 
-def _users_dependency_context(
+def _viability_check_probe_context(
+    adapter: Adapter,
+    config: StatisticsConfig,
+) -> tuple[str, list[ColumnMeta], TableCounts]:
+    """The wide fixture's FQN, columns, and Phase A counts - what `probe_timeline` needs."""
+
+    fqn = next(
+        t.fqn for t in adapter.list_tables(include=["*"], exclude=[]) if _is_viability_check(t.fqn)
+    )
+    columns = adapter.introspect_columns(fqn)
+    counts, _ = adapter.compute_base_statistics(fqn, columns, config)
+
+    return fqn, columns, counts
+
+
+def _curator_dependency_context(
     adapter: Adapter,
     config: StatisticsConfig,
 ) -> tuple[str, list[ColumnMeta], TableCounts, dict[str, BaseStats]]:
     """The `curator` FQN, its columns and Phase A output - what `probe_dependencies` needs."""
 
-    fqn = next(t.fqn for t in adapter.list_tables(include=["*"], exclude=[]) if _is_users(t.fqn))
+    fqn = next(t.fqn for t in adapter.list_tables(include=["*"], exclude=[]) if _is_curator(t.fqn))
     columns = adapter.introspect_columns(fqn)
     counts, base = adapter.compute_base_statistics(fqn, columns, config)
 
     return fqn, columns, counts, base
 
 
-def _metrics_dependency_context(
+def _viability_check_dependency_context(
     adapter: Adapter,
     config: StatisticsConfig,
 ) -> tuple[str, list[ColumnMeta], TableCounts, dict[str, BaseStats]]:
     """The wide `viability_check` FQN, its columns, and Phase A output for `probe_dependencies`."""
 
-    fqn = next(t.fqn for t in adapter.list_tables(include=["*"], exclude=[]) if _is_metrics(t.fqn))
+    fqn = next(
+        t.fqn for t in adapter.list_tables(include=["*"], exclude=[]) if _is_viability_check(t.fqn)
+    )
     columns = adapter.introspect_columns(fqn)
     counts, base = adapter.compute_base_statistics(fqn, columns, config)
 
@@ -865,7 +1174,7 @@ class TestCrossAdapterDayCountAgreement:
         empty_stats_config: StatisticsConfig,
     ) -> None:
         spans = {
-            vendor: _spans(_metrics_stats(adapter, empty_stats_config))
+            vendor: _spans(_viability_check_stats(adapter, empty_stats_config))
             for vendor, adapter in all_sql_adapters.items()
         }
 
@@ -879,7 +1188,7 @@ class TestCrossAdapterDayCountAgreement:
         """`max_age_days` is derived engine-side from this value - agreement here is enough."""
 
         maxima = {
-            vendor: _range_maxima(_metrics_stats(adapter, empty_stats_config))
+            vendor: _range_maxima(_viability_check_stats(adapter, empty_stats_config))
             for vendor, adapter in all_sql_adapters.items()
         }
 
@@ -922,7 +1231,7 @@ class TestFutureDatedColumns:
         """The clamp is lossy, and this is where the lost information stays."""
 
         _, factory = sql_adapter_factory
-        stats = _metrics_stats(factory(), empty_stats_config)
+        stats = _viability_check_stats(factory(), empty_stats_config)
 
         for name, maximum in WIDE_FUTURE_MAX.items():
             rng = stats[name].range

@@ -83,6 +83,20 @@ class TestRoutes:
         for label in ("grain", "cardinality", "completeness"):
             assert f'<div class="label">{label}</div>' in body
 
+    def test_cardinality_and_null_count_carry_the_exact_value_reachable(
+        self,
+        rich_conn: ConnectionConfig,
+    ) -> None:
+        """`_human_number` rounds to one decimal with a K/M/B/T suffix, so 1,499 and 1,500 both
+        render `1.5K` - the exact figure must still be reachable on the page.
+        """
+
+        client = web.create_app([rich_conn]).test_client()
+
+        body = client.get("/t/primary/seedbank.batch").data.decode()
+
+        assert re.search(r'class="num" title="\d+">', body)
+
     def test_columns_card_carries_the_skyline_preview(self, rich_conn: ConnectionConfig) -> None:
         client = web.create_app([rich_conn]).test_client()
 

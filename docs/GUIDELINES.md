@@ -70,9 +70,27 @@ just install     # uv sync --extra dev --extra mcp --extra docs
   worth a second run before it is trusted as a regression.** Re-run `test-cov` once more on
   the same tree; only a repeat disagreement is real. A single run's number is not
   self-certifying — coverage.py's own run-to-run stability on this suite has not been proven.
+- **`-n auto` is sized by memory, not by cores.** `tests/conftest.py` divides the smallest of a
+  32 GiB ceiling, the cgroup limit and `MemAvailable` by a per-worker allowance;
+  `DBPRINT_TEST_MEMORY_MB` overrides the ceiling. `--dist loadgroup` is the other half - the
+  per-vendor xdist groups hold each substrate to one live instance per run.
 - **Optional extras**: `postgres` (`psycopg[binary]`), `mysql` (`mysql-connector-python`),
-  `snowflake` (`snowflake-connector-python`), `mcp` (the `serve` command + MCP SDK), `docs`
-  (the `dbprint docs` site: Flask, Markdown, inflect). `dev` pulls the test + lint toolchain.
+  `snowflake` (`snowflake-connector-python`), `duckdb` (`duckdb`), `clickhouse`
+  (`clickhouse-connect`), `redshift` (`redshift-connector`), `databricks`
+  (`databricks-sql-connector`), `bigquery` (`google-cloud-bigquery`), `mcp` (the `serve`
+  command + MCP SDK), `docs` (the `dbprint docs` site: Flask, Markdown, inflect). `dev` pulls
+  the test + lint toolchain, plus `chdb` for the ClickHouse contract suite - the one substrate
+  here that is a library, not a server - and `pyspark`/`delta-spark` for the Databricks one.
+  Redshift has no substrate of any kind, local or in-process; its contract suite runs against
+  Postgres, wrapped in a shim that answers the Redshift-only catalog statements from Postgres's
+  own catalog (tests/adapters/conftest.py). Databricks has none either: its production driver
+  speaks Databricks' own wire protocol, which nothing local can stand in for, so its contract
+  suite runs a real local PySpark + Delta session instead - a genuine engine, but the
+  `information_schema`-absent fallback path only, never real Unity Catalog. BigQuery's contract
+  suite runs against a real `goccy/bigquery-emulator` container instead, reached through a
+  REST-based test cursor rather than the real `google-cloud-bigquery` client (measured to hang
+  against this emulator) - a genuine query engine, but several `INFORMATION_SCHEMA` views are
+  absent from it regardless.
   Vendor connectors are imported lazily so a base install never pays for them (see §1, Imports).
 - **Virtualenv**: the `justfile` auto-routes `uv` to a container-local venv under `/tmp` when
   it detects a container; otherwise it uses `.venv/` in the working directory. Do not run

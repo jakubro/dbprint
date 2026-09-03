@@ -179,6 +179,32 @@ class TestBuildInvocation:
         assert (output / "index.html").is_file()
         assert "Wrote" in result.output
 
+    def test_a_failed_route_is_reported_and_moves_the_exit_code(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        (tmp_path / ".dbprint.yaml").write_text(PROJECT_BASE)
+        monkeypatch.chdir(tmp_path)
+        output = tmp_path / "site"
+
+        import dbprint.docs as docs_pkg
+        from dbprint.docs.build import BuildResult
+
+        def fake_build_site(connections, output_path, *, force=False):
+            return BuildResult(
+                output=output_path,
+                pages_written=1,
+                failed_routes=("/t/primary/broken",),
+            )
+
+        monkeypatch.setattr(docs_pkg, "build_site", fake_build_site)
+
+        result = CliRunner().invoke(main, ["docs", "build", "--output", str(output)])
+
+        assert result.exit_code == EXIT_GENERIC
+        assert "/t/primary/broken" in result.output
+
     def test_output_not_owned_without_force_exits_one(
         self,
         tmp_path: Path,

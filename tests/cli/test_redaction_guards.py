@@ -15,12 +15,14 @@ from dbprint.adapters import (
     ColumnStats,
     CommentsMeta,
     Frequencies,
+    Length,
     MockAdapter,
     MockTable,
     Range,
     ValueCount,
 )
 from dbprint.cli.main import main
+from dbprint.spec.classification import has_day_resolution, is_string_like_type
 
 
 EXIT_OK = 0
@@ -79,6 +81,17 @@ def _project(*blocks: str) -> str:
     )
 
 
+def _length_from_values(values: tuple[Any, ...]) -> Length:
+    """A minimal, internally-consistent length summary (SPEC 2.2.4) for a fixture column -
+    nothing asserts on the numbers, so an unweighted min/max/avg keeps the ordering true.
+    """
+
+    lengths = sorted(len(str(v)) for v in values)
+    avg = sum(lengths) / len(lengths)
+
+    return Length(min=lengths[0], max=lengths[-1], avg=avg, p95=float(lengths[-1]))
+
+
 def _pair_column(
     sql_type: str,
     values: tuple[Any, Any],
@@ -98,6 +111,7 @@ def _pair_column(
         values=(ValueCount(value=values[0], count=120), ValueCount(value=values[1], count=80)),
         values_coverage=1.0,
         distribution="uniform",
+        length=_length_from_values(values) if is_string_like_type(sql_type) else None,
     )
 
 
@@ -117,11 +131,12 @@ def _categorical_column(sql_type: str, values: tuple[Any, ...]) -> ColumnStats:
         values=tuple(ValueCount(value=v, count=count) for v in values),
         values_coverage=1.0,
         distribution="uniform",
+        length=_length_from_values(values) if is_string_like_type(sql_type) else None,
     )
 
 
 def _temporal_column(sql_type: str) -> ColumnStats:
-    """Cardinality above the enumeration threshold, so classification stays temporal (SPEC 4.2)."""
+    """Cardinality above the enumeration threshold, so classification stays temporal (SPEC 3.2)."""
 
     return ColumnStats(
         sql_type=sql_type,
@@ -131,10 +146,16 @@ def _temporal_column(sql_type: str) -> ColumnStats:
         cardinality=120,
         cardinality_ratio=0.6,
         cardinality_method="exact",
+        # A non-exhaustive top-N slice (SPEC 2.2.3); no `values_coverage` alongside it.
+        values=(
+            ValueCount(value="2024-01-01", count=2),
+            ValueCount(value="2025-03-04", count=1),
+        ),
         distribution="uniform",
         frequencies=Frequencies(top=2, bottom=1, listed=120, total=200),
         range=Range(min="2024-01-01", max="2026-06-08", span_days=889),
         percentiles={"p01": "2024-01-01", "p50": "2025-03-04", "p99": "2026-06-08"},
+        quantized_count=3 if has_day_resolution(sql_type) else None,
     )
 
 
@@ -172,6 +193,7 @@ def _email_column() -> ColumnStats:
         ),
         values_coverage=1.0,
         distribution="imbalanced",
+        length=_length_from_values(emails),
     )
 
 

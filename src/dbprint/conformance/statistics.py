@@ -12,9 +12,12 @@ from dbprint.spec.classification import (
     compute_candidate_key_exception,
     compute_cardinality_ratio,
     compute_null_rate,
+    has_day_resolution,
     is_candidate_key,
+    is_string_like_type,
 )
 from dbprint.spec.coverage import coverage_share, is_incoherent
+from dbprint.spec.looks_like import MATCH_THRESHOLD
 from dbprint.spec.redaction import REDACTED_DAY_COUNT_GRANULARITY
 from dbprint.spec.sketch import METHOD as SKETCH_METHOD
 from dbprint.spec.sketch import K as SKETCH_K
@@ -33,36 +36,60 @@ _PRECISION_DECIMALS = 6
 # read. Temporal containment needs no tolerance; both sides parse the same ISO text.
 _PERCENTILE_CONTAINMENT_TOLERANCE = 1e-06
 
-# The `inferred.*` rows of the SPEC 2.2.3 matrix, kept separate from the flat fields because
-# the container's own verdict overrides each sub-field independently; `unsupported` is absent
-# since SPEC 2.2.3 forbids the container itself. `epoch_unit` follows SPEC 4.1.5 and SPEC 4.5
-# (never epoch-shaped on boolean/json/temporal); `sampled`/`matched` follow `looks_like`,
-# whose evidence they are (SPEC 4.1.3). `candidate_key` and `candidate_key_exception` carry
-# no row here (SPEC 4.2): `_check_candidate_key` checks them against the measured ratio.
+# The `inferred.*` rows of the SPEC 2.2.3 matrix, separate from the flat fields because the
+# container's verdict overrides each sub-field independently. `candidate_key` carries no row.
 _FORBIDDEN_INFERRED_BY_CLASSIFICATION: dict[str, set[str]] = {
-    "boolean": {"looks_like", "sampled", "matched", "fk_candidate", "epoch_unit"},
-    "json": {"looks_like", "sampled", "matched", "fk_candidate", "epoch_unit"},
+    "boolean": {
+        "looks_like",
+        "sampled",
+        "matched",
+        "looks_like_candidate",
+        "looks_like_candidate_share",
+        "fk_candidate",
+        "epoch_unit",
+    },
+    "json": {
+        "looks_like",
+        "sampled",
+        "matched",
+        "looks_like_candidate",
+        "looks_like_candidate_share",
+        "fk_candidate",
+        "epoch_unit",
+    },
     "categorical": {"fk_candidate"},
-    "temporal": {"looks_like", "sampled", "matched", "fk_candidate", "epoch_unit"},
-    "numeric": {"looks_like", "sampled", "matched", "fk_candidate"},
+    "temporal": {
+        "looks_like",
+        "sampled",
+        "matched",
+        "looks_like_candidate",
+        "looks_like_candidate_share",
+        "fk_candidate",
+        "epoch_unit",
+    },
+    "numeric": {
+        "looks_like",
+        "sampled",
+        "matched",
+        "looks_like_candidate",
+        "looks_like_candidate_share",
+        "fk_candidate",
+    },
     "text": {"fk_candidate"},
 }
 
 
 @dataclass(frozen=True)
 class _ConditionalCell:
-    """A SPEC 2.2.3 cell whose verdict depends on another field of the same column.
-
-    The matrix is otherwise a function of `classification` alone. A registered cell is REQUIRED
-    while its condition is unmet and FORBIDDEN once it holds. `holds` reads the whole column,
-    not one named field: a redaction is a top-level marker, a shape sits under `inferred`.
+    """A SPEC 2.2.3 cell whose verdict depends on another field of the same column - REQUIRED
+    while its condition is unmet, FORBIDDEN once it holds; the matrix is otherwise classification.
     """
 
     classifications: frozenset[str]
     fields: frozenset[str]
     reason: str
     spec_ref: str
-    holds: Callable[[dict], bool]
+    holds: Callable[[dict, int], bool]
 
 
 def _inferred_of(col: dict) -> dict:
@@ -73,6 +100,55 @@ def _inferred_of(col: dict) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _redacted_single_row_aggregate(col: dict, rows_scanned: int) -> bool:
+    """Whether `mean`/`sum`/`length` would republish the one cell a redacted marker withholds -
+    an aggregate over at most one non-null row equals that row (SPEC 2.2.9).
+    """
+
+    if col.get("redacted") is None:
+        return False
+
+    null_count = col.get("null_count")
+
+    if not isinstance(null_count, int):
+        return False
+
+    return rows_scanned - null_count <= 1
+
+
+def _string_valued_sql_type(col: dict) -> bool:
+    """Whether `col`'s declared type is one `length` could apply to, cross-dialect - the same
+    elimination test every adapter's Phase A uses, so the matrix cannot outrun a producer.
+    """
+
+    sql_type = col.get("sql_type")
+
+    return isinstance(sql_type, str) and is_string_like_type(sql_type)
+
+
+def _no_day_resolution(col: dict) -> bool:
+    """Whether `col`'s declared type has no day component `quantized_count` could describe - the
+    same elimination test every adapter's temporal fetch uses to decide whether to compute it.
+    """
+
+    sql_type = col.get("sql_type")
+
+    return not (isinstance(sql_type, str) and has_day_resolution(sql_type))
+
+
+def _no_non_null_rows(col: dict, rows_scanned: int) -> bool:
+    """Whether the scanned set holds no non-null value for `length` to aggregate over - only
+    `categorical`/`foreign_key_candidate` can be string-typed and all-null at once (SPEC 3.3).
+    """
+
+    null_count = col.get("null_count")
+
+    if not isinstance(null_count, int):
+        return False
+
+    return rows_scanned - null_count <= 0
+
+
 _CONDITIONAL_CELLS: tuple[_ConditionalCell, ...] = (
     # `drop` emits no literal, so the bound fields are absent, not placeholders (SPEC 2.2.9).
     # `freshness` is unaffected: `max_age_days` is derived, not a value read from a cell.
@@ -81,7 +157,7 @@ _CONDITIONAL_CELLS: tuple[_ConditionalCell, ...] = (
         fields=frozenset({"range", "percentiles"}),
         reason="the column declares redacted: drop, which emits no literal",
         spec_ref="§2.2.9",
-        holds=lambda col: col.get("redacted") == "drop",
+        holds=lambda col, rows_scanned: col.get("redacted") == "drop",
     ),
     # Prose top values are unusable and their grouped scan is expensive, so the format
     # exempts the enumeration (and `distribution`, derived from it) for `text` alone.
@@ -90,7 +166,53 @@ _CONDITIONAL_CELLS: tuple[_ConditionalCell, ...] = (
         fields=frozenset({"values", "values_coverage", "distribution"}),
         reason="the column is inferred prose, which publishes no value list",
         spec_ref="§2.2.3",
-        holds=lambda col: _inferred_of(col).get("looks_like") == "prose",
+        holds=lambda col, rows_scanned: _inferred_of(col).get("looks_like") == "prose",
+    ),
+    _ConditionalCell(
+        classifications=frozenset({"numeric"}),
+        fields=frozenset({"mean", "sum"}),
+        reason=(
+            "the column carries a redacted marker over at most one non-null scanned row, "
+            "so the aggregate would republish the cell it withholds"
+        ),
+        spec_ref="§2.2.9",
+        holds=_redacted_single_row_aggregate,
+    ),
+    # `length` follows the value's type, not the classification - `categorical` and
+    # `foreign_key_candidate` match before any type-based branch runs (SPEC 3.2).
+    _ConditionalCell(
+        classifications=frozenset({"categorical", "foreign_key_candidate"}),
+        fields=frozenset({"length"}),
+        reason=(
+            "the column's sql_type does not carry a string value, or the scanned set holds "
+            "no non-null value for the aggregate to describe"
+        ),
+        spec_ref="§2.2.3",
+        holds=lambda col, rows_scanned: (
+            not _string_valued_sql_type(col) or _no_non_null_rows(col, rows_scanned)
+        ),
+    ),
+    _ConditionalCell(
+        classifications=frozenset({"text", "categorical", "foreign_key_candidate"}),
+        fields=frozenset({"length"}),
+        reason=(
+            "the column carries a redacted marker over at most one non-null scanned row, "
+            "so the aggregate would republish the cell it withholds"
+        ),
+        spec_ref="§2.2.9",
+        holds=_redacted_single_row_aggregate,
+    ),
+    # `quantized_count` follows the value's day resolution, not the classification alone:
+    # DATE is always its own day-truncation and TIME/YEAR carry no date at all (SPEC 2.2.3).
+    _ConditionalCell(
+        classifications=frozenset({"temporal"}),
+        fields=frozenset({"quantized_count"}),
+        reason=(
+            "the column's sql_type carries no day component to truncate to - DATE is "
+            "already its own truncation, TIME and YEAR carry no date at all"
+        ),
+        spec_ref="§2.2.3",
+        holds=lambda col, rows_scanned: _no_day_resolution(col),
     ),
 )
 
@@ -109,6 +231,8 @@ def check(data: Any, path: str, tbl_fqn: str) -> list[Issue]:
     # definition governs each column's field set, so the SPEC 2.2.3 matrix does not apply.
     catalog_only = data.get("catalog_only") is True
 
+    issues.extend(_check_table_unmeasured(data, path))
+    issues.extend(_check_depends_on(data, path))
     issues.extend(_check_scope(data, path, row_count))
 
     # SPEC 2.2.8 counts over the scanned set: the whole table only when `scope` is absent.
@@ -122,6 +246,8 @@ def check(data: Any, path: str, tbl_fqn: str) -> list[Issue]:
     issues.extend(_check_physical_layout(data, path, columns))
     issues.extend(_check_grain(data, path, columns, row_count, scoped))
     issues.extend(_check_dependencies(data, path, columns, row_count, scoped))
+    issues.extend(_check_timeline(data, path, columns, row_count, scoped, rows_scanned))
+    issues.extend(_check_populated(data, path, columns))
     issues.extend(_check_catalog_only_columns(columns, path, catalog_only=catalog_only))
 
     for col_name, col in columns.items():
@@ -131,8 +257,11 @@ def check(data: Any, path: str, tbl_fqn: str) -> list[Issue]:
         col_path = f"{path}::columns.{col_name}"
         classification = col.get("classification")
 
+        # Both read the SPEC 2.2.3 matrix, so both need a classification it has a row for. An
+        # unknown one warns (SPEC 5); `catalog_only` (SPEC 2.2.15) replaces the matrix entirely.
         if classification in _REQUIRED_BY_CLASSIFICATION and not catalog_only:
-            issues.extend(_check_matrix(col, col_path, classification))
+            issues.extend(_check_matrix(col, col_path, classification, rows_scanned))
+            issues.extend(_check_unmeasured(col, col_path, classification, rows_scanned))
 
         issues.extend(_check_count_invariants(col, col_path, rows_scanned))
         issues.extend(_check_candidate_key(col, col_path, rows_scanned))
@@ -149,6 +278,9 @@ def check(data: Any, path: str, tbl_fqn: str) -> list[Issue]:
         issues.extend(_check_span_days(col, col_path))
         issues.extend(_check_percentiles_order(col, col_path))
         issues.extend(_check_percentiles_containment(col, col_path))
+        issues.extend(_check_length_order(col, col_path))
+        issues.extend(_check_normalized_cardinality_order(col, col_path))
+        issues.extend(_check_looks_like_candidate(col, col_path))
         issues.extend(_check_max_age_days_mismatch(col, col_path, profiled_at))
         issues.extend(_check_redacted_day_counts(col, col_path))
         issues.extend(_check_physical_name(col, col_path, col_name))
@@ -163,11 +295,8 @@ def _check_null_patterns(
     columns: dict,
     rows_scanned: int,
 ) -> list[Issue]:
-    """Validate the table-level null census per SPEC 2.2.10.
-
-    Summing the pattern counts that name a column must reproduce that column's own
-    `null_count` - the format's only arithmetic identity crossing from a table-level object
-    to a per-column one, which two figures read over different scans cannot both satisfy.
+    """Validate the table-level null census per SPEC 2.2.10 - summing the pattern counts naming
+    a column must reproduce its own `null_count`, which two different scans cannot satisfy.
     """
 
     block = data.get("null_patterns")
@@ -177,7 +306,9 @@ def _check_null_patterns(
     )
 
     if block is None or not isinstance(block, dict):
-        if nulls_exist:
+        # SPEC 2.2.1: a file naming the census unmeasured has already said the read did not
+        # answer, so its absence asserts nothing about whether the table carries nulls.
+        if nulls_exist and "null_patterns" not in _table_unmeasured_of(data):
             return [
                 Issue(
                     path,
@@ -219,11 +350,29 @@ def _check_null_patterns(
     return issues + _check_null_pattern_reconciliation(entries, block, path, columns)
 
 
-def _check_physical_layout(data: dict, path: str, columns: dict) -> list[Issue]:
-    """SPEC 2.2.11: a named `column` must exist, and the two surfaces must agree.
+def _check_depends_on(data: dict, path: str) -> list[Issue]:
+    """SPEC 2.2.17: `depends_on` names what a view/matview reads, never what a table does -
+    object grain, so nothing here cross-checks `columns` or `relationships.yaml`.
+    """
 
-    `physical_layout.keys[].column` and each column's own `physical_layout_key` are two views
-    of one fact, so emitting one without the other writes a file that contradicts itself.
+    if "depends_on" not in data or data.get("type") != "table":
+        return []
+
+    return [
+        Issue(
+            path,
+            "stats.depends-on-on-table",
+            "error",
+            "depends_on is present but type is 'table'; the field names what a "
+            "view/matview reads and MUST NOT appear on a plain table.",
+            "§2.2.17",
+        ),
+    ]
+
+
+def _check_physical_layout(data: dict, path: str, columns: dict) -> list[Issue]:
+    """SPEC 2.2.11: a named `column` must exist, and the two surfaces must agree - they are two
+    views of one fact, so emitting one without the other writes a self-contradicting file.
     """
 
     block = data.get("physical_layout")
@@ -505,6 +654,178 @@ def _check_dependencies(
     return issues
 
 
+def _check_timeline(
+    data: dict,
+    path: str,
+    columns: dict,
+    row_count: int,
+    scoped: bool,
+    rows_scanned: int,
+) -> list[Issue]:
+    """SPEC 2.2.16: the anchor names a real, non-redacted temporal column, buckets are
+    ascending by `start`, and `coverage` agrees with the listed counts over `rows_scanned`.
+    """
+
+    block = data.get("timeline")
+
+    if not isinstance(block, dict):
+        return []
+
+    issues: list[Issue] = []
+    column = block.get("column")
+    col = columns.get(column) if isinstance(column, str) else None
+
+    if not isinstance(column, str) or col is None:
+        issues.append(
+            Issue(
+                path,
+                "stats.timeline-unknown-column",
+                "error",
+                f"timeline.column names {column!r}, not present in `columns`.",
+                "§2.2.16",
+            ),
+        )
+    else:
+        if col.get("classification") != "temporal":
+            issues.append(
+                Issue(
+                    path,
+                    "stats.timeline-anchor-not-temporal",
+                    "error",
+                    f"timeline.column {column!r} classifies {col.get('classification')!r}, "
+                    "not `temporal`.",
+                    "§2.2.16",
+                ),
+            )
+
+        if col.get("redacted") is not None:
+            issues.append(
+                Issue(
+                    path,
+                    "stats.timeline-anchor-redacted",
+                    "error",
+                    f"timeline.column {column!r} carries a `redacted` marker; the anchor "
+                    "rule MUST never choose a redacted column.",
+                    "§2.2.16",
+                ),
+            )
+
+    if scoped:
+        issues.append(
+            Issue(
+                path,
+                "stats.timeline-under-scope",
+                "error",
+                "timeline is present on a file that also carries `scope`; a bucketed count "
+                "over a sample is not a timeline.",
+                "§2.2.16",
+            ),
+        )
+
+    if row_count == 0:
+        issues.append(
+            Issue(
+                path,
+                "stats.timeline-on-empty-table",
+                "error",
+                "timeline is present on a table with row_count 0; there is nothing to bucket.",
+                "§2.2.16",
+            ),
+        )
+
+    buckets = [b for b in block.get("buckets") or [] if isinstance(b, dict)]
+    starts = [b.get("start") for b in buckets if isinstance(b.get("start"), str)]
+
+    if starts != sorted(starts):
+        issues.append(
+            Issue(
+                path,
+                "stats.timeline-buckets-unordered",
+                "error",
+                "timeline.buckets is not ascending by `start`.",
+                "§2.2.16",
+            ),
+        )
+
+    covered = sum(b.get("count") for b in buckets if isinstance(b.get("count"), int))
+    coverage = block.get("coverage")
+
+    if isinstance(coverage, (int, float)):
+        expected = covered / rows_scanned if rows_scanned else 0.0
+
+        if abs(coverage - expected) > 1e-6:
+            issues.append(
+                Issue(
+                    path,
+                    "stats.timeline-coverage-mismatch",
+                    "error",
+                    f"timeline.coverage is {coverage}, but the listed bucket counts over "
+                    f"rows_scanned computes to {expected}.",
+                    "§2.2.16",
+                ),
+            )
+
+    return issues
+
+
+def _check_populated(data: dict, path: str, columns: dict) -> list[Issue]:
+    """SPEC 2.2.4: `populated` requires `timeline` in the same file, and each instant lies
+    within the anchor column's own measured `range`.
+    """
+
+    timeline = data.get("timeline")
+    anchor_name = timeline.get("column") if isinstance(timeline, dict) else None
+    anchor_col = columns.get(anchor_name) if isinstance(anchor_name, str) else None
+    anchor_range = anchor_col.get("range") if isinstance(anchor_col, dict) else None
+    lo = parse_instant(anchor_range.get("min")) if isinstance(anchor_range, dict) else None
+    hi = parse_instant(anchor_range.get("max")) if isinstance(anchor_range, dict) else None
+
+    issues: list[Issue] = []
+
+    for col_name, col in columns.items():
+        if not isinstance(col, dict):
+            continue
+
+        populated = col.get("populated")
+
+        if not isinstance(populated, dict):
+            continue
+
+        col_path = f"{path}::columns.{col_name}"
+
+        if anchor_name is None:
+            issues.append(
+                Issue(
+                    col_path,
+                    "stats.populated-without-timeline",
+                    "error",
+                    "populated is present but the file carries no timeline block to name "
+                    "the anchor its instants are read against.",
+                    "§2.2.4",
+                ),
+            )
+            continue
+
+        if lo is None or hi is None:
+            continue
+
+        for key in ("from", "to"):
+            instant = parse_instant(populated.get(key))
+
+            if instant is not None and not lo <= instant <= hi:
+                issues.append(
+                    Issue(
+                        col_path,
+                        "stats.populated-out-of-anchor-range",
+                        "error",
+                        f"populated.{key} falls outside the anchor {anchor_name!r}'s own range.",
+                        "§2.2.4",
+                    ),
+                )
+
+    return issues
+
+
 def _check_null_pattern_columns(entries: list[dict], path: str, columns: dict) -> list[Issue]:
     """Every named column exists in this file, so a pattern is readable on its own."""
 
@@ -527,10 +848,8 @@ def _check_null_pattern_columns(entries: list[dict], path: str, columns: dict) -
 
 
 def _check_null_pattern_distinctness(entries: list[dict], path: str) -> list[Issue]:
-    """Each combination appears once, or the entries do not partition anything.
-
-    Two entries naming the same columns double-count the rows they describe and break the
-    reconciliation, without either count being wrong on its own.
+    """Each combination appears once, or the entries do not partition anything - a duplicate
+    double-counts the rows it describes without either count being wrong on its own.
     """
 
     seen = [_pattern_columns(entry) for entry in entries]
@@ -861,9 +1180,9 @@ def _check_catalog_only_columns(
     return issues
 
 
-def _check_matrix(col: dict, col_path: str, classification: str) -> list[Issue]:
+def _check_matrix(col: dict, col_path: str, classification: str, rows_scanned: int) -> list[Issue]:
     issues: list[Issue] = []
-    required, forbidden, exceptions = _matrix_cells(col, classification)
+    required, forbidden, exceptions = _matrix_cells(col, classification, rows_scanned)
 
     for field in required:
         if field not in col:
@@ -896,9 +1215,21 @@ def _check_matrix(col: dict, col_path: str, classification: str) -> list[Issue]:
     return issues
 
 
+def unmeasured_of(col: dict) -> frozenset[str]:
+    """The field names the column declares it could not measure (SPEC 2.2.4), or an empty set."""
+
+    value = col.get("unmeasured")
+
+    if not isinstance(value, list):
+        return frozenset()
+
+    return frozenset(name for name in value if isinstance(name, str))
+
+
 def _matrix_cells(
     col: dict,
     classification: str,
+    rows_scanned: int,
 ) -> tuple[set[str], set[str], dict[str, _ConditionalCell]]:
     """The required and forbidden field sets for one column, exceptions applied.
 
@@ -910,22 +1241,23 @@ def _matrix_cells(
     exceptions: dict[str, _ConditionalCell] = {}
 
     for cell in _CONDITIONAL_CELLS:
-        if classification not in cell.classifications or not cell.holds(col):
+        if classification not in cell.classifications or not cell.holds(col, rows_scanned):
             continue
 
         required -= cell.fields
         forbidden |= cell.fields
         exceptions.update(dict.fromkeys(cell.fields, cell))
 
+    # SPEC 2.2.4: a field the column names unmeasured stops being required, and does not become
+    # forbidden - `_check_unmeasured` reports an emitted one, so adding it here would charge twice.
+    required -= unmeasured_of(col)
+
     return required, forbidden, exceptions
 
 
 def _check_inferred_matrix(col: dict, col_path: str, classification: str) -> list[Issue]:
-    """Check the `inferred.*` forbidden rows of the matrix, which a flat key test cannot reach.
-
-    Reported under the same code as the flat rows, with the dotted name in the detail. An
-    absent or malformed container is the flat check's business. No classification REQUIRES an
-    `inferred.*` sub-field.
+    """Check the `inferred.*` forbidden rows of the matrix, which a flat key test cannot reach -
+    same code as the flat rows, with the dotted name in the detail; none is ever REQUIRED.
     """
 
     inferred = col.get("inferred")
@@ -1057,6 +1389,20 @@ def _check_count_invariants(col: dict, col_path: str, rows_scanned: int) -> list
             ),
         )
 
+    # `nullable` is a DDL fact (SPEC 2.2.2), not a data measurement, so it cannot legitimately
+    # disagree with a NULL the same column's own scan already counted.
+    if col.get("nullable") is False and isinstance(null_count, int) and null_count > 0:
+        issues.append(
+            Issue(
+                col_path,
+                "stats.nullable-contradicts-null-count",
+                "error",
+                f"nullable=False but null_count={null_count}; a column declared "
+                f"non-nullable cannot have scanned a NULL.",
+                "§2.2.2",
+            ),
+        )
+
     if (
         isinstance(cardinality, int)
         and isinstance(null_count, int)
@@ -1072,6 +1418,14 @@ def _check_count_invariants(col: dict, col_path: str, rows_scanned: int) -> list
                 "§2.2.7",
             ),
         )
+
+    # Redaction does not touch these - a count discloses no literal (SPEC 2.2.9) - so the
+    # bound applies unconditionally, the same population the cardinality check above uses.
+    if isinstance(null_count, int):
+        non_null = max(rows_scanned - null_count, 0)
+
+        for field in ("zero_count", "negative_count", "empty_count", "quantized_count"):
+            issues.extend(_degenerate_count_issue(col_path, field, col.get(field), non_null))
 
     # Recomputed through the producer's own pure-arithmetic rules. Unlike values_coverage
     # neither rule clamps: the impossible input (a count exceeding rows_scanned) is caught
@@ -1253,6 +1607,83 @@ def _is_exhaustive(coverage: object) -> bool:
     return isinstance(coverage, (int, float)) and not isinstance(coverage, bool) and coverage == 1.0
 
 
+def _check_unmeasured(
+    col: dict,
+    col_path: str,
+    classification: str,
+    rows_scanned: int,
+) -> list[Issue]:
+    """SPEC 2.2.4: a named field must be absent, and must be one the matrix required - otherwise
+    the marker either contradicts a measurement or absorbs the structural absences SPEC 7.2 covers.
+    """
+
+    named = unmeasured_of(col)
+
+    if not named:
+        return []
+
+    issues: list[Issue] = []
+    # Against the UNEXEMPTED matrix: `_matrix_cells` has already moved these out of `required`,
+    # so asking it here would report every name as unrequired.
+    required = set(_REQUIRED_BY_CLASSIFICATION[classification])
+
+    for cell in _CONDITIONAL_CELLS:
+        if classification in cell.classifications and cell.holds(col, rows_scanned):
+            required -= cell.fields
+
+    for field in sorted(named):
+        if field in col:
+            issues.append(
+                Issue(
+                    col_path,
+                    "stats.unmeasured-names-emitted-field",
+                    "error",
+                    f"unmeasured names {field!r}, which this column also emits.",
+                    "§2.2.4",
+                ),
+            )
+        elif field not in required:
+            issues.append(
+                Issue(
+                    col_path,
+                    "stats.unmeasured-names-unrequired-field",
+                    "error",
+                    f"unmeasured names {field!r}, which classification={classification!r} "
+                    f"does not require; its absence needs no marker.",
+                    "§2.2.4",
+                ),
+            )
+
+    return issues
+
+
+def _table_unmeasured_of(data: dict) -> frozenset[str]:
+    """The table-level blocks the file declares it could not measure (SPEC 2.2.1)."""
+
+    value = data.get("unmeasured")
+
+    if not isinstance(value, list):
+        return frozenset()
+
+    return frozenset(name for name in value if isinstance(name, str))
+
+
+def _check_table_unmeasured(data: dict, path: str) -> list[Issue]:
+    """SPEC 2.2.1: a named table-level block must be absent, for the column rule's own reason."""
+
+    return [
+        Issue(
+            path,
+            "stats.unmeasured-names-emitted-block",
+            "error",
+            f"unmeasured names {block!r}, which this file also emits.",
+            "§2.2.1",
+        )
+        for block in sorted(_table_unmeasured_of(data))
+        if data.get(block) is not None
+    ]
+
+
 def _check_distribution(col: dict, col_path: str) -> list[Issue]:
     """Verify distribution against an exhaustive `values` list, when verifiable.
 
@@ -1421,7 +1852,7 @@ def _check_precision(col: dict, col_path: str) -> list[Issue]:
 
     issues: list[Issue] = []
 
-    for field in ("null_rate", "cardinality_ratio", "values_coverage"):
+    for field in ("null_rate", "cardinality_ratio", "values_coverage", "mean", "sum"):
         issues.extend(_precision_issue(col.get(field), col_path, field))
 
     bounds = col.get("range")
@@ -1461,11 +1892,28 @@ def _precision_issue(value: object, col_path: str, field: str) -> list[Issue]:
     ]
 
 
-def _check_unrepresentable(col: dict, col_path: str) -> list[Issue]:
-    """Verify SPEC 2.2.4's two consistency rules for `unrepresentable`.
+def _degenerate_count_issue(col_path: str, field: str, value: object, bound: int) -> list[Issue]:
+    """`zero_count`/`negative_count`/`empty_count` bounded by the non-null scanned rows - one
+    code covers all three, the message naming which field and by how much.
+    """
 
-    An empty list is a violation, and every name must be a field the column emitted; both
-    are relational over the column's other fields, so the JSON Schema cannot state them.
+    if not isinstance(value, int) or isinstance(value, bool) or value <= bound:
+        return []
+
+    return [
+        Issue(
+            col_path,
+            "stats.degenerate-count-exceeds-row-count",
+            "error",
+            f"{field}={value} exceeds the non-null scanned count {bound}.",
+            "§2.2.7",
+        ),
+    ]
+
+
+def _check_unrepresentable(col: dict, col_path: str) -> list[Issue]:
+    """Verify SPEC 2.2.4's two consistency rules for `unrepresentable` - both are relational over
+    the column's other fields, so the JSON Schema cannot state either.
     """
 
     entries = col.get("unrepresentable")
@@ -1687,12 +2135,111 @@ def _check_percentiles_containment(col: dict, col_path: str) -> list[Issue]:
     return issues
 
 
-def _check_max_age_days_mismatch(col: dict, col_path: str, profiled_at: Any) -> list[Issue]:
-    """SPEC 2.2.4: `freshness.max_age_days` must equal `max(0, day_count(range.max, profiled_at))`.
+def _check_length_order(col: dict, col_path: str) -> list[Issue]:
+    """SPEC 2.2.4: `length.min` <= `length.avg` <= `length.max` - an average outside its own
+    bounds is impossible over any nonempty sample, so only a producer inversion publishes one.
+    """
 
-    Skipped wherever the bound cannot be read back the same way: a `max` named in
-    `unrepresentable`, an unparseable reading (TIME-only, `infinity`, a BC year), or an absent
-    `range`. Any `redacted` marker skips it too - SPEC 2.2.9 coarsens `max_age_days` there.
+    length = col.get("length")
+
+    if not isinstance(length, dict):
+        return []
+
+    lo, avg, hi = length.get("min"), length.get("avg"), length.get("max")
+
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (lo, avg, hi)):
+        return []
+
+    if lo <= avg <= hi:
+        return []
+
+    return [
+        Issue(
+            col_path,
+            "stats.length-order-violated",
+            "error",
+            f"length.min={lo!r}, length.avg={avg!r}, length.max={hi!r}; expected min <= avg <= max.",
+            "§2.2.4",
+        ),
+    ]
+
+
+def _check_normalized_cardinality_order(col: dict, col_path: str) -> list[Issue]:
+    """SPEC 2.2.4: `normalized_cardinality` <= `cardinality` - unchecked where `cardinality` is
+    approximate, an undershooting estimate being legitimately exceeded by the exact count.
+    """
+
+    normalized = col.get("normalized_cardinality")
+    cardinality = col.get("cardinality")
+
+    if not isinstance(normalized, int) or isinstance(normalized, bool):
+        return []
+
+    if not isinstance(cardinality, int) or isinstance(cardinality, bool):
+        return []
+
+    if col.get("cardinality_method") == "approximate":
+        return []
+
+    if normalized <= cardinality:
+        return []
+
+    return [
+        Issue(
+            col_path,
+            "stats.normalized-cardinality-exceeds-cardinality",
+            "error",
+            f"normalized_cardinality={normalized!r} exceeds cardinality={cardinality!r}; "
+            "folding case and trimming whitespace cannot increase distinctness.",
+            "§2.2.4",
+        ),
+    ]
+
+
+def _check_looks_like_candidate(col: dict, col_path: str) -> list[Issue]:
+    """SPEC 4.1.3: the near-miss is mutually exclusive with a verdict, and stops being a
+    near-miss once its own share clears the verdict threshold - it would have been one.
+    """
+
+    inferred = _inferred_of(col)
+    candidate = inferred.get("looks_like_candidate")
+    share = inferred.get("looks_like_candidate_share")
+
+    if candidate is None and share is None:
+        return []
+
+    issues: list[Issue] = []
+
+    if inferred.get("looks_like") is not None:
+        issues.append(
+            Issue(
+                col_path,
+                "stats.looks-like-candidate-with-verdict",
+                "error",
+                "inferred.looks_like_candidate is present alongside inferred.looks_like; "
+                "the near-miss applies only where no verdict was reached.",
+                "§4.1.3",
+            ),
+        )
+
+    if isinstance(share, (int, float)) and not isinstance(share, bool) and share >= MATCH_THRESHOLD:
+        issues.append(
+            Issue(
+                col_path,
+                "stats.looks-like-candidate-at-verdict-threshold",
+                "error",
+                f"inferred.looks_like_candidate_share={share!r} clears the SPEC 4.1.3 verdict "
+                "threshold; a share this high would have been inferred.looks_like instead.",
+                "§4.1.3",
+            ),
+        )
+
+    return issues
+
+
+def _check_max_age_days_mismatch(col: dict, col_path: str, profiled_at: Any) -> list[Issue]:
+    """SPEC 2.2.4: `freshness.max_age_days` must equal `max(0, day_count(range.max, profiled_at))`
+    - skipped wherever the bound cannot be read back the same way, redaction included.
     """
 
     if col.get("redacted") is not None:

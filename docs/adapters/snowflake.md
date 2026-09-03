@@ -16,10 +16,10 @@ Credentials differ from the other two engines: `account`, `user`, `warehouse`, `
 CREATE ROLE dbprint_ro;
 
 GRANT USAGE ON WAREHOUSE profiling_wh TO ROLE dbprint_ro;
-GRANT USAGE ON DATABASE analytics_db TO ROLE dbprint_ro;
-GRANT USAGE ON SCHEMA analytics_db.seedbank TO ROLE dbprint_ro;
-GRANT SELECT ON ALL TABLES IN SCHEMA analytics_db.seedbank TO ROLE dbprint_ro;
-GRANT SELECT ON ALL VIEWS IN SCHEMA analytics_db.seedbank TO ROLE dbprint_ro;
+GRANT USAGE ON DATABASE arboretum TO ROLE dbprint_ro;
+GRANT USAGE ON SCHEMA arboretum.seedbank TO ROLE dbprint_ro;
+GRANT SELECT ON ALL TABLES IN SCHEMA arboretum.seedbank TO ROLE dbprint_ro;
+GRANT SELECT ON ALL VIEWS IN SCHEMA arboretum.seedbank TO ROLE dbprint_ro;
 
 GRANT ROLE dbprint_ro TO USER dbprint_service;
 ```
@@ -71,7 +71,7 @@ Where it does fire, the drawn rows are copied once into a session-lifetime tempo
 
 No extra grant is required for it. Snowflake exempts temporary tables from the `CREATE TABLE` privilege, and the schema the copy lands in is one the role already holds `USAGE` on.
 
-Where the write is refused anyway — a managed-access schema, or a policy that blocks it — the run does not fail. It warns on stderr and falls back to re-evaluating the sample per statement. The fallback is not an equivalent path: each statement then draws its own rows, so a column's listed value counts and the non-null figure they are a share of come from different reads, and the file can disagree with itself on a table nobody wrote to. Setting `materialize_sample: false` chooses that trade deliberately, which is the right call where policy forbids the tool writing anything at all.
+Where the write is refused anyway — a managed-access schema, or a policy that blocks it — the run does not fail. It warns on stderr and falls back to re-evaluating the sample per statement. The fallback is not an equivalent path: each statement then draws its own rows, so a column's listed value counts and the non-null figure they are a share of come from different reads, and the file can disagree with itself on a table nobody wrote to. Setting `materialize_sample: false` chooses that trade deliberately, which is the right call where the tool must stay strictly read-only.
 
 ## Reference
 

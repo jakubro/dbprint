@@ -102,10 +102,15 @@ def compute_null_rate(null_count: int, rows_scanned: int) -> float:
     return _floored(rounded, null_count)
 
 
-_BOOLEAN_TYPES = ("boolean",)
-_JSON_TYPES = ("json", "jsonb", "variant", "object")
+# MySQL has no native BOOLEAN - `BOOLEAN`/`BOOL` is an alias for `TINYINT(1)`, and `base_type()`
+# strips the width that distinguishes it, so this is checked against the raw `sql_type`.
+_MYSQL_BOOLEAN_TYPE = "tinyint(1)"
+
+_BOOLEAN_TYPES = ("boolean", "bool")
+_JSON_TYPES = ("json", "jsonb", "variant", "object", "super")
 _TEMPORAL_TYPES = (
     "date",
+    "date32",
     "time",
     "timestamp",
     "timestamp with time zone",
@@ -116,6 +121,7 @@ _TEMPORAL_TYPES = (
     "timestamp_ltz",
     "timestamp_tz",
     "datetime",
+    "datetime64",
     "year",
 )
 _NUMERIC_TYPES = (
@@ -133,30 +139,114 @@ _NUMERIC_TYPES = (
     "int",
     "tinyint",
     "mediumint",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "int128",
+    "int256",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+    "uint128",
+    "uint256",
+    "float32",
+    "float64",
+    "decimal32",
+    "decimal64",
+    "decimal128",
+    "decimal256",
+    "hugeint",
+    "ubigint",
+    "uinteger",
+    "usmallint",
+    "utinyint",
+    "bignumeric",
+    "dec",
+    "fixed",
 )
-_CHARACTER_TYPES = ("varchar", "text", "char", "character varying", "character", "string", "uuid")
-_UNSUPPORTED_TYPES = ("bytea", "blob", "binary", "varbinary", "image", "record", "struct")
+_CHARACTER_TYPES = (
+    "varchar",
+    "text",
+    "char",
+    "character varying",
+    "character",
+    "string",
+    "uuid",
+    "fixedstring",
+)
+_UNSUPPORTED_TYPES = (
+    "bytea",
+    "blob",
+    "binary",
+    "varbinary",
+    "image",
+    "record",
+    "struct",
+    "array",
+    "map",
+    "tuple",
+    "nested",
+    "aggregatefunction",
+    "simpleaggregatefunction",
+)
 
-# Matches the group wherever it falls, not only at the end: `timestamp(3) with time zone`
-# carries its qualifier after the group, which a first-`(` split would discard.
-_PRECISION_RE = re.compile(r"\(\d+(?:,\s*\d+)?\)")
+# Matches one non-nested parenthesized group wherever it falls, not only at the end - some
+# types qualify after the group, and some carry non-digit content a digit-only pattern misses.
+_PRECISION_RE = re.compile(r"\([^()]*\)")
 
 # MySQL reports these inside `column_type` (`bigint unsigned`, `int unsigned zerofill`),
 # with no separating paren for a base-name split to key on.
 _MYSQL_NUMERIC_QUALIFIER_RE = re.compile(r"\b(unsigned|zerofill|signed)\b")
 
+# ClickHouse names a type by wrapping it (`Nullable(Int32)`, `LowCardinality(String)`) rather
+# than qualifying it - the wrapped name is the type, so unwrapping recurses to it directly.
+# The wrapper name is captured (not just discarded) so `is_nullable_type` can share this same
+# definition rather than testing nullability with a second, unanchored pattern.
+_CLICKHOUSE_WRAPPER_RE = re.compile(r"^(nullable|lowcardinality)\((.+)\)$")
+
 
 def base_type(sql_type: str) -> str:
-    """Lowercase type name with precision/length and MySQL's numeric qualifiers stripped.
-
-    The one normalization every adapter's pre-classification and `classify` share, so
-    `bigint unsigned` and `numeric(10,2)` reduce identically on every side.
+    """Lowercase type name with wrappers, precision/length and MySQL's qualifiers stripped - the
+    one normalization every adapter's pre-classification and `classify` share.
     """
 
-    stripped = _PRECISION_RE.sub("", sql_type.lower())
+    lowered = sql_type.lower()
+
+    while True:
+        match = _CLICKHOUSE_WRAPPER_RE.match(lowered)
+
+        if match is None:
+            break
+
+        lowered = match.group(2)
+
+    stripped = _PRECISION_RE.sub("", lowered)
     stripped = _MYSQL_NUMERIC_QUALIFIER_RE.sub("", stripped)
 
     return " ".join(stripped.split())
+
+
+def is_nullable_type(sql_type: str) -> bool:
+    """Whether `sql_type` carries a `Nullable(...)` wrapper at any nesting depth.
+
+    ClickHouse's `LowCardinality(Nullable(String))` nests it under a second wrapper, which an
+    anchored test never matches, so this shares `base_type`'s own unwrapping regex.
+    """
+
+    lowered = sql_type.lower()
+
+    while True:
+        match = _CLICKHOUSE_WRAPPER_RE.match(lowered)
+
+        if match is None:
+            return False
+
+        if match.group(1) == "nullable":
+            return True
+
+        lowered = match.group(2)
 
 
 def classify(
@@ -179,7 +269,7 @@ def classify(
 
     if _matches(base, _UNSUPPORTED_TYPES) or _is_array_type(sql_type):
         return "unsupported"
-    elif _matches(base, _BOOLEAN_TYPES):
+    elif _matches(base, _BOOLEAN_TYPES) or _is_mysql_boolean_type(sql_type):
         return "boolean"
     elif _matches(base, _JSON_TYPES):
         return "json"
@@ -197,9 +287,72 @@ def classify(
         return "unsupported"
 
 
+def is_string_like_type(sql_type: str) -> bool:
+    """Whether `sql_type` could hold a string value, by elimination against the other classes -
+    the shared test the matrix and every adapter's Phase A use to decide whether `length` applies.
+    """
+
+    base = base_type(sql_type)
+
+    return not (
+        _matches(base, _UNSUPPORTED_TYPES)
+        or _is_array_type(sql_type)
+        or _matches(base, _BOOLEAN_TYPES)
+        or _matches(base, _JSON_TYPES)
+        or _matches(base, _TEMPORAL_TYPES)
+        or _matches(base, _NUMERIC_TYPES)
+    )
+
+
+# The temporal shapes with no day to truncate to (SPEC 2.2.3): DATE and DATE32 are always
+# their own day-truncation, TIME carries no date at all, YEAR carries neither.
+_NO_DAY_TEMPORAL_TYPES = (
+    "date",
+    "date32",
+    "time",
+    "time with time zone",
+    "time without time zone",
+    "year",
+)
+
+
+def has_day_resolution(sql_type: str) -> bool:
+    """Whether `sql_type` is a temporal type `quantized_count`'s day-truncation applies to - the
+    shared test the matrix and every adapter's temporal fetch use to decide whether to compute.
+    """
+
+    base = base_type(sql_type)
+
+    return _matches(base, _TEMPORAL_TYPES) and not _matches(base, _NO_DAY_TEMPORAL_TYPES)
+
+
+# TIME (with/without time zone) carries no date at all; YEAR carries only a year number.
+# Neither has a calendar day/week/month a bucketing truncation could place.
+_NO_CALENDAR_TEMPORAL_TYPES = (
+    "time",
+    "time with time zone",
+    "time without time zone",
+    "year",
+)
+
+
+def has_calendar_component(sql_type: str) -> bool:
+    """Whether `sql_type` carries a calendar date `timeline` bucketing can truncate to - the
+    anchor rule (SPEC 2.2.16) uses it, so `probe_timeline` can assume a calendar type.
+    """
+
+    base = base_type(sql_type)
+
+    return _matches(base, _TEMPORAL_TYPES) and not _matches(base, _NO_CALENDAR_TEMPORAL_TYPES)
+
+
 def _matches(base: str, types: tuple[str, ...]) -> bool:
     return base in types
 
 
 def _is_array_type(sql_type: str) -> bool:
     return sql_type.rstrip().endswith("[]")
+
+
+def _is_mysql_boolean_type(sql_type: str) -> bool:
+    return sql_type.strip().lower() == _MYSQL_BOOLEAN_TYPE

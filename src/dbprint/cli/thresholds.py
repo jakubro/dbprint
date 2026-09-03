@@ -50,6 +50,7 @@ def resolve(conn: ConnectionConfig, manifest: dict[str, Any] | None) -> OfflineT
     size_gated: list[str] = []
 
     for fqn, entry in ((manifest or {}).get("tables") or {}).items():
+        entry_type = entry.get("type") if isinstance(entry, dict) else None
         recorded = entry.get("max_age_days") if isinstance(entry, dict) else None
 
         if not isinstance(recorded, bool) and isinstance(recorded, (int, float)):
@@ -75,7 +76,8 @@ def resolve(conn: ConnectionConfig, manifest: dict[str, Any] | None) -> OfflineT
             refused[fqn] = str(exc)
             continue
 
-        if conn.size_conditions_name(fqn):
+        # A plain view is never queried, so no size condition can have governed it.
+        if entry_type != "view" and conn.min_rows_conditions_name(fqn):
             size_gated.append(fqn)
 
     return OfflineThresholds(

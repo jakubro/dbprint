@@ -22,7 +22,7 @@ from dbprint.adapters import (
     PhysicalLayoutKey,
 )
 from dbprint.config import ConnectionConfig
-from dbprint.engine import Engine
+from dbprint.engine import Engine, GenerateRequest
 from dbprint.engine.context_assembler import AssemblyOptions, assemble
 
 
@@ -37,6 +37,11 @@ CLUSTER = PhysicalLayout(
 PARTITION_ON_AN_EXPRESSION = PhysicalLayout(
     mechanism="partition",
     keys=(PhysicalLayoutKey(expression="date_trunc('day', logged_at)", column=None),),
+)
+
+SORT = PhysicalLayout(
+    mechanism="sort",
+    keys=(PhysicalLayoutKey(expression="vault_id", column="vault_id"),),
 )
 
 
@@ -90,6 +95,62 @@ class TestEmission:
         assert "physical_layout" not in payload
         assert all("physical_layout_key" not in c for c in payload["columns"].values())
 
+    def test_a_sort_mechanism_round_trips_like_the_other_two(self, tmp_path: Path) -> None:
+        """Redshift's SORTKEY: a third `mechanism` value, same shape as cluster/partition."""
+
+        payload = _generate(tmp_path, SORT)
+
+        assert payload["physical_layout"] == {
+            "mechanism": "sort",
+            "keys": [{"expression": "vault_id", "column": "vault_id"}],
+        }
+
+
+class _LayoutReadFailingAdapter(MockAdapter):
+    """Fails `introspect_physical_layout`, as a missing catalog grant would."""
+
+    def introspect_physical_layout(self, fqn: str) -> PhysicalLayout | None:
+        raise RuntimeError("simulated catalog failure")
+
+
+class TestAFailedRead:
+    """SPEC 2.2.11 reads an absent block as "not clustered", so a run that could not look must
+    say so - and a later run must not then report the real key as newly declared.
+    """
+
+    def test_the_file_names_the_block_unmeasured(self, tmp_path: Path) -> None:
+        payload = _generate(tmp_path, CLUSTER, adapter=_LayoutReadFailingAdapter)
+
+        assert "physical_layout" not in payload
+        assert payload["unmeasured"] == ["physical_layout"]
+
+    def test_a_measured_run_names_nothing(self, tmp_path: Path) -> None:
+        """The control: the same fixture read successfully carries the block and no marker."""
+
+        payload = _generate(tmp_path, CLUSTER)
+
+        assert "unmeasured" not in payload
+
+    def test_the_next_run_reports_no_drift_against_the_failed_one(self, tmp_path: Path) -> None:
+        """The baseline is hydrated from the artifact, so only its own marker tells a failed read
+        from a key that was really dropped.
+        """
+
+        _generate(tmp_path, CLUSTER, adapter=_LayoutReadFailingAdapter)
+        diff = _regenerate(tmp_path, CLUSTER)
+
+        assert [c for c in diff["changes"] if c["kind"] == "physical_layout_changed"] == []
+
+    def test_a_genuine_change_against_a_measured_baseline_still_fires(self, tmp_path: Path) -> None:
+        """The control for the suppression: without a marker, losing the key is real drift."""
+
+        _generate(tmp_path, CLUSTER)
+        diff = _regenerate(tmp_path, None)
+
+        assert [c["kind"] for c in diff["changes"] if c["kind"] == "physical_layout_changed"] == [
+            "physical_layout_changed",
+        ]
+
 
 class TestContextRendering:
     def test_a_cluster_key_renders_its_label_and_columns(self, tmp_path: Path) -> None:
@@ -102,6 +163,11 @@ class TestContextRendering:
         text = _context(tmp_path, PARTITION_ON_AN_EXPRESSION, fmt="md")
 
         assert "Partitioned by: date_trunc('day', logged_at)" in text
+
+    def test_a_sort_key_renders_the_sort_label(self, tmp_path: Path) -> None:
+        text = _context(tmp_path, SORT, fmt="md")
+
+        assert "Sorted by: vault_id" in text
 
     def test_a_table_without_a_declared_key_renders_no_section(self, tmp_path: Path) -> None:
         text = _context(tmp_path, None, fmt="md")
@@ -116,17 +182,34 @@ class TestContextRendering:
         assert payload["statistics"]["physical_layout"]["mechanism"] == "cluster"
 
 
-def _generate(tmp_path: Path, layout: PhysicalLayout | None) -> dict[str, Any]:
-    conn = ConnectionConfig(
+def _generate(
+    tmp_path: Path,
+    layout: PhysicalLayout | None,
+    adapter: type[MockAdapter] = MockAdapter,
+) -> dict[str, Any]:
+    Engine(adapter(_fixture(layout)), _conn(tmp_path), tmp_path).generate()
+
+    return yaml.safe_load(
+        (tmp_path / "w" / "seedbank" / "specimen_loan" / "statistics.yaml").read_text(),
+    )
+
+
+def _regenerate(tmp_path: Path, layout: PhysicalLayout | None) -> dict[str, Any]:
+    """Re-profile over a committed print and read the diff that second run wrote."""
+
+    Engine(MockAdapter(_fixture(layout)), _conn(tmp_path), tmp_path).generate(
+        GenerateRequest(force=True),
+    )
+
+    return yaml.safe_load((tmp_path / "w" / "diff.yaml").read_text())
+
+
+def _conn(tmp_path: Path) -> ConnectionConfig:
+    return ConnectionConfig(
         name="w",
         adapter="postgres",
         output=tmp_path,
         infer_relationships=False,
-    )
-    Engine(MockAdapter(_fixture(layout)), conn, tmp_path).generate()
-
-    return yaml.safe_load(
-        (tmp_path / "w" / "seedbank" / "specimen_loan" / "statistics.yaml").read_text(),
     )
 
 

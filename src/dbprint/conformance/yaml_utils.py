@@ -15,7 +15,7 @@ def load_yaml(path: Path) -> Any:
     PyYAML auto-parses timestamps to datetime objects; JSON Schema has no datetime type.
     """
 
-    return _normalize(yaml.safe_load(path.read_text()))
+    return _normalize(yaml.safe_load(path.read_text(encoding="utf-8")))
 
 
 def _normalize(node: Any) -> Any:

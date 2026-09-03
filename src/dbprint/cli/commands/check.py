@@ -49,8 +49,14 @@ from dbprint.engine.result import DiffResult
 from .. import thresholds
 from ..engine_setup import ConnectionSetupError, build_engine
 from ..options import project_option, refuse_if_remote, resolve_project
-from ..rendering import build_progress_renderer, install_log_handler, remove_log_handler
-from ..rendering.check_data import CheckResult, NotRun, render_data
+from ..rendering import (
+    build_progress_renderer,
+    install_log_handler,
+    remove_log_handler,
+    resolve_render_mode,
+    supports_live,
+)
+from ..rendering.check_data import CheckResult, NotRun, OnlineDisposition, render_data
 from ..rendering.check_tty import render_human
 from ..rendering.errors import emit_error
 from ..rendering.progress import ConnectionSummary, ProgressRenderer
@@ -165,15 +171,20 @@ def check_command(
 
     # Progress goes to stderr so stdout stays a clean result envelope; TTY-detect follows suit.
     err_console = Console(stderr=True)
+    mode = resolve_render_mode(tui, err_console)
 
-    if not quiet and tui is True and not err_console.is_terminal:
-        click.echo("warning: --tui requested but stderr is not a TTY; using plain output", err=True)
+    if not quiet and tui is True and not supports_live(err_console):
+        click.echo(
+            "warning: --tui requested but stderr does not support the live view; "
+            "using plain output",
+            err=True,
+        )
 
     renderer = (
         None
         if quiet
         else build_progress_renderer(
-            live=_progress_live(tui, err_console),
+            live=mode == "tty",
             console=err_console,
             out=click.get_text_stream("stderr"),
         )
@@ -235,17 +246,6 @@ def check_command(
         close_run_log(run_log)
 
 
-def _progress_live(tui: bool | None, console: Console) -> bool:
-    """Detects on the stderr console."""
-
-    if tui is True:
-        return True
-    elif tui is False:
-        return False
-    else:
-        return console.is_terminal
-
-
 def _check_one(
     conn_config: ConnectionConfig,
     max_age_arg: str | None,
@@ -257,6 +257,8 @@ def _check_one(
     deferred: list[str],
 ) -> CheckResult:
     """Run offline checks + optional online checks for one connection."""
+
+    started = time.monotonic()
 
     try:
         override = parse_duration(max_age_arg) if max_age_arg else None
@@ -270,14 +272,21 @@ def _check_one(
     manifest_present = (print_root / "manifest.yaml").is_file()
 
     if not manifest_present:
-        return CheckResult(
+        result = CheckResult(
             connection_name=conn_config.name,
+            print_root=str(print_root),
             manifest_present=False,
             issues=(),
             stale_entries=(),
             default_max_age_days=float(default_max_age_days),
             exit_code=EXIT_GENERIC,
         )
+
+        if renderer is not None:
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            renderer.connection_summary(_summary_view(result, None, elapsed_ms))
+
+        return result
 
     issues = tuple(
         validate_print(
@@ -337,11 +346,13 @@ def _check_one(
     connection_failed = False
     config_refused = False
     partial_scan = False
-    diff_result: DiffResult | None = None
+    online_disposition: OnlineDisposition = "not_requested"
 
     # An offline assertion error does not suppress the online phase - the print is still
     # well-formed and fresh; only `offline_blocks_online` means there is nothing to compare.
-    if online and not offline_blocks_online:
+    if online and offline_blocks_online:
+        online_disposition = "refused"
+    elif online:
         outcome = _run_online(conn_config, project_root, renderer)
         online_drift = outcome.drift
         online_assertion_issues = outcome.statistic + outcome.sql
@@ -349,7 +360,18 @@ def _check_one(
         config_refused = outcome.config_refused
         partial_scan = outcome.partial
         drift_present = bool(outcome.drift)
-        diff_result = outcome.diff_result
+        # `diff_result` is set only once `compute_diff` itself returned - a later reconnect
+        # failure (SQL assertions) does not retroactively un-run the comparison it already made.
+        comparison_ran = outcome.diff_result is not None
+        online_disposition = (
+            "assertions_connection_failed"
+            if connection_failed and comparison_ran
+            else "connection_failed"
+            if connection_failed
+            else "config_refused"
+            if config_refused
+            else "ran"
+        )
 
         # A table the offline resolver refused can also fail inside the engine; the engine's
         # cause comes from the extraction that ran, so it replaces the offline entry.
@@ -386,6 +408,7 @@ def _check_one(
 
     result = CheckResult(
         connection_name=conn_config.name,
+        print_root=str(print_root),
         manifest_present=True,
         issues=issues,
         stale_entries=stale,
@@ -394,10 +417,12 @@ def _check_one(
         drift_issues=online_drift,
         assertion_issues=combined_assertions,
         not_run=not_run,
+        online_disposition=online_disposition,
     )
 
     if renderer is not None:
-        renderer.connection_summary(_summary_view(result, manifest, diff_result))
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        renderer.connection_summary(_summary_view(result, manifest, elapsed_ms))
 
     return result
 
@@ -504,34 +529,39 @@ def _load_committed_statistics(
     *,
     on_table: Callable[[str, int, int], None] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Read every table's committed statistics.yaml into the statistic assertion input shape."""
+    """Read every table's committed statistics.yaml into the statistic assertion input shape.
+
+    `on_table` fires once per table, after its own read - the progress adapter times the delta
+    since the previous call, so ticking first would bill each table's cost to the next tick.
+    """
 
     out: dict[str, dict[str, Any]] = {}
     tables = walkable_tables(manifest)
     total = len(tables)
 
     for i, (fqn, entry) in enumerate(tables.items(), start=1):
-        if on_table is not None:
-            on_table(fqn, i, total)
-
-        entry_path = entry.get("path") or fqn.replace(".", "/")
-        artifacts = declared_artifacts(entry)
-
-        if "statistics" not in artifacts:
-            continue
-
-        stats_path = print_root / entry_path / artifacts["statistics"]
-
-        if not stats_path.is_file():
-            continue
-
         try:
-            data = yaml.safe_load(stats_path.read_text()) or {}
-        except yaml.YAMLError:
-            continue
+            entry_path = entry.get("path") or fqn.replace(".", "/")
+            artifacts = declared_artifacts(entry)
 
-        if isinstance(data, dict):
-            out[fqn] = data
+            if "statistics" not in artifacts:
+                continue
+
+            stats_path = print_root / entry_path / artifacts["statistics"]
+
+            if not stats_path.is_file():
+                continue
+
+            try:
+                data = yaml.safe_load(stats_path.read_text(encoding="utf-8")) or {}
+            except yaml.YAMLError:
+                continue
+
+            if isinstance(data, dict):
+                out[fqn] = data
+        finally:
+            if on_table is not None:
+                on_table(fqn, i, total)
 
     return out
 
@@ -710,7 +740,7 @@ def _load_manifest(print_root: Path) -> dict[str, Any] | None:
         return None
 
     try:
-        data = yaml.safe_load(path.read_text())
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError:
         return None
 
@@ -728,15 +758,20 @@ def _assertions_progress_adapter(
     renderer: ProgressRenderer | None,
     connection_name: str,
 ) -> Callable[[str, int, int], None] | None:
-    """Adapt the assertions walk's bare (fqn, index, total) callback into a `ProgressEvent`.
-
-    The translation lives here because `conformance` never imports `engine` or `cli`.
+    """Adapt the assertions walk's bare (fqn, index, total) callback into a `ProgressEvent` -
+    `conformance` imports neither `engine` nor `cli`, so the translation lives here.
     """
 
     if renderer is None:
         return None
 
+    last = time.monotonic()
+
     def on_table(fqn: str, index: int, total: int) -> None:
+        nonlocal last
+        now = time.monotonic()
+        elapsed_ms = int((now - last) * 1000)
+        last = now
         renderer.on_event(
             ProgressEvent(
                 connection=connection_name,
@@ -745,6 +780,7 @@ def _assertions_progress_adapter(
                 index=index,
                 total=total,
                 fqn=fqn,
+                elapsed_ms=elapsed_ms,
             ),
         )
 
@@ -755,10 +791,8 @@ def _validation_progress_adapter(
     renderer: ProgressRenderer | None,
     connection_name: str,
 ) -> ValidationProgress | None:
-    """Adapt `validate_print`'s per-pass `ValidationTick` into one whole-command `ProgressEvent`.
-
-    The bar spans every pass, so the global index/total are recomputed from the tick's own pass
-    identity; `elapsed_ms` is the delta since the previous tick, which lets the ETA resolve.
+    """Adapt `validate_print`'s per-pass `ValidationTick` into one whole-command `ProgressEvent` -
+    the bar spans every pass, so global index/total recompute from the tick's pass identity.
     """
 
     if renderer is None:
@@ -780,7 +814,10 @@ def _validation_progress_adapter(
                 total=tick.pass_total * tick.total,
                 fqn=tick.fqn,
                 pass_name=tick.pass_name,
+                pass_index=tick.pass_index,
+                pass_total=tick.pass_total,
                 findings=tick.findings,
+                severity=tick.severity,
                 elapsed_ms=elapsed_ms,
             ),
         )
@@ -791,27 +828,67 @@ def _validation_progress_adapter(
 def _summary_view(
     result: CheckResult,
     manifest: dict[str, Any] | None,
-    diff_result: DiffResult | None,
+    elapsed_ms: int,
 ) -> ConnectionSummary:
-    """Project one connection's check outcome into the renderer's summary shape.
-
-    `CheckResult` carries no per-table status, so `not_run` stands in and the rest count ok.
+    """Project one connection's check outcome into the renderer's summary shape. A failure is
+    matched by issue path; `elapsed_ms` is the caller's wall clock, not `diff_result`'s.
     """
 
     total = len(walkable_tables(manifest)) if manifest else 0
     not_run_count = len(result.not_run)
-    elapsed_ms = diff_result.elapsed_ms if diff_result is not None else 0
+    failed_tables = _tables_with_errors(result.issues, manifest)
+    failed_count = len(failed_tables)
 
     return ConnectionSummary(
         connection_name=result.connection_name,
         summary=SummaryCounts(
-            ok=max(total - not_run_count, 0),
+            ok=max(total - not_run_count - failed_count, 0),
             skipped=not_run_count,
-            failed=0,
+            failed=failed_count,
         ),
         elapsed_ms=elapsed_ms,
-        tables=tuple(
-            TableResult(fqn=entry.subject, status="skipped", error=entry.cause, elapsed_ms=0)
-            for entry in result.not_run
+        error=f"exit {result.exit_code}" if result.exit_code != EXIT_OK else None,
+        tables=(
+            tuple(
+                TableResult(fqn=entry.subject, status="skipped", error=entry.cause, elapsed_ms=0)
+                for entry in result.not_run
+            )
+            + tuple(
+                TableResult(fqn=fqn, status="failed", error="conformance error", elapsed_ms=0)
+                for fqn in sorted(failed_tables)
+            )
         ),
     )
+
+
+def _tables_with_errors(
+    issues: tuple[Issue, ...],
+    manifest: dict[str, Any] | None,
+) -> set[str]:
+    """FQNs carrying at least one error-severity issue, by directory-prefix match on its path."""
+
+    if manifest is None:
+        return set()
+
+    dir_to_fqn = {
+        entry.get("path", ""): fqn
+        for fqn, entry in (manifest.get("tables") or {}).items()
+        if isinstance(entry, dict) and entry.get("path")
+    }
+    found: set[str] = set()
+
+    for issue in issues:
+        if issue.severity != "error":
+            continue
+
+        parts = issue.path.split("/")
+
+        for n in range(len(parts) - 1, 0, -1):
+            fqn = dir_to_fqn.get("/".join(parts[:n]))
+
+            if fqn is not None:
+                found.add(fqn)
+
+                break
+
+    return found

@@ -7,11 +7,12 @@ connection satisfying the same DB-API surface.
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from . import ddl as ddl_module
 from . import introspect as introspect_module
 from . import looks_like as looks_like_module
+from . import normalization as normalization_module
 from . import sketch as sketch_module
 from . import stats as stats_module
 from .connection import Connection, ConnectionParams, CursorFactory, exec_query
@@ -62,6 +63,9 @@ class SnowflakeAdapter(Adapter):
         "private_key_file_pwd",
         "schema",
     )
+    # Block sampling's seed guarantee does not cover an unmaterialized re-evaluation, so a
+    # `sample` scope with no copy must be refused rather than measured over drifting rows.
+    SAMPLE_FALLBACK_COHERENT: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -109,6 +113,9 @@ class SnowflakeAdapter(Adapter):
 
     def introspect_physical_layout(self, fqn: str) -> PhysicalLayout | None:
         return introspect_module.physical_layout(self._cursor, self._identity(fqn))
+
+    def introspect_view_dependencies(self) -> dict[str, tuple[str, ...]] | None:
+        return introspect_module.view_dependencies(self._cursor, self._params.database)
 
     def extract_comments(self, fqn: str) -> CommentsMeta:
         return introspect_module.comments(self._cursor, self._identity(fqn))
@@ -191,6 +198,44 @@ class SnowflakeAdapter(Adapter):
             scope,
         )
 
+    def probe_timeline(
+        self,
+        fqn: str,
+        columns: list[ColumnMeta],
+        counts: TableCounts,
+        column: str,
+        unit: Literal["day", "week", "month"],
+        scope: TableScope | None = None,
+    ) -> tuple[tuple[str, int], ...]:
+        return stats_module.probe_timeline(
+            self._cursor,
+            self._identity(fqn),
+            columns,
+            counts,
+            column,
+            unit,
+            scope,
+        )
+
+    def compute_populated_windows(
+        self,
+        fqn: str,
+        columns: list[ColumnMeta],
+        counts: TableCounts,
+        anchor_column: str,
+        subject_columns: tuple[str, ...],
+        scope: TableScope | None = None,
+    ) -> dict[str, tuple[str, str]]:
+        return stats_module.compute_populated_windows(
+            self._cursor,
+            self._identity(fqn),
+            columns,
+            counts,
+            anchor_column,
+            subject_columns,
+            scope,
+        )
+
     def probe_dependencies(
         self,
         fqn: str,
@@ -246,6 +291,19 @@ class SnowflakeAdapter(Adapter):
             sql_type,
             kind,
             k,
+        )
+
+    def compute_normalized_cardinality(
+        self,
+        fqn: str,
+        column: str,
+        scope: TableScope | None = None,
+    ) -> int:
+        return normalization_module.compute_normalized_cardinality(
+            self._cursor,
+            self._identity(fqn),
+            column,
+            scope,
         )
 
     def execute_query(self, sql: str) -> list[tuple[Any, ...]]:

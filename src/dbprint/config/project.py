@@ -38,11 +38,21 @@ OUTPUT_DEFAULT = "prints"
 INFER_RELATIONSHIPS_DEFAULT = True
 MATERIALIZE_SAMPLE_DEFAULT = True
 SKETCH_ALL_COLUMNS_DEFAULT = False
+COMPUTE_TIMELINE_DEFAULT = True
 
 # Credential key for the redaction salt - it lives with the passwords, not in `.dbprint.yaml`.
 REDACTION_SALT_KEY = "redaction_salt"
 
-ADAPTERS: tuple[str, ...] = ("postgres", "snowflake", "mysql")
+ADAPTERS: tuple[str, ...] = (
+    "postgres",
+    "snowflake",
+    "mysql",
+    "duckdb",
+    "clickhouse",
+    "redshift",
+    "databricks",
+    "bigquery",
+)
 
 # Keys read only inside a `rules:` entry, mapped to the tail of the remediation snippet an
 # error suggests. `min_rows` only selects tables, so its snippet also needs a narrowing
@@ -174,7 +184,16 @@ class ConnectionConfig:
     """Per-connection settings; `include`/`exclude` gate what is profiled, `rules` say how."""
 
     name: str
-    adapter: Literal["postgres", "snowflake", "mysql"]
+    adapter: Literal[
+        "postgres",
+        "snowflake",
+        "mysql",
+        "duckdb",
+        "clickhouse",
+        "redshift",
+        "databricks",
+        "bigquery",
+    ]
     auto: bool = False
     output: Path = field(default_factory=lambda: Path(OUTPUT_DEFAULT))
     include: tuple[str, ...] = ("*",)
@@ -187,6 +206,7 @@ class ConnectionConfig:
     infer_relationships: bool = INFER_RELATIONSHIPS_DEFAULT
     materialize_sample: bool = MATERIALIZE_SAMPLE_DEFAULT
     sketch_all_columns: bool = SKETCH_ALL_COLUMNS_DEFAULT
+    compute_timeline: bool = COMPUTE_TIMELINE_DEFAULT
     redact: tuple[RedactRule, ...] = ()
     redaction_salt: str | None = None
     assertions_raw: dict[str, Any] = field(default_factory=dict)
@@ -219,6 +239,13 @@ class ConnectionConfig:
             and rule.matches_name(fqn)
             for rule in self.rules
         )
+
+    def min_rows_conditions_name(self, fqn: str) -> bool:
+        """True when some rule selecting this name carries `min_rows` - narrower than
+        `size_conditions_name`, a `max_rows_scanned` ceiling not affecting `max_age_days`.
+        """
+
+        return any(rule.min_rows is not None and rule.matches_name(fqn) for rule in self.rules)
 
     def redaction_for(
         self,
@@ -417,7 +444,7 @@ def _find_project_config(start: Path) -> Path | None:
 
 def _load_yaml(path: Path) -> dict[str, Any]:
     try:
-        data = yaml.safe_load(path.read_text())
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
         raise ConfigError(f"{path}: invalid YAML — {exc}") from exc
 
@@ -446,6 +473,7 @@ def _parse_defaults(raw: dict[str, Any]) -> dict[str, Any]:
         "infer_relationships": raw.get("infer_relationships"),
         "materialize_sample": raw.get("materialize_sample"),
         "sketch_all_columns": raw.get("sketch_all_columns"),
+        "compute_timeline": raw.get("compute_timeline"),
         "raw": raw,
     }
 
@@ -565,6 +593,13 @@ def _parse_connection(
             defaults.get("sketch_all_columns"),
             default=SKETCH_ALL_COLUMNS_DEFAULT,
             field_label=f"connection {name!r}: sketch_all_columns",
+            config_path=config_path,
+        ),
+        compute_timeline=_coerce_bool(
+            body.get("compute_timeline"),
+            defaults.get("compute_timeline"),
+            default=COMPUTE_TIMELINE_DEFAULT,
+            field_label=f"connection {name!r}: compute_timeline",
             config_path=config_path,
         ),
         assertions_raw=dict(assertions_raw),

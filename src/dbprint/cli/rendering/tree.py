@@ -1,7 +1,5 @@
-"""Pure layout helpers for the `generate`/`diff`/`check` TTY scrollback tree.
-
-`cap` is the line-width budget, `min(120, terminal width)`. A name is tail-truncated so its
-distinguishing end survives, error text head-truncated so the exception kind does.
+"""Pure layout helpers for the `generate`/`diff`/`check` TTY scrollback tree. `cap` is the
+line-width budget (`min(120, terminal width)`), an invariant no rendered line may exceed.
 """
 
 from __future__ import annotations
@@ -57,7 +55,7 @@ def divergent_headers(prev: tuple[str, ...], curr: tuple[str, ...]) -> list[tupl
 def header_line(depth: int, name: str, *, cap: int) -> str:
     """Render one indented header (connection / database / schema) line."""
 
-    indent = depth * _INDENT
+    indent = min(depth * _INDENT, max(cap, 0))
 
     return " " * indent + _truncate_tail(name, cap - indent)
 
@@ -86,6 +84,16 @@ def leaf_note(depth: int, name: str, note: str, *, cap: int) -> str:
     return _leaf_with_right_block(depth, name, block, cap=cap)
 
 
+def leaf_duration(depth: int, name: str, *, cap: int, elapsed: str) -> str:
+    """Render a leaf whose phase measures no rows (sketch, assertions): indented name plus a
+    right-anchored duration alone, never a borrowed `- rows` from the row/elapsed pair.
+    """
+
+    block = f"{elapsed:>{_RIGHT_BLOCK_WIDTH}}"
+
+    return _leaf_with_right_block(depth, name, block, cap=cap)
+
+
 def leaf_error(depth: int, name: str, error: str, *, cap: int) -> str:
     """Render a failed leaf: indented name then the error, head-kept, clipped to `cap`."""
 
@@ -100,37 +108,33 @@ def leaf_error(depth: int, name: str, error: str, *, cap: int) -> str:
 
 
 def warning_line(depth: int, text: str, *, cap: int) -> str:
-    """Render a warning one level past `depth`, head-kept so the warning's subject survives."""
-
-    indent = (depth + 1) * _INDENT
-
-    return " " * indent + _truncate_head(text, max(_MIN_NAME, cap - indent))
-
-
-def banner_line(text: str, *, cap: int) -> str:
-    """`-- <text> ` filled with dashes to `cap`; matches `^-- .+ -+$` when it fits.
-
-    The caller prints a blank line first - no tree header or leaf carries fill characters.
+    """Render a warning one level past `depth`, head-kept so the warning's subject survives.
+    `max(0, ...)`, never a `_MIN_NAME` floor - a floor that clamps upward can outrun `cap`.
     """
 
-    prefix = f"-- {text} "
+    indent = min((depth + 1) * _INDENT, max(cap, 0))
 
-    if len(prefix) >= cap:
-        return _truncate_head(prefix, cap)
+    return " " * indent + _truncate_head(text, max(0, cap - indent))
 
-    return prefix + "-" * (cap - len(prefix))
+
+def banner_box(text: str, *, cap: int) -> str:
+    """A `cap`-wide rounded box, `text` centred on its middle line; three lines joined by `\\n`.
+    No blank line above or below - the box is its own separation; its glyphs are display text.
+    """
+
+    inner = max(cap - 2, 0)
+    label = _truncate_head(text, inner) if len(text) > inner else text
+    top = "╭" + "─" * inner + "╮"
+    middle = "│" + label.center(inner) + "│"
+    bottom = "╰" + "─" * inner + "╯"
+
+    return f"{top}\n{middle}\n{bottom}"
 
 
 def rows_text(n: int | None) -> str:
     """Thousands separators, or a dash when unknown."""
 
     return f"{n:,} rows" if n is not None else "- rows"
-
-
-def secs_text(ms: int | None) -> str:
-    """Seconds to one decimal, or a dash when unknown."""
-
-    return f"{ms / 1000:.1f}s" if ms is not None else "-"
 
 
 def findings_text(n: int) -> str:
@@ -146,13 +150,15 @@ def objects_text(n: int | None) -> str:
 
 
 def duration_text(ms: int | None) -> str:
-    """`Xm Ys`, or `Hh MMm` at an hour or more.
-
-    Unlike `secs_text`, stays readable past an hour - its bare `3600.0s` does not.
+    """One duration format for every elapsed time a user sees: `X.Xs` under a minute, `Xm Ys`
+    under an hour, `Hh MMm` at an hour or more. A dash when unknown.
     """
 
     if ms is None:
         return "-"
+
+    if ms < 60_000:
+        return f"{ms / 1000:.1f}s"
 
     total_seconds = ms // 1000
     hours, remainder = divmod(total_seconds, 3600)
@@ -165,15 +171,25 @@ def duration_text(ms: int | None) -> str:
 
 
 def _leaf_with_right_block(depth: int, name: str, block: str, *, cap: int) -> str:
-    indent = depth * _INDENT
-    name_field = max(_MIN_NAME, cap - indent - len(block) - _GAP)
+    """Fit `name` plus `block` inside `cap`, or shed `block` when the two cannot both fit - `cap`
+    is an invariant, never a target, and `indent` is clamped to it for the same reason.
+    """
+
+    indent = min(depth * _INDENT, max(cap, 0))
+    name_field = cap - indent - len(block) - _GAP
+
+    if name_field < _MIN_NAME:
+        return " " * indent + _truncate_tail(name, max(0, cap - indent))
+
     shown = _truncate_tail(name, name_field)
 
     return " " * indent + f"{shown:<{name_field}}" + " " * _GAP + block
 
 
 def _truncate_tail(text: str, width: int) -> str:
-    """Clip to `width` keeping the tail (`...name`) so the distinguishing end survives."""
+    """Clip to `width` keeping the tail (`...name`), assuming names vary at the end, not a
+    shared prefix.
+    """
 
     if width <= 0:
         return ""

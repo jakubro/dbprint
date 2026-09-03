@@ -22,17 +22,19 @@ default:
 # Full pre-commit check
 check: lint test-cov
 
-# Install all dependencies
+# Install all dependencies and warm Delta's Maven/Ivy jar cache (see tests/_provisioning.py)
 install:
     {{ UV_ENV }} uv sync --extra dev --extra mcp --extra docs 2>&1 | tee /tmp/dbprint--install.log
+    {{ UV_RUN }} python -m tests._provisioning 2>&1 | tee -a /tmp/dbprint--install.log
 
 # Run tests; ARGS narrows (pytest falls back to testpaths when given no path)
 test *ARGS:
-    {{ UV_ENV }} {{ RUN_BOUNDED }} 20m 8192 -- uv run --extra dev --extra mcp --extra docs python -m pytest {{ ARGS }} 2>&1 | tee /tmp/dbprint--test.log
+    {{ UV_ENV }} {{ RUN_BOUNDED }} 20m 32768 -- uv run --extra dev --extra mcp --extra docs python -m pytest {{ ARGS }} 2>&1 | tee /tmp/dbprint--test.log
 
 # Run all tests with coverage, parallelized (kept out of `test` - not worth it on a narrowed run)
+# `loadgroup` honours conftest's per-vendor groups: one live substrate per run, not per worker.
 test-cov *ARGS:
-    just test -n auto --cov=src --cov-report=term-missing {{ ARGS }}
+    just test -n auto --dist loadgroup --cov=src --cov-report=term-missing {{ ARGS }}
 
 # Lint all code
 lint:

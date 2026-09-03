@@ -40,22 +40,30 @@ FORBIDDEN_SUBFIELDS: tuple[tuple[str, str], ...] = (
     ("boolean", "looks_like"),
     ("boolean", "sampled"),
     ("boolean", "matched"),
+    ("boolean", "looks_like_candidate"),
+    ("boolean", "looks_like_candidate_share"),
     ("boolean", "fk_candidate"),
     ("boolean", "epoch_unit"),
     ("json", "looks_like"),
     ("json", "sampled"),
     ("json", "matched"),
+    ("json", "looks_like_candidate"),
+    ("json", "looks_like_candidate_share"),
     ("json", "fk_candidate"),
     ("json", "epoch_unit"),
     ("categorical", "fk_candidate"),
     ("temporal", "looks_like"),
     ("temporal", "sampled"),
     ("temporal", "matched"),
+    ("temporal", "looks_like_candidate"),
+    ("temporal", "looks_like_candidate_share"),
     ("temporal", "fk_candidate"),
     ("temporal", "epoch_unit"),
     ("numeric", "looks_like"),
     ("numeric", "sampled"),
     ("numeric", "matched"),
+    ("numeric", "looks_like_candidate"),
+    ("numeric", "looks_like_candidate_share"),
     ("numeric", "fk_candidate"),
     ("text", "fk_candidate"),
 )
@@ -70,6 +78,8 @@ _SUBFIELD_VALUES: dict[str, Any] = {
     "looks_like": "email",
     "sampled": 100,
     "matched": 95,
+    "looks_like_candidate": "email",
+    "looks_like_candidate_share": 0.7,
     "fk_candidate": {"target": "public.other"},
     "epoch_unit": "seconds",
 }
@@ -151,6 +161,59 @@ class TestLooksLikeEvidenceIsCarriedWhereTheMatrixAllowsIt:
         assert inferred["matched"] / inferred["sampled"] == 0.96
 
 
+class TestLooksLikeCandidateFollowsTheMatrix:
+    """`inferred.looks_like_candidate`/`.looks_like_candidate_share` (SPEC 4.1.3): the
+    near-miss follows `looks_like`'s own admission, but is mutually exclusive with it.
+    """
+
+    @pytest.mark.parametrize("classification", LOOKS_LIKE_BEARING)
+    def test_a_near_miss_is_accepted_absent_a_verdict(self, classification: str) -> None:
+        column = _column(classification)
+        column.setdefault("inferred", {}).update(
+            {"looks_like_candidate": "email", "looks_like_candidate_share": 0.7},
+        )
+
+        assert _errors(_payload(classification, column)) == []
+
+    @pytest.mark.parametrize("classification", LOOKS_LIKE_BEARING)
+    def test_a_near_miss_beside_a_verdict_is_refused(self, classification: str) -> None:
+        column = _column(classification)
+        column.setdefault("inferred", {}).update(
+            {
+                "looks_like": "email",
+                "sampled": 100,
+                "matched": 96,
+                "looks_like_candidate": "url",
+                "looks_like_candidate_share": 0.6,
+            },
+        )
+        payload = _payload(classification, column)
+
+        assert "stats.looks-like-candidate-with-verdict" in _codes(payload)
+        assert check_statistics(payload, PATH) != [], (
+            "the schema's own mutual-exclusion rejects it too"
+        )
+
+    @pytest.mark.parametrize("classification", LOOKS_LIKE_BEARING)
+    def test_a_share_clearing_the_verdict_threshold_is_refused(self, classification: str) -> None:
+        column = _column(classification)
+        column.setdefault("inferred", {}).update(
+            {"looks_like_candidate": "email", "looks_like_candidate_share": 0.95},
+        )
+        payload = _payload(classification, column)
+
+        assert "stats.looks-like-candidate-at-verdict-threshold" in _codes(payload)
+
+    @pytest.mark.parametrize("classification", LOOKS_LIKE_BEARING)
+    def test_a_share_just_under_the_verdict_threshold_conforms(self, classification: str) -> None:
+        column = _column(classification)
+        column.setdefault("inferred", {}).update(
+            {"looks_like_candidate": "email", "looks_like_candidate_share": 0.94},
+        )
+
+        assert _errors(_payload(classification, column)) == []
+
+
 class TestForbiddenInferredSubfields:
     """Cells the matrix marks forbidden, which a flat key test cannot express."""
 
@@ -228,7 +291,13 @@ class TestCandidateKeyAndException:
         """9999 distinct non-null of 10000 scanned, 1 null: no value repeats."""
 
         column = _column("json")
-        column.update(cardinality=9999, cardinality_ratio=0.9999, null_count=1, null_rate=0.0001)
+        column.update(
+            cardinality=9999,
+            cardinality_ratio=0.9999,
+            nullable=True,
+            null_count=1,
+            null_rate=0.0001,
+        )
         column["inferred"] = {"candidate_key": True}
 
         assert _errors(_payload("json", column, row_count=10000)) == []
@@ -453,6 +522,118 @@ class TestTheValueListIsConditionalOnProse:
         assert _errors(_payload("categorical", column)) == []
 
 
+class TestLengthFollowsTheColumnType:
+    """The matrix's fourth conditional cell: `length` on `categorical`/`foreign_key_candidate`
+    tracks `sql_type`, not the classification (SPEC 2.2.3's type-admission footnote).
+    """
+
+    @pytest.mark.parametrize("classification", ["foreign_key_candidate", "categorical"])
+    def test_a_string_typed_column_owes_it(self, classification: str) -> None:
+        """`_column()` already sets `sql_type: TEXT`; removing `length` alone must fail - the type
+        condition is cross-field, so only the Python conformance layer catches it.
+        """
+
+        column = _column(classification)
+        del column["length"]
+        payload = _payload(classification, column)
+
+        assert "stats.missing-required-field-for-classification" in _codes(payload)
+
+    @pytest.mark.parametrize("classification", ["foreign_key_candidate", "categorical"])
+    def test_a_non_string_typed_column_may_not_carry_it(self, classification: str) -> None:
+        column = _column(classification)
+        column["sql_type"] = "INTEGER"
+        payload = _payload(classification, column)
+        forbidden = [
+            i
+            for i in statistics.check(payload, PATH, FQN)
+            if i.code == "stats.forbidden-field-for-classification"
+        ]
+
+        assert {i.spec_ref for i in forbidden} == {"§2.2.3"}
+
+    @pytest.mark.parametrize("classification", ["foreign_key_candidate", "categorical"])
+    def test_a_non_string_typed_column_without_it_conforms(self, classification: str) -> None:
+        column = _column(classification)
+        column["sql_type"] = "INTEGER"
+        del column["length"]
+
+        assert _errors(_payload(classification, column)) == []
+
+    def test_a_redacted_single_row_column_may_not_carry_it_either(self) -> None:
+        """The same last-row inversion `mean`/`sum` avoid (SPEC 2.2.3) - cross-field arithmetic,
+        so only the Python conformance layer catches it.
+        """
+
+        column = _column("text")
+        column["redacted"] = "mask"
+        payload = _payload("text", column, row_count=1)
+        forbidden = [
+            i
+            for i in statistics.check(payload, PATH, FQN)
+            if i.code == "stats.forbidden-field-for-classification"
+        ]
+
+        assert {i.spec_ref for i in forbidden} == {"§2.2.9"}
+
+
+class TestNormalizedCardinalityFollowsTheMatrix:
+    """`normalized_cardinality`: O on the three string-admitting classifications, forbidden
+    everywhere else (SPEC 2.2.3), and bounded against `cardinality` when present.
+    """
+
+    @pytest.mark.parametrize("classification", ["foreign_key_candidate", "categorical", "text"])
+    def test_may_be_carried_on_a_string_typed_column(self, classification: str) -> None:
+        column = _column(classification)
+        column["normalized_cardinality"] = column["cardinality"]
+        payload = _payload(classification, column)
+
+        assert _errors(payload) == []
+
+    @pytest.mark.parametrize(
+        "classification",
+        ["boolean", "json", "temporal", "numeric", "unsupported"],
+    )
+    def test_forbidden_outside_the_string_admitting_classifications(
+        self,
+        classification: str,
+    ) -> None:
+        column = _column(classification)
+        column["normalized_cardinality"] = 1
+        payload = _payload(classification, column)
+
+        assert "stats.forbidden-field-for-classification" in _codes(payload)
+
+    def test_exceeding_cardinality_is_an_error(self) -> None:
+        column = _column("text")
+        column["normalized_cardinality"] = column["cardinality"] + 1
+        payload = _payload("text", column)
+
+        assert "stats.normalized-cardinality-exceeds-cardinality" in _codes(payload)
+
+    def test_exceeding_an_approximate_cardinality_conforms(self) -> None:
+        """SPEC 2.2.4: an approximate `cardinality` makes the comparison approximate on both
+        sides - a stale catalog estimate can legitimately undershoot the exact folded count.
+        """
+
+        column = _column("text")
+        column["cardinality_method"] = "approximate"
+        column["normalized_cardinality"] = column["cardinality"] + 1
+        payload = _payload("text", column)
+
+        assert "stats.normalized-cardinality-exceeds-cardinality" not in _codes(payload)
+
+    def test_below_cardinality_conforms(self) -> None:
+        column = _column("foreign_key_candidate")
+        column["cardinality"] = 5
+        column["cardinality_ratio"] = 0.5
+        column["values"] = [{"value": f"v{i}", "count": 2} for i in range(5)]
+        column["normalized_cardinality"] = 3
+        payload = _payload("foreign_key_candidate", column)
+
+        assert _errors(payload) == []
+
+
 class TestUnrepresentable:
     """The `unrepresentable` row: O on `temporal`, MUST NOT everywhere else."""
 
@@ -577,6 +758,21 @@ class TestSpanDays:
         column["sql_type"] = "TIME"
         column["range"] = {"min": "08:00:00", "max": "17:00:00", "span_days": 0}
         column["percentiles"] = {"p50": "12:30:00"}
+
+        assert _errors(_payload("temporal", column)) == []
+
+
+class TestQuantizedCountFollowsDayResolution:
+    """SPEC 2.2.3's day-resolution footnote keys off `sql_type`, not classification alone -
+    ClickHouse's `Date32` truncates to itself the same as `Date`.
+    """
+
+    def test_a_date32_column_is_not_required_to_carry_it(self) -> None:
+        column = _column("temporal")
+        column["sql_type"] = "Date32"
+        column["range"] = {"min": "2025-01-01", "max": "2032-01-07", "span_days": 2562}
+        column["percentiles"] = {"p50": "2028-07-04"}
+        column["freshness"] = {"max_age_days": 0, "classification": "live"}
 
         assert _errors(_payload("temporal", column)) == []
 
@@ -781,12 +977,18 @@ def _column(classification: str) -> dict[str, Any]:
     # One value over ten rows is a dominant value per SPEC 2.2.5.
     distribution = {"distribution": "dominant_value"}
 
+    # `sql_type` is "TEXT" (string-like) above, so `length` is REQUIRED on both these rows
+    # too (SPEC 2.2.3's type-admission footnote) - "a" is one character, min/max/avg/p95 agree.
+    length = {"length": {"min": 1, "max": 1, "avg": 1.0, "p95": 1.0}}
+
     if classification == "boolean":
         return {**counted, **values}
     elif classification == "json":
         return counted
-    elif classification in ("foreign_key_candidate", "categorical", "text"):
-        return {**counted, **values, **distribution}
+    elif classification in ("foreign_key_candidate", "categorical"):
+        return {**counted, **values, **distribution, **length}
+    elif classification == "text":
+        return {**counted, **values, **distribution, "empty_count": 0, **length}
     elif classification == "temporal":
         # max is a day before `_payload`'s profiled_at, so max_age_days is the 1 asserted
         # here; cardinality=1 over 10 rows is a dominant value per SPEC 2.2.5/2.2.7.
@@ -795,6 +997,7 @@ def _column(classification: str) -> dict[str, Any]:
             "range": {"min": "2025-12-30T00:00:00Z", "max": "2025-12-31T00:00:00Z", "span_days": 1},
             "percentiles": {"p50": "2025-12-30T12:00:00Z"},
             "freshness": {"max_age_days": 1, "classification": "live"},
+            "values": [{"value": "2025-12-30T12:00:00Z", "count": 10}],
             "distribution": "dominant_value",
             "frequencies": {"top": 10, "bottom": 10, "listed": 1, "total": 10},
         }
@@ -803,6 +1006,12 @@ def _column(classification: str) -> dict[str, Any]:
             **counted,
             "range": {"min": 1, "max": 9},
             "percentiles": {"p50": 5},
+            "mean": 5.0,
+            "sum": 50.0,
+            "zero_count": 0,
+            "negative_count": 0,
+            "quantized_count": 10,
+            "values": [{"value": 5, "count": 10}],
             "distribution": "dominant_value",
             "frequencies": {"top": 10, "bottom": 10, "listed": 1, "total": 10},
         }

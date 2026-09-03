@@ -162,3 +162,52 @@ def test_the_entry_point_names_both_starting_conditions() -> None:
 
 def test_absence_is_pointed_at_spec_7() -> None:
     assert "SPEC 7 names what each absence can mean" in gen.build_document()
+
+
+def test_every_detection_value_gets_named_in_the_guide() -> None:
+    """`relationships.schema.json`'s `Detection` enum, not a hardcoded list - a fourth value
+    added there fails this test instead of shipping a guide that still enumerates three.
+    """
+
+    text = gen.build_document()
+
+    for value in gen._detection_values():
+        assert f"`{value}`" in text, f"{value!r} has no vocabulary sentence"
+
+
+def test_the_detection_guard_fires_on_an_unnamed_value() -> None:
+    """A returning `build_document()` already proves this; asserted directly for its own sake."""
+
+    sentence = next(s for name, s in gen._VOCABULARY if name == "foreign_key_candidate")
+
+    with pytest.raises(AssertionError, match="guessed"):
+        gen._check_detection_enumeration(["declared", "inferred", "measured", "guessed"], sentence)
+
+
+def test_measured_edges_are_not_a_stronger_schema_claim() -> None:
+    text = gen.build_document()
+
+    assert "`measured`" in text
+    assert "stronger claim about the schema" in text
+    assert "stronger claim about the data" in text
+
+
+def test_the_depends_on_two_encodings_trap_is_present() -> None:
+    text = gen.build_document()
+
+    assert "`depends_on: []`" in text
+    assert "the key omitted entirely" in text
+
+
+def test_the_timeline_gap_trap_is_present() -> None:
+    text = gen.build_document()
+
+    assert "timeline gap is not a zero" in text
+    assert "`timeline.buckets`" in text
+
+
+def test_the_scope_paragraph_names_sum_as_non_rescalable() -> None:
+    text = gen.build_document()
+    strategy = text.split("## Reading strategy")[1]
+
+    assert "`sum` is not rescalable to table grain" in strategy

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -85,13 +86,13 @@ def _age_every_table(manifest_path: Path, profiled_at: str) -> None:
     the matview - so a fixed ageing splits them into live/stale.
     """
 
-    manifest = yaml.safe_load(manifest_path.read_text())
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
     manifest["generated_at"] = profiled_at
 
     for entry in manifest["tables"].values():
         entry["profiled_at"] = profiled_at
 
-    manifest_path.write_text(yaml.safe_dump(manifest))
+    manifest_path.write_text(yaml.safe_dump(manifest), encoding="utf-8")
 
 
 class TestListHappyPath:
@@ -108,6 +109,99 @@ class TestListHappyPath:
         assert result.exit_code == 0
         assert "primary" in result.output
         assert "table_count\t1" in result.output
+
+
+class TestFormatOption:
+    """`--format json`/`--format yaml` - the machine envelope `check`/`diff` already have."""
+
+    def test_json_emits_one_array_entry_per_connection(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _setup_project(tmp_path)
+        _write_manifest(tmp_path, "public.curator")
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(main, ["list", "--format", "json"])
+
+        payload = json.loads(result.stdout)
+
+        assert payload == [
+            {
+                "connection": "primary",
+                "ok": True,
+                "adapter": "postgres",
+                "generated_at": "2026-06-08T00:00:00Z",
+                "table_count": 1,
+                "live": 0,
+                "stale": 1,
+                "dormant": 0,
+                "described": 0,
+            },
+        ]
+
+    def test_yaml_parses_to_the_same_shape_as_json(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _setup_project(tmp_path)
+        _write_manifest(tmp_path, "public.curator")
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+
+        json_payload = json.loads(runner.invoke(main, ["list", "--format", "json"]).stdout)
+        yaml_payload = list(
+            yaml.safe_load_all(runner.invoke(main, ["list", "--format", "yaml"]).stdout),
+        )
+
+        assert yaml_payload == json_payload
+
+    def test_a_dropped_connection_carries_its_causes_not_a_summary(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _setup_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(main, ["list", "--format", "json"])
+
+        payload = json.loads(result.stdout)
+
+        assert len(payload) == 1
+        assert payload[0]["connection"] == "primary"
+        assert payload[0]["ok"] is False
+        assert "no manifest at" in payload[0]["causes"][0]
+        assert "adapter" not in payload[0]
+
+    def test_two_connections_combine_into_one_array_not_two_documents(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        (tmp_path / ".dbprint.yaml").write_text(CASCADE_YAML)
+        _write_named_manifest(tmp_path, "good", ("public.curator",))
+        _write_named_manifest(tmp_path, "bad", ("public.curator", "public.herbarium"))
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(main, ["list", "--format", "json"])
+
+        payload = json.loads(result.stdout)
+
+        assert [e["connection"] for e in payload] == ["good", "bad"]
+        assert payload[0]["ok"] is True
+        assert payload[1]["ok"] is False
+
+    def test_format_json_ignores_tui_and_never_renders_the_panel(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _setup_project(tmp_path)
+        _write_manifest(tmp_path, "public.curator")
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(main, ["list", "--format", "json", "--tui"])
+
+        json.loads(result.stdout)  # still parses clean - no Rich panel framing mixed in
 
 
 class TestListNoManifest:
@@ -163,6 +257,110 @@ class TestFreshnessClassification:
         result = CliRunner().invoke(main, ["list", "--no-tui"])
 
         assert "stale\t1" in result.output
+
+    def test_a_measured_exceedance_stays_stale_no_matter_how_old(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """`check` names any exceedance `stale` with no split by degree - `list` must agree, not
+        fold the oldest into `dormant` and contradict a `check` run on the identical print.
+        """
+
+        _setup_project(tmp_path)
+        _write_manifest(tmp_path, "public.t", profiled_at=_days_ago(1000), max_age_days=7)
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(main, ["list", "--no-tui"])
+
+        assert "stale\t1" in result.output
+        assert "dormant\t1" not in result.output
+
+    def test_an_unparseable_timestamp_is_dormant_not_stale(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """`dormant` is what `check` calls unmeasurable - a timestamp real enough to compare
+        against a threshold belongs in `stale`, however old.
+        """
+
+        _setup_project(tmp_path)
+        _write_manifest(tmp_path, "public.t", profiled_at="not-a-timestamp", max_age_days=7)
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(main, ["list", "--no-tui"])
+
+        assert "dormant\t1" in result.output
+        assert "stale\t1" not in result.output
+
+
+class TestDescribedCountsTheFile:
+    """`described` names a table `check` would also find undamaged - a declared-but-missing
+    `description.md` is a `manifest.missing-artifact` there, not a described table here.
+    """
+
+    def _write(self, tmp_path: Path, *, write_description_file: bool) -> None:
+        prints = tmp_path / "prints" / "primary"
+        table_dir = prints / "public" / "t"
+        table_dir.mkdir(parents=True, exist_ok=True)
+        stamp = _days_ago(1)
+        manifest = {
+            "format_version": 1,
+            "generated_at": stamp,
+            "connection": "primary",
+            "adapter": "postgres",
+            "dbprint_version": "0.1.0",
+            "statistics_params": {
+                "enumeration_threshold": 50,
+                "top_n_values": 30,
+                "top_n_null_patterns": 20,
+                "looks_like_sample_size": 1000,
+                "percentiles": [1, 25, 50, 75, 99],
+            },
+            "selectors": {"include": ["*"], "exclude": []},
+            "redaction_rules_configured": 0,
+            "default_collation": "en_US.UTF-8",
+            "tables": {
+                "public.t": {
+                    "type": "table",
+                    "path": "public/t",
+                    "artifacts": {
+                        "ddl": "ddl.sql",
+                        "statistics": "statistics.yaml",
+                        "description": "description.md",
+                    },
+                    "columns": 3,
+                    "profiled_at": stamp,
+                },
+            },
+        }
+        (prints / "manifest.yaml").write_text(yaml.safe_dump(manifest))
+
+        if write_description_file:
+            (table_dir / "description.md").write_text("A hand-authored note.\n")
+
+    def test_declared_but_missing_does_not_count(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _setup_project(tmp_path)
+        self._write(tmp_path, write_description_file=False)
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(main, ["list", "--no-tui"])
+
+        assert "described\t0" in result.output
+
+    def test_declared_and_present_counts(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _setup_project(tmp_path)
+        self._write(tmp_path, write_description_file=True)
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(main, ["list", "--no-tui"])
+
+        assert "described\t1" in result.output
 
 
 def _write_two_table_manifest(tmp_path: Path, profiled_at: str) -> None:
@@ -226,6 +424,27 @@ connections:
     rules:
       - include: ["public.t"]
         min_rows: 1000000
+        max_age_days: 30
+"""
+
+CONNECTION_CEILING_ONLY_YAML = """\
+connections:
+  primary:
+    adapter: postgres
+    output: prints
+    max_age_days: 7
+    max_rows_scanned: 1000000000
+"""
+
+RULE_CEILING_ONLY_YAML = """\
+connections:
+  primary:
+    adapter: postgres
+    output: prints
+    max_age_days: 7
+    rules:
+      - include: ["public.t"]
+        max_rows_scanned: 1000000000
         max_age_days: 30
 """
 
@@ -398,6 +617,42 @@ class TestForbiddenRecordedThreshold:
         assert check_result.exit_code != 0
 
 
+def _write_typed_manifest(tmp_path: Path, entries: dict[str, str]) -> None:
+    """Manifest for `primary` with one entry per `{fqn: type}` pair, none recording a threshold."""
+
+    stamp = _days_ago(10)
+    prints = tmp_path / "prints" / "primary"
+    prints.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "format_version": 1,
+        "generated_at": stamp,
+        "connection": "primary",
+        "adapter": "postgres",
+        "dbprint_version": "0.1.0",
+        "statistics_params": {
+            "enumeration_threshold": 50,
+            "top_n_values": 30,
+            "top_n_null_patterns": 20,
+            "looks_like_sample_size": 1000,
+            "percentiles": [1, 25, 50, 75, 99],
+        },
+        "selectors": {"include": ["*"], "exclude": []},
+        "redaction_rules_configured": 0,
+        "default_collation": "en_US.UTF-8",
+        "tables": {
+            fqn: {
+                "type": table_type,
+                "path": fqn.replace(".", "/"),
+                "artifacts": {"ddl": "ddl.sql", "statistics": "statistics.yaml"},
+                "columns": 3,
+                "profiled_at": stamp,
+            }
+            for fqn, table_type in entries.items()
+        },
+    }
+    (prints / "manifest.yaml").write_text(yaml.safe_dump(manifest))
+
+
 class TestSizeGatedRuleOffline:
     def test_the_unapplied_rule_is_named(
         self,
@@ -415,6 +670,53 @@ class TestSizeGatedRuleOffline:
         assert "public.t" in result.stderr
         # The rule's 30 did not apply, so the connection's 7 buckets it stale.
         assert "stale\t1" in result.stdout
+
+    def test_a_plain_view_draws_no_note_but_a_table_still_does(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A view is never queried, so no size condition can have governed it (SPEC 2.2.15)."""
+
+        (tmp_path / ".dbprint.yaml").write_text(
+            SIZE_GATED_YAML.replace('include: ["public.t"]', 'include: ["public.*"]'),
+        )
+        _write_typed_manifest(tmp_path, {"public.t": "table", "public.v": "view"})
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(main, ["list", "--no-tui"])
+
+        assert "public.t" in result.stderr
+        assert "public.v" not in result.stderr
+
+    def test_a_connection_level_ceiling_alone_says_nothing(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A ceiling cannot affect `max_age_days`, so it is not this warning's concern."""
+
+        (tmp_path / ".dbprint.yaml").write_text(CONNECTION_CEILING_ONLY_YAML)
+        _write_manifest(tmp_path, "public.t", profiled_at=_days_ago(10))
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(main, ["list", "--no-tui"])
+
+        assert "min_rows" not in result.stderr
+
+    def test_a_rules_ceiling_alone_says_nothing_but_its_max_age_days_is_used(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The rule applied in full - `max_rows_scanned` gates nothing `matches` checks."""
+
+        (tmp_path / ".dbprint.yaml").write_text(RULE_CEILING_ONLY_YAML)
+        _write_manifest(tmp_path, "public.t", profiled_at=_days_ago(10))
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(main, ["list", "--no-tui"])
+
+        assert "min_rows" not in result.stderr
+        # The rule's 30 applied in full, so the table is not yet stale.
+        assert "live\t1" in result.stdout
 
 
 class TestPerTableBuckets:

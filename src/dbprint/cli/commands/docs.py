@@ -133,8 +133,9 @@ def build_command(
     **Exit codes:**
 
     - `0`: ok
-    - `1`: missing `[docs]` extra, an unresolved connection, or `--output` exists without this
-      tool's marker and `--force` was not passed
+    - `1`: missing `[docs]` extra, an unresolved connection, `--output` exists without this
+      tool's marker and `--force` was not passed, or at least one route returned non-200 and
+      was not written
 
     **Examples:**
 
@@ -152,6 +153,13 @@ def build_command(
         ctx.exit(EXIT_GENERIC)
 
     click.echo(f"Wrote {result.pages_written} pages to {result.output}")
+
+    if result.failed_routes:
+        for route in result.failed_routes:
+            click.echo(f"  failed: {route}", err=True)
+
+        ctx.exit(EXIT_GENERIC)
+
     ctx.exit(EXIT_OK)
 
 

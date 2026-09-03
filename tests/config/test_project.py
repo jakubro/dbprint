@@ -1033,6 +1033,42 @@ class TestSizeConditions:
         assert not conn.size_conditions_name("other.curation_event")
 
 
+class TestMinRowsConditions:
+    """`min_rows_conditions_name` narrows `size_conditions_name` to the question offline
+    freshness fallback actually asks - a ceiling cannot affect `max_age_days` at all.
+    """
+
+    def test_a_connection_level_ceiling_alone_names_nothing(self, tmp_path: Path) -> None:
+        root = _write_config(
+            tmp_path,
+            "connections:\n  w:\n    adapter: postgres\n    max_rows_scanned: 1000000000\n",
+        )
+        conn = load_project(root).connections["w"]
+
+        assert not conn.min_rows_conditions_name("anything.at_all")
+
+    def test_a_rules_ceiling_alone_names_nothing(self, tmp_path: Path) -> None:
+        root = _write_config(
+            tmp_path,
+            "connections:\n"
+            "  w:\n"
+            "    adapter: postgres\n"
+            "    rules:\n"
+            '      - include: ["fixture.*"]\n'
+            "        max_rows_scanned: 1000000000\n"
+            "        max_age_days: 30\n",
+        )
+        conn = load_project(root).connections["w"]
+
+        assert not conn.min_rows_conditions_name("fixture.curation_event")
+
+    def test_a_rules_min_rows_names_it(self, tmp_path: Path) -> None:
+        conn = _size_rule_config(tmp_path)
+
+        assert conn.min_rows_conditions_name("fixture.curation_event")
+        assert not conn.min_rows_conditions_name("other.curation_event")
+
+
 def _size_rule_config(tmp_path: Path) -> ConnectionConfig:
     root = _write_config(
         tmp_path,

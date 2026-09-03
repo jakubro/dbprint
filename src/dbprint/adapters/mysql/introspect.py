@@ -359,6 +359,38 @@ def _partition_key(expression: str) -> PhysicalLayoutKey:
     )
 
 
+def view_dependencies(cursor: Cursor) -> dict[str, tuple[str, ...]]:
+    """Every view's direct object dependencies, one query for the whole connection - the LEFT
+    JOIN seeds every view, so one reading nothing answers `()` rather than going absent.
+    """
+
+    rows = exec_query(
+        cursor,
+        """
+        SELECT
+            t.table_schema AS view_schema,
+            t.table_name   AS view_name,
+            u.table_schema AS source_schema,
+            u.table_name   AS source_name
+        FROM information_schema.tables t
+        LEFT JOIN information_schema.view_table_usage u
+            ON u.view_schema = t.table_schema AND u.view_name = t.table_name
+        WHERE t.table_schema = DATABASE() AND t.table_type = 'VIEW'
+        """,
+    ).fetchall()
+
+    out: dict[str, list[str]] = {}
+
+    for view_schema, view_name, source_schema, source_name in rows:
+        key = f"{_norm(view_schema)}.{_norm(view_name)}"
+        out.setdefault(key, [])
+
+        if source_schema is not None and source_name is not None:
+            out[key].append(f"{_norm(source_schema)}.{_norm(source_name)}")
+
+    return {k: tuple(v) for k, v in out.items()}
+
+
 def table_rows_estimate(cursor: Cursor, fqn: str) -> int:
     """Catalog row-count estimate (approximate for InnoDB); -1 when unavailable."""
 

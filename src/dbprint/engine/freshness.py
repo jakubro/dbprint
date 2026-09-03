@@ -86,6 +86,23 @@ def evaluate(
     return out
 
 
+def format_threshold(days: float) -> str:
+    """Render a threshold in the single-unit form `--max-age`/`parse_duration` accepts back - a
+    configured value owes the reader a typeable form, unlike `format_age`'s compound `Xd Yh`.
+    """
+
+    total_seconds = round(days * 86400)
+
+    if total_seconds % 86400 == 0:
+        return f"{total_seconds // 86400}d"
+    elif total_seconds % 3600 == 0:
+        return f"{total_seconds // 3600}h"
+    elif total_seconds % 60 == 0:
+        return f"{total_seconds // 60}m"
+    else:
+        return f"{total_seconds}s"
+
+
 def format_age(days: float) -> str:
     """Render age as `Xh` under a day, else `Xd Xh`; `unknown` for infinity."""
 

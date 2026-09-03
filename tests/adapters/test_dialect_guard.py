@@ -17,11 +17,21 @@ from typing import Any
 import pytest
 
 from dbprint.adapters import Adapter, StatisticsConfig
+from dbprint.adapters.bigquery import DIALECT as BIGQUERY_DIALECT
+from dbprint.adapters.bigquery import stats as bigquery_stats
+from dbprint.adapters.clickhouse import DIALECT as CLICKHOUSE_DIALECT
+from dbprint.adapters.clickhouse import stats as clickhouse_stats
+from dbprint.adapters.databricks import DIALECT as DATABRICKS_DIALECT
+from dbprint.adapters.databricks import stats as databricks_stats
 from dbprint.adapters.dialect import VENDOR_SUPPORT, Dialect, Vendor
+from dbprint.adapters.duckdb import DIALECT as DUCKDB_DIALECT
+from dbprint.adapters.duckdb import stats as duckdb_stats
 from dbprint.adapters.mysql import DIALECT as MYSQL_DIALECT
 from dbprint.adapters.mysql import stats as mysql_stats
 from dbprint.adapters.postgres import DIALECT as POSTGRES_DIALECT
 from dbprint.adapters.postgres import stats as postgres_stats
+from dbprint.adapters.redshift import DIALECT as REDSHIFT_DIALECT
+from dbprint.adapters.redshift import stats as redshift_stats
 from dbprint.adapters.snowflake import DIALECT as SNOWFLAKE_DIALECT
 from dbprint.adapters.snowflake import stats as snowflake_stats
 
@@ -30,12 +40,22 @@ DIALECTS: dict[str, Dialect] = {
     "postgres": POSTGRES_DIALECT,
     "mysql": MYSQL_DIALECT,
     "snowflake": SNOWFLAKE_DIALECT,
+    "duckdb": DUCKDB_DIALECT,
+    "clickhouse": CLICKHOUSE_DIALECT,
+    "redshift": REDSHIFT_DIALECT,
+    "databricks": DATABRICKS_DIALECT,
+    "bigquery": BIGQUERY_DIALECT,
 }
 
 STATS_MODULES: dict[str, ModuleType] = {
     "postgres": postgres_stats,
     "mysql": mysql_stats,
     "snowflake": snowflake_stats,
+    "duckdb": duckdb_stats,
+    "clickhouse": clickhouse_stats,
+    "redshift": redshift_stats,
+    "databricks": databricks_stats,
+    "bigquery": bigquery_stats,
 }
 
 # Statistics helpers that run for one pre-classification each, owning SQL no other branch emits.
@@ -46,12 +66,47 @@ BRANCH_HELPERS = (
     "_approximate_distribution_via_top_n",
 )
 
+# BigQuery builds its scalar aggregates inline in `_fetch_phase_b_batch`, one statement over
+# every column, so that name stands in for both per-classification helpers below.
+BIGQUERY_BRANCH_HELPERS = (
+    "_fetch_value_list",
+    "_approximate_distribution_via_top_n",
+    "_fetch_phase_b_batch",
+)
+
+# Redshift's temporal scalars and its value list are two separate calls - `_fetch_temporal_scalars`
+# stands in for the shared `_fetch_temporal_block` name, so a value-list failure costs neither.
+REDSHIFT_BRANCH_HELPERS = (
+    "_fetch_value_list",
+    "_fetch_numeric_block",
+    "_fetch_temporal_scalars",
+    "_approximate_distribution_via_top_n",
+)
+
+
+def _branch_helpers(vendor: str) -> tuple[str, ...]:
+    """The statistics-branch helper names this vendor's stats module actually defines."""
+
+    if vendor == "bigquery":
+        return BIGQUERY_BRANCH_HELPERS
+
+    if vendor == "redshift":
+        return REDSHIFT_BRANCH_HELPERS
+
+    return BRANCH_HELPERS
+
+
 # The clause each vendor uses to bound a sample, emitted only past `n * SMALL_TABLE_FACTOR`
 # rows, so its presence proves the sampling path ran rather than the DISTINCT shortcut.
 SAMPLE_CLAUSES: dict[str, str] = {
     "postgres": "tablesample bernoulli",
     "mysql": "order by rand()",
     "snowflake": "sample row (",
+    "duckdb": "tablesample reservoir(",
+    "clickhouse": "sample ",
+    "redshift": "order by random()",
+    "databricks": "order by rand(",
+    "bigquery": "order by rand(",
 }
 
 NARROW_TABLES = ["*.curator", "*.herbarium"]
@@ -97,7 +152,8 @@ def sweep(
 
     vendor, factory = sql_adapter_factory
     module = STATS_MODULES[vendor]
-    counts = _install_branch_spies(monkeypatch, module)
+    helpers = _branch_helpers(vendor)
+    counts = _install_branch_spies(monkeypatch, module, helpers)
     classifications = _install_classification_spy(monkeypatch, module)
     adapter = factory()
 
@@ -138,11 +194,25 @@ class Sweep:
         config = StatisticsConfig()
 
         for table in self.adapter.list_tables(include=include or ["*"], exclude=[]):
-            self.adapter.extract_ddl(table.fqn)
+            # Both substrates lack a DDL statement entirely (measured) - a substrate limitation,
+            # not a dialect difference, so real DDL extraction is left to the live tier.
+            if self.vendor not in ("databricks", "bigquery"):
+                self.adapter.extract_ddl(table.fqn)
+
             columns = self.adapter.introspect_columns(table.fqn)
-            relationships = self.adapter.introspect_relationships(table.fqn)
+
+            # The emulator has no `TABLE_CONSTRAINTS`/`KEY_COLUMN_USAGE` view (measured).
+            # `TABLE_OPTIONS` and `TABLE_STORAGE` degrade to empty/`None`, so neither needs a skip.
+            if self.vendor == "bigquery":
+                relationships = []
+            else:
+                relationships = self.adapter.introspect_relationships(table.fqn)
+
             self.adapter.introspect_indexes(table.fqn)
-            self.adapter.introspect_unique_keys(table.fqn)
+
+            if self.vendor != "bigquery":
+                self.adapter.introspect_unique_keys(table.fqn)
+
             self.adapter.introspect_physical_layout(table.fqn)
             self.adapter.extract_comments(table.fqn)
             self.adapter.estimate_row_count(table.fqn)
@@ -220,7 +290,8 @@ class TestDialectConformance:
 class TestBranchExecution:
     def test_every_statistics_branch_executes(self, sweep: Sweep) -> None:
         sweep.run()
-        unexecuted = [name for name in BRANCH_HELPERS if not sweep.branch_counts[name]]
+        helpers = _branch_helpers(sweep.vendor)
+        unexecuted = [name for name in helpers if not sweep.branch_counts[name]]
 
         assert not unexecuted, (
             f"{sweep.vendor}: these statistics branches emitted no SQL against the "
@@ -228,8 +299,17 @@ class TestBranchExecution:
         )
 
     def test_sampling_path_executes(self, sweep: Sweep) -> None:
+        """The oversample branch is gated on a catalog estimate, never a scan - neither Databricks
+        nor BigQuery can produce one here, so both correctly decline to oversample.
+        """
+
         recorder = sweep.run()
         clause = SAMPLE_CLAUSES[sweep.vendor]
+
+        if sweep.vendor in ("databricks", "bigquery"):
+            pytest.skip(
+                "estimate_row_count is always None on this substrate; see test docstring.",
+            )
 
         assert any(clause in statement for statement in recorder.flattened()), (
             f"{sweep.vendor}: no statement carried {clause!r}, so every sample_values call "
@@ -237,14 +317,16 @@ class TestBranchExecution:
         )
 
     def test_every_pre_classification_is_reached(self, sweep: Sweep) -> None:
-        """Helper counters cannot separate the branches that share a helper.
-
-        `foreign_key_candidate` and `text` both call `_fetch_value_list`, and the FK branch
-        is the one a `frozenset()` caller never reaches.
+        """Helper counters cannot separate branches sharing a helper - `foreign_key_candidate`
+        and `text` both call `_fetch_value_list`, and a `frozenset()` caller never reaches the FK.
         """
 
         sweep.run()
-        expected = {"categorical", "foreign_key_candidate", "numeric", "temporal"}
+        expected = {"categorical", "numeric", "temporal"}
+
+        if sweep.vendor not in ("clickhouse", "databricks", "bigquery"):
+            expected.add("foreign_key_candidate")
+
         missing = expected - sweep.classifications
 
         assert not missing, (
@@ -268,10 +350,20 @@ class TestNarrowTablesAloneAreNotEnough:
             "the narrow tables should still reach the value-list branch"
         )
 
-        reached = [name for name in BRANCH_HELPERS if sweep.branch_counts[name]]
+        if sweep.vendor == "bigquery":
+            # `_fetch_phase_b_batch` also carries length_p95, so its call count alone cannot
+            # stand in for "numeric/temporal SQL was skipped"; the classification spy does.
+            assert not sweep.classifications & {"numeric", "temporal"}, sweep.classifications
+
+            return
+
+        reached = [name for name in _branch_helpers(sweep.vendor) if sweep.branch_counts[name]]
+        temporal_helper = (
+            "_fetch_temporal_scalars" if sweep.vendor == "redshift" else "_fetch_temporal_block"
+        )
 
         assert "_fetch_numeric_block" not in reached
-        assert "_fetch_temporal_block" not in reached
+        assert temporal_helper not in reached
 
     def test_narrow_tables_leave_the_sampling_path_unexecuted(self, sweep: Sweep) -> None:
         recorder = sweep.run(include=NARROW_TABLES)
@@ -350,6 +442,20 @@ class TestDeclaredParamstyleMatchesDriver:
         [
             ("dbprint.adapters.postgres.connection", "psycopg", "pyformat", POSTGRES_DIALECT),
             ("dbprint.adapters.mysql.connection", "mysql.connector", "pyformat", MYSQL_DIALECT),
+            (
+                "dbprint.adapters.clickhouse.connection",
+                "clickhouse_connect.dbapi",
+                "pyformat",
+                CLICKHOUSE_DIALECT,
+            ),
+            (
+                "dbprint.adapters.redshift.connection",
+                "redshift_connector",
+                # redshift_connector's own DB-API constant says "format" (bare `%s`, no name) -
+                # the same marker text this project's own two-value model calls "pyformat".
+                "pyformat",
+                REDSHIFT_DIALECT,
+            ),
         ],
     )
     def test_driver_default_is_kept_and_matches_the_declaration(
@@ -382,6 +488,66 @@ class TestDeclaredParamstyleMatchesDriver:
             "from the driver default and would no longer describe what it binds."
         )
         assert dialect.paramstyle == driver_default
+
+    def test_duckdb_driver_default_is_kept_and_matches_the_declaration(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """duckdb's own DB-API declares `qmark` natively; the adapter passes no override.
+
+        Its `ConnectionParams` does not fit the shared postgres/mysql shape, so it tests alone.
+        """
+
+        from dbprint.adapters.duckdb import connection as duckdb_connection
+
+        captured = _capture_connect_kwargs(monkeypatch, duckdb_connection, "duckdb")
+        connection = duckdb_connection.Connection(
+            duckdb_connection.ConnectionParams(database=":memory:"),
+        )
+        connection.open()
+
+        assert captured, "duckdb.connection never reached the driver; the check would be vacuous."
+        assert DUCKDB_DIALECT.paramstyle == "qmark"
+
+    def test_bigquery_dbapi_declares_pyformat(self) -> None:
+        """BigQuery's factory calls `dbapi.connect(client)` positionally, which the shared stub
+        cannot capture - checked against the installed module's own declared constant instead.
+        """
+
+        dbapi = pytest.importorskip("google.cloud.bigquery.dbapi")
+
+        assert BIGQUERY_DIALECT.paramstyle == dbapi.paramstyle
+
+    def test_databricks_native_mode_is_kept_and_binds_qmark(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """databricks-sql-connector defaults to native binding, which the adapter does not
+        override, and native positional structure binds `?` - read from the connector's source,
+        its `paramstyle` constant naming only the named-dict case.
+        """
+
+        from dbprint.adapters.databricks import connection as databricks_connection
+
+        captured = _capture_connect_kwargs(monkeypatch, databricks_connection, "databricks.sql")
+        connection = databricks_connection.Connection(
+            databricks_connection.ConnectionParams(
+                server_hostname="h",
+                http_path="p",
+                access_token="t",
+                catalog="c",
+            ),
+        )
+        connection.open()
+
+        assert captured, (
+            "databricks.connection never reached the driver; the check would be vacuous."
+        )
+        assert "use_inline_params" not in captured, (
+            "the adapter overrides use_inline_params; the declared placeholder is derived "
+            "from the connector's native-mode default and would no longer describe what it binds."
+        )
+        assert DATABRICKS_DIALECT.paramstyle == "qmark"
 
 
 def _install_recorder(adapter: Any) -> Recorder:
@@ -421,12 +587,16 @@ class _RecordingProxy:
         return getattr(self._target, name)
 
 
-def _install_branch_spies(monkeypatch: pytest.MonkeyPatch, module: ModuleType) -> Counter[str]:
+def _install_branch_spies(
+    monkeypatch: pytest.MonkeyPatch,
+    module: ModuleType,
+    helpers: tuple[str, ...] = BRANCH_HELPERS,
+) -> Counter[str]:
     """Count calls to each classification-specific statistics helper."""
 
     counts: Counter[str] = Counter()
 
-    for name in BRANCH_HELPERS:
+    for name in helpers:
         monkeypatch.setattr(module, name, _counting(name, getattr(module, name), counts))
 
     return counts

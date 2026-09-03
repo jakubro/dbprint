@@ -92,7 +92,7 @@ class TestBoundsRule:
 
 
 class TestPerValueRule:
-    """The four SPEC 4.1.5 sampled classifications: reuses `looks_like`'s own threshold."""
+    """The three SPEC 4.1.5 sampled classifications: reuses `looks_like`'s own threshold."""
 
     def test_a_seconds_text_column_is_detected(self) -> None:
         values = [str(1704067200 + i) for i in range(30)]

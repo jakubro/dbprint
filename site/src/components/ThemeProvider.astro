@@ -1,0 +1,47 @@
+---
+// Starlight's ThemeProvider with one change: a first visit is seeded to light rather than
+// following the OS. Seeding storage rather than just painting light is what makes it stick -
+// the theme picker re-applies its own stored value on hydration and would otherwise win.
+import { Icon } from '@astrojs/starlight/components';
+---
+
+{/* Inlined to avoid FOUC. */}
+<script is:inline>
+	window.StarlightThemeProvider = (() => {
+		const hasStorage = typeof localStorage !== 'undefined';
+		// null means never chosen; '' means the reader chose auto, which stays auto.
+		const stored = hasStorage ? localStorage.getItem('starlight-theme') : null;
+
+		if (hasStorage && stored === null) localStorage.setItem('starlight-theme', 'light');
+
+		const storedTheme = stored === null ? 'light' : stored;
+		const theme =
+			storedTheme ||
+			(window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+		document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark';
+
+		return {
+			updatePickers(theme = storedTheme || 'auto') {
+				document.querySelectorAll('starlight-theme-select').forEach((picker) => {
+					const select = picker.querySelector('select');
+					if (select) select.value = theme;
+					/** @type {HTMLTemplateElement | null} */
+					const tmpl = document.querySelector(`#theme-icons`);
+					const newIcon = tmpl && tmpl.content.querySelector('.' + theme);
+					if (newIcon) {
+						const oldIcon = picker.querySelector('svg.label-icon');
+						if (oldIcon) {
+							oldIcon.replaceChildren(...newIcon.cloneNode(true).childNodes);
+						}
+					}
+				});
+			},
+		};
+	})();
+</script>
+
+<template id="theme-icons">
+	<Icon name="sun" class="light" />
+	<Icon name="moon" class="dark" />
+	<Icon name="laptop" class="auto" />
+</template>

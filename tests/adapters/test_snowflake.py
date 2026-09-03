@@ -1154,6 +1154,67 @@ class TestPhysicalLayout:
         assert adapter.introspect_physical_layout("memory.seedbank.curation_event") is None
 
 
+class TestViewDependencies:
+    """`introspect_view_dependencies` via `ACCOUNT_USAGE.OBJECT_DEPENDENCIES` - the shim proves
+    row-shape handling only, never real Snowflake dependency resolution.
+    """
+
+    def _adapter(self, con: duckdb.DuckDBPyConnection) -> SnowflakeAdapter:
+        shim = SnowflakeDialectShim(con)
+        a = SnowflakeAdapter(CREDS, cursor_factory=lambda _: shim)
+        a.connect()
+
+        return a
+
+    def test_a_view_reading_two_tables_lists_both(
+        self,
+        fresh_duckdb: duckdb.DuckDBPyConnection,
+    ) -> None:
+        fresh_duckdb.execute("CREATE SCHEMA seedbank")
+        fresh_duckdb.execute("CREATE TABLE seedbank.taxon (id INTEGER)")
+        fresh_duckdb.execute("CREATE TABLE seedbank.herbarium (id INTEGER)")
+        fresh_duckdb.execute(
+            "CREATE VIEW seedbank.both_v AS "
+            "SELECT taxon.id AS a, herbarium.id AS b FROM seedbank.taxon, seedbank.herbarium",
+        )
+        adapter = self._adapter(fresh_duckdb)
+
+        deps = adapter.introspect_view_dependencies()
+
+        assert deps is not None
+        assert set(deps["memory.seedbank.both_v"]) == {
+            "memory.seedbank.taxon",
+            "memory.seedbank.herbarium",
+        }
+
+    def test_a_view_reading_nothing_answers_with_an_empty_tuple(
+        self,
+        fresh_duckdb: duckdb.DuckDBPyConnection,
+    ) -> None:
+        fresh_duckdb.execute("CREATE SCHEMA seedbank")
+        fresh_duckdb.execute("CREATE VIEW seedbank.literal_v AS SELECT 1 AS x")
+        adapter = self._adapter(fresh_duckdb)
+
+        deps = adapter.introspect_view_dependencies()
+
+        assert deps is not None
+        assert deps["memory.seedbank.literal_v"] == ()
+
+    def test_a_view_does_not_depend_on_itself(
+        self,
+        fresh_duckdb: duckdb.DuckDBPyConnection,
+    ) -> None:
+        fresh_duckdb.execute("CREATE SCHEMA seedbank")
+        fresh_duckdb.execute("CREATE TABLE seedbank.taxon (id INTEGER)")
+        fresh_duckdb.execute("CREATE VIEW seedbank.taxon_v AS SELECT id FROM seedbank.taxon")
+        adapter = self._adapter(fresh_duckdb)
+
+        deps = adapter.introspect_view_dependencies()
+
+        assert deps is not None
+        assert deps["memory.seedbank.taxon_v"] == ("memory.seedbank.taxon",)
+
+
 class TestEmptyTable:
     def test_empty_table_yields_zero_stats(self, fresh_duckdb: duckdb.DuckDBPyConnection) -> None:
         from dbprint.config import StatisticsConfig
@@ -1564,6 +1625,8 @@ class TestApproximateCardinality:
     ) -> None:
         """The estimate must not decide the SPEC 4.2 candidate-key question by itself."""
 
+        from dbprint.config import StatisticsConfig
+
         _seed_wide(fresh_duckdb)
         _, approximate = self._run(fresh_duckdb, threshold=10)
         _, exact = self._run(fresh_duckdb, threshold=1_000_000)
@@ -1572,7 +1635,9 @@ class TestApproximateCardinality:
         assert approximate["id"].cardinality_ratio == exact["id"].cardinality_ratio
         # The numeric branch either way - the estimate must not decide the candidate-key ratio.
         assert (approximate["id"].cardinality_ratio or 0) >= 0.9999
-        assert approximate["id"].values is None
+        # numeric takes the top-N branch (SPEC 2.2.3), never a full categorical enumeration.
+        assert approximate["id"].values is not None
+        assert len(approximate["id"].values) <= StatisticsConfig().top_n_values
 
     def test_cardinality_never_exceeds_the_row_count(
         self,
@@ -1589,10 +1654,8 @@ class TestApproximateCardinality:
 
 
 class _CannedPhaseARow:
-    """A cursor stub returning one pre-chosen Phase A row, HLL variance sidestepped.
-
-    A real HLL estimate above the non-null count is not reproducible at small N, so the row
-    (row count, null count, estimate) is fed straight to `_phase_a`.
+    """A cursor stub returning one pre-chosen Phase A row - a real HLL estimate above the
+    non-null count is not reproducible at small N, so the row is fed straight to `_phase_a`.
     """
 
     def __init__(self, row: tuple[int, ...]) -> None:
@@ -1627,7 +1690,7 @@ class TestApproximateEstimateBoundedByNonNullCount:
     def test_the_phase_a_clamp(self) -> None:
         from dbprint.adapters.snowflake import stats as sf_stats
 
-        cursor = _CannedPhaseARow((4_000_000, 1_840_000, 2_180_000))
+        cursor = _CannedPhaseARow((4_000_000, 1_840_000, 0, 0, 0, 2_180_000))
         col = ColumnMeta(name="val", sql_type="number", nullable=True, default=None, ordinal=1)
 
         _, base = sf_stats._phase_a(cursor, self._identity(), "memory.seedbank.wide", [col], True)
@@ -1637,7 +1700,7 @@ class TestApproximateEstimateBoundedByNonNullCount:
     def test_an_estimate_within_bounds_is_untouched(self) -> None:
         from dbprint.adapters.snowflake import stats as sf_stats
 
-        cursor = _CannedPhaseARow((4_000_000, 1_840_000, 2_000_000))
+        cursor = _CannedPhaseARow((4_000_000, 1_840_000, 0, 0, 0, 2_000_000))
         col = ColumnMeta(name="val", sql_type="number", nullable=True, default=None, ordinal=1)
 
         _, base = sf_stats._phase_a(cursor, self._identity(), "memory.seedbank.wide", [col], True)

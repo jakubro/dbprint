@@ -14,7 +14,7 @@ REQUIRED = ["host", "port", "database", "user", "password"]
 
 def _write_connections_file(path: Path, body: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body)
+    path.write_text(body, encoding="utf-8")
 
     return path
 

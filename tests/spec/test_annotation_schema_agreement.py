@@ -35,7 +35,7 @@ _RELATIONSHIPS_SCHEMA_PATH = _SPEC_DIR / "relationships.schema.json"
 def _load_schema(path: Path) -> dict:
     """Parse a real producer schema file directly, independent of the generator."""
 
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 class TestGoldenReference:

@@ -11,6 +11,7 @@ from dbprint.engine.freshness import (
     StaleEntry,
     evaluate,
     format_age,
+    format_threshold,
     parse_duration,
 )
 
@@ -132,3 +133,19 @@ class TestFormatAge:
 
     def test_infinity_renders_unknown(self) -> None:
         assert format_age(float("inf")) == "unknown"
+
+
+class TestFormatThreshold:
+    def test_a_value_from_a_flag_round_trips(self) -> None:
+        """A threshold is a configured value - `--max-age 12h` must render back as `12h`,
+        not the compound `12.0h`/`0d 12h` shape `format_age` uses for a measured age.
+        """
+
+        for text in ("7d", "12h", "30m", "45s"):
+            assert format_threshold(parse_duration(text)) == text
+
+    def test_whole_days_render_as_days_not_hours(self) -> None:
+        assert format_threshold(2.0) == "2d"
+
+    def test_sub_day_renders_in_the_finest_exact_unit(self) -> None:
+        assert format_threshold(0.5) == "12h"

@@ -13,5 +13,7 @@ READING_GUIDE_FILENAME = (
 )
 
 READING_GUIDE_TEXT = (
-    importlib.resources.files("dbprint.engine").joinpath("reading_guide.md").read_text()
+    importlib.resources.files("dbprint.engine")
+    .joinpath("reading_guide.md")
+    .read_text(encoding="utf-8")
 )

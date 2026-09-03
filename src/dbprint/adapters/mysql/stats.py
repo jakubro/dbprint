@@ -10,10 +10,11 @@ Cardinality is always `COUNT(DISTINCT col)`, so `cardinality_method` always publ
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import timedelta
-from typing import Any
+from decimal import Decimal
+from typing import Any, Literal
 
 from dbprint.config import StatisticsConfig
 from dbprint.spec.classification import (
@@ -35,6 +36,7 @@ from ..base import (
     ColumnStats,
     Distribution,
     Frequencies,
+    Length,
     NullPatterns,
     Range,
     RowCountMethod,
@@ -46,6 +48,7 @@ from ..base import (
     null_flags,
     null_patterns_from_rows,
     seed_from_fqn,
+    temporal_block_unmeasured,
 )
 
 
@@ -89,6 +92,11 @@ _DATE_ONLY_TYPES = ("date",)
 _TZ_TYPES = ("timestamp",)
 
 _JSON_TYPES = ("json",)
+
+# MySQL has no native BOOLEAN - `tinyint(1)` is the width-preserving spelling for one, which
+# `_is_boolean` reads raw. Named singular so the plural-keyed registry sweep skips it.
+_BOOLEAN_TYPE = "tinyint(1)"
+
 _UNSUPPORTED_TYPES = (
     "blob",
     "tinyblob",
@@ -241,6 +249,124 @@ def probe_grain(
     return tuple(pair for i, pair in enumerate(candidates) if row[i] == counts.rows_scanned)
 
 
+def probe_timeline(
+    cursor: Cursor,
+    fqn: str,
+    columns: list[ColumnMeta],
+    counts: TableCounts,
+    column: str,
+    unit: Literal["day", "week", "month"],
+    scope: TableScope | None = None,
+) -> tuple[tuple[str, int], ...]:
+    """One grouped statement bucketing `column` at `unit` grain (SPEC 2.2.16) - grouping is on
+    the truncated value, which is always a bare DATE, so the outer render is `DATE_FORMAT`.
+    """
+
+    del counts
+
+    source = _table_source(fqn, _quote_qualified(fqn), scope)
+    by_name = {col.name: col for col in columns}
+    col = by_name[column]
+    cn = _quote_ident(col.name)
+    bucket_expr = _timeline_bucket_expr(cn, col.sql_type, unit)
+
+    rows = exec_query(
+        cursor,
+        f"""
+        SELECT DATE_FORMAT(bucket_start, '%Y-%m-%d') AS bucket_text, cnt
+        FROM (
+            SELECT {bucket_expr} AS bucket_start, COUNT(*) AS cnt
+            FROM {source}
+            WHERE {cn} IS NOT NULL
+            GROUP BY 1
+        ) buckets
+        ORDER BY bucket_start
+        """,
+    ).fetchall()
+
+    return tuple((row[0], int(row[1])) for row in rows)
+
+
+def _timeline_bucket_expr(cn: str, sql_type: str, unit: str) -> str:
+    """Truncation expression for `probe_timeline`'s GROUP BY key (SPEC 2.2.16) - MySQL has no
+    `date_trunc`, and a TIMESTAMP normalizes to UTC first; the result is always a bare DATE.
+    """
+
+    is_timestamp = _matches(sql_type, _TZ_TYPES)
+    normalized = f"CONVERT_TZ({cn}, @@session.time_zone, '+00:00')" if is_timestamp else cn
+
+    if unit == "day":
+        return f"CAST({normalized} AS DATE)"
+
+    if unit == "week":
+        return f"DATE_SUB(CAST({normalized} AS DATE), INTERVAL WEEKDAY({normalized}) DAY)"
+
+    return f"DATE_SUB(CAST({normalized} AS DATE), INTERVAL (DAYOFMONTH({normalized}) - 1) DAY)"
+
+
+def compute_populated_windows(
+    cursor: Cursor,
+    fqn: str,
+    columns: list[ColumnMeta],
+    counts: TableCounts,
+    anchor_column: str,
+    subject_columns: tuple[str, ...],
+    scope: TableScope | None = None,
+) -> dict[str, tuple[str, str]]:
+    """One statement, two conditional aggregates per subject column (SPEC 2.2.4) - aggregated in
+    a derived table so the outer query renders each bound through the anchor's domain rule.
+    """
+
+    del counts
+
+    if not subject_columns:
+        return {}
+
+    source = _table_source(fqn, _quote_qualified(fqn), scope)
+    by_name = {col.name: col for col in columns}
+    anchor = by_name[anchor_column]
+    anchor_cn = _quote_ident(anchor.name)
+
+    agg_exprs = []
+    outer_exprs = []
+
+    for i, subject in enumerate(subject_columns):
+        subject_cn = _quote_ident(by_name[subject].name)
+        agg_exprs.append(
+            f"MIN(CASE WHEN {subject_cn} IS NOT NULL THEN {anchor_cn} END) AS from_{i}",
+        )
+        agg_exprs.append(
+            f"MAX(CASE WHEN {subject_cn} IS NOT NULL THEN {anchor_cn} END) AS to_{i}",
+        )
+        outer_exprs.append(
+            f"{_render_calendar_bound(f'from_{i}', anchor.sql_type)} AS from_{i}_text",
+        )
+        outer_exprs.append(f"{_render_calendar_bound(f'to_{i}', anchor.sql_type)} AS to_{i}_text")
+
+    row = exec_query(
+        cursor,
+        f"""
+        SELECT {", ".join(outer_exprs)}
+        FROM (
+            SELECT {", ".join(agg_exprs)} FROM {source}
+        ) agg
+        """,
+    ).fetchone()
+
+    if row is None:
+        return {}
+
+    windows: dict[str, tuple[str, str]] = {}
+
+    for i, subject in enumerate(subject_columns):
+        from_text, to_text = row[2 * i], row[2 * i + 1]
+
+        if from_text is not None and to_text is not None:
+            windows[subject] = (from_text, to_text)
+
+    return windows
+
+
 def probe_dependencies(
     cursor: Cursor,
     fqn: str,
@@ -342,7 +468,7 @@ def _table_row_count(
     rows_scanned: int,
     scope: TableScope | None,
 ) -> tuple[int, RowCountMethod]:
-    """Rows in the table and how they were obtained, per SPEC 2.2.2.
+    """Rows in the table and how they were obtained, per SPEC 2.2.1.
 
     A narrowed read takes the catalog estimate; with none it counts exactly, since the
     scanned figure would report a filter matching nothing as an empty table (SPEC 2.2.7).
@@ -374,6 +500,22 @@ def _phase_a(
     for col in columns:
         cn = _quote_ident(col.name)
         select_parts.append(f"COUNT(*) - COUNT({cn}) AS null_{_alias(col.name)}")
+
+        if _matches(col.sql_type, _NUMERIC_TYPES) and not _is_boolean(col.sql_type):
+            select_parts.append(f"COALESCE(SUM({cn} = 0), 0) AS zero_{_alias(col.name)}")
+            select_parts.append(f"COALESCE(SUM({cn} < 0), 0) AS neg_{_alias(col.name)}")
+            select_parts.append(
+                f"COALESCE(SUM({cn} = TRUNCATE({cn}, 0)), 0) AS quant_{_alias(col.name)}",
+            )
+        elif _is_string_like(col.sql_type):
+            select_parts.append(
+                f"COALESCE(SUM(CAST({cn} AS CHAR) = ''), 0) AS empty_{_alias(col.name)}",
+            )
+            length_expr = f"CHAR_LENGTH(CAST({cn} AS CHAR))"
+            select_parts.append(f"MIN({length_expr}) AS lenmin_{_alias(col.name)}")
+            select_parts.append(f"MAX({length_expr}) AS lenmax_{_alias(col.name)}")
+            select_parts.append(f"AVG({length_expr}) AS lenavg_{_alias(col.name)}")
+
         select_parts.append(f"COUNT(DISTINCT {cn}) AS card_{_alias(col.name)}")
 
     sql = f"SELECT {', '.join(select_parts)} FROM {source}"
@@ -388,12 +530,41 @@ def _phase_a(
 
     for col in columns:
         null_count = int(row[idx])
-        cardinality = int(row[idx + 1])
-        idx += 2
+        idx += 1
+        zero_count = negative_count = empty_count = quantized_count = None
+        length_min = length_max = length_avg = None
+
+        if _matches(col.sql_type, _NUMERIC_TYPES) and not _is_boolean(col.sql_type):
+            zero_count = int(row[idx])
+            idx += 1
+            negative_count = int(row[idx])
+            idx += 1
+            quantized_count = int(row[idx])
+            idx += 1
+        elif _is_string_like(col.sql_type):
+            empty_count = int(row[idx])
+            idx += 1
+            length_min = row[idx]
+            idx += 1
+            length_max = row[idx]
+            idx += 1
+            length_avg = row[idx]
+            idx += 1
+
+        cardinality = int(row[idx])
+        idx += 1
         out[col.name] = BaseStats(
             null_count=null_count,
             cardinality=cardinality,
+            cardinality_method="exact",
             supported=not _is_unsupported(col.sql_type),
+            zero_count=zero_count,
+            negative_count=negative_count,
+            empty_count=empty_count,
+            quantized_count=quantized_count,
+            length_min=length_min,
+            length_max=length_max,
+            length_avg=length_avg,
         )
 
     return row_count, out
@@ -458,6 +629,22 @@ def _phase_b(
     cardinality_ratio = compute_cardinality_ratio(cardinality, rows_scanned)
     method: CardinalityMethod = "exact"
     non_null = rows_scanned - null_count
+    length_min, length_max = base.length_min, base.length_max
+
+    if length_min is not None and length_max is not None:
+        length_p95 = _fetch_length_p95(cursor, source, col)
+        length = (
+            Length(
+                min=length_min,
+                max=length_max,
+                avg=_round_numeric(base.length_avg),
+                p95=length_p95,
+            )
+            if length_p95 is not None
+            else None
+        )
+    else:
+        length = None
 
     stats = ColumnStats(
         sql_type=col.sql_type,
@@ -467,10 +654,22 @@ def _phase_b(
         cardinality=cardinality,
         cardinality_ratio=cardinality_ratio,
         cardinality_method=method,
+        # Phase A gates these on raw sql_type, not on `pre` - a numeric type that classifies
+        # categorical would otherwise carry a field its own classification forbids.
+        zero_count=base.zero_count if pre == "numeric" else None,
+        negative_count=base.negative_count if pre == "numeric" else None,
+        empty_count=base.empty_count if pre == "text" else None,
+        quantized_count=base.quantized_count if pre == "numeric" else None,
+        length=length,
     )
 
     if pre == "json":
         return stats
+
+    if pre == "boolean":
+        values, coverage, _ = _fetch_value_list(cursor, source, col, non_null, config)
+
+        return _replace(stats, values=values, values_coverage=coverage)
 
     if pre == "categorical":
         values, coverage, exhaustive = _fetch_value_list(cursor, source, col, non_null, config)
@@ -488,7 +687,7 @@ def _phase_b(
         )
 
     if pre == "numeric":
-        rng, percentiles, distribution, frequencies = _fetch_numeric_block(
+        rng, percentiles, distribution, frequencies, values, mean, total = _fetch_numeric_block(
             cursor,
             source,
             col,
@@ -502,20 +701,20 @@ def _phase_b(
             percentiles=percentiles,
             distribution=distribution,
             frequencies=frequencies,
+            values=values,
+            mean=mean,
+            sum=total,
         )
 
     if pre == "temporal":
-        # A column that cannot produce bounds loses them; the table survives.
         try:
-            rng, percentiles, distribution, unrepresentable, frequencies = _fetch_temporal_block(
-                cursor,
-                source,
-                col,
-                non_null,
-                config,
+            rng, percentiles, distribution, unrepresentable, frequencies, values, quantized = (
+                _fetch_temporal_block(cursor, source, col, non_null, config)
             )
-        except Exception:  # noqa: BLE001 - no temporal stats rather than a failed table
-            return stats
+        except Exception:  # noqa: BLE001 - the temporal block degrades as a whole, and its
+            # fields are REQUIRED here (SPEC 2.2.3); the column names what the read cost it
+            # rather than leaving an absence a reader would read as a structural cause.
+            return _replace(stats, unmeasured=temporal_block_unmeasured(col.sql_type))
 
         return _replace(
             stats,
@@ -524,6 +723,8 @@ def _phase_b(
             distribution=distribution,
             frequencies=frequencies,
             unrepresentable=unrepresentable or None,
+            values=values,
+            quantized_count=quantized,
         )
 
     # pre in {"text", "foreign_key_candidate"}: only `text` is suppressible.
@@ -550,11 +751,12 @@ def _pre_classify(
     """Adapter-internal classification mirroring the engine's SPEC 3.2 logic.
 
     Uniqueness plays no part: the cardinality ratio sits on the `inferred` axis (SPEC 4.2).
-    No native BOOLEAN (tinyint(1) alias) - such columns fall through to categorical/numeric.
     """
 
     if _is_unsupported(col.sql_type):
         return "unsupported"
+    elif _is_boolean(col.sql_type):
+        return "boolean"
     elif _matches(col.sql_type, _JSON_TYPES):
         return "json"
     elif has_declared_fk:
@@ -618,29 +820,45 @@ def _fetch_numeric_block(
     col: ColumnMeta,
     non_null: int,
     config: StatisticsConfig,
-) -> tuple[Range, dict[str, Any], Distribution, Frequencies]:
+) -> tuple[
+    Range,
+    dict[str, Any],
+    Distribution,
+    Frequencies,
+    tuple[ValueCount, ...],
+    float | None,
+    float | None,
+]:
     cn = _quote_ident(col.name)
     keys = config.percentiles
     sql = (
-        f"SELECT MIN({cn}) AS mn, MAX({cn}) AS mx{_percentile_select(cn, keys)} "
+        f"SELECT MIN({cn}) AS mn, MAX({cn}) AS mx, AVG({cn}) AS avg_val, SUM({cn}) AS sum_val"
+        f"{_percentile_select(cn, keys)} "
         f"FROM {_ranked(source, cn)} ranked"
     )
     row = exec_query(cursor, sql).fetchone()
 
     if row is None:
-        return Range(min=None, max=None), {}, "uniform", summarize_frequencies([])
+        return Range(min=None, max=None), {}, "uniform", summarize_frequencies([]), (), None, None
 
-    rng = Range(min=_round_numeric(row[0]), max=_round_numeric(row[1]))
-    percentiles = {f"p{p:02d}": _round_numeric(v) for p, v in zip(keys, row[2:])}
-    distribution, frequencies = _approximate_distribution_via_top_n(
+    rng = Range(
+        min=_round_numeric(row[0], exact_int=True),
+        max=_round_numeric(row[1], exact_int=True),
+    )
+    mean = _round_numeric(row[2])
+    total = _round_numeric(row[3], exact_int=True)
+    percentiles = {f"p{p:02d}": _round_numeric(v) for p, v in zip(keys, row[4:])}
+    distribution, frequencies, values = _approximate_distribution_via_top_n(
         cursor,
         source,
-        col.name,
+        cn,
+        cn,
         non_null,
         config,
+        _round_numeric,
     )
 
-    return rng, percentiles, distribution, frequencies
+    return rng, percentiles, distribution, frequencies, values, mean, total
 
 
 def _fetch_temporal_block(
@@ -649,7 +867,15 @@ def _fetch_temporal_block(
     col: ColumnMeta,
     non_null: int,
     config: StatisticsConfig,
-) -> tuple[Range, dict[str, Any], Distribution, tuple[str, ...], Frequencies]:
+) -> tuple[
+    Range,
+    dict[str, Any],
+    Distribution,
+    tuple[str, ...],
+    Frequencies,
+    tuple[ValueCount, ...],
+    int | None,
+]:
     if _matches(col.sql_type, _TIME_ONLY_TYPES) or _matches(col.sql_type, _YEAR_TYPES):
         return _fetch_native_temporal_block(cursor, source, col, non_null, config)
 
@@ -662,12 +888,17 @@ def _fetch_native_temporal_block(
     col: ColumnMeta,
     non_null: int,
     config: StatisticsConfig,
-) -> tuple[Range, dict[str, Any], Distribution, tuple[str, ...], Frequencies]:
-    """TIME and YEAR fetch path: neither risks a driver conversion failure.
-
-    YEAR's native range (0000, 1901-2155) never leaves the connector's decode domain.
-    `mn`/`mx` read the column itself; only the span goes through a date via `_as_date`,
-    and TIME, carrying no date, always spans 0 days.
+) -> tuple[
+    Range,
+    dict[str, Any],
+    Distribution,
+    tuple[str, ...],
+    Frequencies,
+    tuple[ValueCount, ...],
+    int | None,
+]:
+    """TIME and YEAR fetch path: neither risks a driver conversion failure, and neither carries
+    a date to truncate to (SPEC 2.2.4), so `quantized_count` is always absent.
     """
 
     cn = _quote_ident(col.name)
@@ -690,7 +921,7 @@ def _fetch_native_temporal_block(
     if row is None:
         empty_range = Range(min=None, max=None, span_days=0)
 
-        return empty_range, {}, "uniform", (), summarize_frequencies([])
+        return empty_range, {}, "uniform", (), summarize_frequencies([]), (), None
 
     # Floored in SQL per SPEC 2.2.4; this only narrows the type.
     span_raw = 0 if time_only else row[2]
@@ -699,15 +930,17 @@ def _fetch_native_temporal_block(
     rng = Range(min=_iso_or_value(row[0]), max=_iso_or_value(row[1]), span_days=span_days)
     percentiles = {f"p{p:02d}": _iso_or_value(v) for p, v in zip(keys, percentile_values)}
 
-    distribution, frequencies = _approximate_distribution_via_top_n(
+    distribution, frequencies, values = _approximate_distribution_via_top_n(
         cursor,
         source,
-        col.name,
+        cn,
+        cn,
         non_null,
         config,
+        _iso_or_value,
     )
 
-    return rng, percentiles, distribution, (), frequencies
+    return rng, percentiles, distribution, (), frequencies, values, None
 
 
 def _fetch_calendar_temporal_block(
@@ -716,7 +949,15 @@ def _fetch_calendar_temporal_block(
     col: ColumnMeta,
     non_null: int,
     config: StatisticsConfig,
-) -> tuple[Range, dict[str, Any], Distribution, tuple[str, ...], Frequencies]:
+) -> tuple[
+    Range,
+    dict[str, Any],
+    Distribution,
+    tuple[str, ...],
+    Frequencies,
+    tuple[ValueCount, ...],
+    int | None,
+]:
     """DATE / DATETIME / TIMESTAMP: bounds and percentiles render to text in SQL.
 
     The connector silently fetches the zero-date sentinel `0000-00-00` as NULL, which reads
@@ -725,8 +966,14 @@ def _fetch_calendar_temporal_block(
 
     cn = _quote_ident(col.name)
     keys = config.percentiles
+    # A DATE value is always its own day-truncation (SPEC 2.2.3): the count would be a
+    # truism, so `quantized_count` is omitted entirely rather than published as a constant.
+    day_aligned = not _matches(col.sql_type, _DATE_ONLY_TYPES)
     agg_select = [f"MIN({cn}) AS mn", f"MAX({cn}) AS mx"]
     agg_select.append(f"FLOOR(TIMESTAMPDIFF(SECOND, MIN({cn}), MAX({cn})) / 86400) AS span_days")
+
+    if day_aligned:
+        agg_select.append(f"COALESCE(SUM({cn} = CAST({cn} AS DATE)), 0) AS quant")
 
     percentile_renders = [
         (f"p{p:02d}", _render_calendar_bound(f"p_{p:02d}", col.sql_type)) for p in keys
@@ -736,6 +983,7 @@ def _fetch_calendar_temporal_block(
         f"{_render_calendar_bound('mx', col.sql_type)} AS mx_text",
         "span_days",
         *(f"{expr} AS {key}_text" for key, expr in percentile_renders),
+        *(["quant"] if day_aligned else []),
     ]
 
     sql = (
@@ -749,26 +997,32 @@ def _fetch_calendar_temporal_block(
     if row is None:
         empty_range = Range(min=None, max=None, span_days=0)
 
-        return empty_range, {}, "uniform", (), summarize_frequencies([])
+        return empty_range, {}, "uniform", (), summarize_frequencies([]), (), None
 
     span_raw = row[2]
-    percentile_texts = row[3:]
+    n_pct = len(keys)
+    percentile_texts = row[3 : 3 + n_pct]
+    quantized_count = int(row[3 + n_pct]) if day_aligned else None
 
     # Floored in SQL per SPEC 2.2.4; this only narrows the type.
     span_days = int(span_raw) if span_raw is not None else 0
     rng = Range(min=row[0], max=row[1], span_days=span_days)
     percentiles = {key: text for (key, _), text in zip(percentile_renders, percentile_texts)}
 
-    distribution, frequencies = _approximate_distribution_via_top_n(
+    # Rendered the same way the bounds above already were - a raw fetch of the zero-date
+    # sentinel silently reads as NULL, which is what `_render_calendar_bound` avoids.
+    distribution, frequencies, values = _approximate_distribution_via_top_n(
         cursor,
         source,
-        col.name,
+        _render_calendar_bound(cn, col.sql_type),
+        cn,
         non_null,
         config,
+        lambda v: v,
     )
     unrepresentable = _unrepresentable_fields(rng, percentiles)
 
-    return rng, percentiles, distribution, unrepresentable, frequencies
+    return rng, percentiles, distribution, unrepresentable, frequencies, values, quantized_count
 
 
 def _render_calendar_bound(expr: str, sql_type: str) -> str:
@@ -856,35 +1110,62 @@ def _percentile_select(quoted_col: str, keys: Sequence[int]) -> str:
     return ", " + ", ".join(parts)
 
 
+def _fetch_length_p95(cursor: Cursor, source: str, col: ColumnMeta) -> float | None:
+    """P95 character length (SPEC 2.2.4), ranked the same way numeric percentiles are - but with
+    an explicit alias, the shared helpers repeating an expression only a bare column resolves.
+    """
+
+    cn = _quote_ident(col.name)
+    length_expr = f"CHAR_LENGTH(CAST({cn} AS CHAR))"
+    sql = (
+        "SELECT MIN(CASE WHEN dbprint_rn >= CEIL(0.95 * dbprint_n) THEN dbprint_len END) "
+        f"FROM (SELECT {length_expr} AS dbprint_len, "
+        f"ROW_NUMBER() OVER (ORDER BY {length_expr}) AS dbprint_rn, "
+        f"COUNT(*) OVER () AS dbprint_n "
+        f"FROM {source} WHERE {cn} IS NOT NULL) ranked"
+    )
+    row = exec_query(cursor, sql).fetchone()
+
+    return _round_numeric(row[0]) if row is not None else None
+
+
 def _approximate_distribution_via_top_n(
     cursor: Cursor,
     source: str,
-    col_name: str,
+    select_expr: str,
+    group_expr: str,
     non_null: int,
     config: StatisticsConfig,
-) -> tuple[Distribution, Frequencies]:
-    cn = _quote_ident(col_name)
+    value_transform: Callable[[Any], Any],
+) -> tuple[Distribution, Frequencies, tuple[ValueCount, ...]]:
+    """Distribution, frequencies, and the same top-N rows `values` publishes (SPEC 2.2.3) -
+    grouping stays on the raw column, so a rendered expression cannot split one value in two.
+    """
+
     n = config.top_n_values
     rows = exec_query(
         cursor,
         f"""
-        SELECT cnt FROM (
-            SELECT {cn} AS v, COUNT(*) AS cnt
-            FROM {source}
-            WHERE {cn} IS NOT NULL
-            GROUP BY {cn}
-            ORDER BY cnt DESC, CAST({cn} AS CHAR) ASC
-            LIMIT %s
-        ) t
+        SELECT {select_expr} AS rendered, COUNT(*) AS cnt
+        FROM {source}
+        WHERE {group_expr} IS NOT NULL
+        GROUP BY {group_expr}
+        ORDER BY cnt DESC, CAST({select_expr} AS CHAR) ASC
+        LIMIT {int(n) + 1}
         """,
-        (n + 1,),
     ).fetchall()
-    fetched = [int(r[0]) for r in rows]
-    kept = fetched[:n]
+    exhaustive = len(rows) <= n
+    entries = sorted(
+        (ValueCount(value=value_transform(value), count=int(cnt)) for value, cnt in rows[:n]),
+        key=lambda v: (-v.count, str(v.value)),
+    )
+    values = tuple(entries)
+    kept_counts = [v.count for v in values]
 
     return (
-        classify_distribution(kept, non_null, exhaustive=len(fetched) <= n),
-        summarize_frequencies(kept),
+        classify_distribution(kept_counts, non_null, exhaustive=exhaustive),
+        summarize_frequencies(kept_counts),
+        values,
     )
 
 
@@ -910,12 +1191,42 @@ def _matches(sql_type: str, types: tuple[str, ...]) -> bool:
     return base_type(sql_type) in types
 
 
-def _round_numeric(v: Any) -> Any:
+def _is_boolean(sql_type: str) -> bool:
+    """`col.sql_type` is `column_type` here, keeping the display width `base_type()` strips -
+    `tinyint(1)` is a declared BOOLEAN's spelling, so this compares the raw string.
+    """
+
+    return sql_type.strip().lower() == _BOOLEAN_TYPE
+
+
+def _is_string_like(sql_type: str) -> bool:
+    """The SQL-type half of the test `_pre_classify` falls through to `text` on - a `tinyint(1)`
+    boolean's `base_type()` is already in `_NUMERIC_TYPES`, so this returns `False` for it.
+    """
+
+    return not (
+        _is_unsupported(sql_type)
+        or _matches(sql_type, _JSON_TYPES)
+        or _matches(sql_type, _TEMPORAL_TYPES)
+        or _matches(sql_type, _NUMERIC_TYPES)
+    )
+
+
+def _round_numeric(v: Any, *, exact_int: bool = False) -> Any:
+    """`exact_int` is set only for count-like fields (`sum`, `range.min`/`max`) - an average or a
+    percentile stays rate-valued, so it stays fractional even when one instance is whole (SPEC 2.2.6).
+    """
+
     if v is None:
         return None
 
     if isinstance(v, int):
         return v
+
+    # A Decimal integral to the last digit publishes exact - float64 loses precision above
+    # 2**53, which a total over a bigint column reaches (SPEC 2.2.6 rounds only what is not).
+    if exact_int and isinstance(v, Decimal) and v.is_finite() and v == int(v):
+        return int(v)
 
     try:
         return round(float(v), 6)

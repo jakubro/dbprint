@@ -17,6 +17,7 @@ from dbprint.adapters import (
     ColumnMeta,
     ColumnStats,
     CommentsMeta,
+    Length,
     MockAdapter,
     MockTable,
     StatisticsConfig,
@@ -213,6 +214,8 @@ def _fixture() -> dict[str, MockTable]:
             values=listed,
             values_coverage=0.2,
             distribution="long_tail",
+            empty_count=0,
+            length=Length(min=3, max=3, avg=3.0, p95=3.0),
         )
 
     # Three values, enumerated in full, so this one's counts have to add up.
@@ -231,6 +234,7 @@ def _fixture() -> dict[str, MockTable]:
         ),
         values_coverage=1.0,
         distribution="imbalanced",
+        length=Length(min=1, max=1, avg=1.0, p95=1.0),
     )
 
     return {

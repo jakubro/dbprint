@@ -31,7 +31,7 @@ def _cli_sources() -> list[Path]:
 def _literal_exit_codes(path: Path) -> list[tuple[int, str]]:
     """Return (line, snippet) for every exit code written as an integer literal."""
 
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     hits: list[tuple[int, str]] = []
 
     for node in ast.walk(tree):

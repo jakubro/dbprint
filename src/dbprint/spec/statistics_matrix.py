@@ -1,8 +1,5 @@
-"""The SPEC v1 section 2.2.3 field matrix, by classification.
-
-Read by both the engine and the conformance validator, so the two cannot disagree about
-which fields a classification carries. Only the flat rows live here: the two conditional
-footnotes - a dropped bound, a prose value list - are derived procedurally by each reader.
+"""The SPEC v1 section 2.2.3 field matrix, by classification - read by both the engine and the
+validator. Only the flat rows live here; the conditional footnotes are derived by each reader.
 """
 
 from __future__ import annotations
@@ -48,6 +45,7 @@ REQUIRED_FIELDS: dict[str, frozenset[str]] = {
             "values",
             "values_coverage",
             "distribution",
+            "length",
         },
     ),
     "categorical": frozenset(
@@ -63,6 +61,7 @@ REQUIRED_FIELDS: dict[str, frozenset[str]] = {
             "values",
             "values_coverage",
             "distribution",
+            "length",
         },
     ),
     "temporal": frozenset(
@@ -80,6 +79,8 @@ REQUIRED_FIELDS: dict[str, frozenset[str]] = {
             "freshness",
             "distribution",
             "frequencies",
+            "values",
+            "quantized_count",
         },
     ),
     "numeric": frozenset(
@@ -94,8 +95,14 @@ REQUIRED_FIELDS: dict[str, frozenset[str]] = {
             "classification",
             "range",
             "percentiles",
+            "mean",
+            "sum",
+            "zero_count",
+            "negative_count",
+            "quantized_count",
             "distribution",
             "frequencies",
+            "values",
         },
     ),
     "text": frozenset(
@@ -110,7 +117,9 @@ REQUIRED_FIELDS: dict[str, frozenset[str]] = {
             "classification",
             "values",
             "values_coverage",
+            "empty_count",
             "distribution",
+            "length",
         },
     ),
     "unsupported": frozenset({"sql_type", "nullable", "null_count", "null_rate", "classification"}),
@@ -118,7 +127,22 @@ REQUIRED_FIELDS: dict[str, frozenset[str]] = {
 
 FORBIDDEN_FIELDS: dict[str, frozenset[str]] = {
     "boolean": frozenset(
-        {"distribution", "range", "percentiles", "freshness", "unrepresentable", "frequencies"},
+        {
+            "distribution",
+            "range",
+            "percentiles",
+            "mean",
+            "sum",
+            "zero_count",
+            "negative_count",
+            "empty_count",
+            "quantized_count",
+            "length",
+            "normalized_cardinality",
+            "freshness",
+            "unrepresentable",
+            "frequencies",
+        },
     ),
     "json": frozenset(
         {
@@ -128,6 +152,14 @@ FORBIDDEN_FIELDS: dict[str, frozenset[str]] = {
             "distribution",
             "range",
             "percentiles",
+            "mean",
+            "sum",
+            "zero_count",
+            "negative_count",
+            "empty_count",
+            "quantized_count",
+            "length",
+            "normalized_cardinality",
             "freshness",
             "redacted",
             "unrepresentable",
@@ -136,16 +168,73 @@ FORBIDDEN_FIELDS: dict[str, frozenset[str]] = {
         },
     ),
     "foreign_key_candidate": frozenset(
-        {"range", "percentiles", "freshness", "unrepresentable", "frequencies"},
+        {
+            "range",
+            "percentiles",
+            "mean",
+            "sum",
+            "zero_count",
+            "negative_count",
+            "empty_count",
+            "quantized_count",
+            "freshness",
+            "unrepresentable",
+            "frequencies",
+        },
     ),
     "categorical": frozenset(
-        {"range", "percentiles", "freshness", "unrepresentable", "frequencies"},
+        {
+            "range",
+            "percentiles",
+            "mean",
+            "sum",
+            "zero_count",
+            "negative_count",
+            "empty_count",
+            "quantized_count",
+            "freshness",
+            "unrepresentable",
+            "frequencies",
+        },
     ),
-    "temporal": frozenset({"values", "values_coverage", "values_coverage_method"}),
+    "temporal": frozenset(
+        {
+            "values_coverage",
+            "values_coverage_method",
+            "mean",
+            "sum",
+            "zero_count",
+            "negative_count",
+            "empty_count",
+            "length",
+            "normalized_cardinality",
+        },
+    ),
     "numeric": frozenset(
-        {"values", "values_coverage", "values_coverage_method", "freshness", "unrepresentable"},
+        {
+            "values_coverage",
+            "values_coverage_method",
+            "freshness",
+            "unrepresentable",
+            "empty_count",
+            "length",
+            "normalized_cardinality",
+        },
     ),
-    "text": frozenset({"range", "percentiles", "freshness", "unrepresentable", "frequencies"}),
+    "text": frozenset(
+        {
+            "range",
+            "percentiles",
+            "mean",
+            "sum",
+            "zero_count",
+            "negative_count",
+            "quantized_count",
+            "freshness",
+            "unrepresentable",
+            "frequencies",
+        },
+    ),
     "unsupported": frozenset(
         {
             "cardinality",
@@ -157,6 +246,14 @@ FORBIDDEN_FIELDS: dict[str, frozenset[str]] = {
             "distribution",
             "range",
             "percentiles",
+            "mean",
+            "sum",
+            "zero_count",
+            "negative_count",
+            "empty_count",
+            "quantized_count",
+            "length",
+            "normalized_cardinality",
             "freshness",
             "inferred",
             "redacted",

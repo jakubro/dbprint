@@ -38,8 +38,13 @@ STATISTICS_DEFERRED = {
     "scope": "a scalar/flag block, not addressable per-entry",
     "null_patterns": "identity is an unordered column SET, unlike grain's ordered array",
     "dependencies": "identity is a determinant/dependent pair - no measured demand yet",
+    "timeline": "identity is a single chosen anchor column, not a keyed collection - no "
+    "measured demand yet",
     "physical_layout": "identity is a clustering/partition expression, not a column name",
+    "depends_on": "a bare list of FQN strings, not a keyed collection - no measured demand yet",
     "columns": "address-by-map-key (keyed-map shape), not address-by-identity-tuple",
+    "unmeasured": "a producer's record of what its own run could not obtain - a human has "
+    "nothing to correct about it, and annotating a field as measured would not make it so",
 }
 RELATIONSHIPS_DEFERRED = {
     "eligible_target": "a table-level scalar, not addressable",
@@ -209,14 +214,14 @@ def _check_complete(
 
 
 def _load(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _write(path: Path, schema: dict[str, Any]) -> None:
     ordered = {k: schema[k] for k in _HEADER_KEYS} | {
         k: v for k, v in schema.items() if k not in _HEADER_KEYS
     }
-    path.write_text(json.dumps(ordered, indent=2) + "\n")
+    path.write_text(json.dumps(ordered, indent=2) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

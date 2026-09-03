@@ -140,7 +140,9 @@ class TestGetTableContext:
         assert result["table"] == "fixture.shape_probe"
         assert "CREATE TABLE" in result["ddl"]
         assert result["statistics"]["table"] == "fixture.shape_probe"
-        assert result["relationships"]["refers_to"] == []
+        # A list, not asserted empty: `probe_id`'s value set nests inside other tables' keys, so
+        # this table carries measured edges; the shape under test is the envelope, not the count.
+        assert isinstance(result["relationships"]["refers_to"], list)
         assert "text" not in result
         assert "description" not in result  # not declared for this table
         assert "annotations" not in result
@@ -259,6 +261,70 @@ class TestGetTableContext:
         )
 
         assert "annotations" not in result
+
+
+class TestCorruptedArtifactPassesThroughUnchanged:
+    """`_corrupted` is the assembler's own key (MCP.md 4.1) - the tool must not recompute or
+    overwrite it - a second, independent computation is what makes two formats disagree.
+    """
+
+    @staticmethod
+    def _corrupt_statistics(conn: ConnectionConfig) -> None:
+        path = conn.output / conn.name / "seedbank" / "collector" / "statistics.yaml"
+        path.write_text("columns: [unterminated")
+
+    def test_json_format_carries_the_assemblers_corrupted_mapping(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        self._corrupt_statistics(primary_conn)
+        state = _state_for(primary_conn)
+        result = _dict_result(
+            state,
+            "get_table_context",
+            {"table": "seedbank.collector", "format": "json"},
+        )
+
+        assert isinstance(result["_corrupted"], dict)
+        assert set(result["_corrupted"]) == {"statistics"}
+        assert isinstance(result["_corrupted"]["statistics"], str)
+
+    def test_yaml_format_carries_the_same_mapping_as_json(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        self._corrupt_statistics(primary_conn)
+        state = _state_for(primary_conn)
+        json_result = _dict_result(
+            state,
+            "get_table_context",
+            {"table": "seedbank.collector", "format": "json"},
+        )
+        yaml_result = dispatch(
+            state,
+            "get_table_context",
+            {"table": "seedbank.collector", "format": "yaml"},
+        )
+
+        assert isinstance(yaml_result, str)
+        assert yaml.safe_load(yaml_result)["_corrupted"] == json_result["_corrupted"]
+
+    def test_md_format_names_it_exactly_once(self, primary_conn: ConnectionConfig) -> None:
+        """The assembler's own header already states `Unreadable: statistics` - the tool must
+        not prepend a second note built from a second, independent parse of the same file.
+        """
+
+        self._corrupt_statistics(primary_conn)
+        state = _state_for(primary_conn)
+        result = dispatch(
+            state,
+            "get_table_context",
+            {"table": "seedbank.collector", "format": "md"},
+        )
+
+        assert isinstance(result, str)
+        assert result.count("Unreadable:") == 1
+        assert "Unreadable: statistics (present on disk, failed to parse)" in result
 
 
 class TestListTables:
@@ -537,6 +603,35 @@ class TestSearchColumns:
         assert ("seedbank.collector", "email") in matches
         # institution's cardinality_ratio is 0.0375 - not unique, so not a candidate key.
         assert ("seedbank.collector", "institution") not in matches
+
+    def test_candidate_key_false_excludes_columns_never_tested(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        """`false` must mean "tested, confirmed not a key", not "no verdict either way" -
+        `payload_bytes` is `unsupported` and carries no `inferred` block, so it answers neither.
+        """
+
+        state = _state_for(primary_conn)
+        result = _dict_result(state, "search_columns", {"candidate_key": False})
+        matches = {(m["table_fqn"], m["column"]) for m in result["matches"]}
+
+        assert ("seedbank.collector", "postal_code") in matches
+        assert ("fixture.shape_probe", "payload_bytes") not in matches
+
+    def test_candidate_key_false_includes_a_measured_column_with_no_inferred_block(
+        self,
+        scoped_conn: ConnectionConfig,
+    ) -> None:
+        """A boolean, temporal or plain numeric column draws no `looks_like` sample and matches no
+        sensitivity rule, so `inferred` is absent - `candidate_key: false` must still match it.
+        """
+
+        state = _state_for(scoped_conn)
+        result = _dict_result(state, "search_columns", {"candidate_key": False})
+        matches = {(m["table_fqn"], m["column"]) for m in result["matches"]}
+
+        assert ("public.curator", "email") in matches
 
     def test_looks_like_filter_carries_the_verdict_and_its_evidence(
         self,

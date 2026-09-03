@@ -11,6 +11,10 @@
   <div class="notice">{{ missing_artifacts_notice }}</div>
 {% endif %}
 
+{% if corrupted_artifacts_notice %}
+  <div class="notice">{{ corrupted_artifacts_notice }}</div>
+{% endif %}
+
 {% if catalog_only_notice %}
   <div class="notice">{{ catalog_only_notice }}</div>
 {% endif %}
@@ -28,6 +32,7 @@
     {% if row_count.share_pct is not none %}
       <div class="muted">
         scanned {{ row_count.rows_scanned|human }} ({{ row_count.share_pct }}%)
+        {% if row_count.sample is not none %}, sample {{ row_count.sample }}{% endif %}
         {% if row_count.filter %}, filter <code>{{ row_count.filter }}</code>{% endif %}
       </div>
       <div class="bar-track"><span class="bar-fill bar-fill-muted" style="width:{{ row_count.share_pct }}%"></span></div>
@@ -175,9 +180,53 @@
     </div>
   {% endif %}
 
+  {% if timeline %}
+    <div class="hedge-block">
+      <h2>Timeline - <a href="#col-{{ timeline.column }}">{{ timeline.column }}</a> by {{ timeline.unit }}</h2>
+      <div class="hedge">
+        {# floor, not round: a coverage below 1 must never render as a 100.0% it is withheld from claiming #}
+        Bucketed non-null counts,
+        {{ 'every scanned row' if timeline.coverage >= 1 else ((timeline.coverage * 1000)|round(0, 'floor') / 10) ~ '% of scanned rows' }}.
+        A missing bucket is a gap - no rows fell in that {{ timeline.unit }}.
+      </div>
+      {% if timeline.buckets %}
+        <table>
+          <thead><tr><th>Start</th><th class="num">Count</th></tr></thead>
+          <tbody>
+            {% for b in timeline.buckets %}
+              <tr>
+                <td>{{ b.start }}</td>
+                <td class="num">{{ b.count }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <div class="hedge">No non-null values bucketed.</div>
+      {% endif %}
+    </div>
+  {% endif %}
+
+  {% if depends_on is not none %}
+    <div class="hedge-block">
+      <h2>Depends on</h2>
+      <div class="hedge">Catalog-derived, direct dependencies only - a different relation than a foreign key.</div>
+      {% if depends_on %}
+        <ul>
+          {% for t in depends_on %}
+            <li><a href="{{ url_for('table', conn=conn, table=t) }}">{{ t }}</a></li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <div class="hedge">Reads nothing else printed.</div>
+      {% endif %}
+    </div>
+  {% endif %}
+
   {% if physical_layout %}
     <div class="hedge-block">
-      <h2>{{ 'Clustered by' if physical_layout.mechanism == 'cluster' else 'Partitioned by' }}</h2>
+      <h2>{{ {'cluster': 'Clustered by', 'partition': 'Partitioned by', 'sort': 'Sorted by'}
+          .get(physical_layout.mechanism, 'Partitioned by') }}</h2>
       <div class="hedge">
         Declared, not measured - not a claim about how well this holds today.
       </div>
@@ -232,6 +281,9 @@
             <span><span class="skyline-swatch skyline-{{ bucket }}"></span>{{ label }}</span>
           {% endfor %}
           <span>height = cardinality (log)<br>fill = completeness</span>
+          {% if skyline_coverage and skyline_coverage.measured < skyline_coverage.total %}
+            <span>{{ skyline_coverage.measured }} of {{ skyline_coverage.total }} columns plotted - the rest carry no measured cardinality</span>
+          {% endif %}
         </div>
       </div>
     </div>
@@ -299,13 +351,22 @@
             <td>
               <div class="bar-inline">
                 <span class="bar-track"><span class="bar-fill" style="width:{{ ((col.null_rate or 0) * 100)|round(2) }}%"></span></span>
-                <span class="num">{{ col.null_count|human }}</span>
+                <span class="num" title="{{ col.null_count }}">{{ col.null_count|human }}</span>
               </div>
+              {% if col.zero_count or col.negative_count or col.empty_count %}
+                <div class="muted">
+                  {% if col.zero_count %}{{ col.zero_count|human }} zero{% endif %}
+                  {% if col.zero_count and col.negative_count %}&middot;{% endif %}
+                  {% if col.negative_count %}{{ col.negative_count|human }} negative{% endif %}
+                  {% if (col.zero_count or col.negative_count) and col.empty_count %}&middot;{% endif %}
+                  {% if col.empty_count %}{{ col.empty_count|human }} empty{% endif %}
+                </div>
+              {% endif %}
             </td>
             <td>
               {% if col.cardinality %}
                 <div class="bar-inline">
-                  <span class="num">{{ col.cardinality.value|human }}</span>
+                  <span class="num" title="{{ col.cardinality.value }}">{{ col.cardinality.value|human }}</span>
                   {% if col.cardinality.approximate %}<span class="muted">(approx)</span>{% endif %}
                   {% if col.cardinality.saturates %}<span class="muted">(= scanned rows)</span>{% endif %}
                 </div>
@@ -364,6 +425,13 @@
                 {% if col.range.unrepresentable %}
                   <div class="muted">unrepresentable: {{ col.range.unrepresentable|join(', ') }}</div>
                 {% endif %}
+                {% if col.range.mean is not none or col.range.sum is not none %}
+                  <div class="muted">
+                    {% if col.range.mean is not none %}mean {{ col.range.mean }}{% endif %}
+                    {% if col.range.mean is not none and col.range.sum is not none %}&middot;{% endif %}
+                    {% if col.range.sum is not none %}sum {{ col.range.sum|human }}{% endif %}
+                  </div>
+                {% endif %}
                 {% if col.range.frequencies %}
                   <div class="muted">
                     top {{ col.range.frequencies.top|human }} &middot; bottom {{ col.range.frequencies.bottom|human }}
@@ -373,6 +441,11 @@
                 {% if col.range.freshness %}
                   <div class="muted">{{ col.range.freshness.classification }} &middot; {{ col.range.freshness.max_age_days }}d old</div>
                 {% endif %}
+              {% endif %}
+              {% if col.length %}
+                <div class="muted">
+                  length {{ col.length.min|human }}-{{ col.length.max|human }} &middot; avg {{ col.length.avg }} &middot; p95 {{ col.length.p95 }}
+                </div>
               {% endif %}
             </td>
             <td>
@@ -401,7 +474,7 @@
         {% if null_patterns.coverage is not none %}
           <div class="muted">
             Observed over
-            {{ 'every scanned row' if null_patterns.coverage >= 1 else (null_patterns.coverage * 100)|round(1) ~ '% of scanned rows' }}.
+            {{ 'every scanned row' if null_patterns.coverage >= 1 else ((null_patterns.coverage * 1000)|round(0, 'floor') / 10) ~ '% of scanned rows' }}{% if null_patterns.coverage_method == 'bounded' %} (bounded){% endif %}.
           </div>
         {% endif %}
       </div>
@@ -425,7 +498,7 @@
             <td>{{ col_links(r.column) }}</td>
             <td><a href="{{ url_for('table', conn=conn, table=r.target_table) }}">{{ r.target_table }}</a></td>
             <td>{{ col_links(r.target_column, url_for('table', conn=conn, table=r.target_table)) }}</td>
-            <td><span class="badge {{ 'badge-declared' if r.detection == 'declared' else 'badge-inferred' }}">{{ r.detection }}</span></td>
+            <td><span class="badge {{ {'declared': 'badge-declared', 'measured': 'badge-measured'}.get(r.detection, 'badge-inferred') }}">{{ r.detection }}</span></td>
             <td>
               {% if r.on_delete %}<div class="muted">on_delete={{ r.on_delete }}</div>{% endif %}
               {% if r.constraint_name %}<div class="muted">{{ r.constraint_name }}</div>{% endif %}
@@ -453,7 +526,7 @@
             <td>{{ col_links(r.column) }}</td>
             <td><a href="{{ url_for('table', conn=conn, table=r.referencer_table) }}">{{ r.referencer_table }}</a></td>
             <td>{{ col_links(r.referencer_column, url_for('table', conn=conn, table=r.referencer_table)) }}</td>
-            <td><span class="badge {{ 'badge-declared' if r.detection == 'declared' else 'badge-inferred' }}">{{ r.detection }}</span></td>
+            <td><span class="badge {{ {'declared': 'badge-declared', 'measured': 'badge-measured'}.get(r.detection, 'badge-inferred') }}">{{ r.detection }}</span></td>
             <td>
               {% if r.on_delete %}<div class="muted">on_delete={{ r.on_delete }}</div>{% endif %}
               {% if r.constraint_name %}<div class="muted">{{ r.constraint_name }}</div>{% endif %}
@@ -470,6 +543,7 @@
                   {% if r.observed.coherent == false %}<div class="rel-incoherent">INCOHERENT: referencing cardinality exceeds the target's</div>{% endif %}
                 {% endif %}
               {% endif %}
+              {% if r.rejected %}<div class="rel-rejected">REJECTED by human annotation{% if r.rejected_note %}: {{ r.rejected_note }}{% endif %}</div>{% endif %}
             </td>
           </tr>
         {% endfor %}

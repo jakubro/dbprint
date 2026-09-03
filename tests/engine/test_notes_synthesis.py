@@ -165,6 +165,39 @@ class TestNumeric:
         s = _stats("numeric", range={"min": 0, "max": 100}, percentiles={"p50": 42})
         assert synthesize(s) == "range 0..100, p50=42"
 
+    def test_mean_follows_the_median(self) -> None:
+        s = _stats("numeric", range={"min": 0, "max": 100}, percentiles={"p50": 42}, mean=51.5)
+        assert synthesize(s) == "range 0..100, p50=42, mean=51.5"
+
+    def test_mean_survives_redaction(self) -> None:
+        """`mean` is an aggregate, not a cell value (SPEC 2.2.9): it stands beside the marker."""
+
+        s = _stats(
+            "numeric",
+            range={"min": 0, "max": 100},
+            percentiles={"p50": 42},
+            mean=51.5,
+            redacted="mask",
+        )
+        assert synthesize(s) == "redacted (mask), mean=51.5"
+
+    def test_zero_and_negative_counts_follow_mean(self) -> None:
+        s = _stats(
+            "numeric",
+            range={"min": -10, "max": 100},
+            percentiles={"p50": 42},
+            mean=51.5,
+            zero_count=6,
+            negative_count=3,
+        )
+        assert synthesize(s) == "range -10..100, p50=42, mean=51.5, 6 zero, 3 negative"
+
+    def test_a_zero_count_of_zero_is_silent(self) -> None:
+        """A measured zero share is still worth stating; the absence of one is not."""
+
+        s = _stats("numeric", range={"min": 0, "max": 100}, percentiles={"p50": 42}, zero_count=0)
+        assert "zero" not in synthesize(s)
+
 
 class TestText:
     def test_top_two_when_truncated(self) -> None:
@@ -188,6 +221,21 @@ class TestText:
 
         assert out == "6 distinct: " + " / ".join(f"v{i}" for i in range(6))
         assert "top:" not in out
+
+    def test_empty_count_follows_the_top_list(self) -> None:
+        s = _stats(
+            "text",
+            values=[{"value": "a", "count": 200}, {"value": "b", "count": 150}],
+            values_coverage=0.86,
+            empty_count=40,
+        )
+        assert synthesize(s) == "top: a (200), b (150), 40 empty"
+
+    def test_empty_count_reaches_a_prose_column_with_no_value_list(self) -> None:
+        """SPEC 2.2.3's prose exemption drops the value list, not the census beside it."""
+
+        s = _stats("text", values=[], empty_count=12)
+        assert synthesize(s) == "text, 12 empty"
 
     def test_prose_publishes_no_list_regardless_of_coverage(self) -> None:
         """A prose column carries no `values` at all (SPEC 2.2.3 footnote), coverage or not."""
@@ -420,7 +468,7 @@ class TestLooksLikeSuffix:
         assert synthesize(s).endswith(", looks like email")
 
     def test_the_evidence_a_verdict_rests_on_rides_beside_it(self) -> None:
-        """The same `sampled`/`matched` pair `search_columns` already carries (SPEC 4.1.5)."""
+        """The same `sampled`/`matched` pair `search_columns` already carries (SPEC 4.1.3)."""
 
         s = _stats(
             "text",
@@ -453,6 +501,30 @@ class TestLooksLikeSuffix:
         out = synthesize(s, statistics_params={"looks_like_sample_size": 500})
 
         assert out.endswith(", looks like email (480 of 500 sampled, 500 configured)")
+
+
+class TestLooksLikeCandidateSuffix:
+    """SPEC 4.1.3's near-miss: `looks_like_candidate_share` is a share of the sample, never a
+    row-grain figure, so the sentence must name its population.
+    """
+
+    def test_the_share_names_its_population_as_sampled_values(self) -> None:
+        s = _stats(
+            "text",
+            values=[{"value": "x", "count": 1}],
+            inferred={"looks_like_candidate": "email", "looks_like_candidate_share": 0.53},
+        )
+        assert synthesize(s).endswith(", near email (53% of sampled values, no verdict)")
+
+    def test_worded_near_never_looks_like(self) -> None:
+        """A reader scanning for a verdict must not mistake this for one (SPEC 4.1.3)."""
+
+        s = _stats(
+            "text",
+            values=[{"value": "x", "count": 1}],
+            inferred={"looks_like_candidate": "email", "looks_like_candidate_share": 0.53},
+        )
+        assert "looks like" not in synthesize(s)
 
 
 class TestCoverageMethodSuffix:
@@ -519,6 +591,30 @@ class TestEpochUnitSuffix:
     def test_absent_when_not_detected(self) -> None:
         s = _stats("numeric", range={"min": 1, "max": 9})
         assert "epoch" not in synthesize(s)
+
+
+class TestUnmeasuredSuffix:
+    """SPEC 2.2.4: the one absence a reader must not take as a property of the column."""
+
+    def test_names_the_fields_the_run_could_not_obtain(self) -> None:
+        s = _stats("temporal", unmeasured=["distribution", "frequencies", "values"])
+
+        assert ", unmeasured: distribution, frequencies, values" in synthesize(s)
+
+    def test_it_leads_the_other_qualifiers(self) -> None:
+        """It says the rest of the line describes a partial read, so it cannot trail one."""
+
+        s = _stats(
+            "temporal",
+            null_rate=0.25,
+            unmeasured=["distribution"],
+        )
+        line = synthesize(s)
+
+        assert line.index("unmeasured") < line.index("null")
+
+    def test_absent_when_every_read_answered(self) -> None:
+        assert "unmeasured" not in synthesize(_stats("temporal", range={"min": "a", "max": "b"}))
 
 
 class TestUnrepresentableSuffix:

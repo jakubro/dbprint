@@ -76,6 +76,8 @@ def check(data: Any, path: str) -> list[Issue]:
             issues.extend(_check_grain_changed(change, where))
         elif kind == "physical_layout_changed":
             issues.extend(_check_physical_layout_changed(change, where))
+        elif kind == "depends_on_changed":
+            issues.extend(_check_depends_on_changed(change, where))
 
     return issues
 
@@ -276,6 +278,21 @@ def _check_physical_layout_changed(change: dict, where: str) -> list[Issue]:
             "diff.physical-layout-changed-no-change",
             "error",
             "physical_layout_changed event's before and after are identical.",
+            "§2.6.6",
+        ),
+    ]
+
+
+def _check_depends_on_changed(change: dict, where: str) -> list[Issue]:
+    if change.get("before") != change.get("after"):
+        return []
+
+    return [
+        Issue(
+            where,
+            "diff.depends-on-changed-no-change",
+            "error",
+            "depends_on_changed event's before and after are identical.",
             "§2.6.6",
         ),
     ]

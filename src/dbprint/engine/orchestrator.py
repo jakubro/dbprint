@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import yaml
 
@@ -26,6 +26,7 @@ from dbprint.adapters.base import (
     ColumnMeta,
     ColumnProgress,
     ColumnStats,
+    CommentsMeta,
     Dependency,
     ForeignKeyMeta,
     Freshness,
@@ -35,10 +36,13 @@ from dbprint.adapters.base import (
     Inferred,
     NullPatterns,
     PhysicalLayout,
+    Populated,
     TableCounts,
     TableMeta,
     TableScope,
     TableType,
+    Timeline,
+    TimelineBucket,
     UniqueKeyMeta,
 )
 from dbprint.adapters.errors import QueryFailed
@@ -54,9 +58,11 @@ from dbprint.spec.classification import (
     classify,
     compute_candidate_key_exception,
     compute_cardinality_ratio,
+    has_calendar_component,
     is_candidate_key,
+    is_string_like_type,
 )
-from dbprint.spec.coverage import is_incoherent
+from dbprint.spec.coverage import coverage_share, is_incoherent
 from dbprint.spec.epoch import bounds_epoch_unit, sample_epoch_unit
 from dbprint.spec.looks_like import detect_with_evidence
 from dbprint.spec.redaction import Primitive, coarsen_day_count, redact_value
@@ -72,7 +78,7 @@ from dbprint.spec.sketch import (
     pack_sketch,
     sketch_kind,
 )
-from dbprint.spec.statistics_matrix import FORBIDDEN_FIELDS
+from dbprint.spec.statistics_matrix import FORBIDDEN_FIELDS, REQUIRED_FIELDS
 from dbprint.spec.temporal_age import freshness_classification
 from dbprint.spec.temporal_age import max_age_days as derive_max_age_days
 from dbprint.spec.v1 import FORMAT_VERSION
@@ -142,9 +148,9 @@ _VALUE_LIST_CLASSIFICATIONS = {"boolean", "categorical", "foreign_key_candidate"
 # range, no percentiles. A cheap pre-filter, not the per-column verdict.
 _NO_CELL_VALUE_CLASSIFICATIONS = {"json", "unsupported"}
 
-# Per-table cap on measured grain candidate pairs (SPEC 2.2.12) - a producer constant,
-# never a `.dbprint.yaml` key: the honesty marker it produces is not tunable.
-_GRAIN_SEARCH_CAP = 8
+# Per-table cap on measured grain candidate pairs (SPEC 2.2.12) - a producer constant, never a
+# `.dbprint.yaml` key: the honesty marker it produces is not tunable.
+_GRAIN_SEARCH_CAP = 32
 
 # Per-table cap on measured dependency candidate pairs (SPEC 2.2.13). The cardinality
 # prune leaves the space quadratic in the low-cardinality column count, so a cap is needed.
@@ -416,6 +422,19 @@ class Engine:
         # Constant for the whole run too (SPEC 2.2.2) - one catalog scalar, reused for every
         # column's omit-if-matches comparison and the manifest's own record.
         default_collation = self._adapter.default_collation()
+        # One catalog read for every view/matview this connection has. Any read failure degrades
+        # to omitting `depends_on` this run rather than failing the whole connection.
+        try:
+            with _operation("introspect_view_dependencies"):
+                dependencies_map = self._adapter.introspect_view_dependencies()
+        except Exception as exc:  # noqa: BLE001 - degrade to full omission, never fail the run
+            _LOG.warning(
+                "view-dependency catalog read failed for connection %r: %s; every "
+                "view/matview omits depends_on this run",
+                self._conn.name,
+                exc,
+            )
+            dependencies_map = None
         per_table_results: list[TableResult] = []
         per_table_refers_to: dict[str, list[ForeignKeyMeta]] = {}
         per_table_meta: dict[str, _PerTableContext] = {}
@@ -456,6 +475,7 @@ class Engine:
                     read_row_counts=read_row_counts,
                     inventory=inventory,
                     default_collation=default_collation,
+                    dependencies_map=dependencies_map,
                 )
             finally:
                 trace_context.fqn.reset(fqn_token)
@@ -505,6 +525,21 @@ class Engine:
             fqn for fqn in carried_matched + carried_out_of_scope if fqn not in dropped_carried
         )
 
+        # Pass 2 rewrites each relationships.yaml in full, so every table must have finished
+        # pass 1. Sketches go first; the reverse index goes after both passes that read them.
+        sketch_failures: tuple[SketchFailure, ...] = ()
+
+        try:
+            if write_artifacts and not not_attempted:
+                sketch_failures = self._write_key_sketches(per_table_meta, emitter=emitter)
+                self._add_value_derived_edges(per_table_meta)
+                self._write_normalized_cardinalities(per_table_meta)
+        finally:
+            # Every extracted table's materialized sample outlives extraction for
+            # `_write_normalized_cardinalities` to read, so it is released here regardless.
+            for ctx in per_table_meta.values():
+                self._release_scope(ctx.fqn, ctx.read_scope)
+
         incoming = relationship_graph.resolve(per_table_refers_to)
         # A referencer this run left alone never had its relationships.yaml rewritten, so it
         # still records what it refers to, provided its print exists (`present_carried`).
@@ -517,13 +552,7 @@ class Engine:
         for fqn, ctx in per_table_meta.items():
             ctx.referenced_by = _merge_incoming(incoming.get(fqn, []), preserved.get(fqn, []))
 
-        # Pass 2 rewrites each relationships.yaml in full, so it needs every table to have
-        # completed pass 1 - a truncated run would strip real `referenced_by` entries.
-        # Sketches go first: `observed` (SPEC 2.3.10) reads each endpoint's own `sketch`.
-        sketch_failures: tuple[SketchFailure, ...] = ()
-
         if write_artifacts and not not_attempted:
-            sketch_failures = self._write_key_sketches(per_table_meta, emitter=emitter)
             self._write_relationships_artifacts(prints_root, per_table_meta, baseline_states)
 
         diff_dict = _compute_diff_dict(
@@ -571,6 +600,7 @@ class Engine:
         read_row_counts: bool = False,
         inventory: dict[str, inference.TableInventory] | None = None,
         default_collation: str = "",
+        dependencies_map: dict[str, tuple[str, ...]] | None = None,
     ) -> tuple[TableResult, _PerTableContext | None, int | None, tuple[str, ...]]:
         """Extract one table, or report why it was skipped or failed.
 
@@ -585,7 +615,8 @@ class Engine:
         row_count_estimate: int | None = None
 
         # Its own `try`: a catalog read that raises has to fail this table, not the run.
-        if read_row_counts:
+        # A plain view is never queried (SPEC 2.2.15), so no size condition can govern it.
+        if read_row_counts and tbl.type != "view":
             try:
                 with _operation("estimate_row_count"):
                     row_count_estimate = self._adapter.estimate_row_count(tbl.fqn)
@@ -603,8 +634,7 @@ class Engine:
                 )
 
             # The catalog answered "unknown", which is not the read failing. Logged so a
-            # declined-to-sample table is not mistaken for one the config never matched, and
-            # only where a size condition names the table - every view lacks a row count.
+            # declined-to-sample table is not mistaken for one the config never matched.
             if row_count_estimate is None and self._conn.size_conditions_name(tbl.fqn):
                 _LOG.warning(
                     "no row-count estimate for %r; rules carrying `min_rows` or a "
@@ -665,6 +695,7 @@ class Engine:
                 inventory or {},
                 default_collation,
                 row_count_estimate,
+                dependencies_map,
             )
         except Exception as exc:  # noqa: BLE001 - run-all-then-report; fails this table only
             return (
@@ -714,9 +745,14 @@ class Engine:
         inventory: dict[str, inference.TableInventory] | None = None,
         default_collation: str = "",
         row_count_estimate: int | None = None,
+        dependencies_map: dict[str, tuple[str, ...]] | None = None,
     ) -> _PerTableContext:
         with _operation("extract_ddl"):
             ddl = self._adapter.extract_ddl(tbl.fqn)
+
+        # ALWAYS on a view or matview, never on a plain table. Absent from the map means the
+        # producer could not ask; present means the catalog answered, `()` included.
+        depends_on = (dependencies_map or {}).get(tbl.fqn) if tbl.type != "table" else None
 
         with _operation("introspect_columns"):
             columns = self._columns_for(tbl.fqn, inventory)
@@ -728,17 +764,47 @@ class Engine:
                     f"catalog returned no columns for {tbl.fqn!r}; refusing to write an empty print",
                 )
 
-        with _operation("introspect_relationships"):
-            relationships = self._adapter.introspect_relationships(tbl.fqn)
+        try:
+            with _operation("introspect_relationships"):
+                relationships = self._adapter.introspect_relationships(tbl.fqn)
+
+            relationships_known = True
+        except _OperationFailed as exc:
+            # relationships.yaml is a declared artifact (SPEC 2.5, 6.3), and only a plain view may
+            # omit it (SPEC 1.4): elsewhere absence reads as "view" and an empty file as "no FKs".
+            if tbl.type != "view":
+                raise
+
+            _LOG.warning(
+                "introspect_relationships failed for %r: %s",
+                tbl.fqn,
+                _one_line(exc.cause),
+            )
+            relationships = []
+            relationships_known = False
 
         relationships = relationships + self._inferred_edges(tbl.fqn, relationships, inventory)
         eligible_target = self._eligible_target(tbl.fqn, inventory)
 
-        with _operation("introspect_indexes"):
-            indexes = self._adapter.introspect_indexes(tbl.fqn)
+        try:
+            with _operation("introspect_indexes"):
+                indexes = self._adapter.introspect_indexes(tbl.fqn)
 
-        with _operation("extract_comments"):
-            comments = self._adapter.extract_comments(tbl.fqn)
+            indexes_known = True
+        except _OperationFailed as exc:
+            _LOG.warning("introspect_indexes failed for %r: %s", tbl.fqn, _one_line(exc.cause))
+            indexes = []
+            indexes_known = False
+
+        try:
+            with _operation("extract_comments"):
+                comments = self._adapter.extract_comments(tbl.fqn)
+
+            comments_known = True
+        except _OperationFailed as exc:
+            _LOG.warning("extract_comments failed for %r: %s", tbl.fqn, _one_line(exc.cause))
+            comments = CommentsMeta(table=None, columns={})
+            comments_known = False
 
         if tbl.type == "view":
             # No query is ever issued against a view, so its file says so (SPEC 2.2.15)
@@ -751,6 +817,7 @@ class Engine:
                 columns,
                 view_fk_source_columns,
                 settings.statistics.enumeration_threshold,
+                depends_on,
             )
 
             return _PerTableContext(
@@ -772,19 +839,43 @@ class Engine:
                 has_description=False,
                 has_statistics_annotations=False,
                 has_relationships_annotations=False,
+                relationships_known=relationships_known,
+                indexes_known=indexes_known,
+                comments_known=comments_known,
             )
 
         fk_source_columns = frozenset(c for fk in relationships for c in fk.column)
 
-        with _operation("introspect_physical_layout"):
-            physical_layout = self._adapter.introspect_physical_layout(tbl.fqn)
+        try:
+            with _operation("introspect_physical_layout"):
+                physical_layout = self._adapter.introspect_physical_layout(tbl.fqn)
 
-        with _operation("introspect_unique_keys"):
-            declared_keys = self._adapter.introspect_unique_keys(tbl.fqn)
+            physical_layout_known = True
+        except _OperationFailed as exc:
+            _LOG.warning(
+                "introspect_physical_layout failed for %r: %s",
+                tbl.fqn,
+                _one_line(exc.cause),
+            )
+            physical_layout = None
+            physical_layout_known = False
+
+        try:
+            with _operation("introspect_unique_keys"):
+                declared_keys = self._adapter.introspect_unique_keys(tbl.fqn)
+        except _OperationFailed as exc:
+            # `None`, not `[]`: a missing declared-key list must not read as a table with no
+            # keys - `_compute_grain` below carries this into `grain.search.exhausted`.
+            _LOG.warning(
+                "introspect_unique_keys failed for %r: %s",
+                tbl.fqn,
+                _one_line(exc.cause),
+            )
+            declared_keys = None
 
         scope = _table_scope(settings)
-        # A sampling construct redraws per statement, so a sampled table is copied once and
-        # every call below reads the copy. `scope` still reaches the artifact (SPEC 2.2.8).
+        # A sampling construct redraws per statement, so a sampled table is copied once and every
+        # call reads the copy (SPEC 2.2.8 keeps `scope`); on success it is released later, not here.
         read_scope = self._materialize_scope(tbl.fqn, scope)
 
         try:
@@ -822,17 +913,28 @@ class Engine:
                     scope=read_scope,
                 )
 
-            with _operation("compute_null_patterns"):
-                null_patterns = self._adapter.compute_null_patterns(
+            try:
+                with _operation("compute_null_patterns"):
+                    null_patterns = self._adapter.compute_null_patterns(
+                        tbl.fqn,
+                        columns,
+                        settings.statistics,
+                        counts,
+                        base,
+                        read_scope,
+                    )
+            except _OperationFailed as exc:
+                _LOG.warning(
+                    "compute_null_patterns failed for %r: %s",
                     tbl.fqn,
-                    columns,
-                    settings.statistics,
-                    counts,
-                    base,
-                    read_scope,
+                    _one_line(exc.cause),
                 )
+                null_patterns = None
+                null_patterns_known = False
+            else:
+                null_patterns_known = True
 
-            grain = self._compute_grain(
+            grain, grain_probe_ok = self._compute_grain(
                 tbl.fqn,
                 columns,
                 base,
@@ -842,7 +944,7 @@ class Engine:
                 read_scope,
             )
 
-            dependencies = self._compute_dependencies(
+            dependencies, dependencies_known = self._compute_dependencies(
                 tbl.fqn,
                 columns,
                 base,
@@ -850,8 +952,31 @@ class Engine:
                 detected,
                 read_scope,
             )
-        finally:
+
+            timeline = self._compute_timeline(
+                tbl.fqn,
+                columns,
+                base,
+                stats,
+                counts,
+                detected,
+                physical_layout,
+                read_scope,
+            )
+
+            populated_windows = self._compute_populated_windows(
+                tbl.fqn,
+                columns,
+                base,
+                counts,
+                timeline,
+                read_scope,
+            )
+        except Exception:
+            # No `_PerTableContext` reaches `per_table_meta` on this path, so nothing else
+            # will ever see `read_scope` again - release it now rather than leak it.
             self._release_scope(tbl.fqn, read_scope)
+            raise
 
         enriched = _assemble_stats(tbl.fqn, columns, stats, detected, suppressed, generated_at)
         _stamp_values_coverage_method(tbl.fqn, counts.rows_scanned, enriched)
@@ -868,6 +993,19 @@ class Engine:
             default_collation,
             grain,
             dependencies,
+            timeline,
+            populated_windows,
+            depends_on,
+            # SPEC 2.2.1: blocks owed and not measured - absence alone would read as a finding.
+            tuple(
+                block
+                for block, known in (
+                    ("physical_layout", physical_layout_known),
+                    ("null_patterns", null_patterns_known),
+                    ("dependencies", dependencies_known),
+                )
+                if not known
+            ),
         )
 
         return _PerTableContext(
@@ -887,11 +1025,17 @@ class Engine:
             max_age_days=settings.max_age_days,
             rows_scanned=counts.rows_scanned,
             scope=scope,
+            read_scope=read_scope,
             eligible_target=eligible_target,
             has_description=False,
             has_statistics_annotations=False,
             has_relationships_annotations=False,
-            unique_keys=tuple(declared_keys),
+            relationships_known=relationships_known,
+            indexes_known=indexes_known,
+            comments_known=comments_known,
+            physical_layout_known=physical_layout_known,
+            grain_known=declared_keys is not None and grain_probe_ok,
+            unique_keys=tuple(declared_keys or ()),
         )
 
     def _build_inventory(
@@ -1058,6 +1202,8 @@ class Engine:
             epoch_unit_value = None
             looks_like_sampled = None
             looks_like_matched = None
+            looks_like_candidate = None
+            looks_like_candidate_share = None
             samples: list[Any] = []
 
             # Sampling is what `looks_like` costs, so it is gated on the classifications
@@ -1083,18 +1229,23 @@ class Engine:
                         exc,
                     )
                 else:
-                    # SPEC 4.1.5: `numeric_string` on a numeric-typed column restates the type
-                    # it already carries, so it is withheld whatever the classification.
-                    if looks_like_value == "numeric_string" and _matches(
-                        base_type(col.sql_type),
-                        _NUMERIC_TYPES,
-                    ):
+                    is_numeric_sql_type = _matches(base_type(col.sql_type), _NUMERIC_TYPES)
+
+                    # SPEC 4.1.5: `numeric_string` on a numeric-typed column restates the type it
+                    # already carries, so verdict and near-miss alike are withheld.
+                    if looks_like_value == "numeric_string" and is_numeric_sql_type:
                         looks_like_value = None
+
+                    if match.candidate == "numeric_string" and is_numeric_sql_type:
+                        match = replace(match, candidate=None, candidate_share=None)
 
                     # Evidence rides only beside a published verdict (SPEC 4.1.3).
                     if looks_like_value is not None:
                         looks_like_sampled = match.sampled
                         looks_like_matched = match.matched
+                    elif match.candidate is not None:
+                        looks_like_candidate = match.candidate
+                        looks_like_candidate_share = match.candidate_share
 
             # Detection runs against the catalog's own spelling (SPEC 4.4.3), never the
             # lowercased map key - a token-boundary detector reads `firstName`.
@@ -1134,6 +1285,8 @@ class Engine:
                 epoch_unit=epoch_unit_value,
                 sampled=looks_like_sampled,
                 matched=looks_like_matched,
+                looks_like_candidate=looks_like_candidate,
+                looks_like_candidate_share=looks_like_candidate_share,
             )
 
             if (
@@ -1144,6 +1297,8 @@ class Engine:
                 and inferred.epoch_unit is None
                 and inferred.sampled is None
                 and inferred.matched is None
+                and inferred.looks_like_candidate is None
+                and inferred.looks_like_candidate_share is None
             ):
                 inferred = None
 
@@ -1167,36 +1322,50 @@ class Engine:
         base: dict[str, BaseStats],
         counts: TableCounts,
         detected: dict[str, _ColumnDetection],
-        declared_keys: list[UniqueKeyMeta],
+        declared_keys: list[UniqueKeyMeta] | None,
         scope: TableScope | None,
-    ) -> Grain:
-        """SPEC 2.2.12: every declared key, plus a bounded measured probe for the rest.
-
-        Declared keys are catalog metadata, emitted at every arity in declaration order. The
-        measured half issues no statement - `search_exhausted` stays None - under a scope, on
-        an empty table, or where a column's `inferred.candidate_key` already answered.
+    ) -> tuple[Grain, bool]:
+        """SPEC 2.2.12: declared keys plus a bounded measured probe, and whether that probe ran -
+        False leaves the diff nothing to compare, since measured keys are missing, not gone.
         """
 
-        keys = tuple(GrainKey(columns=uk.columns, detection="declared") for uk in declared_keys)
+        known_keys = declared_keys or []
+        keys = tuple(GrainKey(columns=uk.columns, detection="declared") for uk in known_keys)
 
         if (
             scope is not None
             or counts.row_count == 0
             or counts.rows_scanned == 0
-            or any(d.inferred is not None and d.inferred.candidate_key for d in detected.values())
+            or any(
+                d.inferred is not None
+                and d.inferred.candidate_key
+                and d.inferred.candidate_key_exception is None
+                for d in detected.values()
+            )
         ):
-            return Grain(keys=keys, search_exhausted=None)
+            # The measured search was never owed here, so the block is complete as it stands.
+            return Grain(keys=keys, search_exhausted=None), True
 
-        candidates, exhausted = _grain_search_candidates(columns, base, counts, declared_keys)
+        candidates, exhausted = _grain_search_candidates(columns, base, counts, known_keys)
         found: tuple[tuple[str, str], ...] = ()
 
         if candidates:
-            with _operation("probe_grain"):
-                found = self._adapter.probe_grain(fqn, columns, counts, candidates, scope)
+            try:
+                with _operation("probe_grain"):
+                    found = self._adapter.probe_grain(fqn, columns, counts, candidates, scope)
+            except _OperationFailed as exc:
+                # A self-contained optional field: the declared keys above still stand, only
+                # the measured search is lost, and the table is not.
+                _LOG.warning("probe_grain failed for %r: %s", fqn, _one_line(exc.cause))
+
+                return Grain(keys=keys, search_exhausted=None), False
 
         keys = keys + tuple(GrainKey(columns=pair, detection="measured") for pair in found)
 
-        return Grain(keys=keys, search_exhausted=exhausted)
+        if declared_keys is None:
+            exhausted = False
+
+        return Grain(keys=keys, search_exhausted=exhausted), True
 
     def _compute_dependencies(
         self,
@@ -1206,51 +1375,180 @@ class Engine:
         counts: TableCounts,
         detected: dict[str, _ColumnDetection],
         scope: TableScope | None,
-    ) -> tuple[Dependency, ...]:
-        """SPEC 2.2.13: pairwise functional dependencies over the scanned rows.
-
-        Skipped under a `scope` - a dependency over a sample is not a dependency - and on an
-        empty table, where every combination is vacuously functional. A pair below
-        `_DEPENDENCY_STRENGTH_THRESHOLD` is independence, not a finding.
+    ) -> tuple[tuple[Dependency, ...], bool]:
+        """SPEC 2.2.13: pairwise functional dependencies over the scanned rows, and whether the
+        probe ran - a scope or an empty table skips it and reads as "none found", not unmeasured.
         """
 
         if scope is not None or counts.row_count == 0 or counts.rows_scanned == 0:
-            return ()
+            return (), True
 
         candidates = _dependency_candidates(columns, base, counts, detected)
 
         if not candidates:
-            return ()
+            return (), True
 
-        with _operation("probe_dependencies"):
-            strengths = self._adapter.probe_dependencies(
+        try:
+            with _operation("probe_dependencies"):
+                strengths = self._adapter.probe_dependencies(
+                    fqn,
+                    columns,
+                    counts,
+                    base,
+                    candidates,
+                    scope,
+                )
+        except _OperationFailed as exc:
+            # A self-contained optional field: nothing else depends on it, so its own loss
+            # never costs the table.
+            _LOG.warning("probe_dependencies failed for %r: %s", fqn, _one_line(exc.cause))
+
+            return (), False
+
+        return (
+            tuple(
+                Dependency(determinant=a, dependent=b, strength=strength)
+                for (a, b), strength in strengths.items()
+                if strength >= _DEPENDENCY_STRENGTH_THRESHOLD
+            ),
+            True,
+        )
+
+    def _compute_timeline(
+        self,
+        fqn: str,
+        columns: list[ColumnMeta],
+        base: dict[str, BaseStats],
+        stats: dict[str, ColumnStats],
+        counts: TableCounts,
+        detected: dict[str, _ColumnDetection],
+        physical_layout: PhysicalLayout | None,
+        scope: TableScope | None,
+    ) -> Timeline | None:
+        """SPEC 2.2.16: the anchor column's activity, bucketed at an adaptive unit - skipped under
+        a `scope` or an empty table, a bucketed count over a sample not being a timeline.
+        """
+
+        if (
+            not self._conn.compute_timeline
+            or scope is not None
+            or counts.row_count == 0
+            or counts.rows_scanned == 0
+        ):
+            return None
+
+        column = _choose_timeline_anchor(columns, base, counts, detected, physical_layout)
+
+        if column is None:
+            return None
+
+        col_range = stats[column].range
+        unit = _timeline_unit(col_range.span_days if col_range is not None else None)
+
+        try:
+            with _operation("probe_timeline"):
+                rows = self._adapter.probe_timeline(fqn, columns, counts, column, unit, scope)
+        except _OperationFailed as exc:
+            # A self-contained optional field: `populated` (below) requires it, so its own
+            # loss cascades to that one too, but never past both.
+            _LOG.warning("probe_timeline failed for %r: %s", fqn, _one_line(exc.cause))
+
+            return None
+
+        buckets = tuple(TimelineBucket(start=start, count=count) for start, count in rows)
+        covered = sum(bucket.count for bucket in buckets)
+        # SPEC 2.2.6: rounded and clamped through the shared `coverage_share` - `exhaustive` is
+        # the arithmetic fact that every scanned row landed in a bucket, so full coverage is 1.0.
+        coverage = coverage_share(
+            covered,
+            counts.rows_scanned,
+            exhaustive=covered == counts.rows_scanned,
+        )
+
+        return Timeline(column=column, unit=unit, buckets=buckets, coverage=coverage)
+
+    def _compute_populated_windows(
+        self,
+        fqn: str,
+        columns: list[ColumnMeta],
+        base: dict[str, BaseStats],
+        counts: TableCounts,
+        timeline: Timeline | None,
+        scope: TableScope | None,
+    ) -> dict[str, Populated]:
+        """SPEC 2.2.4's `populated`: each column's window, dated against `timeline.column` - so it
+        requires `timeline`, and is suppressed where a column is fully populated or all-null.
+        """
+
+        if timeline is None:
+            return {}
+
+        eligible = tuple(
+            col.name
+            for col in columns
+            if (stats := base.get(col.name)) is not None
+            and 0 < stats.null_count < counts.rows_scanned
+        )
+
+        if not eligible:
+            return {}
+
+        try:
+            with _operation("compute_populated_windows"):
+                windows = self._adapter.compute_populated_windows(
+                    fqn,
+                    columns,
+                    counts,
+                    timeline.column,
+                    eligible,
+                    scope,
+                )
+        except _OperationFailed as exc:
+            # A self-contained optional field: nothing else depends on it, so its own loss
+            # never costs the table.
+            _LOG.warning(
+                "compute_populated_windows failed for %r: %s",
                 fqn,
-                columns,
-                counts,
-                base,
-                candidates,
-                scope,
+                _one_line(exc.cause),
             )
 
-        return tuple(
-            Dependency(determinant=a, dependent=b, strength=strength)
-            for (a, b), strength in strengths.items()
-            if strength >= _DEPENDENCY_STRENGTH_THRESHOLD
-        )
+            return {}
+
+        return {name: Populated(from_=start, to=end) for name, (start, end) in windows.items()}
 
     def _materialize_scope(self, fqn: str, scope: TableScope | None) -> TableScope | None:
         """The scope every statistics statement reads: one copied draw, or `scope` itself.
 
-        Only a drawn fraction is copied, and only where the connection permits the write.
-        A refusal degrades to a per-statement redraw, with a warning.
+        Only a drawn fraction is copied, and only where the connection permits the write. An
+        adapter whose fallback cannot be seeded refuses the table; a coherent one redraws, warning.
         """
 
-        if scope is None or scope.sample is None or not self._conn.materialize_sample:
+        if scope is None or scope.sample is None:
+            return scope
+
+        if not self._conn.materialize_sample:
+            if not self._adapter.SAMPLE_FALLBACK_COHERENT:
+                raise SampleFallbackIncoherent(
+                    f"table {fqn!r}: connection {self._conn.name!r} ({self._conn.adapter}) "
+                    f"sets materialize_sample: false, and this adapter's per-statement "
+                    f"sampling construct cannot be seeded into agreement across statements. "
+                    f"Set materialize_sample: true for this connection, or narrow with a "
+                    f"filter instead of a sample fraction.",
+                )
+
             return scope
 
         try:
             return self._adapter.materialize_scope(fqn, scope)
-        except Exception as exc:  # noqa: BLE001 - degrade to a per-statement redraw
+        except Exception as exc:  # refuse or degrade, per adapter coherence
+            if not self._adapter.SAMPLE_FALLBACK_COHERENT:
+                raise SampleFallbackIncoherent(
+                    f"table {fqn!r}: connection {self._conn.name!r} ({self._conn.adapter}) "
+                    f"could not materialize its sample of {scope.sample} ({exc}), and this "
+                    f"adapter's per-statement fallback cannot be seeded into agreement across "
+                    f"statements. Narrow with a filter instead of a sample fraction.",
+                ) from exc
+
             _LOG.warning(
                 "table %r: could not materialize its sample of %s (%s); each statistic for it "
                 "is measured over its own draw of the rows",
@@ -1270,11 +1568,17 @@ class Engine:
         try:
             self._adapter.release_scope(fqn, scope)
         except Exception as exc:  # noqa: BLE001 - cleanup must never mask the failure it follows
+            if self._adapter.MATERIALIZED_SCOPE_SESSION_SCOPED:
+                fate = "the session drops it"
+            else:
+                fate = "it outlives this run and is not session-scoped"
+
             _LOG.warning(
-                "table %r: could not drop the materialized sample %r (%s); the session drops it",
+                "table %r: could not drop the materialized sample %r (%s); %s",
                 fqn,
                 scope.materialized,
                 exc,
+                fate,
             )
 
     def _write_relationships_artifacts(
@@ -1284,6 +1588,11 @@ class Engine:
         baseline_states: dict[str, diff_module.TableState] | None,
     ) -> None:
         for fqn, ctx in per_table_meta.items():
+            if not ctx.relationships_known:
+                # introspect_relationships failed here - the manifest already withholds the
+                # declaration, so writing the file would leave one the manifest does not name.
+                continue
+
             artifact = _serialize_relationships(fqn, ctx, per_table_meta, baseline_states)
             write_atomic(ctx.tbl_dir, {"relationships.yaml": artifact})
 
@@ -1460,6 +1769,145 @@ class Engine:
 
         return tuple(failures)
 
+    def _add_value_derived_edges(self, per_table_meta: dict[str, _PerTableContext]) -> None:
+        """SPEC 2.3: propose an edge from measured value containment alone, no query issued -
+        appended into `ctx.relationships`, so it feeds the same writer every other edge does.
+        """
+
+        threshold = self._conn.statistics.enumeration_threshold
+        children: list[inference.SketchCandidate] = []
+        parents: list[inference.SketchCandidate] = []
+        existing: set[tuple[str, str, str, str]] = set()
+
+        for fqn, ctx in per_table_meta.items():
+            for fk in ctx.relationships:
+                if len(fk.column) == 1 and len(fk.target_column) == 1:
+                    existing.add((fqn, fk.column[0], fk.target_table, fk.target_column[0]))
+
+            payload = ctx.statistics_payload
+            cols_payload = payload.get("columns") if isinstance(payload, dict) else None
+
+            if not isinstance(cols_payload, dict) or isinstance(payload.get("scope"), dict):
+                continue  # a sketch is never computed under scope (SPEC 2.2.14)
+
+            single_col_keys = {uk.columns[0] for uk in ctx.unique_keys if len(uk.columns) == 1}
+            sql_types = {c.name: c.sql_type for c in ctx.columns}
+
+            for column, col_payload in cols_payload.items():
+                if not isinstance(col_payload, dict):
+                    continue
+
+                sketch = _decode_column_sketch(col_payload.get("sketch"))
+
+                if sketch is None:
+                    continue
+
+                sql_type = sql_types.get(column)
+                cardinality = col_payload.get("cardinality")
+
+                if sql_type is None or not isinstance(cardinality, int):
+                    continue
+
+                inferred = col_payload.get("inferred")
+                candidate_key = isinstance(inferred, dict) and inferred.get("candidate_key") is True
+                candidate = inference.SketchCandidate(fqn, column, sql_type, cardinality, sketch)
+
+                if column in single_col_keys or candidate_key:
+                    parents.append(candidate)
+
+                if candidate_key or cardinality > threshold:
+                    children.append(candidate)
+
+        proposed = inference.infer_value_derived_edges(children, parents, frozenset(existing))
+
+        for target_fqn, edges in proposed.items():
+            per_table_meta[target_fqn].relationships.extend(edges)
+
+    def _write_normalized_cardinalities(self, per_table_meta: dict[str, _PerTableContext]) -> None:
+        """SPEC 2.2.4: the trimmed/case-folded distinct count for the join-key population - second
+        pass, like `_write_key_sketches`, but a redacted or scoped column stays eligible here.
+        """
+
+        candidates: dict[str, set[str]] = {}
+
+        for ctx in per_table_meta.values():
+            for fk in ctx.relationships:
+                if len(fk.column) == 1:
+                    candidates.setdefault(ctx.fqn, set()).add(fk.column[0])
+
+                if len(fk.target_column) == 1:
+                    candidates.setdefault(fk.target_table, set()).add(fk.target_column[0])
+
+        for ctx in per_table_meta.values():
+            cols_payload = (
+                ctx.statistics_payload.get("columns")
+                if isinstance(ctx.statistics_payload, dict)
+                else None
+            )
+
+            if not isinstance(cols_payload, dict):
+                continue
+
+            declared = _normalized_cardinality_candidates(cols_payload, ctx.unique_keys)
+
+            if declared:
+                candidates.setdefault(ctx.fqn, set()).update(declared)
+
+        for fqn in sorted(candidates):
+            ctx = per_table_meta.get(fqn)
+
+            if ctx is None:
+                continue  # target's own table wasn't re-extracted this run
+
+            payload = ctx.statistics_payload
+
+            if not payload or payload.get("catalog_only") is True:
+                continue  # nothing was queried at all (SPEC 2.2.15) - no live read to re-take
+
+            cols_payload = payload.get("columns")
+
+            if not isinstance(cols_payload, dict):
+                continue
+
+            sql_types = {c.name: c.sql_type for c in ctx.columns}
+            changed = False
+
+            for column in sorted(candidates[fqn]):
+                col_payload = cols_payload.get(column)
+
+                if not isinstance(col_payload, dict) or not isinstance(
+                    col_payload.get("cardinality"),
+                    int,
+                ):
+                    continue
+
+                if not is_string_like_type(sql_types.get(column, "")):
+                    continue
+
+                try:
+                    with _operation("compute_normalized_cardinality"):
+                        normalized = self._adapter.compute_normalized_cardinality(
+                            fqn,
+                            column,
+                            ctx.read_scope,
+                        )
+                except Exception as exc:  # noqa: BLE001 - run-all-then-report; this column only
+                    cause = exc.cause if isinstance(exc, _OperationFailed) else exc
+                    _LOG.warning(
+                        "compute_normalized_cardinality failed for %r.%r: %s",
+                        fqn,
+                        column,
+                        _one_line(cause),
+                    )
+                    continue
+
+                col_payload["normalized_cardinality"] = normalized
+                changed = True
+
+            if changed:
+                ctx.statistics_yaml = _dump_yaml(payload)
+                write_atomic(ctx.tbl_dir, {"statistics.yaml": ctx.statistics_yaml})
+
     def _write_manifest_artifacts(
         self,
         prints_root: Path,
@@ -1581,6 +2029,9 @@ class _PerTableContext:
     max_age_days: int | None = None
     rows_scanned: int | None = None
     scope: TableScope | None = None
+    # The materialized copy `scope` was read through, kept alive past extraction so
+    # `_write_normalized_cardinalities` reads the same rows `cardinality` did, not a fresh draw.
+    read_scope: TableScope | None = None
     eligible_target: bool | None = None
     has_description: bool = False
     has_statistics_annotations: bool = False
@@ -1588,6 +2039,15 @@ class _PerTableContext:
     tbl_dir: Path = field(default=Path("/dev/null"))
     referenced_by: list[Any] = field(default_factory=list)
     unique_keys: tuple[UniqueKeyMeta, ...] = field(default_factory=tuple)
+    # False when `introspect_relationships` failed for this table - the manifest must not
+    # declare a `relationships` artifact this run did not write.
+    relationships_known: bool = True
+    # False when this run's own catalog read for the field failed and it degraded to a placeholder.
+    # The diff compares such a field against nothing: a placeholder cannot be told from a removal.
+    indexes_known: bool = True
+    comments_known: bool = True
+    physical_layout_known: bool = True
+    grain_known: bool = True
 
 
 def _widened_sketch_candidates(
@@ -1614,6 +2074,28 @@ def _widened_sketch_candidates(
 
         if isinstance(cardinality, int) and cardinality <= SKETCH_K:
             out.add(name)
+            continue
+
+        inferred = col_payload.get("inferred")
+
+        if isinstance(inferred, dict) and inferred.get("candidate_key") is True:
+            out.add(name)
+
+    return out
+
+
+def _normalized_cardinality_candidates(
+    columns_payload: dict[str, Any],
+    unique_keys: tuple[UniqueKeyMeta, ...],
+) -> set[str]:
+    """The join-key population `sketch` (SPEC 2.2.14) also defines, minus its own
+    exhaustive-cardinality widening - type and exclusion filtering happens in the caller.
+    """
+
+    out = {uk.columns[0] for uk in unique_keys if len(uk.columns) == 1} & set(columns_payload)
+
+    for name, col_payload in columns_payload.items():
+        if not isinstance(col_payload, dict):
             continue
 
         inferred = col_payload.get("inferred")
@@ -1713,7 +2195,11 @@ class _ProgressEmitter:
         self._emit("finalizing", status, total, total, None)
 
     def sketch_phase(self, status: ProgressStatus, total: int) -> None:
-        self._emit("sketch", status, 0, total, None)
+        """`index` agrees with the last `sketch_table` tick: 0 before the pass starts, `total`
+        once it closes - never a start-shaped bracket restating an already-finished bar.
+        """
+
+        self._emit("sketch", status, total if status == "done" else 0, total, None)
 
     def sketch_table(
         self,
@@ -1789,6 +2275,12 @@ class _ProgressEmitter:
 
 
 # Helpers.
+
+
+class SampleFallbackIncoherent(RuntimeError):
+    """A `sample` scope has no materialized copy and the adapter's fallback cannot be seeded, so
+    the table is refused rather than measured over rows that differ between statements.
+    """
 
 
 class _OperationFailed(RuntimeError):
@@ -2161,6 +2653,66 @@ def _dependency_candidates(
     return tuple(ordered[:_DEPENDENCY_SEARCH_CAP])
 
 
+def _choose_timeline_anchor(
+    columns: list[ColumnMeta],
+    base: dict[str, BaseStats],
+    counts: TableCounts,
+    detected: dict[str, _ColumnDetection],
+    physical_layout: PhysicalLayout | None,
+) -> str | None:
+    """SPEC 2.2.16's three-step anchor rule: physical layout first, then measured recency -
+    ties break by higher cardinality, then column name; a table may have no anchor at all.
+    """
+
+    sql_types = {col.name: col.sql_type for col in columns}
+
+    def eligible(name: str) -> bool:
+        detection = detected.get(name)
+
+        return (
+            detection is not None
+            and detection.classification == "temporal"
+            and detection.redaction is None
+            and has_calendar_component(sql_types.get(name, ""))
+        )
+
+    if physical_layout is not None:
+        for key in physical_layout.keys:
+            if key.column is not None and eligible(key.column):
+                return key.column
+
+    candidates = [col.name for col in columns if eligible(col.name)]
+
+    if not candidates:
+        return None
+
+    def rank(name: str) -> tuple[float, int, str]:
+        stats = base[name]
+        null_rate = stats.null_count / counts.rows_scanned if counts.rows_scanned else 0.0
+
+        return (null_rate, -stats.cardinality, name)
+
+    return min(candidates, key=rank)
+
+
+_TIMELINE_DAY_SPAN_CAP = 90
+_TIMELINE_WEEK_SPAN_CAP = 730
+
+
+def _timeline_unit(span_days: int | None) -> Literal["day", "week", "month"]:
+    """Adaptive bucket width, so the list stays a few dozen to low hundreds of entries wide -
+    an unknown span buckets by day, where `buckets` comes back empty anyway.
+    """
+
+    if span_days is None or span_days <= _TIMELINE_DAY_SPAN_CAP:
+        return "day"
+
+    if span_days <= _TIMELINE_WEEK_SPAN_CAP:
+        return "week"
+
+    return "month"
+
+
 def _table_scope(settings: TableSettings) -> TableScope | None:
     """Row-level narrowing in force for one table, or None for a full scan."""
 
@@ -2182,6 +2734,10 @@ def _serialize_statistics(
     default_collation: str = "",
     grain: Grain | None = None,
     dependencies: tuple[Dependency, ...] = (),
+    timeline: Timeline | None = None,
+    populated_windows: dict[str, Populated] | None = None,
+    depends_on: tuple[str, ...] | None = None,
+    unmeasured: tuple[str, ...] = (),
 ) -> str:
     columns_payload: dict[str, Any] = {}
     narrows = scope is not None and scope.narrows
@@ -2222,10 +2778,16 @@ def _serialize_statistics(
         if name in physical_layout_columns:
             col_dict["physical_layout_key"] = True
 
-        for field_name, value in _emitted_extras(e, salt):
+        window = (populated_windows or {}).get(name)
+
+        if window is not None:
+            col_dict["populated"] = {"from": window.from_, "to": window.to}
+
+        for field_name, value in _emitted_extras(e, counts.rows_scanned, salt):
             col_dict[field_name] = value
 
         _drop_forbidden_fields(fqn, name, e.classification, col_dict)
+        _mark_unmeasured(col_dict, e.stats.unmeasured, e.classification)
         columns_payload[name] = col_dict
 
     payload: dict[str, Any] = {
@@ -2290,11 +2852,34 @@ def _serialize_statistics(
 
         payload["grain"] = grain_block
 
-    # Always emitted, `[]` for nothing - the same "answered, not skipped" convention as `grain`.
-    payload["dependencies"] = [
-        {"determinant": d.determinant, "dependent": d.dependent, "strength": d.strength}
-        for d in dependencies
-    ]
+    # Emitted whenever the probe ran, `[]` for nothing - the same "answered, not skipped" convention
+    # as `grain`. A run that could not ask names it below instead, since `[]` states a finding.
+    if "dependencies" not in unmeasured:
+        payload["dependencies"] = [
+            {"determinant": d.determinant, "dependent": d.dependent, "strength": d.strength}
+            for d in dependencies
+        ]
+
+    # Absent means no eligible anchor, a scope, an empty table, or config-disabled - never
+    # "not looked". Present means an anchor was chosen, even where `buckets` comes back empty.
+    if timeline is not None:
+        payload["timeline"] = {
+            "column": timeline.column,
+            "unit": timeline.unit,
+            "buckets": [
+                {"start": bucket.start, "count": bucket.count} for bucket in timeline.buckets
+            ],
+            "coverage": timeline.coverage,
+        }
+
+    # ALWAYS on a view/matview, NEVER on a plain table. `None` means the producer could not
+    # ask; `[]` means the catalog answered and this object reads nothing else printed.
+    if depends_on is not None:
+        payload["depends_on"] = list(depends_on)
+
+    # SPEC 2.2.1: only blocks this run owed and missed - never one already structurally absent.
+    if named := sorted(b for b in unmeasured if payload.get(b) is None):
+        payload["unmeasured"] = named
 
     payload["columns"] = columns_payload
 
@@ -2308,6 +2893,7 @@ def _serialize_catalog_only_statistics(
     columns: list[ColumnMeta],
     fk_source_columns: frozenset[str],
     enumeration_threshold: int,
+    depends_on: tuple[str, ...] | None = None,
 ) -> str:
     """The statistics artifact for an object nothing was queried for (SPEC 2.2.15).
 
@@ -2346,8 +2932,14 @@ def _serialize_catalog_only_statistics(
         "profiled_at": profiled_at,
         "catalog_only": True,
         "grain": {"keys": []},
-        "columns": columns_payload,
     }
+
+    # Catalog-derived, like `physical_layout` - SPEC 2.2.15 licenses either MAY still be
+    # emitted here, unlike a measurement such as `dependencies`. Absent means could not ask.
+    if depends_on is not None:
+        payload["depends_on"] = list(depends_on)
+
+    payload["columns"] = columns_payload
 
     return _dump_yaml(payload)
 
@@ -2380,7 +2972,7 @@ def _drop_forbidden_fields(
         )
 
 
-def _emitted_extras(e: _EnrichedColumnStats, salt: str = ""):
+def _emitted_extras(e: _EnrichedColumnStats, rows_scanned: int, salt: str = ""):
     """Every value-bearing field for one column, redacted where a rule covers it.
 
     The value list, range bounds and percentiles are the cell values a primitive acts on;
@@ -2407,6 +2999,12 @@ def _emitted_extras(e: _EnrichedColumnStats, salt: str = ""):
 
         if e.inferred.matched is not None:
             inf["matched"] = e.inferred.matched
+
+        if e.inferred.looks_like_candidate is not None:
+            inf["looks_like_candidate"] = e.inferred.looks_like_candidate
+
+        if e.inferred.looks_like_candidate_share is not None:
+            inf["looks_like_candidate_share"] = e.inferred.looks_like_candidate_share
 
         if e.inferred.candidate_key:
             inf["candidate_key"] = True
@@ -2464,6 +3062,39 @@ def _emitted_extras(e: _EnrichedColumnStats, salt: str = ""):
             {k: _redacted_scalar(v, e.redaction, salt) for k, v in s.percentiles.items()},
         )
 
+    # Aggregates, not cell values (SPEC 2.2.9) - passed through unredacted, except where the
+    # scanned set is too small for the aggregate to be anything but the one cell it withholds.
+    if not (e.redaction is not None and rows_scanned - s.null_count <= 1):
+        if s.mean is not None:
+            yield "mean", s.mean
+
+        if s.sum is not None:
+            yield "sum", s.sum
+
+        if s.length is not None:
+            yield (
+                "length",
+                {
+                    "min": s.length.min,
+                    "max": s.length.max,
+                    "avg": s.length.avg,
+                    "p95": s.length.p95,
+                },
+            )
+
+    # A count discloses no literal (SPEC 2.2.9), so redaction never suppresses these.
+    if s.zero_count is not None:
+        yield "zero_count", s.zero_count
+
+    if s.negative_count is not None:
+        yield "negative_count", s.negative_count
+
+    if s.empty_count is not None:
+        yield "empty_count", s.empty_count
+
+    if s.quantized_count is not None:
+        yield "quantized_count", s.quantized_count
+
     if e.freshness is not None:
         yield (
             "freshness",
@@ -2477,6 +3108,26 @@ def _emitted_extras(e: _EnrichedColumnStats, salt: str = ""):
     # (SPEC 2.2.4), so this follows `range`/`percentiles` under `drop` too.
     if s.unrepresentable and e.redaction != "drop":
         yield "unrepresentable", list(s.unrepresentable)
+
+
+def _mark_unmeasured(
+    col_dict: dict[str, Any],
+    names: tuple[str, ...] | None,
+    classification: str,
+) -> None:
+    """Name the REQUIRED fields this column owed and did not obtain (SPEC 2.2.4).
+
+    Intersected with what the column carries rather than trusted from the adapter: a name it also
+    emits is a contradiction, and one the matrix never required is an absence SPEC 7.2 explains.
+    """
+
+    if not names:
+        return
+
+    owed = set(names) & REQUIRED_FIELDS.get(classification, frozenset())
+
+    if named := sorted(owed - col_dict.keys()):
+        col_dict["unmeasured"] = named
 
 
 def _redacted_entry(value_count: Any, primitive: str | None, salt: str) -> dict[str, Any]:
@@ -2584,12 +3235,11 @@ def _serialize_relationships(
 
 
 def _fk_action_fields(detection: str, on_delete: str, on_update: str) -> dict[str, str]:
-    """SPEC 2.3.8: an inferred edge carries no referential action; only a declared one does.
-
-    Emitting `NO ACTION` would dress a guess in the clothing of a real constraint.
+    """SPEC 2.3.8: a guessed edge carries no referential action; only a declared one does -
+    emitting `NO ACTION` would dress a guess in the clothing of a real constraint.
     """
 
-    if detection == "inferred":
+    if detection != "declared":
         return {}
 
     return {"on_delete": on_delete, "on_update": on_update}
@@ -2823,9 +3473,9 @@ def _entry_from_context(
         type=ctx.type,
         path="/".join(ctx.namespace_path),
         has_statistics=ctx.statistics_yaml is not None,
-        # `_write_relationships_artifacts` writes for every table: an edgeless view's
-        # empty refers_to/referenced_by is still a measurement.
-        has_relationships=True,
+        # Written for every table `introspect_relationships` answered for - an edgeless view's
+        # empty result is still a measurement, a failed read gets neither file nor entry.
+        has_relationships=ctx.relationships_known,
         has_description=ctx.has_description,
         has_statistics_annotations=ctx.has_statistics_annotations,
         has_relationships_annotations=ctx.has_relationships_annotations,
@@ -3161,28 +3811,36 @@ def _table_state_from_context(ctx: _PerTableContext) -> diff_module.TableState:
         )
         for c in ctx.columns
     }
-    state.relationships = [
-        diff_module.FkState(
-            source_columns=fk.column,
-            target_table=fk.target_table,
-            target_columns=fk.target_column,
-            on_delete=fk.on_delete,
-            on_update=fk.on_update,
-            detection=fk.detection,
-        )
-        for fk in ctx.relationships
-    ]
-    state.indexes = {
-        idx.name: diff_module.IndexState(
-            name=idx.name,
-            columns=idx.columns,
-            unique=idx.unique,
-            type=idx.type,
-        )
-        for idx in ctx.indexes
-    }
+    # A read that failed THIS run contributes None, not its placeholder: an empty container cannot
+    # be told from a real removal, so the comparison is skipped rather than reporting false drift.
+    if ctx.relationships_known:
+        state.relationships = [
+            diff_module.FkState(
+                source_columns=fk.column,
+                target_table=fk.target_table,
+                target_columns=fk.target_column,
+                # Mirrors `_fk_action_fields`'s write-time rule (SPEC 2.3.8): a guessed edge
+                # carries no referential action, so live and hydrated baseline stay comparable.
+                on_delete=None if fk.detection != "declared" else fk.on_delete,
+                on_update=None if fk.detection != "declared" else fk.on_update,
+                detection=fk.detection,
+            )
+            for fk in ctx.relationships
+        ]
+
+    if ctx.indexes_known:
+        state.indexes = {
+            idx.name: diff_module.IndexState(
+                name=idx.name,
+                columns=idx.columns,
+                unique=idx.unique,
+                type=idx.type,
+            )
+            for idx in ctx.indexes
+        }
+
     state.table_comment = ctx.comments.table
-    state.table_comment_known = True
+    state.table_comment_known = ctx.comments_known
     state.column_comments = dict(ctx.comments.columns)
     state.statistics = diff_module.comparable_columns(ctx.statistics_payload.get("columns") or {})
     row_count = ctx.statistics_payload.get("row_count")
@@ -3196,10 +3854,19 @@ def _table_state_from_context(ctx: _PerTableContext) -> diff_module.TableState:
     # contributed", as for every statistics-derived field. A view carries `grain: {keys: []}`
     # (SPEC 2.2.15) but never `physical_layout`, which stays None either way.
     if ctx.statistics_payload:
-        state.grain = diff_module.grain_from_block(ctx.statistics_payload.get("grain"))
-        state.physical_layout = diff_module.physical_layout_from_block(
-            ctx.statistics_payload.get("physical_layout"),
-        )
+        # The flags gate this run's write; the artifact's marker is what a later diff reads back.
+        table_unmeasured = set(ctx.statistics_payload.get("unmeasured") or [])
+
+        if ctx.grain_known:
+            state.grain = diff_module.grain_from_block(ctx.statistics_payload.get("grain"))
+
+        if ctx.physical_layout_known and "physical_layout" not in table_unmeasured:
+            state.physical_layout = diff_module.physical_layout_from_block(
+                ctx.statistics_payload.get("physical_layout"),
+            )
+
+        depends_on = ctx.statistics_payload.get("depends_on")
+        state.depends_on = tuple(depends_on) if isinstance(depends_on, list) else None
 
     return state
 

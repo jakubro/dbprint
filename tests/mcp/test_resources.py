@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import yaml
 
@@ -86,13 +88,107 @@ class TestParseUri:
 
 
 class TestEnumerate:
-    def test_manifest_diff_and_reading_always_listed(self, primary_conn: ConnectionConfig) -> None:
+    def test_manifest_diff_and_reading_are_listed(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
         state = ServedConnections(served={"production": primary_conn}, default="production")
         entries = enumerate_for(state)
         uris = [e.uri for e in entries]
         assert "dbprint://production/manifest" in uris
         assert "dbprint://production/diff" in uris
         assert "dbprint://production/reading" in uris
+
+    def test_diff_still_listed_when_never_computed(self, primary_conn: ConnectionConfig) -> None:
+        """MCP.md 3.3: `diff` is producer-written and unconditional - a print with no diff.yaml
+        still lists the URI, and `read()` surfaces the absence as `no_diff_available`.
+        """
+
+        diff_path = primary_conn.output / primary_conn.name / "diff.yaml"
+        diff_path.unlink()
+        state = ServedConnections(served={"production": primary_conn}, default="production")
+        entries = enumerate_for(state)
+        uris = {e.uri for e in entries}
+
+        assert "dbprint://production/diff" in uris
+
+        with pytest.raises(McpError) as excinfo:
+            read(state, "dbprint://production/diff")
+
+        assert excinfo.value.code == -32603
+        assert "no diff available" in excinfo.value.detail
+
+    def test_reading_still_listed_when_the_guide_is_absent(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        """Same unconditional treatment as `diff` - `reading` is producer-written too."""
+
+        from dbprint.engine.reading_guide import READING_GUIDE_FILENAME
+
+        (primary_conn.output / primary_conn.name / READING_GUIDE_FILENAME).unlink()
+        state = ServedConnections(served={"production": primary_conn}, default="production")
+        entries = enumerate_for(state)
+        uris = {e.uri for e in entries}
+
+        assert "dbprint://production/reading" in uris
+
+        with pytest.raises(McpError) as excinfo:
+            read(state, "dbprint://production/reading")
+
+        assert excinfo.value.code == -32603
+        assert "no reading guide available" in excinfo.value.detail
+
+    def test_three_connection_level_resources_survive_a_dry_run(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        """MCP.md 3.3: exactly 3 unconditional resources per connection - a dry run writes
+        neither `diff.yaml` nor the reading guide, and the listing must not shrink to 1.
+        """
+
+        from dbprint.engine.reading_guide import READING_GUIDE_FILENAME
+
+        print_root = primary_conn.output / primary_conn.name
+        (print_root / "diff.yaml").unlink()
+        (print_root / READING_GUIDE_FILENAME).unlink()
+        expected = {
+            "dbprint://production/manifest",
+            "dbprint://production/diff",
+            "dbprint://production/reading",
+        }
+        state = ServedConnections(served={"production": primary_conn}, default="production")
+        uris = {e.uri for e in enumerate_for(state)}
+
+        assert uris & expected == expected
+
+    def test_manifest_diff_and_reading_still_listed_when_never_generated(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """MCP.md 3.3 gates the connection-level resources on the connection being served, not on
+        a print existing - a never-generated connection sits on the same continuum as a dry run.
+        """
+
+        empty_conn = ConnectionConfig(
+            name="empty",
+            adapter="postgres",
+            output=tmp_path / "prints",
+        )
+        state = ServedConnections(served={"empty": empty_conn}, default="empty")
+
+        entries = enumerate_for(state)
+        connection_entries = {e.uri for e in entries if e.uri.startswith("dbprint://empty/")}
+
+        assert connection_entries == {
+            "dbprint://empty/manifest",
+            "dbprint://empty/diff",
+            "dbprint://empty/reading",
+        }
+
+        for uri in connection_entries:
+            with pytest.raises(McpError):
+                read(state, uri)
 
     def test_per_table_entries_included(self, primary_conn: ConnectionConfig) -> None:
         state = ServedConnections(served={"production": primary_conn}, default="production")

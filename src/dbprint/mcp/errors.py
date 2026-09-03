@@ -122,6 +122,16 @@ def no_reading_guide_available(path: str) -> McpError:
     )
 
 
+def no_reference_document_available(document: str) -> McpError:
+    """Neither the packaged copy nor the source-tree fallback resolved - an install defect."""
+
+    return McpError(
+        -32603,
+        f"no {document} reference document available - neither the installed package nor "
+        "the source tree carries it.",
+    )
+
+
 def undeclared_artifact_kind(kind: str, table: str) -> McpError:
     """The manifest never declares this kind for this table - a caller error, not corruption."""
 

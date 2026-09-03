@@ -92,9 +92,14 @@ def test_an_emitted_empty_collection_is_read_in_7_4_and_not_as_an_absence(shape:
     assert shape not in _section("### 7.2 Absent per-column fields", "### 7.3")
 
 
-def test_producer_failure_is_stated_as_unrepresentable() -> None:
-    """The one cause no row can carry, so it is stated rather than left to be assumed."""
+def test_producer_failure_is_stated_as_representable_only_through_the_marker() -> None:
+    """The one cause no row can carry, so 7.1 names where it IS carried instead.
+
+    A reader who missed that would take every absence below for a property of the data.
+    """
 
     preamble = _section("### 7.1 The two absences", "### 7.2")
 
-    assert "not representable at all" in preamble
+    assert "`unmeasured`" in preamble
+    assert "only on an artifact that carries the marker" in preamble
+    assert "not representable at all" not in preamble

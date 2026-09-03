@@ -14,7 +14,7 @@ from click.testing import CliRunner
 from rich.console import Console
 
 from dbprint.cli.main import main
-from dbprint.cli.rendering.progress import LiveProgressRenderer
+from dbprint.cli.rendering.progress import LiveProgressRenderer, _eta_seconds
 from dbprint.engine import ProgressEvent
 
 
@@ -60,7 +60,27 @@ class TestOfflineProgress:
         result = CliRunner().invoke(main, ["check", "--format", "json"])
 
         assert "seedbank.accession" in result.stderr
-        assert "\tok\t" in result.stderr
+        assert "\tvalidated\t" in result.stderr
+
+    def test_summary_elapsed_ms_is_real_not_the_online_only_diff_result(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """`diff_result` exists only under `--online`; an offline run's summary must still
+        report a real wall-clock duration rather than the `0` that source alone would give.
+        """
+
+        _seed_committed_print(tmp_path, committed_print)
+        monkeypatch.chdir(tmp_path)
+
+        result = CliRunner().invoke(main, ["check", "--format", "json", "--no-tui"])
+
+        summary_line = next(line for line in result.stderr.splitlines() if "\tsummary\t" in line)
+        elapsed = summary_line.rsplit("\t", 1)[-1]
+
+        assert elapsed != "0.0s"
 
     def test_stdout_stays_a_clean_envelope(
         self,
@@ -101,6 +121,30 @@ class TestOfflineProgress:
 
         issues = validate_print(committed_print / "production")
         assert isinstance(issues, list)
+
+    def test_a_missing_manifest_still_reaches_the_connection_summary(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A connection with no manifest never runs a table, but the renderer must still be
+        told it happened - otherwise the run's own ok/failed tally silently omits it.
+        """
+
+        (tmp_path / ".dbprint.yaml").write_text(
+            "connections:\n  primary:\n    adapter: postgres\n    output: prints\n",
+        )
+        monkeypatch.chdir(tmp_path)
+
+        result = CliRunner().invoke(main, ["check", "--format", "json", "--no-tui"])
+
+        summary_line = next(
+            (line for line in result.stderr.splitlines() if "\tsummary\t" in line),
+            None,
+        )
+
+        assert summary_line is not None
+        assert "primary\tsummary\t0 ok / 0 failed / 0 skipped" in summary_line
 
 
 class TestQuiet:
@@ -148,7 +192,7 @@ class TestQuiet:
         assert quiet.exit_code == loud.exit_code
         assert _rounded_age(quiet.stdout) == _rounded_age(loud.stdout)
 
-    def test_quiet_with_tui_prints_no_not_a_tty_warning(
+    def test_quiet_with_tui_prints_no_refusal_warning(
         self,
         tmp_path: Path,
         committed_print: Path,
@@ -161,7 +205,30 @@ class TestQuiet:
 
         result = CliRunner().invoke(main, ["check", "--format", "json", "--quiet", "--tui"])
 
-        assert "not a TTY" not in result.stderr
+        assert "does not support the live view" not in result.stderr
+
+
+class TestRefusedTuiIsStated:
+    """A `--tui` request refused for being a dumb or too-short terminal says so, not just an
+    outright non-terminal - both routes downgrade through the same `supports_live` check.
+    """
+
+    def test_a_dumb_terminal_states_the_downgrade(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _seed_committed_print(tmp_path, committed_print)
+        monkeypatch.chdir(tmp_path)
+        # `TTY_COMPATIBLE=1` makes Rich report a real terminal without a pty; `TERM=dumb` then
+        # makes it a dumb one, which `is_terminal` alone does not distinguish.
+        monkeypatch.setenv("TTY_COMPATIBLE", "1")
+        monkeypatch.setenv("TERM", "dumb")
+
+        result = CliRunner().invoke(main, ["check", "--format", "json", "--tui"])
+
+        assert "warning: --tui requested but stderr does not support the live view" in result.stderr
 
 
 class TestOnlineProgress:
@@ -194,6 +261,12 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
 
 
+def _duration_seconds(line: str) -> float:
+    """The trailing `tree.duration_text` field on a streaming progress line, as a float."""
+
+    return float(line.rsplit("\t", 1)[-1].removesuffix("s"))
+
+
 def _tick(
     fqn: str,
     index: int,
@@ -215,6 +288,8 @@ def _tick(
         total=pass_total * total,
         fqn=fqn,
         pass_name=pass_name,
+        pass_index=pass_index,
+        pass_total=pass_total,
         findings=findings,
         elapsed_ms=elapsed_ms,
     )
@@ -251,7 +326,7 @@ class TestValidationLiveRendering:
             assert r._total == 6  # 2 tables * 3 passes
             assert r._index == 6  # last tick: pass 3, table 2
 
-    def test_banner_prints_once_preceded_by_a_blank_line(self) -> None:
+    def test_banner_box_prints_once_as_a_rounded_box(self) -> None:
         buf = StringIO()
         console = Console(file=buf, force_terminal=True, width=100, color_system=None)
 
@@ -259,10 +334,26 @@ class TestValidationLiveRendering:
             self._drive_two_tables_three_passes(r)
 
         lines = _strip_ansi(buf.getvalue()).splitlines()
-        banner_idxs = [i for i, line in enumerate(lines) if re.match(r"^-- .+ -+$", line)]
-        assert len(banner_idxs) == 1
-        assert lines[banner_idxs[0]].startswith("-- Validating ")
-        assert lines[banner_idxs[0] - 1].strip() == ""
+        top_idxs = [i for i, line in enumerate(lines) if line.startswith("╭")]
+        assert len(top_idxs) == 1
+        top = top_idxs[0]
+        assert "Validating" in lines[top + 1]
+        assert lines[top + 2].startswith("╰")
+        # No blank-line print of its own precedes the box - two consecutive blanks would mean
+        # one survived. A pty capture covers the harness's own line cadence.
+        assert not (top >= 2 and lines[top - 1].strip() == "" and lines[top - 2].strip() == "")
+
+    def test_footer_names_the_running_pass(self) -> None:
+        console = Console(file=StringIO(), force_terminal=True, width=100, color_system=None)
+
+        with LiveProgressRenderer(console) as r:
+            r.on_event(_tick("seedbank.accession", 1, 2, "manifest", 1, 3))
+            assert "manifest" in r._bar_line().plain
+            assert "seedbank.accession" in r._inflight_line().plain
+            assert "manifest" not in r._inflight_line().plain
+
+            r.on_event(_tick("seedbank.accession", 1, 2, "artifacts", 2, 3))
+            assert "artifacts" in r._bar_line().plain
 
     def test_leaf_prints_only_on_the_findings_tick_with_a_count_not_rows(self) -> None:
         buf = StringIO()
@@ -278,33 +369,86 @@ class TestValidationLiveRendering:
         assert out.count("accession") == 1  # header + leaf, once - not once per pass
         assert out.count("taxon") == 1
 
-    def test_footer_names_the_running_pass(self) -> None:
+    def test_eta_resolves_within_the_first_tick_not_the_first_findings_tick(self) -> None:
+        """Every `validate` tick carries its own `elapsed_ms`; the ETA accumulates from the
+        first one rather than waiting for the tenth, closing tick that also carries `findings`.
+        """
+
         console = Console(file=StringIO(), force_terminal=True, width=100, color_system=None)
 
         with LiveProgressRenderer(console) as r:
-            r.on_event(_tick("seedbank.accession", 1, 2, "manifest", 1, 3))
-            assert "manifest" in r._inflight_line().plain
-
-            r.on_event(_tick("seedbank.accession", 1, 2, "artifacts", 2, 3))
-            assert "artifacts" in r._inflight_line().plain
-
-    def test_eta_resolves_once_a_findings_tick_lands(self) -> None:
-        console = Console(file=StringIO(), force_terminal=True, width=100, color_system=None)
-
-        with LiveProgressRenderer(console) as r:
-            r.on_event(_tick("seedbank.accession", 1, 2, "manifest", 1, 3))
             assert "--:--" in r._bar_line().plain
 
-            r.on_event(
-                _tick("seedbank.accession", 1, 2, "edge claims", 3, 3, findings=0, elapsed_ms=5),
-            )
+            r.on_event(_tick("seedbank.accession", 1, 2, "manifest", 1, 3, elapsed_ms=5))
             assert "--:--" not in r._bar_line().plain
+
+    def test_the_running_pass_is_priced_from_its_own_cost(self) -> None:
+        """The running pass prices at its own rate; unmeasured passes fall back to the run mean."""
+
+        console = Console(file=StringIO(), force_terminal=True, width=100, color_system=None)
+
+        with LiveProgressRenderer(console) as r:
+            for i in (1, 2):
+                r.on_event(_tick("seedbank.accession", i, 2, "manifest", 1, 3, elapsed_ms=1_000))
+
+            r.on_event(_tick("seedbank.accession", 1, 2, "artifacts", 2, 3, elapsed_ms=10))
+            eta = _eta_seconds(r._costs, r._segment, *r._remaining_split())
+
+        # One tick left in the cheap pass at its own 10ms, two beyond it at the run's 670ms mean.
+        assert eta == pytest.approx((10 + 2 * 670) / 1000)
+
+    def test_eta_resets_on_a_connection_change_with_no_connecting_event(self) -> None:
+        """`check` never emits `connecting` - the reset must not depend on that phase firing."""
+
+        console = Console(file=StringIO(), force_terminal=True, width=100, color_system=None)
+
+        with LiveProgressRenderer(console) as r:
+            r.on_event(_tick("acme.t1", 1, 1, "manifest", 1, 1, elapsed_ms=2_000))
+            r.on_event(
+                ProgressEvent(
+                    connection="secondary",
+                    phase="validate",
+                    status="done",
+                    index=1,
+                    total=3,
+                    fqn="s.t1",
+                    pass_name="manifest",
+                    pass_index=1,
+                    pass_total=1,
+                    elapsed_ms=5,
+                ),
+            )
+            eta = _eta_seconds(r._costs, r._segment, *r._remaining_split())
+
+        # 2 remaining ticks priced at `secondary`'s own 5ms - `acme`'s 2000ms must not blend in.
+        assert eta == pytest.approx(2 * 5 / 1000)
+
+    def test_bar_label_carries_the_pass_padded_to_a_fixed_bracket_column(self) -> None:
+        console = Console(file=StringIO(), force_terminal=True, width=100, color_system=None)
+
+        with LiveProgressRenderer(console) as r:
+            r.on_event(_tick("seedbank.accession", 1, 2, "manifest", 1, 10))
+            short = r._bar_line().plain
+            assert short.startswith("Validating manifest")
+
+            r.on_event(_tick("seedbank.accession", 1, 2, "edge reciprocity", 3, 10))
+            long = r._bar_line().plain
+            assert long.startswith("Validating edge reciprocity")
+
+            assert short.index("[") == long.index("[")
 
 
 class TestAssertionsLiveRendering:
     """The single `assertions` pass shares `validate`'s bar but has no findings count of its own."""
 
-    def _assertions_tick(self, fqn: str, index: int, total: int) -> ProgressEvent:
+    def _assertions_tick(
+        self,
+        fqn: str,
+        index: int,
+        total: int,
+        *,
+        elapsed_ms: int | None = None,
+    ) -> ProgressEvent:
         """Shaped like `_assertions_progress_adapter`'s own output - no `pass_name` or `findings`."""
 
         return ProgressEvent(
@@ -314,6 +458,7 @@ class TestAssertionsLiveRendering:
             index=index,
             total=total,
             fqn=fqn,
+            elapsed_ms=elapsed_ms,
         )
 
     def test_every_tick_prints_its_leaf(self) -> None:
@@ -328,6 +473,21 @@ class TestAssertionsLiveRendering:
         assert out.count("accession") == 1
         assert out.count("taxon") == 1
 
+    def test_the_leaf_carries_a_duration_never_a_borrowed_row_count(self) -> None:
+        """Assertions read no table rows - `- rows` would claim a measurement this phase
+        never took. `elapsed_ms` is real once `_assertions_progress_adapter` times it.
+        """
+
+        buf = StringIO()
+        console = Console(file=buf, force_terminal=True, width=100, color_system=None)
+
+        with LiveProgressRenderer(console) as r:
+            r.on_event(self._assertions_tick("seedbank.accession", 1, 1, elapsed_ms=250))
+
+        out = buf.getvalue()
+        assert "rows" not in out
+        assert "0.2s" in out
+
     def test_banner_reads_checking_assertions(self) -> None:
         buf = StringIO()
         console = Console(file=buf, force_terminal=True, width=100, color_system=None)
@@ -336,6 +496,72 @@ class TestAssertionsLiveRendering:
             r.on_event(self._assertions_tick("seedbank.accession", 1, 1))
 
         lines = _strip_ansi(buf.getvalue()).splitlines()
-        banner_idxs = [i for i, line in enumerate(lines) if re.match(r"^-- .+ -+$", line)]
-        assert len(banner_idxs) == 1
-        assert lines[banner_idxs[0]].startswith("-- Checking assertions ")
+        top_idxs = [i for i, line in enumerate(lines) if line.startswith("╭")]
+        assert len(top_idxs) == 1
+        assert "Checking assertions" in lines[top_idxs[0] + 1]
+
+
+class TestAssertionsDurationAttribution:
+    """`_load_committed_statistics` driven for real - not a hand-built `ProgressEvent` - since
+    the defect is in when `on_table` fires relative to the read it is supposed to time.
+    """
+
+    def test_each_tables_duration_lands_on_its_own_line(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """`on_table` fires after each table's read, so a slow table's cost lands on its own line.
+        `fixture.shape_probe` is the first table `check` walks; its read is made artificially slow.
+        """
+
+        import time
+
+        import dbprint.cli.commands.check as check_module
+
+        _seed_committed_print(tmp_path, committed_print)
+        (tmp_path / ".dbprint.yaml").write_text(
+            PROJECT_YAML + "    assertions:\n"
+            "      tables:\n"
+            "        fixture.shape_probe:\n"
+            "          row_count: {min: 1}\n",
+        )
+        monkeypatch.chdir(tmp_path)
+
+        # Replaces only this module's own `yaml` name - the real module and every other caller
+        # stay untouched, so the delay applies exactly once, to this module's own read.
+        real_yaml = check_module.yaml
+        marker = "table: fixture.shape_probe"
+
+        class _SlowedForOneTable:
+            def safe_load(self, text: str) -> Any:
+                if marker in text:
+                    time.sleep(1.0)
+
+                return real_yaml.safe_load(text)
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(real_yaml, name)
+
+        monkeypatch.setattr(check_module, "yaml", _SlowedForOneTable())
+
+        result = CliRunner().invoke(main, ["check", "--format", "json", "--no-tui"])
+        lines = {
+            line.split("\t", 2)[1]: line
+            for line in result.stderr.splitlines()
+            if "\tasserted\t" in line
+        }
+
+        slow = _duration_seconds(lines["fixture.shape_probe"])
+        fast = _duration_seconds(lines["seedbank.accession"])
+
+        # A relative comparison, not a fixed threshold: a heavily parallel run can add its own
+        # noise to every table's read, but the marked table's own ~1s sleep must still dominate.
+        assert slow >= 0.9, (
+            f"the slowed table's own line should show ~1.0s: {lines['fixture.shape_probe']}"
+        )
+        assert fast < slow - 0.5, (
+            f"the fast table's line should not inherit the slow table's cost: "
+            f"slow={slow}s fast={fast}s"
+        )

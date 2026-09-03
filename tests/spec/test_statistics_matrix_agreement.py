@@ -6,22 +6,31 @@ each other, never with the specification - this is the one check against the mar
 
 from __future__ import annotations
 
+import re
+
 from dbprint.spec.statistics_matrix import FORBIDDEN_FIELDS, REQUIRED_FIELDS
-from tests.spec._spec_markdown import matrix, matrix_classifications
+from tests.spec._spec_markdown import SPEC, matrix, matrix_classifications
 
 
-# The four column-field verdict forms of SPEC 2.2.3's legend, spelled by escape to keep
-# this file ASCII. A fifth, "R (scoped)", is reached only by `rows_scanned` and is handled
-# by name below, being conditioned on a file-level block rather than a sibling field.
+_H1_RE = re.compile(r"^# ", re.MULTILINE)
+
+
+# The column-field verdict forms of SPEC 2.2.3's legend, escaped to keep this file ASCII.
+# "R (scoped)" is reached only by `rows_scanned` and is handled by name below.
 _REQUIRED = "R"
 _OPTIONAL = "O"
 _FORBIDDEN = "\u2014"  # the table's em-dash: MUST NOT emit
 _R_DAGGER = "R\u2020"  # REQUIRED unless SPEC 2.2.3's dropped-bound footnote applies
 _R_DOUBLE_DAGGER = "R\u2021"  # REQUIRED unless the prose-column footnote applies
+_R_PILCROW = "R\u00b6"  # REQUIRED unless the single-row-redacted-aggregate footnote applies
+_R_PILCROW_VBAR = "R\u00b6\u2016"  # both the pilcrow condition and the type-admission footnote
+_R_REFERENCE_MARK = "R\u203b"  # REQUIRED unless the day-resolution footnote applies
 
-# SPEC 2.2.3's two footnote conditions: the flat row is REQUIRED and each reader
-# subtracts the condition procedurally, so both daggers map to plain R's membership.
-_REQUIRED_VERDICTS = frozenset({_REQUIRED, _R_DAGGER, _R_DOUBLE_DAGGER})
+# SPEC 2.2.3's footnote conditions: the flat row is REQUIRED and each reader subtracts the
+# condition procedurally, so every footnote - alone or combined - maps to plain R's membership.
+_REQUIRED_VERDICTS = frozenset(
+    {_REQUIRED, _R_DAGGER, _R_DOUBLE_DAGGER, _R_PILCROW, _R_PILCROW_VBAR, _R_REFERENCE_MARK},
+)
 
 
 # The module models a nested field at its container's name only, so a dotted field
@@ -108,8 +117,18 @@ def test_rows_scanned_is_conditioned_on_the_file_not_a_column() -> None:
         assert "rows_scanned" not in FORBIDDEN_FIELDS[classification]
 
 
-def test_the_two_footnote_conditions_reach_exactly_their_known_cells() -> None:
-    """A cell gaining or losing a dagger changes both readers - the module's flat REQUIRED
+def test_the_document_has_exactly_one_top_level_heading() -> None:
+    """A footnote marker with Markdown significance (`#` at column 0) reads as a second `<h1>`
+    on any compliant renderer - the site, GitHub, and the wheel `hatch_build` packages all see it.
+    """
+
+    text = SPEC.read_text(encoding="utf-8")
+
+    assert len(_H1_RE.findall(text)) == 1
+
+
+def test_the_footnote_conditions_reach_exactly_their_known_cells() -> None:
+    """A cell gaining or losing a footnote changes both readers - the module's flat REQUIRED
     entry and the validator's procedural subtraction - so the exact set is asserted.
     """
 
@@ -117,6 +136,9 @@ def test_the_two_footnote_conditions_reach_exactly_their_known_cells() -> None:
     classifications = matrix_classifications()
     daggered: set[tuple[str, str]] = set()
     double_daggered: set[tuple[str, str]] = set()
+    pilcrowed: set[tuple[str, str]] = set()
+    pilcrow_vbarred: set[tuple[str, str]] = set()
+    reference_marked: set[tuple[str, str]] = set()
 
     for field, verdicts in field_matrix.items():
         for classification, verdict in zip(classifications, verdicts, strict=True):
@@ -124,6 +146,12 @@ def test_the_two_footnote_conditions_reach_exactly_their_known_cells() -> None:
                 daggered.add((field, classification))
             elif verdict == _R_DOUBLE_DAGGER:
                 double_daggered.add((field, classification))
+            elif verdict == _R_PILCROW:
+                pilcrowed.add((field, classification))
+            elif verdict == _R_PILCROW_VBAR:
+                pilcrow_vbarred.add((field, classification))
+            elif verdict == _R_REFERENCE_MARK:
+                reference_marked.add((field, classification))
 
     assert daggered == {
         ("range", "temporal"),
@@ -136,4 +164,16 @@ def test_the_two_footnote_conditions_reach_exactly_their_known_cells() -> None:
         ("values", "text"),
         ("values_coverage", "text"),
         ("distribution", "text"),
+    }
+    assert pilcrowed == {
+        ("mean", "numeric"),
+        ("sum", "numeric"),
+        ("length", "text"),
+    }
+    assert pilcrow_vbarred == {
+        ("length", "categorical"),
+        ("length", "foreign_key_candidate"),
+    }
+    assert reference_marked == {
+        ("quantized_count", "temporal"),
     }

@@ -20,8 +20,12 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            ca-certificates curl git locales \
+            ca-certificates curl default-jre-headless git locales \
             postgresql postgresql-client mariadb-server mariadb-client
+
+          curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
+          apt-get install -y --no-install-recommends nodejs
+
           curl -LsSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
           curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
           locale-gen en_US.UTF-8
@@ -30,6 +34,9 @@ jobs:
 
       - name: Trust the checkout
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install the site's node dependencies, for the packaged-link cross-check test
+        run: cd site && npm ci
 
       - name: Install dependencies
         run: just install

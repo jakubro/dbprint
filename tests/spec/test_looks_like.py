@@ -17,6 +17,7 @@ import pytest
 
 from dbprint.spec.looks_like import (
     MATCH_THRESHOLD,
+    NEAR_MISS_FLOOR,
     _CURRENCY_CODES,
     LooksLike,
     detect,
@@ -1197,4 +1198,71 @@ class TestDetectWithEvidence:
 
         assert match.pattern is None
         assert match.sampled == 0
+
+
+class TestNearMiss:
+    """The best-scoring pattern below the verdict threshold (SPEC 4.1.3), floor at 50%."""
+
+    def test_a_mixed_column_reports_the_dominant_pattern_and_its_share(self) -> None:
+        values = _emails(70) + [f"free text value {i}" for i in range(30)]
+
+        match = detect_with_evidence(values)
+
+        assert match.pattern is None
+        assert match.candidate == "email"
+        assert match.candidate_share == pytest.approx(0.7)
+
+    def test_a_column_matching_nothing_above_the_floor_reports_no_candidate(self) -> None:
+        """Five shapes at even shares: the best of them clears neither the verdict nor the floor."""
+
+        values = (
+            _emails(16) + _uuids(16) + _media_types(16) + ["10.0.0.1"] * 16 + ["2026-01-01"] * 16
+        )
+
+        match = detect_with_evidence(values)
+
+        assert match.pattern is None
+        assert match.candidate is None
+        assert match.candidate_share is None
+
+    def test_exactly_at_the_floor_reports_a_candidate(self) -> None:
+        values = _emails(50) + [f"free text value {i}" for i in range(50)]
+
+        match = detect_with_evidence(values)
+
+        assert match.candidate == "email"
+        assert match.candidate_share == pytest.approx(NEAR_MISS_FLOOR)
+
+    def test_just_below_the_floor_reports_no_candidate(self) -> None:
+        values = _emails(49) + [f"free text value {i}" for i in range(51)]
+
+        match = detect_with_evidence(values)
+
+        assert match.candidate is None
+        assert match.candidate_share is None
+
+    def test_a_tie_at_the_bar_follows_the_priority_order(self) -> None:
+        """`uuid` outranks `email` (SPEC 4.1.4); an even split resolves to it, not by scan order."""
+
+        values = _uuids(50) + _emails(50)
+
+        match = detect_with_evidence(values)
+
+        assert match.candidate == "uuid"
+        assert match.candidate_share == pytest.approx(0.5)
+
+    def test_a_verdict_carries_no_candidate(self) -> None:
+        """The near-miss and the verdict are mutually exclusive - a winner is never also one."""
+
+        match = detect_with_evidence(_emails(100))
+
+        assert match.pattern == "email"
+        assert match.candidate is None
+        assert match.candidate_share is None
+
+    def test_an_empty_sample_reports_no_candidate(self) -> None:
+        match = detect_with_evidence([])
+
+        assert match.candidate is None
+        assert match.candidate_share is None
         assert match.matched == 0

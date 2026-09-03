@@ -105,6 +105,11 @@ columns:
     values_coverage: 1.0
     values_coverage_method: measured
     distribution: uniform
+    length:
+      min: 1
+      max: 1
+      avg: 1.0
+      p95: 1.0
     sketch:
       method: kmv_md5_lo64
       values: Glk1ty6svikvgLhNFD4SV2EBQJV6+rVxhp5OHwlHEBLXPW31tQu3te325emjLpTa
@@ -139,6 +144,11 @@ columns:
     values_coverage: 1.0
     values_coverage_method: measured
     distribution: uniform
+    length:
+      min: 16
+      max: 23
+      avg: 19.0
+      p95: 23.0
     sketch:
       method: kmv_md5_lo64
       values: ZXfLg2JajdFxa+ntC37FIJv+eoUBFYZNn1RDoHag2iGoUBlQ4KMfptg43OGlAh4C35IO8ioGftvzcdwdAY8f6w==

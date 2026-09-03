@@ -1,12 +1,9 @@
-"""`dbprint list` - offline summary of committed prints per connection.
-
-Reads `prints/<conn>/manifest.yaml`: connection metadata, schema + table counts, freshness
-buckets relative to `max_age_days`, and the count of tables carrying a `description.md`.
-"""
+"""`dbprint list` - offline summary of committed prints per connection."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import rich_click as click
@@ -14,12 +11,18 @@ import yaml
 from rich.console import Console
 
 from dbprint.engine import EXIT_GENERIC, EXIT_OK
-from dbprint.engine.baseline import manifest_shape_error, walkable_tables
+from dbprint.engine.baseline import (
+    declared_artifacts,
+    manifest_shape_error,
+    table_directory,
+    walkable_tables,
+)
+from dbprint.engine.freshness import evaluate
 from .. import thresholds
 from ..options import project_option, resolve_project
 from ..rendering import resolve_render_mode
 from ..rendering.errors import emit_error
-from ..rendering.list_data import render_data, render_not_run_data
+from ..rendering.list_data import render_data, render_not_run_piped, render_piped
 from ..rendering.list_tty import render_human
 from ..resolution import ConnectionResolutionError, resolve
 
@@ -28,21 +31,30 @@ from ..resolution import ConnectionResolutionError, resolve
 @click.argument("conn", required=False)
 @project_option
 @click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["human", "json", "yaml"], case_sensitive=False),
+    default="human",
+    show_default=True,
+    help="Output format.",
+)
+@click.option(
     "--tui/--no-tui",
     default=None,
-    help="Force TTY (Rich) or piped (plain-text) rendering.",
+    help="Force TTY (Rich) or piped (plain-text) rendering. Human format only.",
 )
 @click.pass_context
 def list_command(
     ctx: click.Context,
     conn: str | None,
     project: str | None,
+    fmt: str,
     tui: bool | None,
 ) -> None:
     """Summarise committed prints offline (no database connection).
 
-    Reads `prints/<conn>/manifest.yaml` and reports connection metadata, table
-    and schema counts, freshness buckets (live / stale / dormant) relative to
+    Reads `prints/<conn>/manifest.yaml` and reports connection metadata, the
+    table count, freshness buckets (live / stale / dormant) relative to
     each table's own `max_age_days`, and how many tables carry a user-authored
     `description.md`. Never connects to the database.
 
@@ -62,6 +74,7 @@ def list_command(
 
     - `dbprint list`: all auto connections
     - `dbprint list warehouse`: one connection
+    - `dbprint list --format json`: machine-readable summary
     """
 
     project_config = resolve_project(project)
@@ -72,22 +85,38 @@ def list_command(
         click.echo(str(exc), err=True)
         ctx.exit(EXIT_GENERIC)
 
-    mode = resolve_render_mode(tui)
+    fmt_lower = fmt.lower()
     console = Console()
+    # --tui only chooses a rendering of the human format; json/yaml is always one combined
+    # payload, ignoring --tui the same way `diff`'s own --format/--tui pair does.
+    mode = resolve_render_mode(tui, console) if fmt_lower == "human" else "piped"
     overall_exit = EXIT_OK
+    entries: list[dict[str, Any]] = []
 
     for conn_config in connections:
         manifest_path = conn_config.output / conn_config.name / "manifest.yaml"
 
         if not manifest_path.is_file():
-            _drop(conn_config.name, [f"no manifest at {manifest_path}"], mode)
+            _drop(
+                conn_config.name,
+                [f"no manifest at {manifest_path}"],
+                mode,
+                fmt_lower,
+                entries,
+            )
             overall_exit = max(overall_exit, EXIT_GENERIC)
             continue
 
         try:
-            parsed = yaml.safe_load(manifest_path.read_text())
+            parsed = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
         except yaml.YAMLError as exc:
-            _drop(conn_config.name, [f"could not parse {manifest_path}: {exc}"], mode)
+            _drop(
+                conn_config.name,
+                [f"could not parse {manifest_path}: {exc}"],
+                mode,
+                fmt_lower,
+                entries,
+            )
             overall_exit = max(overall_exit, EXIT_GENERIC)
             continue
 
@@ -95,7 +124,13 @@ def list_command(
         unusable = manifest_shape_error(parsed) or _unwalkable_entry_reason(parsed)
 
         if unusable is not None:
-            _drop(conn_config.name, [f"ignoring {manifest_path}: {unusable}"], mode)
+            _drop(
+                conn_config.name,
+                [f"ignoring {manifest_path}: {unusable}"],
+                mode,
+                fmt_lower,
+                entries,
+            )
             overall_exit = max(overall_exit, EXIT_GENERIC)
             continue
 
@@ -105,7 +140,7 @@ def list_command(
         # A table the cascade refuses has no threshold to bucket it by, so the counts would
         # describe fewer tables than `table_count` names; the connection is skipped whole.
         if resolved.refused:
-            _drop(conn_config.name, list(resolved.refused.values()), mode)
+            _drop(conn_config.name, list(resolved.refused.values()), mode, fmt_lower, entries)
             overall_exit = max(overall_exit, EXIT_GENERIC)
             continue
 
@@ -115,12 +150,18 @@ def list_command(
                 err=True,
             )
 
-        summary = _summarize_connection(manifest, resolved)
+        print_root = conn_config.output / conn_config.name
+        summary = _summarize_connection(manifest, resolved, print_root)
 
-        if mode == "tty":
+        if fmt_lower in {"json", "yaml"}:
+            entries.append({"connection": conn_config.name, "ok": True, **summary})
+        elif mode == "tty":
             render_human(conn_config.name, summary, console)
         else:
-            render_data(conn_config.name, summary, click.get_text_stream("stdout"))
+            render_piped(conn_config.name, summary, click.get_text_stream("stdout"))
+
+    if fmt_lower in {"json", "yaml"}:
+        render_data(entries, fmt_lower, click.get_text_stream("stdout"))
 
     ctx.exit(overall_exit)
 
@@ -128,32 +169,36 @@ def list_command(
 def _summarize_connection(
     manifest: dict[str, Any],
     resolved: thresholds.OfflineThresholds,
+    print_root: Path,
 ) -> dict[str, Any]:
-    """Summarise one connection's manifest against its settled thresholds."""
+    """Summarise one connection's manifest against its settled thresholds - buckets come from
+    `engine.freshness.evaluate`, so `check` and `list` never disagree about stale vs dormant.
+    """
 
     tables = manifest.get("tables", {})
     now = datetime.now(UTC)
+    by_fqn = {e.fqn: e for e in evaluate(manifest, 0.0, now, threshold_for=resolved.threshold_for)}
     live = stale = dormant = described = 0
 
     for fqn, entry in tables.items():
-        # Each table is bucketed against its own threshold, so the counts agree with `check`.
-        bucket = _freshness_bucket(
-            entry.get("profiled_at"),
-            now,
-            resolved.threshold_for(fqn),
-        )
+        stale_entry = by_fqn.get(fqn)
 
-        if bucket == "live":
+        if stale_entry is None:
             live += 1
-        elif bucket == "stale":
-            stale += 1
-        elif bucket == "dormant":
+        elif stale_entry.age_days == float("inf"):
             dormant += 1
+        else:
+            stale += 1
 
-        artifacts = entry.get("artifacts") or {}
+        # A declared-but-missing description does not count (SPEC 2.5): the manifest
+        # promising a file is not the same fact as the file being there to read.
+        artifacts = declared_artifacts(entry)
 
-        if isinstance(artifacts, dict) and "description" in artifacts:
-            described += 1
+        if "description" in artifacts:
+            table_dir = table_directory(print_root, fqn, entry)
+
+            if (table_dir / artifacts["description"]).is_file():
+                described += 1
 
     return {
         "adapter": manifest.get("adapter", ""),
@@ -166,7 +211,13 @@ def _summarize_connection(
     }
 
 
-def _drop(name: str, causes: list[str], mode: str) -> None:
+def _drop(
+    name: str,
+    causes: list[str],
+    mode: str,
+    fmt: str,
+    entries: list[dict[str, Any]],
+) -> None:
     """Report a connection this command could not summarise, on both channels.
 
     stderr always carries the cause; stdout carries it only in machine mode, where a consumer
@@ -176,8 +227,10 @@ def _drop(name: str, causes: list[str], mode: str) -> None:
     for cause in causes:
         emit_error(f"{name}: {cause}")
 
-    if mode != "tty":
-        render_not_run_data(name, causes, click.get_text_stream("stdout"))
+    if fmt in {"json", "yaml"}:
+        entries.append({"connection": name, "ok": False, "causes": list(causes)})
+    elif mode != "tty":
+        render_not_run_piped(name, causes, click.get_text_stream("stdout"))
 
 
 def _unwalkable_entry_reason(manifest: Any) -> str | None:
@@ -194,22 +247,3 @@ def _unwalkable_entry_reason(manifest: Any) -> str | None:
         return None
 
     return f"no usable entry for {', '.join(unwalkable)}"
-
-
-def _freshness_bucket(profiled_at: str | None, now: datetime, max_age_days: float) -> str:
-    if not profiled_at:
-        return "dormant"
-
-    try:
-        prior = datetime.fromisoformat(profiled_at)
-    except (ValueError, AttributeError):
-        return "dormant"
-
-    age_days = (now - prior).total_seconds() / 86400.0
-
-    if age_days < max_age_days:
-        return "live"
-    elif age_days < max_age_days * 13:  # ~90 days when max_age_days=7
-        return "stale"
-    else:
-        return "dormant"

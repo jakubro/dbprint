@@ -48,6 +48,36 @@ _COMMITTED_PRINTS = _COMMITTED_PRINTS / "production/prints"
 # is first needed), so every xdist worker in the run agrees on the same lock file.
 _CLUSTER_BOOTSTRAP_LOCK_PATH = Path("/tmp/dbprint--test-cluster-bootstrap.lock")
 
+# A private root is one filesystem shared by every xdist worker, so the same escape is visible to
+# all of them - one marker per claimed entry turns "every worker reports it" into "one does".
+_CONTAINMENT_CLAIMS_DIR = Path("/tmp/dbprint--containment-claims")
+
+_UNSAFE_CLAIM_CHARS_RE = re.compile(r"[^A-Za-z0-9_.-]")
+
+# `-n auto` sized by cores alone stands up more live substrates than the host has memory for.
+_MEMORY_CEILING_MB = 32 * 1024
+
+# Estimate, not a measurement - the expensive worker is the one holding Spark or ClickHouse.
+_WORKER_MEMORY_MB = 2 * 1024
+
+_MEMORY_CEILING_ENV = "DBPRINT_TEST_MEMORY_MB"
+
+_MEM_AVAILABLE_RE = re.compile(r"^MemAvailable:\s+(\d+) kB$", re.MULTILINE)
+
+# Vendors whose substrate is a server or a container: one xdist group each, so `--dist load` runs
+# a single live instance per vendor. duckdb and the mock are absent - in-process, cheap to repeat.
+_SUBSTRATE_VENDORS = frozenset(
+    {
+        "postgres",
+        "mysql",
+        "snowflake",
+        "clickhouse",
+        "redshift",
+        "databricks",
+        "bigquery",
+    },
+)
+
 # Set on the re-exec, so the sandboxed process does not sandbox itself again.
 _SANDBOX_MARKER = "DBPRINT_TEST_SANDBOXED"
 
@@ -114,11 +144,81 @@ def _reexec_under_sandbox() -> None:
     os.execv(bwrap, [bwrap, *_SANDBOX_ARGV, sys.executable, "-m", "pytest", *sys.argv[1:]])
 
 
+def pytest_xdist_auto_num_workers() -> int:
+    """Size `-n auto` by the memory budget rather than by the core count."""
+
+    cores = os.cpu_count() or 1
+
+    return max(1, min(cores, _memory_budget_mb() // _WORKER_MEMORY_MB))
+
+
+def _memory_budget_mb() -> int:
+    """Return the smallest of the ceiling, this cgroup's limit, and what the host has free."""
+
+    ceiling = int(os.environ.get(_MEMORY_CEILING_ENV) or _MEMORY_CEILING_MB)
+    measured = (_cgroup_limit_mb(), _available_mb())
+
+    return min([ceiling, *(value for value in measured if value is not None)])
+
+
+def _cgroup_limit_mb() -> int | None:
+    """Return this cgroup's v2 memory ceiling, or None where it is unset or unreadable."""
+
+    try:
+        raw = Path("/sys/fs/cgroup/memory.max").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+
+    if raw == "max":
+        return None
+
+    return int(raw) // (1024 * 1024)
+
+
+def _available_mb() -> int | None:
+    """Return MemAvailable - what the host can give up without swapping - or None."""
+
+    try:
+        meminfo = Path("/proc/meminfo").read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    match = _MEM_AVAILABLE_RE.search(meminfo)
+
+    return int(match.group(1)) // 1024 if match is not None else None
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Pin every vendor-parameterised test to that vendor's xdist group."""
+
+    for item in items:
+        vendor = _substrate_vendor(item)
+
+        if vendor is not None:
+            item.add_marker(pytest.mark.xdist_group(vendor))
+
+
+def _substrate_vendor(item: pytest.Item) -> str | None:
+    """Return the out-of-process substrate an item is parameterised on, or None."""
+
+    callspec = getattr(item, "callspec", None)
+
+    if callspec is None:
+        return None
+
+    for value in callspec.params.values():
+        if isinstance(value, str) and value in _SUBSTRATE_VENDORS:
+            return value
+
+    return None
+
+
 def pytest_sessionfinish(session: pytest.Session) -> None:
-    """Remove the lock files the run created, once no worker can still take one.
+    """Remove the lock files and containment claims the run created, once no worker can still
+    need one.
 
     Only the controller does it. xdist finishes the controller after every worker, so a peer
-    cannot be holding a lock this deletes.
+    cannot be holding a lock, or still checking a claim, this deletes.
     """
 
     if hasattr(session.config, "workerinput"):
@@ -127,24 +227,78 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
     for path in (_CLUSTER_BOOTSTRAP_LOCK_PATH, INSTALL_LOCK_PATH):
         path.unlink(missing_ok=True)
 
+    shutil.rmtree(_CONTAINMENT_CLAIMS_DIR, ignore_errors=True)
 
-@pytest.fixture(scope="session", autouse=True)
-def _contained_to_scratch() -> Iterator[None]:
-    """Fail the session when it left anything outside the scratch tree."""
 
-    before = _containment.snapshot()
+def _claim(key: str) -> bool:
+    """Atomically claim a containment violation; True only for the first caller to claim it.
 
-    yield
+    A private root is one filesystem shared by every worker and test, so the same escape is
+    visible to every later check - the claim is what makes it report exactly once.
+    """
+
+    _CONTAINMENT_CLAIMS_DIR.mkdir(parents=True, exist_ok=True)
+    marker = _CONTAINMENT_CLAIMS_DIR / _UNSAFE_CLAIM_CHARS_RE.sub("_", key)
+
+    try:
+        marker.touch(exist_ok=False)
+    except FileExistsError:
+        return False
+
+    return True
+
+
+def _unclaimed_problems(before: dict[str, frozenset[str]]) -> list[str]:
+    """Diff since `before` against the live filesystem, keeping only what nothing has claimed."""
 
     problems = []
-    appeared = _containment.escaped(before, _containment.snapshot())
-    strays = _containment.suite_entries()
+    appeared = {
+        root: [name for name in names if _claim(f"appeared::{root}::{name}")]
+        for root, names in _containment.escaped(before, _containment.snapshot()).items()
+    }
+    appeared = {root: names for root, names in appeared.items() if names}
+    strays = [entry for entry in _containment.suite_entries() if _claim(f"stray::{entry}")]
 
     if appeared:
         problems.append(f"new entries under a private root: {appeared}")
 
     if strays:
         problems.append(f"suite-named entries outside the scratch tree: {strays}")
+
+    return problems
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _contained_to_scratch_session() -> Iterator[None]:
+    """Catch a write a per-test check cannot see: one made during a session fixture's setup,
+    before the first test that triggers it has taken its snapshot.
+
+    The fallback, not the primary attribution - a per-test write is claimed there first.
+    """
+
+    before = _containment.snapshot()
+
+    yield
+
+    problems = _unclaimed_problems(before)
+
+    if problems:
+        raise AssertionError("; ".join(problems))
+
+
+@pytest.fixture(autouse=True)
+def _contained_to_scratch_per_test() -> Iterator[None]:
+    """Fail the one test that wrote outside the scratch tree, naming what it created.
+
+    Snapshotting per test pins the writer: the failing test is whichever one's own window
+    contains the write, not whichever ran last in a session shared by every check.
+    """
+
+    before = _containment.snapshot()
+
+    yield
+
+    problems = _unclaimed_problems(before)
 
     if problems:
         raise AssertionError("; ".join(problems))
@@ -186,7 +340,7 @@ def _serialize_cluster_bootstrap() -> Iterator[None]:
 
     _CLUSTER_BOOTSTRAP_LOCK_PATH.touch(exist_ok=True)
 
-    with _CLUSTER_BOOTSTRAP_LOCK_PATH.open("r+") as lock_file:
+    with _CLUSTER_BOOTSTRAP_LOCK_PATH.open("r+", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
 
         try:
@@ -419,6 +573,7 @@ def mysql_cluster() -> Iterator[MysqlCluster]:
                     str(mariadbd),
                     "--no-defaults",
                     f"--datadir={data_dir}",
+                    f"--tmpdir={data_dir}",
                     f"--socket={socket_path}",
                     f"--port={port}",
                     "--bind-address=127.0.0.1",

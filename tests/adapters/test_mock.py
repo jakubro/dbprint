@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from dbprint.adapters import (
+    ColumnStats,
     CommentsMeta,
     MockAdapter,
     MockTable,
@@ -111,3 +112,76 @@ class TestStatisticsContract:
             TableCounts(row_count=0, rows_scanned=0, row_count_method="exact"),
             {},
         )
+
+
+def _stats_table(
+    cardinality: int,
+    normalized_cardinalities: dict[str, int] | None = None,
+) -> MockTable:
+    return MockTable(
+        type="table",
+        namespace_path=("schema", "t"),
+        ddl="CREATE TABLE schema.t (s text);\n",
+        columns=[],
+        relationships=[],
+        indexes=[],
+        comments=CommentsMeta(table=None, columns={}),
+        stats={
+            "s": ColumnStats(
+                sql_type="text",
+                nullable=True,
+                null_count=0,
+                null_rate=0.0,
+                cardinality=cardinality,
+                cardinality_ratio=0.5,
+                cardinality_method="exact",
+            ),
+        },
+        samples={},
+        normalized_cardinalities=normalized_cardinalities or {},
+    )
+
+
+class TestViewDependencies:
+    """`introspect_view_dependencies`: connection-scoped, stated on the adapter itself - not
+    per-MockTable, the same way `default_collation` never rides the fixture dict either.
+    """
+
+    def test_defaults_to_none(self) -> None:
+        """Unstated means "not asked", the same default a real adapter's own failure produces."""
+
+        adapter = MockAdapter({"schema.v": _empty_table()})
+        adapter.connect()
+        assert adapter.introspect_view_dependencies() is None
+
+    def test_returns_the_stated_map_verbatim(self) -> None:
+        stated: dict[str, tuple[str, ...]] = {"schema.v": ("schema.t",), "schema.w": ()}
+        adapter = MockAdapter({"schema.t": _empty_table()}, dependencies=stated)
+        adapter.connect()
+        assert adapter.introspect_view_dependencies() == stated
+
+
+class TestNormalizedCardinality:
+    """`compute_normalized_cardinality`: stated, never derived - the fixture's own merge
+    count, defaulting to `cardinality` (no case/whitespace merges) when unstated.
+    """
+
+    def test_defaults_to_cardinality_when_unstated(self) -> None:
+        adapter = MockAdapter({"schema.t": _stats_table(cardinality=5)})
+        adapter.connect()
+
+        assert adapter.compute_normalized_cardinality("schema.t", "s") == 5
+
+    def test_uses_the_stated_merge_count_when_present(self) -> None:
+        adapter = MockAdapter(
+            {"schema.t": _stats_table(cardinality=5, normalized_cardinalities={"s": 3})},
+        )
+        adapter.connect()
+
+        assert adapter.compute_normalized_cardinality("schema.t", "s") == 3
+
+    def test_missing_column_falls_back_to_zero(self) -> None:
+        adapter = MockAdapter({"schema.t": _empty_table()})
+        adapter.connect()
+
+        assert adapter.compute_normalized_cardinality("schema.t", "no_such_col") == 0

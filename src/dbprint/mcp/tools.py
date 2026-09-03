@@ -337,24 +337,16 @@ def _tool_get_table_context(
         budget=budget,
     )
 
-    table_dir = table_directory(_print_root(conn), table, entry)
-    declared = declared_artifacts(entry)
-    corrupted = _corrupted_artifacts(table_dir, declared)
-
     # MCP.md 4.1: json returns the structured object, yaml that object as text, md markdown.
-    # `_missing` is the assembler's own - carried in the payload or header, never prepended here.
+    # `_missing`/`_corrupted` are the assembler's own - carried in the payload or header,
+    # never recomputed here: one computation, one answer on every format.
     if options.format == "json":
-        result = assemble_structured_context(
+        return assemble_structured_context(
             manifest=manifest,
             print_root=_print_root(conn),
             table=table,
             options=options,
         )
-
-        if corrupted:
-            result["_corrupted"] = corrupted
-
-        return result
 
     if options.format == "yaml":
         structured = assemble_structured_context(
@@ -364,27 +356,15 @@ def _tool_get_table_context(
             options=options,
         )
 
-        if corrupted:
-            structured["_corrupted"] = corrupted
-
         return yaml.safe_dump(structured, sort_keys=False, default_flow_style=False)
 
-    result_text = assemble_context(
+    return assemble_context(
         manifest=manifest,
         print_root=_print_root(conn),
         tables=[table],
         options=options,
         connection_name=conn.name,
     ).text
-
-    notes = [f"> **{kind}** did not parse: {msg}" for kind, msg in corrupted.items()]
-
-    if notes:
-        note = "\n".join(notes)
-
-        return f"{note}\n\n{result_text}" if result_text else note
-
-    return result_text
 
 
 def _tool_list_tables(state: ServedConnections, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -453,7 +433,8 @@ def _field_matches(value: Any, glob: str | None) -> bool:
 
 
 def _column_matches(col: dict[str, Any], filters: _ColumnFilters) -> bool:
-    inferred = col.get("inferred") or {}
+    raw_inferred = col.get("inferred")
+    inferred = raw_inferred or {}
 
     if not _field_matches(col.get("classification"), filters.classification):
         return False
@@ -470,10 +451,15 @@ def _column_matches(col: dict[str, Any], filters: _ColumnFilters) -> bool:
     if not _field_matches(col.get("redacted"), filters.redacted):
         return False
 
-    return not (
-        filters.candidate_key is not None
-        and bool(inferred.get("candidate_key")) != filters.candidate_key
-    )
+    if filters.candidate_key is None:
+        return True
+
+    # `candidate_key` is a bare `true`, so "tested, not a key" and "never tested" both read as
+    # absent - `cardinality`, never emitted for a `catalog_only` column, tells them apart.
+    if col.get("cardinality") is None:
+        return False
+
+    return bool(inferred.get("candidate_key")) == filters.candidate_key
 
 
 def _search_match(
@@ -623,7 +609,7 @@ def _tool_get_diff(state: ServedConnections, arguments: dict[str, Any]) -> dict[
         raise errors.no_diff_available(str(diff_path))
 
     try:
-        data = yaml.safe_load(diff_path.read_text())
+        data = yaml.safe_load(diff_path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
         raise errors.yaml_parse_error(str(diff_path), str(exc)) from exc
 
@@ -713,40 +699,6 @@ def _validate_limit(value: Any) -> int | None:
     return value
 
 
-_YAML_ARTIFACT_KINDS = (
-    "statistics",
-    "relationships",
-    "statistics_annotations",
-    "relationships_annotations",
-)
-
-
-def _corrupted_artifacts(table_dir: Path, artifacts: dict[str, str]) -> dict[str, str]:
-    """Kind -> parse-error message, for every declared YAML artifact that fails to parse.
-
-    Not an undeclared kind (silently omitted, SPEC 2.3) and not a declared-but-absent file
-    (`engine.baseline.missing_artifacts`) - only bytes present and broken.
-    """
-
-    corrupted: dict[str, str] = {}
-
-    for kind in _YAML_ARTIFACT_KINDS:
-        if kind not in artifacts:
-            continue
-
-        path = table_dir / artifacts[kind]
-
-        if not path.is_file():
-            continue
-
-        try:
-            yaml.safe_load(path.read_text())
-        except yaml.YAMLError as exc:
-            corrupted[kind] = str(exc)
-
-    return corrupted
-
-
 def _load_manifest(conn: ConnectionConfig) -> dict[str, Any] | None:
     manifest_path = _print_root(conn) / "manifest.yaml"
 
@@ -754,7 +706,7 @@ def _load_manifest(conn: ConnectionConfig) -> dict[str, Any] | None:
         return None
 
     try:
-        data = yaml.safe_load(manifest_path.read_text())
+        data = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
         raise errors.yaml_parse_error(str(manifest_path), str(exc)) from exc
 
@@ -785,7 +737,7 @@ def _load_statistics_columns(
         return {}, None
 
     try:
-        data = yaml.safe_load(stats_path.read_text()) or {}
+        data = yaml.safe_load(stats_path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
         return {}, str(exc)
 
@@ -816,7 +768,7 @@ def _load_annotation_columns(
         return {}, None
 
     try:
-        data = yaml.safe_load(ann_path.read_text()) or {}
+        data = yaml.safe_load(ann_path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
         return {}, str(exc)
 

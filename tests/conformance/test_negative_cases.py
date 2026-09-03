@@ -54,12 +54,13 @@ _StringTimestampLoader.add_constructor(
 
 
 def _load_yaml_file(p: Path) -> Any:
-    return yaml.load(p.read_text(), Loader=_StringTimestampLoader)
+    return yaml.load(p.read_text(encoding="utf-8"), Loader=_StringTimestampLoader)
 
 
 def _write_yaml_file(p: Path, data: Any) -> None:
     p.write_text(
         yaml.safe_dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
     )
 
 
@@ -147,6 +148,38 @@ def test_schema_unknown_classification(print_dir: Path) -> None:
     data["columns"]["accession_id"]["classification"] = "weird_new_value"
     _write_yaml_file(target, data)
     assert "schema.unknown-classification" in _codes(validate_print(print_dir))
+
+
+class TestAdapterFieldIsProducerIdentity:
+    """`adapter` names who wrote the print, not what it means - any non-empty name validates."""
+
+    def test_a_non_roster_manifest_adapter_validates(self, print_dir: Path) -> None:
+        target = print_dir / "manifest.yaml"
+        data = _load_yaml_file(target)
+        data["adapter"] = "duckdb"
+        _write_yaml_file(target, data)
+        assert not [i for i in validate_print(print_dir) if i.code.startswith("schema.")]
+
+    def test_a_non_roster_diff_adapter_validates(self, print_dir: Path) -> None:
+        target = print_dir / "diff.yaml"
+        data = _load_yaml_file(target)
+        data["adapter"] = "duckdb"
+        _write_yaml_file(target, data)
+        assert not [i for i in validate_print(print_dir) if i.code.startswith("schema.")]
+
+    def test_an_empty_manifest_adapter_still_fails(self, print_dir: Path) -> None:
+        target = print_dir / "manifest.yaml"
+        data = _load_yaml_file(target)
+        data["adapter"] = ""
+        _write_yaml_file(target, data)
+        assert "schema.type-mismatch" in _codes(validate_print(print_dir))
+
+    def test_a_missing_manifest_adapter_still_fails(self, print_dir: Path) -> None:
+        target = print_dir / "manifest.yaml"
+        data = _load_yaml_file(target)
+        del data["adapter"]
+        _write_yaml_file(target, data)
+        assert "schema.missing-required-field" in _codes(validate_print(print_dir))
 
 
 def test_schema_unknown_change_kind(print_dir: Path) -> None:
@@ -388,8 +421,9 @@ def test_stats_missing_required_field_for_classification(print_dir: Path) -> Non
 def test_stats_forbidden_field_for_classification(print_dir: Path) -> None:
     target = print_dir / "seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
-    # accession_id is numeric (unique, SPEC 4.2); values is MUST NOT emit
-    data["columns"]["accession_id"]["values"] = {"foo": 1}
+    # accession_id is numeric (unique, SPEC 4.2); values_coverage is MUST NOT emit there,
+    # unlike values itself, which is now legitimate on numeric (SPEC 2.2.3)
+    data["columns"]["accession_id"]["values_coverage"] = 1.0
     _write_yaml_file(target, data)
     assert "stats.forbidden-field-for-classification" in _codes(validate_print(print_dir))
 
@@ -416,6 +450,39 @@ def test_stats_null_count_exceeds_row_count(print_dir: Path) -> None:
     data["columns"]["taxon_id"]["null_count"] = 999999999
     _write_yaml_file(target, data)
     assert "stats.null-count-exceeds-row-count" in _codes(validate_print(print_dir))
+
+
+def test_stats_nullable_contradicts_null_count(print_dir: Path) -> None:
+    target = print_dir / "seedbank/accession/statistics.yaml"
+    data = _load_yaml_file(target)
+    # traits already carries a nonzero null_count; only nullable is falsified here.
+    data["columns"]["traits"]["nullable"] = False
+    _write_yaml_file(target, data)
+    assert "stats.nullable-contradicts-null-count" in _codes(validate_print(print_dir))
+
+
+def test_stats_zero_count_exceeds_row_count(print_dir: Path) -> None:
+    target = print_dir / "seedbank/accession/statistics.yaml"
+    data = _load_yaml_file(target)
+    data["columns"]["accession_id"]["zero_count"] = 999999999
+    _write_yaml_file(target, data)
+    assert "stats.degenerate-count-exceeds-row-count" in _codes(validate_print(print_dir))
+
+
+def test_stats_empty_count_exceeds_row_count(print_dir: Path) -> None:
+    target = print_dir / "seedbank/accession/statistics.yaml"
+    data = _load_yaml_file(target)
+    data["columns"]["accession_code"]["empty_count"] = 999999999
+    _write_yaml_file(target, data)
+    assert "stats.degenerate-count-exceeds-row-count" in _codes(validate_print(print_dir))
+
+
+def test_stats_length_order_violated(print_dir: Path) -> None:
+    target = print_dir / "seedbank/accession/statistics.yaml"
+    data = _load_yaml_file(target)
+    data["columns"]["accession_code"]["length"]["avg"] = 999999999.0
+    _write_yaml_file(target, data)
+    assert "stats.length-order-violated" in _codes(validate_print(print_dir))
 
 
 def test_stats_values_sum_mismatch(print_dir: Path) -> None:
@@ -1036,6 +1103,126 @@ def test_stats_dependencies_measured_on_empty_table(print_dir: Path) -> None:
     assert "stats.dependencies-measured-on-empty-table" in _codes(validate_print(print_dir))
 
 
+def test_stats_timeline_unknown_column(print_dir: Path) -> None:
+    target = print_dir / "seedbank/accession/statistics.yaml"
+    data = _load_yaml_file(target)
+    data["timeline"]["column"] = "not_a_column"
+    _write_yaml_file(target, data)
+
+    assert "stats.timeline-unknown-column" in _codes(validate_print(print_dir))
+
+
+def test_stats_timeline_anchor_not_temporal(print_dir: Path) -> None:
+    target = print_dir / "seedbank/accession/statistics.yaml"
+    data = _load_yaml_file(target)
+    data["timeline"]["column"] = "accession_id"
+    _write_yaml_file(target, data)
+
+    assert "stats.timeline-anchor-not-temporal" in _codes(validate_print(print_dir))
+
+
+def test_stats_timeline_anchor_redacted(print_dir: Path) -> None:
+    target = print_dir / "seedbank/accession/statistics.yaml"
+    data = _load_yaml_file(target)
+    data["columns"]["collected_on"]["redacted"] = "mask"
+    _write_yaml_file(target, data)
+
+    assert "stats.timeline-anchor-redacted" in _codes(validate_print(print_dir))
+
+
+def test_stats_timeline_under_scope(print_dir: Path) -> None:
+    target = print_dir / "seedbank/accession/statistics.yaml"
+    data = _load_yaml_file(target)
+    data["scope"] = {"rows_scanned": 20, "sample": 0.5}
+    _write_yaml_file(target, data)
+
+    assert "stats.timeline-under-scope" in _codes(validate_print(print_dir))
+
+
+def test_stats_timeline_on_empty_table(print_dir: Path) -> None:
+    target = print_dir / "seedbank/accession/statistics.yaml"
+    data = _load_yaml_file(target)
+    data["row_count"] = 0
+    _write_yaml_file(target, data)
+
+    assert "stats.timeline-on-empty-table" in _codes(validate_print(print_dir))
+
+
+def test_stats_timeline_buckets_unordered(print_dir: Path) -> None:
+    target = print_dir / "seedbank/accession/statistics.yaml"
+    data = _load_yaml_file(target)
+    data["timeline"]["buckets"] = list(reversed(data["timeline"]["buckets"]))
+    _write_yaml_file(target, data)
+
+    assert "stats.timeline-buckets-unordered" in _codes(validate_print(print_dir))
+
+
+def test_stats_timeline_coverage_mismatch(print_dir: Path) -> None:
+    target = print_dir / "seedbank/accession/statistics.yaml"
+    data = _load_yaml_file(target)
+    data["timeline"]["coverage"] = 0.01
+    _write_yaml_file(target, data)
+
+    assert "stats.timeline-coverage-mismatch" in _codes(validate_print(print_dir))
+
+
+def test_stats_timeline_absent_is_conformant(print_dir: Path) -> None:
+    """A MINOR-version addition (SPEC 5): its absence must not fail schema validation."""
+
+    target = print_dir / "seedbank/accession/statistics.yaml"
+    data = _load_yaml_file(target)
+    data.pop("timeline", None)
+    _write_yaml_file(target, data)
+
+    assert "schema.missing-required-field" not in _codes(validate_print(print_dir))
+
+
+def test_stats_populated_without_timeline(print_dir: Path) -> None:
+    """`traits.populated` in the reference example has nowhere to read its anchor from
+    once `timeline` itself is removed.
+    """
+
+    target = print_dir / "seedbank/accession/statistics.yaml"
+    data = _load_yaml_file(target)
+    assert "populated" in data["columns"]["traits"]
+    data.pop("timeline", None)
+    _write_yaml_file(target, data)
+
+    assert "stats.populated-without-timeline" in _codes(validate_print(print_dir))
+
+
+def test_stats_populated_out_of_anchor_range(print_dir: Path) -> None:
+    target = print_dir / "seedbank/accession/statistics.yaml"
+    data = _load_yaml_file(target)
+    data["columns"]["traits"]["populated"]["from"] = "1900-01-01"
+    _write_yaml_file(target, data)
+
+    assert "stats.populated-out-of-anchor-range" in _codes(validate_print(print_dir))
+
+
+def test_stats_depends_on_on_table(print_dir: Path) -> None:
+    """SPEC 2.2.17: `depends_on` names what a view/matview reads, never a plain table."""
+
+    target = print_dir / "seedbank/accession/statistics.yaml"
+    data = _load_yaml_file(target)
+    assert data["type"] == "table"
+    data["depends_on"] = []
+    _write_yaml_file(target, data)
+
+    assert "stats.depends-on-on-table" in _codes(validate_print(print_dir))
+
+
+def test_stats_populated_absent_is_conformant(print_dir: Path) -> None:
+    """A MINOR-version addition (SPEC 5): its absence must not fail schema validation."""
+
+    target = print_dir / "seedbank/accession/statistics.yaml"
+    data = _load_yaml_file(target)
+    del data["columns"]["traits"]["populated"]
+    _write_yaml_file(target, data)
+
+    assert "schema.missing-required-field" not in _codes(validate_print(print_dir))
+
+
 def test_stats_distribution_mismatch(print_dir: Path) -> None:
     """The mismatch check only verifies against an exhaustive `values` list (SPEC 2.2.5)."""
 
@@ -1291,6 +1478,32 @@ def test_eligible_target_rejects_a_non_boolean() -> None:
     assert "schema.type-mismatch" in {i.code for i in check_relationships(payload, "t")}
 
 
+def test_relationships_measured_detection_is_schema_valid(print_dir: Path) -> None:
+    """The reference example's own measured edge (accession.seed_count) validates clean."""
+
+    target = print_dir / "seedbank/accession/relationships.yaml"
+    data = _load_yaml_file(target)
+    measured = [e for e in data["refers_to"] if e.get("detection") == "measured"]
+    assert measured, "reference example expected to carry a measured edge"
+
+    errors = [i for i in validate_print(print_dir) if i.severity == "error"]
+    assert errors == []
+
+
+def test_relationships_measured_edge_relabeled_declared_still_needs_on_delete(
+    print_dir: Path,
+) -> None:
+    """Widening the enum does not loosen `declared`'s own on_delete/on_update requirement."""
+
+    target = print_dir / "seedbank/accession/relationships.yaml"
+    data = _load_yaml_file(target)
+    entry = next(e for e in data["refers_to"] if e.get("detection") == "measured")
+    entry["detection"] = "declared"
+    _write_yaml_file(target, data)
+
+    assert "schema.missing-required-field" in _codes(validate_print(print_dir))
+
+
 # --- Diff invariants ------------------------------------------------
 
 
@@ -1430,6 +1643,18 @@ def test_diff_physical_layout_changed_no_change(print_dir: Path) -> None:
     _write_yaml_file(target, data)
     codes = _codes(validate_print(print_dir))
     assert "diff.physical-layout-changed-no-change" in codes
+
+
+def test_diff_depends_on_changed_no_change(print_dir: Path) -> None:
+    target = print_dir / "diff.yaml"
+    data = _load_yaml_file(target)
+    block = ["seedbank.germination_trial"]
+    data["changes"].append(
+        {"kind": "depends_on_changed", "table": "a", "before": block, "after": block},
+    )
+    _write_yaml_file(target, data)
+    codes = _codes(validate_print(print_dir))
+    assert "diff.depends-on-changed-no-change" in codes
 
 
 # --- DDL ------------------------------------------------------------

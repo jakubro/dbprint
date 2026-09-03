@@ -15,12 +15,15 @@ import pytest
 import yaml
 
 from dbprint.adapters import (
+    BaseStats,
     ColumnMeta,
     ColumnStats,
     CommentsMeta,
     ForeignKeyMeta,
     Frequencies,
+    IndexMeta,
     Inferred,
+    Length,
     MockAdapter,
     MockTable,
     NullPattern,
@@ -29,6 +32,7 @@ from dbprint.adapters import (
     PhysicalLayoutKey,
     Range,
     StatisticsConfig,
+    TableCounts,
     TableScope,
     UniqueKeyMeta,
     ValueCount,
@@ -125,6 +129,8 @@ def _curator_fixture() -> dict[str, MockTable]:
                     ),
                     values_coverage=0.2,
                     distribution="long_tail",
+                    empty_count=0,
+                    length=Length(min=36, max=36, avg=36.0, p95=36.0),
                     inferred=Inferred(candidate_key=True),
                 ),
                 # herbarium_id carries a declared FK, so it classifies foreign_key_candidate,
@@ -143,6 +149,7 @@ def _curator_fixture() -> dict[str, MockTable]:
                     ),
                     values_coverage=0.188889,
                     distribution="uniform",
+                    length=Length(min=36, max=36, avg=36.0, p95=36.0),
                 ),
             },
             # A census is owed wherever a column carries a null (SPEC 2.2.10), and is stated
@@ -184,6 +191,7 @@ def _curator_fixture() -> dict[str, MockTable]:
                     ),
                     values_coverage=1.0,
                     distribution="uniform",
+                    length=Length(min=36, max=36, avg=36.0, p95=36.0),
                     inferred=Inferred(candidate_key=True),
                 ),
             },
@@ -235,7 +243,8 @@ def _numeric_looks_like_fixture() -> dict[str, MockTable]:
                 "    target_id integer NOT NULL,\n"
                 "    status_code integer NOT NULL,\n"
                 "    serial_label character varying(20) NOT NULL,\n"
-                "    device_imei bigint NOT NULL\n"
+                "    device_imei bigint NOT NULL,\n"
+                "    partial_code integer NOT NULL\n"
                 ");\n"
             ),
             columns=[
@@ -266,6 +275,13 @@ def _numeric_looks_like_fixture() -> dict[str, MockTable]:
                     nullable=False,
                     default=None,
                     ordinal=4,
+                ),
+                ColumnMeta(
+                    name="partial_code",
+                    sql_type="integer",
+                    nullable=False,
+                    default=None,
+                    ordinal=5,
                 ),
             ],
             relationships=[
@@ -325,6 +341,8 @@ def _numeric_looks_like_fixture() -> dict[str, MockTable]:
                     values=tuple(ValueCount(value=str(9000 + i), count=1) for i in range(60)),
                     values_coverage=0.6,
                     distribution="uniform",
+                    empty_count=0,
+                    length=Length(min=4, max=4, avg=4.0, p95=4.0),
                 ),
                 # cardinality 1 <= enumeration_threshold -> categorical, but its samples are a
                 # valid IMEI - a pattern that outranks numeric_string, so suppression skips it.
@@ -340,12 +358,28 @@ def _numeric_looks_like_fixture() -> dict[str, MockTable]:
                     values_coverage=1.0,
                     distribution="uniform",
                 ),
+                # A near-miss numeric_string (60%, between the floor and the verdict bar), so
+                # suppression must withhold the candidate/share too, not only a verdict.
+                "partial_code": ColumnStats(
+                    sql_type="integer",
+                    nullable=False,
+                    null_count=0,
+                    null_rate=0.0,
+                    cardinality=5,
+                    cardinality_ratio=0.05,
+                    cardinality_method="exact",
+                    values=tuple(ValueCount(value=i, count=20) for i in range(1, 6)),
+                    values_coverage=1.0,
+                    distribution="uniform",
+                ),
             },
             samples={
                 "target_id": [str(1000 + i) for i in range(20)],
                 "status_code": ["1", "2", "3"] * 20,
                 "serial_label": [str(9000 + i) for i in range(60)],
                 "device_imei": ["352099001761481"] * 20,
+                "partial_code": [str(i) for i in range(1, 13)]
+                + ["ref-a", "ref-b", "ref-c", "ref-d", "ref-e", "ref-f", "ref-g", "ref-h"],
             },
             row_count=100,
         ),
@@ -362,7 +396,7 @@ def _build_engine(tmp_path: Path, fixture: dict[str, MockTable]) -> Engine:
 def _profiled_at(manifest: Path) -> dict[str, str]:
     """Map each manifest table to its `profiled_at` stamp."""
 
-    data = yaml.safe_load(manifest.read_text())
+    data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
 
     return {fqn: entry["profiled_at"] for fqn, entry in data["tables"].items()}
 
@@ -370,7 +404,7 @@ def _profiled_at(manifest: Path) -> dict[str, str]:
 def _thresholds(manifest: Path) -> dict[str, Any]:
     """Map each manifest table to the freshness threshold its entry records."""
 
-    data = yaml.safe_load(manifest.read_text())
+    data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
 
     return {fqn: entry.get("max_age_days") for fqn, entry in data["tables"].items()}
 
@@ -378,15 +412,18 @@ def _thresholds(manifest: Path) -> dict[str, Any]:
 def _age_manifest_entry(manifest: Path, fqn: str, profiled_at: str) -> None:
     """Backdate one table so the next run finds it stale while its siblings stay fresh."""
 
-    data = yaml.safe_load(manifest.read_text())
+    data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
     data["tables"][fqn]["profiled_at"] = profiled_at
-    manifest.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
+    manifest.write_text(
+        yaml.dump(data, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
 
 
 def _referencers(relationships: Path) -> list[str]:
     """Referencer tables listed under a print's `referenced_by`."""
 
-    data = yaml.safe_load(relationships.read_text())
+    data = yaml.safe_load(relationships.read_text(encoding="utf-8"))
 
     return [e["referencer_table"] for e in data.get("referenced_by") or []]
 
@@ -396,7 +433,7 @@ def _changes_by_kind(diff_path: Path) -> dict[str, list[dict[str, Any]]]:
 
     grouped: dict[str, list[dict[str, Any]]] = {}
 
-    for change in yaml.safe_load(diff_path.read_text())["changes"]:
+    for change in yaml.safe_load(diff_path.read_text(encoding="utf-8"))["changes"]:
         grouped.setdefault(change["kind"], []).append(change)
 
     return grouped
@@ -452,6 +489,7 @@ def _drifted_curator_fixture() -> dict[str, MockTable]:
                 values=(ValueCount(value="00000000-0000-7000-8000-000000000001", count=3),),
                 values_coverage=0.031579,
                 distribution="uniform",
+                length=Length(min=36, max=36, avg=36.0, p95=36.0),
             ),
         },
     )
@@ -772,6 +810,25 @@ class TestNumericStringSuppressedOnNumericType:
         assert "sampled" not in inferred
         assert "matched" not in inferred
 
+    def test_a_numeric_near_miss_carries_no_looks_like_candidate_either(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """SPEC 4.1.5's suppression reaches the near-miss pair too, not only a published verdict -
+        a numeric-typed column withholds `numeric_string` whichever share it scored.
+        """
+
+        _build_engine(tmp_path, _numeric_looks_like_fixture()).generate()
+        stats = yaml.safe_load(
+            (tmp_path / "primary" / "fixture" / "type_probe" / "statistics.yaml").read_text(),
+        )
+        inferred = stats["columns"]["partial_code"].get("inferred") or {}
+
+        assert stats["columns"]["partial_code"]["classification"] == "categorical"
+        assert "looks_like" not in inferred
+        assert "looks_like_candidate" not in inferred
+        assert "looks_like_candidate_share" not in inferred
+
     def test_a_text_column_of_digit_strings_still_publishes_the_verdict(
         self,
         tmp_path: Path,
@@ -904,6 +961,12 @@ def _unnamed_type_fixture() -> dict[str, MockTable]:
                     frequencies=Frequencies(top=2, bottom=1, listed=60, total=80),
                     range=Range(min=1, max=1000),
                     percentiles={"p50": 500},
+                    mean=480.0,
+                    sum=28800.0,
+                    zero_count=0,
+                    negative_count=0,
+                    quantized_count=0,
+                    values=(ValueCount(value=500, count=2), ValueCount(value=600, count=1)),
                 ),
                 "address": ColumnStats(
                     sql_type="inet",
@@ -916,6 +979,8 @@ def _unnamed_type_fixture() -> dict[str, MockTable]:
                     values=(ValueCount(value="10.0.0.1", count=1),),
                     values_coverage=0.016667,
                     distribution="uniform",
+                    empty_count=0,
+                    length=Length(min=8, max=8, avg=8.0, p95=8.0),
                 ),
                 "location": ColumnStats(
                     sql_type="inet",
@@ -987,6 +1052,11 @@ def _epoch_fixture() -> dict[str, MockTable]:
             distribution="uniform",
             range=Range(min=lo, max=hi),
             percentiles={"p50": (lo + hi) // 2},
+            mean=(lo + hi) / 2,
+            sum=float((lo + hi) // 2 * 60),
+            zero_count=0,
+            negative_count=0,
+            quantized_count=0,
         )
 
     # Consecutive epoch seconds from 1704067201, skipping 1704067219 and 1704067227: both
@@ -1062,9 +1132,12 @@ def _epoch_fixture() -> dict[str, MockTable]:
                     values=(ValueCount(value="1704067200", count=1),),
                     values_coverage=0.016667,
                     distribution="uniform",
+                    empty_count=0,
+                    length=Length(min=10, max=10, avg=10.0, p95=10.0),
                 ),
                 "epoch_dropped": _numeric_stats(1704067200, 1786492800),
-                # Sampled as `text`, but its draw clears no pattern: evidence, no verdict.
+                # Sampled as `text`, but its draw clears no pattern and no near-miss floor
+                # either (SPEC 4.1.3): evidence, no verdict, no candidate.
                 "no_shape": ColumnStats(
                     sql_type="varchar",
                     nullable=False,
@@ -1073,14 +1146,18 @@ def _epoch_fixture() -> dict[str, MockTable]:
                     cardinality=30,
                     cardinality_ratio=0.3,
                     cardinality_method="exact",
-                    values=tuple(ValueCount(value=f"zq{i}wm", count=1) for i in range(30)),
+                    values=tuple(
+                        ValueCount(value=f"noshape-value-{i}", count=1) for i in range(30)
+                    ),
                     values_coverage=0.3,
                     distribution="uniform",
+                    empty_count=0,
+                    length=Length(min=15, max=16, avg=15.666667, p95=16.0),
                 ),
             },
             samples={
                 "epoch_text": epoch_text_samples,
-                "no_shape": [f"zq{i}wm" for i in range(30)],
+                "no_shape": [f"noshape-value-{i}" for i in range(30)],
             },
             row_count=100,
         ),
@@ -1095,6 +1172,8 @@ def _misfiled_datum_fixture() -> dict[str, MockTable]:
     """
 
     def _numeric(sql_type: str, lo: int, hi: int) -> ColumnStats:
+        mid = (lo + hi) // 2
+
         return ColumnStats(
             sql_type=sql_type,
             nullable=False,
@@ -1106,7 +1185,13 @@ def _misfiled_datum_fixture() -> dict[str, MockTable]:
             distribution="uniform",
             frequencies=Frequencies(top=2, bottom=1, listed=60, total=80),
             range=Range(min=lo, max=hi),
-            percentiles={"p50": (lo + hi) // 2},
+            percentiles={"p50": mid},
+            mean=float(mid),
+            sum=float(mid * 60),
+            zero_count=0,
+            negative_count=0,
+            quantized_count=0,
+            values=(ValueCount(value=mid, count=2), ValueCount(value=hi, count=1)),
         )
 
     return {
@@ -1172,6 +1257,10 @@ def _misfiled_datum_fixture() -> dict[str, MockTable]:
                     cardinality_method="exact",
                     range=Range(min="1960-01-01", max="2005-01-01", span_days=16437),
                     percentiles={"p50": "1980-04-02"},
+                    values=(
+                        ValueCount(value="1980-04-02", count=2),
+                        ValueCount(value="2005-01-01", count=1),
+                    ),
                     distribution="uniform",
                     frequencies=Frequencies(top=2, bottom=1, listed=60, total=80),
                 ),
@@ -1391,6 +1480,91 @@ class TestFaultIsolation:
         assert "rules[1]" in (failure.error or "")
 
 
+class _IncoherentSampleAdapter(MockAdapter):
+    """Declares its fallback incoherent, like Snowflake/MySQL/ClickHouse/Redshift/BigQuery."""
+
+    SAMPLE_FALLBACK_COHERENT = False
+
+
+class _RefusingMaterializeAdapter(_IncoherentSampleAdapter):
+    """Also refuses the copy itself - the write-refused path, not the config-off one."""
+
+    def materialize_scope(self, fqn: str, scope: TableScope) -> TableScope:
+        raise RuntimeError("simulated write refusal")
+
+
+class TestSampleFallbackCoherence:
+    """An adapter whose per-statement fallback cannot be seeded refuses the table rather than
+    measuring it over rows that would differ between statements.
+    """
+
+    def test_materialize_sample_false_refuses_an_incoherent_adapter(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        conn = replace(
+            _conn_config(tmp_path),
+            materialize_sample=False,
+            rules=(RuleConfig(include=("public.curator",), sample=0.5),),
+        )
+        result = Engine(_IncoherentSampleAdapter(_curator_fixture()), conn, tmp_path).generate()
+
+        assert {t.fqn: t.status for t in result.tables} == {
+            "public.curator": "failed",
+            "public.herbarium": "ok",
+        }
+
+        failure = next(t for t in result.tables if t.fqn == "public.curator")
+        assert "materialize_sample" in (failure.error or "")
+
+    def test_a_refused_write_names_the_underlying_cause(self, tmp_path: Path) -> None:
+        conn = replace(
+            _conn_config(tmp_path),
+            rules=(RuleConfig(include=("public.curator",), sample=0.5),),
+        )
+        result = Engine(_RefusingMaterializeAdapter(_curator_fixture()), conn, tmp_path).generate()
+
+        assert {t.fqn: t.status for t in result.tables} == {
+            "public.curator": "failed",
+            "public.herbarium": "ok",
+        }
+
+        failure = next(t for t in result.tables if t.fqn == "public.curator")
+        assert "simulated write refusal" in (failure.error or "")
+
+    def test_a_coherent_adapter_is_unaffected_by_materialize_sample_false(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        conn = replace(
+            _conn_config(tmp_path),
+            materialize_sample=False,
+            rules=(RuleConfig(include=("public.curator",), sample=0.5),),
+        )
+        result = Engine(MockAdapter(_curator_fixture()), conn, tmp_path).generate()
+
+        assert {t.status for t in result.tables} == {"ok"}
+
+    def test_a_filter_scope_is_unaffected_on_an_incoherent_adapter(self, tmp_path: Path) -> None:
+        conn = replace(
+            _conn_config(tmp_path),
+            materialize_sample=False,
+            rules=(RuleConfig(include=("public.curator",), filter="id IS NOT NULL"),),
+        )
+        result = Engine(_IncoherentSampleAdapter(_curator_fixture()), conn, tmp_path).generate()
+
+        assert {t.status for t in result.tables} == {"ok"}
+
+    def test_an_unsampled_table_is_unaffected_on_an_incoherent_adapter(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        conn = replace(_conn_config(tmp_path), materialize_sample=False)
+        result = Engine(_IncoherentSampleAdapter(_curator_fixture()), conn, tmp_path).generate()
+
+        assert {t.status for t in result.tables} == {"ok"}
+
+
 class TestClassifierFaultIsolation:
     """A classifier fault costs one column's verdict, never the table (run-all-then-report)."""
 
@@ -1503,13 +1677,13 @@ class TestPerTableFreshnessSkip:
 
     @staticmethod
     def _age_manifest(manifest: Path, days: float) -> None:
-        data = yaml.safe_load(manifest.read_text())
+        data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
         stamp = (datetime.now(UTC) - timedelta(days=days)).isoformat()
 
         for entry in data["tables"].values():
             entry["profiled_at"] = stamp.replace("+00:00", "Z")
 
-        manifest.write_text(yaml.safe_dump(data, sort_keys=False))
+        manifest.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
     def test_one_table_reprofiles_while_the_other_skips(self, tmp_path: Path) -> None:
         _build_engine(tmp_path, _curator_fixture()).generate()
@@ -1708,7 +1882,9 @@ class TestForbiddenFieldGate:
         )["columns"]["viability_pct"]
 
         assert col["classification"] == "numeric"
-        assert "values" not in col
+        # `values` itself is legitimate on `numeric` (SPEC 2.2.3) and survives untouched;
+        # `values_coverage` stays forbidden there and is what this gate actually drops.
+        assert col["values"] == [{"value": "1", "count": 10}]
         assert "values_coverage" not in col
 
     def test_the_drop_is_warned_about(
@@ -1734,10 +1910,8 @@ class TestForbiddenFieldGate:
 
 
 def _drifted_numeric_fixture() -> dict[str, MockTable]:
-    """A `numeric` column whose adapter also hands back a `values` list.
-
-    No live adapter does this; it is the shape a disagreement between the engine's
-    classification and an adapter's computed fields would take.
+    """A `numeric` column whose adapter also hands back `values_coverage` - `values` is included
+    so the gate is shown dropping the one forbidden field, not the whole block.
     """
 
     return {
@@ -1770,6 +1944,11 @@ def _drifted_numeric_fixture() -> dict[str, MockTable]:
                     frequencies=Frequencies(top=2, bottom=1, listed=60, total=80),
                     range=Range(min=1, max=100),
                     percentiles={"p50": 50},
+                    mean=45.0,
+                    sum=2700.0,
+                    zero_count=0,
+                    negative_count=0,
+                    quantized_count=0,
                     values=(ValueCount(value="1", count=10),),
                     values_coverage=1.0,
                 ),
@@ -2065,6 +2244,103 @@ class TestMaxRowsScannedCeiling:
         Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
 
         assert adapter.estimate_calls == []
+
+    @staticmethod
+    def _with_a_view(fixture: dict[str, MockTable]) -> dict[str, MockTable]:
+        fixture["public.active_curators_v"] = MockTable(
+            type="view",
+            namespace_path=("public", "active_curators_v"),
+            ddl="CREATE VIEW public.active_curators_v AS SELECT id FROM public.curator;\n",
+            columns=[
+                ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1),
+            ],
+            relationships=[],
+            indexes=[],
+            comments=CommentsMeta(table=None, columns={}),
+            stats={},
+            samples={},
+        )
+
+        return fixture
+
+    def test_a_view_draws_no_estimate_under_a_connection_level_ceiling(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A view is never queried (SPEC 2.2.15), so no size condition can govern it."""
+
+        fixture = self._with_a_view(_sized_fixture(curator=280_421, herbarium=1000))
+        adapter = _EstimateCountingAdapter(fixture)
+        conn = replace(_conn_config(tmp_path), max_rows_scanned=100_000)
+        Engine(adapter, conn, tmp_path).generate()
+
+        assert "public.active_curators_v" not in adapter.estimate_calls
+
+    def test_a_view_draws_no_warning_but_an_unread_table_still_does(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        fixture = self._with_a_view(_sized_fixture(curator=None, herbarium=1000))
+        conn = replace(_conn_config(tmp_path), max_rows_scanned=100_000)
+
+        with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
+            Engine(MockAdapter(fixture), conn, tmp_path).generate()
+
+        assert "public.curator" in caplog.text
+        assert "public.active_curators_v" not in caplog.text
+
+    @staticmethod
+    def _with_a_matview(fixture: dict[str, MockTable]) -> dict[str, MockTable]:
+        fixture["public.germination_by_taxon_mv"] = MockTable(
+            type="matview",
+            namespace_path=("public", "germination_by_taxon_mv"),
+            ddl="CREATE MATERIALIZED VIEW public.germination_by_taxon_mv AS SELECT 1;\n",
+            columns=[
+                ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1),
+            ],
+            relationships=[],
+            indexes=[],
+            comments=CommentsMeta(table=None, columns={}),
+            stats={},
+            samples={},
+            row_count_estimate=None,
+        )
+
+        return fixture
+
+    def test_a_matview_with_no_estimate_still_warns(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A matview can carry an estimate, so an absent one is a state that can change."""
+
+        fixture = self._with_a_matview(_sized_fixture(curator=280_421, herbarium=1000))
+        conn = replace(_conn_config(tmp_path), max_rows_scanned=100_000)
+
+        with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
+            Engine(MockAdapter(fixture), conn, tmp_path).generate()
+
+        assert "public.germination_by_taxon_mv" in caplog.text
+
+    def test_a_view_under_a_ceiling_writes_the_same_catalog_only_statistics(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The view's file is unaffected by the read it no longer takes."""
+
+        without_ceiling = self._with_a_view(_sized_fixture(curator=280_421, herbarium=1000))
+        Engine(MockAdapter(without_ceiling), _conn_config(tmp_path), tmp_path).generate()
+        baseline = tmp_path / "primary" / "public" / "active_curators_v" / "statistics.yaml"
+        baseline_text = normalize_instants(baseline.read_text())
+
+        shutil.rmtree(tmp_path / "primary")
+        with_ceiling = self._with_a_view(_sized_fixture(curator=280_421, herbarium=1000))
+        conn = replace(_conn_config(tmp_path), max_rows_scanned=100_000)
+        Engine(MockAdapter(with_ceiling), conn, tmp_path).generate()
+
+        assert normalize_instants(baseline.read_text()) == baseline_text
 
 
 class TestRecordedFreshnessThreshold:
@@ -3213,6 +3489,11 @@ def _driver_typed_fixture() -> dict[str, MockTable]:
                         "p50": Decimal("42.00"),
                         "p99": Decimal("9100.75"),
                     },
+                    mean=118.42,
+                    sum=10658.0,
+                    zero_count=0,
+                    negative_count=0,
+                    quantized_count=0,
                 ),
             },
             samples={},
@@ -3290,6 +3571,11 @@ def _nan_bound_fixture() -> dict[str, MockTable]:
                     distribution="long_tail",
                     range=Range(min=float("nan"), max=float("nan")),
                     percentiles={"p50": float("nan")},
+                    mean=float("nan"),
+                    sum=float("nan"),
+                    zero_count=0,
+                    negative_count=0,
+                    quantized_count=0,
                 ),
             },
             samples={},
@@ -3793,7 +4079,7 @@ class TestOnlineAndOfflineReadTheSameStatistics:
 
 
 def _read_yaml(path: Path) -> Any:
-    return yaml.safe_load(path.read_text())
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
 def _inferrable_fixture(*, declared: bool = False, target_key: bool = True) -> dict[str, MockTable]:
@@ -3845,6 +4131,8 @@ def _inferrable_fixture(*, declared: bool = False, target_key: bool = True) -> d
                     ),
                     values_coverage=0.2,
                     distribution="long_tail",
+                    empty_count=0,
+                    length=Length(min=36, max=36, avg=36.0, p95=36.0),
                     inferred=Inferred(candidate_key=True),
                 ),
                 "curator_id": ColumnStats(
@@ -3861,6 +4149,7 @@ def _inferrable_fixture(*, declared: bool = False, target_key: bool = True) -> d
                     ),
                     values_coverage=0.188889,
                     distribution="uniform",
+                    length=Length(min=36, max=36, avg=36.0, p95=36.0),
                 ),
             },
             null_patterns=NullPatterns(
@@ -3900,6 +4189,7 @@ def _inferrable_fixture(*, declared: bool = False, target_key: bool = True) -> d
                     ),
                     values_coverage=1.0,
                     distribution="uniform",
+                    length=Length(min=36, max=36, avg=36.0, p95=36.0),
                     inferred=Inferred(candidate_key=True),
                 ),
             },
@@ -3965,6 +4255,18 @@ class TestInferredForeignKeys:
         assert [(e["target_table"], e["detection"]) for e in edges] == [
             ("public.curator", "declared"),
         ]
+
+    def test_an_unchanged_inferred_edge_produces_no_diff_event(self, tmp_path: Path) -> None:
+        """The live side must not compare a real-looking placeholder against the baseline's
+        genuine absence (SPEC 2.3.8) - an unchanged inferred edge diffs as unchanged.
+        """
+
+        fixture = _inferrable_fixture()
+        _build_engine(tmp_path, fixture).generate()
+        result = _build_engine(tmp_path, fixture).compute_diff()
+
+        modified = [c for c in result.diff["changes"] if c["kind"] == "relationship_modified"]
+        assert modified == []
 
     def test_an_inferred_key_promotes_the_column(self, tmp_path: Path) -> None:
         """SPEC 3.1: an inferred FK makes the column foreign_key_candidate."""
@@ -5009,6 +5311,221 @@ class TestKeySketchFaultIsolation:
         assert result.exit_code == EXIT_PARTIAL
 
 
+def _folded_fixture() -> dict[str, MockTable]:
+    """One parent and one child linked by a STRING-typed FK, for `normalized_cardinality`
+    (SPEC 2.2.4) - each also carries a plain `id`, outside the join-key population.
+    """
+
+    def col(cardinality: int, normalized: int) -> ColumnStats:
+        return ColumnStats(
+            sql_type="text",
+            nullable=True,
+            null_count=0,
+            null_rate=0.0,
+            cardinality=cardinality,
+            cardinality_ratio=round(cardinality / 10, 6),
+            cardinality_method="exact",
+            values=tuple(ValueCount(value=f"v{i}", count=1) for i in range(cardinality)),
+            values_coverage=1.0,
+            distribution="uniform",
+        )
+
+    parent = MockTable(
+        type="table",
+        namespace_path=("public", "parent"),
+        ddl="CREATE TABLE public.parent (code text PRIMARY KEY, id text);\n",
+        columns=[
+            ColumnMeta(name="code", sql_type="text", nullable=False, default=None, ordinal=1),
+            ColumnMeta(name="id", sql_type="text", nullable=False, default=None, ordinal=2),
+        ],
+        relationships=[],
+        indexes=[],
+        comments=CommentsMeta(table=None, columns={}),
+        # `id`'s cardinality stays below `row_count` so its ratio misses the SPEC 4.2
+        # candidate-key threshold - it must NOT enter the join-key population by accident.
+        stats={"code": col(10, 10), "id": col(6, 6)},
+        samples={},
+        row_count=10,
+        unique_keys=[UniqueKeyMeta(columns=("code",), primary=True)],
+        normalized_cardinalities={"code": 8},
+    )
+    child = MockTable(
+        type="table",
+        namespace_path=("public", "child"),
+        ddl="CREATE TABLE public.child (id text, parent_code text);\n",
+        columns=[
+            ColumnMeta(name="id", sql_type="text", nullable=False, default=None, ordinal=1),
+            ColumnMeta(
+                name="parent_code",
+                sql_type="text",
+                nullable=True,
+                default=None,
+                ordinal=2,
+            ),
+        ],
+        relationships=[
+            ForeignKeyMeta(
+                column=("parent_code",),
+                target_table="public.parent",
+                target_column=("code",),
+                on_delete="CASCADE",
+                on_update="NO ACTION",
+                constraint_name="parent_code_fk",
+            ),
+        ],
+        indexes=[],
+        comments=CommentsMeta(table=None, columns={}),
+        # `id`'s cardinality stays below `row_count` for the same reason as `parent.id`.
+        stats={"id": col(15, 15), "parent_code": col(10, 7)},
+        samples={},
+        row_count=40,
+        normalized_cardinalities={"parent_code": 7},
+    )
+
+    return {"public.parent": parent, "public.child": child}
+
+
+class TestNormalizedCardinality:
+    """SPEC 2.2.4: the trimmed/case-folded distinct count for the join-key population - narrower
+    than `sketch`'s, and unlike it a redacted column and a scoped table both stay eligible.
+    """
+
+    @staticmethod
+    def _stats(tmp_path: Path, table: str) -> dict[str, Any]:
+        return yaml.safe_load(
+            (tmp_path / "primary" / "public" / table / "statistics.yaml").read_text(),
+        )
+
+    def test_the_referencing_column_carries_it(self, tmp_path: Path) -> None:
+        Engine(MockAdapter(_folded_fixture()), _conn_config(tmp_path), tmp_path).generate()
+        col = self._stats(tmp_path, "child")["columns"]["parent_code"]
+
+        assert col["normalized_cardinality"] == 7
+
+    def test_the_referenced_column_also_carries_it(self, tmp_path: Path) -> None:
+        """The parent side of the same edge - also a declared unique key, either way eligible."""
+
+        Engine(MockAdapter(_folded_fixture()), _conn_config(tmp_path), tmp_path).generate()
+        col = self._stats(tmp_path, "parent")["columns"]["code"]
+
+        assert col["normalized_cardinality"] == 8
+
+    def test_a_plain_column_outside_the_population_carries_no_field(self, tmp_path: Path) -> None:
+        """`id` on either table names no edge, no unique key, no candidate key."""
+
+        Engine(MockAdapter(_folded_fixture()), _conn_config(tmp_path), tmp_path).generate()
+
+        assert "normalized_cardinality" not in self._stats(tmp_path, "child")["columns"]["id"]
+        assert "normalized_cardinality" not in self._stats(tmp_path, "parent")["columns"]["id"]
+
+    def test_a_redacted_join_key_still_carries_it(self, tmp_path: Path) -> None:
+        """Unlike `sketch`: a merge count discloses no literal (SPEC 2.2.4)."""
+
+        conn = replace(
+            _conn_config(tmp_path),
+            redact=(RedactRule(columns=("*.parent_code",), with_="hash"),),
+            redaction_salt="pepper",
+        )
+        Engine(MockAdapter(_folded_fixture()), conn, tmp_path).generate()
+        col = self._stats(tmp_path, "child")["columns"]["parent_code"]
+
+        assert col["redacted"] == "hash"
+        assert col["normalized_cardinality"] == 7
+
+    def test_a_scoped_tables_join_key_still_carries_it(self, tmp_path: Path) -> None:
+        """Unlike `sketch`: a scanned-set count like every other (SPEC 2.2.8)."""
+
+        fixture = _folded_fixture()
+        fixture["public.child"] = replace(fixture["public.child"], rows_scanned=20)
+        conn = replace(
+            _conn_config(tmp_path),
+            rules=(RuleConfig(include=("public.child",), sample=0.5),),
+        )
+        Engine(MockAdapter(fixture), conn, tmp_path).generate()
+
+        assert (
+            self._stats(tmp_path, "child")["columns"]["parent_code"]["normalized_cardinality"] == 7
+        )
+
+    def test_a_non_string_typed_join_key_carries_no_field(self, tmp_path: Path) -> None:
+        """`_observed_fixture`'s integer FK: the type gate excludes it, unlike `sketch`."""
+
+        Engine(MockAdapter(_observed_fixture()), _conn_config(tmp_path), tmp_path).generate()
+        col = yaml.safe_load(
+            (tmp_path / "primary" / "public" / "child" / "statistics.yaml").read_text(),
+        )["columns"]["parent_id"]
+
+        assert "normalized_cardinality" not in col
+
+    def test_never_exceeds_cardinality(self, tmp_path: Path) -> None:
+        Engine(MockAdapter(_folded_fixture()), _conn_config(tmp_path), tmp_path).generate()
+        col = self._stats(tmp_path, "child")["columns"]["parent_code"]
+
+        assert col["normalized_cardinality"] <= col["cardinality"]
+
+
+class _NormalizedCardinalityFailingAdapter(MockAdapter):
+    """Fails `compute_normalized_cardinality` for one column, as a statement timeout would."""
+
+    def __init__(self, fixture: dict[str, MockTable], *, failing_column: str) -> None:
+        super().__init__(fixture)
+        self._failing_column = failing_column
+
+    def compute_normalized_cardinality(
+        self,
+        fqn: str,
+        column: str,
+        scope: Any = None,
+    ) -> int:
+        if column == self._failing_column:
+            raise RuntimeError("simulated normalization query timeout")
+
+        return super().compute_normalized_cardinality(fqn, column, scope)
+
+
+class TestNormalizedCardinalityFaultIsolation:
+    """One column's query failure leaves the field absent for that column, never aborts the run."""
+
+    @staticmethod
+    def _stats(tmp_path: Path, table: str) -> dict[str, Any]:
+        return yaml.safe_load(
+            (tmp_path / "primary" / "public" / table / "statistics.yaml").read_text(),
+        )
+
+    def test_the_failing_column_carries_no_field(self, tmp_path: Path) -> None:
+        adapter = _NormalizedCardinalityFailingAdapter(
+            _folded_fixture(),
+            failing_column="parent_code",
+        )
+        result = Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
+
+        assert (
+            "normalized_cardinality" not in self._stats(tmp_path, "child")["columns"]["parent_code"]
+        )
+        assert {t.status for t in result.tables} == {"ok"}
+
+    def test_every_other_column_still_gets_its_value(self, tmp_path: Path) -> None:
+        adapter = _NormalizedCardinalityFailingAdapter(
+            _folded_fixture(),
+            failing_column="parent_code",
+        )
+        Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
+
+        assert self._stats(tmp_path, "parent")["columns"]["code"]["normalized_cardinality"] == 8
+
+    def test_every_artifact_is_still_written(self, tmp_path: Path) -> None:
+        adapter = _NormalizedCardinalityFailingAdapter(
+            _folded_fixture(),
+            failing_column="parent_code",
+        )
+        Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
+        prints = tmp_path / "primary"
+
+        assert (prints / "manifest.yaml").is_file()
+        assert (prints / "public" / "child" / "relationships.yaml").is_file()
+        assert (prints / "public" / "parent" / "relationships.yaml").is_file()
+
+
 class TestTheInferenceUniverse:
     """What one object's presence, or a failed read of it, may do to another's edges."""
 
@@ -5077,8 +5594,8 @@ class TestTheInferenceUniverse:
         tmp_path: Path,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Suppressing an inferred edge marks no artifact, so the warning is the only record -
-        nothing reads declared keys a second time, so it never resurfaces in extraction.
+        """Suppressing an inferred edge marks no artifact, so the pre-pass warning is the only
+        record - extraction reads declared keys again, degrading to `grain` and warning anew.
         """
 
         with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
@@ -5093,6 +5610,7 @@ class TestTheInferenceUniverse:
                 "catalog pre-pass introspect_unique_keys failed for 'b.curator': "
                 "simulated catalog failure"
             ),
+            "introspect_unique_keys failed for 'b.curator': RuntimeError: simulated catalog failure",
         ]
 
     def test_an_object_whose_columns_failed_is_named_but_never_targeted(
@@ -5575,3 +6093,254 @@ class TestStatementTraceContext:
         assert orchestrator.trace_context.connection.get() == ""
         assert orchestrator.trace_context.fqn.get() == ""
         assert orchestrator.trace_context.phase.get() == ""
+
+
+def _grain_search_fixture() -> dict[str, MockTable]:
+    """A single table with two non-unique, null-free columns and a declared key.
+
+    Neither column is a candidate key, so `_compute_grain`'s measured search actually runs.
+    """
+
+    return {
+        "public.herbarium": MockTable(
+            type="table",
+            namespace_path=("public", "herbarium"),
+            ddl="CREATE TABLE public.herbarium (a integer NOT NULL, b integer NOT NULL);\n",
+            columns=[
+                ColumnMeta(name="a", sql_type="integer", nullable=False, default=None, ordinal=1),
+                ColumnMeta(name="b", sql_type="integer", nullable=False, default=None, ordinal=2),
+            ],
+            relationships=[],
+            indexes=[],
+            comments=CommentsMeta(table=None, columns={}),
+            stats={
+                name: ColumnStats(
+                    sql_type="integer",
+                    nullable=False,
+                    null_count=0,
+                    null_rate=0.0,
+                    cardinality=10,
+                    cardinality_ratio=0.1,
+                    cardinality_method="exact",
+                    values=tuple(ValueCount(value=i, count=10) for i in range(10)),
+                    values_coverage=1.0,
+                    distribution="uniform",
+                )
+                for name in ("a", "b")
+            },
+            samples={},
+            row_count=100,
+            unique_keys=[UniqueKeyMeta(columns=("a",))],
+        ),
+    }
+
+
+class _RelationshipsFailingAdapter(MockAdapter):
+    """Fails the relationship read for one object, as a permission or dialect error would."""
+
+    def introspect_relationships(self, fqn: str) -> list[ForeignKeyMeta]:
+        if fqn == "public.herbarium":
+            raise RuntimeError("simulated catalog failure")
+
+        return super().introspect_relationships(fqn)
+
+
+class _IndexesFailingAdapter(MockAdapter):
+    """Fails the index read for one object."""
+
+    def introspect_indexes(self, fqn: str) -> list[IndexMeta]:
+        if fqn == "public.herbarium":
+            raise RuntimeError("simulated catalog failure")
+
+        return super().introspect_indexes(fqn)
+
+
+class _CommentsFailingAdapter(MockAdapter):
+    """Fails the comment read for one object."""
+
+    def extract_comments(self, fqn: str) -> CommentsMeta:
+        if fqn == "public.herbarium":
+            raise RuntimeError("simulated catalog failure")
+
+        return super().extract_comments(fqn)
+
+
+class _PhysicalLayoutFailingAdapter(MockAdapter):
+    """Fails the physical-layout read for one object."""
+
+    def introspect_physical_layout(self, fqn: str) -> PhysicalLayout | None:
+        if fqn == "public.herbarium":
+            raise RuntimeError("simulated catalog failure")
+
+        return super().introspect_physical_layout(fqn)
+
+
+class _NullPatternsFailingAdapter(MockAdapter):
+    """Fails the null-pattern scan for one object."""
+
+    def compute_null_patterns(
+        self,
+        fqn: str,
+        columns: list[ColumnMeta],
+        config: StatisticsConfig,
+        counts: TableCounts,
+        base: dict[str, BaseStats],
+        scope: TableScope | None = None,
+    ) -> NullPatterns | None:
+        if fqn == "public.herbarium":
+            raise RuntimeError("simulated catalog failure")
+
+        return super().compute_null_patterns(fqn, columns, config, counts, base, scope)
+
+
+class TestCatalogReadDegrade:
+    """Each optional catalog read omits its own field and leaves the table profiled rather than
+    failing it - `introspect_relationships` also stops the manifest declaring an unwritten file.
+    """
+
+    def test_a_failed_relationship_read_still_fails_a_table(self, tmp_path: Path) -> None:
+        """SPEC 1.4 makes `relationships.yaml` REQUIRED for a table: omitting it says "plain view"
+        (SPEC 7.3) and an empty one asserts no foreign keys, so the only honest outcome is failure.
+        """
+
+        result = Engine(
+            _RelationshipsFailingAdapter(_curator_fixture()),
+            _conn_config(tmp_path),
+            tmp_path,
+        ).generate()
+
+        assert {t.fqn: t.status for t in result.tables} == {
+            "public.curator": "ok",
+            "public.herbarium": "failed",
+        }
+
+    def test_a_failed_relationship_read_degrades_a_plain_view(self, tmp_path: Path) -> None:
+        """The one object SPEC 1.4 lets go without the file, so the degrade is legal - and the
+        manifest must not declare a file this run did not write.
+        """
+
+        fixture = _curator_fixture()
+        fixture["public.herbarium"] = replace(fixture["public.herbarium"], type="view")
+        result = Engine(
+            _RelationshipsFailingAdapter(fixture),
+            _conn_config(tmp_path),
+            tmp_path,
+        ).generate()
+
+        assert next(t for t in result.tables if t.fqn == "public.herbarium").status == "ok"
+
+        manifest = yaml.safe_load((tmp_path / "primary" / "manifest.yaml").read_text())
+
+        assert "relationships" not in manifest["tables"]["public.herbarium"]["artifacts"]
+        assert not (tmp_path / "primary" / "public" / "herbarium" / "relationships.yaml").exists()
+        assert "relationships" in manifest["tables"]["public.curator"]["artifacts"]
+        assert (tmp_path / "primary" / "public" / "curator" / "relationships.yaml").exists()
+
+    def test_a_failed_index_read_omits_indexes_and_leaves_the_table_profiled(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        result = Engine(
+            _IndexesFailingAdapter(_curator_fixture()),
+            _conn_config(tmp_path),
+            tmp_path,
+        ).generate()
+
+        assert next(t for t in result.tables if t.fqn == "public.herbarium").status == "ok"
+        manifest = yaml.safe_load((tmp_path / "primary" / "manifest.yaml").read_text())
+        assert "statistics" in manifest["tables"]["public.herbarium"]["artifacts"]
+
+    def test_a_failed_comment_read_omits_descriptions_and_leaves_the_table_profiled(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        result = Engine(
+            _CommentsFailingAdapter(_curator_fixture()),
+            _conn_config(tmp_path),
+            tmp_path,
+        ).generate()
+
+        assert next(t for t in result.tables if t.fqn == "public.herbarium").status == "ok"
+
+    def test_a_failed_physical_layout_read_leaves_the_table_profiled(self, tmp_path: Path) -> None:
+        result = Engine(
+            _PhysicalLayoutFailingAdapter(_curator_fixture()),
+            _conn_config(tmp_path),
+            tmp_path,
+        ).generate()
+
+        assert next(t for t in result.tables if t.fqn == "public.herbarium").status == "ok"
+        stats = yaml.safe_load(
+            (tmp_path / "primary" / "public" / "herbarium" / "statistics.yaml").read_text(),
+        )
+        assert "physical_layout" not in stats
+
+    def test_a_failed_null_pattern_scan_leaves_the_table_profiled(self, tmp_path: Path) -> None:
+        result = Engine(
+            _NullPatternsFailingAdapter(_curator_fixture()),
+            _conn_config(tmp_path),
+            tmp_path,
+        ).generate()
+
+        assert next(t for t in result.tables if t.fqn == "public.herbarium").status == "ok"
+        stats = yaml.safe_load(
+            (tmp_path / "primary" / "public" / "herbarium" / "statistics.yaml").read_text(),
+        )
+        assert "null_patterns" not in stats
+
+    def test_a_failed_unique_key_read_loses_the_declared_key_but_not_the_table(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        result = Engine(
+            _KeyReadFailingAdapter(_grain_search_fixture(), "public.herbarium"),
+            _conn_config(tmp_path),
+            tmp_path,
+        ).generate()
+
+        assert next(t for t in result.tables if t.fqn == "public.herbarium").status == "ok"
+        stats = yaml.safe_load(
+            (tmp_path / "primary" / "public" / "herbarium" / "statistics.yaml").read_text(),
+        )
+        keys = stats["grain"]["keys"]
+
+        assert not any(k["detection"] == "declared" for k in keys)
+
+    def test_a_failed_unique_key_read_marks_the_measured_search_incomplete(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A search run without knowing every declared key cannot claim exhaustiveness -
+        `search.exhausted` reads `false`, never `true` or absent.
+        """
+
+        result = Engine(
+            _KeyReadFailingAdapter(_grain_search_fixture(), "public.herbarium"),
+            _conn_config(tmp_path),
+            tmp_path,
+        ).generate()
+
+        assert next(t for t in result.tables if t.fqn == "public.herbarium").status == "ok"
+        stats = yaml.safe_load(
+            (tmp_path / "primary" / "public" / "herbarium" / "statistics.yaml").read_text(),
+        )
+
+        assert stats["grain"]["search"]["exhausted"] is False
+
+    def test_an_unaffected_table_still_reports_its_declared_key(self, tmp_path: Path) -> None:
+        """The control: the same fixture, no failing read, still reports `a` as declared."""
+
+        result = Engine(
+            MockAdapter(_grain_search_fixture()),
+            _conn_config(tmp_path),
+            tmp_path,
+        ).generate()
+
+        assert next(t for t in result.tables if t.fqn == "public.herbarium").status == "ok"
+        stats = yaml.safe_load(
+            (tmp_path / "primary" / "public" / "herbarium" / "statistics.yaml").read_text(),
+        )
+        keys = stats["grain"]["keys"]
+
+        assert any(k["detection"] == "declared" and k["columns"] == ["a"] for k in keys)
+        assert stats["grain"]["search"]["exhausted"] is True

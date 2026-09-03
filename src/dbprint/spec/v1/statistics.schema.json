@@ -118,6 +118,18 @@
         "$ref": "#/$defs/Dependency"
       }
     },
+    "unmeasured": {
+      "$ref": "#/$defs/TableUnmeasured"
+    },
+    "timeline": {
+      "$ref": "#/$defs/Timeline"
+    },
+    "depends_on": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "columns": {
       "type": "object"
     }
@@ -192,7 +204,8 @@
         "mechanism": {
           "enum": [
             "cluster",
-            "partition"
+            "partition",
+            "sort"
           ]
         },
         "keys": {
@@ -294,6 +307,76 @@
           "type": "number",
           "exclusiveMinimum": 0,
           "maximum": 1
+        }
+      }
+    },
+    "Timeline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "column",
+        "unit",
+        "buckets",
+        "coverage"
+      ],
+      "properties": {
+        "column": {
+          "type": "string",
+          "minLength": 1
+        },
+        "unit": {
+          "enum": [
+            "day",
+            "week",
+            "month"
+          ]
+        },
+        "buckets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TimelineBucket"
+          }
+        },
+        "coverage": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "TimelineBucket": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start",
+        "count"
+      ],
+      "properties": {
+        "start": {
+          "type": "string",
+          "minLength": 1
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "Populated": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "to"
+      ],
+      "properties": {
+        "from": {
+          "type": "string",
+          "minLength": 1
+        },
+        "to": {
+          "type": "string",
+          "minLength": 1
         }
       }
     },
@@ -440,6 +523,33 @@
         }
       }
     },
+    "Length": {
+      "type": "object",
+      "required": [
+        "min",
+        "max",
+        "avg",
+        "p95"
+      ],
+      "properties": {
+        "min": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "avg": {
+          "type": "number",
+          "minimum": 0
+        },
+        "p95": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
     "Percentiles": {
       "type": "object",
       "minProperties": 1,
@@ -509,6 +619,14 @@
           "type": "integer",
           "minimum": 0
         },
+        "looks_like_candidate": {
+          "$ref": "#/$defs/LooksLike"
+        },
+        "looks_like_candidate_share": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
         "candidate_key": {
           "const": true
         },
@@ -524,6 +642,12 @@
         "epoch_unit": {
           "$ref": "#/$defs/EpochUnit"
         }
+      },
+      "not": {
+        "required": [
+          "looks_like",
+          "looks_like_candidate"
+        ]
       }
     },
     "CatalogOnlyColumn": {
@@ -608,6 +732,9 @@
           "type": "integer",
           "minimum": 0
         },
+        "populated": {
+          "$ref": "#/$defs/Populated"
+        },
         "inferred": {
           "$ref": "#/$defs/Inferred"
         },
@@ -637,11 +764,43 @@
         "percentiles": {
           "$ref": "#/$defs/Percentiles"
         },
+        "mean": {
+          "type": "number"
+        },
+        "sum": {
+          "type": "number"
+        },
+        "zero_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "negative_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "empty_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "quantized_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "length": {
+          "$ref": "#/$defs/Length"
+        },
+        "normalized_cardinality": {
+          "type": "integer",
+          "minimum": 0
+        },
         "freshness": {
           "$ref": "#/$defs/Freshness"
         },
         "unrepresentable": {
           "$ref": "#/$defs/Unrepresentable"
+        },
+        "unmeasured": {
+          "$ref": "#/$defs/Unmeasured"
         },
         "redacted": {
           "$ref": "#/$defs/Redaction"
@@ -688,13 +847,24 @@
         "sql_type",
         "nullable",
         "null_count",
-        "null_rate",
-        "cardinality",
-        "cardinality_ratio",
-        "cardinality_method",
-        "values",
-        "values_coverage"
+        "null_rate"
       ],
+      "if": {
+        "not": {
+          "required": [
+            "unmeasured"
+          ]
+        }
+      },
+      "then": {
+        "required": [
+          "cardinality",
+          "cardinality_ratio",
+          "cardinality_method",
+          "values",
+          "values_coverage"
+        ]
+      },
       "allOf": [
         {
           "not": {
@@ -732,12 +902,68 @@
           }
         },
         {
+          "not": {
+            "required": [
+              "length"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "normalized_cardinality"
+            ]
+          }
+        },
+        {
           "$ref": "#/$defs/SensitivityOnlyInferred"
         },
         {
           "not": {
             "required": [
               "unrepresentable"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "mean"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "sum"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "zero_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "negative_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "empty_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "quantized_count"
             ]
           }
         }
@@ -754,11 +980,22 @@
         "sql_type",
         "nullable",
         "null_count",
-        "null_rate",
-        "cardinality",
-        "cardinality_ratio",
-        "cardinality_method"
+        "null_rate"
       ],
+      "if": {
+        "not": {
+          "required": [
+            "unmeasured"
+          ]
+        }
+      },
+      "then": {
+        "required": [
+          "cardinality",
+          "cardinality_ratio",
+          "cardinality_method"
+        ]
+      },
       "allOf": [
         {
           "not": {
@@ -817,6 +1054,20 @@
           }
         },
         {
+          "not": {
+            "required": [
+              "length"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "normalized_cardinality"
+            ]
+          }
+        },
+        {
           "$ref": "#/$defs/SensitivityOnlyInferred"
         },
         {
@@ -839,6 +1090,48 @@
               "sketch"
             ]
           }
+        },
+        {
+          "not": {
+            "required": [
+              "mean"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "sum"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "zero_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "negative_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "empty_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "quantized_count"
+            ]
+          }
         }
       ]
     },
@@ -853,14 +1146,25 @@
         "sql_type",
         "nullable",
         "null_count",
-        "null_rate",
-        "cardinality",
-        "cardinality_ratio",
-        "cardinality_method",
-        "distribution",
-        "values",
-        "values_coverage"
+        "null_rate"
       ],
+      "if": {
+        "not": {
+          "required": [
+            "unmeasured"
+          ]
+        }
+      },
+      "then": {
+        "required": [
+          "cardinality",
+          "cardinality_ratio",
+          "cardinality_method",
+          "distribution",
+          "values",
+          "values_coverage"
+        ]
+      },
       "allOf": [
         {
           "not": {
@@ -896,6 +1200,48 @@
               "frequencies"
             ]
           }
+        },
+        {
+          "not": {
+            "required": [
+              "mean"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "sum"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "zero_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "negative_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "empty_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "quantized_count"
+            ]
+          }
         }
       ]
     },
@@ -910,14 +1256,25 @@
         "sql_type",
         "nullable",
         "null_count",
-        "null_rate",
-        "cardinality",
-        "cardinality_ratio",
-        "cardinality_method",
-        "distribution",
-        "values",
-        "values_coverage"
+        "null_rate"
       ],
+      "if": {
+        "not": {
+          "required": [
+            "unmeasured"
+          ]
+        }
+      },
+      "then": {
+        "required": [
+          "cardinality",
+          "cardinality_ratio",
+          "cardinality_method",
+          "distribution",
+          "values",
+          "values_coverage"
+        ]
+      },
       "allOf": [
         {
           "not": {
@@ -964,6 +1321,48 @@
               "frequencies"
             ]
           }
+        },
+        {
+          "not": {
+            "required": [
+              "mean"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "sum"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "zero_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "negative_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "empty_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "quantized_count"
+            ]
+          }
         }
       ]
     },
@@ -999,10 +1398,19 @@
         ]
       },
       "else": {
-        "required": [
-          "range",
-          "percentiles"
-        ]
+        "if": {
+          "not": {
+            "required": [
+              "unmeasured"
+            ]
+          }
+        },
+        "then": {
+          "required": [
+            "range",
+            "percentiles"
+          ]
+        }
       }
     },
     "TemporalRules": {
@@ -1016,14 +1424,26 @@
         "sql_type",
         "nullable",
         "null_count",
-        "null_rate",
-        "cardinality",
-        "cardinality_ratio",
-        "cardinality_method",
-        "freshness",
-        "distribution",
-        "frequencies"
+        "null_rate"
       ],
+      "if": {
+        "not": {
+          "required": [
+            "unmeasured"
+          ]
+        }
+      },
+      "then": {
+        "required": [
+          "cardinality",
+          "cardinality_ratio",
+          "cardinality_method",
+          "freshness",
+          "distribution",
+          "frequencies",
+          "values"
+        ]
+      },
       "allOf": [
         {
           "not": {
@@ -1042,7 +1462,14 @@
         {
           "not": {
             "required": [
-              "values"
+              "length"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "normalized_cardinality"
             ]
           }
         },
@@ -1051,6 +1478,41 @@
         },
         {
           "$ref": "#/$defs/BoundsUnlessDropped"
+        },
+        {
+          "not": {
+            "required": [
+              "mean"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "sum"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "zero_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "negative_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "empty_count"
+            ]
+          }
         }
       ]
     },
@@ -1065,13 +1527,28 @@
         "sql_type",
         "nullable",
         "null_count",
-        "null_rate",
-        "cardinality",
-        "cardinality_ratio",
-        "cardinality_method",
-        "distribution",
-        "frequencies"
+        "null_rate"
       ],
+      "if": {
+        "not": {
+          "required": [
+            "unmeasured"
+          ]
+        }
+      },
+      "then": {
+        "required": [
+          "cardinality",
+          "cardinality_ratio",
+          "cardinality_method",
+          "distribution",
+          "frequencies",
+          "values",
+          "zero_count",
+          "negative_count",
+          "quantized_count"
+        ]
+      },
       "allOf": [
         {
           "not": {
@@ -1084,13 +1561,6 @@
           "not": {
             "required": [
               "values_coverage_method"
-            ]
-          }
-        },
-        {
-          "not": {
-            "required": [
-              "values"
             ]
           }
         },
@@ -1122,6 +1592,27 @@
           "not": {
             "required": [
               "unrepresentable"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "length"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "normalized_cardinality"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "empty_count"
             ]
           }
         }
@@ -1181,11 +1672,20 @@
         ]
       },
       "else": {
-        "required": [
-          "values",
-          "values_coverage",
-          "distribution"
-        ]
+        "if": {
+          "not": {
+            "required": [
+              "unmeasured"
+            ]
+          }
+        },
+        "then": {
+          "required": [
+            "values",
+            "values_coverage",
+            "distribution"
+          ]
+        }
       }
     },
     "TextRules": {
@@ -1199,11 +1699,23 @@
         "sql_type",
         "nullable",
         "null_count",
-        "null_rate",
-        "cardinality",
-        "cardinality_ratio",
-        "cardinality_method"
+        "null_rate"
       ],
+      "if": {
+        "not": {
+          "required": [
+            "unmeasured"
+          ]
+        }
+      },
+      "then": {
+        "required": [
+          "cardinality",
+          "cardinality_ratio",
+          "cardinality_method",
+          "empty_count"
+        ]
+      },
       "allOf": [
         {
           "$ref": "#/$defs/ValueListUnlessProse"
@@ -1251,6 +1763,41 @@
           "not": {
             "required": [
               "frequencies"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "mean"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "sum"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "zero_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "negative_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "quantized_count"
             ]
           }
         }
@@ -1374,6 +1921,62 @@
               "sketch"
             ]
           }
+        },
+        {
+          "not": {
+            "required": [
+              "length"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "normalized_cardinality"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "mean"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "sum"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "zero_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "negative_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "empty_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "quantized_count"
+            ]
+          }
         }
       ]
     },
@@ -1400,6 +2003,20 @@
               "not": {
                 "required": [
                   "matched"
+                ]
+              }
+            },
+            {
+              "not": {
+                "required": [
+                  "looks_like_candidate"
+                ]
+              }
+            },
+            {
+              "not": {
+                "required": [
+                  "looks_like_candidate_share"
                 ]
               }
             },
@@ -1444,6 +2061,20 @@
               "not": {
                 "required": [
                   "matched"
+                ]
+              }
+            },
+            {
+              "not": {
+                "required": [
+                  "looks_like_candidate"
+                ]
+              }
+            },
+            {
+              "not": {
+                "required": [
+                  "looks_like_candidate_share"
                 ]
               }
             },
@@ -1499,6 +2130,30 @@
       "items": {
         "type": "string",
         "pattern": "^(min|max|p[0-9]{2})$"
+      }
+    },
+    "TableUnmeasured": {
+      "description": "SPEC 2.2.1: the table-level twin, restricted to the three blocks whose absence is otherwise a positive claim. `grain` is excluded (required, and `search.exhausted` already carries the partial case) and so is `depends_on` (its absence already means the producer could not ask).",
+      "type": "array",
+      "uniqueItems": true,
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "enum": [
+          "physical_layout",
+          "null_patterns",
+          "dependencies"
+        ]
+      }
+    },
+    "Unmeasured": {
+      "description": "SPEC 2.2.4 / 2.2.1: names the fields (or table-level blocks) this run attempted and could not obtain. Every named entry MUST be absent from the same object - which no schema keyword can express against a name list, so the conformance validator carries that half. Its presence relaxes the classification branch's own required list to the five fields REQUIRED on every classification, since which of the rest it excuses is that same name list. Omitted entirely when nothing failed.",
+      "type": "array",
+      "uniqueItems": true,
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
       }
     }
   }

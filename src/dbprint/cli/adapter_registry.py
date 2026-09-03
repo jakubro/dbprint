@@ -6,12 +6,27 @@ it receives a pre-built adapter and never imports a concrete adapter module.
 
 from __future__ import annotations
 
-from dbprint.adapters import Adapter, MysqlAdapter, PostgresAdapter, SnowflakeAdapter
+from dbprint.adapters import (
+    Adapter,
+    BigqueryAdapter,
+    ClickhouseAdapter,
+    DatabricksAdapter,
+    DuckdbAdapter,
+    MysqlAdapter,
+    PostgresAdapter,
+    RedshiftAdapter,
+    SnowflakeAdapter,
+)
 
 
 ADAPTERS: dict[str, type[Adapter]] = {
+    "bigquery": BigqueryAdapter,
+    "clickhouse": ClickhouseAdapter,
+    "databricks": DatabricksAdapter,
+    "duckdb": DuckdbAdapter,
     "mysql": MysqlAdapter,
     "postgres": PostgresAdapter,
+    "redshift": RedshiftAdapter,
     "snowflake": SnowflakeAdapter,
 }
 

@@ -429,7 +429,7 @@ Two channels, not one. `resources/read` failures are genuine JSON-RPC protocol e
 |---|---|---|
 | Reading an absent optional file (e.g., missing `description.md` / `statistics.annotations.yaml`) | `-32602 InvalidParams` | `"description.md is optional and not authored for table 'arboretum.seedbank.accession'."` |
 | Reading a resource for an unconfigured connection | `-32602 InvalidParams` | `"connection 'bar' not in .dbprint.yaml. Configured: ['a', 'b', 'c']"` |
-| Reading a resource for a connection configured but not served by this server instance | `-32602 InvalidParams` | `"connection 'staging' is configured but not served by this instance. Served: ['analytics']. Restart the server naming it to serve it."` |
+| Reading a resource for a connection configured but not served by this server instance | `-32602 InvalidParams` | `"connection 'staging' is configured but not served by this instance. Served: ['arboretum']. Restart the server naming it to serve it."` |
 | Reading a resource for an unknown table | `-32602 InvalidParams` | `"table 'foo' not found in connection 'bar'. Run dbprint list bar for valid names."` |
 | Reading a kind the manifest never declares for that table (e.g. `relationships` for a plain view declaring none) | `-32602 InvalidParams` | `"relationships is not declared for table 'arboretum.seedbank.v' - check the object's type before requesting it; the manifest does not declare every kind for every object."` |
 | Manifest references a file that is absent on disk | `-32603 InternalError` | `"manifest references statistics.yaml but file is absent at <path>. Re-run dbprint generate."` |
@@ -445,7 +445,7 @@ Two channels, not one. `resources/read` failures are genuine JSON-RPC protocol e
 |---|---|
 | Unknown `table` | `"table 'foo' not found in connection 'bar'. Run dbprint list bar for valid names."` |
 | Unknown `conn` | `"connection 'bar' not in .dbprint.yaml. Configured: ['a', 'b', 'c']"` |
-| `conn` configured but not served by this server instance | `"connection 'staging' is configured but not served by this instance. Served: ['analytics']. Restart the server naming it to serve it."` |
+| `conn` configured but not served by this server instance | `"connection 'staging' is configured but not served by this instance. Served: ['arboretum']. Restart the server naming it to serve it."` |
 | `get_table_context` called with an empty `table` | `"table '' must be a non-empty string."` |
 | `get_table_context` called with `format` outside its declared enum | `"format 'yml' must be one of ['md', 'json', 'yaml']."` |
 | `get_table_context` called with `budget_tokens` below its declared minimum | `"budget_tokens 0 must be an integer >= 1."` |

@@ -3,6 +3,9 @@
 Locates a server binary (initdb, mariadbd, ...); a container apt-installs what is missing and
 retries, while a host miss raises rather than mutating the developer's system. apt runs with
 `APT::Sandbox::User=root`, since `_apt` cannot write its temp files in some images.
+
+Run directly (`python -m tests._provisioning`, wired into `just install`) to warm Delta Lake's
+Maven/Ivy jar resolution once at install time - see `warm_delta_ivy_cache()`.
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ import fcntl
 import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from glob import glob
@@ -19,6 +23,10 @@ from pathlib import Path
 
 # One fixed path, so every xdist worker in the run agrees on the same lock file.
 INSTALL_LOCK_PATH = Path("/tmp/dbprint--provisioning.lock")
+
+# One fixed path, shared by `warm_delta_ivy_cache()` and every xdist worker's Databricks fixture -
+# a per-process tempdir would make each worker re-resolve Delta's Maven jars from scratch.
+SPARK_IVY_CACHE_PATH = Path("/tmp/dbprint--spark-ivy-cache")
 
 
 def in_container() -> bool:
@@ -64,6 +72,57 @@ def discover_or_install(
     )
 
 
+def ensure_java() -> Path:
+    """Locate a JVM, apt-installing a headless JRE on miss inside a container."""
+
+    return discover_or_install(
+        "java",
+        ("default-jre-headless",),
+        host_install_hint=(
+            "'java' not found on PATH, and pyspark ships no JVM of its own. "
+            "Install: default-jre-headless."
+        ),
+    )
+
+
+def warm_delta_ivy_cache() -> int:
+    """Resolve and cache Delta Lake's Maven/Ivy jars once, returning the process exit code.
+
+    `delta-spark` ships no jars, so warming here turns a Maven outage into a clear install-time
+    error. Exit 0 where no JVM can be found or installed - the Databricks tests skip on that too.
+    """
+
+    try:
+        ensure_java()
+    except RuntimeError as exc:
+        print(f"warm_delta_ivy_cache: {exc} Skipping - Databricks tests will skip too.")
+
+        return 0
+
+    from delta import configure_spark_with_delta_pip
+    from pyspark.sql import SparkSession
+
+    SPARK_IVY_CACHE_PATH.mkdir(parents=True, exist_ok=True)
+    builder = (
+        SparkSession.builder.master("local[1]")
+        .appName("dbprint-ivy-warm")
+        .config("spark.jars.ivy", str(SPARK_IVY_CACHE_PATH))
+        .config("spark.ui.enabled", "false")
+    )
+
+    try:
+        spark = configure_spark_with_delta_pip(builder).getOrCreate()
+    except Exception as exc:  # noqa: BLE001 - any resolution failure is the one thing to report
+        print(f"warm_delta_ivy_cache: could not resolve Delta's Maven jars: {exc}", file=sys.stderr)
+
+        return 1
+
+    spark.stop()
+    print("warm_delta_ivy_cache: Delta's Maven jars resolved and cached")
+
+    return 0
+
+
 def _locate(binary: str, candidate_globs: tuple[str, ...]) -> Path | None:
     """Return the binary path from PATH or the candidate globs, else None."""
 
@@ -93,7 +152,7 @@ def _install_lock() -> Iterator[None]:
 
     INSTALL_LOCK_PATH.touch(exist_ok=True)
 
-    with INSTALL_LOCK_PATH.open("r+") as lock_file:
+    with INSTALL_LOCK_PATH.open("r+", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
 
         try:
@@ -116,3 +175,7 @@ def _apt_install(apt_packages: tuple[str, ...]) -> None:
                 f"`{' '.join(argv)}` failed (exit {result.returncode}): "
                 f"{result.stderr.strip()[:500]}",
             )
+
+
+if __name__ == "__main__":
+    raise SystemExit(warm_delta_ivy_cache())

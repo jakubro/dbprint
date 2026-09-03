@@ -23,7 +23,7 @@ def test_every_mocktable_namespace_path_matches_its_fqn_key() -> None:
 
 
 def _mismatches_in_file(path: Path) -> list[str]:
-    tree = ast.parse(path.read_text(), filename=str(path))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     bindings = _bindings(tree)
     mismatches: list[str] = []
 

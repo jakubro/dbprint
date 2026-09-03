@@ -7,7 +7,7 @@ requires-python = ">=3.13"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Jakub Roman" }]
-keywords = ["database", "schema", "profiling", "snowflake", "postgresql", "mysql", "cli", "ai-agents"]
+keywords = ["database", "schema", "profiling", "snowflake", "postgresql", "mysql", "duckdb", "clickhouse", "redshift", "databricks", "bigquery", "cli", "ai-agents"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
@@ -35,10 +35,18 @@ dev = [
   "pytest-cov",
   "ruff>=0.16.3",
   "ty>=0.0.73",
+  "hatchling",
   "duckdb>=1.0",
   "psycopg[binary]>=3.2",
   "mysql-connector-python>=26.7",
   "pytest-xdist>=3.8.0",
+  "chdb>=4.3",
+  "clickhouse-connect>=1.7",
+  "redshift-connector>=2.1",
+  "databricks-sql-connector>=4.2",
+  "pyspark>=4.0",
+  "delta-spark>=4.0",
+  "google-cloud-bigquery>=3.27",
 ]
 postgres = [
   "psycopg[binary]>=3.2",
@@ -49,6 +57,21 @@ mysql = [
 snowflake = [
   "cryptography>=50.0",
   "snowflake-connector-python>=3.6",
+]
+duckdb = [
+  "duckdb>=1.0",
+]
+clickhouse = [
+  "clickhouse-connect>=1.7",
+]
+redshift = [
+  "redshift-connector>=2.1",
+]
+databricks = [
+  "databricks-sql-connector>=4.2",
+]
+bigquery = [
+  "google-cloud-bigquery>=3.27",
 ]
 mcp = [
   "mcp>=2,<3",
@@ -77,11 +100,7 @@ path = "src/dbprint/__init__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/dbprint"]
 
-# Each specification ships inside the package it governs, so a citation printed by `check`
-# resolves for a reader who installed from an index rather than cloning.
-[tool.hatch.build.targets.wheel.force-include]
-"docs/format/v1/SPEC.md" = "dbprint/spec/v1/SPEC.md"
-"docs/ASSERTIONS.md" = "dbprint/assertions/ASSERTIONS.md"
+[tool.hatch.build.targets.wheel.hooks.custom]
 
 [tool.coverage.run]
 data_file = "/tmp/.coverage-dbprint"

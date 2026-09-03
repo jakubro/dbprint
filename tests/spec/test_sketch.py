@@ -5,11 +5,15 @@
 
 from __future__ import annotations
 
+import importlib
+from types import ModuleType
 from unittest.mock import patch
 
 import pytest
 
+from dbprint.cli.adapter_registry import ADAPTERS
 from dbprint.spec import sketch as sketch_module
+from dbprint.spec.classification import base_type
 from dbprint.spec.sketch import (
     answerable_count,
     answerable_subset_containment,
@@ -54,6 +58,16 @@ class TestSketchKind:
             pytest.param("uuid", "text", id="uuid"),
             pytest.param("boolean", "boolean", id="boolean"),
             pytest.param("timestamp with time zone", "temporal", id="timestamptz"),
+            pytest.param("Nullable(Int32)", "integer", id="clickhouse_wrapped_int32"),
+            pytest.param("UInt64", "integer", id="clickhouse_uint64"),
+            pytest.param("HUGEINT", "integer", id="duckdb_hugeint"),
+            pytest.param("UBIGINT", "integer", id="duckdb_ubigint"),
+            pytest.param("INT64", "integer", id="bigquery_int64"),
+            pytest.param("BOOL", "boolean", id="bigquery_bool"),
+            pytest.param("Bool", "boolean", id="clickhouse_bool"),
+            pytest.param("Date32", "temporal", id="clickhouse_date32"),
+            pytest.param("DateTime64(6)", "temporal", id="clickhouse_datetime64"),
+            pytest.param("FixedString(10)", "text", id="clickhouse_fixedstring"),
         ],
     )
     def test_a_covered_type_resolves_its_kind(self, sql_type: str, kind: str) -> None:
@@ -66,10 +80,72 @@ class TestSketchKind:
             pytest.param("money", id="money"),
             pytest.param("json", id="json"),
             pytest.param("bytea", id="unsupported"),
+            pytest.param("Decimal256(4)", id="clickhouse_wide_decimal"),
+            pytest.param("BIGNUMERIC", id="bigquery_bignumeric"),
         ],
     )
     def test_a_type_with_no_canonical_encoding_resolves_nothing(self, sql_type: str) -> None:
         assert sketch_kind(sql_type) is None
+
+
+# Numeric but excluded from every kind by name (SPEC 2.2.14): floating-point and `money` have no
+# canonical encoding, and the wide decimals wait on a scale-preserving string cast.
+_FLOAT_AND_MONEY_TYPES = frozenset(
+    {"real", "double precision", "double", "float", "money", "float32", "float64"},
+)
+_WIDE_DECIMAL_TYPES = frozenset(
+    {"decimal32", "decimal64", "decimal128", "decimal256", "bignumeric"},
+)
+
+
+def _adapter_stats_module(adapter_cls: type) -> ModuleType:
+    """Import the vendor package's `stats` module beside its registered `adapter` module."""
+
+    package = adapter_cls.__module__.rsplit(".", 1)[0]
+
+    return importlib.import_module(f"{package}.stats")
+
+
+class TestEveryAdaptersSketchableTypesResolve:
+    """The convergence contract for `sketch_kind`, in the spirit of `test_classification.py`'s
+    registry-driven sweep - a ninth adapter's type spellings are checked automatically.
+    """
+
+    def test_every_adapters_own_boolean_and_temporal_types_resolve(self) -> None:
+        unresolved = [
+            (vendor, table_name, sql_type)
+            for vendor, adapter_cls in ADAPTERS.items()
+            for table_name in ("_BOOLEAN_TYPES", "_TEMPORAL_TYPES")
+            for sql_type in getattr(_adapter_stats_module(adapter_cls), table_name, ())
+            if sketch_kind(sql_type) is None
+        ]
+
+        assert unresolved == []
+
+    def test_every_adapters_own_numeric_types_resolve_except_the_documented_exclusions(
+        self,
+    ) -> None:
+        unresolved = [
+            (vendor, sql_type)
+            for vendor, adapter_cls in ADAPTERS.items()
+            for sql_type in getattr(_adapter_stats_module(adapter_cls), "_NUMERIC_TYPES", ())
+            if base_type(sql_type) not in _FLOAT_AND_MONEY_TYPES
+            and base_type(sql_type) not in _WIDE_DECIMAL_TYPES
+            and sketch_kind(sql_type) is None
+        ]
+
+        assert unresolved == []
+
+    def test_the_shared_character_types_all_resolve_to_text(self) -> None:
+        """No adapter declares its own text-type tuple - `is_string_like_type` is an
+        elimination test, so the shared list itself is what a new spelling would extend.
+        """
+
+        from dbprint.spec.classification import _CHARACTER_TYPES
+
+        unresolved = [t for t in _CHARACTER_TYPES if sketch_kind(t) != "text"]
+
+        assert unresolved == []
 
 
 class TestPackAndDecode:

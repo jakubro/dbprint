@@ -32,7 +32,7 @@ def _connection(tmp_path: Path, name: str = "primary") -> ConnectionConfig:
 
 def _write(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(data, sort_keys=False))
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
 
 @pytest.fixture

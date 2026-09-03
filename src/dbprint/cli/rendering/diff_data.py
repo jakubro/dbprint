@@ -68,6 +68,7 @@ def render_human_text(diff_dict: dict[str, Any], options: DiffRenderOptions) -> 
     _emit_section(buf, "Modified (row count)", _row_count_lines_by_table(changes))
     _emit_section(buf, "Modified (grain)", _grain_lines_by_table(changes))
     _emit_section(buf, "Modified (physical layout)", _physical_layout_lines_by_table(changes))
+    _emit_section(buf, "Modified (depends_on)", _depends_on_lines_by_table(changes))
     statistics_by_table, elided = _statistics_lines_by_table(changes, options)
     _emit_section(buf, "Modified (statistics)", statistics_by_table)
 
@@ -343,6 +344,26 @@ def _format_physical_layout_side(block: dict[str, Any] | None) -> str:
     return f"{mechanism} ({exprs})"
 
 
+def _depends_on_lines_by_table(changes: list[dict[str, Any]]) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+
+    for ev in changes:
+        if ev.get("kind") != "depends_on_changed":
+            continue
+
+        fqn = ev.get("table") or ""
+        out.setdefault(fqn, []).append(_format_depends_on_event(ev))
+
+    return out
+
+
+def _format_depends_on_event(ev: dict[str, Any]) -> str:
+    before = ", ".join(ev.get("before") or []) or "none"
+    after = ", ".join(ev.get("after") or []) or "none"
+
+    return f"~ depends_on: {before} -> {after}"
+
+
 def _statistics_lines_by_table(
     changes: list[dict[str, Any]],
     options: DiffRenderOptions,
@@ -443,9 +464,13 @@ def _relationship_lines_by_table(changes: list[dict[str, Any]]) -> dict[str, lis
         out.setdefault(source, []).append(
             f"{marker} -> {target}.{target_col}  (via {source_col}){details}",
         )
-        out.setdefault(target, []).append(
-            f"{marker} <- {source}.{source_col}  (via {target_col}){details}",
-        )
+
+        # A self-referencing FK's source and target are the same table - the outgoing line
+        # above already names it once, agreeing with `relationships_changed`'s own count.
+        if target != source:
+            out.setdefault(target, []).append(
+                f"{marker} <- {source}.{source_col}  (via {target_col}){details}",
+            )
 
     for values in out.values():
         values.sort()
@@ -462,18 +487,25 @@ def _rel_marker(kind: str) -> str:
 
 
 def _rel_details(ev: dict[str, Any]) -> str:
-    if ev.get("kind") != "relationship_modified":
-        return ""
+    """Trailing detail for one relationship line - `detection` when the event carries it (SPEC
+    2.3: a consumer MUST NOT treat a guess as a constraint), plus a modified edge's action deltas.
+    """
 
     parts: list[str] = []
-    on_delete = ev.get("on_delete")
-    on_update = ev.get("on_update")
+    detection = ev.get("detection")
 
-    if isinstance(on_delete, dict):
-        parts.append(f"on_delete {on_delete.get('before')} -> {on_delete.get('after')}")
+    if isinstance(detection, str) and detection:
+        parts.append(detection)
 
-    if isinstance(on_update, dict):
-        parts.append(f"on_update {on_update.get('before')} -> {on_update.get('after')}")
+    if ev.get("kind") == "relationship_modified":
+        on_delete = ev.get("on_delete")
+        on_update = ev.get("on_update")
+
+        if isinstance(on_delete, dict):
+            parts.append(f"on_delete {on_delete.get('before')} -> {on_delete.get('after')}")
+
+        if isinstance(on_update, dict):
+            parts.append(f"on_update {on_update.get('before')} -> {on_update.get('after')}")
 
     return f"   {', '.join(parts)}" if parts else ""
 

@@ -8,6 +8,7 @@ records why not. The skill is a shorter layout protocol; both files are golden-t
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -16,6 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SPEC_PATH = REPO_ROOT / "docs/format/v1/SPEC.md"
 GUIDE_PATH = REPO_ROOT / "src/dbprint/engine/reading_guide.md"
 SKILL_PATH = REPO_ROOT / "docs/examples/skill/dbprint.md"
+RELATIONSHIPS_SCHEMA_PATH = REPO_ROOT / "src/dbprint/spec/v1/relationships.schema.json"
 
 _BACKTICKED = re.compile(r"`([^`]+)`")
 
@@ -68,7 +70,28 @@ def _require(condition: bool, message: str) -> None:
 
 
 def _require_contains(path: Path, needle: str, message: str) -> None:
-    _require(needle in path.read_text(), f"{message} ({path})")
+    _require(needle in path.read_text(encoding="utf-8"), f"{message} ({path})")
+
+
+def _detection_values() -> list[str]:
+    """`relationships.yaml`'s own `detection` enum - the producer's authoritative list."""
+
+    schema = json.loads(RELATIONSHIPS_SCHEMA_PATH.read_text())
+
+    return list(schema["$defs"]["Detection"]["enum"])
+
+
+def _check_detection_enumeration(values: list[str], vocabulary_text: str) -> None:
+    """Every `detection` value the schema allows must be named in the vocabulary sentence - a new
+    value fails generation here instead of shipping a guide whose enumeration closed without it.
+    """
+
+    for value in values:
+        _require(
+            f"`{value}`" in vocabulary_text,
+            f"relationships.schema.json's Detection enum has {value!r}, "
+            "not named in the foreign_key_candidate vocabulary sentence",
+        )
 
 
 # One sentence per classification, in SPEC 3.2's priority order, anchored to SPEC 3's field
@@ -92,9 +115,12 @@ _VOCABULARY = (
         "foreign_key_candidate",
         (
             "Carries a foreign key on this column, the referencing side - not the target. "
-            "`relationships.yaml`'s own entry says `declared` (from the catalog) or "
-            "`inferred` (a naming guess a database will not enforce); its value list follows "
-            "the same truncation rule as `categorical`/`text` below."
+            "`relationships.yaml`'s own entry says `declared` (from the catalog), `inferred` "
+            "(a naming guess a database will not enforce), or `measured` (proposed from value "
+            "containment between two columns' sketches) - a measured edge is a stronger claim "
+            "about the data at the instant of the read, never a stronger claim about the "
+            "schema than an inferred one (SPEC 2.3); its value list follows the same "
+            "truncation rule as `categorical`/`text` below."
         ),
     ),
     (
@@ -187,6 +213,11 @@ def _check_vocabulary_anchors(matrix: dict[str, dict[str, str]]) -> None:
     )
     _require_contains(
         SPEC_PATH,
+        "It is not a stronger CLAIM about the schema than an inferred edge is",
+        "SPEC 2.3's measured-edge-not-a-schema-claim sentence moved",
+    )
+    _require_contains(
+        SPEC_PATH,
         "Has a foreign key, declared or inferred",
         "SPEC 3.1's foreign_key_candidate direction moved",
     )
@@ -230,10 +261,14 @@ _TRAPS = (
         "timestamp ordering. MySQL takes every percentile by rank."
     ),
     (
-        "**An inferred edge can resolve on a name coincidence.** `refers_to`/`referenced_by` "
-        "entries with `detection: inferred` are a naming match, not a verified relationship "
-        "(SPEC 2.3) - `relationships.annotations.yaml` records where a human has since "
-        "rejected one."
+        "**An inferred edge can resolve on a name coincidence, and a measured edge is not a "
+        "stronger schema claim than either.** `refers_to`/`referenced_by` entries with "
+        "`detection: inferred` are a naming match, not a verified relationship; a `measured` "
+        "entry is stronger evidence about the data at `profiled_at`, never a stronger claim "
+        "about the schema - a consumer MAY use either as a join candidate, never as "
+        "cardinality-guaranteed, and SHOULD prefer a `declared` edge over both where one "
+        "exists (SPEC 2.3) - `relationships.annotations.yaml` records where a human has "
+        "since rejected an inferred one."
     ),
     (
         "**`cardinality` is collation-relative.** Two prints of one logical schema, taken "
@@ -289,12 +324,13 @@ _TRAPS = (
         "two agreed, `bounded` states a producer caught them disagreeing (SPEC 2.2.4)."
     ),
     (
-        "**`numeric`/`temporal` carry no `values` list; `frequencies` is the substitute, "
-        "not an omission.** Its four counts - `top`, `bottom`, `listed`, `total` - reproduce "
-        "the same top-N fetch `distribution` is computed from, published because these two "
-        "classifications carry no `values` list for a validator to recompute the verdict "
-        "against (SPEC 2.2.4). None of the four is a share; recompute any ratio against "
-        "`non_null`/`cardinality` before trusting a rounded one."
+        "**`numeric`/`temporal` carry `values` but never `values_coverage`; `frequencies` "
+        "is not an omission.** The list is the same top-N fetch `distribution` is computed "
+        "from, but it is never exhaustive on these two classifications, so a validator has "
+        "no exhaustive list to recompute `distribution` from - `frequencies`'s four counts "
+        "- `top`, `bottom`, `listed`, `total` - are what it checks instead (SPEC 2.2.4). "
+        "None of the four is a share; recompute any ratio against `non_null`/`cardinality` "
+        "before trusting a rounded one."
     ),
     (
         "**`unrepresentable` changes how a bound must be read, not just which fields are "
@@ -302,6 +338,31 @@ _TRAPS = (
         "Gregorian) is still emitted as text - the database's own rendering - but named here "
         "so a consumer feeding it to a typed parser degrades deliberately instead of "
         "crashing (SPEC 2.2.4). The marker says nothing about whether the value is correct."
+    ),
+    (
+        "**`depends_on: []` and the key omitted mean different things.** A view or "
+        "matview's `[]` states the catalog answered and it reads no other object in the "
+        "print; the key omitted entirely states the producer could not ask - no grant, no "
+        "such catalog table on this engine version, or the read failed for any other "
+        "reason (SPEC 2.2.17). Collapsing the two into one `[]` would spend that meaning "
+        "on every engine to cover one engine's own gap."
+    ),
+    (
+        "**A field named in `unmeasured` was attempted and lost, not forbidden.** Every other "
+        "absence a print carries is structural - the classification forbids the field, a "
+        "redaction withheld it, the type has no day to truncate to - and SPEC 7 reads it that "
+        "way. A name in a column's `unmeasured` list (SPEC 2.2.4), or a block in the file's "
+        "own (SPEC 2.2.1), states that this run issued the read and did not get an answer: "
+        "treat that field as unknown, never as zero, none, or a property of the data. An "
+        "artifact with no marker anywhere is not thereby complete - a producer predating the "
+        "field, or one that dropped a measurement silently, looks identical."
+    ),
+    (
+        "**A timeline gap is not a zero.** `timeline.buckets` lists only a day/week/month "
+        "span containing at least one non-null anchor value - a span with none is absent "
+        "from the list, never published as a zero-count entry, so two consecutive buckets "
+        "whose `start` values are not adjacent at `unit`'s own width mark a gap where no "
+        "row fell, not a measured absence of activity (SPEC 2.2.16)."
     ),
 )
 
@@ -365,8 +426,7 @@ def _check_trap_anchors() -> None:
     )
     _require_contains(
         SPEC_PATH,
-        "these two classifications carry no `values` list for a validator to recompute "
-        "the verdict against",
+        "a validator has no exhaustive list to recompute `distribution` from",
         "SPEC's frequencies-substitute sentence moved",
     )
     _require_contains(
@@ -374,6 +434,23 @@ def _check_trap_anchors() -> None:
         "lets a consumer feeding that value to a typed parser degrade deliberately "
         "instead of crashing",
         "SPEC's unrepresentable-degrade sentence moved",
+    )
+    _require_contains(
+        SPEC_PATH,
+        "A producer MUST NOT collapse the two: emitting `[]` for an object the catalog "
+        "never answered for",
+        "SPEC's depends_on two-encoding sentence moved",
+    )
+    _require_contains(
+        SPEC_PATH,
+        "A consumer reading two consecutive buckets whose `start` values are not adjacent "
+        "at `unit`'s own width has found a gap",
+        "SPEC's timeline-gap sentence moved",
+    )
+    _require_contains(
+        SPEC_PATH,
+        "this marker is what makes the true one expressible",
+        "SPEC's unmeasured-marker sentence moved",
     )
     _require_contains(
         SPEC_PATH,
@@ -413,13 +490,16 @@ A file carrying a top-level `scope` block did not read the whole table - a row
 predicate narrowed it, or a sample bounded the cost. Every count in it except
 `row_count` is over `rows_scanned`, not the table (SPEC 2.2.8) - a `boolean`'s exact
 split and a `values_coverage: 1.0` are both exhaustive over that narrower set only,
-never wider than what was actually read.
+never wider than what was actually read, and `sum` is not rescalable to table grain
+by assuming the sample is representative: read it as a partial total, never the
+column's true sum.
 
 A `physical_layout` block declares a clustering or partitioning key: `mechanism`
 (`cluster` or `partition`) names the mechanism, not a judgment; `keys` is ordered,
 its first component pruning far more than its last; each key's `column` is what a
 predicate matches against, `expression` what was actually declared. Absence means
-the table is not clustered or partitioned, never that nobody checked (SPEC 2.2.11).
+the table is not clustered or partitioned, never that nobody checked - unless the
+file's own `unmeasured` list names the block (SPEC 2.2.11, 2.2.1).
 
 A column carrying a `redacted` marker (`mask`, `drop`, `hash`) withholds literals, not
 measurements - `cardinality`, `null_rate`, `values_coverage` and `distribution` stay
@@ -546,6 +626,9 @@ def build_document() -> str:
     _check_vocabulary_anchors(matrix)
     _check_trap_anchors()
     _check_consumer_must_coverage(spec)
+
+    fk_candidate_sentence = next(s for name, s in _VOCABULARY if name == "foreign_key_candidate")
+    _check_detection_enumeration(_detection_values(), fk_candidate_sentence)
 
     vocab_lines = [
         "## Vocabulary",

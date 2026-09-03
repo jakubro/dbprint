@@ -127,6 +127,11 @@ columns:
     values_coverage: 1.0
     values_coverage_method: measured
     distribution: uniform
+    length:
+      min: 8
+      max: 10
+      avg: 9.0
+      p95: 10.0
   json_text:
     sql_type: text
     nullable: false
@@ -204,9 +209,15 @@ columns:
       count: 1
     values_coverage: 0.6
     distribution: uniform
+    length:
+      min: 43
+      max: 43
+      avg: 43.0
+      p95: 43.0
     sketch:
       method: kmv_md5_lo64
       values: BS3YNZqYWRkFeYDnycqRhhRgqZeOZhDrForIiWlC0PMXt1YEa41jWSNijS3BFUgENjjM/BxpsZc5Hy5I/RJoEjldXz9xYAGWPOxXsKYnKMA+thbc6i1sKEV4yVnPODmjR7vZntDiIHdJY6M6SzL1bU8bCVGmEG9UUpaJoIgLzq9WEOkIYSbvFGGOknfbWhBMbIvhiYJCABx0ztrI1NTHAID0UADPoMdshWkPCi9Ov5GH73q67w+Bf4y2vfG8ph9VjY8+yyyRFBqUjSFy73U+T5bHFf+UdnMPmaUKE6io7XWbU38xW+Qg6qbnOhMCXTwPrHzXj2X7fx+wk1tunqA457JSnlMlm6IOsqKzAjuGl9KzVfkBNxMYYrjc4Yg/DfQXu6bwpGLXG03BxTAela5gI8eTmENUaa+h05hEjYCUvBXXJpk5x4LVa+ITaEy8HA6T4sYGjFGiw8fllCiDXCorLfDCLwUtufop8xShUYj537/1uJFXQdB6K/X6whBJUEo6+UmBbqptB97+yvGnpqFyhw==
+    normalized_cardinality: 50
   payload_bytes:
     sql_type: bytea
     nullable: true

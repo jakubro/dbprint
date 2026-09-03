@@ -175,6 +175,28 @@ class TestMarkdown:
         )
         assert "<!-- truncated:" in result.text
 
+    def test_a_budget_too_tight_for_the_header_is_not_counted_as_included(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The entire output is a truncation-marker comment - a caller checking
+        `tables_included == 0` must see that, not a false "one table rendered".
+        """
+
+        print_root = _seed_print(tmp_path)
+        opts = AssemblyOptions(budget=1)
+        result = assemble_context(
+            MANIFEST,
+            print_root,
+            ["herbarium.public.collector"],
+            opts,
+            "primary",
+        )
+
+        assert result.tables_included == 0
+        assert result.truncated == ("herbarium.public.collector",)
+        assert "<!-- truncated:" in result.text
+
 
 class TestCorruptArtifact:
     """A present-but-unparseable artifact must not read as never-profiled (SPEC 2.5)."""
@@ -317,6 +339,25 @@ class TestConnectionNotes:
         )
 
         assert "# Context for connection primary" in result.text
+
+    def test_corrupt_manifest_annotations_is_reported_not_silently_dropped(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A parse failure is distinguishable from "no notes were ever written"."""
+
+        print_root = _seed_two_table_print(tmp_path, notes=None)
+        (print_root / "manifest.annotations.yaml").write_text("not: [valid: yaml")
+
+        result = assemble_context(
+            TWO_TABLE_MANIFEST,
+            print_root,
+            ["herbarium.public.collector", "herbarium.public.specimen_loan"],
+            AssemblyOptions(),
+            "primary",
+        )
+
+        assert "Unreadable: manifest_annotations (present on disk, failed to parse)" in result.text
 
     def test_a_single_table_render_carries_no_connection_notes(self, tmp_path: Path) -> None:
         """A single-table render has no connection-wide slot; the fact is out of scope for it."""
@@ -714,6 +755,67 @@ class TestCardinalityCueNamesItsPopulation:
         assert "| trace_id | 0 |" in text
 
 
+def _seed_timeline_print(tmp_path: Path, coverage: float) -> Path:
+    """A one-table print whose statistics carry a `timeline` block (SPEC 2.2.16)."""
+
+    print_root = tmp_path / "prints" / "primary"
+    table_dir = print_root / "herbarium" / "public" / "field_log"
+    table_dir.mkdir(parents=True)
+    (print_root / "manifest.yaml").write_text(yaml.safe_dump(SCOPED_MANIFEST))
+    (table_dir / "ddl.sql").write_text("CREATE TABLE field_log (trace_id varchar(64));\n")
+    (table_dir / "statistics.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "format_version": 1,
+                "table": "herbarium.public.field_log",
+                "type": "table",
+                "profiled_at": "2026-06-09T00:00:00Z",
+                "row_count": 4_000_000,
+                "row_count_method": "exact",
+                "timeline": {
+                    "column": "created_at",
+                    "unit": "day",
+                    "buckets": [{"start": "2024-01-01", "count": 1}],
+                    "coverage": coverage,
+                },
+                "columns": {"trace_id": _scoped_column(4_000_000, 4_000_000)},
+            },
+        ),
+    )
+
+    return print_root
+
+
+class TestTimelineCoverageQualifier:
+    """A `<1.0` coverage never reads as complete (SPEC 2.2.16) - a null anchor value counts
+    toward `rows_scanned` but no bucket, the one way coverage falls short of `1.0`.
+    """
+
+    def test_a_coverage_short_of_1_never_renders_as_100_percent(self, tmp_path: Path) -> None:
+        root = _seed_timeline_print(tmp_path, 0.996)
+        text = _render_scoped(root)
+
+        assert "99.6% of scanned rows" in text
+        assert "100% of scanned rows" not in text
+
+    def test_the_clamp_ceiling_itself_never_renders_as_100_percent(self, tmp_path: Path) -> None:
+        """`0.999999` is the ceiling a `<1.0` coverage is clamped to, and rounding to one decimal
+        would send it to the `100.0%` the words above are withheld for claiming.
+        """
+
+        root = _seed_timeline_print(tmp_path, 0.999999)
+        text = _render_scoped(root)
+
+        assert "99.9% of scanned rows" in text
+        assert "100.0% of scanned rows" not in text
+        assert "every scanned row" not in text
+
+    def test_a_coverage_of_exactly_1_renders_every_scanned_row(self, tmp_path: Path) -> None:
+        root = _seed_timeline_print(tmp_path, 1.0)
+
+        assert "every scanned row" in _render_scoped(root)
+
+
 class TestRelationshipsMarkdown:
     """Every rendered edge states its `detection` (SPEC 2.3); `on_delete=` never on a guess."""
 
@@ -735,7 +837,7 @@ class TestRelationshipsMarkdown:
             annotated_grain=None,
             relationship_annotations=relationship_annotations,
             missing=(),
-            corrupted=(),
+            corrupted={},
             statistics_params_override=None,
         )
 
@@ -882,7 +984,7 @@ class TestObservedRendering:
             annotated_grain=None,
             relationship_annotations=None,
             missing=(),
-            corrupted=(),
+            corrupted={},
             statistics_params_override=None,
         )
 
@@ -988,7 +1090,7 @@ class TestNullPatternsMarkdown:
             annotated_grain=None,
             relationship_annotations=None,
             missing=(),
-            corrupted=(),
+            corrupted={},
             statistics_params_override=None,
         )
 
@@ -1486,6 +1588,10 @@ class TestAnnotations:
         )
         assert "## Annotations" not in result.text
         assert "## Description" in result.text
+        # The parse failure is stated, not silently dropped alongside the missing section.
+        assert (
+            "Unreadable: statistics_annotations (present on disk, failed to parse)" in result.text
+        )
 
     @staticmethod
     def _seed_annotations(tmp_path: Path, columns: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
@@ -1803,6 +1909,75 @@ class TestAnnotations:
             },
         }
         assert list(result).index("annotations") < list(result).index("statistics")
+
+    def test_a_corrupt_relationships_annotations_file_is_reported(self, tmp_path: Path) -> None:
+        """The same distinguishable-corruption fix, for the relationships side."""
+
+        print_root = _seed_print(tmp_path)
+        table_dir = print_root / "herbarium" / "public" / "collector"
+        manifest_path = print_root / "manifest.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text())
+        manifest["tables"]["herbarium.public.collector"]["artifacts"][
+            "relationships_annotations"
+        ] = "relationships.annotations.yaml"
+        manifest_path.write_text(yaml.safe_dump(manifest))
+        (table_dir / "relationships.annotations.yaml").write_text("not: [valid, - yaml")
+
+        result = assemble_context(
+            manifest,
+            print_root,
+            ["herbarium.public.collector"],
+            AssemblyOptions(),
+            "primary",
+        )
+
+        assert (
+            "Unreadable: relationships_annotations (present on disk, failed to parse)"
+            in result.text
+        )
+
+    def test_a_corrupt_artifact_reaches_the_structured_header(self, tmp_path: Path) -> None:
+        """The markdown path already names a corrupt artifact - `--format json`/`yaml` must carry
+        the same fact, not drop the section like a table that never declared the artifact.
+        """
+
+        print_root = _seed_print(tmp_path)
+        table_dir = print_root / "herbarium" / "public" / "collector"
+        manifest_path = print_root / "manifest.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text())
+        manifest["tables"]["herbarium.public.collector"]["artifacts"][
+            "relationships_annotations"
+        ] = "relationships.annotations.yaml"
+        manifest_path.write_text(yaml.safe_dump(manifest))
+        (table_dir / "relationships.annotations.yaml").write_text("not: [valid, - yaml")
+
+        result = assemble_structured_context(
+            manifest,
+            print_root,
+            "herbarium.public.collector",
+            AssemblyOptions(format="json"),
+        )
+
+        assert set(result["_corrupted"]) == {"relationships_annotations"}
+        assert "expected the node content" in result["_corrupted"]["relationships_annotations"]
+
+    def test_a_non_mapping_artifact_reports_why(self, tmp_path: Path) -> None:
+        """A YAML-valid file that isn't a mapping is corrupt for a different reason than a
+        syntax error - both must carry a reason string in the same `_corrupted` shape.
+        """
+
+        print_root = _seed_print(tmp_path)
+        table_dir = print_root / "herbarium" / "public" / "collector"
+        (table_dir / "statistics.yaml").write_text(yaml.safe_dump(["not", "a", "mapping"]))
+
+        result = assemble_structured_context(
+            yaml.safe_load((print_root / "manifest.yaml").read_text()),
+            print_root,
+            "herbarium.public.collector",
+            AssemblyOptions(format="json"),
+        )
+
+        assert result["_corrupted"] == {"statistics": "parses, but is not a mapping"}
 
     def test_structured_json_includes_relationship_annotations(self, tmp_path: Path) -> None:
         print_root = _seed_print(tmp_path)

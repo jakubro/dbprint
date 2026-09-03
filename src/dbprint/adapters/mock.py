@@ -6,7 +6,7 @@ Constructed from a dict keyed by FQN; each method returns its fixture content ve
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, ClassVar, Literal
 
 from dbprint.config import StatisticsConfig
 from dbprint.config.selectors import expand
@@ -62,19 +62,36 @@ class MockTable:
     measured_unique_pairs: frozenset[tuple[str, str]] = field(default_factory=frozenset)
     # (determinant, dependent) -> strength; stated by the fixture, never derived from `stats`.
     dependency_strengths: dict[tuple[str, str], float] = field(default_factory=dict)
+    # column -> trimmed/case-folded distinct count; stated, never derived from `stats`.
+    # A column absent here defaults to its own `cardinality` (no case/whitespace merges).
+    normalized_cardinalities: dict[str, int] = field(default_factory=dict)
+    # column -> ordered (bucket_start, count) pairs; stated, never derived from `stats` or
+    # `samples` - a fixture states the buckets it wants `probe_timeline` to hand back.
+    timeline_buckets: dict[str, tuple[tuple[str, int], ...]] = field(default_factory=dict)
+    # subject column -> (from, to); stated, never derived - a fixture states the window it
+    # wants `compute_populated_windows` to hand back.
+    populated_windows: dict[str, tuple[str, str]] = field(default_factory=dict)
 
 
 class MockAdapter(Adapter):
     """Adapter backed entirely by a static fixture dict."""
 
+    # Draws nothing - every statistic is fixture-stated, so an unmaterialized sample scope
+    # can never disagree with itself across statements.
+    SAMPLE_FALLBACK_COHERENT: ClassVar[bool] = True
+
     def __init__(
         self,
         fixture: dict[str, MockTable],
         query_results: dict[str, list[tuple[Any, ...]]] | None = None,
+        dependencies: dict[str, tuple[str, ...]] | None = None,
     ) -> None:
         self._fixture = dict(fixture)
         self._connected = False
         self._query_results: dict[str, list[tuple[Any, ...]]] = dict(query_results or {})
+        # Connection-scoped, like `default_collation` - not per-MockTable. None (the default)
+        # means "not asked"; a dict (even empty) means the catalog answered.
+        self._dependencies = dependencies
 
     def connect(self) -> None:
         self._connected = True
@@ -118,6 +135,11 @@ class MockAdapter(Adapter):
 
     def introspect_physical_layout(self, fqn: str) -> PhysicalLayout | None:
         return self._lookup(fqn).physical_layout
+
+    def introspect_view_dependencies(self) -> dict[str, tuple[str, ...]] | None:
+        """The fixture's stated connection-wide map - no SQL, no per-view lookup."""
+
+        return self._dependencies
 
     def extract_comments(self, fqn: str) -> CommentsMeta:
         return self._lookup(fqn).comments
@@ -195,6 +217,22 @@ class MockAdapter(Adapter):
             for name, s in tbl.stats.items()
         }
 
+    def materialize_scope(self, fqn: str, scope: TableScope) -> TableScope:
+        """Mark a sampled draw materialized, with no real copy behind it.
+
+        `compute_normalized_cardinality` still checks `materialized`, so a caller regressing to
+        the unmaterialized scope is caught there.
+        """
+
+        del fqn
+
+        return replace(scope, materialized="mock-materialized")
+
+    def release_scope(self, fqn: str, scope: TableScope) -> None:
+        """No real copy to drop."""
+
+        del fqn, scope
+
     def compute_null_patterns(
         self,
         fqn: str,
@@ -222,6 +260,37 @@ class MockAdapter(Adapter):
         unique = self._lookup(fqn).measured_unique_pairs
 
         return tuple(pair for pair in candidates if pair in unique or pair[::-1] in unique)
+
+    def probe_timeline(
+        self,
+        fqn: str,
+        columns: list[ColumnMeta],
+        counts: TableCounts,
+        column: str,
+        unit: Literal["day", "week", "month"],
+        scope: TableScope | None = None,
+    ) -> tuple[tuple[str, int], ...]:
+        """Return the fixture's canned buckets for `column` - no SQL, no truncation math."""
+
+        del columns, counts, unit, scope
+
+        return self._lookup(fqn).timeline_buckets.get(column, ())
+
+    def compute_populated_windows(
+        self,
+        fqn: str,
+        columns: list[ColumnMeta],
+        counts: TableCounts,
+        anchor_column: str,
+        subject_columns: tuple[str, ...],
+        scope: TableScope | None = None,
+    ) -> dict[str, tuple[str, str]]:
+        """Return the fixture's canned windows for `subject_columns` - no SQL, no aggregate."""
+
+        del columns, counts, anchor_column, scope
+        stated = self._lookup(fqn).populated_windows
+
+        return {name: stated[name] for name in subject_columns if name in stated}
 
     def probe_dependencies(
         self,
@@ -274,6 +343,34 @@ class MockAdapter(Adapter):
         hashes = sorted(low64_md5(canonical_form(v.value, kind)) for v in values)
 
         return tuple(hashes[:k])
+
+    def compute_normalized_cardinality(
+        self,
+        fqn: str,
+        column: str,
+        scope: TableScope | None = None,
+    ) -> int:
+        """The fixture's stated merged count, defaulting to `cardinality` (no merges).
+
+        Raises on a `sample` scope with no materialized copy - every real adapter's read refuses
+        the same state, so the wrong scope is caught rather than answered anyway.
+        """
+
+        if scope is not None and scope.sample is not None and scope.materialized is None:
+            raise ValueError(
+                f"{fqn!r}.{column!r}: compute_normalized_cardinality was given an "
+                f"unmaterialized sample scope",
+            )
+
+        tbl = self._lookup(fqn)
+        stated = tbl.normalized_cardinalities.get(column)
+
+        if stated is not None:
+            return stated
+
+        col = tbl.stats.get(column)
+
+        return col.cardinality if col is not None and col.cardinality is not None else 0
 
     def execute_query(self, sql: str) -> list[tuple[Any, ...]]:
         """Return canned results matched on the exact SQL string.

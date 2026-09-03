@@ -53,6 +53,7 @@ class TestEmptyDiff:
             "Modified (row count)",
             "Modified (grain)",
             "Modified (physical layout)",
+            "Modified (depends_on)",
             "Modified (statistics)",
             "Modified (relationships)",
             "Modified (indexes)",
@@ -62,7 +63,7 @@ class TestEmptyDiff:
             assert label in text
 
         # Every section renders the (none) marker on empty diff.
-        assert text.count("(none)") == 9
+        assert text.count("(none)") == 10
 
     def test_footer_emitted(self) -> None:
         text = render_human_text(_empty_diff(), _options())
@@ -297,6 +298,37 @@ class TestPhysicalLayoutSection:
         assert "~ physical_layout: none -> cluster (logged_at::date)" in text
 
 
+class TestDependsOnSection:
+    def test_a_redefined_view_is_rendered(self) -> None:
+        diff = _diff_with(
+            [
+                {
+                    "kind": "depends_on_changed",
+                    "table": "public.germination_by_taxon_mv",
+                    "before": ["seedbank.germination_trial"],
+                    "after": ["seedbank.germination_reading"],
+                },
+            ],
+        )
+        text = render_human_text(diff, _options())
+        assert "public.germination_by_taxon_mv" in text
+        assert "~ depends_on: seedbank.germination_trial -> seedbank.germination_reading" in text
+
+    def test_an_empty_side_renders_none(self) -> None:
+        diff = _diff_with(
+            [
+                {
+                    "kind": "depends_on_changed",
+                    "table": "public.germination_by_taxon_mv",
+                    "before": [],
+                    "after": ["seedbank.germination_reading"],
+                },
+            ],
+        )
+        text = render_human_text(diff, _options())
+        assert "~ depends_on: none -> seedbank.germination_reading" in text
+
+
 class TestStatisticsThreshold:
     def test_sub_threshold_filtered_in_human(self) -> None:
         diff = _diff_with(
@@ -452,6 +484,49 @@ class TestRelationshipsDualDirection:
         assert "+ -> public.herbarium.id" in text
         # Under target: incoming <- source
         assert "+ <- public.curator.herbarium_id" in text
+
+    def test_self_referencing_edge_renders_exactly_one_line(self) -> None:
+        """`relationships_changed` counts a self-referencing FK as one event - the rendered text
+        must agree, not print the outgoing and incoming halves as two lines.
+        """
+
+        diff = _diff_with(
+            [
+                {
+                    "kind": "relationship_added",
+                    "source_table": "public.botanist",
+                    "source_column": ["mentor_id"],
+                    "target_table": "public.botanist",
+                    "target_column": ["id"],
+                    "detection": "declared",
+                },
+            ],
+        )
+        text = render_human_text(diff, _options())
+        section = text.split("Modified (relationships):")[1].split("Modified (indexes):")[0]
+        edge_lines = [line for line in section.splitlines() if "->" in line or "<-" in line]
+
+        assert len(edge_lines) == 1
+
+    def test_added_states_its_detection(self) -> None:
+        """The JSON envelope already carries `detection` on every added edge - the human
+        text must not be the one place `declared`/`inferred` never appears.
+        """
+
+        diff = _diff_with(
+            [
+                {
+                    "kind": "relationship_added",
+                    "source_table": "public.curator",
+                    "source_column": ["herbarium_id"],
+                    "target_table": "public.herbarium",
+                    "target_column": ["id"],
+                    "detection": "inferred",
+                },
+            ],
+        )
+        text = render_human_text(diff, _options())
+        assert "inferred" in text
 
     def test_modified_includes_on_delete_change(self) -> None:
         diff = _diff_with(

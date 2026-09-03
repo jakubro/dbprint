@@ -6,11 +6,12 @@ session is open first. The wire protocol is served by MariaDB (test substrate) a
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from . import ddl as ddl_module
 from . import introspect as introspect_module
 from . import looks_like as looks_like_module
+from . import normalization as normalization_module
 from . import sketch as sketch_module
 from . import stats as stats_module
 from .connection import Connection, ConnectionParams, MysqlConnectionError, exec_query
@@ -39,6 +40,9 @@ class MysqlAdapter(Adapter):
     """Concrete Adapter for MySQL / MariaDB backed by mysql-connector-python."""
 
     REQUIRED_KEYS: ClassVar[tuple[str, ...]] = ("host", "port", "database", "user", "password")
+    # RAND(seed) is undocumented across multiple references in one statement, so a
+    # `sample` scope with no copy must be refused rather than measured over drifting rows.
+    SAMPLE_FALLBACK_COHERENT: ClassVar[bool] = False
 
     def __init__(self, credentials: dict[str, str]) -> None:
         self._params = ConnectionParams.from_credentials(credentials)
@@ -73,6 +77,9 @@ class MysqlAdapter(Adapter):
 
     def introspect_physical_layout(self, fqn: str) -> PhysicalLayout | None:
         return introspect_module.physical_layout(self._cursor, fqn)
+
+    def introspect_view_dependencies(self) -> dict[str, tuple[str, ...]] | None:
+        return introspect_module.view_dependencies(self._cursor)
 
     def extract_comments(self, fqn: str) -> CommentsMeta:
         return introspect_module.comments(self._cursor, fqn)
@@ -146,6 +153,36 @@ class MysqlAdapter(Adapter):
     ) -> tuple[tuple[str, str], ...]:
         return stats_module.probe_grain(self._cursor, fqn, columns, counts, candidates, scope)
 
+    def probe_timeline(
+        self,
+        fqn: str,
+        columns: list[ColumnMeta],
+        counts: TableCounts,
+        column: str,
+        unit: Literal["day", "week", "month"],
+        scope: TableScope | None = None,
+    ) -> tuple[tuple[str, int], ...]:
+        return stats_module.probe_timeline(self._cursor, fqn, columns, counts, column, unit, scope)
+
+    def compute_populated_windows(
+        self,
+        fqn: str,
+        columns: list[ColumnMeta],
+        counts: TableCounts,
+        anchor_column: str,
+        subject_columns: tuple[str, ...],
+        scope: TableScope | None = None,
+    ) -> dict[str, tuple[str, str]]:
+        return stats_module.compute_populated_windows(
+            self._cursor,
+            fqn,
+            columns,
+            counts,
+            anchor_column,
+            subject_columns,
+            scope,
+        )
+
     def probe_dependencies(
         self,
         fqn: str,
@@ -191,6 +228,19 @@ class MysqlAdapter(Adapter):
         k: int,
     ) -> tuple[int, ...]:
         return sketch_module.compute_key_sketch(self._cursor, fqn, column, sql_type, kind, k)
+
+    def compute_normalized_cardinality(
+        self,
+        fqn: str,
+        column: str,
+        scope: TableScope | None = None,
+    ) -> int:
+        return normalization_module.compute_normalized_cardinality(
+            self._cursor,
+            fqn,
+            column,
+            scope,
+        )
 
     def execute_query(self, sql: str) -> list[tuple[Any, ...]]:
         """Run user-authored SQL and return all rows; SQL assertion path (ASSERTIONS.md 3).

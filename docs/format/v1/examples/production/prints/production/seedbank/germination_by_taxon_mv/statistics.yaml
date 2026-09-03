@@ -21,6 +21,10 @@ grain:
   search:
     exhausted: true
 dependencies: []
+depends_on:
+- seedbank.accession
+- seedbank.germination_trial
+- seedbank.taxon
 columns:
   taxon_id:
     sql_type: integer
@@ -132,6 +136,67 @@ columns:
     cardinality: 100
     cardinality_ratio: 0.12987
     cardinality_method: exact
+    values:
+    - value: 72
+      count: 13
+    - value: 74
+      count: 13
+    - value: 76
+      count: 13
+    - value: 78
+      count: 13
+    - value: 20
+      count: 12
+    - value: 31
+      count: 12
+    - value: 32
+      count: 12
+    - value: 33
+      count: 12
+    - value: 34
+      count: 12
+    - value: 35
+      count: 12
+    - value: 36
+      count: 12
+    - value: 37
+      count: 12
+    - value: 38
+      count: 12
+    - value: 39
+      count: 12
+    - value: 71
+      count: 12
+    - value: 73
+      count: 12
+    - value: 75
+      count: 12
+    - value: 77
+      count: 12
+    - value: 79
+      count: 12
+    - value: 21
+      count: 11
+    - value: 22
+      count: 11
+    - value: 23
+      count: 11
+    - value: 24
+      count: 11
+    - value: 25
+      count: 11
+    - value: 26
+      count: 11
+    - value: 27
+      count: 11
+    - value: 28
+      count: 11
+    - value: 29
+      count: 11
+    - value: 30
+      count: 11
+    - value: 40
+      count: 11
     distribution: uniform
     frequencies:
       top: 13
@@ -147,6 +212,11 @@ columns:
       p50: 54.0
       p75: 72.75
       p99: 134.0
+    mean: 57.857143
+    sum: 44550
+    zero_count: 0
+    negative_count: 0
+    quantized_count: 770
     sketch:
       method: kmv_md5_lo64
       values: A7sZ8tjZUk0Fp+IoqJw3mQdrHFcipGqiB9OqPZmOUTULfUjFkbj0MBP0KUOIHGVfF7YiVCEWkbUY7O5HFFpywBkJREDDF+IbJMfSWDvmklEl+Fl4NPqDpCaCKRUcm94RKU3/3D5GOQQqo1PieHkTPC4OsT1YXkwiOv5XwuAIvIw76AeaXHTQeT8UJEnQNwKNQrbTvq2YqSNGyQd+u141w0eOx2pwTptSSGcyUuSQ9zZIgbU+HhsYtlB8rNji8q78UM3xsg3m9GZS7T2JoUa0RVYkCy/wEAveV2qP1MnsaZdXrmQ56Hm7Klv414YiJ3xOXYe4x9i5qs1eBpcTr5+mymjROPK0/dbwbD9niBm24FhswIeccbXbXGzpMrlXtvMybrHh+Mvhg7lvfNnf0OXeqnDe0F9aO/PsdHv6Lxtfh9t0qBTskje27HVoe+YQajuEdaGkpuG5dw93MoaolbyENnrfNLHXfojXe7vtDso/4uCAQkdxg7esP4Yj42vU48fFjvTGKOugJZGP+VzPqUzr2ZPuipv4rn0LlkMUFedwxt2Y1doQ/mbyHZpqF77wKTMcmqJL6UsxnSGbKWOXhsti75s2leDLbN5/m741VKT99vudz407XG4LAaLfEz8HMJXdpEsOWIZoDLmk0bwOF0LAi6gzUXxF0xBwqEXhwuinYr2yN080K+ntRLOPyNKHLx7GtGktNN6GM8S1ApOt/st7GLsYZM3uTT1uu6Aooh7TgEa+/lWHlrmVhMBfPYq2WMVRx4x1vR4G8hXHyZal7lOnD8nUO79bvof7ykZEadLPnz7Rl+rNd6zOXtM8NrG1/Cyx1mVFPPsuVfDYRhBj9KxYptlYPDT9NW7127Cn1JQTLuXb68KskSgwP9whJwj3IbeI3b0GlKTpvcjeuV/FhM2WXd+FJ1mfpiZC4HkCslTfrRDgypoVthU2d+D/LsGbNxUU4e0P9hP1Y73jsTloMag5j+afNRA5FSGJ6hXRUq3QcpTvyW9AJ1vcCvJphi6nc5Pd9bXDADlGxI/5e6bOkr9a3fp0irbZrz/X/3B3knPpWqY=
@@ -159,6 +229,67 @@ columns:
     cardinality: 76
     cardinality_ratio: 0.098701
     cardinality_method: exact
+    values:
+    - value: 14
+      count: 24
+    - value: 12
+      count: 23
+    - value: 6
+      count: 23
+    - value: 20
+      count: 22
+    - value: 7
+      count: 22
+    - value: 8
+      count: 22
+    - value: 9
+      count: 22
+    - value: 65
+      count: 17
+    - value: 62
+      count: 16
+    - value: 63
+      count: 16
+    - value: 70
+      count: 15
+    - value: 59
+      count: 14
+    - value: 68
+      count: 14
+    - value: 48
+      count: 13
+    - value: 50
+      count: 13
+    - value: 51
+      count: 13
+    - value: 56
+      count: 13
+    - value: 57
+      count: 13
+    - value: 60
+      count: 13
+    - value: 13
+      count: 12
+    - value: 15
+      count: 12
+    - value: 16
+      count: 12
+    - value: 17
+      count: 12
+    - value: 18
+      count: 12
+    - value: 19
+      count: 12
+    - value: 35
+      count: 12
+    - value: 39
+      count: 12
+    - value: 43
+      count: 12
+    - value: 47
+      count: 12
+    - value: 54
+      count: 12
     distribution: uniform
     frequencies:
       top: 24
@@ -174,6 +305,11 @@ columns:
       p50: 34.0
       p75: 56.0
       p99: 104.0
+    mean: 37.363636
+    sum: 28770
+    zero_count: 0
+    negative_count: 0
+    quantized_count: 770
     sketch:
       method: kmv_md5_lo64
       values: BafiKKicN5kHaxxXIqRqog215Ll/wq85E/QpQ4gcZV8Y7O5HFFpywCX4WXg0+oOkJoIpFRyb3hEpTf/cPkY5BCqjU+J4eRM8LJkLCoJlLcouDrE9WF5MIjr+V8LgCLyMO+gHmlx00Hk/FCRJ0DcCjUSqnVut6XuvRskHfrteNcNHjsdqcE6bUkiBtT4eGxi2UM3xsg3m9GZWJAsv8BAL3ln1H9ApfiNtWjbe3UvqJUNdh7jH2LmqzV4GlxOvn6bKaNE48rT91vBsP2eIGbbgWG9gbrUl/9xWb3zZ39Dl3qpvteYIfrGy3HADuD3UdVKUcN7QX1o78+x0e/ovG1+H23VdOObRY+ggdWh75hBqO4R3MoaolbyENnu77Q7KP+LgjN9K0imfbSOO9MYo66AlkY/5XM+pTOvZltPIvR+PL/OXlcRCY2tV+5jV2hD+ZvIdmmoXvvApMxybNpXgy2zef5u+NVSk/fb7nc+NO1xuCwGkSw5YhmgMuaTRvA4XQsCLqDNRfEXTEHCqJ6DJm/9nELI3TzQr6e1Es4/I0ocvHsa1ApOt/st7GLsYZM3uTT1uvv5Vh5a5lYTAXz2KtljFUceMdb0eBvIVykZEadLPnz7TPDaxtfwssdZlRTz7LlXw2EYQY/SsWKbZWDw0/TVu9dvrwqyRKDA/3CEnCPcht4jdvQaUpOm9yN65X8WEzZZd4MqaFbYVNnfhY0Z8na5SG+HtD/YT9WO947E5aDGoOY/mnzUQORUhieoV0VKt0HKU6hr8UcfGrSbvyW9AJ1vcCvdDn4/6vf/E+nSKttmvP9c=

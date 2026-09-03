@@ -1,9 +1,12 @@
-"""Diff computation tests - 18 v1 change kinds."""
+"""Diff computation tests - 19 v1 change kinds."""
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any
 
+from dbprint.adapters.base import ColumnStats
+from dbprint.engine import diff as diff_module
 from dbprint.engine.diff import (
     ColumnState,
     DiffSelectors,
@@ -78,6 +81,22 @@ class TestEmpty:
         diff = _compute(None, {"public.t": _table()})
         kinds = _kinds(diff)
         assert kinds == ["table_added"]
+
+
+class TestBaselineProvenance:
+    def test_no_recorded_version_stays_none_even_with_a_recorded_timestamp(self) -> None:
+        """A print recording `generated_at` but no `dbprint_version` must not have this run's own
+        version substituted in - that misattributes the baseline to a process that never wrote it.
+        """
+
+        diff = _compute({}, {}, baseline_generated_at=GEN_TS)
+
+        assert diff["baseline"]["dbprint_version"] is None
+
+    def test_a_recorded_version_passes_through(self) -> None:
+        diff = _compute({}, {}, baseline_generated_at=GEN_TS, baseline_dbprint_version="0.1.0")
+
+        assert diff["baseline"]["dbprint_version"] == "0.1.0"
 
 
 class TestTableLifecycle:
@@ -395,6 +414,64 @@ class TestPhysicalLayoutChanges:
         assert has_schema_changes(diff) is True
 
 
+class TestDependsOnChanges:
+    """`depends_on` (SPEC 2.2.17) is a declared fact, not data drift - a view/matview redefined
+    to read a different object reports here even though no table's own rows moved.
+    """
+
+    def test_a_redefined_view_is_reportable(self) -> None:
+        before = _table(type="view", depends_on=("seedbank.germination_trial",))
+        after = _table(type="view", depends_on=("seedbank.germination_reading",))
+        diff = _compute({"public.t": before}, {"public.t": after})
+        change = next(c for c in diff["changes"] if c["kind"] == "depends_on_changed")
+
+        assert change["before"] == ["seedbank.germination_trial"]
+        assert change["after"] == ["seedbank.germination_reading"]
+
+    def test_unchanged_emits_nothing(self) -> None:
+        before = _table(type="view", depends_on=("seedbank.germination_trial",))
+        after = _table(type="view", depends_on=("seedbank.germination_trial",))
+        diff = _compute({"public.t": before}, {"public.t": after})
+
+        assert "depends_on_changed" not in _kinds(diff)
+
+    def test_either_side_unknown_emits_nothing(self) -> None:
+        """A table (never carries the field) or a view the catalog could not answer for -
+        both must read as nothing to compare, never as a removal.
+        """
+
+        before = _table(type="view", depends_on=None)
+        after = _table(type="view", depends_on=("seedbank.germination_trial",))
+        diff = _compute({"public.t": before}, {"public.t": after})
+
+        assert "depends_on_changed" not in _kinds(diff)
+
+    def test_absent_on_both_sides_emits_nothing(self) -> None:
+        """A view whose catalog cannot answer the question reads as absent on both
+        sides - never as a removal.
+        """
+
+        before = _table(type="view", depends_on=None)
+        after = _table(type="view", depends_on=None)
+        diff = _compute({"public.t": before}, {"public.t": after})
+
+        assert "depends_on_changed" not in _kinds(diff)
+
+    def test_depends_on_change_counts_the_table_as_modified(self) -> None:
+        before = _table(type="view", depends_on=("seedbank.germination_trial",))
+        after = _table(type="view", depends_on=("seedbank.germination_reading",))
+        diff = _compute({"public.t": before}, {"public.t": after})
+
+        assert diff["summary"]["tables_modified"] == 1
+
+    def test_depends_on_change_is_a_schema_change(self) -> None:
+        before = _table(type="view", depends_on=("seedbank.germination_trial",))
+        after = _table(type="view", depends_on=("seedbank.germination_reading",))
+        diff = _compute({"public.t": before}, {"public.t": after})
+
+        assert has_schema_changes(diff) is True
+
+
 class TestGrainAndPhysicalLayoutParsing:
     """Unit coverage for the shared block-to-state parsers both hydration sites call."""
 
@@ -662,6 +739,89 @@ class TestLooksLikeEvidenceExclusion:
 
         assert {c["stat"] for c in changed} == {"inferred.looks_like"}
 
+    def test_a_near_miss_share_that_moved_with_the_redraw_reports_nothing(self) -> None:
+        """`looks_like_candidate`/`_share` are drawn from the same sample as `sampled`/
+        `matched` and move for the identical reason - excluded on the same terms.
+        """
+
+        before = _table(
+            columns={"a": ColumnState("a", "text", True, None)},
+            statistics={
+                "a": {
+                    "inferred": {
+                        "looks_like_candidate": "email",
+                        "looks_like_candidate_share": 0.62,
+                    },
+                },
+            },
+        )
+        after = _table(
+            columns={"a": ColumnState("a", "text", True, None)},
+            statistics={
+                "a": {
+                    "inferred": {
+                        "looks_like_candidate": "email",
+                        "looks_like_candidate_share": 0.58,
+                    },
+                },
+            },
+        )
+        diff = _compute({"public.t": before}, {"public.t": after})
+
+        assert [c for c in diff["changes"] if c["kind"] == "statistic_changed"] == []
+
+
+class TestNormalizedCardinalityPresenceGate:
+    """A presence gate, not a blanket exclusion: `normalized_cardinality` has no current side
+    on a diff-only run (no sketch pass), but both sides are populated on `generate`.
+    """
+
+    def test_a_genuine_change_reports_when_both_sides_carry_it(self) -> None:
+        before = _table(
+            columns={"a": ColumnState("a", "text", True, None)},
+            statistics={"a": {"normalized_cardinality": 2}},
+        )
+        after = _table(
+            columns={"a": ColumnState("a", "text", True, None)},
+            statistics={"a": {"normalized_cardinality": 1}},
+        )
+        diff = _compute({"public.t": before}, {"public.t": after})
+        change = next(c for c in diff["changes"] if c["kind"] == "statistic_changed")
+
+        assert change["stat"] == "normalized_cardinality"
+        assert change["before"] == 2
+        assert change["after"] == 1
+
+    def test_absent_on_the_current_side_reports_nothing(self) -> None:
+        """A diff-only run: the baseline (a prior `generate`) carries it, the live side never
+        computes it - absence must not read as the field dropping to nothing.
+        """
+
+        before = _table(
+            columns={"a": ColumnState("a", "text", True, None)},
+            statistics={"a": {"normalized_cardinality": 2}},
+        )
+        after = _table(
+            columns={"a": ColumnState("a", "text", True, None)},
+            statistics={"a": {}},
+        )
+        diff = _compute({"public.t": before}, {"public.t": after})
+
+        assert [c for c in diff["changes"] if c["kind"] == "statistic_changed"] == []
+
+    def test_absent_on_both_sides_reports_nothing(self) -> None:
+        before = _table(
+            columns={"a": ColumnState("a", "text", True, None)},
+            statistics={"a": {}},
+        )
+        after = _table(
+            columns={"a": ColumnState("a", "text", True, None)},
+            statistics={"a": {}},
+        )
+        diff = _compute({"public.t": before}, {"public.t": after})
+
+        assert [c for c in diff["changes"] if c["kind"] == "statistic_changed"] == []
+
 
 class TestApproximateCardinalityExclusion:
     """A cardinality read from the planner, not counted, must not report false drift."""
@@ -898,6 +1058,138 @@ class TestPopulationSuppression:
             [c for c in diff["changes"] if c["kind"] == "statistic_changed"],
         )
 
+    def test_the_six_scale_dependent_counts_are_suppressed_under_scope(self) -> None:
+        """The count fields scale with `rows_scanned` exactly as `null_count` does (SPEC 2.2.8) -
+        a re-scanned table's own growth must not read as drift on any of them.
+        """
+
+        before = _table(
+            columns={"a": ColumnState("a", "int", True, None)},
+            statistics={
+                "a": {
+                    "sum": 1000,
+                    "zero_count": 10,
+                    "negative_count": 5,
+                    "empty_count": 2,
+                    "quantized_count": 900,
+                    "normalized_cardinality": 800,
+                },
+            },
+            scoped=True,
+        )
+        after = _table(
+            columns={"a": ColumnState("a", "int", True, None)},
+            statistics={
+                "a": {
+                    "sum": 1100,
+                    "zero_count": 11,
+                    "negative_count": 6,
+                    "empty_count": 3,
+                    "quantized_count": 990,
+                    "normalized_cardinality": 880,
+                },
+            },
+            scoped=True,
+        )
+        diff = _compute({"public.t": before}, {"public.t": after})
+
+        assert diff["changes"] == []
+
+    def test_the_scanned_set_marker_itself_never_compares(self) -> None:
+        """`rows_scanned` rides every column of a scoped file (SPEC 2.2.8) and describes the read,
+        not the data - comparing it reports drift on the one field guaranteed to move.
+        """
+
+        before = _table(
+            columns={"a": ColumnState("a", "int", True, None)},
+            statistics={"a": {"rows_scanned": 10_000, "null_rate": 0.1}},
+            scoped=True,
+        )
+        after = _table(
+            columns={"a": ColumnState("a", "int", True, None)},
+            statistics={"a": {"rows_scanned": 12_500, "null_rate": 0.1}},
+            scoped=True,
+        )
+        diff = _compute({"public.t": before}, {"public.t": after})
+
+        assert diff["changes"] == []
+
+    def test_a_field_either_side_names_unmeasured_is_not_compared(self) -> None:
+        """SPEC 2.2.4: the baseline is hydrated from an artifact, so only its own marker tells a
+        failed read from a value that really moved.
+
+        Both sides are projected through `comparable_columns`, where the gate reads the marker.
+        """
+
+        before = _table(
+            columns={"a": ColumnState("a", "int", True, None)},
+            statistics=comparable_columns({"a": {"cardinality": 900, "null_count": 4}}),
+        )
+        after = _table(
+            columns={"a": ColumnState("a", "int", True, None)},
+            statistics=comparable_columns(
+                {"a": {"null_count": 4, "unmeasured": ["cardinality"]}},
+            ),
+        )
+        diff = _compute({"public.t": before}, {"public.t": after})
+
+        assert diff["changes"] == []
+
+    def test_the_marker_itself_is_never_an_event(self) -> None:
+        """A marker lifted between two runs is not drift about the column - and the field it named
+        has a real value on one side only, which is the marker's whole point.
+        """
+
+        before = _table(
+            columns={"a": ColumnState("a", "int", True, None)},
+            statistics=comparable_columns(
+                {"a": {"null_count": 4, "unmeasured": ["cardinality"]}},
+            ),
+        )
+        after = _table(
+            columns={"a": ColumnState("a", "int", True, None)},
+            statistics=comparable_columns({"a": {"cardinality": 900, "null_count": 4}}),
+        )
+        diff = _compute({"public.t": before}, {"public.t": after})
+
+        assert diff["changes"] == []
+
+    def test_mean_and_length_are_not_swept_up_by_the_same_suppression(self) -> None:
+        """The control: `mean` is normalised (like `null_rate`) and `length` is scale-free
+        (SPEC 2.2.4) - neither belongs in the scale-dependent set, and both keep comparing.
+        """
+
+        before = _table(
+            columns={"a": ColumnState("a", "int", True, None)},
+            statistics={"a": {"mean": 42.5, "length": {"min": 1, "max": 10}}},
+            scoped=True,
+        )
+        after = _table(
+            columns={"a": ColumnState("a", "int", True, None)},
+            statistics={"a": {"mean": 50.1, "length": {"min": 1, "max": 12}}},
+            scoped=True,
+        )
+        diff = _compute({"public.t": before}, {"public.t": after})
+        stats_changed = {c["stat"] for c in diff["changes"] if c["kind"] == "statistic_changed"}
+
+        assert stats_changed == {"mean", "length.max"}
+
+    def test_the_five_counts_still_compare_unscoped(self) -> None:
+        """The suppression is scope-conditional, not blanket - real drift still reports."""
+
+        before = _table(
+            columns={"a": ColumnState("a", "int", True, None)},
+            statistics={"a": {"zero_count": 10}},
+        )
+        after = _table(
+            columns={"a": ColumnState("a", "int", True, None)},
+            statistics={"a": {"zero_count": 900}},
+        )
+        diff = _compute({"public.t": before}, {"public.t": after})
+        stats_changed = {c["stat"] for c in diff["changes"] if c["kind"] == "statistic_changed"}
+
+        assert stats_changed == {"zero_count"}
+
 
 class TestCatalogOnlySuppression:
     """A table nothing was queried for has no measurement to compare (SPEC 2.2.15)."""
@@ -997,6 +1289,15 @@ class TestComparableColumns:
         assert comparable_columns({"a": "corrupted", "b": {"cardinality": 1}}) == {
             "b": {"cardinality": 1},
         }
+
+    def test_the_unmeasured_marker_survives_the_projection(self) -> None:
+        """It is read per comparison, not compared (SPEC 2.2.4) - stripping it here would leave
+        the gate that reads it looking at an empty set on every real diff.
+        """
+
+        payload = {"a": {"cardinality": 3, "unmeasured": ["distribution"]}}
+
+        assert comparable_columns(payload) == payload
 
 
 class TestUnchangedTablesCount:
@@ -1162,3 +1463,64 @@ class TestSelectorScoping:
         )
         assert diff["changes"] == []
         assert "table_removed" not in _kinds(diff)
+
+
+# `ColumnStats` fields whose artifact value nests, flattening under `_stat_paths` into dotted
+# sub-paths ("range.min") rather than a bare name - the sub-paths are what needs classifying.
+_CONTAINER_COLUMN_STATS_FIELDS = frozenset(
+    {"frequencies", "range", "percentiles", "length", "inferred"},
+)
+
+# Flat fields reviewed and confirmed correct to compare unconditionally, scope included: ratios
+# and non-numeric verdicts that are not scan-scale, plus `mean` (normalised like `null_rate`).
+_DELIBERATELY_UNSUPPRESSED_STATS = frozenset(
+    {
+        "null_rate",
+        "cardinality_ratio",
+        "cardinality_method",
+        "values_coverage",
+        "distribution",
+        "mean",
+        "unrepresentable",
+    },
+)
+
+
+class TestColumnStatsCompleteness:
+    """Every scalar `ColumnStats` field is triaged in `diff.py` - population-absolute, uncompared,
+    marker, presence-gated or compared unconditionally - so a new one cannot slip through.
+    """
+
+    @staticmethod
+    def _flat_fields() -> set[str]:
+        return {
+            f.name
+            for f in dataclasses.fields(ColumnStats)
+            if f.name not in _CONTAINER_COLUMN_STATS_FIELDS
+        }
+
+    @staticmethod
+    def _triaged() -> set[str]:
+        uncompared = {name for name in diff_module._UNCOMPARED_STATS if "." not in name}
+
+        return (
+            uncompared
+            | diff_module._MARKER_STATS
+            | diff_module._POPULATION_ABSOLUTE_STATS
+            | diff_module._PRESENCE_GATED_STATS
+            | _DELIBERATELY_UNSUPPRESSED_STATS
+        )
+
+    def test_every_flat_field_is_triaged(self) -> None:
+        untriaged = self._flat_fields() - self._triaged()
+
+        assert untriaged == set(), (
+            f"{sorted(untriaged)} landed on ColumnStats with no diff.py triage - classify each "
+            "in _POPULATION_ABSOLUTE_STATS, _UNCOMPARED_STATS, _PRESENCE_GATED_STATS, or record "
+            "it as deliberately unsuppressed"
+        )
+
+    def test_the_guard_actually_fires_on_an_untriaged_field(self) -> None:
+        """Proves the sweep isn't vacuous - not just that today's fields happen to pass."""
+
+        assert "a_future_field" in (self._flat_fields() | {"a_future_field"}) - self._triaged()

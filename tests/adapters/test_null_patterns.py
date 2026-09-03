@@ -11,6 +11,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+import pytest
+
 from dbprint.adapters import Adapter, StatisticsConfig, TableScope
 
 
@@ -24,6 +26,11 @@ DRAW_CLAUSES: dict[str, str] = {
     "postgres": "tablesample",
     "mysql": "rand(",
     "snowflake": "sample system (",
+    "duckdb": "tablesample bernoulli(",
+    "clickhouse": "sample ",
+    "redshift": "random() <",
+    "databricks": "tablesample (",
+    "bigquery": "tablesample system (",
 }
 
 
@@ -190,13 +197,17 @@ class TestOneStatementPerTable:
         self,
         sql_adapter_factory: tuple[str, Callable[[], Adapter]],
     ) -> None:
-        """Left on the sampling construct the census draws its own rows, so its combinations
-        would describe a different population than the `null_count` they are checked against.
+        """The census must read the materialized copy, or its combinations describe a different
+        population than the `null_count` they check. Databricks has no local temp table (measured).
         """
 
         from tests.adapters.test_dialect_guard import _install_recorder
 
         vendor, factory = sql_adapter_factory
+
+        if vendor == "databricks":
+            pytest.skip("Databricks has no local `CREATE TEMPORARY TABLE`; see test docstring.")
+
         adapter = factory()
 
         try:
@@ -249,12 +260,25 @@ class TestOneStatementPerTable:
 
 
 def _quote(vendor: str, name: str) -> str:
-    return f"`{name}`" if vendor == "mysql" else f'"{name}"'
+    return (
+        f"`{name}`" if vendor in ("mysql", "clickhouse", "databricks", "bigquery") else f'"{name}"'
+    )
 
 
 def _wide_ddl(vendor: str, namespace: str, names: list[str]) -> str:
     qualified = ".".join(_quote(vendor, part) for part in [*namespace.split("."), "wide"])
+
+    if vendor == "clickhouse":
+        # ClickHouse has no default engine and no implicit nullability - both are load-bearing
+        # here: the width test needs an all-NULL row, which a bare `Int32` would refuse or coerce.
+        columns = ", ".join(f"{_quote(vendor, name)} Nullable(Int32)" for name in names)
+
+        return f"CREATE TABLE {qualified} ({columns}) ENGINE = Memory"
+
     columns = ", ".join(f"{_quote(vendor, name)} INTEGER" for name in names)
+
+    if vendor == "databricks":
+        return f"CREATE TABLE {qualified} ({columns}) USING DELTA"
 
     return f"CREATE TABLE {qualified} ({columns})"
 

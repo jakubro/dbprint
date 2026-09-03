@@ -9,12 +9,14 @@ line-ending = "lf"
 exclude = ["docs/CLI.md"]
 
 [lint]
+preview = true
 extend-select = [
   "I",
   "RUF001",
   "RUF002",
   "RUF003",
   "COM812",
+  "PLW1514",
 ]
 
 [lint.per-file-ignores]

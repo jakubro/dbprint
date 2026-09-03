@@ -19,7 +19,18 @@ from .adapter_registry import get_adapter_class
 
 # Credential keys the run log's per-connection record may name - an allowlist, never
 # a deny-list, so a future credential key defaults to withheld rather than leaked.
-_TARGET_KEYS: tuple[str, ...] = ("host", "port", "database", "account", "warehouse")
+_TARGET_KEYS: tuple[str, ...] = (
+    "host",
+    "port",
+    "database",
+    "account",
+    "warehouse",
+    "server_hostname",
+    "http_path",
+    "catalog",
+    "project",
+    "dataset",
+)
 
 
 @dataclass(frozen=True)

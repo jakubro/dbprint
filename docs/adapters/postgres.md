@@ -78,7 +78,7 @@ table 'seedbank.germination_trial': could not materialize its sample of 0.25
 each statistic for it is measured over its own draw of the rows
 ```
 
-The fallback is not an equivalent path. Each statement then draws its own rows, so a column's listed value counts and the non-null figure they are a share of come from different reads, and the file can disagree with itself on a table nobody wrote to. Setting `materialize_sample: false` chooses that trade deliberately, which is the right call where policy forbids the tool writing anything at all — and the wrong one where it was chosen to avoid a grant.
+The fallback is not an equivalent path. Each statement then draws its own rows, so a column's listed value counts and the non-null figure they are a share of come from different reads, and the file can disagree with itself on a table nobody wrote to. Setting `materialize_sample: false` chooses that trade deliberately, which is the right call where the tool must stay strictly read-only — and the wrong one where it was chosen to avoid a grant.
 
 ## Reference
 

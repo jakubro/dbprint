@@ -20,4 +20,200 @@ refers_to:
     coherent: true
     containment: 1.0
     answerable_count: 25
-referenced_by: []
+- column:
+  - accession_id
+  target_table: seedbank.germination_trial
+  target_column:
+  - trial_id
+  detection: measured
+  observed:
+    fanout_avg: 12.5
+    target_coverage: 0.062222
+    scope_compatible: true
+    fanout_max: 13
+    coherent: true
+    containment: 1.0
+    answerable_count: 56
+- column:
+  - image_id
+  target_table: seedbank.germination_trial
+  target_column:
+  - trial_id
+  detection: measured
+  observed:
+    fanout_avg: 1.0
+    target_coverage: 0.777778
+    scope_compatible: true
+    fanout_max: 1
+    coherent: true
+    containment: 1.0
+    answerable_count: 700
+- column:
+  - accession_id
+  target_table: seedbank.specimen_image
+  target_column:
+  - image_id
+  detection: measured
+  observed:
+    fanout_avg: 12.5
+    target_coverage: 0.08
+    scope_compatible: true
+    fanout_max: 13
+    coherent: true
+    containment: 1.0
+    answerable_count: 56
+- column:
+  - accession_id
+  target_table: seedbank.taxon
+  target_column:
+  - taxon_id
+  detection: measured
+  observed:
+    fanout_avg: 12.5
+    target_coverage: 0.186667
+    scope_compatible: true
+    fanout_max: 13
+    coherent: true
+    containment: 1.0
+    answerable_count: 56
+referenced_by:
+- column:
+  - image_id
+  referencer_table: fixture.shape_probe
+  referencer_column:
+  - probe_id
+  detection: measured
+  observed:
+    fanout_avg: 1.0
+    target_coverage: 0.071429
+    scope_compatible: true
+    fanout_max: 1
+    coherent: true
+    containment: 1.0
+    answerable_count: 50
+- column:
+  - image_id
+  referencer_table: seedbank.accession
+  referencer_column:
+  - taxon_id
+  detection: measured
+  observed:
+    fanout_avg: 8.333333
+    target_coverage: 0.428571
+    scope_compatible: true
+    fanout_max: 9
+    coherent: true
+    containment: 1.0
+    answerable_count: 300
+- column:
+  - image_id
+  referencer_table: seedbank.germination_by_taxon_mv
+  referencer_column:
+  - taxon_id
+  detection: measured
+  observed:
+    fanout_avg: 2.566667
+    target_coverage: 0.428571
+    scope_compatible: true
+    fanout_max: 3
+    coherent: true
+    containment: 1.0
+    answerable_count: 300
+- column:
+  - image_id
+  referencer_table: seedbank.germination_by_taxon_mv
+  referencer_column:
+  - total_germinated
+  detection: measured
+  observed:
+    fanout_avg: 10.131579
+    target_coverage: 0.108571
+    scope_compatible: true
+    fanout_max: 24
+    coherent: true
+    containment: 1.0
+    answerable_count: 76
+- column:
+  - image_id
+  referencer_table: seedbank.germination_by_taxon_mv
+  referencer_column:
+  - total_sown
+  detection: measured
+  observed:
+    fanout_avg: 7.7
+    target_coverage: 0.142857
+    scope_compatible: true
+    fanout_max: 13
+    coherent: true
+    containment: 1.0
+    answerable_count: 100
+- column:
+  - image_id
+  referencer_table: seedbank.germination_trial
+  referencer_column:
+  - accession_id
+  detection: measured
+  observed:
+    fanout_avg: 2.8125
+    target_coverage: 0.457143
+    scope_compatible: true
+    fanout_max: 3
+    coherent: true
+    containment: 1.0
+    answerable_count: 320
+- column:
+  - image_id
+  referencer_table: seedbank.germination_trial
+  referencer_column:
+  - germinated_count
+  detection: measured
+  observed:
+    fanout_avg: 16.981132
+    target_coverage: 0.075714
+    scope_compatible: true
+    fanout_max: 30
+    coherent: true
+    containment: 1.0
+    answerable_count: 53
+- column:
+  - image_id
+  referencer_table: seedbank.germination_trial
+  referencer_column:
+  - sown_count
+  detection: measured
+  observed:
+    fanout_avg: 15.0
+    target_coverage: 0.085714
+    scope_compatible: true
+    fanout_max: 15
+    coherent: true
+    containment: 1.0
+    answerable_count: 60
+- column:
+  - image_id
+  referencer_table: seedbank.specimen_image
+  referencer_column:
+  - accession_id
+  detection: measured
+  observed:
+    fanout_avg: 12.5
+    target_coverage: 0.08
+    scope_compatible: true
+    fanout_max: 13
+    coherent: true
+    containment: 1.0
+    answerable_count: 56
+- column:
+  - image_id
+  referencer_table: seedbank.taxon
+  referencer_column:
+  - taxon_id
+  detection: measured
+  observed:
+    fanout_avg: 1.0
+    target_coverage: 0.428571
+    scope_compatible: true
+    fanout_max: 1
+    coherent: true
+    containment: 1.0
+    answerable_count: 300

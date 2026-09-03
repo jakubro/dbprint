@@ -7,9 +7,11 @@ docs/CLI.md drifts from freshly-rendered --help.
 from __future__ import annotations
 
 import importlib.util
+import re
 from pathlib import Path
 
 import pytest
+import rich_click as click
 from click.testing import CliRunner
 
 from dbprint.cli.main import main
@@ -105,6 +107,45 @@ class TestContextArgument:
         assert "table FQN" in flat
         assert "fnmatch pattern" in flat
         assert "--all for every table" in flat
+
+
+def _command_paths(group: click.Group, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
+    """Every command/subcommand path reachable from `group`, walked from its own registry."""
+
+    paths: list[tuple[str, ...]] = []
+
+    for name, command in sorted(group.commands.items()):
+        path = (*prefix, name)
+        paths.append(path)
+
+        if isinstance(command, click.Group):
+            paths.extend(_command_paths(command, path))
+
+    return paths
+
+
+class TestShortHelp:
+    def test_root_short_help_matches_long(self) -> None:
+        runner = CliRunner()
+        short = runner.invoke(main, ["-h"])
+        long = runner.invoke(main, ["--help"])
+
+        assert short.exit_code == 0
+        assert short.output == long.output
+
+    @pytest.mark.parametrize("path", _command_paths(main), ids=lambda path: " ".join(path))
+    def test_command_short_help_matches_long(self, path: tuple[str, ...]) -> None:
+        runner = CliRunner()
+        short = runner.invoke(main, [*path, "-h"])
+        long = runner.invoke(main, [*path, "--help"])
+
+        assert short.exit_code == 0
+        assert short.output == long.output
+
+    def test_help_entry_advertises_short_spelling(self) -> None:
+        # rich-click renders declared aliases as separate columns, so `-h` stands alone
+        # rather than joined to `--help` - the lookaround excludes `--help`'s own `-h`.
+        assert re.search(r"(?<![-\w])-h(?![-\w])", _flat())
 
 
 class TestGoldenReference:

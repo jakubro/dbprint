@@ -355,12 +355,14 @@ class TestFlushWarningsCalledPerConnection:
 
         assert first_flush < first_b_event
 
-    def test_connection_error_still_flushes_before_the_next_connection(
+    def test_connection_error_still_reports_a_summary_and_flushes(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """ "a" fails to connect (EXIT_CONNECTION) - the branch that skips `connection_summary`."""
+        """Both connections fail to connect (EXIT_CONNECTION) - each still gets its own
+        error-carrying summary, so the run cannot report success by skipping it.
+        """
 
         _seed_project(tmp_path)
         _seed_baseline(tmp_path, "a")
@@ -368,8 +370,8 @@ class TestFlushWarningsCalledPerConnection:
         recorder = _run_with_recorder(tmp_path, monkeypatch, _ConnectFailsAdapter)
 
         assert "flush_warnings" in recorder.calls
-        # No "b" event to anchor on (both fail); the check is that "a" flushed regardless.
-        assert not any(c.startswith("connection_summary") for c in recorder.calls)
+        assert recorder.calls.count("connection_summary:a") == 1
+        assert recorder.calls.count("connection_summary:b") == 1
 
     def test_every_connection_gets_exactly_one_flush_on_a_clean_run(
         self,

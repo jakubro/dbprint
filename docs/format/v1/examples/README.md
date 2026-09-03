@@ -20,7 +20,7 @@ Two schemas:
 
 ## What's demonstrated
 
-**Adapter**: PostgreSQL. Fully-qualified names are two-part — `seedbank.accession`, not `analytics.seedbank.accession` — and lowercase, the path-case convention the format addresses objects by. The print spans **two schemas**, so the `<schema>/<table>/` namespace path is exercised at two distinct depths in one connection.
+**Adapter**: PostgreSQL. Fully-qualified names are two-part — `seedbank.accession`, not `arboretum.seedbank.accession` — and lowercase, the path-case convention the format addresses objects by. The print spans **two schemas**, so the `<schema>/<table>/` namespace path is exercised at two distinct depths in one connection.
 
 **Ten objects:**
 

@@ -82,6 +82,8 @@ def _prose_column(spelling: str) -> dict[str, Any]:
                 "cardinality_ratio": 0.9,
                 "cardinality_method": "exact",
                 "classification": "text",
+                "empty_count": 0,
+                "length": {"min": 1, "max": 1, "avg": 1.0, "p95": 1.0},
                 "inferred": {"looks_like": spelling},
             },
         },

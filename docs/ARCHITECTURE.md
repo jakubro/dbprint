@@ -48,7 +48,12 @@ change. Treat a mismatch as a bug in this document, not in the code.
 │   │   ├── mock.py                         #   deterministic in-memory adapter (for tests)
 │   │   ├── postgres/                       #   concrete adapter package
 │   │   ├── mysql/                          #   concrete adapter package
-│   │   └── snowflake/                      #   concrete adapter package
+│   │   ├── snowflake/                      #   concrete adapter package
+│   │   ├── duckdb/                         #   concrete adapter package - in-process, no server
+│   │   ├── clickhouse/                     #   concrete adapter package - refuses an unmaterialized sample
+│   │   ├── redshift/                       #   concrete adapter package - refuses an unmaterialized sample
+│   │   ├── databricks/                     #   concrete adapter package - degrades to an unmaterialized sample
+│   │   └── bigquery/                       #   concrete adapter package - refuses an unmaterialized sample
 │   ├── engine/                             # Orchestration layer
 │   │   ├── orchestrator.py                 #   Engine.generate() top-level flow
 │   │   ├── writer.py                       #   atomic per-table writes
@@ -261,6 +266,8 @@ class Adapter(ABC):
 
     def introspect_physical_layout(self, fqn: str) -> PhysicalLayout | None: ...
 
+    def introspect_view_dependencies(self) -> dict[str, tuple[str, ...]] | None: ...
+
     def compute_null_patterns(
         self,
         fqn: str,
@@ -280,6 +287,26 @@ class Adapter(ABC):
         scope: TableScope | None = None,
     ) -> tuple[tuple[str, str], ...]: ...
 
+    def probe_timeline(
+        self,
+        fqn: str,
+        columns: list[ColumnMeta],
+        counts: TableCounts,
+        column: str,
+        unit: Literal["day", "week", "month"],
+        scope: TableScope | None = None,
+    ) -> tuple[tuple[str, int], ...]: ...
+
+    def compute_populated_windows(
+        self,
+        fqn: str,
+        columns: list[ColumnMeta],
+        counts: TableCounts,
+        anchor_column: str,
+        subject_columns: tuple[str, ...],
+        scope: TableScope | None = None,
+    ) -> dict[str, tuple[str, str]]: ...
+
     def probe_dependencies(
         self,
         fqn: str,
@@ -293,10 +320,14 @@ class Adapter(ABC):
     def compute_key_sketch(
         self, fqn: str, column: str, sql_type: str, kind: SketchKind, k: int
     ) -> tuple[int, ...]: ...
+
+    def compute_normalized_cardinality(
+        self, fqn: str, column: str, scope: TableScope | None = None
+    ) -> int: ...
 ```
 
-All twenty are abstract: a subclass missing any one of them fails at instantiation, not at the
-call site.
+All twenty-four are abstract: a subclass missing any one of them fails at instantiation, not at
+the call site.
 
 **Statistics come in two calls, and the engine works between them.** Phase A is
 one batched query yielding the table's counts plus each column's `null_count`
@@ -399,20 +430,29 @@ sampling construct draws again every time it is evaluated, so the fields of one
 `statistics.yaml` can describe different rows on a table nobody wrote to — and
 `values_coverage` is a listed sum over `rows_scanned - null_count`, an identity
 that holds only when both sides came from the same rows. So a sampled table is
-read once into a session-lifetime copy, and every statement after that reads a
-name: `materialize_scope` creates it and puts its name on the scope, `_source`
-returns that name instead of a sampling construct, and `release_scope` drops it.
+read once into a session-lifetime copy (a real, self-expiring dataset table on
+BigQuery instead, which has no session-scoped relation to copy into), and every
+statement after that reads a name: `materialize_scope` creates it and puts its
+name on the scope, `_source` returns that name instead of a sampling
+construct, and `release_scope` drops it.
 The engine wraps the three statistics calls in the pair, and the copy is
 producer-internal — `TableScope.materialized` never reaches an artifact, because
 SPEC 2.2.8 forbids recording how the sample was drawn.
 
 Three things bound it. The copy costs a write, so it is refusable: the
 `materialize_sample` connection key turns it off, and a refused `CREATE
-TEMPORARY TABLE` degrades to the seeded path below with a warning rather than
-failing the table. Only a drawn fraction is copied — a full scan has nothing to
-copy, and a predicate selects the same rows however often it is evaluated
-(`TableScope` rejects a `materialized` without a `sample`). And the copy holds
-the sampled fraction only, for the session, so it is gone when the run ends.
+TEMPORARY TABLE` is caught the same way. What happens next turns on whether the
+adapter's per-statement fallback can be seeded into agreement across statements
+(`Adapter.SAMPLE_FALLBACK_COHERENT`) — a coherent adapter degrades to the seeded
+path below with a warning; one that is not refuses the table outright, naming
+the connection key and the adapter's own limitation, rather than publish a file
+whose fields describe different rows. Only a drawn fraction is copied — a full
+scan has nothing to copy, and a predicate selects the same rows however often it
+is evaluated (`TableScope` rejects a `materialized` without a `sample`). And the
+copy holds the sampled fraction only, for the session, so it is gone when the
+run ends - except on BigQuery, which has no session-scoped table at all: its
+copy is an ordinary dataset table instead, bounded by an expiration set at
+create time rather than by session teardown (see CONFIG.md's per-adapter note).
 
 The sampler adds its own bounded draw on top of that source rather than
 reading all of it: `SELECT DISTINCT` blocks, so a row limit trims the result
@@ -460,13 +500,18 @@ artifact, which SPEC 2.2.8 requires. It is also what the copy itself is built
 from, so two runs against an unchanged table copy the same rows wherever the
 engine honours it.
 
-What the seed does **not** do is guarantee that two evaluations of one seeded
-expression read the same rows. Postgres says they do — `BERNOULLI` decides
-membership per row by hashing (block, offset, seed). Snowflake documents no such
-guarantee for the block sampler its seed is restricted to, and MySQL documents
-nothing at all about `RAND(seed)` across several references in one statement. On
-those two the seeded path is best-effort, and best-effort is exactly what the
-copy exists to stop being the only option.
+What the seed does **not** do, on every adapter, is guarantee that two
+evaluations of one seeded expression read the same rows — and an adapter
+states which side of that line it is on through `SAMPLE_FALLBACK_COHERENT`.
+Postgres and duckdb are True: `BERNOULLI` decides membership per row by
+hashing (block, offset, seed), so an unmaterialized fallback still reads the
+same rows on every statement. Databricks is True above its measured runtime
+floor — `TABLESAMPLE ... REPEATABLE` is coherent on this engine. Snowflake,
+MySQL, ClickHouse, Redshift and BigQuery are False: none of their
+per-statement constructs is documented to reproduce a row set on repeat
+evaluation, so the engine refuses a `sample` scope with no materialized copy
+on those five rather than publish a file whose fields disagree with each
+other.
 
 Two consequences worth stating plainly. `TABLESAMPLE` binds to a base table and
 cannot nest, which is why Postgres has two composition shapes where the others
@@ -818,15 +863,15 @@ fields (`referencer_table`, `referencer_column`). Rewrite each
 ```mermaid
 flowchart TB
     subgraph P1[Pass 1: per-table extract]
-        T1[Table users<br/>refers_to: orgs] --> W1[Write relationships.yaml<br/>referenced_by: []]
-        T2[Table orgs<br/>refers_to: -] --> W2[Write relationships.yaml<br/>referenced_by: []]
-        T3[Table subs<br/>refers_to: users, orgs] --> W3[Write relationships.yaml<br/>referenced_by: []]
+        T1[Table accession<br/>refers_to: taxon] --> W1["Write relationships.yaml<br/>referenced_by: []"]
+        T2[Table taxon<br/>refers_to: -] --> W2["Write relationships.yaml<br/>referenced_by: []"]
+        T3[Table germination_trial<br/>refers_to: accession, taxon] --> W3["Write relationships.yaml<br/>referenced_by: []"]
     end
     P1 --> G[Build reverse index<br/>from all refers_to]
     subgraph P2[Pass 2: backfill]
-        G --> R1[Rewrite users<br/>referenced_by: subs]
-        G --> R2[Rewrite orgs<br/>referenced_by: users, subs]
-        G --> R3[Rewrite subs<br/>referenced_by: -]
+        G --> R1[Rewrite accession<br/>referenced_by: germination_trial]
+        G --> R2[Rewrite taxon<br/>referenced_by: accession, germination_trial]
+        G --> R3[Rewrite germination_trial<br/>referenced_by: -]
     end
 ```
 
@@ -919,7 +964,7 @@ flowchart LR
 ### Intersection vs union — why asymmetric
 
 Include is intersection: when the project config restricts to
-`arboretum.*`, a CLI `--include marketing.*` cannot reach outside the
+`arboretum.*`, a CLI `--include herbarium.*` cannot reach outside the
 project scope. The project config is the contract; the CLI is a per-run
 narrower.
 
@@ -977,11 +1022,11 @@ sources in this order and returns the first hit:
 
 ```mermaid
 flowchart LR
-    A[Need key 'host'<br/>for connection 'analytics'] --> B{DBPRINT_ANALYTICS_HOST<br/>in os.environ?}
+    A[Need key 'host'<br/>for connection 'arboretum'] --> B{DBPRINT_ARBORETUM_HOST<br/>in os.environ?}
     B -->|yes| Z[Value]
-    B -->|no| C{~/.dbprint/connections.yaml<br/>has analytics.host?}
+    B -->|no| C{~/.dbprint/connections.yaml<br/>has arboretum.host?}
     C -->|yes| Z
-    C -->|no| D{.env at project root<br/>defines DBPRINT_ANALYTICS_HOST?}
+    C -->|no| D{.env at project root<br/>defines DBPRINT_ARBORETUM_HOST?}
     D -->|yes| Z
     D -->|no| E[Raise — connection<br/>error, exit 4]
 ```
@@ -1009,11 +1054,11 @@ stay outside the project tree.
 ### Connections file shape
 
 ```yaml
-analytics:
+arboretum:
   adapter: postgres
   host: db.internal
   port: 5432
-  database: analytics
+  database: arboretum
   user: dbprint_ro
   password: <redacted>
 warehouse:
@@ -1021,7 +1066,7 @@ warehouse:
   account: xy12345.us-east-1
   user: DBPRINT_RO
   warehouse: COMPUTE_WH
-  database: ANALYTICS
+  database: ARBORETUM
   role: DBPRINT_RO
   private_key_file: ~/.ssh/snowflake_rsa.p8   # RSA key-pair auth (alternative: password)
   # private_key_file_pwd: <passphrase>        # only when the key is encrypted
@@ -1132,6 +1177,39 @@ This pattern matches the spec's `validate_print` contract in
 [§6.5 of the spec](format/v1/SPEC.md#65-run-all-then-report) — the
 implementation mirrors what the format asks of conformers.
 
+### Per-operation failure policy
+
+"Aborts that table" in the row above is not one policy — it is the fallback
+every adapter operation gets unless something wraps it. Three policies
+actually apply, and reading for a `try` is the only way to know which one
+governs a given call today, so they are enumerated here instead.
+
+| Operation | Scope | On failure |
+|---|---|---|
+| `extract_ddl` | table | Aborts the table — the artifact describes nothing without it. |
+| `introspect_columns` | table | Aborts the table, same reason. |
+| `compute_base_statistics` | table | Aborts the table — every later phase reads its output. |
+| `compute_column_statistics` | table | Aborts the table, same reason. |
+| `estimate_row_count` | table | Aborts the table. Only called when a rule's size condition needs it. |
+| `sample_values` | column | Aborts the table — raised inside the same per-table pass `compute_column_statistics` runs under, with nothing between it and that pass's own abort. |
+| `introspect_relationships` | table | Degrades: `relationships` is empty and the manifest does not declare a `relationships` artifact for this table, since `relationships.yaml` is a separate declared file (§6.3) rather than a key inside `statistics.yaml`. |
+| `introspect_indexes` | table | Degrades: `indexes` is absent. |
+| `extract_comments` | table | Degrades: table and column descriptions are absent. |
+| `introspect_physical_layout` | table | Degrades: `physical_layout` is absent — indistinguishable from a table confirmed unclustered, since the format has no third state for this field. |
+| `introspect_unique_keys` | table | Degrades: no declared key reaches `grain`, and `grain.search.exhausted` reads `false` rather than `true` or absent — a search run without knowing every declared key cannot claim to be exhaustive, the same distinction §2.2.12 draws between "the look was incomplete" and "the search found nothing." |
+| `compute_null_patterns` | table | Degrades: `null_patterns` is absent — indistinguishable from a table with nothing to relate, the same limitation as `introspect_physical_layout`. |
+| `introspect_view_dependencies` | connection | Degrades: every view/matview this run touches omits `depends_on`. One catalog read for the whole connection, so one failure costs every view rather than one table. |
+| `probe_grain` | table | Degrades: the declared keys already found still stand; the measured search is lost. |
+| `probe_dependencies` | table | Degrades: `dependencies` is empty. |
+| `probe_timeline` | table | Degrades: `timeline` is absent, and `populated` with it — the latter is computed from the former. |
+| `compute_populated_windows` | table | Degrades: `populated` is empty. |
+| `compute_key_sketch` | column | Degrades: that column omits `sketch`; recorded in `GenerateResult.sketch_failures`, reported once per column, never per table. |
+| `compute_normalized_cardinality` | column | Degrades: that column omits `normalized_cardinality`. |
+
+A degraded operation logs one warning naming the table (or connection) and
+the operation, never one per column on a wide table — the same discipline
+`compute_key_sketch`'s own failure list already keeps.
+
 ### Exit codes
 
 The vocabulary has one definition site, `engine/result.py`, including the
@@ -1238,6 +1316,11 @@ substrate provides the schema and data.
 | `postgres` | Ephemeral cluster started via `initdb` + `pg_ctl`; per-test fresh database | Session-scoped cluster amortises startup; per-test DB isolates schemas |
 | `snowflake` | In-memory duckdb connection injected via `cursor_factory`; per-test fresh `:memory:` instance | Adapter SQL targets duckdb directly; Snowflake-only behavior is outside the automated suite |
 | `mysql` | Ephemeral MariaDB started via `mariadb-install-db` + `mariadbd`; per-test fresh database | Session-scoped cluster amortises startup; the adapter speaks the wire protocol both MariaDB and Oracle MySQL serve. Native-JSON-type parity is verified by the environment-gated live suite |
+| `duckdb` | In-memory duckdb connection, per test | The adapter under test and its substrate are the same engine - no substitution point exists, unlike the Snowflake row below |
+| `clickhouse` | In-process chdb instance injected via `cursor_factory`, per test | Real ClickHouse (chdb embeds the engine as a library), so this proves engine semantics, not just dialect shape - the strongest substrate here after duckdb's own row. Cannot prove anything distributed |
+| `redshift` | Real Postgres, wrapped in a shim (`RedshiftDialectShim`) that answers the Redshift-only catalog statements from Postgres's own catalog and rewrites three SQL constructs Postgres spells differently; per-test fresh database | The weakest substrate here: no Redshift-derived engine exists to embed or install. Proves the statistics-computation SQL genuinely (`WITHIN GROUP`, `RANDOM()`, `CREATE TEMPORARY TABLE ... AS SELECT` all run unmodified against a real server) and constraint introspection genuinely too (`pg_constraint`, a standard PostgreSQL catalog table, reached unmodified) - only the genuinely Redshift-only surfaces (`SVV_*`/`STV_*`, `SHOW TABLE`/`SHOW VIEW`, `db_collation()`) are fabricated. See below |
+| `databricks` | Real local PySpark + Delta session, no shim, for the `information_schema`-absent fallback path (session-scoped, fresh Delta schema per test); `RecordedResponseCursor` answers Unity Catalog's own primary path from rows hand-transcribed to Databricks' own documented schemas, for the same reason a shim was never an option - no local substrate implements it at all | Two substrates, not one: the fallback path is a genuine engine (`SHOW CREATE TABLE`, `DESCRIBE ... AS JSON`, `ANALYZE TABLE` and every constraint clause are refused outright on OSS Delta, measured); Unity Catalog's own path is fabricated response data, proving the adapter's parsing/pairing logic against a documented row shape, never a real engine's behavior. See below |
+| `bigquery` | Real `goccy/bigquery-emulator` container, no shim; a REST-based test cursor bypasses the real `google-cloud-bigquery` client entirely (measured: its DB-API layer hangs against this emulator) | A genuine engine, unlike the Redshift row - no fabricated catalog layer - but several `INFORMATION_SCHEMA` columns are absent here regardless (`TABLE_CONSTRAINTS`, `KEY_COLUMN_USAGE`, `clustering_ordinal_position`), and `is_partitioning_column` always reports `NO` even for a genuine `PARTITION BY` column. Declared constraints, physical layout, and real recreate-DDL are left to the environment-gated live suite. See below |
 
 ### Why duckdb for Snowflake
 
@@ -1289,6 +1372,176 @@ real server rather than an in-process stand-in. The one tested divergence:
 `ENUM`, `AUTO_INCREMENT` counter stripping, backtick identifiers, FK actions,
 and secondary indexes all behave identically on both and are covered against
 the MariaDB substrate.
+
+### Why chdb for ClickHouse
+
+chdb embeds the same ClickHouse engine the production driver
+(`clickhouse-connect`) talks to over HTTP, linked in-process as a Python
+library instead of reached over a socket — a stronger position than every
+other row in this table except duckdb's own, which is the same engine as
+its adapter by construction. The production driver is bypassed entirely:
+`ClickhouseAdapter` accepts a `cursor_factory` the same way `duckdb`'s does,
+and the test fixture hands back a chdb DB-API cursor instead of opening a
+real network connection.
+
+What it proves: dialect shape and engine semantics both — a table's
+`SAMPLE` behavior, its aggregate functions, and its catalog reads are all
+the real thing. What it cannot prove: anything distributed. `SAMPLE`
+against a `Distributed` table or a `ReplicatedMergeTree`, cluster-wide
+`system` table behavior, and access-control-gated reads are all outside an
+in-process build's reach.
+
+One measured finding shapes the adapter more than the substrate choice
+does: a table's own `SAMPLE BY` key does not guarantee that `SAMPLE`
+narrows anything — a monotonic key was measured reading the whole table at
+every requested fraction. Materialization is not an optimization here the
+way it is for the other four adapters; it is the only way a sampled
+`statistics.yaml` can be trusted, which is why `materialize_sample: false`
+fails a sampled table outright on this adapter rather than degrading to an
+unseeded read (see [CONFIG.md](CONFIG.md)'s `materialize_sample` section).
+
+### Why Postgres, shimmed, for Redshift
+
+No AWS emulator exists — no Redshift analogue to DynamoDB Local — and every third-party
+candidate is either Postgres with a thin veneer, a control-plane mock with no SQL engine, or a
+different engine behind a transpiler. Postgres is the closest by dialect and the most dangerous
+one to run unmodified: it enforces constraints Redshift only records, has `TABLESAMPLE` where
+Redshift has none, and exposes `pg_stats` Redshift lacks. `RedshiftDialectShim`
+(tests/adapters/conftest.py) is the same pattern `SnowflakeDialectShim` uses against duckdb,
+applied to a real server instead of an in-process one:
+
+- Genuinely Redshift-only catalog statements (`SVV_REDSHIFT_TABLES`, `SVV_REDSHIFT_COLUMNS`,
+  `SVV_TABLE_INFO`, `STV_MV_INFO`, `SHOW TABLE`, `SHOW VIEW`, `db_collation()`) have no Postgres
+  equivalent at all and are answered by querying Postgres's own `pg_catalog`/`information_schema`
+  and fabricating the documented row shape - never executed as written. `SHOW TABLE`/`SHOW VIEW`
+  additionally raise on a kind mismatch (a view via `SHOW TABLE`, or the reverse) rather than
+  answering - AWS documents no error/empty-result contract for either direction, so this proves
+  the adapter's own try/fallback is reached, not which text a real cluster would return once it
+  is. Constraints (`relationships`/`unique_keys`) need no fabrication at all: `pg_constraint` is
+  a standard PostgreSQL catalog table the AWS documentation lists as accessible on Redshift, so
+  this reaches the real server unmodified rather than answering through `SHOW CONSTRAINTS` -
+  whose two forms return unrelated, unverified column shapes and never cover UNIQUE at all.
+- Three statistics-computation constructs are rewritten before reaching the real cursor: the
+  sketch's `STRTOL`-based low-64-bit recombination becomes Postgres's own `bit(32)` cast
+  (`postgres/sketch.py`'s technique); `APPROXIMATE PERCENTILE_DISC` drops its qualifier, the
+  plain aggregate form Redshift lacks being the ordinary one on Postgres; and `DATEDIFF('day',
+  MIN(c), MAX(c))` becomes Postgres's own native `MAX(c) - MIN(c)` date subtraction - Postgres
+  has no `DATEDIFF` function at all.
+- Everything else the adapter emits - `RANDOM()`, `WITHIN GROUP`, `PERCENTILE_CONT`,
+  `CREATE TEMPORARY TABLE ... AS SELECT`, the `pg_class`/`pg_namespace`/`pg_attribute`/
+  `pg_depend`/`pg_description` reads Redshift retains from its Postgres lineage - reaches the
+  real server unmodified.
+
+A deny-list (`tests/adapters/test_dialect_guard.py`'s `VENDOR_SUPPORT`, audited for every
+fragment this adapter's own SQL touches) keeps `TABLESAMPLE`, `pg_stats` and every other
+Postgres-only construct out of what the adapter is allowed to emit, so the substrate cannot
+quietly become the thing it exists to guard against.
+
+What it proves: the statistics-computation SQL genuinely, against a real server - percentile
+batching, sampling refusal, sketch correctness (cross-checked against `spec.sketch.low64_md5`
+directly in `tests/adapters/test_redshift.py`), cross-vendor percentile/distribution agreement,
+and constraint introspection via `pg_constraint` all execute for real. What it cannot prove:
+anything the shim fabricates rather than runs - real `SHOW TABLE` output shape,
+`SVV_REDSHIFT_COLUMNS`'s actual column set, whether Redshift's own grammar accepts an unaliased
+derived table the way modern Postgres does (measured: it does here, but Redshift's parser
+predates the Postgres version that relaxed this rule, so the two cannot be assumed to agree),
+constraint enforcement (informational-only is Redshift's stated behavior, never exercised
+against an engine that could enforce it instead), and the entire cost/percentile-restriction
+model AWS documents, unmeasured.
+
+### Why local PySpark + Delta, no shim, for Databricks
+
+Databricks' production driver speaks Databricks' own wire protocol; nothing local can be
+pointed at it the way Postgres stands in for Redshift's wire-compatible one, so a shim answering
+fabricated catalog rows was never an option here - there is no real server to run the rest of
+the statistics SQL against either. A local PySpark session with `delta-spark` is a genuine
+substitute instead: OSS Apache Spark, the open-source engine Databricks Runtime is built on, so
+every statement that reaches it runs for real, not fabricated.
+
+The substitution is at the catalog layer, and it is structural rather than a stand-in for one
+statement: this substrate has no Unity Catalog, so `DatabricksAdapter.connect()`'s own
+`detect_unity_catalog()` probe fails and every table takes the `information_schema`-absent
+fallback path (`SHOW SCHEMAS` + `SHOW TABLES`/`SHOW VIEWS` for listing, `DESCRIBE TABLE` for
+columns, no relationships or unique keys - Unity Catalog only) - the same path a legacy
+`hive_metastore` connection takes on real Databricks, exercised for real rather than assumed.
+Measured refusals on this substrate, all Unity-Catalog-only or version-gated features real
+Databricks documents but OSS Delta does not implement: `SHOW CREATE TABLE`
+(`DELTA_OPERATION_NOT_ALLOWED`), `DESCRIBE TABLE EXTENDED ... AS JSON` and `ANALYZE TABLE`
+(`NOT_SUPPORTED_COMMAND_FOR_V2_TABLE`), every `PRIMARY KEY`/`FOREIGN KEY`/`UNIQUE` constraint
+clause, and `CREATE TEMPORARY TABLE ... AS SELECT` (a documented Databricks SQL feature with no
+OSS Spark equivalent - the parser names `CREATE TEMPORARY VIEW` as the substitute outright).
+Each is left to the environment-gated live suite (`tests/live/test_databricks_live.py`); the
+first two are also skipped at the test-driver level (`Sweep.run()`, `TestExtractDdl`) rather
+than left to abort every table's whole extraction, matching what the orchestrator's own
+materialize-or-degrade catch already does for the last one in production.
+
+What it proves: the fallback-path introspection SQL and every statistics statement genuinely,
+against a real engine - percentile batching (`PERCENTILE(c, ARRAY(...))`, one call for every
+level, unlike Postgres/Redshift's one-`WITHIN GROUP`-per-key shape), `TABLESAMPLE ...
+REPEATABLE`'s measured coherence (two identical draws - why this adapter degrades to the
+unmaterialized path instead of refusing, unlike ClickHouse and Redshift), the
+null-safe `struct(a, b)` composite-distinct-count construct, sketch correctness
+(cross-checked against `spec.sketch.low64_md5` directly in `tests/adapters/test_databricks.py`),
+a session-local temporary view not retyping a same-named real table, and a documented view's
+comment surviving `DESCRIBE DETAIL`'s own refusal all execute for real. What it cannot prove:
+Unity Catalog's own primary introspection path, any statement OSS Delta refuses outright, and
+real DBR's exact behavior where it is documented to differ from OSS Spark.
+
+Unity Catalog's own primary path (`information_schema`, `DESCRIBE TABLE EXTENDED ... AS JSON`)
+has no local substrate at all - not even OSS Delta implements it - so `RecordedResponseCursor`
+(`tests/adapters/conftest.py`) answers those statements from rows hand-transcribed to
+Databricks' own documented schemas instead, dispatched by the same substring-match convention
+`RedshiftDialectShim` uses for its genuinely-fabricated surfaces. Unlike that shim, nothing here
+ever reaches a real engine - there is no "genuinely, against a real engine" half to this one.
+What it proves: the adapter's own parsing and pairing logic against a documented row shape -
+`full_data_type` over the simple type name, `position_in_unique_constraint`-based composite-key
+pairing (not a positional zip, which a reordered parent key defeats), cross-catalog FK
+resolution, an unmapped `table_type` raising rather than vanishing the object, and a column's
+own `default`/`collation` read from `DESCRIBE TABLE EXTENDED ... AS JSON` rather than the
+always-`NULL` `information_schema.columns.column_default`. What it cannot prove: that a real
+workspace's rows are actually shaped the way the documentation says, or the entire cost/
+governance model Unity Catalog layers over `information_schema` access, both left to the
+environment-gated live suite.
+
+### Why the bigquery-emulator container, no shim, for BigQuery
+
+BigQuery's production driver speaks a REST/gRPC protocol, not a wire-compatible SQL socket
+another engine could stand in for, so - as with Databricks - a shim answering fabricated
+catalog rows was never an option. `goccy/bigquery-emulator` is a genuine substitute instead: it
+implements GoogleSQL's query engine directly, so every statistics statement that reaches it
+runs for real, not fabricated. The real `google-cloud-bigquery` DB-API client is bypassed for
+tests: its job-polling loop is measured to hang against this emulator for minutes (confirmed via
+container logs showing dozens of repeated retries on a single `CREATE TABLE`), so the test
+fixture hands the adapter a `cursor_factory` that speaks the emulator's REST `jobs.query`
+endpoint directly instead.
+
+The substitution is at the catalog layer, structural rather than a stand-in for one statement:
+several `INFORMATION_SCHEMA` views are absent from the emulator entirely (`TABLE_CONSTRAINTS`,
+`KEY_COLUMN_USAGE`, `COLUMNS.column_default`, `COLUMNS.collation_name`,
+`COLUMNS.clustering_ordinal_position`; `TABLE_OPTIONS` exists but returns no rows), and
+`COLUMNS.is_partitioning_column` always reports `NO`, even for a column a
+genuine `PARTITION BY` clause names (all measured directly against the emulator). Each is left
+to the environment-gated live suite (`tests/live/test_bigquery_live.py`): declared
+`PRIMARY KEY`/`FOREIGN KEY` relationships, `introspect_physical_layout`'s cluster/partition
+detection, and `extract_ddl`'s real recreate-DDL text all require it, since nothing about them
+is provable locally regardless of what a table actually declares.
+
+What it proves: the statistics-computation SQL genuinely, against a real engine - `APPROX_
+QUANTILES`' single-call 101-boundary fetch, `APPROX_COUNT_DISTINCT`'s conditional use (skipped
+for a type it cannot group - GEOGRAPHY and every other `_is_unsupported` type - and routed
+through `TO_JSON_STRING` for JSON, which cannot be grouped directly either), the exact re-count
+`_settle_near_unique` runs for a column near SPEC 4.2's `candidate_key` threshold (converging
+with every other adapter's own exact-by-default there), and the materialized-copy path (a real
+throwaway table in the dataset, not a `_SESSION.`-scoped temp table - see
+`adapters.bigquery.stats.materialize`) all execute for real. `TABLESAMPLE SYSTEM` having no
+seed clause in the grammar is what makes this adapter declare `SAMPLE_FALLBACK_COHERENT =
+False`, so the engine refuses an unmaterialized sample scope before any statement here runs
+(same declaration ClickHouse and Redshift carry). What it cannot prove: the catalog
+gaps listed above, and any behavior a real BigQuery project's cost-based query planner or
+storage layer would show that a query-only emulator does not model - including whether
+`looks_like`'s own oversample draw is reproducible, since this emulator's `ORDER BY RAND()`
+was measured to return the same fixed order on every call regardless of a table's real
+sampling behavior, the one gap the environment-gated live suite alone can close.
 
 ---
 

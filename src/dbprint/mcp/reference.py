@@ -1,6 +1,8 @@
 """Packaged SPEC.md/ASSERTIONS.md, sliced by heading (MCP.md 4.6).
 
-Read through `importlib.resources` against the installed package, never a source-tree path.
+Read through `importlib.resources` against the installed package first, the only path a wheel
+install has. `hatch_build.py` force-includes both documents at build time rather than committing
+a second copy, so an editable install falls back to the source the build hook itself reads.
 """
 
 from __future__ import annotations
@@ -8,7 +10,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from importlib import resources
+from pathlib import Path
 from typing import Literal
+
+from . import errors
 
 
 ReferenceDocument = Literal["spec", "assertions"]
@@ -17,6 +22,16 @@ _PACKAGE_FILE: dict[ReferenceDocument, tuple[str, str]] = {
     "spec": ("dbprint.spec.v1", "SPEC.md"),
     "assertions": ("dbprint.assertions", "ASSERTIONS.md"),
 }
+
+# Mirrors `hatch_build.PACKAGED`'s source side - an editable install resolves inside the
+# checked-out repo, where the build hook's own input is on disk. Tested to agree with it.
+_SOURCE_TREE_FALLBACK: dict[ReferenceDocument, str] = {
+    "spec": "docs/format/v1/SPEC.md",
+    "assertions": "docs/ASSERTIONS.md",
+}
+
+# src/dbprint/mcp/reference.py -> repo root (parents[0]=mcp, [1]=dbprint, [2]=src, [3]=root).
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(\S.*)$")
 _NUMBER_RE = re.compile(r"^(\d+(?:\.\d+)*)\.?(?:\s|$)")
@@ -94,7 +109,17 @@ def section_of(text: str, number: str) -> str | None:
 def _read(document: ReferenceDocument) -> str:
     package, filename = _PACKAGE_FILE[document]
 
-    return resources.files(package).joinpath(filename).read_text()
+    try:
+        return resources.files(package).joinpath(filename).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        pass
+
+    fallback = _REPO_ROOT / _SOURCE_TREE_FALLBACK[document]
+
+    if fallback.is_file():
+        return fallback.read_text(encoding="utf-8")
+
+    raise errors.no_reference_document_available(document)
 
 
 def _parse_headings(text: str) -> list[_Heading]:

@@ -20,7 +20,7 @@
     "format_version": {"const": 1},
     "generated_at": {"$ref": "#/$defs/UtcIso8601"},
     "connection": {"type": "string", "minLength": 1},
-    "adapter": {"enum": ["snowflake", "postgres", "mysql"]},
+    "adapter": {"type": "string", "minLength": 1},
     "dbprint_version": {"type": "string", "minLength": 1},
     "statistics_params": {"$ref": "#/$defs/StatisticsParams"},
     "selectors": {"$ref": "#/$defs/Selectors"},

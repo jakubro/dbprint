@@ -1,8 +1,8 @@
 """Diff computation per SPEC 2.6.
 
-`compute()` covers all 18 v1 change kinds and fires events only for tables within
-`target.selectors` scope (SPEC 2.6.8). `baseline` is the parsed manifest+per-table dict
-tree of the prior on-disk state (None on the first-ever run); `current` is the same shape.
+`compute()` covers every v1 change kind and fires events only for tables within
+`target.selectors` scope (SPEC 2.6.8). `baseline` is the parsed manifest+per-table dict tree of
+the prior on-disk state (None on the first-ever run); `current` is the same shape.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
-from dbprint import __version__ as DBPRINT_VERSION
 from dbprint.config.selectors import match as selector_match
 from dbprint.spec.v1 import FORMAT_VERSION
 
@@ -22,10 +21,11 @@ DATA_CHANGE_KIND = "statistic_changed"
 ROW_COUNT_CHANGE_KIND = "table_row_count_changed"
 GRAIN_CHANGE_KIND = "grain_changed"
 PHYSICAL_LAYOUT_CHANGE_KIND = "physical_layout_changed"
+DEPENDS_ON_CHANGE_KIND = "depends_on_changed"
 
 # Kinds reporting data moving; every other kind means a committed print is no longer true.
-# grain_changed and physical_layout_changed sit with the shape-moving kinds: both state what
-# a constraint declares, and a table's own data churning does not move either.
+# grain_changed, physical_layout_changed and depends_on_changed sit with the shape-moving kinds:
+# each states what a constraint or a view's substrate declares, which churning data cannot move.
 DATA_CHANGE_KINDS = frozenset({DATA_CHANGE_KIND, ROW_COUNT_CHANGE_KIND})
 
 
@@ -67,6 +67,9 @@ class TableState:
     catalog_only: bool = False
     grain: TableGrainState | None = None
     physical_layout: PhysicalLayoutState | None = None
+    # The FQNs a view/matview reads (SPEC 2.2.17); None on a table or where the catalog could not
+    # answer - absent on both sides reads as "nothing to compare", never as a removal.
+    depends_on: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -132,8 +135,10 @@ class FkState:
     source_columns: tuple[str, ...]
     target_table: str
     target_columns: tuple[str, ...]
-    on_delete: str
-    on_update: str
+    # None on a baseline-hydrated edge that recorded neither (SPEC 2.3.8) - never defaulted to
+    # a real action, which a live-extracted edge (this dataclass's other producer) always has.
+    on_delete: str | None
+    on_update: str | None
     detection: str = "declared"
 
 
@@ -226,8 +231,9 @@ def compute(
             "source": "committed_prints",
             "path": baseline_path,
             "generated_at": baseline_generated_at,
-            "dbprint_version": baseline_dbprint_version
-            or (DBPRINT_VERSION if baseline_generated_at else None),
+            # Whatever the committed print itself recorded, or None - never this process's own
+            # version, which describes the run computing the diff, not the baseline being read.
+            "dbprint_version": baseline_dbprint_version,
         },
         "target": {
             "source": "live_database",
@@ -253,19 +259,33 @@ def has_schema_changes(diff_dict: dict[str, Any]) -> bool:
     return any(c.get("kind") not in DATA_CHANGE_KINDS for c in diff_dict.get("changes") or [])
 
 
-# `inferred.sampled`/`matched` move whenever the sample is redrawn - drift about the
-# measurement, not the column. `sketch` (SPEC 2.2.14) is written only by
-# `_write_key_sketches`, so a diff-only run has no current side to compare against.
+# `sampled`/`matched` and the `looks_like_candidate` pair move whenever the sample is redrawn -
+# drift about the measurement, not the column. `sketch` has no current side in a diff-only run.
+# Membership here is a BLANKET PROJECTION, not a per-comparison skip: `comparable_columns` strips
+# these off both sides, so a field the comparison must still READ belongs in `_MARKER_STATS`.
 _UNCOMPARED_STATS = frozenset(
     {
         "freshness",
         "sql_type",
         "nullable",
+        # The scanned-set marker itself (SPEC 2.2.8), echoed on every column of a scoped file -
+        # it describes the read, not the data, and differs between any two sampled runs.
+        "rows_scanned",
         "inferred.sampled",
         "inferred.matched",
+        "inferred.looks_like_candidate",
+        "inferred.looks_like_candidate_share",
         "sketch",
     },
 )
+
+# Present on one side only where the other never computed it - a `dbprint diff` run has no current
+# side, so it is skipped rather than compared; a `generate` run compares it normally.
+_PRESENCE_GATED_STATS = frozenset({"normalized_cardinality"})
+
+# Kept by the projection and skipped per comparison: a marker, not a measurement (SPEC 2.2.4), but
+# one `_diff_one_column_stats` must still read off both sides to know what not to compare.
+_MARKER_STATS = frozenset({"unmeasured"})
 
 
 def comparable_columns(columns: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -392,6 +412,12 @@ def _diff_table(fqn: str, before: TableState, after: TableState) -> list[dict[st
         if layout_change is not None:
             out.append(layout_change)
 
+    if before.depends_on is not None and after.depends_on is not None:
+        depends_on_change = _diff_depends_on(fqn, before.depends_on, after.depends_on)
+
+        if depends_on_change is not None:
+            out.append(depends_on_change)
+
     if (
         before.statistics is not None
         and after.statistics is not None
@@ -483,7 +509,13 @@ def _diff_relationships(
     before: list[FkState],
     after: list[FkState],
 ) -> list[dict[str, Any]]:
+    """SPEC 2.6.6: a `detection: measured` edge produces no event, on either side - `diff` never
+    runs the sketch pass one depends on, so every such edge would report as removed.
+    """
+
     out: list[dict[str, Any]] = []
+    before = [fk for fk in before if fk.detection != "measured"]
+    after = [fk for fk in after if fk.detection != "measured"]
     before_by_key = {_fk_key(fk): fk for fk in before}
     after_by_key = {_fk_key(fk): fk for fk in after}
 
@@ -709,6 +741,26 @@ def _physical_layout_payload(state: PhysicalLayoutState) -> dict[str, Any] | Non
     }
 
 
+def _diff_depends_on(
+    fqn: str,
+    before: tuple[str, ...],
+    after: tuple[str, ...],
+) -> dict[str, Any] | None:
+    """A table-grain event: which objects a view/matview reads (SPEC 2.2.17) is a declared fact
+    that moves only when someone edits the view, not when its rows churn.
+    """
+
+    if before == after:
+        return None
+
+    return {
+        "kind": DEPENDS_ON_CHANGE_KIND,
+        "table": fqn,
+        "before": list(before),
+        "after": list(after),
+    }
+
+
 def _diff_statistics(
     fqn: str,
     before_stats: dict[str, dict[str, Any]],
@@ -739,7 +791,34 @@ _APPROXIMATE_EXCLUDED_STATS = frozenset({"cardinality", "cardinality_ratio"})
 
 # Scan-scale by construction: a side carrying `scope` suppresses them rather than reporting
 # its population change as drift. Ratios are normalised to their own scan and keep comparing.
-_POPULATION_ABSOLUTE_STATS = frozenset({"cardinality", "null_count", "values"})
+# The count fields scale one-for-one with `rows_scanned` as `null_count` does (SPEC 2.2.8);
+# `mean` and `length.*` do not, and keep comparing under scope like `null_rate`.
+_POPULATION_ABSOLUTE_STATS = frozenset(
+    {
+        "cardinality",
+        "null_count",
+        "values",
+        "sum",
+        "zero_count",
+        "negative_count",
+        "empty_count",
+        "quantized_count",
+        # A distinct-value count under folding (SPEC 2.2.4), so it scales with the scanned set
+        # exactly as `cardinality` beside it does.
+        "normalized_cardinality",
+    },
+)
+
+
+def _unmeasured_of(col: dict[str, Any]) -> frozenset[str]:
+    """The field names one side declares it could not measure (SPEC 2.2.4)."""
+
+    value = col.get("unmeasured")
+
+    if not isinstance(value, list):
+        return frozenset()
+
+    return frozenset(name for name in value if isinstance(name, str))
 
 
 def _diff_one_column_stats(
@@ -758,15 +837,24 @@ def _diff_one_column_stats(
     )
     out: list[dict[str, Any]] = []
     paths = _stat_paths(before) | _stat_paths(after)
+    # SPEC 2.2.4: a field either side declares unmeasured has no reading to compare - and only the
+    # artifact's own marker can tell a hydrated baseline's failed read from a value that moved.
+    unmeasured = _unmeasured_of(before) | _unmeasured_of(after)
 
     for path in sorted(paths):
-        if path in _UNCOMPARED_STATS:
+        if path in _UNCOMPARED_STATS or path in _MARKER_STATS:
+            continue
+
+        if path.split(".")[0] in unmeasured:
             continue
 
         if approximate and path in _APPROXIMATE_EXCLUDED_STATS:
             continue
 
         if scoped and path in _POPULATION_ABSOLUTE_STATS:
+            continue
+
+        if path in _PRESENCE_GATED_STATS and (path not in before or path not in after):
             continue
 
         b = _get_path(before, path)
@@ -907,7 +995,7 @@ def _summarize(
             # No summary counter of its own (SPEC 2.6.4) - still counts the table as
             # modified, or a row-count-only change would read as unchanged.
             modified_tables.add(c["table"])
-        elif kind in {GRAIN_CHANGE_KIND, PHYSICAL_LAYOUT_CHANGE_KIND}:
+        elif kind in {GRAIN_CHANGE_KIND, PHYSICAL_LAYOUT_CHANGE_KIND, DEPENDS_ON_CHANGE_KIND}:
             # No summary counter of their own - still counts the table as modified.
             modified_tables.add(c["table"])
         elif kind in {"relationship_added", "relationship_removed", "relationship_modified"}:

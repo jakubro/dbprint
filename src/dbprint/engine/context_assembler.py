@@ -53,7 +53,7 @@ class TableArtifacts:
     annotated_grain: dict[str, Any] | None
     relationship_annotations: list[dict[str, Any]] | None
     missing: tuple[str, ...]
-    corrupted: tuple[str, ...]
+    corrupted: dict[str, str]
     statistics_params_override: dict[str, Any] | None
 
 
@@ -105,10 +105,13 @@ def _assemble_markdown(
 
     if multi and connection_name:
         header = f"# Context for connection {connection_name} ({len(artifacts)} tables)"
-        notes = _load_connection_notes(print_root)
+        notes, notes_reason = _load_connection_notes(print_root)
 
         if notes:
             header += "\n\n" + notes
+
+        if notes_reason is not None:
+            header += "\n\n" + _corrupted_summary({"manifest_annotations": notes_reason})
 
         provenance = _provenance_block(manifest, connection_name)
 
@@ -142,7 +145,7 @@ def _assemble_markdown(
     adapter = adapter if isinstance(adapter, str) and adapter else None
 
     for a in artifacts:
-        fragment, was_truncated = _render_table_markdown(
+        fragment, was_truncated, has_content = _render_table_markdown(
             a,
             options,
             per_table_budget,
@@ -152,6 +155,10 @@ def _assemble_markdown(
 
         if fragment:
             fragments.append(fragment)
+
+        # A budget too tight for even the header leaves `fragment` as the bare truncation
+        # marker - real text, but not a table this run actually included.
+        if has_content:
             included += 1
 
             if was_truncated:
@@ -175,8 +182,10 @@ def _render_table_markdown(
     budget: int | None,
     connection_statistics_params: dict[str, Any],
     adapter: str | None,
-) -> tuple[str, bool]:
-    """Render one table; return (markdown text, was_truncated)."""
+) -> tuple[str, bool, bool]:
+    """Render one table; return (markdown text, was_truncated, has_content). `has_content` is
+    false when the budget missed even the header - `text` is then the bare truncation marker.
+    """
 
     include_qualifiers = options.include_stats and bool(a.statistics)
     sections: list[Section] = []
@@ -228,7 +237,7 @@ def _render_table_markdown(
     if marker:
         text = f"{text}\n\n{marker}" if text else marker
 
-    return text, selection.truncated
+    return text, selection.truncated, bool(selection.included)
 
 
 def _markdown_header(
@@ -267,6 +276,8 @@ def _markdown_header(
     qualifiers = (
         _scope_summary(statistics),
         _grain_summary(statistics, a.annotated_grain),
+        _timeline_summary(statistics),
+        _depends_on_summary(statistics),
         _statistics_params_override_summary(
             connection_statistics_params,
             a.statistics_params_override,
@@ -304,8 +315,12 @@ def _missing_summary(missing: tuple[str, ...]) -> str:
     return f"Missing: {', '.join(missing)} (declared but missing from disk)"
 
 
-def _corrupted_summary(corrupted: tuple[str, ...]) -> str:
-    """One line naming every declared kind present on disk but unreadable (SPEC 2.5)."""
+def _corrupted_summary(corrupted: dict[str, str]) -> str:
+    """One line naming every declared kind present on disk but unreadable (SPEC 2.5).
+
+    `corrupted` maps kind to why: the structured payload carries the reason, this prose line
+    only the kinds.
+    """
 
     return f"Unreadable: {', '.join(corrupted)} (present on disk, failed to parse)"
 
@@ -398,6 +413,62 @@ def _grain_summary(statistics: dict[str, Any], annotated_grain: dict[str, Any] |
     )
 
     return f"Grain: {rendered}"
+
+
+def _timeline_summary(statistics: dict[str, Any]) -> str:
+    """The anchor column's bucketed activity, one line (SPEC 2.2.16) - anchor, unit, bucket
+    count and span, enough to judge recency and gaps without the full column list.
+    """
+
+    block = statistics.get("timeline")
+
+    if not block:
+        return ""
+
+    column, unit = block.get("column"), block.get("unit")
+    buckets = [b for b in (block.get("buckets") or []) if isinstance(b, dict)]
+
+    if not buckets:
+        return f"Timeline: {column} ({unit}), no non-null values bucketed"
+
+    span = f"{buckets[0].get('start')} to {buckets[-1].get('start')}"
+    coverage = block.get("coverage")
+    is_real_number = isinstance(coverage, (int, float)) and not isinstance(coverage, bool)
+    covered = f", {_coverage_share_words(coverage)}" if is_real_number else ""
+
+    return f"Timeline: {column} ({unit}), {len(buckets)} bucket(s), {span}{covered}"
+
+
+def _coverage_share_words(coverage: float) -> str:
+    """A `<1.0` coverage never rounds up to a false "every scanned row" (SPEC 2.2.16) - a null
+    anchor counts toward `rows_scanned` but no bucket, so `1.0` alone means every value landed.
+
+    The percentage floors rather than rounds: `0.9995` must not print as the `100.0%` those
+    words are withheld for saying.
+    """
+
+    if coverage >= 1:
+        return "every scanned row"
+
+    return f"{math.floor(coverage * 1000) / 10}% of scanned rows"
+
+
+def _depends_on_summary(statistics: dict[str, Any]) -> str:
+    """What a view/matview reads, one line (SPEC 2.2.17) - absent when the producer could not
+    ask, so this renders nothing rather than guess; a plain table never carries the field.
+    """
+
+    block = statistics.get("depends_on")
+
+    if not isinstance(block, list):
+        return ""
+
+    names = [t for t in block if isinstance(t, str)]
+
+    if not names:
+        return "Depends on: nothing else in this print"
+
+    return f"Depends on: {', '.join(names)}"
 
 
 def _annotated_grain_keys(annotated_grain: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -646,7 +717,8 @@ def _markdown_physical_layout(a: TableArtifacts) -> str:
     assert a.statistics is not None
     block = a.statistics.get("physical_layout") or {}
     keys = [k for k in (block.get("keys") or []) if isinstance(k, dict)]
-    label = "Clustered by" if block.get("mechanism") == "cluster" else "Partitioned by"
+    labels = {"cluster": "Clustered by", "partition": "Partitioned by", "sort": "Sorted by"}
+    label = labels.get(block.get("mechanism"), "Partitioned by")
     expressions = ", ".join(k.get("expression", "") for k in keys)
 
     return f"## Physical layout\n\n{label}: {expressions}"
@@ -681,9 +753,7 @@ def _markdown_null_patterns(a: TableArtifacts) -> str:
     coverage = block.get("coverage")
 
     if isinstance(coverage, (int, float)) and not isinstance(coverage, bool):
-        share = (
-            "every scanned row" if coverage >= 1 else f"{round(coverage * 100, 1)}% of scanned rows"
-        )
+        share = _coverage_share_words(coverage)
         # Silent on `measured` - matches the per-column coverage hedge (notes_synthesis.py).
         hedge = " (bounded)" if block.get("coverage_method") == "bounded" else ""
         lines.append("")
@@ -825,10 +895,8 @@ def _rejection_line(entry: dict[str, Any] | None) -> list[str]:
 
 
 def _edge_detection(entry: dict[str, Any]) -> str:
-    """`detection` as SPEC 2.3 requires it on every edge; absence reads as the weaker claim.
-
-    A hand-edited artifact can drop the field, and defaulting to `inferred` never
-    overstates the edge (SPEC 2.3: a consumer MUST NOT treat a guess as a constraint).
+    """The weaker reading of an absent `detection`, which SPEC 2.3.2 marks REQUIRED and gives no
+    default: `inferred` never overstates the edge (SPEC 2.3 forbids reading a guess as declared).
     """
 
     return entry.get("detection") or "inferred"
@@ -857,6 +925,11 @@ def _format_cardinality_cell(col: dict[str, Any], row_count: int | None) -> str:
 
     if col.get("cardinality_method") == "approximate":
         text += " (approx)"
+
+    normalized = col.get("normalized_cardinality")
+
+    if isinstance(normalized, int) and normalized < cardinality:
+        text += f" ({cardinality - normalized} merge case/whitespace-folded)"
 
     return text
 
@@ -911,39 +984,38 @@ def _build_fk_target_map(relationships: dict[str, Any]) -> dict[str, str]:
     return out
 
 
-def _load_artifact(path: Path) -> tuple[dict[str, Any] | None, bool]:
-    """`(None, False)` covers both "never declared" and "declared but missing"; `(None, True)`
-    is a declared file that exists and does not parse as a mapping.
+def _load_artifact(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    """`(None, None)` covers both "never declared" and "declared but missing"; a non-`None` reason
+    is a declared file that exists and failed to parse, naming why.
     """
 
     if not path.is_file():
-        return None, False
+        return None, None
 
     try:
-        data = yaml.safe_load(path.read_text())
-    except yaml.YAMLError:
-        return None, True
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        return None, str(exc)
 
-    return (data, False) if isinstance(data, dict) else (None, True)
+    if isinstance(data, dict):
+        return data, None
 
-
-def _artifact_mapping(path: Path) -> dict[str, Any] | None:
-    """None when the file is missing, unparseable or misshapen."""
-
-    return _load_artifact(path)[0]
+    return None, "parses, but is not a mapping"
 
 
-def _load_connection_notes(print_root: Path) -> str | None:
-    """`manifest.annotations.yaml`'s `notes` field (SPEC 2.7.3), or None when absent/empty."""
+def _load_connection_notes(print_root: Path) -> tuple[str | None, str | None]:
+    """`manifest.annotations.yaml`'s `notes` field (SPEC 2.7.3) and why it is corrupt, if it is -
+    `(None, None)` covers absent and empty alike; a non-`None` reason is present but unreadable.
+    """
 
-    mapping = _artifact_mapping(print_root / "manifest.annotations.yaml")
+    mapping, reason = _load_artifact(print_root / "manifest.annotations.yaml")
 
     if mapping is None:
-        return None
+        return None, reason
 
     notes = mapping.get("notes")
 
-    return notes.strip() if isinstance(notes, str) and notes.strip() else None
+    return (notes.strip() if isinstance(notes, str) and notes.strip() else None), None
 
 
 def _annotation_columns(mapping: dict[str, Any] | None) -> dict[str, dict[str, Any]] | None:
@@ -999,24 +1071,24 @@ def _load_table_artifacts(manifest: dict[str, Any], print_root: Path, fqn: str) 
     artifacts = declared_artifacts(entry)
 
     ddl_path = table_path / artifacts.get("ddl", "ddl.sql")
-    ddl = ddl_path.read_text() if ddl_path.is_file() else ""
+    ddl = ddl_path.read_text(encoding="utf-8") if ddl_path.is_file() else ""
 
     statistics = None
-    corrupted: list[str] = []
+    corrupted: dict[str, str] = {}
 
     if "statistics" in artifacts:
-        statistics, stats_corrupted = _load_artifact(table_path / artifacts["statistics"])
+        statistics, stats_reason = _load_artifact(table_path / artifacts["statistics"])
 
-        if stats_corrupted:
-            corrupted.append("statistics")
+        if stats_reason is not None:
+            corrupted["statistics"] = stats_reason
 
     relationships = None
 
     if "relationships" in artifacts:
-        relationships, rel_corrupted = _load_artifact(table_path / artifacts["relationships"])
+        relationships, rel_reason = _load_artifact(table_path / artifacts["relationships"])
 
-        if rel_corrupted:
-            corrupted.append("relationships")
+        if rel_reason is not None:
+            corrupted["relationships"] = rel_reason
 
     description = None
 
@@ -1024,13 +1096,19 @@ def _load_table_artifacts(manifest: dict[str, Any], print_root: Path, fqn: str) 
         desc_path = table_path / artifacts["description"]
 
         if desc_path.is_file():
-            description = desc_path.read_text()
+            description = desc_path.read_text(encoding="utf-8")
 
     annotations = None
     annotated_grain = None
 
     if "statistics_annotations" in artifacts:
-        stats_ann = _artifact_mapping(table_path / artifacts["statistics_annotations"])
+        stats_ann, stats_ann_reason = _load_artifact(
+            table_path / artifacts["statistics_annotations"],
+        )
+
+        if stats_ann_reason is not None:
+            corrupted["statistics_annotations"] = stats_ann_reason
+
         annotations = _annotation_columns(stats_ann)
         annotated_grain = _annotated_grain(stats_ann)
 
@@ -1045,9 +1123,14 @@ def _load_table_artifacts(manifest: dict[str, Any], print_root: Path, fqn: str) 
     relationship_annotations = None
 
     if "relationships_annotations" in artifacts:
-        relationship_annotations = _relationship_annotation_entries(
-            _artifact_mapping(table_path / artifacts["relationships_annotations"]),
+        rel_ann, rel_ann_reason = _load_artifact(
+            table_path / artifacts["relationships_annotations"],
         )
+
+        if rel_ann_reason is not None:
+            corrupted["relationships_annotations"] = rel_ann_reason
+
+        relationship_annotations = _relationship_annotation_entries(rel_ann)
 
     table_params = entry.get("statistics_params")
 
@@ -1064,7 +1147,7 @@ def _load_table_artifacts(manifest: dict[str, Any], print_root: Path, fqn: str) 
         annotated_grain=annotated_grain,
         relationship_annotations=relationship_annotations,
         missing=missing_artifacts(table_path, artifacts),
-        corrupted=tuple(corrupted),
+        corrupted=corrupted,
         statistics_params_override=table_params if isinstance(table_params, dict) else None,
     )
 
@@ -1100,6 +1183,9 @@ def _budgeted_structured_payload(
 
     if a.missing:
         header["_missing"] = list(a.missing)
+
+    if a.corrupted:
+        header["_corrupted"] = dict(a.corrupted)
 
     candidates: list[tuple[str, Any]] = []
 

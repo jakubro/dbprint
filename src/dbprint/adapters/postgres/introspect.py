@@ -481,6 +481,50 @@ def _split_top_level_commas(text: str) -> list[str]:
     return parts
 
 
+def view_dependencies(conn: psycopg.Connection) -> dict[str, tuple[str, ...]]:
+    """Every view/matview's direct object dependencies, one query for the whole connection -
+    the LEFT joins seed every view, so absence means "not a view", never "reads nothing".
+    """
+
+    rows = exec_query(
+        conn,
+        """
+        SELECT DISTINCT
+            vn.nspname AS view_schema,
+            v.relname  AS view_name,
+            sn.nspname AS source_schema,
+            s.relname  AS source_name
+        FROM pg_class v
+        JOIN pg_namespace vn ON vn.oid = v.relnamespace
+        LEFT JOIN pg_rewrite r ON r.ev_class = v.oid
+        LEFT JOIN pg_depend dep ON dep.objid = r.oid
+            AND dep.refobjsubid > 0
+            AND dep.deptype = 'n'
+        LEFT JOIN pg_class s ON s.oid = dep.refobjid
+            AND s.oid <> v.oid
+            AND s.relkind IN ('r', 'p', 'v', 'm', 'f')
+        LEFT JOIN pg_namespace sn ON sn.oid = s.relnamespace
+            AND sn.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND sn.nspname NOT LIKE 'pg_toast%'
+        WHERE v.relkind IN ('v', 'm')
+          AND vn.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND vn.nspname NOT LIKE 'pg_toast%'
+        ORDER BY 1, 2, 3, 4
+        """,
+    ).fetchall()
+
+    out: dict[str, list[str]] = {}
+
+    for view_schema, view_name, source_schema, source_name in rows:
+        key = f"{view_schema.lower()}.{view_name.lower()}"
+        out.setdefault(key, [])
+
+        if source_schema is not None and source_name is not None:
+            out[key].append(f"{source_schema.lower()}.{source_name.lower()}")
+
+    return {k: tuple(v) for k, v in out.items()}
+
+
 def reltuples_estimate(conn: psycopg.Connection, fqn: str) -> float:
     """Planner-stat row-count estimate; -1 if no stats yet (use exact path then)."""
 

@@ -387,6 +387,48 @@ def _split_top_level_commas(text: str) -> list[str]:
     return parts
 
 
+def view_dependencies(cursor: Cursor, database: str) -> dict[str, tuple[str, ...]]:
+    """Every view/matview's direct object dependencies, for the whole connection - two
+    statements, the second reading an account-wide catalog that lags up to three hours.
+    """
+
+    view_rows = exec_query(
+        cursor,
+        """
+        SELECT table_catalog, table_schema, table_name
+        FROM information_schema.tables
+        WHERE table_type IN ('VIEW', 'MATERIALIZED VIEW')
+        """,
+    ).fetchall()
+
+    out: dict[str, list[str]] = {
+        f"{catalog.lower()}.{schema.lower()}.{name.lower()}": []
+        for catalog, schema, name in view_rows
+    }
+
+    dep_rows = exec_query(
+        cursor,
+        """
+        SELECT
+            referencing_database, referencing_schema, referencing_object_name,
+            referenced_database, referenced_schema, referenced_object_name
+        FROM snowflake.account_usage.object_dependencies
+        WHERE referencing_object_domain IN ('VIEW', 'MATERIALIZED VIEW')
+          AND referenced_object_domain IN ('TABLE', 'VIEW', 'MATERIALIZED VIEW', 'EXTERNAL TABLE')
+          AND UPPER(referencing_database) = UPPER(?)
+        """,
+        [database],
+    ).fetchall()
+
+    for view_db, view_schema, view_name, source_db, source_schema, source_name in dep_rows:
+        key = f"{view_db.lower()}.{view_schema.lower()}.{view_name.lower()}"
+        out.setdefault(key, []).append(
+            f"{source_db.lower()}.{source_schema.lower()}.{source_name.lower()}",
+        )
+
+    return {k: tuple(v) for k, v in out.items()}
+
+
 def row_count_estimate(cursor: Cursor, identity: Identity) -> int:
     """Catalog row count for the table, never a scan; -1 when the catalog has no entry."""
 

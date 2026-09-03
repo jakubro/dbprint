@@ -14,6 +14,7 @@ from typing import Any
 import yaml
 
 from dbprint.adapters import (
+    BaseStats,
     ColumnMeta,
     ColumnStats,
     CommentsMeta,
@@ -21,8 +22,12 @@ from dbprint.adapters import (
     MockTable,
     NullPattern,
     NullPatterns,
+    StatisticsConfig,
+    TableCounts,
+    TableScope,
 )
 from dbprint.config import ConnectionConfig
+from dbprint.conformance.statistics import check
 from dbprint.engine import Engine
 from dbprint.engine.context_assembler import AssemblyOptions, assemble
 
@@ -83,6 +88,57 @@ class TestEmission:
         assert payload["null_patterns"]["coverage_method"] == "measured"
 
 
+class _CensusFailingAdapter(MockAdapter):
+    """Fails the grouped null scan, as a statement timeout on a wide table would."""
+
+    def compute_null_patterns(
+        self,
+        fqn: str,
+        columns: list[ColumnMeta],
+        config: StatisticsConfig,
+        counts: TableCounts,
+        base: dict[str, BaseStats],
+        scope: TableScope | None = None,
+    ) -> NullPatterns | None:
+        raise RuntimeError("simulated statement timeout")
+
+
+class TestAFailedCensus:
+    """An absent block asserts the table carries no nulls (SPEC 2.2.10), so a run whose scan
+    failed says otherwise through the marker - and validates, where an unmarked absence does not.
+    """
+
+    def test_the_file_names_the_block_unmeasured(self, tmp_path: Path) -> None:
+        payload = _generate(
+            tmp_path,
+            "seedbank.accession",
+            _accession_fixture(ACCESSION_NULL_PATTERNS),
+            adapter=_CensusFailingAdapter,
+        )
+
+        assert "null_patterns" not in payload
+        assert payload["unmeasured"] == ["null_patterns"]
+
+    def test_the_absent_block_raises_no_census_error(self, tmp_path: Path) -> None:
+        """Without the marker: `stats.null-patterns-absent-with-nulls` on a blameless producer."""
+
+        payload = _generate(
+            tmp_path,
+            "seedbank.accession",
+            _accession_fixture(ACCESSION_NULL_PATTERNS),
+            adapter=_CensusFailingAdapter,
+        )
+        codes = {i.code for i in check(payload, "statistics.yaml", "seedbank.accession")}
+
+        assert "stats.null-patterns-absent-with-nulls" not in codes
+
+        unmarked = {k: v for k, v in payload.items() if k != "unmeasured"}
+
+        assert "stats.null-patterns-absent-with-nulls" in {
+            i.code for i in check(unmarked, "statistics.yaml", "seedbank.accession")
+        }
+
+
 class TestTruncatedCoverageMethod:
     """A capped census - `coverage` short of 1.0 - carries no method (SPEC 2.2.10).
 
@@ -134,14 +190,19 @@ class TestContextRendering:
         assert payload["statistics"]["null_patterns"]["coverage"] == 1.0
 
 
-def _generate(tmp_path: Path, table_key: str, fixture: dict[str, MockTable]) -> dict[str, Any]:
+def _generate(
+    tmp_path: Path,
+    table_key: str,
+    fixture: dict[str, MockTable],
+    adapter: type[MockAdapter] = MockAdapter,
+) -> dict[str, Any]:
     conn = ConnectionConfig(
         name="w",
         adapter="postgres",
         output=tmp_path,
         infer_relationships=False,
     )
-    Engine(MockAdapter(fixture), conn, tmp_path).generate()
+    Engine(adapter(fixture), conn, tmp_path).generate()
     schema, name = table_key.split(".")
 
     return yaml.safe_load((tmp_path / "w" / schema / name / "statistics.yaml").read_text())

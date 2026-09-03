@@ -27,7 +27,7 @@ EXAMPLE_ROOT = REPO_ROOT / "docs/format/v1/examples/production"
 PRINT_ROOT = EXAMPLE_ROOT / "prints/production"
 SQL_DIR = Path(__file__).resolve().parent / "sql"
 
-DATABASE = "analytics"
+DATABASE = "arboretum"
 CONNECTION = "production"
 
 # Every stamped timestamp collapses here, so regeneration diffs nothing but clocks.

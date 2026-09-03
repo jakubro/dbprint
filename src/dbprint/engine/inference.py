@@ -1,7 +1,5 @@
-"""Foreign-key inference from column naming, per SPEC v1, section 2.3.
-
-Naming is the only evidence for edges a catalog does not declare, as on a warehouse that
-does not enforce FKs. Pure: no I/O, no statistics, so no edge depends on profiling order.
+"""Foreign-key inference (SPEC 2.3): from column naming, and from measured value containment.
+Neither issues a query - naming is pure, and containment reads statistics already on disk.
 """
 
 from __future__ import annotations
@@ -10,10 +8,24 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from dbprint.adapters.base import ColumnMeta, ForeignKeyMeta, TableType, UniqueKeyMeta
+from dbprint.spec.sketch import (
+    K as SKETCH_K,
+)
+from dbprint.spec.sketch import (
+    answerable_count,
+    answerable_subset_containment,
+    estimate_intersection,
+    sketch_kind,
+)
 
 
 # The one naming convention strong enough to act on: `<name>_id` refers to table `<name>`.
 _FK_SUFFIX = "_id"
+
+# SPEC 2.2.14's own margin, `1/sqrt(answerable_count)`, falls to 0.05 at 400 - the slack a
+# 0.95 containment floor leaves once both sketches are truncated.
+_VALUE_DERIVED_MIN_ANSWERABLE = 400
+_VALUE_DERIVED_MIN_CONTAINMENT = 0.95
 
 
 @dataclass(frozen=True)
@@ -70,6 +82,107 @@ class TableInventory:
             unique_columns=tuple(unique),
             keys_known=keys_known,
         )
+
+
+@dataclass(frozen=True)
+class SketchCandidate:
+    """One column eligible for the value-derived comparison, per SPEC 2.3's floors 1/2 - the
+    caller decides eligibility; this module compares whichever sketches it is handed.
+    """
+
+    fqn: str
+    column: str
+    sql_type: str
+    cardinality: int
+    sketch: tuple[int, ...]
+
+
+def infer_value_derived_edges(
+    children: Sequence[SketchCandidate],
+    parents: Sequence[SketchCandidate],
+    existing: frozenset[tuple[str, str, str, str]],
+) -> dict[str, list[ForeignKeyMeta]]:
+    """Propose an edge from measured value containment alone (SPEC 2.3's `measured` detection) -
+    every qualifying child column of a table contributes, and the table's whole list is ordered
+    once at the end for diff stability across runs.
+    """
+
+    proposals: dict[str, list[tuple[str, str, str, ForeignKeyMeta]]] = {}
+
+    for child in children:
+        child_kind = sketch_kind(child.sql_type)
+
+        if child_kind is None:
+            continue
+
+        for parent in parents:
+            if parent.fqn == child.fqn and parent.column == child.column:
+                continue
+
+            if sketch_kind(parent.sql_type) != child_kind:
+                continue
+
+            if (child.fqn, child.column, parent.fqn, parent.column) in existing:
+                continue
+
+            if _measure_containment(child, parent) is None:
+                continue
+
+            proposals.setdefault(child.fqn, []).append(
+                (
+                    child.column,
+                    parent.fqn,
+                    parent.column,
+                    ForeignKeyMeta(
+                        column=(child.column,),
+                        target_table=parent.fqn,
+                        target_column=(parent.column,),
+                        on_delete="NO ACTION",
+                        on_update="NO ACTION",
+                        constraint_name=None,
+                        detection="measured",
+                    ),
+                ),
+            )
+
+    return {
+        fqn: [fk for _, _, _, fk in sorted(entries, key=lambda p: (p[1], p[2], p[0]))]
+        for fqn, entries in proposals.items()
+    }
+
+
+def _measure_containment(child: SketchCandidate, parent: SketchCandidate) -> float | None:
+    """SPEC 2.3's floor 3, or None where the measurement cannot carry the claim."""
+
+    # SPEC 2.3.11: the parent's cardinality MUST be the larger - equal makes neither larger and
+    # licenses the edge in both directions, each end naming the other as parent.
+    if child.cardinality >= parent.cardinality:
+        return None
+
+    both_exhaustive = len(child.sketch) < SKETCH_K and len(parent.sketch) < SKETCH_K
+
+    if both_exhaustive:
+        result = answerable_subset_containment(child.sketch, parent.sketch)
+
+        if result is None:
+            return None
+
+        ratio, _count = result
+        containment = min(1.0, round(ratio, 6))
+
+        return containment if containment == 1.0 else None
+
+    if not child.cardinality:
+        return None
+
+    intersection = estimate_intersection(child.sketch, parent.sketch)
+    containment = min(1.0, round(intersection / child.cardinality, 6))
+    count = answerable_count(child.sketch, parent.sketch)
+
+    if count >= _VALUE_DERIVED_MIN_ANSWERABLE and containment >= _VALUE_DERIVED_MIN_CONTAINMENT:
+        return containment
+
+    return None
 
 
 def infer_foreign_keys(

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from dbprint.config import ConnectionConfig
 from dbprint.docs import catalogue, view
@@ -17,6 +19,14 @@ def _column(conn: ConnectionConfig, fqn: str, name: str) -> dict[str, Any]:
     assert artifacts.statistics is not None
 
     return artifacts.statistics["columns"][name]
+
+
+def _empty_conn() -> catalogue.PrintConnection:
+    """A connection with no tables - `relationship_rows`' cross-table rejection lookup resolves
+    to nothing for it.
+    """
+
+    return catalogue.PrintConnection(name="x", root=Path("/nonexistent"), manifest={}, tables={})
 
 
 def _statistics(conn: ConnectionConfig, fqn: str) -> dict[str, Any]:
@@ -51,8 +61,35 @@ class TestRowCountView:
         assert row_count["rows_scanned"] == 10_000
         assert row_count["share_pct"] == 1.0
 
+    def test_a_sampled_read_carries_its_sample_fraction(
+        self,
+        scoped_conn: ConnectionConfig,
+    ) -> None:
+        """`scope_view` already computes `sample`; `row_count_view` must carry it through, or a
+        sampled read and a filtered read render identically.
+        """
+
+        found = catalogue.load_connections([scoped_conn])[0]
+        artifacts = catalogue.load_table(found, "seedbank.curation_event")
+        assert artifacts is not None
+
+        row_count = view.row_count_view(artifacts.entry, artifacts.statistics)
+
+        assert row_count["sample"] == 0.01
+
     def test_no_statistics_carries_no_scan_share(self) -> None:
         row_count = view.row_count_view({"row_count": 300}, None)
+
+        assert row_count["row_count"] == 300
+        assert row_count["rows_scanned"] is None
+        assert row_count["share_pct"] is None
+
+    def test_catalog_only_never_reports_a_scanned_share_even_if_row_count_is_set(self) -> None:
+        """A catalog-only print never carries `row_count` (SPEC 2.2.15), so this guard only bites
+        a hand-edited or foreign one - the scanned share must stay suppressed regardless.
+        """
+
+        row_count = view.row_count_view({}, {"catalog_only": True, "row_count": 300})
 
         assert row_count["row_count"] == 300
         assert row_count["rows_scanned"] is None
@@ -170,6 +207,18 @@ class TestNullPatternsView:
     def test_absent_is_none(self) -> None:
         assert view.null_patterns_view({}) is None
 
+    def test_coverage_method_reaches_the_view(self) -> None:
+        """`engine.context_assembler` renders the same field as a `(bounded)` hedge - the
+        docs page must carry the same fact, not just the bare coverage number it qualifies.
+        """
+
+        statistics = {"null_patterns": {"coverage": 0.5, "coverage_method": "bounded"}}
+
+        patterns = view.null_patterns_view(statistics)
+
+        assert patterns is not None
+        assert patterns["coverage_method"] == "bounded"
+
 
 class TestNullCompanions:
     def test_multi_column_entry_names_the_other_columns(
@@ -220,6 +269,22 @@ class TestDependenciesView:
 
     def test_absent_is_empty_list_not_none(self) -> None:
         assert view.dependencies_view({}) == []
+
+
+class TestDependsOnView:
+    """SPEC 2.2.17: two encodings, so `None` and `[]` must never collapse into one."""
+
+    def test_present_and_populated(self) -> None:
+        assert view.depends_on_view({"depends_on": ["seedbank.taxon", "seedbank.herbarium"]}) == [
+            "seedbank.taxon",
+            "seedbank.herbarium",
+        ]
+
+    def test_present_and_empty_is_not_none(self) -> None:
+        assert view.depends_on_view({"depends_on": []}) == []
+
+    def test_absent_means_could_not_ask(self) -> None:
+        assert view.depends_on_view({}) is None
 
 
 class TestColumnsEmptyNotice:
@@ -336,11 +401,46 @@ class TestCompletenessView:
         assert view.completeness_view({}) is None
 
 
+class TestCorruptedArtifactsNotice:
+    def test_none_when_nothing_corrupted(self) -> None:
+        assert view.corrupted_artifacts_notice(()) is None
+
+    def test_names_every_corrupted_kind(self) -> None:
+        notice = view.corrupted_artifacts_notice(("relationships", "statistics_annotations"))
+
+        assert notice == (
+            "Unreadable: relationships, statistics_annotations (present on disk, failed to parse)"
+        )
+
+
 class TestSkylineLegend:
     def test_the_key_bucket_is_labelled_fk_candidate(self) -> None:
         legend = dict(view.skyline_legend())
 
         assert legend["key"] == "FK candidate"
+
+
+class TestSkylineHeights:
+    def test_a_column_with_no_cardinality_ratio_is_excluded(self) -> None:
+        heights = view.skyline_heights(
+            {
+                "measured": {"cardinality_ratio": 0.5},
+                "unsupported_col": {"classification": "unsupported"},
+            },
+        )
+
+        assert "unsupported_col" not in heights
+        assert "measured" in heights
+
+    def test_every_column_unmeasured_yields_an_empty_map_not_a_full_height(self) -> None:
+        heights = view.skyline_heights({"a": {}, "b": {"classification": "unsupported"}})
+
+        assert heights == {}
+
+    def test_a_zero_ratio_is_measured_and_included(self) -> None:
+        heights = view.skyline_heights({"a": {"cardinality_ratio": 0.0}})
+
+        assert "a" in heights
 
 
 class TestSkylineBar:
@@ -530,6 +630,57 @@ class TestColumnView:
 
         assert "FK -> seedbank.cultivar.cultivar_id (declared)" in rendered["notes"]
 
+    def test_statistics_params_reaches_the_configured_sample_size_hedge(self) -> None:
+        """`engine.context_assembler` threads the manifest's `statistics_params` (SPEC 2.5) into
+        `synthesize` to reach the "N configured" hedge; the docs page must pass them too.
+        """
+
+        col = {
+            "sql_type": "text",
+            "nullable": True,
+            "classification": "text",
+            "inferred": {"looks_like": "uuid", "sampled": 50, "matched": 50},
+        }
+
+        rendered = view.column_view(
+            "id",
+            col,
+            None,
+            None,
+            {},
+            {},
+            statistics_params={"looks_like_sample_size": 500},
+        )
+
+        assert "500 configured" in rendered["notes"]
+
+    def test_degenerate_census_passes_through(self) -> None:
+        col = {
+            "sql_type": "numeric",
+            "nullable": False,
+            "classification": "numeric",
+            "zero_count": 60,
+            "negative_count": 3,
+        }
+
+        rendered = view.column_view("balance", col, None, None, {}, {})
+
+        assert rendered["zero_count"] == 60
+        assert rendered["negative_count"] == 3
+        assert rendered["empty_count"] is None
+
+    def test_length_passes_through(self) -> None:
+        col = {
+            "sql_type": "text",
+            "nullable": False,
+            "classification": "text",
+            "length": {"min": 2, "max": 4000, "avg": 187.4, "p95": 512.0},
+        }
+
+        rendered = view.column_view("error_message", col, None, None, {}, {})
+
+        assert rendered["length"] == {"min": 2, "max": 4000, "avg": 187.4, "p95": 512.0}
+
     def test_annotation_note_is_linkified(self, rich_conn: ConnectionConfig) -> None:
         found = catalogue.load_connections([rich_conn])[0]
         artifacts = catalogue.load_table(found, "seedbank.batch")
@@ -649,7 +800,12 @@ class TestRelationshipRows:
         artifacts = catalogue.load_table(found, "seedbank.batch")
         assert artifacts is not None
 
-        rows = view.relationship_rows(artifacts.relationships, artifacts.relationships_annotations)
+        rows = view.relationship_rows(
+            found,
+            artifacts.fqn,
+            artifacts.relationships,
+            artifacts.relationships_annotations,
+        )
 
         assert rows["refers_to"][0]["detection"] == "declared"
         assert rows["referenced_by"][0]["detection"] == "inferred"
@@ -667,7 +823,7 @@ class TestRelationshipRows:
             ],
         }
 
-        rows = view.relationship_rows(relationships, None)
+        rows = view.relationship_rows(_empty_conn(), "s.t", relationships, None)
 
         assert rows["referenced_by"][0]["on_delete"] is None
 
@@ -676,7 +832,12 @@ class TestRelationshipRows:
         artifacts = catalogue.load_table(found, "seedbank.batch")
         assert artifacts is not None
 
-        rows = view.relationship_rows(artifacts.relationships, artifacts.relationships_annotations)
+        rows = view.relationship_rows(
+            found,
+            artifacts.fqn,
+            artifacts.relationships,
+            artifacts.relationships_annotations,
+        )
 
         assert rows["refers_to"][0]["on_delete"] == "RESTRICT"
 
@@ -685,7 +846,12 @@ class TestRelationshipRows:
         artifacts = catalogue.load_table(found, "seedbank.batch")
         assert artifacts is not None
 
-        rows = view.relationship_rows(artifacts.relationships, artifacts.relationships_annotations)
+        rows = view.relationship_rows(
+            found,
+            artifacts.fqn,
+            artifacts.relationships,
+            artifacts.relationships_annotations,
+        )
 
         assert rows["refers_to"][0]["observed"]["fanout_avg"] == 7.5
 
@@ -706,7 +872,7 @@ class TestRelationshipRows:
             "referenced_by": [],
         }
 
-        rows = view.relationship_rows(relationships, None)
+        rows = view.relationship_rows(_empty_conn(), "s.t", relationships, None)
 
         assert rows["refers_to"][0]["observed"] == {"scope_compatible": False}
 
@@ -723,7 +889,7 @@ class TestRelationshipRows:
             "referenced_by": [],
         }
 
-        rows = view.relationship_rows(relationships, None)
+        rows = view.relationship_rows(_empty_conn(), "s.t", relationships, None)
 
         assert rows["refers_to"][0]["observed"] is None
 
@@ -747,7 +913,7 @@ class TestRelationshipRows:
             "referenced_by": [],
         }
 
-        rows = view.relationship_rows(relationships, None)
+        rows = view.relationship_rows(_empty_conn(), "s.t", relationships, None)
 
         assert rows["refers_to"][0]["observed"]["answerable_count"] == 7
 
@@ -759,7 +925,12 @@ class TestRelationshipRows:
         artifacts = catalogue.load_table(found, "seedbank.batch")
         assert artifacts is not None
 
-        rows = view.relationship_rows(artifacts.relationships, artifacts.relationships_annotations)
+        rows = view.relationship_rows(
+            found,
+            artifacts.fqn,
+            artifacts.relationships,
+            artifacts.relationships_annotations,
+        )
 
         # The rejection addresses seedbank.nonexistent, not the real edge, so it does not apply.
         assert rows["refers_to"][0]["rejected"] is False
@@ -788,11 +959,81 @@ class TestRelationshipRows:
             ],
         }
 
-        rows = view.relationship_rows(relationships, annotations)
+        rows = view.relationship_rows(_empty_conn(), "s.t", relationships, annotations)
 
         # A rejection with no `note` must not collapse into "not rejected".
         assert rows["refers_to"][0]["rejected"] is True
         assert rows["refers_to"][0]["rejected_note"] is None
+
+    def test_in_rows_reads_the_referencer_tables_own_rejection(self, tmp_path: Path) -> None:
+        """SPEC 2.7.2 has no `referenced_by` verdict - a rejection is authored only on the table
+        owning the `refers_to` entry, so the target's page reads it from the referencer.
+        """
+
+        root = tmp_path / "prints" / "primary"
+        (root / "public" / "accession").mkdir(parents=True)
+        (root / "public" / "taxon").mkdir(parents=True)
+        tables = {
+            "public.accession": {
+                "path": "public/accession",
+                "artifacts": {
+                    "relationships": "relationships.yaml",
+                    "relationships_annotations": "relationships.annotations.yaml",
+                },
+            },
+            "public.taxon": {
+                "path": "public/taxon",
+                "artifacts": {"relationships": "relationships.yaml"},
+            },
+        }
+        conn = catalogue.PrintConnection(name="primary", root=root, manifest={}, tables=tables)
+
+        (root / "public/accession/relationships.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "refers_to": [
+                        {
+                            "column": ["taxon_id"],
+                            "target_table": "public.taxon",
+                            "target_column": ["id"],
+                            "detection": "declared",
+                        },
+                    ],
+                    "referenced_by": [],
+                },
+            ),
+        )
+        (root / "public/accession/relationships.annotations.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "refers_to": [
+                        {
+                            "column": ["taxon_id"],
+                            "target_table": "public.taxon",
+                            "target_column": ["id"],
+                            "verdict": "rejected",
+                            "note": "name collision, not a real key",
+                        },
+                    ],
+                },
+            ),
+        )
+        taxon_relationships = {
+            "refers_to": [],
+            "referenced_by": [
+                {
+                    "column": ["id"],
+                    "referencer_table": "public.accession",
+                    "referencer_column": ["taxon_id"],
+                    "detection": "declared",
+                },
+            ],
+        }
+
+        rows = view.relationship_rows(conn, "public.taxon", taxon_relationships, None)
+
+        assert rows["referenced_by"][0]["rejected"] is True
+        assert rows["referenced_by"][0]["rejected_note"] == "name collision, not a real key"
 
 
 class TestLinkify:
@@ -859,6 +1100,74 @@ class TestBuildTableView:
         assert page["columns_empty_notice"] is not None
         assert page["skyline"] == []
         assert page["columns"] == []
+
+    def test_a_column_with_no_cardinality_ratio_is_not_plotted_and_coverage_narrows(
+        self,
+    ) -> None:
+        """An `unsupported` column is not drawn as a fabricated least-unique bar."""
+
+        conn = catalogue.PrintConnection(
+            name="primary",
+            root=Path("/does/not/matter"),
+            manifest={"adapter": "postgres"},
+            tables={},
+        )
+        artifacts = catalogue.TableArtifacts(
+            fqn="public.mixed",
+            entry={},
+            ddl=None,
+            statistics={
+                "row_count": 10,
+                "columns": {
+                    "measured": {"classification": "text", "cardinality_ratio": 0.5},
+                    "opaque": {"classification": "unsupported"},
+                },
+            },
+            relationships=None,
+            description=None,
+            statistics_annotations=None,
+            relationships_annotations=None,
+            missing=(),
+        )
+
+        page = view.build_table_view(conn, artifacts)
+
+        names = {s["name"] for s in page["skyline"]}
+        assert names == {"measured"}
+        assert page["skyline_coverage"] == {"measured": 1, "total": 2}
+
+    def test_a_corrupt_relationships_file_is_named_beside_the_empty_related_tables(
+        self,
+    ) -> None:
+        """The empty "no related tables" state alone would read as a clean absence; the notice
+        distinguishes it by saying the file exists and could not be read.
+        """
+
+        conn = catalogue.PrintConnection(
+            name="primary",
+            root=Path("/does/not/matter"),
+            manifest={"adapter": "postgres"},
+            tables={},
+        )
+        artifacts = catalogue.TableArtifacts(
+            fqn="public.orphan",
+            entry={},
+            ddl=None,
+            statistics={"row_count": 1, "columns": {}},
+            relationships=None,
+            description=None,
+            statistics_annotations=None,
+            relationships_annotations=None,
+            missing=(),
+            corrupted=("relationships",),
+        )
+
+        page = view.build_table_view(conn, artifacts)
+
+        assert page["relationships"]["refers_to"] == []
+        assert page["corrupted_artifacts_notice"] == (
+            "Unreadable: relationships (present on disk, failed to parse)"
+        )
 
     def test_catalog_only_view_suppresses_every_measured_aggregate(
         self,

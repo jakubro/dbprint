@@ -8,6 +8,7 @@ from .progress import (
     build_progress_renderer,
     install_log_handler,
     remove_log_handler,
+    supports_live,
 )
 
 
@@ -18,4 +19,5 @@ __all__ = [
     "install_log_handler",
     "remove_log_handler",
     "resolve_render_mode",
+    "supports_live",
 ]

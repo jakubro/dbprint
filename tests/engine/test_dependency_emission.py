@@ -12,7 +12,16 @@ from typing import Any
 
 import yaml
 
-from dbprint.adapters import ColumnMeta, ColumnStats, CommentsMeta, MockAdapter, MockTable
+from dbprint.adapters import (
+    BaseStats,
+    ColumnMeta,
+    ColumnStats,
+    CommentsMeta,
+    MockAdapter,
+    MockTable,
+    TableCounts,
+    TableScope,
+)
 from dbprint.config import ConnectionConfig, RuleConfig
 from dbprint.engine import Engine
 
@@ -129,6 +138,67 @@ class TestSkipConditions:
 
         assert payload["dependencies"] == []
 
+    def test_a_skipped_search_still_answers_the_question(self, tmp_path: Path) -> None:
+        """The control for the class below: a skip is an answer (`[]`), never a failed read, so
+        the file carries the block and no marker.
+        """
+
+        payload = _generate(
+            tmp_path,
+            strengths={("status", "status_label"): 1.0},
+            row_count=0,
+        )
+
+        assert "unmeasured" not in payload
+
+
+class _ProbeFailingAdapter(MockAdapter):
+    """Fails `probe_dependencies`, as a statement timeout on a wide table would."""
+
+    def probe_dependencies(
+        self,
+        fqn: str,
+        columns: list[ColumnMeta],
+        counts: TableCounts,
+        base: dict[str, BaseStats],
+        candidates: tuple[tuple[str, str], ...],
+        scope: TableScope | None = None,
+    ) -> dict[tuple[str, str], float]:
+        raise RuntimeError("simulated statement timeout")
+
+
+class TestAFailedProbe:
+    """SPEC 2.2.13: `[]` states the search ran and found nothing, so a run that could not ask
+    must omit the block and name it instead - the two readings are not interchangeable.
+    """
+
+    def test_the_block_is_absent_rather_than_empty(self, tmp_path: Path) -> None:
+        payload = _generate(
+            tmp_path,
+            strengths={("status", "status_label"): 1.0},
+            adapter=_ProbeFailingAdapter,
+        )
+
+        assert "dependencies" not in payload
+
+    def test_the_file_names_the_block_unmeasured(self, tmp_path: Path) -> None:
+        payload = _generate(
+            tmp_path,
+            strengths={("status", "status_label"): 1.0},
+            adapter=_ProbeFailingAdapter,
+        )
+
+        assert payload["unmeasured"] == ["dependencies"]
+
+    def test_the_table_still_profiles(self, tmp_path: Path) -> None:
+        payload = _generate(
+            tmp_path,
+            strengths={("status", "status_label"): 1.0},
+            adapter=_ProbeFailingAdapter,
+        )
+
+        assert payload["columns"]["status"]["cardinality"] == 3
+
 
 def _generate(
     tmp_path: Path,
@@ -136,6 +206,7 @@ def _generate(
     strengths: dict[tuple[str, str], float],
     sample: float | None = None,
     row_count: int = 10_000,
+    adapter: type[MockAdapter] = MockAdapter,
 ) -> dict[str, Any]:
     rules = (RuleConfig(sample=sample),) if sample is not None else ()
     conn = ConnectionConfig(
@@ -146,7 +217,7 @@ def _generate(
         rules=rules,
     )
     fixture = _fixture(strengths, row_count)
-    Engine(MockAdapter(fixture), conn, tmp_path).generate()
+    Engine(adapter(fixture), conn, tmp_path).generate()
 
     return yaml.safe_load((tmp_path / "w" / "public" / "wide" / "statistics.yaml").read_text())
 

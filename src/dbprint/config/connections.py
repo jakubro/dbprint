@@ -93,7 +93,7 @@ def _load_connections_file(path: Path) -> dict[str, dict[str, Any]]:
         return {}
 
     try:
-        data = yaml.safe_load(path.read_text())
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
         raise ConfigError(f"{path}: invalid YAML — {exc}") from exc
 

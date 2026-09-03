@@ -33,20 +33,25 @@ from .state import ServedConnections
 SERVER_NAME = "dbprint"
 
 # Delivered unprompted on every connect (MCP.md 2) - the floor that prevents a silent
-# order-of-magnitude error, plus a pointer to the reading resource. Every field it names
-# exists on the artifact by the time a client reads this (SPEC 2.2.8, 4.1.3, 2.3.8).
+# order-of-magnitude error, plus a pointer to the reading resource. Every claim it makes
+# still holds against SPEC 2.2.8, 4.1.3, 4.4.2 and 2.3.8 - test_server.py binds it there.
 SERVER_DESCRIPTION = (
     "Reads committed dbprint prints - a database's structure and per-column "
     "statistics, captured offline. Three things decide whether an answer "
     "drawn from them is right.\n\n"
-    "Scope. Counts and ratios describe the rows that were scanned, which is "
-    "not always the whole table. A column carrying a population marker was "
-    "sampled; rescale by rows_scanned / row_count before comparing against a "
-    "table-wide figure.\n\n"
+    "Scope. A column carrying a population marker was sampled - a count "
+    "describes the rows that were scanned, not always the whole table, and "
+    "MAY be scaled up to a rough table-wide figure by multiplying it by "
+    "row_count / rows_scanned. A ratio, a bound, a percentile, or an aggregate like sum or "
+    "mean is not: none of them scales with population size the way a count "
+    "does, and rescaling one assumes the sample is representative, which "
+    "the artifact never asserts.\n\n"
     "Inference. Everything under inferred is the producer's guess, not the "
     "database's assertion - candidate_key, looks_like, sensitivity, and any "
-    "relationship marked detection: inferred. Each publishes the evidence it "
-    "rests on; read that before acting on it.\n\n"
+    "relationship marked detection: inferred. looks_like publishes the "
+    "sampled/matched evidence it rests on; candidate_key's own verdict is "
+    "recomputable from cardinality_ratio; sensitivity publishes no evidence "
+    "at all, and its absence never means safe to publish.\n\n"
     "Absence. A missing field means the producer did not or could not "
     "measure it - never that the value is zero, none, or safe to assume.\n\n"
     "Start from search_columns to locate a fact across the print; the "

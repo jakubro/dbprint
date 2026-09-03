@@ -110,7 +110,7 @@ def context_command(
     - `dbprint context arboretum.seedbank.accession`: one table, full Markdown
     - `dbprint context 'public.*'`: every public table (pattern)
     - `dbprint context --all --no-ddl`: every table, skip DDL
-    - `dbprint context users --budget 4000`: cap output near 4000 tokens
+    - `dbprint context accession --budget 4000`: cap output near 4000 tokens
     """
 
     if select_all and target is not None:
@@ -185,7 +185,7 @@ def context_command(
         text += "\n"
 
     if output_path is not None:
-        output_path.write_text(text)
+        output_path.write_text(text, encoding="utf-8")
     else:
         click.echo(text, nl=False)
 
@@ -232,7 +232,7 @@ def _load_manifest(conn: ConnectionConfig) -> dict[str, Any] | None:
         return None
 
     try:
-        data = yaml.safe_load(path.read_text())
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError:
         return None
 
@@ -255,7 +255,7 @@ def _unusable_manifest_cause(conn: ConnectionConfig) -> str:
         return f"no manifest at {path}. Run `dbprint generate {conn.name}` first."
 
     try:
-        data = yaml.safe_load(path.read_text())
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
         return f"could not parse {path}: {exc}"
 

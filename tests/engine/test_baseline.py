@@ -482,6 +482,96 @@ class TestWrongShapeArtifacts:
         assert caplog.text == ""
 
 
+class TestRelationshipEdgeDefaults:
+    """An inferred edge declares no referential action (SPEC 2.3.8), so neither may be defaulted
+    to a declared-looking value; an absent `detection` hydrates as `inferred`, no SPEC default.
+    """
+
+    def _write_relationships(self, tmp_path: Path, relationships: dict) -> Path:
+        prints = _seed_print(tmp_path)
+        (prints / "public" / "curator" / "relationships.yaml").write_text(
+            yaml.safe_dump(relationships),
+        )
+
+        return prints
+
+    def test_an_edge_omitting_the_fields_hydrates_as_inferred_with_no_action(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        prints = self._write_relationships(
+            tmp_path,
+            {
+                "format_version": 1,
+                "table": "public.curator",
+                "profiled_at": "2026-06-08T00:00:00Z",
+                "refers_to": [
+                    {
+                        "column": ["herbarium_id"],
+                        "target_table": "public.herbarium",
+                        "target_column": ["id"],
+                    },
+                ],
+                "referenced_by": [
+                    {
+                        "column": ["id"],
+                        "referencer_table": "public.accession",
+                        "referencer_column": ["curator_id"],
+                    },
+                ],
+            },
+        )
+
+        manifest = load_baseline_manifest(prints)
+        states = baseline_states_from_manifest(manifest)
+        hydrate_baseline_states(states, prints, manifest)
+        edges = load_incoming_edges(prints, manifest)
+
+        assert states is not None
+        relationships = states["public.curator"].relationships
+        assert relationships is not None
+        fk = relationships[0]
+        assert (fk.on_delete, fk.on_update, fk.detection) == (None, None, "inferred")
+
+        incoming = edges["public.curator"][0]
+        assert (incoming.on_delete, incoming.on_update, incoming.detection) == (
+            None,
+            None,
+            "inferred",
+        )
+
+    def test_an_edge_carrying_the_fields_hydrates_them_verbatim(self, tmp_path: Path) -> None:
+        prints = self._write_relationships(
+            tmp_path,
+            {
+                "format_version": 1,
+                "table": "public.curator",
+                "profiled_at": "2026-06-08T00:00:00Z",
+                "refers_to": [
+                    {
+                        "column": ["herbarium_id"],
+                        "target_table": "public.herbarium",
+                        "target_column": ["id"],
+                        "on_delete": "CASCADE",
+                        "on_update": "NO ACTION",
+                        "detection": "declared",
+                    },
+                ],
+                "referenced_by": [],
+            },
+        )
+
+        manifest = load_baseline_manifest(prints)
+        states = baseline_states_from_manifest(manifest)
+        hydrate_baseline_states(states, prints, manifest)
+
+        assert states is not None
+        relationships = states["public.curator"].relationships
+        assert relationships is not None
+        fk = relationships[0]
+        assert (fk.on_delete, fk.on_update, fk.detection) == ("CASCADE", "NO ACTION", "declared")
+
+
 class TestAnEntryTheReaderCannotFollow:
     """`path` and the artifact names are joined onto a directory, so a non-string value
     drops that entry whole while the tables beside it hydrate normally.

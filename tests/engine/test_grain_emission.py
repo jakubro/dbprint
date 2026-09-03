@@ -109,12 +109,12 @@ class TestMeasuredSearch:
         assert payload["grain"]["search"] == {"exhausted": True}
 
     def test_exhausted_false_when_the_cap_cuts_the_search_short(self, tmp_path: Path) -> None:
-        """5 null-free columns of equal cardinality make 10 prunable pairs - over the cap of 8."""
+        """9 null-free columns of equal cardinality make 36 prunable pairs - over the cap of 32."""
 
         payload = _generate(tmp_path, unique_keys=[], mode="wide")
 
         assert payload["grain"]["search"] == {"exhausted": False}
-        assert len(payload["grain"]["keys"]) <= 8
+        assert len(payload["grain"]["keys"]) <= 32
 
 
 class TestSkipConditions:
@@ -153,6 +153,28 @@ class TestSkipConditions:
 
         assert payload["grain"]["keys"] == []
         assert "search" not in payload["grain"]
+
+    def test_a_near_unique_candidate_key_does_not_suppress_the_measured_search(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A flag carrying `candidate_key_exception` is a near-uniqueness ratio, not the
+        answer a pair search gives (SPEC 4.2) - unlike an exact flag, it suppresses nothing.
+        """
+
+        payload = _generate(
+            tmp_path,
+            unique_keys=[],
+            measured_pairs={("a", "b")},
+            near_unique_column="id",
+            row_count=100_000,
+        )
+
+        assert (
+            payload["columns"]["id"]["inferred"]["candidate_key_exception"] == "measured_duplicates"
+        )
+        assert payload["grain"]["keys"] == [{"columns": ["a", "b"], "detection": "measured"}]
+        assert payload["grain"]["search"] == {"exhausted": True}
 
 
 class TestContextRendering:
@@ -283,6 +305,7 @@ def _generate(
     *,
     measured_pairs: set[tuple[str, str]] | None = None,
     candidate_key_column: str | None = None,
+    near_unique_column: str | None = None,
     sample: float | None = None,
     row_count: int = 1000,
     mode: str = "base",
@@ -295,7 +318,14 @@ def _generate(
         infer_relationships=False,
         rules=rules,
     )
-    fixture = _fixture(unique_keys, measured_pairs or set(), candidate_key_column, row_count, mode)
+    fixture = _fixture(
+        unique_keys,
+        measured_pairs or set(),
+        candidate_key_column,
+        row_count,
+        mode,
+        near_unique_column,
+    )
     Engine(MockAdapter(fixture), conn, tmp_path).generate()
 
     return yaml.safe_load((tmp_path / "w" / "public" / "wide" / "statistics.yaml").read_text())
@@ -321,13 +351,12 @@ def _context(
     ).text
 
 
-# Per `mode`, the null-free columns a candidate pair is drawn from: "base" keeps every pair
-# under the cap, "prune" adds a low-cardinality column the arithmetic prune excludes, "wide"
-# exceeds the cap. `e` rides every mode with a null, so it never enters a candidate pair.
+# Per `mode`, the null-free columns a candidate pair is drawn from - "base" stays under the
+# cap, "prune" adds a pruned column, "wide" exceeds it; `e` carries a null in every mode.
 _MODE_COLUMNS: dict[str, tuple[str, ...]] = {
     "base": ("id", "a", "b"),
     "prune": ("a", "b", "lo"),
-    "wide": ("w1", "w2", "w3", "w4", "w5"),
+    "wide": ("w1", "w2", "w3", "w4", "w5", "w6", "w7", "w8", "w9"),
 }
 
 
@@ -337,8 +366,9 @@ def _fixture(
     candidate_key_column: str | None,
     row_count: int,
     mode: str,
+    near_unique_column: str | None = None,
 ) -> dict[str, MockTable]:
-    # The engine recomputes `candidate_key` from `cardinality`/`row_count` (SPEC 4.2), never
+    # The engine recomputes `candidate_key` from `cardinality`/`rows_scanned` (SPEC 4.2), never
     # from `ColumnStats.inferred`, so `candidate_key_column` works only through cardinality.
     def _column(cardinality: int, *, null_count: int = 0) -> ColumnStats:
         return ColumnStats(
@@ -363,6 +393,11 @@ def _fixture(
 
     if candidate_key_column is not None:
         cardinalities[candidate_key_column] = row_count
+
+    # One short of unique: the ratio still clears SPEC 4.2's threshold, but an exact count short
+    # of `row_count` earns `candidate_key_exception: measured_duplicates`, not a clean flag.
+    if near_unique_column is not None:
+        cardinalities[near_unique_column] = row_count - 1
 
     columns = [
         ColumnMeta(name=name, sql_type="text", nullable=False, default=None, ordinal=i)

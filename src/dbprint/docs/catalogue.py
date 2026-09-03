@@ -36,7 +36,9 @@ class PrintConnection:
 
 @dataclass(frozen=True)
 class TableArtifacts:
-    """One table's on-disk artifacts, parsed and bundled by kind. Any kind may be absent."""
+    """One table's on-disk artifacts, parsed and bundled by kind; any kind may be absent.
+    `corrupted` is declared and present but unparseable - not `missing`, and not a `None` value.
+    """
 
     fqn: str
     entry: dict[str, Any]
@@ -47,6 +49,7 @@ class TableArtifacts:
     statistics_annotations: dict[str, Any] | None
     relationships_annotations: dict[str, Any] | None
     missing: tuple[str, ...]
+    corrupted: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -97,17 +100,29 @@ def load_table(conn: PrintConnection, fqn: str) -> TableArtifacts | None:
 
     table_dir = table_directory(conn.root, fqn, entry)
     artifacts = declared_artifacts(entry)
+    corrupted: list[str] = []
 
     return TableArtifacts(
         fqn=fqn,
         entry=entry,
         ddl=_read_text(table_dir, artifacts, "ddl"),
-        statistics=_read_yaml(table_dir, artifacts, "statistics"),
-        relationships=_read_yaml(table_dir, artifacts, "relationships"),
+        statistics=_read_yaml(table_dir, artifacts, "statistics", corrupted),
+        relationships=_read_yaml(table_dir, artifacts, "relationships", corrupted),
         description=_read_text(table_dir, artifacts, "description"),
-        statistics_annotations=_read_yaml(table_dir, artifacts, "statistics_annotations"),
-        relationships_annotations=_read_yaml(table_dir, artifacts, "relationships_annotations"),
+        statistics_annotations=_read_yaml(
+            table_dir,
+            artifacts,
+            "statistics_annotations",
+            corrupted,
+        ),
+        relationships_annotations=_read_yaml(
+            table_dir,
+            artifacts,
+            "relationships_annotations",
+            corrupted,
+        ),
         missing=missing_artifacts(table_dir, artifacts),
+        corrupted=tuple(corrupted),
     )
 
 
@@ -191,18 +206,24 @@ def prefix_tree(names: list[str], prefix_len: int = 0) -> PrefixTree:
     )
 
 
+def _read_yaml_status(path: Path) -> tuple[dict[str, Any] | None, bool]:
+    """`(None, False)` covers absent; `(None, True)` is present but unparseable or not a mapping."""
+
+    if not path.is_file():
+        return None, False
+
+    try:
+        data = yaml.load(path.read_text(encoding="utf-8"), _LOADER)
+    except yaml.YAMLError:
+        return None, True
+
+    return (data, False) if isinstance(data, dict) else (None, True)
+
+
 def _read_yaml_mapping(path: Path) -> dict[str, Any] | None:
     """Parse a YAML file as a mapping, or None when absent, unparseable, or not a mapping."""
 
-    if not path.is_file():
-        return None
-
-    try:
-        data = yaml.load(path.read_text(), _LOADER)
-    except yaml.YAMLError:
-        return None
-
-    return data if isinstance(data, dict) else None
+    return _read_yaml_status(path)[0]
 
 
 def _read_text(table_dir: Path, artifacts: dict[str, str], kind: str) -> str | None:
@@ -213,13 +234,23 @@ def _read_text(table_dir: Path, artifacts: dict[str, str], kind: str) -> str | N
 
     path = table_dir / filename
 
-    return path.read_text() if path.is_file() else None
+    return path.read_text(encoding="utf-8") if path.is_file() else None
 
 
-def _read_yaml(table_dir: Path, artifacts: dict[str, str], kind: str) -> dict[str, Any] | None:
+def _read_yaml(
+    table_dir: Path,
+    artifacts: dict[str, str],
+    kind: str,
+    corrupted: list[str] | None = None,
+) -> dict[str, Any] | None:
     filename = artifacts.get(kind)
 
     if filename is None:
         return None
 
-    return _read_yaml_mapping(table_dir / filename)
+    data, is_corrupted = _read_yaml_status(table_dir / filename)
+
+    if is_corrupted and corrupted is not None:
+        corrupted.append(kind)
+
+    return data

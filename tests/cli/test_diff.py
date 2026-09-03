@@ -352,7 +352,33 @@ class TestNoBaseline:
             result = runner.invoke(main, ["diff", "--no-tui"])
 
         assert result.exit_code == 1
-        assert "No committed prints at prints/primary/" in result.output + (result.stderr or "")
+        assert f"No committed prints at {tmp_path / 'prints' / 'primary'}/" in (
+            result.output + (result.stderr or "")
+        )
+
+    def test_names_a_non_default_configured_output(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The message names the connection's real `output`, not a hardcoded `prints/`."""
+
+        project_yaml = PROJECT_YAML.replace("output: prints", "output: warehouse_prints")
+        (tmp_path / ".dbprint.yaml").write_text(project_yaml)
+        monkeypatch.chdir(tmp_path)
+
+        for k, v in _credential_env().items():
+            monkeypatch.setenv(k, v)
+
+        runner = CliRunner()
+
+        with _patch_registry(_MockPostgresAdapterBase):
+            result = runner.invoke(main, ["diff", "--no-tui"])
+
+        output = result.output + (result.stderr or "")
+
+        assert f"No committed prints at {tmp_path / 'warehouse_prints' / 'primary'}/" in output
+        assert str(tmp_path / "prints" / "primary") not in output
 
 
 class TestCleanState:
@@ -370,6 +396,38 @@ class TestCleanState:
             result = runner.invoke(main, ["diff", "--no-tui"])
 
         assert result.exit_code == 0
+
+
+class TestRefusedTuiIsStated:
+    """A dumb or too-short terminal refuses `--tui` too, not just an outright non-terminal -
+    both routes downgrade through the same `supports_live` check `check` and `generate` share.
+    """
+
+    def test_a_dumb_terminal_states_the_downgrade(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _setup_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        for k, v in _credential_env().items():
+            monkeypatch.setenv(k, v)
+
+        # `TTY_COMPATIBLE=1` makes Rich report a real terminal without a pty; `TERM=dumb` then
+        # makes it a dumb one, which `is_terminal` alone does not distinguish.
+        monkeypatch.setenv("TTY_COMPATIBLE", "1")
+        monkeypatch.setenv("TERM", "dumb")
+
+        runner = CliRunner()
+
+        with _patch_registry(_MockPostgresAdapterBase):
+            runner.invoke(main, ["generate", "--no-tui"])
+            result = runner.invoke(main, ["diff", "--tui"])
+
+        assert "warning: --tui requested but stderr does not support the live view" in (
+            result.stderr
+        )
 
 
 class TestEmptySelectorMatch:

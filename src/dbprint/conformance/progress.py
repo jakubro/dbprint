@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Literal
 
 
 # Execution order inside `validate_print`, one entry per `on_table` call site.
@@ -26,9 +27,8 @@ TableSink = Callable[[str, int, int], None]
 
 @dataclass(frozen=True)
 class ValidationTick:
-    """One (table, pass) progress signal from `validate_print`'s offline walk.
-
-    `findings` is the table's issue count so far - set only on the pass that closes it.
+    """One (table, pass) progress signal from `validate_print`'s offline walk. `findings` and
+    `severity` are set only on the pass that closes a table; `severity` is None when clean.
     """
 
     fqn: str
@@ -38,6 +38,7 @@ class ValidationTick:
     pass_index: int
     pass_total: int
     findings: int | None = None
+    severity: Literal["error", "warning"] | None = None
 
 
 ValidationProgress = Callable[[ValidationTick], None]

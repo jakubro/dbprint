@@ -117,12 +117,13 @@ Both commands render differently to a terminal than to a pipe, and both take fla
 choice. `--no-tui` gives the plain tab-separated form a log should capture; `--tui` forces the Rich
 form.
 
-A piped `dbprint generate` looks like this — one tab-separated record per event that has
-something to report, with a `start`/`done` pair per preparatory phase, a pair per table, and a
-`sketched` line for each table that got a join-key sketch:
+`generate`'s progress is on stderr, the same as `check` and `diff` - merge it into the pipe to
+capture it. One tab-separated record per event that has something to report, with a
+`start`/`done` pair per preparatory phase, a pair per table, and a `sketched` line for each table
+that got a join-key sketch:
 
 ```console
-$ dbprint generate | tee generate.log
+$ dbprint generate 2>&1 | tee generate.log
 primary	connecting	start
 primary	connecting	done
 primary	listing	start
@@ -144,10 +145,8 @@ primary	public.taxon	sketched	0.0s
 primary	summary	4 ok / 0 failed / 0 skipped	932ms
 ```
 
-`-q` silences progress, and **which stream it silences differs by command**: on `generate` it is
-stdout, which is where that command's progress goes; on `diff` and `check` it is stderr, and the
-stdout payload is unaffected. A pipeline reaching for `-q` on `diff` to quieten a log still gets the
-full report on stdout.
+`-q` silences stderr progress on every command - `generate`, `diff` and `check` all put it there,
+so a pipeline reaching for `-q` to quieten a log never affects a command's own stdout payload.
 
 ## The machine envelope
 

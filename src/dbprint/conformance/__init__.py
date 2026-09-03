@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 import yaml
 
@@ -149,6 +150,7 @@ def validate_print(
         findings = _findings_by_table(issues, tables)
 
         for i, tbl_fqn in enumerate(tables, start=1):
+            count, severity = findings.get(tbl_fqn, (0, None))
             on_table(
                 ValidationTick(
                     fqn=tbl_fqn,
@@ -157,7 +159,8 @@ def validate_print(
                     pass_name=VALIDATION_PASSES[-1],
                     pass_index=pass_total,
                     pass_total=pass_total,
-                    findings=findings.get(tbl_fqn, 0),
+                    findings=count,
+                    severity=severity,
                 ),
             )
 
@@ -243,14 +246,17 @@ def _pass_sink(
     return sink
 
 
-def _findings_by_table(issues: list[Issue], tables: dict[str, dict]) -> dict[str, int]:
-    """Count issues per table, attributed by directory prefix of `Issue.path`.
-
-    An issue with no table directory prefix (a connection-level file) attributes to none.
+def _findings_by_table(
+    issues: list[Issue],
+    tables: dict[str, dict],
+) -> dict[str, tuple[int, Literal["error", "warning"] | None]]:
+    """Count issues per table and the worst severity among them, by directory prefix of
+    `Issue.path`; a connection-level file attributes to none, and `error` outranks `warning`.
     """
 
     dir_to_fqn = {entry.get("path", ""): fqn for fqn, entry in tables.items() if entry.get("path")}
     counts: dict[str, int] = {}
+    worst: dict[str, Literal["error", "warning"]] = {}
 
     for issue in issues:
         parts = issue.path.split("/")
@@ -260,6 +266,10 @@ def _findings_by_table(issues: list[Issue], tables: dict[str, dict]) -> dict[str
 
             if fqn is not None:
                 counts[fqn] = counts.get(fqn, 0) + 1
+
+                if issue.severity == "error" or fqn not in worst:
+                    worst[fqn] = issue.severity
+
                 break
 
-    return counts
+    return {fqn: (count, worst.get(fqn)) for fqn, count in counts.items()}

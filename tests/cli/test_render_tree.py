@@ -56,18 +56,47 @@ class TestHeaderLine:
         assert tree.header_line(2, "fieldwork", cap=80) == "    fieldwork"
 
 
+class TestBannerBox:
+    def test_three_lines_rounded_and_cap_wide(self) -> None:
+        top, middle, bottom = tree.banner_box("Validating", cap=20).split("\n")
+        assert top == "╭" + "─" * 18 + "╮"
+        assert bottom == "╰" + "─" * 18 + "╯"
+        assert len(top) == len(middle) == len(bottom) == 20
+        assert "Validating" in middle
+        assert middle.startswith("│") and middle.endswith("│")
+
+    def test_label_centred(self) -> None:
+        _, middle, _ = tree.banner_box("Hi", cap=10).split("\n")
+        assert middle == "│" + "Hi".center(8) + "│"
+
+    def test_label_head_kept_when_narrower_than_cap_allows(self) -> None:
+        _, middle, _ = tree.banner_box("Checking assertions", cap=12).split("\n")
+        inner = middle[1:-1]
+        assert len(inner) == 10
+        assert inner.strip().endswith("...")
+        assert inner.strip().startswith("Check")
+
+
 class TestLeafAlignment:
     def test_rows_and_elapsed_align_across_mixed_widths(self) -> None:
         cap = 80
         cases = [("a", 0, 0), ("germination_trial", 4, 0), ("z" * 40, 42_724, 1200)]
         lines = [
-            tree.leaf_metrics(2, name, cap=cap, rows=tree.rows_text(rc), elapsed=tree.secs_text(ms))
+            tree.leaf_metrics(
+                2,
+                name,
+                cap=cap,
+                rows=tree.rows_text(rc),
+                elapsed=tree.duration_text(ms),
+            )
             for name, rc, ms in cases
         ]
 
         # Every ok leaf fills the cap exactly, so rows/elapsed share a flush-right end column.
         assert all(len(line) == cap for line in lines)
-        assert [line.endswith(tree.secs_text(ms)) for line, (_, _, ms) in zip(lines, cases)] == [
+        assert [
+            line.endswith(tree.duration_text(ms)) for line, (_, _, ms) in zip(lines, cases)
+        ] == [
             True,
             True,
             True,
@@ -80,13 +109,92 @@ class TestLeafAlignment:
             "very_long_table_name_" + "z" * 30,
             cap=cap,
             rows=tree.rows_text(7),
-            elapsed=tree.secs_text(300),
+            elapsed=tree.duration_text(300),
         )
 
         assert len(line) == cap
-        assert line.endswith(tree.secs_text(300))
+        assert line.endswith(tree.duration_text(300))
         assert "..." in line  # head dropped
         assert "z" in line  # distinguishing tail kept
+
+
+class TestLeafWidthInvariant:
+    """Below the floor where name and block cannot both fit, the block is shed - `cap` is an
+    invariant, and the name takes the full remaining width.
+    """
+
+    def test_narrow_cap_sheds_the_block_and_stays_within_cap(self) -> None:
+        cap = 40
+        line = tree.leaf_metrics(
+            2,
+            "germination_trial",
+            cap=cap,
+            rows=tree.rows_text(120),
+            elapsed=tree.duration_text(100),
+        )
+
+        assert len(line) <= cap
+        assert "germination_trial" in line
+        assert "rows" not in line  # the block was shed, not squeezed into an unreadable stub
+
+    def test_wide_cap_keeps_the_block_unchanged(self) -> None:
+        cap = 80
+        line = tree.leaf_metrics(
+            2,
+            "germination_trial",
+            cap=cap,
+            rows=tree.rows_text(120),
+            elapsed=tree.duration_text(100),
+        )
+
+        assert len(line) == cap
+        assert "rows" in line
+
+    def test_a_name_longer_than_the_shed_width_still_stays_within_cap(self) -> None:
+        cap = 40
+        line = tree.leaf_metrics(
+            2,
+            "z" * 60,
+            cap=cap,
+            rows=tree.rows_text(120),
+            elapsed=tree.duration_text(100),
+        )
+
+        assert len(line) <= cap
+
+    def test_indentation_alone_exceeding_cap_never_exceeds_it(self) -> None:
+        """A pathologically narrow terminal where depth's own indent already outruns `cap` -
+        the invariant holds even when there is no room for a name at all.
+        """
+
+        line = tree.leaf_metrics(
+            5,
+            "germination_trial",
+            cap=6,
+            rows=tree.rows_text(120),
+            elapsed=tree.duration_text(100),
+        )
+
+        assert len(line) <= 6
+
+
+class TestWarningLineWidthInvariant:
+    def test_a_narrow_cap_never_exceeds_it(self) -> None:
+        line = tree.warning_line(2, "no row-count estimate; rules do not apply", cap=8)
+
+        assert len(line) <= 8
+
+    def test_indentation_alone_exceeding_cap_never_exceeds_it(self) -> None:
+        line = tree.warning_line(5, "no row-count estimate; rules do not apply", cap=6)
+
+        assert len(line) <= 6
+
+
+class TestHeaderLineWidthInvariant:
+    def test_indentation_alone_exceeding_cap_never_exceeds_it(self) -> None:
+        line = tree.header_line(5, "seedbank", cap=6)
+
+        assert len(line) <= 6
 
 
 class TestLeafNote:

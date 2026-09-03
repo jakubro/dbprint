@@ -97,31 +97,65 @@ def build_table_view(
 
     null_patterns = null_patterns_view(statistics) if statistics else None
     annotations = annotation_view(artifacts.statistics_annotations, columns)
+    # Connection-level default, overridden per table (SPEC 2.5) - the same two-level merge
+    # `engine.context_assembler` applies, so the docs page and `context` cannot diverge.
+    connection_params = conn.manifest.get("statistics_params")
+    table_params = artifacts.entry.get("statistics_params")
+    statistics_params = {
+        **(connection_params if isinstance(connection_params, dict) else {}),
+        **(table_params if isinstance(table_params, dict) else {}),
+    }
     column_rows = [
-        column_view(name, col, row_count, relationships, annotations, targets, null_patterns)
+        column_view(
+            name,
+            col,
+            row_count,
+            relationships,
+            annotations,
+            targets,
+            null_patterns,
+            statistics_params,
+        )
         for name, col in columns.items()
     ]
+
+    skyline_coverage = None
 
     if catalog_only:
         skyline = []
     else:
         heights = skyline_heights(columns) if columns else {}
         skyline = [
-            {"name": name, **skyline_bar(col, heights.get(name, 0.0))}
+            {"name": name, **skyline_bar(col, heights[name])}
             for name, col in skyline_order(columns)
+            if name in heights
         ]
+
+        if columns:
+            skyline_coverage = {"measured": len(heights), "total": len(columns)}
+
+    rows = relationship_rows(
+        conn,
+        artifacts.fqn,
+        relationships,
+        artifacts.relationships_annotations,
+    )
+    depends_on = depends_on_view(statistics) if statistics else None
 
     return {
         "fqn": artifacts.fqn,
         "entry": artifacts.entry,
         "adapter": conn.manifest.get("adapter"),
         "missing_artifacts_notice": missing_artifacts_notice(artifacts.missing),
+        "corrupted_artifacts_notice": corrupted_artifacts_notice(artifacts.corrupted),
         "catalog_only_notice": catalog_only_notice(statistics),
         "row_count": row_count_view(artifacts.entry, statistics),
         "grain": grain_view(statistics, artifacts.statistics_annotations) if statistics else None,
         "null_patterns": null_patterns,
         "physical_layout": physical_layout_view(statistics) if statistics else None,
         "dependencies": dependencies_view(statistics) if statistics else [],
+        "timeline": timeline_view(statistics) if statistics else None,
+        "depends_on": depends_on,
         "columns_empty_notice": columns_empty_notice(statistics),
         "cards": summary_cards(columns, relationships) if statistics and not catalog_only else None,
         "cardinality": cardinality_view(columns, row_count)
@@ -130,36 +164,43 @@ def build_table_view(
         "completeness": completeness_view(columns) if columns and not catalog_only else None,
         "skyline": skyline,
         "skyline_legend": skyline_legend(),
+        "skyline_coverage": skyline_coverage,
         "columns": column_rows,
-        "relationships": relationship_rows(relationships, artifacts.relationships_annotations),
-        "diagram": diagram.build(artifacts.fqn, relationships, conn.name),
+        "relationships": rows,
+        "diagram": diagram.build(artifacts.fqn, rows, conn.name, tuple(depends_on or ())),
         "description": linkify(artifacts.description, targets),
         "ddl": artifacts.ddl,
     }
 
 
 def row_count_view(entry: dict[str, Any], statistics: dict[str, Any] | None) -> dict[str, Any]:
-    """Row count and the share of it scanned.
-
-    `rows_scanned` equals `row_count` when `scope` is absent (SPEC 2.2.8), so a full read
-    reads 100%; a table with no statistics carries no share at all.
+    """Row count and the share of it scanned - `rows_scanned` equals `row_count` with no `scope`
+    (SPEC 2.2.8); catalog-only (SPEC 2.2.15) queried nothing, so it carries no share at all.
     """
 
     row_count = (statistics or {}).get("row_count", entry.get("row_count"))
+    catalog_only = bool(statistics) and statistics.get("catalog_only") is True
     scope = scope_view(statistics) if statistics else None
 
     if scope is not None:
-        rows_scanned, share_pct, filter_ = (
+        rows_scanned, share_pct, filter_, sample = (
             scope["rows_scanned"],
             scope["share_pct"],
             scope["filter"],
+            scope["sample"],
         )
-    elif statistics is not None and isinstance(row_count, int) and row_count >= 0:
+    elif (
+        not catalog_only
+        and statistics is not None
+        and isinstance(row_count, int)
+        and row_count >= 0
+    ):
         rows_scanned = row_count
         share_pct = 100.0 if row_count > 0 else None
         filter_ = None
+        sample = None
     else:
-        rows_scanned, share_pct, filter_ = None, None, None
+        rows_scanned, share_pct, filter_, sample = None, None, None, None
 
     return {
         "row_count": row_count,
@@ -167,6 +208,7 @@ def row_count_view(entry: dict[str, Any], statistics: dict[str, Any] | None) -> 
         "rows_scanned": rows_scanned,
         "share_pct": share_pct,
         "filter": filter_,
+        "sample": sample,
     }
 
 
@@ -258,7 +300,11 @@ def null_patterns_view(statistics: dict[str, Any]) -> dict[str, Any] | None:
 
     patterns = [p for p in (block.get("patterns") or []) if isinstance(p, dict)]
 
-    return {"coverage": block.get("coverage"), "patterns": patterns}
+    return {
+        "coverage": block.get("coverage"),
+        "coverage_method": block.get("coverage_method"),
+        "patterns": patterns,
+    }
 
 
 def null_companions(null_patterns: dict[str, Any] | None, column: str) -> list[str]:
@@ -305,6 +351,39 @@ def dependencies_view(statistics: dict[str, Any]) -> list[dict[str, Any]]:
     return [d for d in (statistics.get("dependencies") or []) if isinstance(d, dict)]
 
 
+def depends_on_view(statistics: dict[str, Any]) -> list[str] | None:
+    """Objects this view/matview reads directly, catalog-derived (SPEC 2.2.17) - `None` means the
+    producer could not ask, while an empty list means the catalog answered and found nothing.
+    """
+
+    block = statistics.get("depends_on")
+
+    if not isinstance(block, list):
+        return None
+
+    return [t for t in block if isinstance(t, str)]
+
+
+def timeline_view(statistics: dict[str, Any]) -> dict[str, Any] | None:
+    """The anchor column's activity, bucketed at an adaptive unit (SPEC 2.2.16) - absent for
+    several causes, all indistinguishable to a reader by design.
+    """
+
+    block = statistics.get("timeline")
+
+    if not isinstance(block, dict):
+        return None
+
+    buckets = [b for b in (block.get("buckets") or []) if isinstance(b, dict)]
+
+    return {
+        "column": block.get("column"),
+        "unit": block.get("unit"),
+        "buckets": buckets,
+        "coverage": block.get("coverage"),
+    }
+
+
 def missing_artifacts_notice(missing: tuple[str, ...]) -> str | None:
     """One line naming every declared kind whose file is absent (SPEC 2.5), or None."""
 
@@ -312,6 +391,17 @@ def missing_artifacts_notice(missing: tuple[str, ...]) -> str | None:
         return None
 
     return f"Missing: {', '.join(missing)} (declared but missing from disk)"
+
+
+def corrupted_artifacts_notice(corrupted: tuple[str, ...]) -> str | None:
+    """One line naming every declared kind present on disk but unreadable, or None - distinct
+    from `missing_artifacts_notice`, because a corrupt file exists and absence reads differently.
+    """
+
+    if not corrupted:
+        return None
+
+    return f"Unreadable: {', '.join(corrupted)} (present on disk, failed to parse)"
 
 
 def columns_empty_notice(statistics: dict[str, Any] | None) -> str | None:
@@ -456,17 +546,25 @@ def skyline_legend() -> list[tuple[str, str]]:
 
 
 def skyline_heights(columns: dict[str, Any]) -> dict[str, float]:
-    """Log-scale cardinality ratios, normalized so the most-unique column reaches 100%."""
+    """Log-scale cardinality ratios, normalized so the most-unique column reaches 100%. A column
+    with no `cardinality_ratio` is excluded, never defaulted to 0 - the caller reads the absence.
+    """
 
     epsilon = 1e-6
-    log_values = {
-        col: math.log10((stat.get("cardinality_ratio") or 0) + epsilon)
+    measured = {
+        col: stat["cardinality_ratio"]
         for col, stat in columns.items()
+        if stat.get("cardinality_ratio") is not None
     }
+
+    if not measured:
+        return {}
+
+    log_values = {col: math.log10(ratio + epsilon) for col, ratio in measured.items()}
     lo, hi = min(log_values.values()), max(log_values.values())
 
     if hi == lo:
-        return {col: 100.0 for col in columns}
+        return {col: 100.0 for col in log_values}
 
     return {col: round(max(6.0, (v - lo) / (hi - lo) * 100), 1) for col, v in log_values.items()}
 
@@ -512,14 +610,13 @@ def cardinality_cell(col: dict[str, Any], row_count: int | None) -> dict[str, An
         "value": cardinality,
         "approximate": col.get("cardinality_method") == "approximate",
         "saturates": saturates,
+        "normalized_cardinality": col.get("normalized_cardinality"),
     }
 
 
 def values_view(col: dict[str, Any]) -> dict[str, Any] | None:
-    """Bar geometry for a `values` list, plus the coverage hedge.
-
-    Counts and coverage are true under every redaction primitive (SPEC 2.2.9); only the
-    literal `value` is withheld.
+    """Bar geometry for a `values` list, plus the coverage hedge - counts and coverage are true
+    under every redaction primitive (SPEC 2.2.9); only the literal `value` is withheld.
     """
 
     values = col.get("values")
@@ -548,10 +645,8 @@ def values_view(col: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def range_view(col: dict[str, Any]) -> dict[str, Any] | None:
-    """Range, percentiles, freshness and frequencies for a numeric/temporal column.
-
-    A masked or hashed bound must never be ordered, compared, or plotted (SPEC 2.2.9), so any
-    `redacted` marker suppresses both the box geometry and the percentile list.
+    """Range, percentiles, mean/sum, freshness and frequencies for a numeric/temporal column -
+    a `redacted` marker suppresses the box geometry and percentile list, but not aggregates.
     """
 
     rng = col.get("range")
@@ -578,6 +673,8 @@ def range_view(col: dict[str, Any]) -> dict[str, Any] | None:
         "percentiles": percentile_list,
         "bounds": rng if redaction is None else None,
         "unrepresentable": tuple(col.get("unrepresentable") or ()),
+        "mean": col.get("mean"),
+        "sum": col.get("sum"),
         "freshness": dict(freshness) if isinstance(freshness, dict) else None,
         "frequencies": dict(frequencies) if isinstance(frequencies, dict) else None,
     }
@@ -622,11 +719,10 @@ def column_view(
     annotations: dict[str, dict[str, Any]],
     targets: dict[str, str],
     null_patterns: dict[str, Any] | None = None,
+    statistics_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Everything the table page needs to render one column's row and expanded detail.
-
-    `notes` reuses `engine.notes_synthesis.synthesize` in `hints_only` mode: the facts this
-    table has no cell of its own for.
+    """Everything the table page needs to render one column's row and expanded detail. `notes`
+    reuses `engine.notes_synthesis.synthesize` in `hints_only` mode, shaped by `statistics_params`.
     """
 
     fk_target = fk_target_map(relationships).get(name)
@@ -646,8 +742,19 @@ def column_view(
         "null_rate": col.get("null_rate"),
         "null_count": col.get("null_count"),
         "null_companions": null_companions(null_patterns, name),
+        "zero_count": col.get("zero_count"),
+        "negative_count": col.get("negative_count"),
+        "empty_count": col.get("empty_count"),
+        "quantized_count": col.get("quantized_count"),
+        "populated": col.get("populated"),
+        "length": col.get("length"),
         "distribution": col.get("distribution"),
-        "notes": notes_synthesis.synthesize(col, fk_target, hints_only=True),
+        "notes": notes_synthesis.synthesize(
+            col,
+            fk_target,
+            hints_only=True,
+            statistics_params=statistics_params,
+        ),
         # Not "values": Jinja resolves `.values` to the dict's bound method before item access.
         "value_list": values_view(col),
         "range": range_view(col),
@@ -686,13 +793,13 @@ def fk_target_map(relationships: dict[str, Any] | None) -> dict[str, str]:
 
 
 def relationship_rows(
+    conn: catalogue.PrintConnection,
+    fqn: str,
     relationships: dict[str, Any] | None,
     relationship_annotations: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Every `refers_to`/`referenced_by` edge, `detection` always stated, no filler action.
-
-    An inferred edge carries no `on_delete` (SPEC 2.3.8), so it renders only when the
-    artifact carries it. The template has no `on_update` cell; that key is not emitted.
+    """Every `refers_to`/`referenced_by` edge, `detection` always stated, no filler action (SPEC
+    2.3.8); `in_rows` reads the referencer's own annotations - only that table authors a rejection.
     """
 
     refers_to = (relationships or {}).get("refers_to") or []
@@ -719,18 +826,23 @@ def relationship_rows(
             },
         )
 
-    in_rows = [
-        {
-            "column": entry.get("column") or [],
-            "referencer_table": entry.get("referencer_table"),
-            "referencer_column": entry.get("referencer_column") or [],
-            "detection": _edge_detection(entry),
-            "on_delete": entry.get("on_delete"),
-            "constraint_name": entry.get("constraint_name"),
-            "observed": _observed_view(entry),
-        }
-        for entry in referenced_by
-    ]
+    in_rows = []
+
+    for entry in referenced_by:
+        rejection = _incoming_rejection(conn, fqn, entry)
+        in_rows.append(
+            {
+                "column": entry.get("column") or [],
+                "referencer_table": entry.get("referencer_table"),
+                "referencer_column": entry.get("referencer_column") or [],
+                "detection": _edge_detection(entry),
+                "on_delete": entry.get("on_delete"),
+                "constraint_name": entry.get("constraint_name"),
+                "observed": _observed_view(entry),
+                "rejected": rejection is not None,
+                "rejected_note": rejection.get("note") if rejection else None,
+            },
+        )
 
     return {
         "refers_to": out_rows,
@@ -797,7 +909,7 @@ def _plural_variants(name: str) -> list[str]:
 
 
 def _edge_detection(entry: dict[str, Any]) -> str:
-    """`detection` as SPEC 2.3 requires it; absence reads as the weaker claim, `inferred`."""
+    """The weaker reading of an absent `detection`, which SPEC 2.3.2 requires but never defaults."""
 
     return entry.get("detection") or "inferred"
 
@@ -824,11 +936,38 @@ def _edge_key(entry: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def _observed_view(entry: dict[str, Any]) -> dict[str, Any] | None:
-    """Join cost for one edge (SPEC 2.3.10); None means "not measured", never any other reason.
+def _incoming_rejection(
+    conn: catalogue.PrintConnection,
+    this_fqn: str,
+    entry: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Whether the referencer's own `refers_to` entry for this edge is rejected - read from that
+    table's artifacts, since a rejection is a fact about the edge's owning table, not this one.
+    """
 
-    `scope_compatible: false` is itself a measurement, so it returns a dict naming that
-    rather than the same None.
+    referencer = entry.get("referencer_table")
+
+    if not isinstance(referencer, str) or not referencer:
+        return None
+
+    referencer_artifacts = catalogue.load_table(conn, referencer)
+
+    if referencer_artifacts is None:
+        return None
+
+    rejected = _rejected_edges(referencer_artifacts.relationships_annotations)
+    key = (
+        tuple(entry.get("referencer_column") or ()),
+        this_fqn,
+        tuple(entry.get("column") or ()),
+    )
+
+    return rejected.get(key)
+
+
+def _observed_view(entry: dict[str, Any]) -> dict[str, Any] | None:
+    """Join cost for one edge (SPEC 2.3.10); None means "not measured", never any other reason -
+    `scope_compatible: false` is itself a measurement, so it returns a dict naming that.
     """
 
     observed = entry.get("observed")

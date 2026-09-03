@@ -2,6 +2,8 @@ import { fileURLToPath } from "node:url";
 
 import starlight from "@astrojs/starlight";
 import { defineConfig } from "astro/config";
+import mermaid from "astro-mermaid";
+import starlightThemeRapide from "starlight-theme-rapide";
 
 import { dropLeadingHeading } from "./src/plugins/drop-leading-heading.mjs";
 import { rewriteMarkdownLinks } from "./src/plugins/rewrite-markdown-links.mjs";
@@ -105,8 +107,15 @@ export default defineConfig({
     ],
   },
   integrations: [
+    // Claims fenced mermaid blocks before Starlight's renderer sees them, so it must stay first.
+    mermaid({ autoTheme: true }),
     starlight({
       title: "dbprint",
+      plugins: [starlightThemeRapide()],
+      components: { ThemeProvider: "./src/components/ThemeProvider.astro" },
+      // Inlined rather than emitted: trailingSlash "always" appends a slash to the hashed
+      // /_astro/ec.<hash>.css route, so the dev server never matches it and code blocks lose styling.
+      expressiveCode: { emitExternalStylesheet: false },
       sidebar: SIDEBAR,
       customCss: ["./src/styles/custom.css"],
     }),

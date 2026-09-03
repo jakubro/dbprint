@@ -7,8 +7,10 @@ NEVER stamps `classification`. Approximate methods activate above `APPROXIMATE_T
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from decimal import Decimal
+from typing import TYPE_CHECKING, Any, Literal
 
 from dbprint.config import StatisticsConfig
 from dbprint.spec.classification import (
@@ -30,6 +32,7 @@ from ..base import (
     ColumnStats,
     Distribution,
     Frequencies,
+    Length,
     NullPatterns,
     Range,
     RowCountMethod,
@@ -41,6 +44,7 @@ from ..base import (
     null_flags,
     null_patterns_from_rows,
     seed_from_fqn,
+    temporal_block_unmeasured,
 )
 
 
@@ -229,6 +233,119 @@ def probe_grain(
     return tuple(pair for i, pair in enumerate(candidates) if row[i] == counts.rows_scanned)
 
 
+def probe_timeline(
+    conn: psycopg.Connection,
+    fqn: str,
+    columns: list[ColumnMeta],
+    counts: TableCounts,
+    column: str,
+    unit: Literal["day", "week", "month"],
+    scope: TableScope | None = None,
+) -> tuple[tuple[str, int], ...]:
+    """One grouped statement bucketing `column` at `unit` grain (SPEC 2.2.16) - truncation is in
+    a CTE, so ordering sorts the real temporal value rather than its rendered text.
+    """
+
+    del counts
+
+    source = _table_source(fqn, _quoted_fqn(fqn), scope)
+    by_name = {col.name: col for col in columns}
+    col = by_name[column]
+    cn = _quote_ident(col.physical_name or col.name)
+    bucket_expr = _timeline_bucket_expr(cn, col.sql_type, unit)
+
+    rows = exec_query(
+        conn,
+        f"""
+        WITH buckets AS (
+            SELECT {bucket_expr} AS bucket_start, COUNT(*) AS cnt
+            FROM {source}
+            WHERE {cn} IS NOT NULL
+            GROUP BY 1
+        )
+        SELECT {_render_calendar_bound("bucket_start", col.sql_type)} AS bucket_text, cnt
+        FROM buckets
+        ORDER BY bucket_start
+        """,
+    ).fetchall()
+
+    return tuple((row[0], int(row[1])) for row in rows)
+
+
+def _timeline_bucket_expr(cn: str, sql_type: str, unit: str) -> str:
+    """Truncation expression for `probe_timeline`'s GROUP BY key (SPEC 2.2.16) - `date_trunc`
+    has no `date` overload before Postgres 14, so a DATE column casts to timestamp first.
+    """
+
+    if _matches(sql_type, _DATE_ONLY_TYPES):
+        return f"date_trunc('{unit}', {cn}::timestamp)"
+
+    return f"date_trunc('{unit}', {cn})"
+
+
+def compute_populated_windows(
+    conn: psycopg.Connection,
+    fqn: str,
+    columns: list[ColumnMeta],
+    counts: TableCounts,
+    anchor_column: str,
+    subject_columns: tuple[str, ...],
+    scope: TableScope | None = None,
+) -> dict[str, tuple[str, str]]:
+    """One statement, two conditional aggregates per subject column (SPEC 2.2.4) - aggregated in
+    a CTE so the outer query renders each bound through the anchor's own domain rule.
+    """
+
+    del counts
+
+    if not subject_columns:
+        return {}
+
+    source = _table_source(fqn, _quoted_fqn(fqn), scope)
+    by_name = {col.name: col for col in columns}
+    anchor = by_name[anchor_column]
+    anchor_cn = _quote_ident(anchor.physical_name or anchor.name)
+
+    agg_exprs = []
+    outer_exprs = []
+
+    for i, subject in enumerate(subject_columns):
+        subject_cn = _quote_ident(by_name[subject].physical_name or by_name[subject].name)
+        agg_exprs.append(
+            f"MIN(CASE WHEN {subject_cn} IS NOT NULL THEN {anchor_cn} END) AS from_{i}",
+        )
+        agg_exprs.append(
+            f"MAX(CASE WHEN {subject_cn} IS NOT NULL THEN {anchor_cn} END) AS to_{i}",
+        )
+        outer_exprs.append(
+            f"{_render_calendar_bound(f'from_{i}', anchor.sql_type)} AS from_{i}_text",
+        )
+        outer_exprs.append(f"{_render_calendar_bound(f'to_{i}', anchor.sql_type)} AS to_{i}_text")
+
+    row = exec_query(
+        conn,
+        f"""
+        WITH agg AS (
+            SELECT {", ".join(agg_exprs)} FROM {source}
+        )
+        SELECT {", ".join(outer_exprs)} FROM agg
+        """,
+    ).fetchone()
+
+    if row is None:
+        return {}
+
+    windows: dict[str, tuple[str, str]] = {}
+
+    for i, subject in enumerate(subject_columns):
+        from_text, to_text = row[2 * i], row[2 * i + 1]
+
+        if from_text is not None and to_text is not None:
+            windows[subject] = (from_text, to_text)
+
+    return windows
+
+
 def probe_dependencies(
     conn: psycopg.Connection,
     fqn: str,
@@ -343,7 +460,7 @@ def _table_row_count(
     reltuples: float,
     scope: TableScope | None,
 ) -> tuple[int, RowCountMethod]:
-    """Rows in the table and how they were obtained, per SPEC 2.2.2.
+    """Rows in the table and how they were obtained, per SPEC 2.2.1.
 
     A narrowed read takes the planner estimate; a never-analyzed table has none and counts
     exactly, since the scanned figure would report a filter matching nothing as an empty
@@ -377,6 +494,25 @@ def _phase_a(
         cn = _quote_ident(col.physical_name or col.name)
         select_parts.append(f"COUNT(*) FILTER (WHERE {cn} IS NULL) AS null_{_alias(col.name)}")
 
+        if _matches(col.sql_type, _NUMERIC_TYPES):
+            select_parts.append(f"COUNT(*) FILTER (WHERE {cn} = 0) AS zero_{_alias(col.name)}")
+            select_parts.append(f"COUNT(*) FILTER (WHERE {cn} < 0) AS neg_{_alias(col.name)}")
+            select_parts.append(
+                f"COUNT(*) FILTER (WHERE {cn} = TRUNC({cn})) AS quant_{_alias(col.name)}",
+            )
+        elif _is_string_like(col.sql_type):
+            select_parts.append(
+                f"COUNT(*) FILTER (WHERE CAST({cn} AS text) = '') AS empty_{_alias(col.name)}",
+            )
+            length_expr = f"LENGTH(CAST({cn} AS text))"
+            select_parts.append(f"MIN({length_expr}) AS lenmin_{_alias(col.name)}")
+            select_parts.append(f"MAX({length_expr}) AS lenmax_{_alias(col.name)}")
+            select_parts.append(f"AVG({length_expr}) AS lenavg_{_alias(col.name)}")
+            select_parts.append(
+                f"PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY {length_expr}) "
+                f"AS lenp95_{_alias(col.name)}",
+            )
+
         if not approximate:
             select_parts.append(f"COUNT(DISTINCT {cn}) AS card_{_alias(col.name)}")
 
@@ -393,6 +529,28 @@ def _phase_a(
     for col in columns:
         null_count = int(row[idx])
         idx += 1
+        zero_count = negative_count = empty_count = quantized_count = None
+        length_min = length_max = length_avg = length_p95 = None
+
+        if _matches(col.sql_type, _NUMERIC_TYPES):
+            zero_count = int(row[idx])
+            idx += 1
+            negative_count = int(row[idx])
+            idx += 1
+            quantized_count = int(row[idx])
+            idx += 1
+        elif _is_string_like(col.sql_type):
+            empty_count = int(row[idx])
+            idx += 1
+            length_min = row[idx]
+            idx += 1
+            length_max = row[idx]
+            idx += 1
+            length_avg = row[idx]
+            idx += 1
+            length_p95 = row[idx]
+            idx += 1
+
         method: CardinalityMethod = "exact"
 
         if approximate:
@@ -418,6 +576,14 @@ def _phase_a(
             cardinality=cardinality,
             cardinality_method=method,
             supported=not _is_unsupported(col.sql_type) and col.name not in composite,
+            zero_count=zero_count,
+            negative_count=negative_count,
+            empty_count=empty_count,
+            quantized_count=quantized_count,
+            length_min=length_min,
+            length_max=length_max,
+            length_avg=length_avg,
+            length_p95=length_p95,
         )
 
     if approximate:
@@ -574,6 +740,17 @@ def _phase_b(
     cardinality_ratio = compute_cardinality_ratio(cardinality, rows_scanned)
     method: CardinalityMethod = base.cardinality_method
     non_null = rows_scanned - null_count
+    length_min, length_max = base.length_min, base.length_max
+    length = (
+        Length(
+            min=length_min,
+            max=length_max,
+            avg=_round_numeric(base.length_avg),
+            p95=_round_numeric(base.length_p95),
+        )
+        if length_min is not None and length_max is not None
+        else None
+    )
 
     stats = ColumnStats(
         sql_type=col.sql_type,
@@ -583,6 +760,13 @@ def _phase_b(
         cardinality=cardinality,
         cardinality_ratio=cardinality_ratio,
         cardinality_method=method,
+        # Phase A gates these on raw sql_type, not on `pre` - a numeric type that classifies
+        # categorical would otherwise carry a field its own classification forbids.
+        zero_count=base.zero_count if pre == "numeric" else None,
+        negative_count=base.negative_count if pre == "numeric" else None,
+        empty_count=base.empty_count if pre == "text" else None,
+        quantized_count=base.quantized_count if pre == "numeric" else None,
+        length=length,
     )
 
     if pre == "json":
@@ -609,7 +793,7 @@ def _phase_b(
         )
 
     if pre == "numeric":
-        rng, percentiles, distribution, frequencies = _fetch_numeric_block(
+        rng, percentiles, distribution, frequencies, values, mean, total = _fetch_numeric_block(
             conn,
             source,
             col,
@@ -623,20 +807,20 @@ def _phase_b(
             percentiles=percentiles,
             distribution=distribution,
             frequencies=frequencies,
+            values=values,
+            mean=mean,
+            sum=total,
         )
 
     if pre == "temporal":
-        # A column that cannot produce bounds loses them; the table survives.
         try:
-            rng, percentiles, distribution, unrepresentable, frequencies = _fetch_temporal_block(
-                conn,
-                source,
-                col,
-                non_null,
-                config,
+            rng, percentiles, distribution, unrepresentable, frequencies, values, quantized = (
+                _fetch_temporal_block(conn, source, col, non_null, config)
             )
-        except Exception:  # noqa: BLE001 - no temporal stats rather than a failed table
-            return stats
+        except Exception:  # noqa: BLE001 - the temporal block degrades as a whole, and its
+            # fields are REQUIRED here (SPEC 2.2.3); the column names what the read cost it
+            # rather than leaving an absence a reader would read as a structural cause.
+            return _replace(stats, unmeasured=temporal_block_unmeasured(col.sql_type))
 
         return _replace(
             stats,
@@ -645,6 +829,8 @@ def _phase_b(
             distribution=distribution,
             frequencies=frequencies,
             unrepresentable=unrepresentable or None,
+            values=values,
+            quantized_count=quantized,
         )
 
     # pre == "text": the only suppressible classification; `distribution` goes with the list.
@@ -744,7 +930,15 @@ def _fetch_numeric_block(
     col: ColumnMeta,
     non_null: int,
     config: StatisticsConfig,
-) -> tuple[Range, dict[str, Any], Distribution, Frequencies]:
+) -> tuple[
+    Range,
+    dict[str, Any],
+    Distribution,
+    Frequencies,
+    tuple[ValueCount, ...],
+    float | None,
+    float | None,
+]:
     cn = _quote_ident(col.physical_name or col.name)
     percentile_keys = config.percentiles
     pct_select = ", ".join(
@@ -753,25 +947,33 @@ def _fetch_numeric_block(
     )
     row = exec_query(
         conn,
-        f"SELECT MIN({cn}) AS mn, MAX({cn}) AS mx, {pct_select} FROM {source} WHERE {cn} IS NOT NULL",
+        f"SELECT MIN({cn}) AS mn, MAX({cn}) AS mx, AVG({cn}) AS avg_val, SUM({cn}) AS sum_val, "
+        f"{pct_select} FROM {source} WHERE {cn} IS NOT NULL",
     ).fetchone()
 
     if row is None:
         empty_range = Range(min=None, max=None)
 
-        return empty_range, {}, "uniform", summarize_frequencies([])
+        return empty_range, {}, "uniform", summarize_frequencies([]), (), None, None
 
-    rng = Range(min=_round_numeric(row[0]), max=_round_numeric(row[1]))
-    percentiles = {f"p{p:02d}": _round_numeric(v) for p, v in zip(percentile_keys, row[2:])}
-    distribution, frequencies = _approximate_distribution_via_top_n(
+    rng = Range(
+        min=_round_numeric(row[0], exact_int=True),
+        max=_round_numeric(row[1], exact_int=True),
+    )
+    mean = _round_numeric(row[2])
+    total = _round_numeric(row[3], exact_int=True)
+    percentiles = {f"p{p:02d}": _round_numeric(v) for p, v in zip(percentile_keys, row[4:])}
+    distribution, frequencies, values = _approximate_distribution_via_top_n(
         conn,
         source,
-        col.physical_name or col.name,
+        cn,
+        cn,
         non_null,
         config,
+        _round_numeric,
     )
 
-    return rng, percentiles, distribution, frequencies
+    return rng, percentiles, distribution, frequencies, values, mean, total
 
 
 # A raw fetch of a calendar type can hand psycopg a value it refuses to build: infinity, or a
@@ -791,7 +993,15 @@ def _fetch_temporal_block(
     col: ColumnMeta,
     non_null: int,
     config: StatisticsConfig,
-) -> tuple[Range, dict[str, Any], Distribution, tuple[str, ...], Frequencies]:
+) -> tuple[
+    Range,
+    dict[str, Any],
+    Distribution,
+    tuple[str, ...],
+    Frequencies,
+    tuple[ValueCount, ...],
+    int | None,
+]:
     if _matches(col.sql_type, _TIME_ONLY_TYPES):
         return _fetch_clock_temporal_block(conn, source, col, non_null, config)
 
@@ -804,10 +1014,17 @@ def _fetch_clock_temporal_block(
     col: ColumnMeta,
     non_null: int,
     config: StatisticsConfig,
-) -> tuple[Range, dict[str, Any], Distribution, tuple[str, ...], Frequencies]:
-    """TIME / TIME WITH TIME ZONE fetch path.
-
-    Neither carries a year or an `infinity` sentinel, and both fall inside one day: span is 0.
+) -> tuple[
+    Range,
+    dict[str, Any],
+    Distribution,
+    tuple[str, ...],
+    Frequencies,
+    tuple[ValueCount, ...],
+    int | None,
+]:
+    """TIME / TIME WITH TIME ZONE fetch path - neither carries a year, an `infinity` sentinel or
+    a date to truncate to (SPEC 2.2.4), so span is 0 and `quantized_count` always absent.
     """
 
     cn = _quote_ident(col.physical_name or col.name)
@@ -829,19 +1046,21 @@ def _fetch_clock_temporal_block(
     if row is None:
         empty_range = Range(min=None, max=None, span_days=0)
 
-        return empty_range, {}, "uniform", (), summarize_frequencies([])
+        return empty_range, {}, "uniform", (), summarize_frequencies([]), (), None
 
     rng = Range(min=_iso_or_value(row[0]), max=_iso_or_value(row[1]), span_days=0)
     percentiles = {f"p{p:02d}": _iso_or_value(v) for p, v in zip(percentile_keys, row[2:])}
-    distribution, frequencies = _approximate_distribution_via_top_n(
+    distribution, frequencies, values = _approximate_distribution_via_top_n(
         conn,
         source,
-        col.physical_name or col.name,
+        cn,
+        cn,
         non_null,
         config,
+        _iso_or_value,
     )
 
-    return rng, percentiles, distribution, (), frequencies
+    return rng, percentiles, distribution, (), frequencies, values, None
 
 
 def _fetch_calendar_temporal_block(
@@ -850,7 +1069,15 @@ def _fetch_calendar_temporal_block(
     col: ColumnMeta,
     non_null: int,
     config: StatisticsConfig,
-) -> tuple[Range, dict[str, Any], Distribution, tuple[str, ...], Frequencies]:
+) -> tuple[
+    Range,
+    dict[str, Any],
+    Distribution,
+    tuple[str, ...],
+    Frequencies,
+    tuple[ValueCount, ...],
+    int | None,
+]:
     """DATE / TIMESTAMP[TZ]: bounds and percentiles render to text in SQL.
 
     The CTE aggregates real values first, since rendered text does not sort like a temporal
@@ -859,16 +1086,21 @@ def _fetch_calendar_temporal_block(
 
     cn = _quote_ident(col.physical_name or col.name)
     percentile_keys = config.percentiles
+    date_only = _matches(col.sql_type, _DATE_ONLY_TYPES)
     cast_type = (
-        "timestamptz"
-        if _matches(col.sql_type, _TZ_TYPES)
-        else "date"
-        if _matches(col.sql_type, _DATE_ONLY_TYPES)
-        else "timestamp"
+        "timestamptz" if _matches(col.sql_type, _TZ_TYPES) else "date" if date_only else "timestamp"
     )
+    # A DATE value is always its own day-truncation (SPEC 2.2.3): the count would be a
+    # truism, so `quantized_count` is omitted entirely rather than published as a constant.
+    day_aligned = not date_only
 
     agg_select = ", ".join(
         [f"MIN({cn}) AS mn", f"MAX({cn}) AS mx"]
+        + (
+            [f"COUNT(*) FILTER (WHERE {cn} = date_trunc('day', {cn})) AS quant"]
+            if day_aligned
+            else []
+        )
         + [
             f"percentile_disc({p / 100.0}::double precision) WITHIN GROUP (ORDER BY {cn}) AS p_{p:02d}"
             for p in percentile_keys
@@ -893,6 +1125,7 @@ def _fetch_calendar_temporal_block(
         f"{_render_calendar_bound('mx', col.sql_type)} AS mx_text",
         *(f"{expr} AS {key}_text" for key, expr in percentile_renders),
         f"{span_days} AS span_days",
+        *(["quant"] if day_aligned else []),
     ]
 
     row = exec_query(
@@ -908,27 +1141,32 @@ def _fetch_calendar_temporal_block(
     if row is None:
         empty_range = Range(min=None, max=None, span_days=0)
 
-        return empty_range, {}, "uniform", (), summarize_frequencies([])
+        return empty_range, {}, "uniform", (), summarize_frequencies([]), (), None
 
     n_pct = len(percentile_keys)
     pct_texts = row[2 : 2 + n_pct]
     span_raw = row[2 + n_pct]
+    quantized_count = int(row[2 + n_pct + 1]) if day_aligned else None
 
     # Floored in SQL per SPEC 2.2.4; this only narrows the type.
     span_days_val = int(span_raw) if span_raw is not None else 0
     rng = Range(min=row[0], max=row[1], span_days=span_days_val)
     percentiles = {key: text for (key, _), text in zip(percentile_renders, pct_texts)}
 
-    distribution, frequencies = _approximate_distribution_via_top_n(
+    # Same rendering the bounds above already went through - a raw fetch of the group key
+    # risks the driver overflow `_render_calendar_bound` exists to avoid (see module note).
+    distribution, frequencies, values = _approximate_distribution_via_top_n(
         conn,
         source,
-        col.physical_name or col.name,
+        _render_calendar_bound(cn, col.sql_type),
+        cn,
         non_null,
         config,
+        lambda v: v,
     )
     unrepresentable = _unrepresentable_fields(rng, percentiles)
 
-    return rng, percentiles, distribution, unrepresentable, frequencies
+    return rng, percentiles, distribution, unrepresentable, frequencies, values, quantized_count
 
 
 def _render_calendar_bound(expr: str, sql_type: str) -> str:
@@ -987,36 +1225,41 @@ def _unrepresentable_fields(rng: Range, percentiles: dict[str, Any]) -> tuple[st
 def _approximate_distribution_via_top_n(
     conn: psycopg.Connection,
     source: str,
-    col_name: str,
+    select_expr: str,
+    group_expr: str,
     non_null: int,
     config: StatisticsConfig,
-) -> tuple[Distribution, Frequencies]:
-    cn = _quote_ident(col_name)
+    value_transform: Callable[[Any], Any],
+) -> tuple[Distribution, Frequencies, tuple[ValueCount, ...]]:
+    """Distribution, frequencies, and the same top-N rows `values` publishes (SPEC 2.2.3) -
+    grouping stays on the raw column, so a rendered expression cannot split one value in two.
+    """
+
     n = config.top_n_values
     rows = exec_query(
         conn,
         f"""
-        SELECT cnt
-        FROM (
-            SELECT {cn}, COUNT(*) AS cnt
-            FROM {source}
-            WHERE {cn} IS NOT NULL
-            GROUP BY {cn}
-            ORDER BY cnt DESC, CAST({cn} AS text) ASC
-            LIMIT %s
-        ) t
+        SELECT {select_expr} AS rendered, COUNT(*) AS cnt
+        FROM {source}
+        WHERE {group_expr} IS NOT NULL
+        GROUP BY {group_expr}
+        ORDER BY cnt DESC, CAST({select_expr} AS text) ASC
+        LIMIT %s
         """,
         (n + 1,),
     ).fetchall()
-    fetched = [int(r[0]) for r in rows]
-    kept = fetched[:n]
+    exhaustive = len(rows) <= n
+    entries = sorted(
+        (ValueCount(value=value_transform(value), count=int(cnt)) for value, cnt in rows[:n]),
+        key=lambda v: (-v.count, str(v.value)),
+    )
+    values = tuple(entries)
+    kept_counts = [v.count for v in values]
 
-    return classify_distribution(
-        kept,
-        non_null,
-        exhaustive=len(fetched) <= n,
-    ), summarize_frequencies(
-        kept,
+    return (
+        classify_distribution(kept_counts, non_null, exhaustive=exhaustive),
+        summarize_frequencies(kept_counts),
+        values,
     )
 
 
@@ -1044,12 +1287,35 @@ def _matches(sql_type: str, types: tuple[str, ...]) -> bool:
     return base_type(sql_type) in types
 
 
-def _round_numeric(v: Any) -> Any:
+def _is_string_like(sql_type: str) -> bool:
+    """The same type test `_pre_classify` falls through to `text` on, run ahead of cardinality -
+    the SQL-type half only; the cardinality-and-FK half is added by that branch itself.
+    """
+
+    return not (
+        _is_unsupported(sql_type)
+        or _matches(sql_type, _BOOLEAN_TYPES)
+        or _matches(sql_type, _JSON_TYPES)
+        or _matches(sql_type, _TEMPORAL_TYPES)
+        or _matches(sql_type, _NUMERIC_TYPES)
+    )
+
+
+def _round_numeric(v: Any, *, exact_int: bool = False) -> Any:
+    """`exact_int` is set only for count-like fields (`sum`, `range.min`/`max`) - an average or a
+    percentile stays rate-valued, so it stays fractional even when one instance is whole (SPEC 2.2.6).
+    """
+
     if v is None:
         return None
 
     if isinstance(v, int):
         return v
+
+    # A Decimal integral to the last digit publishes exact - float64 loses precision above
+    # 2**53, which a total over a bigint column reaches (SPEC 2.2.6 rounds only what is not).
+    if exact_int and isinstance(v, Decimal) and v.is_finite() and v == int(v):
+        return int(v)
 
     try:
         return round(float(v), 6)

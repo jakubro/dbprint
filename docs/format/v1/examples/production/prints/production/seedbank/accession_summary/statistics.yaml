@@ -5,6 +5,10 @@ profiled_at: '2026-05-17T22:48:01Z'
 catalog_only: true
 grain:
   keys: []
+depends_on:
+- seedbank.accession
+- seedbank.collector
+- seedbank.taxon
 columns:
   accession_id:
     sql_type: bigint

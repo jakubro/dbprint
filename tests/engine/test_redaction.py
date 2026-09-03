@@ -534,6 +534,87 @@ class TestBoundsUnderARedactedColumn:
         return payload["columns"]["observed_at"]
 
 
+class TestAggregatesUnderARedactedColumn:
+    """SPEC 2.2.3's redacted-aggregate footnote, end-to-end through `generate` - a redacted
+    column with at most one non-null row must not publish an aggregate equal to that row.
+    """
+
+    def _amount(self, tmp_path: Path, *, values: tuple[int, ...]) -> dict[str, Any]:
+        non_null = len(values)
+        total = float(sum(values))
+        mean = total / non_null
+        table = MockTable(
+            type="table",
+            namespace_path=("fixture", "staging"),
+            ddl="CREATE TABLE fixture.staging (amount bigint);\n",
+            columns=[
+                ColumnMeta(
+                    name="amount",
+                    sql_type="bigint",
+                    nullable=True,
+                    default=None,
+                    ordinal=1,
+                ),
+            ],
+            relationships=[],
+            indexes=[],
+            comments=CommentsMeta(table=None, columns={}),
+            stats={
+                "amount": ColumnStats(
+                    sql_type="bigint",
+                    nullable=True,
+                    null_count=0,
+                    null_rate=0.0,
+                    cardinality=non_null,
+                    cardinality_ratio=1.0,
+                    cardinality_method="exact",
+                    range=Range(min=min(values), max=max(values)),
+                    percentiles={"p50": sorted(values)[non_null // 2]},
+                    mean=mean,
+                    sum=total,
+                    zero_count=0,
+                    negative_count=0,
+                    quantized_count=non_null,
+                    values=tuple(ValueCount(value=v, count=1) for v in values),
+                    distribution="dominant_value" if non_null == 1 else "uniform",
+                    frequencies=Frequencies(top=1, bottom=1, listed=non_null, total=non_null),
+                ),
+            },
+            samples={},
+            row_count=non_null,
+        )
+        # enumeration_threshold=0 keeps `amount` out of the categorical bucket regardless of
+        # cardinality, so both scenarios below classify `numeric` - the footnote's own axis.
+        conn = replace(
+            _conn_config(tmp_path, enumeration_threshold=0),
+            redact=(RedactRule(columns=("*.amount",), with_="mask"),),
+        )
+        Engine(MockAdapter({"fixture.staging": table}), conn, tmp_path).generate()
+        payload = yaml.safe_load(
+            (tmp_path / "primary" / "fixture" / "staging" / "statistics.yaml").read_text(),
+        )
+
+        return payload["columns"]["amount"]
+
+    def test_withheld_on_a_single_non_null_row(self, tmp_path: Path) -> None:
+        amount = self._amount(tmp_path, values=(42,))
+
+        assert amount["classification"] == "numeric"
+        assert amount["redacted"] == "mask"
+        assert "mean" not in amount
+        assert "sum" not in amount
+        # The bound itself is unaffected by this rule - `mask` substitutes it, never omits it.
+        assert amount["range"]["min"] == MASK_PLACEHOLDER
+
+    def test_survives_once_more_than_one_row_is_non_null(self, tmp_path: Path) -> None:
+        amount = self._amount(tmp_path, values=(10, 20, 30))
+
+        assert amount["classification"] == "numeric"
+        assert amount["redacted"] == "mask"
+        assert amount["mean"] == 20.0
+        assert amount["sum"] == 60.0
+
+
 class TestRedactedDayCounts:
     """A redacted temporal column's derived day counts are floored to 90, under every primitive.
 
@@ -695,6 +776,12 @@ def _valueless_fixture() -> dict[str, MockTable]:
                     cardinality_method="exact",
                     range=Range(min=1, max=99),
                     percentiles={"p50": 50},
+                    mean=49.5,
+                    sum=4950.0,
+                    zero_count=0,
+                    negative_count=0,
+                    quantized_count=80,
+                    values=(ValueCount(value=50, count=2), ValueCount(value=51, count=1)),
                     distribution="uniform",
                     frequencies=Frequencies(top=2, bottom=1, listed=80, total=100),
                 ),
@@ -763,9 +850,14 @@ def _dated_fixture() -> dict[str, MockTable]:
                     cardinality_method="exact",
                     range=Range(min=observed_min, max=observed_max, span_days=1),
                     percentiles={"p50": observed_max},
+                    values=(
+                        ValueCount(value=observed_max, count=2),
+                        ValueCount(value=observed_min, count=1),
+                    ),
                     distribution="uniform",
                     frequencies=Frequencies(top=2, bottom=1, listed=60, total=80),
                     unrepresentable=("max",),
+                    quantized_count=0,
                 ),
             },
             samples={},

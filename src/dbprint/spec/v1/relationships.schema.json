@@ -33,7 +33,7 @@
       "enum": ["NO ACTION", "CASCADE", "SET NULL", "SET DEFAULT", "RESTRICT"]
     },
     "Detection": {
-      "enum": ["declared", "inferred"]
+      "enum": ["declared", "inferred", "measured"]
     },
     "Observed": {
       "type": "object",

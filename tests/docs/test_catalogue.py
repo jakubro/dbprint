@@ -67,6 +67,25 @@ class TestLoadTable:
 
         assert catalogue.load_table(conn, "seedbank.nonexistent") is None
 
+    def test_a_corrupt_declared_yaml_is_named_not_silently_none(
+        self,
+        rich_conn: ConnectionConfig,
+    ) -> None:
+        """`relationships: None` must not read as "never declared" when the file exists and
+        failed to parse - `corrupted` is the caller's way to tell the two apart.
+        """
+
+        (rich_conn.output / "primary" / "seedbank" / "batch" / "relationships.yaml").write_text(
+            "not: [valid, - yaml",
+        )
+        conn = catalogue.load_connections([rich_conn])[0]
+
+        artifacts = catalogue.load_table(conn, "seedbank.batch")
+
+        assert artifacts is not None
+        assert artifacts.relationships is None
+        assert artifacts.corrupted == ("relationships",)
+
 
 class TestLoadRelationships:
     def test_reads_relationships_alone(self, rich_conn: ConnectionConfig) -> None:

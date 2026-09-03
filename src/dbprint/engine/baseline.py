@@ -29,7 +29,7 @@ def load_baseline_manifest(prints_root: Path) -> dict[str, Any] | None:
         return None
 
     try:
-        data = yaml.safe_load(manifest.read_text())
+        data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
     except yaml.YAMLError:
         return None
 
@@ -194,7 +194,7 @@ def _incoming_from_file(path: Path) -> list[IncomingFk]:
         return []
 
     try:
-        data = _as_mapping(yaml.safe_load(path.read_text()), path)
+        data = _as_mapping(yaml.safe_load(path.read_text(encoding="utf-8")), path)
     except yaml.YAMLError:
         return []
 
@@ -213,10 +213,11 @@ def _incoming_from_file(path: Path) -> list[IncomingFk]:
                     column=tuple(entry["column"]),
                     referencer_table=entry["referencer_table"],
                     referencer_column=tuple(entry["referencer_column"]),
-                    # Absent on an inferred edge (SPEC 2.3.8) - `.get`, or the entry is dropped.
-                    on_delete=entry.get("on_delete", "NO ACTION"),
-                    on_update=entry.get("on_update", "NO ACTION"),
-                    detection=entry.get("detection", "declared"),
+                    # Absent on an inferred edge (SPEC 2.3.8) - carried as None, never
+                    # defaulted to a real action or to the stronger claim `declared`.
+                    on_delete=entry.get("on_delete"),
+                    on_update=entry.get("on_update"),
+                    detection=entry.get("detection") or "inferred",
                     constraint_name=entry.get("constraint_name"),
                 ),
             )
@@ -231,7 +232,7 @@ def _hydrate_relationships(state: diff_module.TableState, path: Path) -> None:
         return
 
     try:
-        data = _as_mapping(yaml.safe_load(path.read_text()), path)
+        data = _as_mapping(yaml.safe_load(path.read_text(encoding="utf-8")), path)
     except yaml.YAMLError:
         return
 
@@ -248,10 +249,11 @@ def _hydrate_relationships(state: diff_module.TableState, path: Path) -> None:
                     source_columns=tuple(entry["column"]),
                     target_table=entry["target_table"],
                     target_columns=tuple(entry["target_column"]),
-                    # Absent on an inferred edge (SPEC 2.3.8) - `.get`, or the entry is dropped.
-                    on_delete=entry.get("on_delete", "NO ACTION"),
-                    on_update=entry.get("on_update", "NO ACTION"),
-                    detection=entry.get("detection", "declared"),
+                    # Absent on an inferred edge (SPEC 2.3.8) - carried as None, never
+                    # defaulted to a real action or to the stronger claim `declared`.
+                    on_delete=entry.get("on_delete"),
+                    on_update=entry.get("on_update"),
+                    detection=entry.get("detection") or "inferred",
                 ),
             )
         except (KeyError, TypeError):
@@ -265,7 +267,7 @@ def _hydrate_statistics(state: diff_module.TableState, path: Path) -> None:
         return
 
     try:
-        data = _as_mapping(yaml.safe_load(path.read_text()), path)
+        data = _as_mapping(yaml.safe_load(path.read_text(encoding="utf-8")), path)
     except yaml.YAMLError:
         return
 
@@ -279,7 +281,16 @@ def _hydrate_statistics(state: diff_module.TableState, path: Path) -> None:
     state.scoped = isinstance(data.get("scope"), dict)
     state.catalog_only = data.get("catalog_only") is True
     state.grain = diff_module.grain_from_block(data.get("grain"))
-    state.physical_layout = diff_module.physical_layout_from_block(data.get("physical_layout"))
+    # SPEC 2.2.1: a block the baseline names unmeasured contributes nothing to compare - hydrating
+    # it would resurrect the "confirmed unclustered" sentinel and invent drift against a real read.
+    unmeasured = set(data.get("unmeasured") or [])
+
+    if "physical_layout" not in unmeasured:
+        state.physical_layout = diff_module.physical_layout_from_block(
+            data.get("physical_layout"),
+        )
+    depends_on = data.get("depends_on")
+    state.depends_on = tuple(depends_on) if isinstance(depends_on, list) else None
 
     cols = data.get("columns") or {}
 

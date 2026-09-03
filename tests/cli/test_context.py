@@ -212,6 +212,26 @@ class TestBudget:
         assert result.exit_code == 1
         assert "budget too small" in (result.output + (result.stderr or ""))
 
+    def test_budget_too_small_exits_one_on_markdown(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Markdown's per-table truncation-marker-only case must also fail the run, not just
+        JSON's - the two formats compute `tables_included` on separate paths.
+        """
+
+        _write_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(
+            main,
+            ["context", "--all", "--budget", "1"],
+        )
+
+        assert result.exit_code == 1
+        assert "budget too small" in (result.output + (result.stderr or ""))
+
     def test_unbudgeted_json_is_unchanged(
         self,
         tmp_path: Path,

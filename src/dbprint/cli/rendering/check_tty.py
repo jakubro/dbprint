@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import TextIO
 
 from dbprint.conformance import Issue
-from dbprint.engine.freshness import format_age
+from dbprint.engine.freshness import format_age, format_threshold
 from .check_data import CheckResult
 
 
@@ -25,7 +25,7 @@ def _render_one(result: CheckResult, stream: TextIO) -> None:
     stream.write(f"Connection: {result.connection_name}\n")
 
     if not result.manifest_present:
-        stream.write(f"  FAIL: no manifest at prints/{result.connection_name}/manifest.yaml\n")
+        stream.write(f"  FAIL: no manifest at {result.print_root}/manifest.yaml\n")
         stream.write(f"  exit {result.exit_code}\n")
 
         return
@@ -56,7 +56,8 @@ def _render_one(result: CheckResult, stream: TextIO) -> None:
             stream.write(f"      {entry.cause}\n")
 
     if errors:
-        stream.write(f"  FAIL: conformance ({len(errors)} error(s))\n")
+        warning_note = f", {len(warnings)} warning(s)" if warnings else ""
+        stream.write(f"  FAIL: conformance ({len(errors)} error(s){warning_note})\n")
 
         for issue in errors:
             stream.write(f"    {issue.path}\n")
@@ -70,23 +71,37 @@ def _render_one(result: CheckResult, stream: TextIO) -> None:
 
         stream.write("\n")
 
-    if result.stale_entries:
-        stream.write(f"  FAIL: {len(result.stale_entries)} print(s) exceed their max-age\n")
+    # An unmeasurable age (unparseable `profiled_at`) is not exceedance - `evaluate` records
+    # both as a `StaleEntry`, but only a finite age actually exceeded its threshold.
+    measured_stale = [s for s in result.stale_entries if s.age_days != float("inf")]
+    unmeasurable = [s for s in result.stale_entries if s.age_days == float("inf")]
+
+    # Unconditional: a conformance error must not silence the freshness verdict.
+    if measured_stale:
+        stream.write(f"  FAIL: {len(measured_stale)} print(s) exceed their max-age\n")
 
         # Reported per entry, not once in the header - the threshold is per table.
         stream.writelines(
-            f"    {stale.fqn}    {format_age(stale.age_days)} (max {stale.max_age_days:g}d)\n"
-            for stale in result.stale_entries[:10]
+            f"    {stale.fqn}    {format_age(stale.age_days)} "
+            f"(max {format_threshold(stale.max_age_days)})\n"
+            for stale in measured_stale[:10]
         )
 
-        if len(result.stale_entries) > 10:
-            stream.write(f"    ... {len(result.stale_entries) - 10} more\n")
+        if len(measured_stale) > 10:
+            stream.write(f"    ... {len(measured_stale) - 10} more\n")
 
         stream.write("  Run `dbprint generate` to refresh.\n")
-    elif not errors:
+    else:
         # An all-clear over an incomplete set would overclaim, so the wording narrows.
         judged = "every print that was judged" if result.not_run else "every print"
         stream.write(f"  OK: {judged} is within its max-age threshold\n")
+
+    if unmeasurable:
+        stream.write(f"  NOTE: {len(unmeasurable)} print(s) have an unmeasurable age\n")
+        stream.writelines(f"    {stale.fqn}\n" for stale in unmeasurable[:10])
+
+        if len(unmeasurable) > 10:
+            stream.write(f"    ... {len(unmeasurable) - 10} more\n")
 
     if result.drift_issues:
         stream.write(f"  FAIL: {_drift_heading(result.drift_issues)}\n")

@@ -1231,6 +1231,118 @@ class TestPhysicalLayout:
             adapter.close()
 
 
+class TestViewDependencies:
+    """`introspect_view_dependencies` via `pg_depend`/`pg_rewrite`, one query for the run."""
+
+    def _connect(self, postgres_test_db: dict[str, str]) -> Any:
+        import psycopg
+
+        return psycopg.connect(
+            host=postgres_test_db["host"],
+            port=int(postgres_test_db["port"]),
+            dbname=postgres_test_db["database"],
+            user=postgres_test_db["user"],
+            password="",
+            autocommit=True,
+        )
+
+    def test_a_view_reading_two_tables_lists_both(
+        self,
+        postgres_test_db: dict[str, str],
+    ) -> None:
+        with self._connect(postgres_test_db) as conn:
+            conn.execute("CREATE TABLE public.wide (id int)")
+            conn.execute("CREATE TABLE public.narrow (id int)")
+            conn.execute(
+                "CREATE VIEW public.both_v AS "
+                "SELECT w.id AS wide_id, n.id AS narrow_id FROM public.wide w, public.narrow n",
+            )
+
+        adapter = PostgresAdapter(postgres_test_db)
+        adapter.connect()
+
+        try:
+            deps = adapter.introspect_view_dependencies()
+            assert deps is not None
+            assert set(deps["public.both_v"]) == {"public.wide", "public.narrow"}
+        finally:
+            adapter.close()
+
+    def test_a_view_over_a_view_names_the_view_not_its_own_source(
+        self,
+        postgres_test_db: dict[str, str],
+    ) -> None:
+        with self._connect(postgres_test_db) as conn:
+            conn.execute("CREATE TABLE public.wide (id int)")
+            conn.execute("CREATE VIEW public.inner_v AS SELECT id FROM public.wide")
+            conn.execute("CREATE VIEW public.outer_v AS SELECT id FROM public.inner_v")
+
+        adapter = PostgresAdapter(postgres_test_db)
+        adapter.connect()
+
+        try:
+            deps = adapter.introspect_view_dependencies()
+            assert deps is not None
+            assert deps["public.outer_v"] == ("public.inner_v",)
+            assert deps["public.inner_v"] == ("public.wide",)
+        finally:
+            adapter.close()
+
+    def test_a_view_reading_nothing_answers_with_an_empty_tuple(
+        self,
+        postgres_test_db: dict[str, str],
+    ) -> None:
+        """A resolvable view with no object dependency still seeds an entry - `()`, not absent."""
+
+        with self._connect(postgres_test_db) as conn:
+            conn.execute("CREATE VIEW public.literal_v AS SELECT 1 AS x")
+
+        adapter = PostgresAdapter(postgres_test_db)
+        adapter.connect()
+
+        try:
+            deps = adapter.introspect_view_dependencies()
+            assert deps is not None
+            assert deps["public.literal_v"] == ()
+        finally:
+            adapter.close()
+
+    def test_a_materialized_view_is_named_the_same_way(
+        self,
+        postgres_test_db: dict[str, str],
+    ) -> None:
+        with self._connect(postgres_test_db) as conn:
+            conn.execute("CREATE TABLE public.wide (id int)")
+            conn.execute("CREATE MATERIALIZED VIEW public.wide_mv AS SELECT id FROM public.wide")
+
+        adapter = PostgresAdapter(postgres_test_db)
+        adapter.connect()
+
+        try:
+            deps = adapter.introspect_view_dependencies()
+            assert deps is not None
+            assert deps["public.wide_mv"] == ("public.wide",)
+        finally:
+            adapter.close()
+
+    def test_a_plain_table_never_appears_as_a_key(
+        self,
+        postgres_test_db: dict[str, str],
+    ) -> None:
+        with self._connect(postgres_test_db) as conn:
+            conn.execute("CREATE TABLE public.plain (id int)")
+
+        adapter = PostgresAdapter(postgres_test_db)
+        adapter.connect()
+
+        try:
+            deps = adapter.introspect_view_dependencies()
+            assert deps is not None
+            assert "public.plain" not in deps
+        finally:
+            adapter.close()
+
+
 class TestPartitionChildExclusion:
     """`list_tables` enumerates a partitioned table's parent, never its children."""
 
@@ -1696,14 +1808,19 @@ class TestApproximateCardinality:
         self,
         postgres_test_db: dict[str, str],
     ) -> None:
-        """A near-unique numeric column keeps its bounds rather than enumerating values."""
+        """A near-unique numeric column keeps its bounds and its top-N slice, never a full
+        categorical enumeration of its (near-)500 distinct values.
+        """
 
         self._seed(postgres_test_db, analyze=True)
         stats = self._profile(postgres_test_db, "public.wide_t", threshold=10)
 
-        assert stats["id"].values is None, "numeric never enumerates values (SPEC 2.2.3)"
         assert stats["id"].range is not None
         assert (stats["id"].cardinality_ratio or 0) >= 0.9999
+        assert stats["id"].values is not None
+        assert len(stats["id"].values) <= StatisticsConfig().top_n_values, (
+            "numeric takes the top-N branch, never the categorical enumeration (SPEC 2.2.3)"
+        )
 
     def test_unanalyzed_column_falls_back_to_the_exact_count(
         self,
@@ -2459,7 +2576,7 @@ class TestOutOfRangeTemporal:
                 default=None,
                 ordinal=1,
             )
-            rng, percentiles, _, unrepresentable, _ = pg_stats._fetch_temporal_block(
+            rng, percentiles, _, unrepresentable, _, _, _ = pg_stats._fetch_temporal_block(
                 conn,
                 "public.all_null_ts",
                 col,

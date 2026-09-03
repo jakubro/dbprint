@@ -1,7 +1,5 @@
-"""looks_like pattern detection per SPEC v1, section 4.1.
-
-`detect()` returns the pattern matching >= 95% of a sample, or None; `detect_with_evidence()`
-also returns the draw size and match tally the verdict rests on. Pure: no I/O.
+"""looks_like pattern detection per SPEC v1, section 4.1 - `detect()` returns the pattern
+matching >= 95% of a sample, `detect_with_evidence()` the tally behind it. Pure: no I/O.
 """
 
 from __future__ import annotations
@@ -54,6 +52,9 @@ LooksLike = Literal[
 ]
 
 MATCH_THRESHOLD = 0.95
+# SPEC 4.1.3: the floor a near-miss must clear to publish at all - a producer constant, never
+# configuration, so two prints stay comparable on it.
+NEAR_MISS_FLOOR = 0.50
 
 
 _UUID_RE = re.compile(
@@ -278,15 +279,15 @@ _PROSE_WORD_RE = re.compile(r"[a-z']+")
 
 @dataclass(frozen=True)
 class LooksLikeMatch:
-    """A `detect()` verdict plus the evidence it was scored against.
-
-    `sampled` and `matched` are both `0` only when the sample itself was empty, never when a
-    pattern failed to clear the threshold - `pattern` alone carries that distinction.
+    """A `detect()` verdict plus the evidence it was scored against - `candidate` is mutually
+    exclusive with `pattern`, and a zero tally means an empty sample, not a failed threshold.
     """
 
     pattern: LooksLike | None
     sampled: int
     matched: int
+    candidate: LooksLike | None = None
+    candidate_share: float | None = None
 
 
 def detect(values: Iterable[object]) -> LooksLike | None:
@@ -301,11 +302,8 @@ def detect(values: Iterable[object]) -> LooksLike | None:
 
 
 def detect_with_evidence(values: Iterable[object]) -> LooksLikeMatch:
-    """Like `detect`, but also returns the draw size and the winning pattern's tally.
-
-    `sampled` and `matched` are what SPEC 4.1.3's 95% threshold is computed from, so a
-    consumer recomputes `matched / sampled` to judge how much evidence a verdict rests on -
-    a two-of-two match reads identically to a ten-thousand-of-ten-thousand one without them.
+    """Like `detect`, but also returns the draw size and the winning pattern's tally - without
+    them a two-of-two match reads identically to a ten-thousand-of-ten-thousand one.
     """
 
     sample = list(values)
@@ -320,7 +318,30 @@ def detect_with_evidence(values: Iterable[object]) -> LooksLikeMatch:
         if assigned[pattern] / len(sample) >= MATCH_THRESHOLD:
             return LooksLikeMatch(pattern, len(sample), assigned[pattern])
 
+    candidate, candidate_count = _best_scoring(assigned)
+    candidate_share = candidate_count / len(sample) if candidate is not None else 0.0
+
+    if candidate is not None and candidate_share >= NEAR_MISS_FLOOR:
+        return LooksLikeMatch(None, len(sample), 0, candidate, round(candidate_share, 6))
+
     return LooksLikeMatch(None, len(sample), 0)
+
+
+def _best_scoring(assigned: Counter[LooksLike]) -> tuple[LooksLike | None, int]:
+    """The pattern with the highest tally, ties broken by SPEC 4.1.4 priority order - walks
+    `_PRIORITY`, `Counter.most_common()`'s tie order being insertion order, undefined here.
+    """
+
+    best: LooksLike | None = None
+    best_count = 0
+
+    for pattern, _ in _PRIORITY:
+        count = assigned[pattern]
+
+        if count > best_count:
+            best, best_count = pattern, count
+
+    return best, best_count
 
 
 def _assign(value: str) -> LooksLike | None:

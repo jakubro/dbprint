@@ -79,7 +79,7 @@ def serve_command(
 
     - `dbprint serve`: stdio (editor / agent)
     - `dbprint serve --transport http --port 8765`: loopback HTTP server
-    - `dbprint serve --project /srv/analytics`: a project outside the working directory
+    - `dbprint serve --project /srv/arboretum`: a project outside the working directory
     """
 
     if not read_only:

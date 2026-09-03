@@ -19,12 +19,48 @@ SketchKind = Literal["integer", "decimal", "text", "boolean", "temporal"]
 METHOD = "kmv_md5_lo64"
 K = 1024
 
-_INTEGER_TYPES = ("smallint", "integer", "bigint", "int", "tinyint", "mediumint")
-_DECIMAL_TYPES = ("decimal", "numeric", "number")
-_TEXT_TYPES = ("varchar", "text", "char", "character varying", "character", "string", "uuid")
-_BOOLEAN_TYPES = ("boolean",)
+_INTEGER_TYPES = (
+    "smallint",
+    "integer",
+    "bigint",
+    "int",
+    "tinyint",
+    "mediumint",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "int128",
+    "int256",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+    "uint128",
+    "uint256",
+    "hugeint",
+    "ubigint",
+    "uinteger",
+    "usmallint",
+    "utinyint",
+)
+# The wide decimals (ClickHouse's decimal32..decimal256, BigQuery's bignumeric) are deliberately
+# absent: both engines' string cast drops the trailing zero SPEC 2.2.14's canonical form requires.
+_DECIMAL_TYPES = ("decimal", "numeric", "number", "dec", "fixed")
+_TEXT_TYPES = (
+    "varchar",
+    "text",
+    "char",
+    "character varying",
+    "character",
+    "string",
+    "uuid",
+    "fixedstring",
+)
+_BOOLEAN_TYPES = ("boolean", "bool")
 _TEMPORAL_TYPES = (
     "date",
+    "date32",
     "time",
     "timestamp",
     "timestamp with time zone",
@@ -35,6 +71,7 @@ _TEMPORAL_TYPES = (
     "timestamp_ltz",
     "timestamp_tz",
     "datetime",
+    "datetime64",
     "year",
 )
 

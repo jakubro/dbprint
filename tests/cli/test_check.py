@@ -286,6 +286,40 @@ connections:
         max_age_days: 30
 """
 
+CONNECTION_CEILING_ONLY_YAML = """\
+connections:
+  primary:
+    adapter: postgres
+    output: prints
+    max_age_days: 7
+    max_rows_scanned: 1000000000
+"""
+
+RULE_CEILING_ONLY_YAML = """\
+connections:
+  primary:
+    adapter: postgres
+    output: prints
+    max_age_days: 7
+    rules:
+      - include: ["seedbank.accession"]
+        max_rows_scanned: 1000000000
+        max_age_days: 30
+"""
+
+MIXED_YAML = """\
+connections:
+  primary:
+    adapter: postgres
+    output: prints
+    max_age_days: 7
+    max_rows_scanned: 1000000000
+    rules:
+      - include: ["seedbank.accession"]
+        min_rows: 1000000
+        max_age_days: 30
+"""
+
 
 class TestContradictoryCascadeOffline:
     """A cascade narrowing one table two ways fails that table, not the command.
@@ -495,6 +529,96 @@ class TestSizeGatedRuleOffline:
         assert "min_rows" not in result.stderr
         assert result.exit_code == 0
         assert payload["stale_entries"] == []
+
+    def test_a_plain_view_draws_no_note_but_a_table_still_does(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A view is never queried, so no size condition can have governed it (SPEC 2.2.15)."""
+
+        old = datetime.now(UTC) - timedelta(days=10)
+        _seed_real(
+            tmp_path,
+            committed_print,
+            "primary",
+            ("seedbank.accession", "seedbank.accession_summary"),
+            old,
+        )
+        (tmp_path / ".dbprint.yaml").write_text(
+            SIZE_GATED_YAML.replace(
+                'include: ["seedbank.accession"]',
+                'include: ["seedbank.*"]',
+            ),
+        )
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(main, ["check", "--format", "json"])
+        warning = next(line for line in result.stderr.splitlines() if "min_rows" in line)
+
+        assert "seedbank.accession." in warning
+        assert "seedbank.accession_summary" not in warning
+
+    def test_a_connection_level_ceiling_alone_says_nothing(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A ceiling cannot affect `max_age_days`, so it is not this warning's concern."""
+
+        old = datetime.now(UTC) - timedelta(days=10)
+        _seed_clean(tmp_path, committed_print, profiled_at=old)
+        (tmp_path / ".dbprint.yaml").write_text(CONNECTION_CEILING_ONLY_YAML)
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(main, ["check", "--format", "json"])
+
+        assert "min_rows" not in result.stderr
+
+    def test_a_rules_ceiling_alone_says_nothing_but_its_max_age_days_is_used(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The rule applied in full - `max_rows_scanned` gates nothing `matches` checks."""
+
+        old = datetime.now(UTC) - timedelta(days=10)
+        _seed_clean(tmp_path, committed_print, profiled_at=old)
+        (tmp_path / ".dbprint.yaml").write_text(RULE_CEILING_ONLY_YAML)
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(main, ["check", "--format", "json"])
+        payload = json.loads(result.stdout)[0]
+
+        assert "min_rows" not in result.stderr
+        assert result.exit_code == 0
+        assert payload["stale_entries"] == []
+
+    def test_a_connection_ceiling_and_a_rules_min_rows_names_only_the_gated_table(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A ceiling over every table and a `min_rows` rule over one: only the rule's own
+        table is named, never the whole print the ceiling covers.
+        """
+
+        old = datetime.now(UTC) - timedelta(days=10)
+        _seed_real(
+            tmp_path,
+            committed_print,
+            "primary",
+            ("seedbank.accession", "seedbank.taxon"),
+            old,
+        )
+        (tmp_path / ".dbprint.yaml").write_text(MIXED_YAML)
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(main, ["check", "--format", "json"])
+        warning = next(line for line in result.stderr.splitlines() if "min_rows" in line)
+
+        assert "seedbank.accession." in warning
+        assert "seedbank.taxon" not in warning
 
 
 class TestCleanState:

@@ -375,6 +375,61 @@ class TestHandshakeAdvertisesInstructions:
         assert self._instructions(primary_conn) == SERVER_DESCRIPTION
 
 
+# `SERVER_DESCRIPTION` is delivered unprompted on every connect, so each entry anchors one of its
+# claims to the SPEC sentence behind it: a moved or reworded sentence fails here instead.
+_SPEC_PATH = Path(__file__).resolve().parents[2] / "docs/format/v1/SPEC.md"
+
+_SERVER_DESCRIPTION_ANCHORS = (
+    (
+        (
+            "is NOT rescalable to table grain by the reader without assuming the "
+            "sample is representative"
+        ),
+        "SPEC 2.2.8's sum-not-rescalable sentence moved",
+    ),
+    (
+        "sampled` and `matched` describe `looks_like` alone, never `epoch_unit` or `sensitivity`",
+        "SPEC 4.1.3's sampled/matched scoping sentence moved",
+    ),
+    (
+        'absence means "not detected", never "safe to publish"',
+        "SPEC 4.4.2's sensitivity-absence sentence moved",
+    ),
+)
+
+
+class TestServerDescriptionSpecBinding:
+    """Binds `SERVER_DESCRIPTION`'s own claims to the SPEC sentences that back them."""
+
+    @pytest.mark.parametrize(("needle", "message"), _SERVER_DESCRIPTION_ANCHORS)
+    def test_the_cited_spec_sentence_still_holds(self, needle: str, message: str) -> None:
+        assert needle in _SPEC_PATH.read_text(), message
+
+    def test_sum_and_other_aggregates_are_not_told_to_rescale(self) -> None:
+        from dbprint.mcp.server import SERVER_DESCRIPTION
+
+        assert "sum" in SERVER_DESCRIPTION
+        assert "mean" in SERVER_DESCRIPTION
+        assert "A ratio, a bound, a percentile, or an aggregate" in SERVER_DESCRIPTION
+        assert "assumes the sample is representative" in SERVER_DESCRIPTION
+
+    def test_a_count_still_gets_the_rescale_instruction(self) -> None:
+        from dbprint.mcp.server import SERVER_DESCRIPTION
+
+        # The reciprocal, and named as a multiplication: `rows_scanned / row_count` is below 1,
+        # so an agent multiplying by it shrinks the very count it meant to scale up.
+        assert "multiplying it by row_count / rows_scanned" in SERVER_DESCRIPTION
+        assert "rescaled by rows_scanned / row_count" not in SERVER_DESCRIPTION
+
+    def test_the_evidence_promise_is_scoped_to_looks_like(self) -> None:
+        from dbprint.mcp.server import SERVER_DESCRIPTION
+
+        assert "looks_like publishes the sampled/matched evidence" in SERVER_DESCRIPTION
+        assert "candidate_key's own verdict is recomputable" in SERVER_DESCRIPTION
+        assert "sensitivity publishes no evidence at all" in SERVER_DESCRIPTION
+        assert "its absence never means safe to publish" in SERVER_DESCRIPTION
+
+
 class TestToolDescriptionsReachTheWire:
     """MCP.md 4: each tool's advertised description, over the same handshake a client sees."""
 

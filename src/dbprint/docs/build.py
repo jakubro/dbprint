@@ -27,10 +27,11 @@ class OutputNotOwnedError(RuntimeError):
 
 @dataclass(frozen=True)
 class BuildResult:
-    """What one `build_site` call wrote."""
+    """What one `build_site` call wrote - and, distinctly, what it could not."""
 
     output: Path
     pages_written: int
+    failed_routes: tuple[str, ...] = ()
 
 
 def build_site(
@@ -51,27 +52,36 @@ def build_site(
     client = app.test_client()
     conns = catalogue.load_connections(connections)
 
-    pages = _write_page(client, "/", output / "index.html")
+    pages = 0
+    failed: list[str] = []
+
+    def write(path: str, dest: Path) -> None:
+        nonlocal pages
+
+        if _write_page(client, path, dest):
+            pages += 1
+        else:
+            failed.append(path)
+
+    write("/", output / "index.html")
 
     for conn in conns:
         for name in sorted(conn.tables):
-            pages += _write_page(
-                client,
-                f"/t/{conn.name}/{quote(name)}",
-                output / "t" / conn.name / name / "index.html",
-            )
+            write(f"/t/{conn.name}/{quote(name)}", output / "t" / conn.name / name / "index.html")
 
         for schema in sorted(_schemas(conn)):
-            pages += _write_page(
-                client,
+            write(
                 f"/s/{conn.name}/{quote(schema)}",
                 output / "s" / conn.name / schema / "index.html",
             )
 
     shutil.copytree(_STATIC_DIR, output / "static", dirs_exist_ok=True)
-    (output / MARKER_FILENAME).write_text("dbprint docs build - safe to recreate.\n")
+    (output / MARKER_FILENAME).write_text(
+        "dbprint docs build - safe to recreate.\n",
+        encoding="utf-8",
+    )
 
-    return BuildResult(output=output, pages_written=pages)
+    return BuildResult(output=output, pages_written=pages, failed_routes=tuple(failed))
 
 
 def _schemas(conn: catalogue.PrintConnection) -> set[str]:
@@ -96,15 +106,15 @@ def _prepare_output(output: Path, *, force: bool) -> None:
     output.mkdir(parents=True)
 
 
-def _write_page(client: FlaskClient, path: str, dest: Path) -> int:
-    """Request one route and write its body to `dest`; 1 written, 0 on a non-200 response."""
+def _write_page(client: FlaskClient, path: str, dest: Path) -> bool:
+    """Request one route and write its body to `dest`; `False` on a non-200 response."""
 
     response = client.get(path)
 
     if response.status_code != 200:
-        return 0
+        return False
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(response.data)
 
-    return 1
+    return True

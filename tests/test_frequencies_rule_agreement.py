@@ -92,6 +92,12 @@ def _payload(
                 "classification": "numeric",
                 "range": {"min": 1, "max": 100},
                 "percentiles": {"p50": 50},
+                "mean": 50.0,
+                "sum": 5000.0,
+                "zero_count": 0,
+                "negative_count": 0,
+                "quantized_count": non_null,
+                "values": [{"value": 1, "count": freq.top}],
                 "distribution": distribution,
                 "frequencies": {
                     "top": freq.top,

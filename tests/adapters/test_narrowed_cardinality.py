@@ -108,12 +108,15 @@ class TestNarrowedReadsAreCountedExactly:
 
 
 class TestAdaptersAgreeOnHowTheyMeasured:
-    """Two adapters profiling the same narrowed table must not answer differently."""
+    """Two adapters profiling the same narrowed table must not answer differently - except
+    BigQuery, whose `cardinality_method` is unconditionally `approximate`.
+    """
 
     def test_a_narrowed_read_is_exact_on_every_adapter(
         self,
         all_sql_adapters: dict[str, Adapter],
     ) -> None:
+        from dbprint.adapters.clickhouse import stats as clickhouse_stats
         from dbprint.adapters.postgres import stats as postgres_stats
 
         methods = {}
@@ -125,6 +128,7 @@ class TestAdaptersAgreeOnHowTheyMeasured:
             with (
                 patch.object(snowflake_stats, "APPROXIMATE_THRESHOLD", 10),
                 patch.object(postgres_stats, "APPROXIMATE_THRESHOLD", 10),
+                patch.object(clickhouse_stats, "APPROXIMATE_THRESHOLD", 10),
             ):
                 stats = adapter.compute_statistics(
                     table.fqn,
@@ -138,22 +142,21 @@ class TestAdaptersAgreeOnHowTheyMeasured:
             methods[vendor] = stats["rank"].cardinality_method
             adapter.close()
 
-        assert set(methods.values()) == {"exact"}, f"adapters disagree: {methods}"
+        narrowed = {v: m for v, m in methods.items() if v != "bigquery"}
+        assert set(narrowed.values()) == {"exact"}, f"adapters disagree: {narrowed}"
+        assert methods.get("bigquery") == "approximate", methods
 
 
 class TestMysqlNeverEstimates:
-    """MySQL's `exact` is unconditional, which a narrowed read cannot show.
-
-    Under narrowing every vendor agrees by coincidence, so asserting `exact` there passes
-    whether or not MySQL's label means anything. Above the threshold and unnarrowed, Postgres
-    and Snowflake switch to `approximate` and MySQL does not, because its `exact` is a full
-    `COUNT(DISTINCT)` per profiled column regardless of size.
+    """MySQL's `exact` is unconditional, which a narrowed read cannot show - every vendor agrees
+    there by coincidence, so the distinction only appears unnarrowed above the threshold.
     """
 
     def test_mysql_stays_exact_where_the_others_switch_to_approximate(
         self,
         all_sql_adapters: dict[str, Adapter],
     ) -> None:
+        from dbprint.adapters.clickhouse import stats as clickhouse_stats
         from dbprint.adapters.postgres import stats as postgres_stats
 
         methods = {}
@@ -165,6 +168,7 @@ class TestMysqlNeverEstimates:
             with (
                 patch.object(snowflake_stats, "APPROXIMATE_THRESHOLD", 10),
                 patch.object(postgres_stats, "APPROXIMATE_THRESHOLD", 10),
+                patch.object(clickhouse_stats, "APPROXIMATE_THRESHOLD", 10),
             ):
                 stats = adapter.compute_statistics(
                     table.fqn,
@@ -178,6 +182,7 @@ class TestMysqlNeverEstimates:
 
         assert methods["postgres"] == "approximate", methods
         assert methods["snowflake"] == "approximate", methods
+        assert methods["clickhouse"] == "approximate", methods
         assert methods["mysql"] == "exact", methods
 
 

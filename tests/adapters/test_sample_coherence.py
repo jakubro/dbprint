@@ -3,8 +3,11 @@
 Every statistics query selects FROM the same source expression, but an unseeded sampling
 construct draws again each time, so one `statistics.yaml` would describe different rows on a
 table with no writes. The producer copies the draw once, so the tests split: the copied path,
-where coherence is structural, and the seeded fallback where the write is refused. Both run
-the whole profile twice, which distinguishes a repeatable draw from a repeated one.
+where coherence is structural, and the seeded fallback where a coherent adapter's per-row seed
+does the same job unmaterialized. Both run the whole profile twice.
+
+An adapter whose fallback is NOT coherent (`SAMPLE_FALLBACK_COHERENT = False`) is refused before
+it reaches these statements, so these tests skip it; the engine suite covers that refusal.
 
 Neither can show that live Snowflake honours the seed or accepts the copy: duckdb's own seed
 guarantee holds only single-threaded and models neither of Snowflake's constraints.
@@ -19,6 +22,7 @@ import pytest
 
 from dbprint.adapters import Adapter, ColumnMeta, StatisticsConfig, TableScope
 from dbprint.adapters.errors import QueryFailed
+from dbprint.cli.adapter_registry import get_adapter_class
 
 
 SAMPLE = TableScope(sample=0.25)
@@ -32,7 +36,25 @@ DRAW_CLAUSES: dict[str, str] = {
     "postgres": "tablesample",
     "mysql": "rand(",
     "snowflake": "sample system (",
+    "duckdb": "tablesample bernoulli(",
+    "clickhouse": "sample ",
+    "redshift": "random() <",
+    "databricks": "tablesample (",
+    "bigquery": "tablesample system (",
 }
+
+# The vendors whose unmaterialized fallback stays coherent, written out rather than read from the
+# adapters: a wrongly-flipped flag would turn the tests below into silent skips, not failures.
+COHERENT_FALLBACK_VENDORS = frozenset({"databricks", "duckdb", "postgres"})
+
+# `CREATE TEMPORARY TABLE ... AS SELECT` is a Databricks-only feature OSS Spark rejects
+# (measured), so only tests calling `materialize_scope` directly are affected here.
+_NO_LOCAL_TEMP_TABLE = {"databricks"}
+
+# The DDL keyword each vendor's copy step opens with - only BigQuery diverges, its copy being
+# a genuine non-session table (`adapters.bigquery.stats.materialize`), self-expiring and
+# replaceable rather than session-scoped.
+_COPY_PREFIX: dict[str, str] = {"bigquery": "create or replace table"}
 
 
 def _profile(
@@ -55,6 +77,17 @@ def _profile(
     )
 
 
+def test_which_vendors_claim_a_coherent_fallback_is_pinned() -> None:
+    """A flip either way changes what every test below runs at all, so it is asserted directly.
+
+    Requires no connection: this is what makes it the one check a vendor's absence cannot skip.
+    """
+
+    claimed = {v for v in DRAW_CLAUSES if get_adapter_class(v).SAMPLE_FALLBACK_COHERENT}
+
+    assert claimed == COHERENT_FALLBACK_VENDORS
+
+
 class TestRepeatability:
     def test_two_sampled_profiles_of_one_table_agree(
         self,
@@ -62,7 +95,11 @@ class TestRepeatability:
     ) -> None:
         """The seed derives from the table's own name, which did not move."""
 
-        _, factory = sql_adapter_factory
+        vendor, factory = sql_adapter_factory
+
+        if not get_adapter_class(vendor).SAMPLE_FALLBACK_COHERENT:
+            pytest.skip(f"{vendor} is not SAMPLE_FALLBACK_COHERENT; see module docstring.")
+
         adapter = factory()
 
         try:
@@ -99,7 +136,11 @@ class TestPercentilesComeFromTheRowsBesideThem:
         self,
         sql_adapter_factory: tuple[str, Callable[[], Adapter]],
     ) -> None:
-        _, factory = sql_adapter_factory
+        vendor, factory = sql_adapter_factory
+
+        if not get_adapter_class(vendor).SAMPLE_FALLBACK_COHERENT:
+            pytest.skip(f"{vendor} is not SAMPLE_FALLBACK_COHERENT; see module docstring.")
+
         adapter = factory()
 
         try:
@@ -135,6 +176,10 @@ def test_both_statistics_phases_read_the_same_source(
     from tests.adapters.test_dialect_guard import _install_recorder
 
     vendor, factory = sql_adapter_factory
+
+    if not get_adapter_class(vendor).SAMPLE_FALLBACK_COHERENT:
+        pytest.skip(f"{vendor} is not SAMPLE_FALLBACK_COHERENT; see module docstring.")
+
     adapter = factory()
     recorder = _install_recorder(adapter)
 
@@ -173,6 +218,8 @@ DRAW_EXPRESSIONS: dict[str, str] = {
     "postgres": r"tablesample bernoulli\([^)]*\)(?: repeatable \([^)]*\))?",
     "mysql": r"rand\([^)]*\) < [0-9.]+",
     "snowflake": r"sample system \([^)]*\)(?: seed \([^)]*\))?",
+    "duckdb": r"tablesample bernoulli\([^)]*\)(?: repeatable \([^)]*\))?",
+    "databricks": r"tablesample \([^)]*\)(?: repeatable \([^)]*\))?",
 }
 
 
@@ -195,6 +242,10 @@ def test_no_statement_draws_its_sample_more_than_once(
     from tests.adapters.test_dialect_guard import _install_recorder
 
     vendor, factory = sql_adapter_factory
+
+    if not get_adapter_class(vendor).SAMPLE_FALLBACK_COHERENT:
+        pytest.skip(f"{vendor} is not SAMPLE_FALLBACK_COHERENT; see module docstring.")
+
     adapter = factory()
     recorder = _install_recorder(adapter)
 
@@ -233,6 +284,10 @@ class TestTheCopiedDraw:
         from tests.adapters.test_dialect_guard import _install_recorder
 
         vendor, factory = sql_adapter_factory
+
+        if vendor in _NO_LOCAL_TEMP_TABLE:
+            pytest.skip(f"{vendor} has no local `CREATE TEMPORARY TABLE`; see module docstring.")
+
         adapter = factory()
         recorder = _install_recorder(adapter)
 
@@ -248,9 +303,10 @@ class TestTheCopiedDraw:
             adapter.close()
 
         drawn = [s for s in statements if DRAW_CLAUSES[vendor] in s]
+        copy_prefix = _COPY_PREFIX.get(vendor, "create temporary table")
 
         assert len(drawn) == 1, f"{vendor}: the draw was evaluated {len(drawn)} times: {drawn}"
-        assert drawn[0].startswith("create temporary table"), (
+        assert drawn[0].startswith(copy_prefix), (
             f"{vendor}: the one draw is not the copy that makes it repeatable: {drawn[0]}"
         )
 
@@ -260,7 +316,11 @@ class TestTheCopiedDraw:
     ) -> None:
         """The identity a sampled print kept breaking, asserted on the adapter's output."""
 
-        _, factory = sql_adapter_factory
+        vendor, factory = sql_adapter_factory
+
+        if vendor in _NO_LOCAL_TEMP_TABLE:
+            pytest.skip(f"{vendor} has no local `CREATE TEMPORARY TABLE`; see module docstring.")
+
         adapter = factory()
 
         try:
@@ -290,10 +350,39 @@ class TestTheCopiedDraw:
                 f"{name}: lists {listed} rows against {non_null} non-null rows scanned, "
                 f"so the two came from different draws"
             )
-            assert col.values_coverage is not None and col.values_coverage <= 1
+
+            # numeric/temporal carry `values` but never `values_coverage` (SPEC 2.2.3).
+            if col.range is None and col.percentiles is None:
+                assert col.values_coverage is not None and col.values_coverage <= 1
+
             checked += 1
 
         assert checked, "no column carried a value list; the assertion would be vacuous"
+
+    def test_normalized_cardinality_reads_the_copy_not_a_fresh_draw(
+        self,
+        sql_adapter_factory: tuple[str, Callable[[], Adapter]],
+    ) -> None:
+        """SPEC 2.2.4: unlike `sketch`, a scoped column stays eligible for this field - and
+        it must read the same copy every other statistic already did, not redraw.
+        """
+
+        vendor, factory = sql_adapter_factory
+
+        if vendor in _NO_LOCAL_TEMP_TABLE:
+            pytest.skip(f"{vendor} has no local `CREATE TEMPORARY TABLE`; see module docstring.")
+
+        adapter = factory()
+
+        try:
+            fqn, _columns, scope = _copy_the_draw(adapter)
+            first = adapter.compute_normalized_cardinality(fqn, "label", scope)
+            second = adapter.compute_normalized_cardinality(fqn, "label", scope)
+            adapter.release_scope(fqn, scope)
+        finally:
+            adapter.close()
+
+        assert first == second
 
     def test_releasing_the_copy_drops_it_and_twice_is_harmless(
         self,
@@ -301,7 +390,11 @@ class TestTheCopiedDraw:
     ) -> None:
         """Cleanup runs in a `finally`, so it must survive a second release after a failure."""
 
-        _, factory = sql_adapter_factory
+        vendor, factory = sql_adapter_factory
+
+        if vendor in _NO_LOCAL_TEMP_TABLE:
+            pytest.skip(f"{vendor} has no local `CREATE TEMPORARY TABLE`; see module docstring.")
+
         adapter = factory()
 
         try:
@@ -313,3 +406,27 @@ class TestTheCopiedDraw:
                 adapter.compute_base_statistics(fqn, columns, SAMPLED_CONFIG, scope)
         finally:
             adapter.close()
+
+
+def test_clickhouse_refuses_a_table_without_a_sampling_key(clickhouse_native_connection) -> None:
+    """`SAMPLE` only works on a MergeTree table that declared `SAMPLE BY` at creation - caught
+    from the catalog fact `list_tables` already read, not discovered by a failed `CREATE`.
+    """
+
+    from dbprint.adapters import ClickhouseAdapter
+    from dbprint.adapters.clickhouse.adapter import SamplingKeyMissing
+
+    cur = clickhouse_native_connection
+    adapter = ClickhouseAdapter(
+        {"host": "chdb", "database": "seedbank"},
+        cursor_factory=lambda _p: cur,
+    )
+    adapter.connect()
+
+    try:
+        table = next(iter(adapter.list_tables(include=["*.unsampled"], exclude=[])))
+
+        with pytest.raises(SamplingKeyMissing, match="no SAMPLE BY key"):
+            adapter.materialize_scope(table.fqn, TableScope(sample=0.1))
+    finally:
+        adapter.close()

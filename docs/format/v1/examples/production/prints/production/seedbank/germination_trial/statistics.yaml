@@ -10,6 +10,71 @@ grain:
     - trial_id
     detection: declared
 dependencies: []
+timeline:
+  column: started_on
+  unit: month
+  buckets:
+  - start: '2020-01-01'
+    count: 30
+  - start: '2020-02-01'
+    count: 29
+  - start: '2020-03-01'
+    count: 31
+  - start: '2020-04-01'
+    count: 30
+  - start: '2020-05-01'
+    count: 31
+  - start: '2020-06-01'
+    count: 30
+  - start: '2020-07-01'
+    count: 31
+  - start: '2020-08-01'
+    count: 31
+  - start: '2020-09-01'
+    count: 30
+  - start: '2020-10-01'
+    count: 31
+  - start: '2020-11-01'
+    count: 30
+  - start: '2020-12-01'
+    count: 31
+  - start: '2021-01-01'
+    count: 31
+  - start: '2021-02-01'
+    count: 28
+  - start: '2021-03-01'
+    count: 31
+  - start: '2021-04-01'
+    count: 30
+  - start: '2021-05-01'
+    count: 31
+  - start: '2021-06-01'
+    count: 30
+  - start: '2021-07-01'
+    count: 31
+  - start: '2021-08-01'
+    count: 31
+  - start: '2021-09-01'
+    count: 30
+  - start: '2021-10-01'
+    count: 31
+  - start: '2021-11-01'
+    count: 30
+  - start: '2021-12-01'
+    count: 31
+  - start: '2022-01-01'
+    count: 31
+  - start: '2022-02-01'
+    count: 28
+  - start: '2022-03-01'
+    count: 31
+  - start: '2022-04-01'
+    count: 30
+  - start: '2022-05-01'
+    count: 31
+  - start: '2022-06-01'
+    count: 19
+  coverage: 1.0
 columns:
   trial_id:
     sql_type: integer
@@ -22,6 +87,67 @@ columns:
     cardinality_method: exact
     inferred:
       candidate_key: true
+    values:
+    - value: 1
+      count: 1
+    - value: 10
+      count: 1
+    - value: 100
+      count: 1
+    - value: 101
+      count: 1
+    - value: 102
+      count: 1
+    - value: 103
+      count: 1
+    - value: 104
+      count: 1
+    - value: 105
+      count: 1
+    - value: 106
+      count: 1
+    - value: 107
+      count: 1
+    - value: 108
+      count: 1
+    - value: 109
+      count: 1
+    - value: 11
+      count: 1
+    - value: 110
+      count: 1
+    - value: 111
+      count: 1
+    - value: 112
+      count: 1
+    - value: 113
+      count: 1
+    - value: 114
+      count: 1
+    - value: 115
+      count: 1
+    - value: 116
+      count: 1
+    - value: 117
+      count: 1
+    - value: 118
+      count: 1
+    - value: 119
+      count: 1
+    - value: 12
+      count: 1
+    - value: 120
+      count: 1
+    - value: 121
+      count: 1
+    - value: 122
+      count: 1
+    - value: 123
+      count: 1
+    - value: 124
+      count: 1
+    - value: 125
+      count: 1
     distribution: long_tail
     frequencies:
       top: 1
@@ -37,6 +163,11 @@ columns:
       p50: 450.5
       p75: 675.25
       p99: 891.01
+    mean: 450.5
+    sum: 405450
+    zero_count: 0
+    negative_count: 0
+    quantized_count: 900
     sketch:
       method: kmv_md5_lo64
       values: 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
@@ -191,9 +322,15 @@ columns:
       count: 3
     values_coverage: 0.1
     distribution: long_tail
+    length:
+      min: 36
+      max: 36
+      avg: 36.0
+      p95: 36.0
     sketch:
       method: kmv_md5_lo64
       values: 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
+    normalized_cardinality: 400
   medium:
     sql_type: character varying(40)
     nullable: false
@@ -219,6 +356,11 @@ columns:
     values_coverage: 1.0
     values_coverage_method: measured
     distribution: imbalanced
+    length:
+      min: 7
+      max: 18
+      avg: 12.862222
+      p95: 18.0
     sketch:
       method: kmv_md5_lo64
       values: VFJr7K0TbUtadk7z3CDFom7YqhNZMMR7qaQ6N9AAKEe7btn/Zv2B58weIEQagElf
@@ -231,6 +373,67 @@ columns:
     cardinality: 60
     cardinality_ratio: 0.066667
     cardinality_method: exact
+    values:
+    - value: 20
+      count: 15
+    - value: 21
+      count: 15
+    - value: 22
+      count: 15
+    - value: 23
+      count: 15
+    - value: 24
+      count: 15
+    - value: 25
+      count: 15
+    - value: 26
+      count: 15
+    - value: 27
+      count: 15
+    - value: 28
+      count: 15
+    - value: 29
+      count: 15
+    - value: 30
+      count: 15
+    - value: 31
+      count: 15
+    - value: 32
+      count: 15
+    - value: 33
+      count: 15
+    - value: 34
+      count: 15
+    - value: 35
+      count: 15
+    - value: 36
+      count: 15
+    - value: 37
+      count: 15
+    - value: 38
+      count: 15
+    - value: 39
+      count: 15
+    - value: 40
+      count: 15
+    - value: 41
+      count: 15
+    - value: 42
+      count: 15
+    - value: 43
+      count: 15
+    - value: 44
+      count: 15
+    - value: 45
+      count: 15
+    - value: 46
+      count: 15
+    - value: 47
+      count: 15
+    - value: 48
+      count: 15
+    - value: 49
+      count: 15
     distribution: uniform
     frequencies:
       top: 15
@@ -246,6 +449,11 @@ columns:
       p50: 49.5
       p75: 64.25
       p99: 79.0
+    mean: 49.5
+    sum: 44550
+    zero_count: 0
+    negative_count: 0
+    quantized_count: 900
     sketch:
       method: kmv_md5_lo64
       values: BafiKKicN5kHaxxXIqRqogfTqj2ZjlE1E/QpQ4gcZV8Y7O5HFFpywBkJREDDF+IbJMfSWDvmklEl+Fl4NPqDpCaCKRUcm94RKqNT4nh5EzwuDrE9WF5MIjr+V8LgCLyMO+gHmlx00HlGyQd+u141w0iBtT4eGxi2UHys2OLyrvxQzfGyDeb0ZlYkCy/wEAveXYe4x9i5qs1o0TjytP3W8Gw/Z4gZtuBYb3zZ39Dl3qpw3tBfWjvz7HR7+i8bX4fbdWh75hBqO4R1oaSm4bl3D3cyhqiVvIQ2et80sdd+iNd7u+0Oyj/i4IYj42vU48fFjvTGKOugJZGY1doQ/mbyHZs2leDLbN5/m741VKT99vudz407XG4LAaRLDliGaAy5pNG8DhdCwIuyN080K+ntRLOPyNKHLx7GtGktNN6GM8S1ApOt/st7GLsYZM3uTT1uu6Aooh7TgEbAXz2KtljFUceMdb0eBvIV0zw2sbX8LLHWZUU8+y5V8NhGEGP0rFim2Vg8NP01bvXb68KskSgwP9whJwj3IbeI3b0GlKTpvcjeuV/FhM2WXeDKmhW2FTZ34P8uwZs3FRTh7Q/2E/VjveOxOWgxqDmP5p81EDkVIYnvyW9AJ1vcCvp0irbZrz/X
@@ -258,6 +466,67 @@ columns:
     cardinality: 53
     cardinality_ratio: 0.058889
     cardinality_method: exact
+    values:
+    - value: 12
+      count: 30
+    - value: 14
+      count: 30
+    - value: 20
+      count: 30
+    - value: 6
+      count: 30
+    - value: 7
+      count: 30
+    - value: 8
+      count: 30
+    - value: 9
+      count: 30
+    - value: 10
+      count: 15
+    - value: 11
+      count: 15
+    - value: 13
+      count: 15
+    - value: 15
+      count: 15
+    - value: 16
+      count: 15
+    - value: 17
+      count: 15
+    - value: 18
+      count: 15
+    - value: 19
+      count: 15
+    - value: 21
+      count: 15
+    - value: 22
+      count: 15
+    - value: 23
+      count: 15
+    - value: 24
+      count: 15
+    - value: 25
+      count: 15
+    - value: 26
+      count: 15
+    - value: 27
+      count: 15
+    - value: 28
+      count: 15
+    - value: 30
+      count: 15
+    - value: 31
+      count: 15
+    - value: 32
+      count: 15
+    - value: 33
+      count: 15
+    - value: 34
+      count: 15
+    - value: 35
+      count: 15
+    - value: 36
+      count: 15
     distribution: uniform
     frequencies:
       top: 30
@@ -273,6 +542,11 @@ columns:
       p50: 29.0
       p75: 47.25
       p99: 70.0
+    mean: 31.966667
+    sum: 28770
+    zero_count: 0
+    negative_count: 0
+    quantized_count: 900
     sketch:
       method: kmv_md5_lo64
       values: B2scVyKkaqINteS5f8KvORP0KUOIHGVfJfhZeDT6g6Qqo1PieHkTPCyZCwqCZS3KLg6xPVheTCI6/lfC4Ai8jDvoB5pcdNB5RKqdW63pe69IgbU+HhsYtlDN8bIN5vRmWfUf0Cl+I21aNt7dS+olQ12HuMfYuarNaNE48rT91vBvYG61Jf/cVm982d/Q5d6qb7XmCH6xstxw3tBfWjvz7HR7+i8bX4fbdV045tFj6CB1aHvmEGo7hHcyhqiVvIQ2e7vtDso/4uCM30rSKZ9tI5bTyL0fjy/zl5XEQmNrVfubNpXgy2zef5u+NVSk/fb7nc+NO1xuCwGkSw5YhmgMuaTRvA4XQsCLqiegyZv/ZxCyN080K+ntRLOPyNKHLx7GtQKTrf7Lexi7GGTN7k09bseMdb0eBvIV0zw2sbX8LLHWZUU8+y5V8NhGEGP0rFim2Vg8NP01bvXb68KskSgwP9whJwj3IbeI4MqaFbYVNnfh7Q/2E/VjveOxOWgxqDmP5p81EDkVIYnqGvxRx8atJu/Jb0AnW9wK90Ofj/q9/8T6dIq22a8/1w==
@@ -287,6 +561,67 @@ columns:
     cardinality_method: exact
     inferred:
       candidate_key: true
+    values:
+    - value: '2020-01-02'
+      count: 1
+    - value: '2020-01-03'
+      count: 1
+    - value: '2020-01-04'
+      count: 1
+    - value: '2020-01-05'
+      count: 1
+    - value: '2020-01-06'
+      count: 1
+    - value: '2020-01-07'
+      count: 1
+    - value: '2020-01-08'
+      count: 1
+    - value: '2020-01-09'
+      count: 1
+    - value: '2020-01-10'
+      count: 1
+    - value: '2020-01-11'
+      count: 1
+    - value: '2020-01-12'
+      count: 1
+    - value: '2020-01-13'
+      count: 1
+    - value: '2020-01-14'
+      count: 1
+    - value: '2020-01-15'
+      count: 1
+    - value: '2020-01-16'
+      count: 1
+    - value: '2020-01-17'
+      count: 1
+    - value: '2020-01-18'
+      count: 1
+    - value: '2020-01-19'
+      count: 1
+    - value: '2020-01-20'
+      count: 1
+    - value: '2020-01-21'
+      count: 1
+    - value: '2020-01-22'
+      count: 1
+    - value: '2020-01-23'
+      count: 1
+    - value: '2020-01-24'
+      count: 1
+    - value: '2020-01-25'
+      count: 1
+    - value: '2020-01-26'
+      count: 1
+    - value: '2020-01-27'
+      count: 1
+    - value: '2020-01-28'
+      count: 1
+    - value: '2020-01-29'
+      count: 1
+    - value: '2020-01-30'
+      count: 1
+    - value: '2020-01-31'
+      count: 1
     distribution: long_tail
     frequencies:
       top: 1
@@ -318,6 +653,67 @@ columns:
     cardinality: 459
     cardinality_ratio: 0.51
     cardinality_method: exact
+    values:
+    - value: '2020-02-04T00:00:00Z'
+      count: 2
+    - value: '2020-02-06T00:00:00Z'
+      count: 2
+    - value: '2020-02-08T00:00:00Z'
+      count: 2
+    - value: '2020-02-10T00:00:00Z'
+      count: 2
+    - value: '2020-02-12T00:00:00Z'
+      count: 2
+    - value: '2020-02-14T00:00:00Z'
+      count: 2
+    - value: '2020-02-16T00:00:00Z'
+      count: 2
+    - value: '2020-02-18T00:00:00Z'
+      count: 2
+    - value: '2020-02-20T00:00:00Z'
+      count: 2
+    - value: '2020-02-22T00:00:00Z'
+      count: 2
+    - value: '2020-02-24T00:00:00Z'
+      count: 2
+    - value: '2020-02-26T00:00:00Z'
+      count: 2
+    - value: '2020-02-28T00:00:00Z'
+      count: 2
+    - value: '2020-03-01T00:00:00Z'
+      count: 2
+    - value: '2020-03-03T00:00:00Z'
+      count: 2
+    - value: '2020-03-05T00:00:00Z'
+      count: 2
+    - value: '2020-03-07T00:00:00Z'
+      count: 2
+    - value: '2020-03-09T00:00:00Z'
+      count: 2
+    - value: '2020-03-11T00:00:00Z'
+      count: 2
+    - value: '2020-03-13T00:00:00Z'
+      count: 2
+    - value: '2020-03-15T00:00:00Z'
+      count: 2
+    - value: '2020-03-17T00:00:00Z'
+      count: 2
+    - value: '2020-03-19T00:00:00Z'
+      count: 2
+    - value: '2020-03-21T00:00:00Z'
+      count: 2
+    - value: '2020-03-23T00:00:00Z'
+      count: 2
+    - value: '2020-03-25T00:00:00Z'
+      count: 2
+    - value: '2020-03-27T00:00:00Z'
+      count: 2
+    - value: '2020-03-29T00:00:00Z'
+      count: 2
+    - value: '2020-03-31T00:00:00Z'
+      count: 2
+    - value: '2020-04-02T00:00:00Z'
+      count: 2
     distribution: long_tail
     frequencies:
       top: 2
@@ -334,6 +730,7 @@ columns:
       p50: '2021-04-19T00:00:00Z'
       p75: '2021-11-29T00:00:00Z'
       p99: '2022-07-03T00:00:00Z'
+    quantized_count: 900
     freshness:
       max_age_days: 1396
       classification: dormant

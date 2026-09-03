@@ -28,13 +28,8 @@ ProgressStatus = Literal["start", "done", "failed", "skipped"]
 
 @dataclass(frozen=True)
 class ProgressEvent:
-    """One progress signal emitted while a generate run advances.
-
-    Purely additive: emission never alters extraction, artifacts, or exit codes.
-    `index`/`total` are scoped to the connection. `inventory` fires once per object in the
-    relationship pre-pass, not per table re-profiled, so feeding it into the per-table tracker
-    makes a wide connection's bar appear to restart. `fqn` is None for connection-wide phases.
-    `pass_name`/`findings` are `validate`-phase only; `findings` is set on the closing tick alone.
+    """One progress signal emitted while a generate run advances - purely additive, never
+    altering extraction, artifacts or exit codes; `index`/`total` are connection-scoped.
     """
 
     connection: str
@@ -50,7 +45,10 @@ class ProgressEvent:
     row_count: int | None = None
     error: str | None = None
     pass_name: str | None = None
+    pass_index: int | None = None
+    pass_total: int | None = None
     findings: int | None = None
+    severity: Literal["error", "warning"] | None = None
 
 
 ProgressCallback = Callable[[ProgressEvent], None]

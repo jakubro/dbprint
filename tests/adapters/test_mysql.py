@@ -867,6 +867,42 @@ class TestPhysicalLayout:
             adapter.close()
 
 
+class TestViewDependencies:
+    """`introspect_view_dependencies` needs MySQL 8's `information_schema.view_table_usage`,
+    which MariaDB lacks - so this exercises the documented omission path, not the populated one.
+    """
+
+    def _cursor(self, mysql_test_db: dict[str, str]) -> Any:
+        import mysql.connector
+
+        conn = mysql.connector.connect(
+            host=mysql_test_db["host"],
+            port=int(mysql_test_db["port"]),
+            user=mysql_test_db["user"],
+            password="",
+            database=mysql_test_db["database"],
+            autocommit=True,
+        )
+
+        return conn, conn.cursor()
+
+    def test_view_table_usage_is_absent_on_mariadb(self, mysql_test_db: dict[str, str]) -> None:
+        conn, cur = self._cursor(mysql_test_db)
+        try:
+            cur.execute("CREATE VIEW zz_v AS SELECT 1 AS x")
+        finally:
+            cur.close()
+            conn.close()
+
+        adapter = _build(mysql_test_db)
+
+        try:
+            with pytest.raises(QueryFailed, match="(?i)view_table_usage"):
+                adapter.introspect_view_dependencies()
+        finally:
+            adapter.close()
+
+
 class TestRankedShapeSurvivesUserColumnNames:
     """The ranked derived table's own columns must not collide with the data's.
 

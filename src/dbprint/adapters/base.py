@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any, ClassVar, Literal
 
 from dbprint.config import StatisticsConfig
+from dbprint.spec.classification import has_day_resolution
 from dbprint.spec.coverage import coverage_share
 from dbprint.spec.distribution import Distribution, Frequencies
 from dbprint.spec.sketch import SketchKind
@@ -61,13 +62,23 @@ __all__ = [
     "null_patterns_from_rows",
     "row_count_or_none",
     "seed_from_fqn",
+    "temporal_block_unmeasured",
 ]
 
 
-AdapterType = Literal["postgres", "snowflake", "mysql"]
+AdapterType = Literal[
+    "postgres",
+    "snowflake",
+    "mysql",
+    "duckdb",
+    "clickhouse",
+    "redshift",
+    "databricks",
+    "bigquery",
+]
 TableType = Literal["table", "view", "matview"]
 FkAction = Literal["NO ACTION", "CASCADE", "SET NULL", "SET DEFAULT", "RESTRICT"]
-Detection = Literal["declared", "inferred"]
+Detection = Literal["declared", "inferred", "measured"]
 GrainDetection = Literal["declared", "measured"]
 CardinalityMethod = Literal["exact", "approximate"]
 RowCountMethod = Literal["exact", "approximate"]
@@ -179,6 +190,21 @@ def row_count_or_none(estimate: float) -> int | None:
     return None if estimate < 0 else int(estimate)
 
 
+def temporal_block_unmeasured(sql_type: str) -> tuple[str, ...]:
+    """The REQUIRED fields one failed temporal block costs a column (SPEC 2.2.4).
+
+    `quantized_count` is named only where the type has a day to truncate to: on the others the
+    SPEC 2.2.3 matrix never required it, so naming it would claim a measurement nobody was owed.
+    """
+
+    lost = ["distribution", "freshness", "frequencies", "percentiles", "range", "values"]
+
+    if has_day_resolution(sql_type):
+        lost.append("quantized_count")
+
+    return tuple(sorted(lost))
+
+
 @dataclass(frozen=True)
 class TableMeta:
     """Identifies a table/view/matview and its namespace position."""
@@ -254,13 +280,11 @@ class PhysicalLayoutKey:
 
 @dataclass(frozen=True)
 class PhysicalLayout:
-    """A table's declared clustering or partitioning key - never measured.
-
-    `mechanism` is per adapter (`cluster` for Snowflake, `partition` for Postgres/MySQL) and
-    `keys` is ordered. Absence means "not clustered", never "not checked".
+    """A table's declared clustering or partitioning key - never measured; `mechanism` is per
+    adapter and `keys` ordered, and absence means "not clustered", never "not checked".
     """
 
-    mechanism: Literal["cluster", "partition"]
+    mechanism: Literal["cluster", "partition", "sort"]
     keys: tuple[PhysicalLayoutKey, ...]
 
 
@@ -304,6 +328,36 @@ class Dependency:
 
 
 @dataclass(frozen=True)
+class TimelineBucket:
+    """One bucketed span of the `timeline` anchor column (SPEC 2.2.16)."""
+
+    start: str
+    count: int
+
+
+@dataclass(frozen=True)
+class Timeline:
+    """The anchor column's activity bucketed at an adaptive unit (SPEC 2.2.16) - `coverage` is the
+    listed bucket counts over `rows_scanned`, rounded per SPEC 2.2.6 so a validator cannot disagree.
+    """
+
+    column: str
+    unit: Literal["day", "week", "month"]
+    buckets: tuple[TimelineBucket, ...]
+    coverage: float
+
+
+@dataclass(frozen=True)
+class Populated:
+    """One column's populated window, dated against the table's `timeline` anchor (SPEC 2.2.4).
+    `from_` trails an underscore - `from` is a Python keyword; the serialized key is `from`.
+    """
+
+    from_: str
+    to: str
+
+
+@dataclass(frozen=True)
 class CommentsMeta:
     """Schema-level comments - distinct from user-authored `description.md`."""
 
@@ -321,6 +375,16 @@ class Range:
 
 
 @dataclass(frozen=True)
+class Length:
+    """Character length summary (SPEC 2.2.4), on every string-valued classification."""
+
+    min: int
+    max: int
+    avg: float
+    p95: float
+
+
+@dataclass(frozen=True)
 class Freshness:
     """Temporal-column freshness from `Range.max` vs the run's `profiled_at`.
 
@@ -333,11 +397,8 @@ class Freshness:
 
 @dataclass(frozen=True)
 class Inferred:
-    """Detected-pattern hints - shape, personal-data category, uniqueness flag.
-
-    `looks_like`, `sensitivity` and `epoch_unit` are independent axes, none a fallback for
-    another. `candidate_key_exception` qualifies `candidate_key` where the ratio falls short
-    of a genuine 1.0 (SPEC 4.2). `sampled`/`matched` (SPEC 4.1.3) ride `looks_like` alone.
+    """Detected-pattern hints - shape, personal-data category, epoch unit and uniqueness flag,
+    each an independent axis, none a fallback for another (SPEC 4.5).
     """
 
     looks_like: str | None = None
@@ -347,6 +408,8 @@ class Inferred:
     epoch_unit: str | None = None
     sampled: int | None = None
     matched: int | None = None
+    looks_like_candidate: str | None = None
+    looks_like_candidate_share: float | None = None
 
 
 @dataclass(frozen=True)
@@ -422,7 +485,7 @@ class TableCounts:
     """One table's counts, and how the total was obtained.
 
     `row_count_method` is the adapter's own statement, not derived from whether `scope`
-    narrowed the read (ARCHITECTURE.md 2, SPEC 2.2.2).
+    narrowed the read (ARCHITECTURE.md 2, SPEC 2.2.1).
     """
 
     row_count: int
@@ -441,8 +504,16 @@ class BaseStats:
 
     null_count: int
     cardinality: int
-    cardinality_method: CardinalityMethod = "exact"
+    cardinality_method: CardinalityMethod
     supported: bool = True
+    zero_count: int | None = None
+    negative_count: int | None = None
+    empty_count: int | None = None
+    quantized_count: int | None = None
+    length_min: int | None = None
+    length_max: int | None = None
+    length_avg: float | None = None
+    length_p95: float | None = None
 
 
 @dataclass(frozen=True)
@@ -466,8 +537,18 @@ class ColumnStats:
     frequencies: Frequencies | None = None
     range: Range | None = None
     percentiles: dict[str, Any] | None = None
+    mean: float | None = None
+    sum: float | None = None
+    zero_count: int | None = None
+    negative_count: int | None = None
+    empty_count: int | None = None
+    quantized_count: int | None = None
+    length: Length | None = None
     inferred: Inferred | None = None
     unrepresentable: tuple[str, ...] | None = None
+    # SPEC 2.2.4: the REQUIRED fields this run attempted and could not obtain. Names them so
+    # their absence is not read as the structural cause SPEC 7.2 would otherwise imply.
+    unmeasured: tuple[str, ...] | None = None
 
 
 class Adapter(ABC):
@@ -479,6 +560,14 @@ class Adapter(ABC):
 
     REQUIRED_KEYS: ClassVar[tuple[str, ...]] = ()
     OPTIONAL_KEYS: ClassVar[tuple[str, ...]] = ()
+
+    # Whether an unmaterialized `sample` scope stays coherent across statements - a seeded per-row
+    # predicate (Postgres/duckdb BERNOULLI) redraws identically, an unseeded construct does not.
+    SAMPLE_FALLBACK_COHERENT: ClassVar[bool] = True
+
+    # Whether `materialize_scope`'s copy dies with the session on its own, so a failed
+    # `release_scope` still leaves nothing behind. False names what cleans it up instead.
+    MATERIALIZED_SCOPE_SESSION_SCOPED: ClassVar[bool] = True
 
     @abstractmethod
     def connect(self) -> None:
@@ -535,6 +624,12 @@ class Adapter(ABC):
 
         Catalog metadata only - no scan, never a measurement of how well clustered the table
         is. None means no such key is declared, and every adapter MUST answer.
+        """
+
+    @abstractmethod
+    def introspect_view_dependencies(self) -> dict[str, tuple[str, ...]] | None:
+        """Every view/matview's direct object dependencies, one catalog query for the whole
+        connection - `None`, or an absent key, both mean the source could not be asked.
         """
 
     @abstractmethod
@@ -656,6 +751,34 @@ class Adapter(ABC):
         """
 
     @abstractmethod
+    def probe_timeline(
+        self,
+        fqn: str,
+        columns: list[ColumnMeta],
+        counts: TableCounts,
+        column: str,
+        unit: Literal["day", "week", "month"],
+        scope: TableScope | None = None,
+    ) -> tuple[tuple[str, int], ...]:
+        """Bucket `column`'s non-null values at `unit` grain, one grouped statement (SPEC 2.2.16)
+        - ascending (bucket_start, count) pairs; an empty bucket is absent, never a zero entry.
+        """
+
+    @abstractmethod
+    def compute_populated_windows(
+        self,
+        fqn: str,
+        columns: list[ColumnMeta],
+        counts: TableCounts,
+        anchor_column: str,
+        subject_columns: tuple[str, ...],
+        scope: TableScope | None = None,
+    ) -> dict[str, tuple[str, str]]:
+        """Each subject column's [from, to] window over the anchor, one statement (SPEC 2.2.4) -
+        a subject with no non-null row is absent, and both instants use the anchor's domain rule.
+        """
+
+    @abstractmethod
     def probe_dependencies(
         self,
         fqn: str,
@@ -701,6 +824,17 @@ class Adapter(ABC):
         `kind` picks the canonical encoding family; `sql_type` supplies the temporal rendering
         `kind` alone does not distinguish (SPEC 2.2.14). Computed in-database. Fewer than `k`
         entries means an exact rather than estimated sketch. Never receives a `scope`.
+        """
+
+    @abstractmethod
+    def compute_normalized_cardinality(
+        self,
+        fqn: str,
+        column: str,
+        scope: TableScope | None = None,
+    ) -> int:
+        """The distinct count of `column` once trimmed and case-folded (SPEC 2.2.4) - computed
+        in-database over the same scanned set `scope` narrows `cardinality` to (SPEC 2.2.8).
         """
 
     @abstractmethod

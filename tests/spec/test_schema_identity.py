@@ -47,7 +47,7 @@ def test_the_schema_set_is_not_empty() -> None:
 def test_the_identifier_names_its_own_file(schema: Path) -> None:
     """Each `$id` ends in the basename of the file declaring it."""
 
-    declared = json.loads(schema.read_text())["$id"]
+    declared = json.loads(schema.read_text(encoding="utf-8"))["$id"]
 
     assert declared.rsplit("/", 1)[-1] == schema.name
 
@@ -56,6 +56,6 @@ def test_the_identifier_names_its_own_file(schema: Path) -> None:
 def test_the_identifier_is_under_the_project_account(schema: Path) -> None:
     """Each `$id` is served from an address the project controls."""
 
-    declared = json.loads(schema.read_text())["$id"]
+    declared = json.loads(schema.read_text(encoding="utf-8"))["$id"]
 
     assert declared.startswith(f"https://{account_handle()}.github.io/")

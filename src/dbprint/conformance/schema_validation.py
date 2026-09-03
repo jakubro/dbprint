@@ -28,7 +28,7 @@ _FORWARD_COMPAT_ENUM_FIELDS: dict[str, tuple[str, str]] = {
 
 
 def _load_schema(name: str) -> dict[str, Any]:
-    text = importlib.resources.files("dbprint.spec.v1").joinpath(name).read_text()
+    text = importlib.resources.files("dbprint.spec.v1").joinpath(name).read_text(encoding="utf-8")
 
     return json.loads(text)
 

@@ -183,6 +183,7 @@ body.chart-fs-open { overflow: hidden; }
 .badge-redacted { color: #b8860b; background: #b8860b22; }
 .badge-inferred { color: #9b6bce; background: #9b6bce22; }
 .badge-declared { color: #5cb85c; background: #5cb85c22; }
+.badge-measured { color: #d99a4a; background: #d99a4a22; }
 .badge-sketch { color: #4bb8a8; background: #4bb8a822; }
 
 .boxplot { position: relative; height: 10px; margin: .2rem 0; min-width: 18rem; }

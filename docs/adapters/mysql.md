@@ -78,7 +78,7 @@ each statistic for it is measured over its own draw of the rows
 
 Note that MySQL reports this as a plain access-denied error rather than one naming temporary tables, so the message is worth reading in full before concluding the account lost its `SELECT`.
 
-The fallback is not an equivalent path. Each statement then draws its own rows, so a column's listed value counts and the non-null figure they are a share of come from different reads, and the file can disagree with itself. Setting `materialize_sample: false` chooses that trade deliberately, which is the right call where policy forbids the tool writing anything at all — and the wrong one where it was chosen to avoid a grant.
+The fallback is not an equivalent path. Each statement then draws its own rows, so a column's listed value counts and the non-null figure they are a share of come from different reads, and the file can disagree with itself. Setting `materialize_sample: false` chooses that trade deliberately, which is the right call where the tool must stay strictly read-only — and the wrong one where it was chosen to avoid a grant.
 
 ## Reference
 

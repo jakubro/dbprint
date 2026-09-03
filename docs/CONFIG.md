@@ -33,6 +33,7 @@ defaults:                       # OPTIONAL; each key cascades into every connect
   max_age_days: 7
   infer_relationships: true
   sketch_all_columns: false
+  compute_timeline: true
   statistics: { ... }
   rules: [ ... ]
   redact: [ ... ]
@@ -40,7 +41,7 @@ defaults:                       # OPTIONAL; each key cascades into every connect
 
 connections:                    # REQUIRED; at least one
   <name>:                       # free-form identifier; also the print subdirectory
-    adapter: postgres | snowflake | mysql   # REQUIRED
+    adapter: postgres | snowflake | mysql | duckdb | clickhouse | redshift | databricks | bigquery   # REQUIRED
     auto: false
     output: prints
     include: ["<PATTERN>"]
@@ -50,6 +51,7 @@ connections:                    # REQUIRED; at least one
     infer_relationships: true
     materialize_sample: true
     sketch_all_columns: false
+    compute_timeline: true
     statistics: { ... }
     rules: [ ... ]
     redact: [ ... ]
@@ -65,7 +67,7 @@ entries are appended to the ones from `defaults`, which is what makes a connecti
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `adapter` | enum | — (required) | `postgres` \| `snowflake` \| `mysql` |
+| `adapter` | enum | — (required) | `postgres` \| `snowflake` \| `mysql` \| `duckdb` \| `clickhouse` \| `redshift` \| `databricks` \| `bigquery` |
 | `auto` | bool | `false` | Run this connection on a bare `dbprint <command>` with no `CONN` argument. Any number of connections may set it |
 | `output` | path | `prints` | Root directory, relative to `.dbprint.yaml`. Prints land in `<output>/<name>/` — the connection name is appended, so do not include it |
 | `include` | list of glob | `["*"]` | Tables to profile. **Omitting this profiles everything the connection can see** |
@@ -73,8 +75,9 @@ entries are appended to the ones from `defaults`, which is what makes a connecti
 | `max_age_days` | int ≥ 0 | `7` | A print younger than this is left alone by `generate`, and passes `check`'s freshness gate. A `rules` entry can override it per table, and can condition that override on the table's size. `0` re-profiles on every run — see below. A negative value is refused at load |
 | `max_rows_scanned` | int ≥ 1 | absent | A row-count ceiling covering every table this connection profiles; `defaults` and `rules` may also carry it. See below |
 | `infer_relationships` | bool | `true` | Derive the foreign keys the catalog does not declare, from column naming — see below |
-| `materialize_sample` | bool | `true` | Draw a sampled table's rows once into a temporary table, so every statistic for that table describes the same rows. Takes a temporary-table privilege on PostgreSQL and MySQL, none on Snowflake — see below |
+| `materialize_sample` | bool | `true` | Draw a sampled table's rows once into a temporary table, so every statistic for that table describes the same rows. Takes a temporary-table privilege on PostgreSQL and MySQL, none on Snowflake. On ClickHouse, Redshift and BigQuery the copy is not optional: a `sample` scope with the key set `false`, or a table the copy cannot be taken on, fails that table outright rather than reading it — see below |
 | `sketch_all_columns` | bool | `false` | Sketch every sketchable-type column, not only the smaller required set — see below |
+| `compute_timeline` | bool | `true` | Bucket one temporal column's activity over time — see below |
 | `statistics` | map | see below | What gets measured per column, and how much of it |
 | `rules` | list | `[]` | Per-table overrides of the keys above, plus the two that narrow what is read |
 | `redact` | list | `[]` | What to do with the cell values of the columns each entry covers |
@@ -86,7 +89,7 @@ The five block-valued keys each have their own section below.
 **`infer_relationships` derives the foreign keys a schema never declared.** Plenty of
 warehouses declare none — Snowflake does not enforce them, and analytics schemas in
 PostgreSQL routinely skip them — so a print of one carries an empty relationship graph and
-a reader cannot tell that `invoice.user_id` points at `user.id`. With the key on, a column
+a reader cannot tell that `accession.collector_id` points at `collector.collector_id`. With the key on, a column
 named `<stem>_id` whose stem resolves to an in-scope **table** declaring a single-column
 key of a compatible type becomes an edge marked `detection: inferred`; the rule and its
 refusals are specified in [SPEC 2.3.8](format/v1/SPEC.md). Turning it off removes every one
@@ -103,13 +106,19 @@ spelled differently per engine — `TEMPORARY` on the database for PostgreSQL, `
 TABLES` on the database for MySQL, and nothing at all on Snowflake, which exempts temporary tables
 from the schema's `CREATE TABLE` privilege. The copy lands in the session's own temporary space on
 PostgreSQL and MySQL and in the profiled table's own schema on Snowflake. The object holds the
-sampled fraction only rather than the whole table,
-and its lifetime is the session, so it is gone when the run ends whether the run succeeded or not.
-Where the privilege is absent the run does **not** fail: it falls back to sampling per statement,
-warns on stderr, and the incoherence above is back. Turning the key off chooses that fallback
-deliberately, which is the setting an organisation whose policy forbids the tool writing anything
-wants. A table that is not sampled never materializes — a full scan has nothing to copy, and a
-`filter` is a predicate, so re-evaluating it selects the same rows every time.
+sampled fraction only rather than the whole table, and on every adapter but BigQuery its lifetime
+is the session, so it is gone when the run ends whether the run succeeded or not — BigQuery has no
+session-scoped table at all, so its own copy is a real dataset object with an expiration set
+instead; see the per-adapter note below.
+Where the privilege is absent, what happens next depends on the adapter. PostgreSQL's own
+`TABLESAMPLE BERNOULLI` decides row membership per row from its seed, so it falls back to
+sampling per statement with a warning on stderr, and the incoherence above is back. MySQL and
+Snowflake document no such guarantee for their own constructs, so turning the key off (or a
+refused write) fails that one table instead, naming `materialize_sample` in the message, rather
+than publish a file whose fields describe different reads — see the per-adapter notes below for
+the full split across all eight. A table that is not sampled never materializes — a full scan has
+nothing to copy, and a `filter` is a predicate, so re-evaluating it selects the same rows every
+time.
 
 **`sketch_all_columns` widens the second setting that changes what leaves the database.**
 [SPEC 2.2.14](format/v1/SPEC.md) always sketches a column named by an edge, plus every
@@ -128,6 +137,15 @@ columns, which needs a reproducible read of the whole column — a narrowed read
 one, and a view is never queried. Since a large warehouse is also where sampling gets turned
 on, expect the two settings to meet: a table narrowed by `sample`, `filter` or
 `max_rows_scanned` publishes no sketches regardless.
+
+**`compute_timeline` picks one temporal column per table and buckets its non-null values by
+day, week, or month.** [SPEC 2.2.16](format/v1/SPEC.md) names the anchor deterministically
+— a temporal, non-redacted, calendar-typed column named in the table's own clustering or
+partitioning key first, otherwise the eligible column with the lowest null rate — at the
+cost of one extra grouped query per table that has one. Turning the key off skips that
+query and the column entirely, the same way `infer_relationships: false` skips its own
+pre-pass. Like `sketch_all_columns`, a table carrying a `scope` block or an empty table
+publishes no `timeline` regardless of this setting.
 
 **`max_age_days: 0` means the print is stale the moment it is written.** `generate`
 re-extracts it every run, and `check`'s freshness gate cannot pass at `0` whatever order the
@@ -168,15 +186,15 @@ and refresh dimensions daily while refreshing that fact table weekly.
 
 ```yaml
 rules:
-  - include: ["analytics.events*"]        # OPTIONAL; defaults to ["*"]
-    exclude: ["analytics.events_v2"]      # OPTIONAL; defaults to []
+  - include: ["seedbank.storage_reading*"]   # OPTIONAL; defaults to ["*"]
+    exclude: ["seedbank.storage_reading_v2"] # OPTIONAL; defaults to []
     min_rows: 500000000                   # OPTIONAL; only tables at least this large
     sample: 0.01                          # OPTIONAL; fraction in (0, 1]. Excludes `filter`
     statistics: {top_n_values: 5}         # OPTIONAL; merged key by key
     max_age_days: 30                      # OPTIONAL
-  - include: ["analytics.orders"]
+  - include: ["seedbank.germination_reading"]
     filter: "created_at >= current_date - interval '30 days'"   # OPTIONAL. Excludes `sample`
-  - include: ["analytics.big_*"]
+  - include: ["seedbank.field_*"]
     max_rows_scanned: 1000000000          # OPTIONAL; also valid on a connection or in `defaults`
 ```
 
@@ -218,19 +236,51 @@ rules:
 - `inferred.looks_like` honors both `filter` and `sample`: it must not describe rows outside
   the artifact, and its own draw composes with the sample fraction rather than replacing it -
   so honouring `sample` costs no extra rows. Composition is population-level only on MySQL and
-  Snowflake, which take no seed on this sub-draw; only Postgres coheres row for row.
-- **A sampled table reads one row set within a run, and on PostgreSQL the same one next run.**
-  One table's profile issues many statements against the same narrowed source, so an unseeded
-  fraction would describe different rows per field on a table nobody wrote to. What prevents
-  that is the materialized copy, not the seed. All three adapters also seed the fraction from
-  the table's own name, but only PostgreSQL's `TABLESAMPLE ... REPEATABLE` documents a stable
-  draw across runs: MySQL's seeded predicate holds only while scan order does, and Snowflake
-  does not document two evaluations of one seeded expression reading the same rows — which is
-  precisely why the copy exists. A drift-gating consumer should not read run-to-run stability
-  as a guarantee off PostgreSQL. The exception is the extra draw
-  `inferred.looks_like` takes on top of that row set, which takes no seed on MySQL or
-  Snowflake — so on those two the shape claim agrees with the rest of the profile at the
-  population level rather than row for row.
+  Snowflake, which take no seed on this sub-draw; Postgres and duckdb both cohere row for row.
+- **A sampled table reads one row set within a run, and on PostgreSQL and duckdb the same one
+  next run.** One table's profile issues many statements against the same narrowed source, so
+  an unseeded fraction would describe different rows per field on a table nobody wrote to.
+  What prevents that is the materialized copy, not the seed. The other adapters also seed the
+  fraction from the table's own name, but only PostgreSQL's and duckdb's
+  `TABLESAMPLE ... REPEATABLE` document a stable draw across runs (duckdb's measured directly,
+  reproducing regardless of thread count): MySQL's seeded predicate holds only while scan order
+  does, and Snowflake does not document two evaluations of one seeded expression reading the
+  same rows — which is precisely why the copy exists, and why the engine refuses a `sample`
+  scope with no materialized copy on both rather than publish a file whose fields disagree with
+  each other (`Adapter.SAMPLE_FALLBACK_COHERENT = False`; see the per-adapter notes below). The
+  exception is the extra draw `inferred.looks_like` takes on top of that row set, which takes no
+  seed on MySQL or Snowflake — so on those two the shape claim agrees with the rest of the
+  profile at the population level rather than row for row. duckdb seeds this draw too, the one
+  axis where it reproduces more than Snowflake's own substrate can.
+- **ClickHouse never reads a sampled table without the copy.** A declared `SAMPLE BY` key does
+  not mean `SAMPLE` narrows anything — measured directly: a monotonic key reads the whole table
+  at every requested fraction, and a table with no key at all raises rather than falling back to
+  a full scan. Every other adapter here degrades to an unmaterialized, best-effort read when the
+  copy is unavailable; ClickHouse fails that one table instead, naming `materialize_sample` in
+  the message, because there is no unmaterialized reading of it that is honest. This is the one
+  adapter where `materialize_sample: false` is not a performance trade — it decides whether a
+  `sample`-scoped table is profiled at all.
+- **Redshift never reads a sampled table without the copy either.** There is no seeded sampling
+  clause at all: `WHERE RANDOM() < p` is the only narrowing, and AWS documents its result as not
+  deterministic across a distributed cluster's compute slices, even within one run. A `sample`
+  scope with no materialized copy fails that table rather than mixing rows drawn by independent
+  evaluations of the same predicate — the same refusal ClickHouse makes, for a different reason.
+- **Databricks degrades instead of refusing.** `TABLESAMPLE ... REPEATABLE` is a genuinely
+  reproducible draw on this engine, so a table the copy cannot be taken on still reads a stable
+  fraction directly, with a warning, rather than failing outright.
+- **BigQuery never reads a sampled table without the copy either.** `TABLESAMPLE SYSTEM` has no
+  seed clause in the grammar at all, and the vendor states directly that each execution "might
+  return different results because each execution processes an independently computed sample."
+  A `sample` scope with no materialized copy fails that table rather than publish a
+  `statistics.yaml` whose fields describe different rows - the same refusal ClickHouse and
+  Redshift make, for a third reason. The copy itself also differs from every other adapter's:
+  BigQuery has no session-scoped temporary table, so the draw is copied into an ordinary table
+  in the profiled dataset, created with its own `expiration_timestamp` (a few hours out) rather
+  than the run's own cleanup being the only thing standing between it and an orphaned copy - a
+  killed process or a revoked delete privilege leaves it to expire on its own instead of
+  billing as storage indefinitely. `CREATE OR REPLACE` also means an orphan from an earlier run
+  never wedges a later one with `Already Exists`. The scratch table's own name is excluded from
+  `list_tables`, so it is never profiled as a table of its own.
 - **`min_rows` selects by size, and both conditions must hold.** A rule carrying it governs a
   table only when the name matchers admit it *and* it is at least that large, so
   `min_rows: 500000000` with `sample: 0.01` samples the tables that are too big to scan
@@ -254,7 +304,9 @@ rules:
   path, and the run says so on stderr rather than deciding silently.
 - **A config with neither `min_rows` nor `max_rows_scanned` anywhere costs nothing.** No estimate
   is fetched and the run issues exactly the statements it issued before the keys existed. Either
-  key, at any level, turns the pre-flight on — a ceiling needs the estimate to derive its fraction.
+  key, at any level, turns the pre-flight on for a table — a ceiling needs the estimate to derive
+  its fraction. It has no effect on a plain view, whatever this is set to: a view is never
+  queried, so no estimate is fetched for one and no size rule can govern it.
 - A narrowed run takes the table's `row_count` from the catalog rather than counting it, so
   `row_count_method` reports `approximate`, and the emitted `statistics.yaml` carries the
   `scope` block naming `rows_scanned` with every ratio computed against it. A table crossing
@@ -340,7 +392,7 @@ values**; everything measured about those columns is left alone.
 connections:
   production:
     redact:
-      - columns: ["*.users.email", "*.customers.*_name"]   # selector globs over <fqn>.<column>
+      - columns: ["*.collector.email", "*.curator.*_name"] # selector globs over <fqn>.<column>
         with: mask                                         # OPTIONAL; mask | drop | hash
       - sensitivity: [personal_name, postal_address]       # matches inferred.sensitivity
         with: drop
@@ -461,7 +513,7 @@ Keyed by connection name, matching `.dbprint.yaml`. Never commit it.
 production:
   host: db.internal
   port: 5432
-  database: analytics
+  database: arboretum
   user: dbprint_ro
   password: ...
 ```
@@ -473,9 +525,18 @@ production:
 | PostgreSQL | `host`, `port`, `database`, `user`, `password` | `redaction_salt` |
 | MySQL | `host`, `port`, `database`, `user`, `password` | `redaction_salt` |
 | Snowflake | `account`, `user`, `warehouse`, `database`, `role` | `password`, `private_key_file`, `private_key_file_pwd`, `schema`, `redaction_salt` |
+| duckdb | `database` (a file path, or `:memory:`) | `read_only`, `redaction_salt` |
+| ClickHouse | `host`, `database` | `port` (default `8123`), `user` (default `default`), `password`, `redaction_salt` |
+| Redshift | `host`, `database`, `user`, `password` | `port` (default `5439`), `redaction_salt` |
+| Databricks | `server_hostname`, `http_path`, `access_token`, `catalog` | `redaction_salt` |
+| BigQuery | `project`, `dataset` | `credentials_file`, `redaction_salt` |
 
 Snowflake takes **exactly one** of `password` or `private_key_file`; supplying both, or
 neither, is an error. `private_key_file_pwd` decrypts an encrypted key.
+
+BigQuery has no `password` key at all: credentials resolve through Application Default
+Credentials, the `google-cloud-bigquery` client's own mechanism, unless `credentials_file`
+names a service account key explicitly.
 
 Every unresolved required key is collected and reported in one error rather than one at a
 time.

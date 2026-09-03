@@ -167,19 +167,9 @@ class TestHeadingTreeOf:
 
 
 class TestAgainstRealPackagedContent:
-    """The slicing logic against real SPEC.md/ASSERTIONS.md content.
-
-    `_read` is monkeypatched to the on-disk files: only a built wheel force-includes them.
+    """The slicing logic against real SPEC.md/ASSERTIONS.md content through the real `_read()` -
+    its source-tree fallback resolves them in an editable install without monkeypatching.
     """
-
-    @pytest.fixture(autouse=True)
-    def _real_documents(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        repo_docs = Path(__file__).resolve().parents[2] / "docs"
-        paths = {
-            "spec": repo_docs / "format/v1/SPEC.md",
-            "assertions": repo_docs / "ASSERTIONS.md",
-        }
-        monkeypatch.setattr(reference, "_read", lambda document: paths[document].read_text())
 
     def test_spec_section_resolves(self) -> None:
         text = reference.section("spec", "2.2.9")
@@ -233,3 +223,61 @@ class TestAgainstRealPackagedContent:
 
         for citation in cited:
             assert reference.section("assertions", citation) is not None, citation
+
+
+class TestSourceTreeFallback:
+    """`_read`'s own resolution order: the installed package first, a repo-relative fallback
+    only once that fails - never the reverse, and never a silent empty read either way.
+    """
+
+    def test_falls_back_when_the_package_has_no_copy(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Simulates an editable install directly - the packaged read raises, the fallback
+        still resolves the same content a wheel install would have served.
+        """
+
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            raise FileNotFoundError
+
+        monkeypatch.setattr(reference.resources, "files", _raise)
+
+        text = reference.read_document("spec")
+
+        assert "dbprint format specification" in text
+
+    def test_raises_an_mcp_error_when_neither_path_resolves(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from dbprint.mcp import errors
+
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            raise FileNotFoundError
+
+        monkeypatch.setattr(reference.resources, "files", _raise)
+        monkeypatch.setattr(reference, "_REPO_ROOT", Path("/nonexistent"))
+
+        with pytest.raises(errors.McpError, match="no spec reference document available"):
+            reference.read_document("spec")
+
+    def test_the_fallback_mapping_agrees_with_the_build_hook(self) -> None:
+        """`hatch_build.PACKAGED`'s source side is the same file this fallback reads - a
+        renamed or moved document must fail here, not silently serve stale content.
+        """
+
+        import sys
+
+        repo_root = Path(__file__).resolve().parents[2]
+        sys.path.insert(0, str(repo_root))
+        from hatch_build import PACKAGED
+
+        by_target_name = {Path(target).name: source for source, target in PACKAGED.items()}
+
+        for document, fallback_relpath in reference._SOURCE_TREE_FALLBACK.items():
+            name = Path(fallback_relpath).name
+            assert name in by_target_name, f"{document!r} not in hatch_build.PACKAGED"
+            assert by_target_name[name] == fallback_relpath, (
+                f"{document!r}'s fallback path disagrees with hatch_build.PACKAGED"
+            )

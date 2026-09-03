@@ -179,7 +179,7 @@ class TestPopulationMarker:
 
 
 class TestRowCountMethodIsTheAdaptersStatement:
-    """SPEC 2.2.2: the method says how the count was obtained, not whether the read narrowed -
+    """SPEC 2.2.1: the method says how the count was obtained, not whether the read narrowed -
     they diverge for a narrowed read that counted exactly.
     """
 

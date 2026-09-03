@@ -39,7 +39,11 @@ class _RootGroup(click.RichGroup):
             ctx.exit(EXIT_GENERIC)
 
 
-@click.group(name="dbprint", cls=_RootGroup)
+@click.group(
+    name="dbprint",
+    cls=_RootGroup,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
 @click.version_option(__version__, prog_name="dbprint")
 @click.option("--debug", is_flag=True, default=False, help="Print full tracebacks on error.")
 @click.pass_context

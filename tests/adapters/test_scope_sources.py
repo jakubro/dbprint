@@ -159,19 +159,19 @@ class TestLooksLikePathEstimate:
 
         return mod._scoped_estimate(1_000_000, scope)
 
-    @pytest.mark.parametrize("module", ["snowflake", "postgres", "mysql"])
+    @pytest.mark.parametrize("module", ["snowflake", "postgres", "mysql", "duckdb"])
     def test_a_sample_scales_the_estimate(self, module: str) -> None:
         """A fraction is arithmetic, so a sampled read can reach the cheap path."""
 
         assert self._scoped_estimate(module, TableScope(sample=0.001)) == 1_000.0
 
-    @pytest.mark.parametrize("module", ["snowflake", "postgres", "mysql"])
+    @pytest.mark.parametrize("module", ["snowflake", "postgres", "mysql", "duckdb"])
     def test_a_filter_leaves_the_estimate_alone(self, module: str) -> None:
         """Nothing here estimates selectivity, so a predicate cannot shrink the figure."""
 
         assert self._scoped_estimate(module, TableScope(filter="a > 1")) == 1_000_000.0
 
-    @pytest.mark.parametrize("module", ["snowflake", "postgres", "mysql"])
+    @pytest.mark.parametrize("module", ["snowflake", "postgres", "mysql", "duckdb"])
     def test_an_unscoped_read_keeps_the_whole_table(self, module: str) -> None:
         assert self._scoped_estimate(module, None) == 1_000_000.0
 

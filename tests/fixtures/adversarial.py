@@ -24,11 +24,16 @@ from dbprint.adapters import (
     ForeignKeyMeta,
     Frequencies,
     Inferred,
+    Length,
     MockAdapter,
     MockTable,
     Range,
     ValueCount,
 )
+
+
+# UUIDs render at a fixed width, so every uuid-typed column's length summary is a constant.
+_UUID_LENGTH = Length(min=36, max=36, avg=36.0, p95=36.0)
 from dbprint.cli.main import main
 from dbprint.config import ConnectionConfig
 from dbprint.conformance import validate_print
@@ -135,6 +140,8 @@ def _fixture_tables() -> dict[str, MockTable]:
                 ),
                 values_coverage=0.02,
                 distribution="uniform",
+                empty_count=0,
+                length=_UUID_LENGTH,
                 inferred=Inferred(candidate_key=True),
             ),
             "cultivar_id": ColumnStats(
@@ -148,6 +155,8 @@ def _fixture_tables() -> dict[str, MockTable]:
                 values=tuple(ValueCount(value=f"rank-{i:02d}", count=1) for i in range(30)),
                 values_coverage=TRUNCATED_FK_COVERAGE,
                 distribution="uniform",
+                empty_count=0,
+                length=Length(min=7, max=7, avg=7.0, p95=7.0),
             ),
             "email": ColumnStats(
                 sql_type="text",
@@ -160,6 +169,8 @@ def _fixture_tables() -> dict[str, MockTable]:
                 values=(ValueCount(value="a@example.com", count=SCOPED_ROWS_SCANNED),),
                 values_coverage=1.0,
                 distribution="dominant_value",
+                empty_count=0,
+                length=Length(min=14, max=14, avg=14.0, p95=14.0),
             ),
             "matures_at": ColumnStats(
                 sql_type="timestamp with time zone",
@@ -169,6 +180,9 @@ def _fixture_tables() -> dict[str, MockTable]:
                 cardinality=SCOPED_ROWS_SCANNED,
                 cardinality_ratio=1.0,
                 cardinality_method="exact",
+                # A non-exhaustive top-N slice (SPEC 2.2.3) - `values_coverage` stays absent, so
+                # nothing claims the list is complete.
+                values=tuple(ValueCount(value=f"202{i}-01-01", count=1) for i in range(4, 9)),
                 distribution="uniform",
                 frequencies=Frequencies(
                     top=1,
@@ -178,6 +192,7 @@ def _fixture_tables() -> dict[str, MockTable]:
                 ),
                 range=Range(min="2024-01-01", max=FUTURE_DATED_RANGE_MAX, span_days=27394),
                 percentiles={"p50": "2050-01-01"},
+                quantized_count=0,
             ),
         },
         samples={"id": [f"00000000-0000-7000-8000-{i:012d}" for i in range(20)]},
@@ -207,6 +222,8 @@ def _fixture_tables() -> dict[str, MockTable]:
                 ),
                 values_coverage=1.0,
                 distribution="uniform",
+                empty_count=0,
+                length=_UUID_LENGTH,
                 inferred=Inferred(candidate_key=True),
             ),
         },
@@ -236,6 +253,8 @@ def _fixture_tables() -> dict[str, MockTable]:
                 ),
                 values_coverage=0.000125,
                 distribution="uniform",
+                empty_count=0,
+                length=_UUID_LENGTH,
                 inferred=Inferred(candidate_key=True),
             ),
         },
@@ -296,6 +315,8 @@ def _fixture_tables() -> dict[str, MockTable]:
                 values=(ValueCount(value="x", count=100),),
                 values_coverage=1.0,
                 distribution="dominant_value",
+                empty_count=0,
+                length=Length(min=1, max=1, avg=1.0, p95=1.0),
             )
             for name in ("a", "b", "c")
         },
@@ -327,6 +348,8 @@ def _fixture_tables() -> dict[str, MockTable]:
                 ),
                 values_coverage=1.0,
                 distribution="uniform",
+                empty_count=0,
+                length=_UUID_LENGTH,
                 inferred=Inferred(candidate_key=True),
             ),
         },

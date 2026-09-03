@@ -33,6 +33,7 @@ from ..rendering import (
     install_log_handler,
     remove_log_handler,
     resolve_render_mode,
+    supports_live,
 )
 from ..rendering.diff_data import DiffRenderOptions, render_data, render_human_text
 from ..rendering.diff_tty import render_human as render_human_tty
@@ -153,15 +154,20 @@ def diff_command(
 
     # Progress goes to stderr so stdout stays a clean diff payload; TTY-detect follows suit.
     err_console = Console(stderr=True)
+    progress_mode = resolve_render_mode(tui, err_console)
 
-    if not quiet and tui is True and not err_console.is_terminal:
-        click.echo("warning: --tui requested but stderr is not a TTY; using plain output", err=True)
+    if not quiet and tui is True and not supports_live(err_console):
+        click.echo(
+            "warning: --tui requested but stderr does not support the live view; "
+            "using plain output",
+            err=True,
+        )
 
     renderer = (
         None
         if quiet
         else build_progress_renderer(
-            live=_progress_live(tui, err_console),
+            live=progress_mode == "tty",
             console=err_console,
             out=click.get_text_stream("stderr"),
         )
@@ -187,10 +193,16 @@ def diff_command(
                     try:
                         if not _baseline_present(conn_config):
                             deferred.append(
-                                f"No committed prints at prints/{conn_config.name}/. "
+                                f"No committed prints at "
+                                f"{conn_config.output / conn_config.name}/. "
                                 f"Run `dbprint generate {conn_config.name}` first.",
                             )
                             overall_exit = max(overall_exit, EXIT_GENERIC)
+
+                            if renderer is not None:
+                                renderer.connection_summary(
+                                    _error_summary(conn_config.name, "no committed prints"),
+                                )
 
                             continue
 
@@ -211,12 +223,30 @@ def diff_command(
                             )
                             deferred.append(connection_error_text(result.connection_name, cause))
 
+                            if renderer is not None:
+                                renderer.connection_summary(
+                                    _error_summary(
+                                        result.connection_name,
+                                        cause,
+                                        result.elapsed_ms,
+                                    ),
+                                )
+
                             continue
 
                         # A refused config produced no comparison. Keyed on a cause, not the exit
                         # code: EXIT_GENERIC also covers a missing baseline, which emits one.
                         if result.exit_code == EXIT_GENERIC and result.failed_tables:
                             deferred.append(f"{result.connection_name}: {result.failed_tables[0]}")
+
+                            if renderer is not None:
+                                renderer.connection_summary(
+                                    _error_summary(
+                                        result.connection_name,
+                                        result.failed_tables[0],
+                                        result.elapsed_ms,
+                                    ),
+                                )
 
                             continue
 
@@ -261,9 +291,12 @@ def diff_command(
             with output_path.open("w") as fh:
                 _emit(results, fmt_lower, threshold, fh, mode="piped")
         else:
-            mode = resolve_render_mode(tui) if fmt_lower == "human" else "piped"
+            stdout_console = Console()
+            payload_mode = (
+                resolve_render_mode(tui, stdout_console) if fmt_lower == "human" else "piped"
+            )
             stream = click.get_text_stream("stdout")
-            _emit(results, fmt_lower, threshold, stream, mode=mode)
+            _emit(results, fmt_lower, threshold, stream, mode=payload_mode)
 
         log_run_summary(overall_exit)
         ctx.exit(overall_exit)
@@ -311,15 +344,15 @@ def _emit(
         stream.write("\n")
 
 
-def _progress_live(tui: bool | None, console: Console) -> bool:
-    """Resolve live (footer) vs streaming progress, detecting on the stderr console."""
+def _error_summary(connection_name: str, cause: str, elapsed_ms: int = 0) -> ConnectionSummary:
+    """A connection that never reached a comparison - `error` is `finish()`'s only signal."""
 
-    if tui is True:
-        return True
-    elif tui is False:
-        return False
-    else:
-        return console.is_terminal
+    return ConnectionSummary(
+        connection_name=connection_name,
+        summary=SummaryCounts(ok=0, skipped=0, failed=0),
+        elapsed_ms=elapsed_ms,
+        error=cause,
+    )
 
 
 def _summary_view(result: DiffResult) -> ConnectionSummary:

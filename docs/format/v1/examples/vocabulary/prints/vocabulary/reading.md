@@ -8,7 +8,7 @@ Every column carries exactly one `classification` (SPEC 3):
 
 - **`boolean`** - Carries a full `values` list - the true/false split is exact over what was scanned (see scope, below), never a frequency sample.
 - **`json`** - Carries a distinct-value count (`cardinality`) but no `values` list and no `distribution` - the shape is unmeasured, only the count is.
-- **`foreign_key_candidate`** - Carries a foreign key on this column, the referencing side - not the target. `relationships.yaml`'s own entry says `declared` (from the catalog) or `inferred` (a naming guess a database will not enforce); its value list follows the same truncation rule as `categorical`/`text` below.
+- **`foreign_key_candidate`** - Carries a foreign key on this column, the referencing side - not the target. `relationships.yaml`'s own entry says `declared` (from the catalog), `inferred` (a naming guess a database will not enforce), or `measured` (proposed from value containment between two columns' sketches) - a measured edge is a stronger claim about the data at the instant of the read, never a stronger claim about the schema than an inferred one (SPEC 2.3); its value list follows the same truncation rule as `categorical`/`text` below.
 - **`categorical`** - A closed or sampled domain. `values_coverage == 1.0` licenses an exact-match predicate over what was scanned (see scope, below) - anything less is a frequent-value sample, not the whole set (SPEC 2.2.3).
 - **`temporal`** - Percentiles here are always an actual observed value, never interpolated - every engine takes them by rank. `freshness.max_age_days` clamps at `0` for a future-dated maximum (reads `live`, not negative) and is always `0` for a date-less `TIME` type - `range.max` carries the true value regardless (SPEC 2.2.4).
 - **`numeric`** - Percentiles may be interpolated (Postgres, Snowflake) - a `p50` is not guaranteed to be a value the column actually holds. MySQL always returns an observed value by rank.
@@ -18,7 +18,7 @@ Every column carries exactly one `classification` (SPEC 3):
 ## Residual traps
 
 - **A `p50` is not always a value the column holds.** Numeric percentiles interpolate on Postgres and Snowflake (`PERCENTILE_CONT`); temporal percentiles never interpolate, on any engine, because Snowflake cannot evaluate a continuous percentile against a timestamp ordering. MySQL takes every percentile by rank.
-- **An inferred edge can resolve on a name coincidence.** `refers_to`/`referenced_by` entries with `detection: inferred` are a naming match, not a verified relationship (SPEC 2.3) - `relationships.annotations.yaml` records where a human has since rejected one.
+- **An inferred edge can resolve on a name coincidence, and a measured edge is not a stronger schema claim than either.** `refers_to`/`referenced_by` entries with `detection: inferred` are a naming match, not a verified relationship; a `measured` entry is stronger evidence about the data at `profiled_at`, never a stronger claim about the schema - a consumer MAY use either as a join candidate, never as cardinality-guaranteed, and SHOULD prefer a `declared` edge over both where one exists (SPEC 2.3) - `relationships.annotations.yaml` records where a human has since rejected an inferred one.
 - **`cardinality` is collation-relative.** Two prints of one logical schema, taken through different engines or different column-level collations, can legitimately disagree on a text column's distinct count for this reason alone - it is not drift.
 - **`approximate` can mean two different measurements.** `cardinality_method`/`row_count_method: approximate` covers both a live sketch this run computed and a catalog estimate of unknown staleness - the field alone does not say which (SPEC 2.2.2).
 - **A measured `grain`, `dependencies` entry, or `null_patterns` combination is an observation, never a constraint.** Each states what held over the rows read at `profiled_at`, on the same footing as an inferred relationship - not a rule the database enforces (SPEC 2.2.10, 2.2.12, 2.2.13).
@@ -28,8 +28,11 @@ Every column carries exactly one `classification` (SPEC 3):
 - **A grain search that gave up ruled nothing out.** `grain.search.exhausted: false` means a per-table cap cut the search short before it could test every candidate (SPEC 2.2.12) - the absence of a measured key is a gap in the search, not evidence that the table has none beyond those listed.
 - **A declared artifact with no file on disk is not the same as one never declared.** A manifest entry's `artifacts` map names every kind this table promised; a kind listed there whose file is absent is a broken promise the print SHOULD be treated as inconsistent for, not an absence licensed by the classification or object type (SPEC 2.5, 7.3).
 - **`values_coverage_method: bounded` means the coverage figure is a clamp, not a measurement.** The value list and the population it is measured against were not read at the same instant, so an exhaustive-looking `values_coverage: 1.0` under `bounded` is not the same claim as one with no hedge at all - `measured` states the two agreed, `bounded` states a producer caught them disagreeing (SPEC 2.2.4).
-- **`numeric`/`temporal` carry no `values` list; `frequencies` is the substitute, not an omission.** Its four counts - `top`, `bottom`, `listed`, `total` - reproduce the same top-N fetch `distribution` is computed from, published because these two classifications carry no `values` list for a validator to recompute the verdict against (SPEC 2.2.4). None of the four is a share; recompute any ratio against `non_null`/`cardinality` before trusting a rounded one.
+- **`numeric`/`temporal` carry `values` but never `values_coverage`; `frequencies` is not an omission.** The list is the same top-N fetch `distribution` is computed from, but it is never exhaustive on these two classifications, so a validator has no exhaustive list to recompute `distribution` from - `frequencies`'s four counts - `top`, `bottom`, `listed`, `total` - are what it checks instead (SPEC 2.2.4). None of the four is a share; recompute any ratio against `non_null`/`cardinality` before trusting a rounded one.
 - **`unrepresentable` changes how a bound must be read, not just which fields are absent.** A temporal `min`/`max`/percentile outside the years 0001-9999 (proleptic Gregorian) is still emitted as text - the database's own rendering - but named here so a consumer feeding it to a typed parser degrades deliberately instead of crashing (SPEC 2.2.4). The marker says nothing about whether the value is correct.
+- **`depends_on: []` and the key omitted mean different things.** A view or matview's `[]` states the catalog answered and it reads no other object in the print; the key omitted entirely states the producer could not ask - no grant, no such catalog table on this engine version, or the read failed for any other reason (SPEC 2.2.17). Collapsing the two into one `[]` would spend that meaning on every engine to cover one engine's own gap.
+- **A field named in `unmeasured` was attempted and lost, not forbidden.** Every other absence a print carries is structural - the classification forbids the field, a redaction withheld it, the type has no day to truncate to - and SPEC 7 reads it that way. A name in a column's `unmeasured` list (SPEC 2.2.4), or a block in the file's own (SPEC 2.2.1), states that this run issued the read and did not get an answer: treat that field as unknown, never as zero, none, or a property of the data. An artifact with no marker anywhere is not thereby complete - a producer predating the field, or one that dropped a measurement silently, looks identical.
+- **A timeline gap is not a zero.** `timeline.buckets` lists only a day/week/month span containing at least one non-null anchor value - a span with none is absent from the list, never published as a zero-count entry, so two consecutive buckets whose `start` values are not adjacent at `unit`'s own width mark a gap where no row fell, not a measured absence of activity (SPEC 2.2.16).
 
 ## Reading strategy
 
@@ -51,13 +54,16 @@ A file carrying a top-level `scope` block did not read the whole table - a row
 predicate narrowed it, or a sample bounded the cost. Every count in it except
 `row_count` is over `rows_scanned`, not the table (SPEC 2.2.8) - a `boolean`'s exact
 split and a `values_coverage: 1.0` are both exhaustive over that narrower set only,
-never wider than what was actually read.
+never wider than what was actually read, and `sum` is not rescalable to table grain
+by assuming the sample is representative: read it as a partial total, never the
+column's true sum.
 
 A `physical_layout` block declares a clustering or partitioning key: `mechanism`
 (`cluster` or `partition`) names the mechanism, not a judgment; `keys` is ordered,
 its first component pruning far more than its last; each key's `column` is what a
 predicate matches against, `expression` what was actually declared. Absence means
-the table is not clustered or partitioned, never that nobody checked (SPEC 2.2.11).
+the table is not clustered or partitioned, never that nobody checked - unless the
+file's own `unmeasured` list names the block (SPEC 2.2.11, 2.2.1).
 
 A column carrying a `redacted` marker (`mask`, `drop`, `hash`) withholds literals, not
 measurements - `cardinality`, `null_rate`, `values_coverage` and `distribution` stay

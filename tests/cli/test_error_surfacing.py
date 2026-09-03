@@ -554,8 +554,10 @@ class TestPerTableFailureContext:
         with _registry(_AllDdlFail):
             result = runner.invoke(main, ["generate", "--no-tui"])
 
+        # Progress and the deferred failure block share stderr, and the raw message also appears
+        # on each table's progress line - so the count targets the collapsed block's own line.
         assert "3 tables failed" in result.stderr
-        assert result.stderr.count("not all arguments converted") == 1
+        assert result.stderr.count("3 tables failed: TypeError: not all arguments converted") == 1
 
     def test_distinct_causes_report_separately(self, project: Path) -> None:
         runner = CliRunner()

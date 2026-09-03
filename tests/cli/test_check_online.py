@@ -19,6 +19,7 @@ from dbprint.adapters import (
     ColumnStats,
     CommentsMeta,
     Inferred,
+    Length,
     MockAdapter,
     MockTable,
     UniqueKeyMeta,
@@ -140,6 +141,7 @@ def _seed_clean_print(tmp_path: Path, committed_print: Path) -> Path:
                 "values_coverage": 1.0,
                 "values_coverage_method": "measured",
                 "distribution": "dominant_value",
+                "length": {"min": 8, "max": 8, "avg": 8.0, "p95": 8.0},
             },
             "json_text": {
                 "sql_type": "text",
@@ -159,6 +161,7 @@ def _seed_clean_print(tmp_path: Path, committed_print: Path) -> Path:
                 "values_coverage_method": "measured",
                 "distribution": "uniform",
                 "inferred": {"candidate_key": True},
+                "length": {"min": 16, "max": 16, "avg": 16.0, "p95": 16.0},
             },
             "payload_bytes": {
                 "sql_type": "bytea",
@@ -264,7 +267,7 @@ def _fixture() -> dict[str, MockTable]:
             indexes=[],
             comments=CommentsMeta(table=None, columns={}),
             # Matches `_seed_clean_print`'s committed `id`, so a live run drifts on
-            # nothing (SPEC 4.2: a cardinality-3 integer classifies categorical).
+            # nothing (SPEC 3.2: a cardinality-3 integer classifies categorical).
             unique_keys=[UniqueKeyMeta(columns=("probe_id",), primary=True)],
             stats={
                 "probe_id": ColumnStats(
@@ -291,6 +294,7 @@ def _fixture() -> dict[str, MockTable]:
                     values=(ValueCount(value="10.0.0.1", count=3),),
                     values_coverage=1.0,
                     distribution="dominant_value",
+                    length=Length(min=8, max=8, avg=8.0, p95=8.0),
                 ),
                 "json_text": ColumnStats(
                     sql_type="text",
@@ -306,6 +310,7 @@ def _fixture() -> dict[str, MockTable]:
                     values_coverage=1.0,
                     distribution="uniform",
                     inferred=Inferred(candidate_key=True),
+                    length=Length(min=16, max=16, avg=16.0, p95=16.0),
                 ),
                 "payload_bytes": ColumnStats(
                     sql_type="bytea",
@@ -1049,11 +1054,14 @@ class TestConnectionFailureIsReportedAsItself:
         committed_print: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """`drift_count: 0` would claim a clean comparison ran; the phase never ran at all."""
+
         result = self._run(tmp_path, committed_print, monkeypatch, "--format", "json")
         data = json.loads(result.stdout)
 
         assert data[0]["drift_issues"] == []
-        assert data[0]["summary"]["drift_count"] == 0
+        assert data[0]["summary"]["drift_count"] is None
+        assert data[0]["online_disposition"] == "connection_failed"
 
     def test_the_human_output_does_not_claim_drift(
         self,
@@ -1066,6 +1074,80 @@ class TestConnectionFailureIsReportedAsItself:
         assert "schema drift" not in result.stdout
         assert "did not run" in result.stdout
         assert "could not connect" in result.stdout
+
+
+class _ReconnectFailsAdapter(_MockPgAdapter):
+    """`compute_diff`'s own connect succeeds; the later reconnect for SQL assertions fails -
+    a connection lost after drift was already computed, not one that never reached the table.
+    """
+
+    def __init__(self, _credentials: dict[str, str]) -> None:
+        super().__init__(_credentials)
+        self._connect_calls = 0
+
+    def connect(self) -> None:
+        self._connect_calls += 1
+
+        if self._connect_calls > 1:
+            raise RuntimeError("connection lost")
+
+        super().connect()
+
+
+class TestDriftCountSurvivesALateAssertionConnectionFailure:
+    """A comparison ran before the SQL-assertions reconnect failed - `drift_count` must
+    reflect it, not the phase's overall disposition.
+    """
+
+    def _run(self, tmp_path: Path, committed_print: Path, monkeypatch: pytest.MonkeyPatch):
+        (tmp_path / ".dbprint.yaml").write_text(
+            _project_with_assertions(
+                """\
+    assertions:
+      queries:
+        - name: any
+          sql: SELECT 0
+          expect: 0
+""",
+            ),
+        )
+        _seed_clean_print(tmp_path, committed_print)
+        monkeypatch.chdir(tmp_path)
+
+        for k, v in _credential_env().items():
+            monkeypatch.setenv(k, v)
+
+        with patch.dict(
+            "dbprint.cli.adapter_registry.ADAPTERS",
+            {"postgres": _ReconnectFailsAdapter},
+            clear=True,
+        ):
+            return CliRunner().invoke(main, ["check", "--online", "--format", "json"])
+
+    def test_the_connection_still_fails(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        result = self._run(tmp_path, committed_print, monkeypatch)
+
+        assert result.exit_code == 4
+
+    def test_drift_count_is_zero_not_null(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A comparison ran and found nothing - `null` here would claim it never ran at all."""
+
+        result = self._run(tmp_path, committed_print, monkeypatch)
+        data = json.loads(result.stdout)
+
+        assert data[0]["drift_issues"] == []
+        assert data[0]["summary"]["drift_count"] == 0
+        assert data[0]["online_disposition"] == "assertions_connection_failed"
 
 
 CONTRADICTORY_RULES = """\
@@ -1249,6 +1331,7 @@ def _vault_table() -> MockTable:
                 values=(ValueCount(value="A", count=3),),
                 values_coverage=1.0,
                 distribution="dominant_value",
+                length=Length(min=1, max=1, avg=1.0, p95=1.0),
             ),
             "site_name": ColumnStats(
                 sql_type="character varying(80)",
@@ -1261,6 +1344,7 @@ def _vault_table() -> MockTable:
                 values=(ValueCount(value="Example Vault", count=3),),
                 values_coverage=1.0,
                 distribution="dominant_value",
+                length=Length(min=13, max=13, avg=13.0, p95=13.0),
             ),
             "target_temperature_c": ColumnStats(
                 sql_type="numeric(4,1)",
@@ -1375,6 +1459,7 @@ def _seed_two_table_print(tmp_path: Path, committed_print: Path) -> Path:
                 "values_coverage": 1.0,
                 "values_coverage_method": "measured",
                 "distribution": "dominant_value",
+                "length": {"min": 1, "max": 1, "avg": 1.0, "p95": 1.0},
             },
             "site_name": {
                 "sql_type": "character varying(80)",
@@ -1389,6 +1474,7 @@ def _seed_two_table_print(tmp_path: Path, committed_print: Path) -> Path:
                 "values_coverage": 1.0,
                 "values_coverage_method": "measured",
                 "distribution": "dominant_value",
+                "length": {"min": 13, "max": 13, "avg": 13.0, "p95": 13.0},
             },
             "target_temperature_c": {
                 "sql_type": "numeric(4,1)",

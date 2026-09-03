@@ -27,6 +27,39 @@ class TestBuildSite:
         assert (output / "s" / "primary" / "seedbank" / "index.html").is_file()
         assert result.pages_written == 4
 
+    def test_a_failed_route_is_named_and_not_written(
+        self,
+        rich_conn: ConnectionConfig,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A non-200 response is neither silently dropped nor counted as written."""
+
+        output = tmp_path / "site"
+        real_get = build.FlaskClient.get
+        failing_route = "/t/primary/seedbank.batch"
+
+        def flaky_get(self: build.FlaskClient, path: str, *a: object, **kw: object):
+            if path == failing_route:
+
+                class _Failed:
+                    status_code = 500
+                    data = b""
+
+                return _Failed()
+
+            return real_get(self, path, *a, **kw)
+
+        monkeypatch.setattr(build.FlaskClient, "get", flaky_get)
+
+        result = build.build_site([rich_conn], output)
+
+        assert failing_route in result.failed_routes
+        assert not (output / "t" / "primary" / "seedbank.batch" / "index.html").is_file()
+        assert (output / "t" / "primary" / "seedbank.cultivar" / "index.html").is_file()
+        # index + cultivar + schema wrote; batch did not.
+        assert result.pages_written == 3
+
     def test_writes_pages_for_every_connection_passed(
         self,
         rich_conn: ConnectionConfig,

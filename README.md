@@ -121,7 +121,7 @@ dbprint never writes to either file, and both are read alongside the statistics 
 Requires **Python 3.13+**. Install with the driver extra for your database:
 
 ```sh
-pip install dbprint[postgres]     # or [mysql], [snowflake]
+pip install dbprint[postgres]     # or [mysql], [snowflake], [duckdb], [clickhouse], [redshift], [databricks], [bigquery]
 ```
 
 The Postgres adapter shells out to **`pg_dump`** for DDL, so the PostgreSQL client binaries must be on your `PATH`.
@@ -251,7 +251,7 @@ dbprint clones it for you and asks for no credentials of its own — your existi
 
 | Project | What it does | How dbprint differs |
 |---|---|---|
-| [dryrun](https://github.com/boringSQL/dryrun) | Offline Postgres schema snapshot + MCP server + linting | Nearest thing to this. Its snapshot is a compressed binary bundle you mark `binary` in `.gitattributes`; dbprint's artifact is line-diffable YAML with a published spec, across three databases |
+| [dryrun](https://github.com/boringSQL/dryrun) | Offline Postgres schema snapshot + MCP server + linting | Nearest thing to this. Its snapshot is a compressed binary bundle you mark `binary` in `.gitattributes`; dbprint's artifact is line-diffable YAML with a published spec, across eight databases |
 | [dbt-profiler](https://github.com/data-mie/dbt-profiler) | Column profiles committed as dbt YAML / Markdown | dbt projects only. No DDL, no relationship graph, no semantic inference or redaction |
 | Live-connection MCP servers (dbhub, postgres-mcp, Supabase, Neon) | Query and introspect a database at agent runtime | They need credentials at the agent, every session. dbprint profiles once, commits the result, and serves it with no database in reach |
 | [tbls](https://github.com/k1LoW/tbls), [SchemaSpy](https://github.com/schemaspy/schemaspy) | Schema documentation and ER diagrams for humans | Structure only, no data distributions. `dbprint docs serve` renders the same browsable pages and FK diagrams over a print's measured columns |

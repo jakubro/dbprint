@@ -9,7 +9,7 @@
     "format_version": {"const": 1},
     "generated_at": {"$ref": "#/$defs/UtcIso8601"},
     "connection": {"type": "string", "minLength": 1},
-    "adapter": {"enum": ["snowflake", "postgres", "mysql"]},
+    "adapter": {"type": "string", "minLength": 1},
     "baseline": {"$ref": "#/$defs/Baseline"},
     "target": {"$ref": "#/$defs/Target"},
     "summary": {"$ref": "#/$defs/Summary"},
@@ -83,7 +83,7 @@
       "enum": [
         "table_added", "table_removed",
         "column_added", "column_removed", "column_type_changed", "column_nullable_changed", "column_default_changed",
-        "statistic_changed", "table_row_count_changed", "grain_changed", "physical_layout_changed",
+        "statistic_changed", "table_row_count_changed", "grain_changed", "physical_layout_changed", "depends_on_changed",
         "relationship_added", "relationship_removed", "relationship_modified",
         "index_added", "index_removed", "index_modified",
         "comment_changed"
@@ -107,6 +107,7 @@
         {"$ref": "#/$defs/TableRowCountChanged"},
         {"$ref": "#/$defs/GrainChanged"},
         {"$ref": "#/$defs/PhysicalLayoutChanged"},
+        {"$ref": "#/$defs/DependsOnChanged"},
         {"$ref": "#/$defs/RelationshipAdded"},
         {"$ref": "#/$defs/RelationshipRemoved"},
         {"$ref": "#/$defs/RelationshipModified"},
@@ -228,7 +229,7 @@
       "type": "object",
       "required": ["mechanism", "keys"],
       "properties": {
-        "mechanism": {"enum": ["cluster", "partition"]},
+        "mechanism": {"enum": ["cluster", "partition", "sort"]},
         "keys": {
           "type": "array",
           "items": {
@@ -248,6 +249,16 @@
         "table": {"type": "string"},
         "before": {"oneOf": [{"$ref": "#/$defs/PhysicalLayoutState"}, {"type": "null"}]},
         "after": {"oneOf": [{"$ref": "#/$defs/PhysicalLayoutState"}, {"type": "null"}]}
+      },
+      "required": ["kind", "table", "before", "after"],
+      "type": "object"
+    },
+    "DependsOnChanged": {
+      "properties": {
+        "kind": {"const": "depends_on_changed"},
+        "table": {"type": "string"},
+        "before": {"type": "array", "items": {"type": "string"}},
+        "after": {"type": "array", "items": {"type": "string"}}
       },
       "required": ["kind", "table", "before", "after"],
       "type": "object"

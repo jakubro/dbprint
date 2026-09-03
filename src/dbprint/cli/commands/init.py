@@ -110,7 +110,7 @@ def _write_template(path: Path, content: str, *, force: bool, kind: str) -> tupl
     if path.exists() and not force:
         return (kind, path, "kept")
 
-    path.write_text(content)
+    path.write_text(content, encoding="utf-8")
 
     return (kind, path, "wrote")
 

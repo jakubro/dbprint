@@ -161,7 +161,7 @@ class TestTheCopyIsNotAlwaysAskedFor:
         assert adapter.released == []
 
     def test_the_switch_off_declines_the_write(self, tmp_path: Path) -> None:
-        """The setting an organisation that forbids the tool writing anything chooses."""
+        """`materialize_sample: false` declines the write: no copy is made, and none is read."""
 
         adapter = _run(tmp_path, RuleConfig(sample=0.25), materialize_sample=False)
 

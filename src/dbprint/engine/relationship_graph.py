@@ -20,8 +20,10 @@ class IncomingFk:
     column: tuple[str, ...]
     referencer_table: str
     referencer_column: tuple[str, ...]
-    on_delete: FkAction
-    on_update: FkAction
+    # None on a baseline-hydrated edge that recorded neither (SPEC 2.3.8) - never defaulted to
+    # a real action, which a live-extracted edge (this dataclass's other producer) always has.
+    on_delete: FkAction | None
+    on_update: FkAction | None
     detection: str
     constraint_name: str | None
 

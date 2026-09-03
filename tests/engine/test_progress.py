@@ -346,8 +346,11 @@ class TestSketchPass:
         assert sketch, "fixture has eligible columns; expected at least one sketch event"
         assert sketch[0].status == "start"
         assert sketch[0].fqn is None
+        assert sketch[0].index == 0
         assert sketch[-1].status in ("done", "failed")
         assert sketch[-1].fqn is None
+        # The closing bracket agrees with the last table tick - never a start-shaped 0.
+        assert sketch[-1].index == sketch[-1].total
 
     def test_sketch_tables_visit_in_sorted_fqn_order(self, tmp_path: Path) -> None:
         events = _collect(tmp_path, _two_real_tables())
