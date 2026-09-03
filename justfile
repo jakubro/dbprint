@@ -14,6 +14,8 @@ UV_RUN := UV_ENV + " uv run --extra dev --extra mcp --extra docs"
 PYTHON := UV_RUN + " python -m"
 # Test runner wrapper: bounds wall-clock time and virtual memory
 RUN_BOUNDED := justfile_directory() / "scripts/run-bounded.sh"
+# xdist distribution mode; `load` suits a machine with fewer cores than there are vendor groups
+DIST := env_var_or_default("DBPRINT_TEST_DIST", "loadgroup")
 
 # List available recipes
 default:
@@ -34,7 +36,7 @@ test *ARGS:
 # Run all tests with coverage, parallelized (kept out of `test` - not worth it on a narrowed run)
 # `loadgroup` honours conftest's per-vendor groups: one live substrate per run, not per worker.
 test-cov *ARGS:
-    just test -n auto --dist loadgroup --cov=src --cov-report=term-missing {{ ARGS }}
+    just test -n auto --dist {{ DIST }} --cov=src --cov-report=term-missing {{ ARGS }}
 
 # Lint all code
 lint:
