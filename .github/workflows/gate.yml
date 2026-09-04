@@ -17,6 +17,8 @@ jobs:
     steps:
       - name: Install what the recipes assume is present
         run: |
+          export DEBIAN_FRONTEND=noninteractive
+
           apt-get update
           apt-get install -y --no-install-recommends \
             ca-certificates curl git locales \

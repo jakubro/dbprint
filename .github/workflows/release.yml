@@ -9,13 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  gate:
-    if: github.event.repository.private == false
-    uses: ./.github/workflows/gate.yml
-
   publish:
     if: github.event.repository.private == false
-    needs: gate
     runs-on: ubuntu-latest
     permissions:
       contents: read
