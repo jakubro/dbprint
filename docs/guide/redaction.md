@@ -62,11 +62,31 @@ Keep it stable for the life of the project. Rotating it changes every hashed val
 
 So a connection can change what a project-wide rule applies to a column — `mask` to `hash` — but it cannot lift the coverage, because no primitive means "not redacted". A connection that has to stay unredacted is one whose rule does not belong in `defaults` in the first place.
 
-## Two things redaction does not change
+## Three things redaction does not change
 
-**Detection still runs.** `looks_like` and `sensitivity` are measured over sampled values that are never written to the print, so a hashed email column still reports `looks_like: email`. The shape claim describes the column, not the literals that were emitted.
+**Detection still runs.** `looks_like` and `sensitivity` are measured over sampled values that are never written to the print, so a hashed email column still reports `looks_like: email`. The shape claim describes the column, not the literals that were emitted. A column whose best-scoring pattern falls short of the 95% verdict bar but still clears 50% publishes that near-miss as `inferred.looks_like_candidate` alongside its own share - a weaker signal than `looks_like`, not a value, so redaction leaves it untouched the same way.
 
 **A detected category with no rule covering it is reported, not silenced.** `dbprint check` raises `privacy.unredacted-sensitive` — a warning — for a column that names its own `inferred.sensitivity` and still publishes a cell value nothing withheld. The check reads the committed print, so writing the rule and regenerating is what clears it. [Gating CI](ci.md) covers how warnings surface, which is not the same as how errors do.
+
+**A degenerate-value count discloses no literal, so redaction never suppresses one.** `zero_count`, `negative_count`, `empty_count` and `quantized_count` are exact counts, never the values themselves, and stay in every redacted column at every row count — unlike `mean`, `sum` and `length` below, which are withheld under one specific condition.
+
+## The one condition that withholds an aggregate
+
+`mean`, `sum` and `length` are the exception to "redaction withholds literals and keeps
+measurements": all three are withheld under every primitive, `mask`, `drop` and `hash` alike,
+but only where the scanned set holds at most one non-null value - `rows_scanned - null_count
+<= 1`. Above that threshold none of the three is touched: an aggregate over two or more real
+values does not narrow down to any one of them the way a single-row aggregate would.
+
+This is the same rule stated two ways, and both stay in step: the producer applies it while
+writing the column, and the conformance validator re-derives it from `rows_scanned` and
+`null_count` to check the column was not published in violation of it. Every other
+measurement - `null_count`, `cardinality`, the value counts, `distribution` - is unaffected at
+any row count, redacted or not.
+
+An all-null column never reaches this condition for `length`: it always classifies
+`categorical` (SPEC 3.3), and `categorical`'s own carve-out already omits `length` on an
+all-null scanned set independently of redaction.
 
 ## What a consumer can no longer ask
 

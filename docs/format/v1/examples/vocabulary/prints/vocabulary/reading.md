@@ -58,11 +58,11 @@ never wider than what was actually read, and `sum` is not rescalable to table gr
 by assuming the sample is representative: read it as a partial total, never the
 column's true sum.
 
-A `physical_layout` block declares a clustering or partitioning key: `mechanism`
-(`cluster` or `partition`) names the mechanism, not a judgment; `keys` is ordered,
+A `physical_layout` block declares a clustering, partitioning or sort key: `mechanism`
+(`cluster`, `partition` or `sort`) names the mechanism, not a judgment; `keys` is ordered,
 its first component pruning far more than its last; each key's `column` is what a
 predicate matches against, `expression` what was actually declared. Absence means
-the table is not clustered or partitioned, never that nobody checked - unless the
+the table declares none of the three, never that nobody checked - unless the
 file's own `unmeasured` list names the block (SPEC 2.2.11, 2.2.1).
 
 A column carrying a `redacted` marker (`mask`, `drop`, `hash`) withholds literals, not

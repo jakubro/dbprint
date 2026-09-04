@@ -26,7 +26,7 @@ GRANT CREATE TEMPORARY TABLES ON my_db.* TO 'dbprint_ro'@'%';
 |---|---|---|
 | `SELECT` | the database | connecting, enumerating, DDL and statistics — a plain view takes it for DDL only, since no statement is issued against one |
 | `SHOW VIEW` | the database | a view's DDL only |
-| `CREATE TEMPORARY TABLES` | the database | the sampled-table copy only |
+| `CREATE TEMPORARY TABLES` | the database | the sampled-table copy - without it, a `sample`-scoped table is refused rather than degraded |
 
 ### What an under-privileged account does
 
@@ -37,7 +37,7 @@ primary: could not connect to MySQL at 127.0.0.1:3306/my_db as 'dbprint_ro':
 1044 (42000): Access denied for user 'dbprint_ro'@'%' to database 'my_db'
 ```
 
-and the run exits `4` having profiled nothing. There is no partial print to inspect, which makes a missing grant here easier to diagnose than on the other two engines.
+and the run exits `4` having profiled nothing. There is no partial print to inspect, which makes a missing grant here easier to diagnose than on most of the other seven engines.
 
 `SHOW VIEW` is the one grant that is easy to miss, because it is needed for exactly one thing. A view's DDL comes from `SHOW CREATE TABLE`, which MySQL gates behind `SHOW VIEW` for views specifically. Without it the tables profile normally and every view fails:
 
@@ -68,17 +68,18 @@ Only one thing makes dbprint write, and only under one condition: `materialize_s
 
 Where it does fire, the drawn rows are copied once into a session-lifetime `TEMPORARY` table, and every statistics statement for that table reads the copy. That is what makes the numbers in one file describe one set of rows.
 
-Where `CREATE TEMPORARY TABLES` is absent the run does not fail. It warns on stderr and falls back to re-evaluating the predicate per statement:
+Where `CREATE TEMPORARY TABLES` is absent the run does not fail the whole connection, but it does refuse that table. `RAND(seed)`'s behaviour across multiple references in one statement is undocumented, so MySQL cannot fall back to re-evaluating the predicate per statement the way PostgreSQL does — it raises instead:
 
 ```
-table 'my_db.germination_trial': could not materialize its sample of 0.25
-(ProgrammingError: 1044 (42000): Access denied for user 'dbprint_ro'@'%' to database 'my_db');
-each statistic for it is measured over its own draw of the rows
+table 'my_db.germination_trial': connection 'primary' (mysql) could not materialize its
+sample of 0.25 (ProgrammingError: 1044 (42000): Access denied for user 'dbprint_ro'@'%' to
+database 'my_db'), and this adapter's per-statement fallback cannot be seeded into agreement
+across statements. Narrow with a filter instead of a sample fraction.
 ```
 
-Note that MySQL reports this as a plain access-denied error rather than one naming temporary tables, so the message is worth reading in full before concluding the account lost its `SELECT`.
+MySQL reports the underlying cause as a plain access-denied error rather than one naming temporary tables specifically, so the parenthesized cause is worth reading in full before concluding the account lost its `SELECT` rather than `CREATE TEMPORARY TABLES`.
 
-The fallback is not an equivalent path. Each statement then draws its own rows, so a column's listed value counts and the non-null figure they are a share of come from different reads, and the file can disagree with itself. Setting `materialize_sample: false` chooses that trade deliberately, which is the right call where the tool must stay strictly read-only — and the wrong one where it was chosen to avoid a grant.
+There is no fallback path to choose here: setting `materialize_sample: false` on a `sample`-scoped table refuses it before any statement runs, for the same reason — MySQL's undocumented `RAND(seed)` guarantee means an unmaterialized draw is never trusted.
 
 ## Reference
 

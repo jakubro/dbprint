@@ -255,7 +255,7 @@ def classify(name: str, cardinality: int | None) -> Classification:
   need one. Ruff's `BLE001`/`S110` flag every occurrence; where the catch is deliberate, suppress
   it at the site rather than fixing what is not broken: `except Exception:  # noqa: BLE001 - why
   this site is intentional`. The reason is mandatory and must be true of that site — identical
-  wording across sites that genuinely share one idiom (three adapters degrading the same way on
+  wording across sites that genuinely share one idiom (six adapters degrading the same way on
   a failed temporal fetch) is fine; the same wording pasted onto a site it does not actually
   describe is not. No rule-level or file-level ignore, for `BLE001`/`S110` or any other rule —
   see §0's "no ceiling" note; suppressing a rule everywhere is indistinguishable from never

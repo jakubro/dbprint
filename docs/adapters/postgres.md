@@ -62,7 +62,7 @@ A plain view is the exception at every rung, including the bottom one: a role ho
 | Seeded | yes, from the table's own name |
 | `looks_like` sub-draw | `TABLESAMPLE` at a computed rate, seeded |
 
-PostgreSQL is the engine on which a sampled print is coherent **row for row**: every statement for a sampled table reads the same rows, including the extra distinct-value draw that `inferred.looks_like` takes on top of them. The other two engines can only promise this at the population level.
+PostgreSQL is one of two engines on which a sampled print is coherent **row for row**: every statement for a sampled table reads the same rows, including the extra distinct-value draw that `inferred.looks_like` takes on top of them. duckdb gives the identical guarantee. Databricks reproduces the sampled fraction reliably but not that row-level agreement with `looks_like`; the remaining five engines can only promise coherence at the population level.
 
 ## When dbprint writes
 

@@ -98,7 +98,7 @@ refers_to:
   on_delete: RESTRICT
   detection: declared      # or `inferred`, when dbprint guessed the edge from naming
   observed:
-    fanout_avg: 6.2
+    fanout_avg: 6.25
     target_coverage: 1.0
 ```
 

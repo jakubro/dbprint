@@ -352,7 +352,7 @@ battery and the dialect sweep.
 they are a capability, not a measurement. The default declines — returning the
 scope untouched — so an adapter that cannot write, or has nothing to gain from
 writing, needs no code at all and an implementation outside this repository does
-not break when the pair appears. The three SQL adapters override them; see
+not break when the pair appears. Every shipped adapter overrides them; see
 Row-level narrowing below for what the copy buys.
 
 `TableCounts` carries `row_count`, `rows_scanned` and `row_count_method`.
@@ -392,8 +392,8 @@ every adapter.
 ### Cardinality measurement
 
 `cardinality_method` (part of `BaseStats`, [§2.2.2 of the spec](format/v1/SPEC.md#222-universal-per-column-fields))
-records how a column's distinct-value count was obtained, and the three
-adapters do not agree on the answer.
+records how a column's distinct-value count was obtained, and Postgres, MySQL
+and Snowflake do not agree on the answer.
 
 Postgres and Snowflake both hold a cheap population-level estimate they can
 read instead of scanning: Postgres reads the planner's stored `n_distinct`
@@ -463,7 +463,7 @@ from the scoped estimate. A draw returning fewer than `MIN_SAMPLE_DRAW` values
 is re-taken over the scoped set directly, which is what keeps a selective
 predicate from yielding a near-empty draw with nothing recording it.
 
-A path decision must not itself cost a scan: all three adapters size it from a
+A path decision must not itself cost a scan: every adapter sizes it from a
 catalog estimate, never `COUNT(*)`. A fraction scales that estimate
 arithmetically; a predicate does not, because none of these catalogs estimates
 selectivity, so a filtered read stays on the sampling path and relies on the

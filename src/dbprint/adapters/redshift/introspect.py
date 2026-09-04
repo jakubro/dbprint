@@ -368,8 +368,8 @@ def comments(cursor: Cursor, fqn: str) -> CommentsMeta:
 
 
 def estimate_row_count(cursor: Cursor, fqn: str) -> int:
-    """`SVV_TABLE_INFO.estimated_visible_rows`; -1 when absent or superuser-only access fails -
-    an empty table is missing from the view entirely rather than reported as zero.
+    """`SVV_TABLE_INFO.estimated_visible_rows`; -1 when refused - needs a superuser role or a
+    `GRANT SELECT` on the view - or when an empty table is simply missing from it, not zero.
     """
 
     schema, table = _split_fqn(fqn)
@@ -380,7 +380,7 @@ def estimate_row_count(cursor: Cursor, fqn: str) -> int:
             'SELECT estimated_visible_rows FROM svv_table_info WHERE schema = %s AND "table" = %s',
             (schema, table),
         ).fetchone()
-    except Exception:  # noqa: BLE001 - a non-superuser connection cannot read this view at all
+    except Exception:  # noqa: BLE001 - refused without a superuser role or a grant on the view
         return -1
 
     if not row or row[0] is None:

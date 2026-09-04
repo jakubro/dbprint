@@ -240,14 +240,16 @@ rules:
 - **A sampled table reads one row set within a run, and on PostgreSQL and duckdb the same one
   next run.** One table's profile issues many statements against the same narrowed source, so
   an unseeded fraction would describe different rows per field on a table nobody wrote to.
-  What prevents that is the materialized copy, not the seed. The other adapters also seed the
-  fraction from the table's own name, but only PostgreSQL's and duckdb's
+  What prevents that is the materialized copy, not the seed. MySQL, Snowflake and Databricks
+  also seed the fraction from the table's own name, but only PostgreSQL's and duckdb's
   `TABLESAMPLE ... REPEATABLE` document a stable draw across runs (duckdb's measured directly,
   reproducing regardless of thread count): MySQL's seeded predicate holds only while scan order
   does, and Snowflake does not document two evaluations of one seeded expression reading the
   same rows — which is precisely why the copy exists, and why the engine refuses a `sample`
   scope with no materialized copy on both rather than publish a file whose fields disagree with
-  each other (`Adapter.SAMPLE_FALLBACK_COHERENT = False`; see the per-adapter notes below). The
+  each other (`Adapter.SAMPLE_FALLBACK_COHERENT = False`; see the per-adapter notes below).
+  ClickHouse, Redshift and BigQuery take no seed on the fraction at all, so each refuses a
+  `sample` scope with no materialized copy outright, for the same reason. The
   exception is the extra draw `inferred.looks_like` takes on top of that row set, which takes no
   seed on MySQL or Snowflake — so on those two the shape claim agrees with the rest of the
   profile at the population level rather than row for row. duckdb seeds this draw too, the one
@@ -261,7 +263,7 @@ rules:
   adapter where `materialize_sample: false` is not a performance trade — it decides whether a
   `sample`-scoped table is profiled at all.
 - **Redshift never reads a sampled table without the copy either.** There is no seeded sampling
-  clause at all: `WHERE RANDOM() < p` is the only narrowing, and AWS documents its result as not
+  clause at all: `WHERE RANDOM() < p` is the only narrowing, and its result is not
   deterministic across a distributed cluster's compute slices, even within one run. A `sample`
   scope with no materialized copy fails that table rather than mixing rows drawn by independent
   evaluations of the same predicate — the same refusal ClickHouse makes, for a different reason.
@@ -269,9 +271,9 @@ rules:
   reproducible draw on this engine, so a table the copy cannot be taken on still reads a stable
   fraction directly, with a warning, rather than failing outright.
 - **BigQuery never reads a sampled table without the copy either.** `TABLESAMPLE SYSTEM` has no
-  seed clause in the grammar at all, and the vendor states directly that each execution "might
-  return different results because each execution processes an independently computed sample."
-  A `sample` scope with no materialized copy fails that table rather than publish a
+  seed clause in the grammar at all, and each execution processes an independently computed
+  sample, so results are not guaranteed to match from one execution to the next. A `sample`
+  scope with no materialized copy fails that table rather than publish a
   `statistics.yaml` whose fields describe different rows - the same refusal ClickHouse and
   Redshift make, for a third reason. The copy itself also differs from every other adapter's:
   BigQuery has no session-scoped temporary table, so the draw is copied into an ordinary table

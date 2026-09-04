@@ -6,15 +6,15 @@ This walks a database you can already connect to through to a print committed al
 
 dbprint needs Python 3.13 or newer, and one extra per database engine. The extra carries the driver; the base package carries no database dependency at all.
 
-| Engine | Install | Also needs |
-|---|---|---|
-| PostgreSQL | `pip install 'dbprint[postgres]'` | the `pg_dump` client binary on `PATH` — DDL comes from it, not from a query |
-| MySQL | `pip install 'dbprint[mysql]'` | nothing beyond the extra |
-| Snowflake | `pip install 'dbprint[snowflake]'` | nothing beyond the extra |
+```console
+$ pip install 'dbprint[mysql]'
+```
 
-Two extras are independent of the engine: `dbprint[docs]` for the browsable site, and `dbprint[mcp]` for the MCP server. Combine them as `pip install 'dbprint[postgres,docs]'`.
+This page uses MySQL because it needs nothing beyond the extra — no external binary, no service account file, no warehouse. Every engine dbprint ships an adapter for has its own page with the install line, the exact grants and what it cannot promise about a sampled table: [duckdb](adapters/duckdb.md), [PostgreSQL](adapters/postgres.md), [MySQL](adapters/mysql.md), [ClickHouse](adapters/clickhouse.md), [Redshift](adapters/redshift.md), [Snowflake](adapters/snowflake.md), [Databricks](adapters/databricks.md), [BigQuery](adapters/bigquery.md). Swap the extra and the two connection blocks below for your own engine and the rest of this page is unchanged.
 
-You also need an account on the database that can read the tables you want profiled. The adapter page for your engine — [PostgreSQL](adapters/postgres.md), [MySQL](adapters/mysql.md), [Snowflake](adapters/snowflake.md) — states the exact grants; a role that can already run `SELECT` against those tables is enough to follow this page.
+Two extras are independent of the engine: `dbprint[docs]` for the browsable site, and `dbprint[mcp]` for the MCP server. Combine them as `pip install 'dbprint[mysql,docs]'`.
+
+You also need an account on the database that can read the tables you want profiled. Your engine's adapter page states the exact grants; a role that can already run `SELECT` against those tables is enough to follow this page.
 
 ## 1. Scaffold the project
 
@@ -33,67 +33,73 @@ Two files, with deliberately different lifetimes. `.dbprint.yaml` describes the 
 
 ## 2. Name the connection
 
-`.dbprint.yaml` arrives with one connection called `primary`:
+`.dbprint.yaml` arrives with one connection called `primary`. Point `adapter` and `include` at your engine — this page uses MySQL:
 
 ```yaml
 connections:
   primary:
-    adapter: postgres
+    adapter: mysql
     auto: true
     include:
-      - "public.*"
+      - "seedbank.*"
 ```
 
-`include` is the one line worth reading twice. It decides which tables are profiled, as `fnmatch` globs over the lowercased fully-qualified name; the shape of that name is the engine's own — `schema.table` on PostgreSQL, `database.table` on MySQL, `database.schema.table` on Snowflake. Omitting `include` entirely profiles everything the connection can see, which on a warehouse is rarely what you want.
+`include` is the one line worth reading twice. It decides which tables are profiled, as `fnmatch` globs over the lowercased fully-qualified name; the shape of that name is the engine's own — `database.table` on MySQL, `schema.table` on PostgreSQL and Redshift, `database.schema.table` on Snowflake. Your adapter page states the shape for your engine. Omitting `include` entirely profiles everything the connection can see, which on a warehouse is rarely what you want.
 
 `auto: true` means a bare `dbprint generate` runs this connection without naming it.
-
-The scaffold is PostgreSQL-shaped. On MySQL or Snowflake, change `adapter` to match, and change `include` with it — `public` is a PostgreSQL schema and matches nothing elsewhere. Use `my_db.*` on MySQL and `db.schema.*` on Snowflake.
 
 Then fill in the credentials stub for the same connection name:
 
 ```yaml
 primary:
   host: localhost
-  port: 5432
-  database: my_db
+  port: 3306
+  database: seedbank
   user: dbprint_ro
   password: change_me
 ```
 
-Every key here also reads from `DBPRINT_PRIMARY_<KEY>` in the environment, which is how CI supplies a password without a file. [Configuration](CONFIG.md) has the full resolution order and the per-adapter key list — Snowflake takes `account`, `warehouse` and `role` rather than `host` and `port`.
+Every key here also reads from `DBPRINT_PRIMARY_<KEY>` in the environment, which is how CI supplies a password without a file. [Configuration](CONFIG.md) has the full resolution order and the per-adapter key list — several engines need a different credential shape entirely (Snowflake takes `account`, `warehouse` and `role`; BigQuery takes `project` and `dataset` with no password at all).
 
 ## 3. Profile
 
 ```console
 $ dbprint generate
+╭────────────────────────────────────────────────╮
+│                  Cataloguing                   │
+╰────────────────────────────────────────────────╯
 primary
-  public                                                    4 objects     0m 00s
-  public
+  seedbank                                                  4 objects       0.1s
+╭────────────────────────────────────────────────╮
+│                   Profiling                    │
+╰────────────────────────────────────────────────╯
+primary
+  seedbank
     accession                                              2,500 rows       0.2s
     collector                                                120 rows       0.1s
     taxon                                                    300 rows       0.1s
     taxon_names                                                - rows       0.1s
-
--- Sketching -------------------------------------------------------------------
+╭────────────────────────────────────────────────╮
+│                   Sketching                    │
+╰────────────────────────────────────────────────╯
 primary
-  public
-    accession                                                  - rows       0.0s
-    collector                                                  - rows       0.0s
-    taxon                                                      - rows       0.0s
-primary  -  4 ok  0 failed  0 skipped  -  849ms
+  seedbank
+    accession                                                                0.0s
+    collector                                                                0.0s
+    taxon                                                                    0.1s
+primary  -  4 ok  0 failed  0 skipped  -  0.8s
 Completed  [########################]  4/4  100%  0:00:00
 ```
 
-A progress bar tracks each pass while it runs and settles when it finishes; the tree above it fills in as tables complete, one line per table with its row count and how long it took. Tables are profiled in name order, not the order they appear in the schema.
+A progress bar tracks each pass while it runs and settles when it finishes; a boxed heading marks each pass in the scrollback above it — Cataloguing, then Profiling, then Sketching — and the tree fills in as tables complete, one line per table with its row count and how long it took. Tables are profiled in name order, not the order they appear in the schema.
 
-`- rows` appears for two unrelated reasons here. `taxon_names` is a view, and no query is ever issued against one — its `statistics.yaml` is written from the catalog alone and says so. The sketching lines report it because that pass reads columns rather than rows.
+`- rows` appears once, on `taxon_names`, a view: no query is ever issued against one, so its `statistics.yaml` is written from the catalog alone and says so. The sketching lines carry no rows column at all — that pass reads columns rather than rows, so each of its lines is a name and a duration, nothing else.
 
 Sketching is a second pass because it answers a different question: it summarises join keys so a consumer can estimate how far two columns overlap without querying either. It is skipped for views, and for any table you later narrow to a sample.
 
 Piping the command somewhere gives a plain tab-separated record per event instead, which is the form a CI log should capture — `--no-tui` forces it at a terminal, and `-q` silences progress altogether. [Gating CI](guide/ci.md) shows that form.
 
-One table's failure does not stop the others: every table is attempted and the failures are reported together at the end, listed under the summary and then in full on stderr. The exit code tells you which kind of outcome you got — `0` all well, `5` some tables failed and the rest were still written, `7` every table failed. A `5` is usually a missing grant on one table; a `7` is usually the connection or, on PostgreSQL, a missing `pg_dump`. [Troubleshooting](guide/troubleshooting.md) indexes those by symptom.
+One table's failure does not stop the others: every table is attempted and the failures are reported together at the end, listed under the summary and then in full on stderr. The exit code tells you which kind of outcome you got — `0` all well, `5` some tables failed and the rest were still written, `7` every table failed. A `5` is usually a missing grant on one table; a `7` is usually the connection, or an adapter-specific prerequisite your engine's page names (a missing `pg_dump` on PostgreSQL, an absent `SAMPLE BY` key on ClickHouse). [Troubleshooting](guide/troubleshooting.md) indexes those by symptom.
 
 The run is read-only unless a table is narrowed to a fraction of its rows, and nothing here narrows anything — see [choosing what to profile](guide/scoping.md) for when that changes and what it needs.
 
@@ -105,7 +111,7 @@ prints/
     ├── manifest.yaml          index of every table, its artifacts and its freshness threshold
     ├── diff.yaml              what changed against the previous run
     ├── reading.md             how to read this print, written for whoever opens it next
-    └── public/
+    └── seedbank/
         ├── accession/
         │   ├── ddl.sql        normalized CREATE TABLE
         │   ├── statistics.yaml    row count, and per column: type, nulls, cardinality, distribution

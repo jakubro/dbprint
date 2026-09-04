@@ -40,7 +40,7 @@ connections:
 
 Three ways to narrow, and a table takes at most one of the first two:
 
-- **`sample`** reads a fraction of the table, drawn once and seeded from the table's own name. Within a run every statistic for the table reads that one draw. Across runs only PostgreSQL guarantees the same rows come back; see your engine's adapter page.
+- **`sample`** reads a fraction of the table, drawn once and seeded from the table's own name. Within a run every statistic for the table reads that one draw. Across runs only PostgreSQL and duckdb guarantee the same rows come back; see your engine's adapter page.
 - **`filter`** is one SQL predicate, interpolated verbatim into every statistics query for that table. dbprint does not parse or validate it. Treat `.dbprint.yaml` as carrying the same trust as the credentials file.
 - **`max_rows_scanned`** is a ceiling in rows rather than a fraction; the engine resolves it against the catalog's row estimate. Unlike the other two it is also legal at connection and `defaults` level, because a project-wide budget is the point of it.
 
@@ -72,6 +72,32 @@ The same applies to `values_coverage`: a value of `1.0` under a scope means the 
 `row_count` itself is the count the scan produced whenever the table was read whole, and `row_count_method` reads `exact`. Only a narrowed table takes the catalog's estimate instead, which is what `approximate` marks — and a narrowed table the catalog holds no estimate for is counted with a `COUNT` and reads `exact` too. So `approximate` always means the read was narrowed, while `exact` says nothing either way; `scope` remains the field to read for that.
 
 [SPEC 2.2.8](../format/v1/SPEC.md#228-scope--statistics-over-part-of-a-table) defines the block and the arithmetic; [SPEC 7.1](../format/v1/SPEC.md#71-the-two-absences-that-are-not-absences) covers reading the result. A table crossing a size threshold therefore changes the shape of its own artifact with no schema change at all, and `dbprint diff` shows exactly that.
+
+## What a scope removes outright, rather than rescales
+
+Five whole-table measurements do not just change denominator under a `scope` block - they
+stop running:
+
+- **`timeline`** is absent entirely - a bucketed count over a sample is not a timeline.
+- **`populated`** goes absent alongside it, on every column, for the same reason: it is the
+  timeline anchor's own `min`/`max` over the rows where the *subject* column is non-null, so
+  it needs the same whole-table read `timeline` does. Where it is present, it states what the
+  data shows - never when the column was added.
+- **`grain.search`** is absent - the measured probe never runs. Declared keys are unaffected
+  and still publish.
+- **`dependencies`** (the functional-dependency block) is forced to `[]` - empty, not absent,
+  because the probe read "none found" rather than skipping the question.
+- **`sketch`** is absent on every column, and with it every `detection: measured` relationship
+  edge into or out of the table - a measured edge needs the sketch pass, which a scoped read
+  never takes.
+
+`normalized_cardinality` is the deliberate exception: it is computed over the same scanned set
+`cardinality` already is, so it stays eligible under `scope` like every other per-column field.
+
+None of this is what `unmeasured` describes. `scope` is a decision the config made before the
+run started; `unmeasured` names a field the run tried for and lost - a catalog read that
+failed, a probe that errored. A field a `scope` block removes was never attempted in the first
+place, so it never appears in `unmeasured` either.
 
 ## Coherence across a sampled table
 

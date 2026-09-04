@@ -51,9 +51,14 @@ const SIDEBAR = [
   {
     label: "Adapters",
     items: [
+      { label: "duckdb", slug: "adapters/duckdb" },
       { label: "PostgreSQL", slug: "adapters/postgres" },
       { label: "MySQL", slug: "adapters/mysql" },
+      { label: "ClickHouse", slug: "adapters/clickhouse" },
+      { label: "Redshift", slug: "adapters/redshift" },
       { label: "Snowflake", slug: "adapters/snowflake" },
+      { label: "Databricks", slug: "adapters/databricks" },
+      { label: "BigQuery", slug: "adapters/bigquery" },
     ],
   },
   {
@@ -68,6 +73,7 @@ const SIDEBAR = [
       { label: "Assertions", slug: "assertions" },
       { label: "MCP server", slug: "mcp" },
       { label: "Conformance codes", slug: "reference/conformance" },
+      { label: "Statistics required-field matrix", slug: "reference/statistics-matrix" },
       { label: "Format specification v1", slug: "format/v1/spec" },
       {
         label: "Reference example",

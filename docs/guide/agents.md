@@ -49,9 +49,25 @@ Most clients take a JSON block naming the command:
 
 For a local socket instead of stdio, `--transport http --port 8765`. The bind address is loopback and cannot be widened.
 
-### What the server exposes
+### What every agent reads on connect
 
-Six tools:
+The server states three things unprompted, as its own MCP `instructions` on every handshake:
+
+> Reads committed dbprint prints - a database's structure and per-column statistics, captured offline. Three things decide whether an answer drawn from them is right.
+>
+> **Scope.** A column carrying a population marker was sampled - a count describes the rows that were scanned, not always the whole table, and MAY be scaled up to a rough table-wide figure by multiplying it by `row_count / rows_scanned`. A ratio, a bound, a percentile, or an aggregate like `sum` or `mean` is not: none of them scales with population size the way a count does, and rescaling one assumes the sample is representative, which the artifact never asserts.
+>
+> **Inference.** Everything under `inferred` is the producer's guess, not the database's assertion - `candidate_key`, `looks_like`, `sensitivity`, and any relationship marked `detection: inferred`. `looks_like` publishes the `sampled`/`matched` evidence it rests on; `candidate_key`'s own verdict is recomputable from `cardinality_ratio`; `sensitivity` publishes no evidence at all, and its absence never means safe to publish.
+>
+> **Absence.** A missing field means the producer did not or could not measure it - never that the value is zero, none, or safe to assume.
+>
+> Start from search_columns to locate a fact across the print; the reading guide resource covers the rest.
+
+**Get the rescaling direction right — it inverted between releases.** A count on a column carrying a population marker scales to table grain by `count * (row_count / rows_scanned)`. A ratio, a bound, a percentile or an aggregate is not scalable at all, under any formula. An earlier release stated the reciprocal ratio and also licensed rescaling ratios the current server forbids — both numerically plausible, both wrong for the current server, and not something reading alone will catch, since the two ratios are reciprocals of each other. If your own rules file or prompt still says `rows_scanned / row_count`, or that ratios may be rescaled, it predates this and needs updating.
+
+The inference paragraph distinguishes three cases rather than treating every `inferred` field alike: `looks_like` publishes the evidence it rests on, `candidate_key` is independently recomputable, and `sensitivity` publishes no evidence at all — an agent that has learned to trust `looks_like`'s published evidence should not extend the same trust to a `sensitivity` flag with nothing behind it.
+
+### Tools — six
 
 | Tool | Answers |
 |---|---|
@@ -62,11 +78,15 @@ Six tools:
 | `get_diff` | what changed at the last generate |
 | `get_reference` | the format specification, served from the package |
 
-Plus every artifact as a readable resource under `dbprint://<connection>/...`, so a client that prefers resources over tools gets the raw YAML.
+`get_table_context` is the one to reach for first: it assembles DDL, description, annotations and per-column notes into a single fragment and trims to a budget by dropping whole sections in priority order, never truncating mid-section, rather than making the agent stitch four files together. `search_columns` is the advertised entry point for a broader question — a name glob plus `classification`/`sql_type`/`sensitivity`/`looks_like`/`redacted` filters and a `candidate_key` match, six predicates ANDed, with `rows_scanned` and `row_count` both returned on a scoped match so a caller can tell a sampled number from a table-wide one without a second call.
 
-`get_table_context` is the one to reach for first: it assembles DDL, description, annotations and per-column notes into a single fragment and trims to a budget, rather than making the agent stitch four files together.
+A tool call never surfaces a bare protocol error: a fault comes back as a normal result with `is_error: true` and a readable message, so a client does not need special-case handling to show the agent what went wrong.
 
 The full URI scheme, every tool signature, and the multi-connection rules are in the [MCP server specification](../MCP.md).
+
+### Resources — two shapes
+
+Most artifacts are per-connection, at `dbprint://<connection>/...`, so a client that prefers resources over tools gets the raw YAML. Two resources are the exception: the format specification and the assertion grammar live at `dbprint:///reference/spec` and `dbprint:///reference/assertions` — an empty-authority URI carrying no connection at all, listed once for the whole server rather than once per connection, since neither document is connection-specific.
 
 ### Connections, when there is more than one
 
@@ -97,7 +117,8 @@ Note that connection-level notes from `manifest.annotations.yaml` ride the docum
 
 ## What to expect the agent to get wrong
 
-Two things are worth stating in your own rules file, because they are the misreadings that produce confident wrong answers:
+Three things are worth stating in your own rules file, because they are the misreadings that produce confident wrong answers:
 
 - **A sampled table's ratios are denominated in `rows_scanned`, not in `row_count`.** A `null_rate` under a `scope` block describes the sample. [Choosing what to profile](scoping.md) covers the block; the print's own `reading.md` says the same thing to whoever opens it.
 - **An absent field is not a zero.** The format distinguishes "measured and absent" from "never measured", and [SPEC 7](../format/v1/SPEC.md#7-reading-an-absence) is written from the reader's side specifically for this.
+- **Only a count rescales to table grain, and only by multiplying.** See "Get the rescaling direction right" above — this is the one an agent trained on an older release is most likely to get backwards.

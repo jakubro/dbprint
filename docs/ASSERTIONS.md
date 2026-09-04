@@ -48,7 +48,7 @@ Assertions are declared in `.dbprint.yaml` under each connection:
 ```yaml
 connections:
   <connection_name>:
-    adapter: postgres | snowflake | mysql
+    adapter: postgres | mysql | duckdb | clickhouse | redshift | snowflake | databricks | bigquery
     # ... existing connection fields ...
 
     assertions:
@@ -257,10 +257,15 @@ SQL assertions are written in the adapter's native SQL dialect. Producers MUST N
 | Adapter | Notes |
 |---|---|
 | PostgreSQL | Standard SQL; identifiers case-folded to lowercase unless quoted |
-| Snowflake | Standard SQL; identifiers UPPERCASE unless quoted; warehouse selection inherited from connection config |
 | MySQL | Standard SQL; identifiers lowercase on Linux, case-insensitive on Windows/macOS depending on `lower_case_table_names` |
+| duckdb | Standard SQL; identifiers resolve case-insensitively, `physical_name` carries the catalog's original spelling |
+| ClickHouse | Its own SQL dialect, not standard; identifiers case-sensitive and never folded |
+| Redshift | Standard SQL (Postgres-derived); identifiers case-folded to lowercase unless quoted |
+| Snowflake | Standard SQL; identifiers UPPERCASE unless quoted; warehouse selection inherited from connection config |
+| Databricks | Spark SQL; identifiers case-folded to lowercase unless quoted |
+| BigQuery | GoogleSQL, not standard; identifiers case-sensitive, addressed through dbprint's lowercase-to-physical column map |
 
-Queries MUST be read-only. Evaluators MUST run them in a read-only session where the adapter supports one; the reference implementation does so on PostgreSQL (`SET TRANSACTION READ ONLY`) and not on MySQL or Snowflake, where the query runs on the same session the profile used and read-only is the operator's responsibility — a read-only role or grant. Write operations (INSERT, UPDATE, DELETE, DDL) are out of scope for assertions, and on those two adapters nothing mechanically prevents one.
+Queries MUST be read-only. Evaluators MUST run them in a read-only session where the adapter supports one; the reference implementation does so only on PostgreSQL (`SET TRANSACTION READ ONLY`). Every other adapter runs the query on the same session the profile used, where read-only is the operator's responsibility — a read-only role or grant; duckdb's own `read_only` connection key (see its adapter page) covers the whole session when the operator sets it, but it is opt-in rather than assertion-specific. Write operations (INSERT, UPDATE, DELETE, DDL) are out of scope for assertions, and on every adapter but PostgreSQL nothing mechanically prevents one unless the operator's own grant does.
 
 ### 3.5 Edge cases
 

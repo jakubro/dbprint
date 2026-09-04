@@ -8,7 +8,9 @@ The extra carries the Snowflake Connector for Python and `cryptography`, which k
 
 Fully-qualified names are `database.schema.table`.
 
-Credentials differ from the other two engines: `account`, `user`, `warehouse`, `database` and `role` are required, `schema` is optional, and exactly one of `password` or `private_key_file` is supplied. Both, or neither, is an error. See [Configuration](../CONFIG.md).
+## Credentials
+
+`account`, `user`, `warehouse`, `database` and `role` are required; `schema`, `password`, `private_key_file` and `private_key_file_pwd` are optional, and exactly one of `password` or `private_key_file` is supplied — both, or neither, is an error. `private_key_file_pwd` decrypts an encrypted key. See [Configuration](../CONFIG.md).
 
 ## Privileges
 
@@ -40,13 +42,23 @@ The warehouse grant is not optional even though most of the introspection could 
 
 ### What an under-privileged role does — read this one
 
-Snowflake fails differently from the other two engines, and the difference is the thing most likely to waste an afternoon.
+Snowflake fails differently from most of the other engines, and the difference is the thing most likely to waste an afternoon.
 
 Both surfaces the adapter enumerates from are filtered to what the role can see. `INFORMATION_SCHEMA` returns only objects the current role has been granted access to, and `SHOW` returns only objects the role holds at least one privilege on. A role missing `SELECT` therefore does not get an error — it gets **an empty result**, and dbprint writes a print with no tables in it.
 
-So a run that reports `0 objects` and exits cleanly is the symptom of a missing grant, not of an empty database. PostgreSQL would have reported a permission failure per object and MySQL would have refused the connection; Snowflake reports success over nothing.
+So a run that reports `0 objects` and exits cleanly is the symptom of a missing grant, not of an empty database. PostgreSQL and MySQL would have reported a permission failure or refused the connection outright; Snowflake reports success over nothing.
 
 Check the role's grants before concluding the selectors are wrong.
+
+### The undocumented grant behind `depends_on`
+
+`introspect_view_dependencies` issues two statements: `information_schema.tables` to seed every view, then `snowflake.account_usage.object_dependencies` filtered to the connected database — an account-wide catalog that lags **up to three hours** behind a newly created view. Reading it needs a grant no other statement on this page requires:
+
+```sql
+GRANT DATABASE ROLE SNOWFLAKE.OBJECT_VIEWER TO ROLE dbprint_ro;
+```
+
+Issued by `ACCOUNTADMIN`. This is narrower than `IMPORTED PRIVILEGES ON DATABASE SNOWFLAKE` and is the route Snowflake itself recommends. Without it, a role without access to that share does not fail the run: the catalog read raises, the run degrades with one warning, and every view and matview in the connection omits `depends_on` for that run. Do not expect a view created moments ago to resolve — the three-hour lag is Snowflake's own published figure, not a dbprint limitation.
 
 ## Sampling
 
@@ -61,7 +73,7 @@ Snowflake's seed applies only to `SYSTEM`/`BLOCK` sampling, so that is what a fr
 - **A seed is not supported on fixed-size sampling.** The extra distinct-value draw that `inferred.looks_like` takes is `SAMPLE ROW (n ROWS)`, which is fixed-size, so it cannot be seeded at all.
 - **A seed is not supported on a view or a subquery.** A fraction binds to a base table.
 
-The consequence for a sampled Snowflake print: coherence between a shape claim and the rest of the profile is **population-level only**, never row for row. A test or a consumer asserting that `inferred.sampled` describes the same rows as `null_count` is asserting something this engine cannot deliver. PostgreSQL is the only one of the three that coheres row for row.
+The consequence for a sampled Snowflake print: coherence between a shape claim and the rest of the profile is **population-level only**, never row for row. A test or a consumer asserting that `inferred.sampled` describes the same rows as `null_count` is asserting something this engine cannot deliver. PostgreSQL and duckdb are the two engines that cohere row for row; Databricks reproduces the sampled fraction but not that row-level agreement.
 
 ## When dbprint writes
 
@@ -71,7 +83,15 @@ Where it does fire, the drawn rows are copied once into a session-lifetime tempo
 
 No extra grant is required for it. Snowflake exempts temporary tables from the `CREATE TABLE` privilege, and the schema the copy lands in is one the role already holds `USAGE` on.
 
-Where the write is refused anyway — a managed-access schema, or a policy that blocks it — the run does not fail. It warns on stderr and falls back to re-evaluating the sample per statement. The fallback is not an equivalent path: each statement then draws its own rows, so a column's listed value counts and the non-null figure they are a share of come from different reads, and the file can disagree with itself on a table nobody wrote to. Setting `materialize_sample: false` chooses that trade deliberately, which is the right call where the tool must stay strictly read-only.
+Where the write is refused anyway — a managed-access schema, or a policy that blocks it — the run does not fail the connection, but it does refuse that table. `SAMPLE_FALLBACK_COHERENT` is `false` on Snowflake: a fixed-size sample cannot be seeded, so an unmaterialized draw can never be trusted to agree across statements, and the table is refused rather than degraded:
+
+```
+table 'arboretum.seedbank.germination_trial': connection 'primary' (snowflake) could not
+materialize its sample of 0.25 (<cause>), and this adapter's per-statement fallback cannot be
+seeded into agreement across statements. Narrow with a filter instead of a sample fraction.
+```
+
+Setting `materialize_sample: false` on a `sample`-scoped table is refused the same way, before any statement runs.
 
 ## Reference
 

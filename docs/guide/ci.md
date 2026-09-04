@@ -91,7 +91,7 @@ For the online job, install the extra for your engine and supply credentials thr
           DBPRINT_PRIMARY_PASSWORD: ${{ secrets.DB_PASSWORD }}
 ```
 
-The online job needs a database reachable from the runner and the read privileges its adapter page — [PostgreSQL](../adapters/postgres.md), [MySQL](../adapters/mysql.md), [Snowflake](../adapters/snowflake.md) — lists. PostgreSQL additionally needs `pg_dump` on `PATH`, at least the server's major version.
+The online job needs a database reachable from the runner and the read privileges your engine's adapter page lists — [duckdb](../adapters/duckdb.md), [PostgreSQL](../adapters/postgres.md), [MySQL](../adapters/mysql.md), [ClickHouse](../adapters/clickhouse.md), [Redshift](../adapters/redshift.md), [Snowflake](../adapters/snowflake.md), [Databricks](../adapters/databricks.md), [BigQuery](../adapters/bigquery.md). PostgreSQL additionally needs `pg_dump` on `PATH`, at least the server's major version.
 
 It also needs the temporary-table privilege from that page if anything in scope resolves to a fraction. `--online` re-extracts, so a `sample`, a `filter`-free `max_rows_scanned` ceiling, or a connection-level ceiling all make the job write a temporary table. Without the privilege the job still passes, but each statistic for those tables is measured over its own draw.
 

@@ -61,6 +61,7 @@ docs:
     {{ UV_RUN }} python scripts/gen_cli_docs.py 2>&1 | tee -a /tmp/dbprint--docs.log
     {{ UV_RUN }} python scripts/gen_mcp_docs.py 2>&1 | tee -a /tmp/dbprint--docs.log
     {{ UV_RUN }} python scripts/gen_conformance_index.py 2>&1 | tee -a /tmp/dbprint--docs.log
+    {{ UV_RUN }} python scripts/gen_statistics_matrix.py 2>&1 | tee -a /tmp/dbprint--docs.log
     {{ UV_RUN }} python scripts/gen_reading_guide.py 2>&1 | tee -a /tmp/dbprint--docs.log
     {{ UV_RUN }} python scripts/gen_annotation_schemas.py 2>&1 | tee -a /tmp/dbprint--docs.log
 
