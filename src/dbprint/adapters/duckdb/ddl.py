@@ -15,10 +15,10 @@ def extract_ddl(cursor: Cursor, fqn: str) -> str:
         cursor,
         """
         SELECT sql FROM duckdb_tables()
-        WHERE database_name = ? AND schema_name = ? AND table_name = ?
+        WHERE lower(database_name) = ? AND lower(schema_name) = ? AND lower(table_name) = ?
         UNION ALL
         SELECT sql FROM duckdb_views()
-        WHERE database_name = ? AND schema_name = ? AND view_name = ?
+        WHERE lower(database_name) = ? AND lower(schema_name) = ? AND lower(view_name) = ?
         """,
         (database, schema, table, database, schema, table),
     ).fetchone()

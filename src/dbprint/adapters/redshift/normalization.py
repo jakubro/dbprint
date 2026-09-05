@@ -8,8 +8,9 @@ from typing import TYPE_CHECKING
 
 from . import stats
 from .connection import exec_query
+from .identity import Identity
 from .introspect import resolve_column
-from ..base import TableScope, seed_from_fqn
+from ..base import TableScope
 
 
 if TYPE_CHECKING:
@@ -18,16 +19,15 @@ if TYPE_CHECKING:
 
 def compute_normalized_cardinality(
     cursor: Cursor,
-    fqn: str,
+    identity: Identity,
     column: str,
     scope: TableScope | None = None,
 ) -> int:
     """The distinct count of `column` once trimmed and case-folded (SPEC 2.2.4)."""
 
-    quoted_table = stats._quote_qualified(fqn)
-    cn = stats._quote_ident(resolve_column(cursor, fqn, column))
+    cn = stats._quote_ident(resolve_column(cursor, identity, column))
     normalized = f"LOWER(TRIM({cn}::varchar))"
-    source = stats._source(quoted_table, scope, seed_from_fqn(fqn, stats.SEED_MODULUS))
+    source = stats._source(identity.quoted(), scope, stats._seed(identity))
 
     row = exec_query(
         cursor,

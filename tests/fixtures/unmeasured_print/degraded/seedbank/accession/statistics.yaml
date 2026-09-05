@@ -1,0 +1,56 @@
+format_version: 1
+table: seedbank.accession
+type: table
+profiled_at: '2026-09-04T14:00:17Z'
+row_count: 400
+row_count_method: exact
+grain:
+  keys: []
+dependencies: []
+timeline:
+  column: logged_at
+  unit: day
+  buckets: []
+  coverage: 0.0
+unmeasured:
+- null_patterns
+columns:
+  logged_at:
+    sql_type: timestamp
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: temporal
+    cardinality: 400
+    cardinality_ratio: 1.0
+    cardinality_method: exact
+    inferred:
+      candidate_key: true
+    unmeasured:
+    - distribution
+    - frequencies
+    - freshness
+    - percentiles
+    - quantized_count
+    - range
+    - values
+  field_notes:
+    sql_type: text
+    nullable: true
+    null_count: 40
+    null_rate: 0.1
+    classification: text
+    cardinality: 360
+    cardinality_ratio: 0.9
+    cardinality_method: exact
+    values:
+    - value: collected in the field
+      count: 40
+    values_coverage: 0.111111
+    distribution: long_tail
+    length:
+      min: 22
+      max: 22
+      avg: 22.0
+      p95: 22.0
+    empty_count: 0

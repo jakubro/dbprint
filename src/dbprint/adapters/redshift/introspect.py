@@ -1,5 +1,7 @@
 """Redshift catalog reads: batched `SVV_REDSHIFT_*`/`STV_MV_INFO`, the standard PostgreSQL catalog
 tables for constraints, and per-object `SHOW` for DDL - lowercased (SPEC 1.3).
+
+The catalog stores a quoted `CREATE`'s case, so reads past enumeration bind `Identity`'s spelling.
 """
 
 from __future__ import annotations
@@ -9,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from dbprint.config.selectors import expand
 from .connection import exec_query
+from .identity import Identity
 from ..base import (
     ColumnMeta,
     CommentsMeta,
@@ -52,7 +55,11 @@ _FK_ACTIONS: dict[str, FkAction] = {
 _Candidate = tuple[TableMeta, tuple[str, str]]
 
 
-def list_tables(cursor: Cursor, include: list[str], exclude: list[str]) -> list[TableMeta]:
+def list_tables(
+    cursor: Cursor,
+    include: list[str],
+    exclude: list[str],
+) -> tuple[list[TableMeta], dict[str, tuple[str, str]]]:
     """Enumerate tables/views in the database, filtered by selectors - `SVV_REDSHIFT_TABLES` cannot
     distinguish a materialized view, so `STV_MV_INFO` is joined in to override that one case.
     """
@@ -106,15 +113,17 @@ def list_tables(cursor: Cursor, include: list[str], exclude: list[str]) -> list[
     selected = [entry for entry in candidates if entry[0].fqn in in_scope]
     _enforce_identifier_rules(selected)
 
-    return [meta for meta, _ in selected]
+    return (
+        [meta for meta, _ in selected],
+        {meta.fqn: parts for meta, parts in selected},
+    )
 
 
-def columns(cursor: Cursor, fqn: str) -> list[ColumnMeta]:
+def columns(cursor: Cursor, identity: Identity) -> list[ColumnMeta]:
     """Per-column metadata in ordinal order from `SVV_REDSHIFT_COLUMNS` - collation is not read,
     Redshift declaring it per database (SPEC 2.2.2); `database_name` filters out datashared columns.
     """
 
-    schema, table = _split_fqn(fqn)
     rows = exec_query(
         cursor,
         """
@@ -123,7 +132,7 @@ def columns(cursor: Cursor, fqn: str) -> list[ColumnMeta]:
         WHERE database_name = current_database() AND schema_name = %s AND table_name = %s
         ORDER BY ordinal_position
         """,
-        (schema, table),
+        identity.parts,
     ).fetchall()
 
     return [
@@ -155,7 +164,7 @@ def default_collation(cursor: Cursor) -> str:
     return str(row[0]) if row and row[0] is not None else ""
 
 
-def relationships(cursor: Cursor, fqn: str) -> list[ForeignKeyMeta]:
+def relationships(cursor: Cursor, identity: Identity) -> list[ForeignKeyMeta]:
     """Declared outgoing FKs, informational only: `detection` stays `declared` - the FK grammar
     carries no referential-action slot, so both rules are expected to always read `NO ACTION`.
 
@@ -163,7 +172,6 @@ def relationships(cursor: Cursor, fqn: str) -> list[ForeignKeyMeta]:
     shape, so one composite key's rows would need reassembling across them.
     """
 
-    schema, table = _split_fqn(fqn)
     rows = exec_query(
         cursor,
         """
@@ -187,7 +195,7 @@ def relationships(cursor: Cursor, fqn: str) -> list[ForeignKeyMeta]:
           AND sc.relname = %s
         ORDER BY con.conname
         """,
-        (schema, table),
+        identity.parts,
     ).fetchall()
 
     out: list[ForeignKeyMeta] = []
@@ -217,20 +225,19 @@ def relationships(cursor: Cursor, fqn: str) -> list[ForeignKeyMeta]:
     return out
 
 
-def indexes(cursor: Cursor, fqn: str) -> list[IndexMeta]:
+def indexes(cursor: Cursor, identity: Identity) -> list[IndexMeta]:
     """No index concept exists on Redshift; always empty."""
 
-    del cursor, fqn
+    del cursor, identity
 
     return []
 
 
-def unique_keys(cursor: Cursor, fqn: str) -> list[UniqueKeyMeta]:
+def unique_keys(cursor: Cursor, identity: Identity) -> list[UniqueKeyMeta]:
     """Declared-unique column groups, PRIMARY first - read from `pg_constraint`, since
     `SHOW CONSTRAINTS` emits no UNIQUE rows and Redshift has no index to union in.
     """
 
-    schema, table = _split_fqn(fqn)
     rows = exec_query(
         cursor,
         """
@@ -244,7 +251,7 @@ def unique_keys(cursor: Cursor, fqn: str) -> list[UniqueKeyMeta]:
           AND c.relname = %s
         ORDER BY contype, name
         """,
-        (schema, table),
+        identity.parts,
     ).fetchall()
 
     return [
@@ -256,12 +263,11 @@ def unique_keys(cursor: Cursor, fqn: str) -> list[UniqueKeyMeta]:
     ]
 
 
-def physical_layout(cursor: Cursor, fqn: str) -> PhysicalLayout | None:
+def physical_layout(cursor: Cursor, identity: Identity) -> PhysicalLayout | None:
     """Declared SORTKEY via `SVV_REDSHIFT_COLUMNS.sortkey`, None when none is declared -
     interleaved keys encode as alternating signs, so ordering is by `ABS(sortkey)`.
     """
 
-    schema, table = _split_fqn(fqn)
     rows = exec_query(
         cursor,
         """
@@ -271,7 +277,7 @@ def physical_layout(cursor: Cursor, fqn: str) -> PhysicalLayout | None:
           AND schema_name = %s AND table_name = %s AND sortkey <> 0
         ORDER BY ABS(sortkey)
         """,
-        (schema, table),
+        identity.parts,
     ).fetchall()
 
     if not rows:
@@ -331,10 +337,9 @@ def view_dependencies(cursor: Cursor) -> dict[str, tuple[str, ...]]:
     return {k: tuple(v) for k, v in out.items()}
 
 
-def comments(cursor: Cursor, fqn: str) -> CommentsMeta:
+def comments(cursor: Cursor, identity: Identity) -> CommentsMeta:
     """Table comment + per-column comments from `PG_DESCRIPTION`, "fully accessible" per AWS."""
 
-    schema, table = _split_fqn(fqn)
     table_row = exec_query(
         cursor,
         """
@@ -344,7 +349,7 @@ def comments(cursor: Cursor, fqn: str) -> CommentsMeta:
         LEFT JOIN pg_description d ON d.objoid = c.oid AND d.objsubid = 0
         WHERE n.nspname = %s AND c.relname = %s
         """,
-        (schema, table),
+        identity.parts,
     ).fetchone()
     table_comment = table_row[0] if table_row else None
 
@@ -358,7 +363,7 @@ def comments(cursor: Cursor, fqn: str) -> CommentsMeta:
         JOIN pg_description d ON d.objoid = c.oid AND d.objsubid = a.attnum
         WHERE n.nspname = %s AND c.relname = %s AND a.attnum > 0
         """,
-        (schema, table),
+        identity.parts,
     ).fetchall()
 
     return CommentsMeta(
@@ -367,18 +372,16 @@ def comments(cursor: Cursor, fqn: str) -> CommentsMeta:
     )
 
 
-def estimate_row_count(cursor: Cursor, fqn: str) -> int:
+def estimate_row_count(cursor: Cursor, identity: Identity) -> int:
     """`SVV_TABLE_INFO.estimated_visible_rows`; -1 when refused - needs a superuser role or a
     `GRANT SELECT` on the view - or when an empty table is simply missing from it, not zero.
     """
-
-    schema, table = _split_fqn(fqn)
 
     try:
         row = exec_query(
             cursor,
             'SELECT estimated_visible_rows FROM svv_table_info WHERE schema = %s AND "table" = %s',
-            (schema, table),
+            identity.parts,
         ).fetchone()
     except Exception:  # noqa: BLE001 - refused without a superuser role or a grant on the view
         return -1
@@ -389,19 +392,18 @@ def estimate_row_count(cursor: Cursor, fqn: str) -> int:
     return int(row[0])
 
 
-def table_rows_estimate(cursor: Cursor, fqn: str) -> int:
+def table_rows_estimate(cursor: Cursor, identity: Identity) -> int:
     """Alias kept for `looks_like.py`'s naming parity with the other adapters."""
 
-    return estimate_row_count(cursor, fqn)
+    return estimate_row_count(cursor, identity)
 
 
-def resolve_column(cursor: Cursor, fqn: str, column: str) -> str:
+def resolve_column(cursor: Cursor, identity: Identity, column: str) -> str:
     """The catalog's own spelling for a lowercased column name (SPEC 2.2.1's map key).
 
     The only way to address a mixed-case column under `enable_case_sensitive_identifier`.
     """
 
-    schema, table = _split_fqn(fqn)
     row = exec_query(
         cursor,
         """
@@ -410,11 +412,13 @@ def resolve_column(cursor: Cursor, fqn: str, column: str) -> str:
         WHERE database_name = current_database()
           AND schema_name = %s AND table_name = %s AND LOWER(column_name) = %s
         """,
-        (schema, table, column),
+        (*identity.parts, column),
     ).fetchone()
 
     if row is None:
-        raise KeyError(f"no column named {column!r} (case-insensitive) on {fqn!r}")
+        raise KeyError(
+            f"no column named {column!r} (case-insensitive) on {identity.dotted()!r}",
+        )
 
     return str(row[0])
 
@@ -487,15 +491,6 @@ def _reject_message(fqn: str, reason: str, detail: str) -> str:
         f"    exclude:\n"
         f'      - "{fqn}"'
     )
-
-
-def _split_fqn(fqn: str) -> tuple[str, str]:
-    if "." not in fqn:
-        raise ValueError(f"Redshift FQN must be 'schema.table', got {fqn!r}")
-
-    schema, _, table = fqn.partition(".")
-
-    return schema, table
 
 
 def _norm(name: str) -> str:

@@ -6,19 +6,20 @@ from __future__ import annotations
 
 from . import stats
 from .connection import Cursor, exec_query
+from .identity import Identity
 from ..base import TableScope
 
 
 def compute_normalized_cardinality(
     cursor: Cursor,
-    fqn: str,
+    identity: Identity,
     column: str,
     scope: TableScope | None = None,
 ) -> int:
     """The distinct count of `column` once trimmed and case-folded (SPEC 2.2.4)."""
 
-    cn = stats._quote_ident(column)
-    source = stats._source(fqn, scope)
+    cn = identity.quoted_column(column)
+    source = stats._source(identity, scope)
     normalized = f"lowerUTF8(trimBoth(toString({cn})))"
 
     row = exec_query(

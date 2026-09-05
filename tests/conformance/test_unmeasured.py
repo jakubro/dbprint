@@ -90,28 +90,34 @@ class TestADegradedColumnValidates:
 
 
 class TestTheMarkerCannotBeUsedToLie:
-    def test_naming_a_field_the_column_also_emits_is_an_error(self) -> None:
+    """Every case asserts the whole code list, not membership in it.
+
+    `conformance/statistics.py` keeps a named field out of `forbidden`, so one misuse is one error.
+    """
+
+    def test_naming_a_field_the_column_also_emits_is_one_error(self) -> None:
         """A measurement and its own absence are contradictory claims."""
 
-        codes = _codes(_file(_column(unmeasured=["distribution"])))
+        assert _codes(_file(_column(unmeasured=["distribution"]))) == [
+            "stats.unmeasured-names-emitted-field",
+        ]
 
-        assert "stats.unmeasured-names-emitted-field" in codes
-
-    def test_naming_a_field_the_classification_never_required_is_an_error(self) -> None:
+    def test_naming_a_field_the_classification_never_required_is_one_error(self) -> None:
         """`mean` is forbidden outside `numeric`, so its absence is already structural - naming it
         would turn the marker into a place to dump every absent field.
         """
 
-        codes = _codes(_file(_column(unmeasured=["mean"])))
-
-        assert "stats.unmeasured-names-unrequired-field" in codes
+        assert _codes(_file(_column(unmeasured=["mean"]))) == [
+            "stats.unmeasured-names-unrequired-field",
+        ]
 
     def test_a_forbidden_field_stays_forbidden_when_named(self) -> None:
-        """Naming it must not smuggle it past the forbidden half of the matrix."""
+        """Naming it must not smuggle it past `forbidden`, nor be charged twice for one absence."""
 
-        codes = _codes(_file(_column(mean=1.0, unmeasured=["mean"])))
-
-        assert "stats.unmeasured-names-emitted-field" in codes
+        assert _codes(_file(_column(mean=1.0, unmeasured=["mean"]))) == [
+            "stats.forbidden-field-for-classification",
+            "stats.unmeasured-names-emitted-field",
+        ]
 
 
 class TestTheTableLevelTwin:

@@ -5,6 +5,7 @@ Databricks filtering table properties from its own output (documented).
 from __future__ import annotations
 
 from .connection import Cursor, exec_query
+from .introspect import _split_fqn
 
 
 def extract_ddl(cursor: Cursor, fqn: str) -> str:
@@ -26,12 +27,3 @@ def normalize(raw: str) -> str:
     text = "\n".join(lines).strip("\n")
 
     return text + "\n" if text else ""
-
-
-def _split_fqn(fqn: str) -> tuple[str, str]:
-    if "." not in fqn:
-        raise ValueError(f"Databricks FQN must be 'schema.table', got {fqn!r}")
-
-    schema, _, table = fqn.partition(".")
-
-    return schema, table

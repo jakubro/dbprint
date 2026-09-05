@@ -287,6 +287,30 @@ class TestDependsOnView:
         assert view.depends_on_view({}) is None
 
 
+class TestUnmeasuredView:
+    """SPEC 2.2.1: the three table-level blocks whose absence is otherwise a positive claim."""
+
+    def test_names_the_blocks_the_run_could_not_obtain(
+        self,
+        degraded_conn: ConnectionConfig,
+    ) -> None:
+        statistics = _statistics(degraded_conn, "seedbank.storage_reading")
+
+        assert view.unmeasured_view(statistics) == (
+            "dependencies",
+            "null_patterns",
+            "physical_layout",
+        )
+
+    def test_absent_marker_is_empty(self, rich_conn: ConnectionConfig) -> None:
+        assert view.unmeasured_view(_statistics(rich_conn, "seedbank.batch")) == ()
+
+    def test_a_non_list_marker_is_ignored(self) -> None:
+        """The artifact is hand-editable, so a bare string must not read as one named block."""
+
+        assert view.unmeasured_view({"unmeasured": "null_patterns"}) == ()
+
+
 class TestColumnsEmptyNotice:
     def test_empty_columns_reads_as_not_read(self, empty_columns_conn: ConnectionConfig) -> None:
         statistics = _statistics(empty_columns_conn, "public.narrow")
@@ -728,6 +752,29 @@ class TestColumnView:
 
         assert rendered["notes"] == ""
 
+    def test_a_degraded_column_carries_the_names_it_lost(
+        self,
+        degraded_conn: ConnectionConfig,
+    ) -> None:
+        col = _column(degraded_conn, "seedbank.storage_reading", "logged_at")
+
+        rendered = view.column_view("logged_at", col, 300, None, {}, {})
+
+        assert rendered["unmeasured"] == (
+            "distribution",
+            "freshness",
+            "frequencies",
+            "percentiles",
+            "quantized_count",
+            "range",
+            "values",
+        )
+
+    def test_a_measured_column_carries_no_names(self, rich_conn: ConnectionConfig) -> None:
+        col = _column(rich_conn, "seedbank.batch", "batch_id")
+
+        assert view.column_view("batch_id", col, 300, None, {}, {})["unmeasured"] == ()
+
     def test_no_physical_name_field(self, rich_conn: ConnectionConfig) -> None:
         col = _column(rich_conn, "seedbank.batch", "cultivar_id")
 
@@ -1073,6 +1120,21 @@ class TestBuildTableView:
         assert page["columns_empty_notice"] is None
         assert page["cardinality"] is not None
         assert page["completeness"] is not None
+
+    def test_composes_both_grains_of_the_marker(self, degraded_conn: ConnectionConfig) -> None:
+        found = catalogue.load_connections([degraded_conn])[0]
+        artifacts = catalogue.load_table(found, "seedbank.storage_reading")
+        assert artifacts is not None
+
+        page = view.build_table_view(found, artifacts)
+
+        assert page["unmeasured"] == ("dependencies", "null_patterns", "physical_layout")
+        assert page["physical_layout"] is None
+        assert page["null_patterns"] is None
+        assert page["dependencies"] == []
+        by_name = {col["name"]: col for col in page["columns"]}
+        assert by_name["logged_at"]["unmeasured"]
+        assert by_name["reading_id"]["unmeasured"] == ()
 
     def test_plural_mention_links_to_the_singular_table_name(
         self,

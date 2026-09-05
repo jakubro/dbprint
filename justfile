@@ -73,6 +73,10 @@ example:
 example-vocabulary:
     {{ UV_RUN }} python scripts/gen_vocabulary_example.py 2>&1 | tee /tmp/dbprint--example-vocabulary.log
 
+# Regenerate the landing page's recording against a throwaway Postgres; golden-tested by check
+demo:
+    {{ UV_RUN }} python scripts/gen_demo_cast.py 2>&1 | tee /tmp/dbprint--demo.log
+
 # Build the documentation site (Astro + Starlight over docs/); its own job, not part of check
 site:
     cd site && npm ci 2>&1 | tee /tmp/dbprint--site.log
@@ -80,4 +84,4 @@ site:
 
 # Serve docs/ with live reload at the configured base; HOST=0.0.0.0 to reach it from outside
 preview HOST="127.0.0.1" PORT="4321":
-    cd site && npm run dev -- --host {{ HOST }} --port {{ PORT }}
+    cd site && npm ci && npm run dev -- --host {{ HOST }} --port {{ PORT }}

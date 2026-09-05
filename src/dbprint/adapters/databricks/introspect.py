@@ -640,7 +640,10 @@ def _str_list(value: object) -> list[str]:
 
 
 def _enforce_identifier_rules(selected: list[_Candidate]) -> None:
-    """Reject identifiers that violate SPEC 1.5 before any artifact is written."""
+    """Reject identifiers that violate SPEC 1.5 before any artifact is written.
+
+    No physical spelling is carried afterwards: both metastores store securable names lowercase.
+    """
 
     seen: dict[str, tuple[str, str]] = {}
 

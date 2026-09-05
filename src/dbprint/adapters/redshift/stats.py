@@ -15,6 +15,7 @@ from dbprint.spec.distribution import classify as classify_distribution
 from dbprint.spec.distribution import summarize as summarize_frequencies
 from dbprint.spec.temporal_range import is_representable
 from .connection import exec_query
+from .identity import Identity
 from .introspect import table_rows_estimate
 from ..base import (
     BaseStats,
@@ -34,6 +35,7 @@ from ..base import (
     materialized_name,
     null_flags,
     null_patterns_from_rows,
+    seed_from_fqn,
 )
 
 
@@ -76,7 +78,7 @@ _UNSUPPORTED_TYPES = ("varbyte", "geometry", "geography", "hllsketch")
 
 def compute_base(
     cursor: Cursor,
-    fqn: str,
+    identity: Identity,
     columns: list[ColumnMeta],
     scope: TableScope | None = None,
 ) -> tuple[TableCounts, dict[str, BaseStats]]:
@@ -85,17 +87,16 @@ def compute_base(
     if not columns:
         return TableCounts(row_count=0, rows_scanned=0), {}
 
-    quoted = _quote_qualified(fqn)
-    source = _table_source(fqn, quoted, scope)
+    source = _table_source(identity, scope)
     rows_scanned, base_stats = _phase_a(cursor, source, columns)
-    row_count, row_count_method = _table_row_count(cursor, fqn, quoted, rows_scanned, scope)
+    row_count, row_count_method = _table_row_count(cursor, identity, rows_scanned, scope)
 
     return TableCounts(row_count, rows_scanned, row_count_method), base_stats
 
 
 def compute_columns(
     cursor: Cursor,
-    fqn: str,
+    identity: Identity,
     columns: list[ColumnMeta],
     config: StatisticsConfig,
     counts: TableCounts,
@@ -116,7 +117,7 @@ def compute_columns(
 
         return {c.name: _empty_stats(c) for c in columns}
 
-    source = _table_source(fqn, _quote_qualified(fqn), scope)
+    source = _table_source(identity, scope)
     enriched: dict[str, ColumnStats] = {}
     total = len(columns)
 
@@ -146,7 +147,7 @@ def compute_columns(
 
 def compute_null_patterns(
     cursor: Cursor,
-    fqn: str,
+    identity: Identity,
     columns: list[ColumnMeta],
     config: StatisticsConfig,
     counts: TableCounts,
@@ -158,7 +159,7 @@ def compute_null_patterns(
     if not has_measurable_nulls(counts, base):
         return None
 
-    source = _table_source(fqn, _quote_qualified(fqn), scope)
+    source = _table_source(identity, scope)
     quoted = [_quote_ident(col.physical_name or col.name) for col in columns]
     cap = config.top_n_null_patterns
     rows = exec_query(
@@ -178,7 +179,7 @@ def compute_null_patterns(
 
 def probe_grain(
     cursor: Cursor,
-    fqn: str,
+    identity: Identity,
     columns: list[ColumnMeta],
     counts: TableCounts,
     candidates: tuple[tuple[str, str], ...],
@@ -189,7 +190,7 @@ def probe_grain(
     if not candidates:
         return ()
 
-    source = _table_source(fqn, _quote_qualified(fqn), scope)
+    source = _table_source(identity, scope)
     physical = {col.name: col.physical_name or col.name for col in columns}
     exprs = [
         f"COUNT(DISTINCT {_composite_distinct_expr(physical[a], physical[b])}) AS dbprint_grain_{i}"
@@ -205,7 +206,7 @@ def probe_grain(
 
 def probe_timeline(
     cursor: Cursor,
-    fqn: str,
+    identity: Identity,
     columns: list[ColumnMeta],
     counts: TableCounts,
     column: str,
@@ -218,7 +219,7 @@ def probe_timeline(
 
     del counts
 
-    source = _table_source(fqn, _quote_qualified(fqn), scope)
+    source = _table_source(identity, scope)
     by_name = {col.name: col for col in columns}
     col = by_name[column]
     cn = _quote_ident(col.physical_name or col.name)
@@ -254,7 +255,7 @@ def _timeline_bucket_expr(cn: str, sql_type: str, unit: str) -> str:
 
 def compute_populated_windows(
     cursor: Cursor,
-    fqn: str,
+    identity: Identity,
     columns: list[ColumnMeta],
     counts: TableCounts,
     anchor_column: str,
@@ -268,7 +269,7 @@ def compute_populated_windows(
     if not subject_columns:
         return {}
 
-    source = _table_source(fqn, _quote_qualified(fqn), scope)
+    source = _table_source(identity, scope)
     by_name = {col.name: col for col in columns}
     anchor = by_name[anchor_column]
     anchor_cn = _quote_ident(anchor.physical_name or anchor.name)
@@ -311,7 +312,7 @@ def compute_populated_windows(
 
 def probe_dependencies(
     cursor: Cursor,
-    fqn: str,
+    identity: Identity,
     columns: list[ColumnMeta],
     counts: TableCounts,
     base: dict[str, BaseStats],
@@ -325,7 +326,7 @@ def probe_dependencies(
     if not candidates:
         return {}
 
-    source = _table_source(fqn, _quote_qualified(fqn), scope)
+    source = _table_source(identity, scope)
     physical = {col.name: col.physical_name or col.name for col in columns}
     exprs = [
         f"COUNT(DISTINCT {_composite_distinct_expr(physical[a], physical[b])}) AS dbprint_dep_{i}"
@@ -347,13 +348,13 @@ def probe_dependencies(
     return out
 
 
-def materialize(cursor: Cursor, fqn: str, scope: TableScope) -> TableScope:
+def materialize(cursor: Cursor, identity: Identity, scope: TableScope) -> TableScope:
     """Copy the drawn fraction into a session-lifetime temp table and name it on the scope -
     `RANDOM()` is evaluated exactly once here.
     """
 
-    name = materialized_name(fqn)
-    drawn = _sample_expr(fqn, scope)
+    name = materialized_name(identity.dotted().lower())
+    drawn = _sample_expr(identity, scope)
     exec_query(cursor, f"CREATE TEMPORARY TABLE {_quote_ident(name)} AS SELECT * FROM {drawn}")
 
     return replace(scope, materialized=name)
@@ -368,12 +369,12 @@ def release(cursor: Cursor, scope: TableScope) -> None:
     exec_query(cursor, f"DROP TABLE IF EXISTS {_quote_ident(scope.materialized)}")
 
 
-def _sample_expr(fqn: str, scope: TableScope) -> str:
+def _sample_expr(identity: Identity, scope: TableScope) -> str:
     """The `RANDOM()`-bearing source `materialize_scope` reads once to build its copy - a derived
     table in a `FROM` clause needs an alias under Postgres-family grammar.
     """
 
-    quoted = _quote_qualified(fqn)
+    quoted = identity.quoted()
 
     if scope.filter is not None:
         return f"(SELECT * FROM {quoted} WHERE ({scope.filter})) AS dbprint_scoped"
@@ -381,16 +382,16 @@ def _sample_expr(fqn: str, scope: TableScope) -> str:
     return f"(SELECT * FROM {quoted} WHERE RANDOM() < {scope.sample}) AS dbprint_scoped"
 
 
-def _quote_qualified(fqn: str) -> str:
-    schema, table = fqn.partition(".")[0], fqn.partition(".")[2]
+def _table_source(identity: Identity, scope: TableScope | None) -> str:
+    """The FROM expression every phase reads, addressing the catalog's own spelling."""
 
-    return f'"{schema}"."{table}"'
+    return _source(identity.quoted(), scope)
 
 
-def _table_source(fqn: str, quoted: str, scope: TableScope | None) -> str:
-    del fqn
+def _seed(identity: Identity) -> int:
+    """The table's draw seed, hashed from the FOLDED path - the artifact's own name for it."""
 
-    return _source(quoted, scope)
+    return seed_from_fqn(identity.dotted().lower(), SEED_MODULUS)
 
 
 def _source(quoted_fqn: str, scope: TableScope | None, seed: int | None = None) -> str:
@@ -410,8 +411,7 @@ def _source(quoted_fqn: str, scope: TableScope | None, seed: int | None = None) 
 
 def _table_row_count(
     cursor: Cursor,
-    fqn: str,
-    quoted_fqn: str,
+    identity: Identity,
     rows_scanned: int,
     scope: TableScope | None,
 ) -> tuple[int, RowCountMethod]:
@@ -422,12 +422,12 @@ def _table_row_count(
     if scope is None or not scope.narrows:
         return rows_scanned, "exact"
 
-    estimate = table_rows_estimate(cursor, fqn)
+    estimate = table_rows_estimate(cursor, identity)
 
     if estimate >= 0:
         return estimate, "approximate"
 
-    row = exec_query(cursor, f"SELECT COUNT(*) FROM {quoted_fqn}").fetchone()
+    row = exec_query(cursor, f"SELECT COUNT(*) FROM {identity.quoted()}").fetchone()
 
     return (int(row[0]) if row and row[0] is not None else rows_scanned), "exact"
 

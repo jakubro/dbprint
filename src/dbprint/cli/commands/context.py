@@ -9,11 +9,14 @@ from typing import Any
 
 import rich_click as click
 import yaml
+from rich.console import Console
 
 from dbprint.config import ConnectionConfig
 from dbprint.engine import EXIT_GENERIC, EXIT_OK, AssemblyOptions, assemble_context
 from dbprint.engine.baseline import manifest_shape_error
 from ..options import project_option, resolve_project
+from ..rendering import resolve_render_mode
+from ..rendering.context_tty import render_human
 from ..resolution import ConnectionResolutionError, resolve
 
 
@@ -67,6 +70,11 @@ from ..resolution import ConnectionResolutionError, resolve
     default=None,
     help="Write output to FILE instead of stdout.",
 )
+@click.option(
+    "--tui/--no-tui",
+    default=None,
+    help="Force TTY (syntax-highlighted) or piped (plain-text) rendering. md format only.",
+)
 @click.pass_context
 def context_command(
     ctx: click.Context,
@@ -82,6 +90,7 @@ def context_command(
     no_stats: bool,
     budget: int | None,
     output_path: Path | None,
+    tui: bool | None,
 ) -> None:
     """Emit an agent-ready context fragment for committed tables.
 
@@ -187,7 +196,19 @@ def context_command(
     if output_path is not None:
         output_path.write_text(text, encoding="utf-8")
     else:
-        click.echo(text, nl=False)
+        # --tui only chooses a rendering of the md format; json/yaml is always plain,
+        # the same way `list`'s own --format/--tui pair works.
+        mode = resolve_render_mode(tui, Console()) if fmt.lower() == "md" else "piped"
+
+        if mode == "tty":
+            tty_console = Console(
+                file=click.get_text_stream("stdout"),
+                force_terminal=True,
+                soft_wrap=True,
+            )
+            render_human(text, tty_console)
+        else:
+            click.echo(text, nl=False)
 
     ctx.exit(overall_exit)
 

@@ -238,6 +238,16 @@
     </div>
   {% endif %}
 
+  {% if 'physical_layout' in unmeasured %}
+    <div class="hedge-block">
+      <h2>Clustering or partitioning</h2>
+      <div class="hedge">
+        Attempted and lost - this run asked and got no answer, so whether a key is declared
+        is unknown here, not answered "none".
+      </div>
+    </div>
+  {% endif %}
+
   {% if dependencies %}
     <div class="hedge-block">
       <h2>Dependencies</h2>
@@ -254,6 +264,15 @@
           {% endfor %}
         </tbody>
       </table>
+    </div>
+  {% endif %}
+
+  {% if 'dependencies' in unmeasured %}
+    <div class="hedge-block">
+      <h2>Dependencies</h2>
+      <div class="hedge">
+        Attempted and lost - the probe did not answer, so no pair here is ruled out.
+      </div>
     </div>
   {% endif %}
 
@@ -377,6 +396,7 @@
             <td>
               {% if col.distribution %}<div class="badge badge-accent">{{ col.distribution|replace('_', ' ') }}</div>{% endif %}
               {% if col.redacted %}<div class="badge badge-redacted">redacted ({{ col.redacted }})</div>{% endif %}
+              {% if col.unmeasured %}<div class="muted">attempted and lost: {{ col.unmeasured|join(', ') }}</div>{% endif %}
 
               {% if col.value_list %}
                 {% if col.value_list.bars %}
@@ -477,6 +497,16 @@
             {{ 'every scanned row' if null_patterns.coverage >= 1 else ((null_patterns.coverage * 1000)|round(0, 'floor') / 10) ~ '% of scanned rows' }}{% if null_patterns.coverage_method == 'bounded' %} (bounded){% endif %}.
           </div>
         {% endif %}
+      </div>
+    {% endif %}
+
+    {% if 'null_patterns' in unmeasured %}
+      <div class="hedge-block">
+        <h2>Columns null on the same rows</h2>
+        <div class="hedge">
+          Attempted and lost - the census did not answer, so which columns share their nulls
+          is unknown here, not answered "none".
+        </div>
       </div>
     {% endif %}
   </div>

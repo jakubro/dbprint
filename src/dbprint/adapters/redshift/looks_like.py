@@ -8,8 +8,9 @@ from typing import TYPE_CHECKING, Any
 
 from . import stats
 from .connection import exec_query
+from .identity import Identity
 from .introspect import resolve_column, table_rows_estimate
-from ..base import MIN_SAMPLE_DRAW, TableScope, seed_from_fqn
+from ..base import MIN_SAMPLE_DRAW, TableScope
 
 
 if TYPE_CHECKING:
@@ -22,7 +23,7 @@ SMALL_TABLE_FACTOR = 10  # row_count < n * factor -> direct DISTINCT path
 
 def sample_distinct(
     cursor: Cursor,
-    fqn: str,
+    identity: Identity,
     column: str,
     n: int,
     scope: TableScope | None = None,
@@ -31,11 +32,10 @@ def sample_distinct(
     statistic, and a predicate-starved draw is re-taken directly.
     """
 
-    quoted = stats._quote_qualified(fqn)
-    cn = stats._quote_ident(resolve_column(cursor, fqn, column))
-    seed = seed_from_fqn(fqn, stats.SEED_MODULUS)
-    source = stats._source(quoted, scope, seed)
-    estimate = _scoped_estimate(table_rows_estimate(cursor, fqn), scope)
+    cn = stats._quote_ident(resolve_column(cursor, identity, column))
+    seed = stats._seed(identity)
+    source = stats._source(identity.quoted(), scope, seed)
+    estimate = _scoped_estimate(table_rows_estimate(cursor, identity), scope)
 
     if estimate <= 0 or estimate < n * SMALL_TABLE_FACTOR:
         return _distinct(cursor, source, cn, n, seed)

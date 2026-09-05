@@ -62,7 +62,7 @@ VENDOR_SUPPORT: dict[str, frozenset[Vendor]] = {
         {"postgres", "mysql", "duckdb", "databricks", "bigquery"},
     ),
     "information_schema.index_columns": frozenset({"snowflake"}),
-    "information_schema.partitions": frozenset({"mysql"}),
+    "information_schema.partitions": frozenset({"mysql", "bigquery"}),
     # Redshift's `SVV_*`/`STV_*` system views - no INFORMATION_SCHEMA equivalent for these fields.
     "svv_": frozenset({"redshift"}),
     "stv_": frozenset({"redshift"}),

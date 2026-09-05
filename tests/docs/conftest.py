@@ -787,6 +787,98 @@ def companion_conn(tmp_path: Path) -> ConnectionConfig:
 
 
 @pytest.fixture
+def degraded_conn(tmp_path: Path) -> ConnectionConfig:
+    """A print whose reads failed at both grains (SPEC 2.2.4, 2.2.1).
+
+    Absent `null_patterns` with nulls present claims no column shares its nulls - unless marked.
+    """
+
+    root = tmp_path / "prints" / "primary"
+
+    manifest = {
+        "format_version": 1,
+        "generated_at": WHEN,
+        "connection": "primary",
+        "adapter": "postgres",
+        "dbprint_version": "0.2.0",
+        "tables": {
+            "seedbank.storage_reading": {
+                "type": "table",
+                "path": "seedbank/storage_reading",
+                "artifacts": {"ddl": "ddl.sql", "statistics": "statistics.yaml"},
+                "columns": 3,
+                "profiled_at": WHEN,
+                "row_count": 300,
+            },
+        },
+    }
+    statistics = {
+        "format_version": 1,
+        "table": "seedbank.storage_reading",
+        "type": "table",
+        "profiled_at": WHEN,
+        "row_count": 300,
+        "row_count_method": "exact",
+        "grain": {"keys": [{"columns": ["reading_id"], "detection": "declared"}]},
+        "unmeasured": ["dependencies", "null_patterns", "physical_layout"],
+        "columns": {
+            "reading_id": {
+                "sql_type": "bigint",
+                "nullable": False,
+                "null_count": 0,
+                "null_rate": 0.0,
+                "cardinality": 300,
+                "cardinality_ratio": 1.0,
+                "cardinality_method": "exact",
+                "classification": "numeric",
+                "distribution": "long_tail",
+                "frequencies": {"top": 1, "bottom": 1, "listed": 30, "total": 30},
+                "range": {"min": 1, "max": 300},
+                "percentiles": {"p01": 3, "p25": 75, "p50": 150, "p75": 225, "p99": 297},
+            },
+            # The whole temporal block failed, so every field it would have carried is named.
+            "logged_at": {
+                "sql_type": "timestamp",
+                "nullable": False,
+                "null_count": 0,
+                "null_rate": 0.0,
+                "cardinality": 280,
+                "cardinality_ratio": 0.9333,
+                "cardinality_method": "exact",
+                "classification": "temporal",
+                "unmeasured": [
+                    "distribution",
+                    "freshness",
+                    "frequencies",
+                    "percentiles",
+                    "quantized_count",
+                    "range",
+                    "values",
+                ],
+            },
+            "note": {
+                "sql_type": "text",
+                "nullable": True,
+                "null_count": 20,
+                "null_rate": 0.0667,
+                "cardinality": 250,
+                "cardinality_ratio": 0.8333,
+                "cardinality_method": "exact",
+                "classification": "text",
+            },
+        },
+    }
+
+    _write(root / "manifest.yaml", manifest)
+    _write(root / "seedbank" / "storage_reading" / "statistics.yaml", statistics)
+    (root / "seedbank" / "storage_reading" / "ddl.sql").write_text(
+        "CREATE TABLE seedbank.storage_reading (reading_id bigint, logged_at timestamp);\n",
+    )
+
+    return _connection(tmp_path)
+
+
+@pytest.fixture
 def declared_missing_conn(tmp_path: Path) -> ConnectionConfig:
     """A table whose manifest declares `statistics` but the file was never written (SPEC 2.5)."""
 

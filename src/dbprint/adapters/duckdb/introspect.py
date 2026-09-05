@@ -79,7 +79,7 @@ def columns(cursor: Cursor, fqn: str) -> list[ColumnMeta]:
         """
         SELECT column_name, column_index, data_type, is_nullable, column_default
         FROM duckdb_columns()
-        WHERE database_name = ? AND schema_name = ? AND table_name = ?
+        WHERE lower(database_name) = ? AND lower(schema_name) = ? AND lower(table_name) = ?
         ORDER BY column_index
         """,
         (database, schema, table),
@@ -128,7 +128,7 @@ def relationships(cursor: Cursor, fqn: str) -> list[ForeignKeyMeta]:
                referenced_column_names
         FROM duckdb_constraints()
         WHERE constraint_type = 'FOREIGN KEY'
-          AND database_name = ? AND schema_name = ? AND table_name = ?
+          AND lower(database_name) = ? AND lower(schema_name) = ? AND lower(table_name) = ?
         ORDER BY constraint_name
         """,
         (database, schema, table),
@@ -159,7 +159,7 @@ def indexes(cursor: Cursor, fqn: str) -> list[IndexMeta]:
         SELECT index_name, sql
         FROM duckdb_indexes()
         WHERE NOT is_unique
-          AND database_name = ? AND schema_name = ? AND table_name = ?
+          AND lower(database_name) = ? AND lower(schema_name) = ? AND lower(table_name) = ?
         ORDER BY index_name
         """,
         (database, schema, table),
@@ -183,7 +183,7 @@ def unique_keys(cursor: Cursor, fqn: str) -> list[UniqueKeyMeta]:
         SELECT constraint_type, constraint_column_names
         FROM duckdb_constraints()
         WHERE constraint_type IN ('PRIMARY KEY', 'UNIQUE')
-          AND database_name = ? AND schema_name = ? AND table_name = ?
+          AND lower(database_name) = ? AND lower(schema_name) = ? AND lower(table_name) = ?
         ORDER BY constraint_index
         """,
         (database, schema, table),
@@ -200,7 +200,7 @@ def unique_keys(cursor: Cursor, fqn: str) -> list[UniqueKeyMeta]:
         SELECT sql
         FROM duckdb_indexes()
         WHERE is_unique AND NOT is_primary
-          AND database_name = ? AND schema_name = ? AND table_name = ?
+          AND lower(database_name) = ? AND lower(schema_name) = ? AND lower(table_name) = ?
         ORDER BY index_name
         """,
         (database, schema, table),
@@ -236,10 +236,10 @@ def comments(cursor: Cursor, fqn: str) -> CommentsMeta:
         cursor,
         """
         SELECT comment FROM duckdb_tables()
-        WHERE database_name = ? AND schema_name = ? AND table_name = ?
+        WHERE lower(database_name) = ? AND lower(schema_name) = ? AND lower(table_name) = ?
         UNION ALL
         SELECT comment FROM duckdb_views()
-        WHERE database_name = ? AND schema_name = ? AND view_name = ?
+        WHERE lower(database_name) = ? AND lower(schema_name) = ? AND lower(view_name) = ?
         """,
         (database, schema, table, database, schema, table),
     ).fetchone()
@@ -248,7 +248,7 @@ def comments(cursor: Cursor, fqn: str) -> CommentsMeta:
         cursor,
         """
         SELECT column_name, comment FROM duckdb_columns()
-        WHERE database_name = ? AND schema_name = ? AND table_name = ?
+        WHERE lower(database_name) = ? AND lower(schema_name) = ? AND lower(table_name) = ?
         """,
         (database, schema, table),
     ).fetchall()
@@ -271,7 +271,7 @@ def row_count_estimate(cursor: Cursor, fqn: str) -> int:
         cursor,
         """
         SELECT estimated_size FROM duckdb_tables()
-        WHERE database_name = ? AND schema_name = ? AND table_name = ?
+        WHERE lower(database_name) = ? AND lower(schema_name) = ? AND lower(table_name) = ?
         """,
         (database, schema, table),
     ).fetchone()
@@ -307,6 +307,8 @@ def _split_fqn(fqn: str) -> tuple[str, str, str]:
 def _enforce_identifier_rules(selected: list[_Candidate]) -> None:
     """Reject identifiers that violate SPEC 1.5 before any artifact is written - two objects
     differing only by case would collapse onto one path, the second overwriting it.
+
+    No physical-spelling carrier is needed: resolution is ASCII-case-insensitive, quoted included.
     """
 
     seen: dict[str, tuple[str, str, str]] = {}

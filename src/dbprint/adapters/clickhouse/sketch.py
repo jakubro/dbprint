@@ -7,11 +7,12 @@ from __future__ import annotations
 from dbprint.spec.sketch import SketchKind
 from . import stats
 from .connection import Cursor, exec_query
+from .identity import Identity
 
 
 def compute_key_sketch(
     cursor: Cursor,
-    fqn: str,
+    identity: Identity,
     column: str,
     sql_type: str,
     kind: SketchKind,
@@ -19,8 +20,8 @@ def compute_key_sketch(
 ) -> tuple[int, ...]:
     """The k smallest low-64-bit MD5 hashes of the column's distinct non-null values."""
 
-    quoted_table = stats._quote_qualified(fqn)
-    quoted_col = stats._quote_ident(column)
+    quoted_table = identity.quoted()
+    quoted_col = identity.quoted_column(column)
     canonical = _canonical_expr(quoted_col, kind, sql_type)
     low64 = _low64_expr("v")
 

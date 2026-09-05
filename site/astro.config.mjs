@@ -118,7 +118,11 @@ export default defineConfig({
     starlight({
       title: "dbprint",
       plugins: [starlightThemeRapide()],
-      components: { ThemeProvider: "./src/components/ThemeProvider.astro" },
+      components: {
+        ThemeProvider: "./src/components/ThemeProvider.astro",
+        // Adds the demo recording above the landing page prose; other routes fall through as-is.
+        MarkdownContent: "./src/components/MarkdownContent.astro",
+      },
       // Inlined rather than emitted: trailingSlash "always" appends a slash to the hashed
       // /_astro/ec.<hash>.css route, so the dev server never matches it and code blocks lose styling.
       expressiveCode: { emitExternalStylesheet: false },

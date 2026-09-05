@@ -10,19 +10,22 @@ from __future__ import annotations
 import re
 
 from .connection import Cursor, exec_query
+from .identity import Identity
 
 
 _AUTO_INCREMENT_COUNTER_RE = re.compile(r"\s+AUTO_INCREMENT=\d+", re.IGNORECASE)
 
 
-def extract_ddl(cursor: Cursor, fqn: str) -> str:
-    """Return native-dialect DDL for the object, post-normalization."""
+def extract_ddl(cursor: Cursor, identity: Identity) -> str:
+    """Return native-dialect DDL for the object, post-normalization.
 
-    database, table = _split_fqn(fqn)
-    row = exec_query(cursor, f"SHOW CREATE TABLE {_quote_qualified(database, table)}").fetchone()
+    Carries the catalog's spelling; at `lower_case_table_names=0` a folded name would miss.
+    """
+
+    row = exec_query(cursor, f"SHOW CREATE TABLE {identity.quoted()}").fetchone()
 
     if not row or len(row) < 2 or not row[1]:
-        raise ValueError(f"no DDL available for {fqn!r}; not found in catalog")
+        raise ValueError(f"no DDL available for {identity.dotted()!r}; not found in catalog")
 
     return normalize(str(row[1]))
 
@@ -35,20 +38,3 @@ def normalize(raw: str) -> str:
     text = "\n".join(lines).strip("\n")
 
     return text + "\n" if text else ""
-
-
-def _split_fqn(fqn: str) -> tuple[str, str]:
-    if "." not in fqn:
-        raise ValueError(f"MySQL FQN must be 'database.table', got {fqn!r}")
-
-    database, _, table = fqn.partition(".")
-
-    return database.strip("`"), table.strip("`")
-
-
-def _quote_qualified(database: str, table: str) -> str:
-    return f"{_quote_ident(database)}.{_quote_ident(table)}"
-
-
-def _quote_ident(name: str) -> str:
-    return "`" + name.replace("`", "``") + "`"

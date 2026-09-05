@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 
 from . import stats
 from .connection import exec_query
+from .identity import Identity
 from .introspect import resolve_column
-from ..base import seed_from_fqn
 
 
 if TYPE_CHECKING:
@@ -20,17 +20,15 @@ if TYPE_CHECKING:
 
 def compute_normalized_cardinality(
     conn: psycopg.Connection,
-    fqn: str,
+    identity: Identity,
     column: str,
     scope: TableScope | None = None,
 ) -> int:
     """The distinct count of `column` once trimmed and case-folded (SPEC 2.2.4)."""
 
-    schema, _, table = fqn.partition(".")
-    quoted_table = stats._quote_qualified(schema, table)
-    cn = stats._quote_ident(resolve_column(conn, fqn, column))
+    cn = stats._quote_ident(resolve_column(conn, identity, column))
     normalized = f"LOWER(TRIM(CAST({cn} AS text)))"
-    source = stats._source(quoted_table, scope, seed_from_fqn(fqn, stats.SEED_MODULUS))
+    source = stats._source(identity.quoted(), scope, stats._seed(identity))
 
     row = exec_query(
         conn,

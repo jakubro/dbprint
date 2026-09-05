@@ -22,7 +22,9 @@ from dbprint.adapters.errors import QueryFailed
 from dbprint.adapters.mysql import ddl as ddl_module
 from dbprint.adapters.mysql import introspect as introspect_module
 from dbprint.adapters.mysql import stats as stats_module
+from dbprint.adapters.mysql.adapter import UnknownTable
 from dbprint.adapters.mysql.connection import ConnectionParams, MysqlConnectionError, exec_query
+from dbprint.adapters.mysql.identity import Identity
 from dbprint.cli.main import main
 from dbprint.config import StatisticsConfig
 from dbprint.conformance import validate_print
@@ -449,6 +451,128 @@ class TestCollation:
         assert columns["forced"]["cardinality"] == 2
 
 
+class TestPhysicalTableIdentity:
+    """SPEC 1.3: a mixed-case table folds into the path, and is still addressable.
+
+    At `lower_case_table_names=0` the catalog compares exactly, so the folded path names nothing.
+    """
+
+    @staticmethod
+    def _connect(creds: dict[str, str], database: str | None = None):
+        import mysql.connector
+
+        return mysql.connector.connect(
+            host=creds["host"],
+            port=int(creds["port"]),
+            user=creds["user"],
+            password="",
+            database=database if database is not None else creds["database"],
+            autocommit=True,
+        )
+
+    def _seed(self, creds: dict[str, str]) -> None:
+        conn = self._connect(creds)
+
+        try:
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE `MixedCase` (id INT, label VARCHAR(32))")
+            cursor.executemany(
+                "INSERT INTO `MixedCase` (id, label) VALUES (%s, %s)",
+                [(i, f"label-{i % 7}") for i in range(120)],
+            )
+            cursor.close()
+        finally:
+            conn.close()
+
+    def test_the_table_name_folds_into_the_path(self, mysql_test_db: dict[str, str]) -> None:
+        self._seed(mysql_test_db)
+        adapter = _build(mysql_test_db)
+        database = mysql_test_db["database"]
+
+        try:
+            listed = adapter.list_tables(include=[f"{database}.mixedcase"], exclude=[])
+        finally:
+            adapter.close()
+
+        assert [t.fqn for t in listed] == [f"{database}.mixedcase"]
+        assert listed[0].namespace_path == (database, "mixedcase")
+
+    def test_every_read_addresses_the_catalog_spelling(
+        self,
+        mysql_test_db: dict[str, str],
+    ) -> None:
+        self._seed(mysql_test_db)
+        adapter = _build(mysql_test_db)
+        fqn = f"{mysql_test_db['database']}.mixedcase"
+
+        try:
+            cols = adapter.introspect_columns(fqn)
+            ddl = adapter.extract_ddl(fqn)
+            counts, stats = adapter.compute_statistics(
+                fqn,
+                cols,
+                StatisticsConfig(),
+                frozenset(),
+            )
+            samples = adapter.sample_values(fqn, "label", n=10)
+            normalized = adapter.compute_normalized_cardinality(fqn, "label")
+        finally:
+            adapter.close()
+
+        assert [c.name for c in cols] == ["id", "label"]
+        assert "CREATE TABLE `MixedCase`" in ddl
+        assert counts.row_count == 120
+        assert stats["id"].cardinality == 120
+        assert samples, "sample_values addressed no rows on the mixed-case table"
+        assert normalized == 7
+
+    def test_a_mixed_case_database_folds_too(self, mysql_test_db: dict[str, str]) -> None:
+        """A database name behaves like a table name at `lower_case_table_names=0`."""
+
+        admin = self._connect(mysql_test_db)
+        cursor = admin.cursor()
+        cursor.execute("CREATE DATABASE `Seedbank`")
+        cursor.execute("CREATE TABLE `Seedbank`.`Accession` (id INT)")
+        cursor.execute("INSERT INTO `Seedbank`.`Accession` (id) VALUES (1), (2)")
+        cursor.close()
+
+        try:
+            adapter = _build({**mysql_test_db, "database": "Seedbank"})
+
+            try:
+                listed = adapter.list_tables(include=["*"], exclude=[])
+                cols = adapter.introspect_columns("seedbank.accession")
+                counts, _stats = adapter.compute_statistics(
+                    "seedbank.accession",
+                    cols,
+                    StatisticsConfig(),
+                    frozenset(),
+                )
+            finally:
+                adapter.close()
+        finally:
+            cleanup = self._connect(mysql_test_db)
+            cleanup.cursor().execute("DROP DATABASE IF EXISTS `Seedbank`")
+            cleanup.close()
+
+        assert [t.fqn for t in listed] == ["seedbank.accession"]
+        assert counts.row_count == 2
+
+    def test_a_table_that_was_never_enumerated_is_refused(
+        self,
+        mysql_test_db: dict[str, str],
+    ) -> None:
+        """Falling back to the folded path would read an absent table as an empty one."""
+
+        adapter = _build(mysql_test_db)
+
+        try:
+            with pytest.raises(UnknownTable, match="call list_tables"):
+                adapter.introspect_columns(f"{mysql_test_db['database']}.never_listed")
+        finally:
+            adapter.close()
+
+
 class TestIdentifierRejection:
     """SPEC 1.5: producers reject identifiers that violate the path-segment allowlist.
 
@@ -475,7 +599,8 @@ class TestIdentifierRejection:
         finally:
             conn.close()
 
-        adapter = _build(mysql_test_db)
+        adapter = MysqlAdapter(mysql_test_db)
+        adapter.connect()
 
         try:
             with pytest.raises(introspect_module.IdentifierRejected) as exc_info:
@@ -513,7 +638,8 @@ class TestIdentifierRejection:
         finally:
             conn.close()
 
-        adapter = _build(mysql_test_db)
+        adapter = MysqlAdapter(mysql_test_db)
+        adapter.connect()
         db = mysql_test_db["database"]
 
         try:
@@ -553,7 +679,8 @@ class TestIdentifierRejection:
         finally:
             conn.close()
 
-        adapter = _build(mysql_test_db)
+        adapter = MysqlAdapter(mysql_test_db)
+        adapter.connect()
         db = mysql_test_db["database"]
 
         try:
@@ -599,7 +726,8 @@ class TestIdentifierRejection:
         finally:
             conn.close()
 
-        adapter = _build(mysql_test_db)
+        adapter = MysqlAdapter(mysql_test_db)
+        adapter.connect()
         db = mysql_test_db["database"]
 
         try:
@@ -624,7 +752,7 @@ class TestIndexesFunctionalKeyParts:
     ]
 
     def _indexes(self) -> list:
-        return introspect_module.indexes(_StubCursor(self._ROWS), "fixture.t")
+        return introspect_module.indexes(_StubCursor(self._ROWS), Identity(parts=("fixture", "t")))
 
     def test_purely_expression_index_omitted(self) -> None:
         names = {idx.name for idx in self._indexes()}
@@ -658,7 +786,10 @@ class TestUniqueKeysFunctionalKeyParts:
     def _groups(self) -> list[tuple[str, ...]]:
         return [
             group.columns
-            for group in introspect_module.unique_keys(_StubCursor(self._ROWS), "fixture.t")
+            for group in introspect_module.unique_keys(
+                _StubCursor(self._ROWS),
+                Identity(parts=("fixture", "t")),
+            )
         ]
 
     def test_a_purely_expression_index_reports_no_group(self) -> None:
@@ -749,8 +880,14 @@ def herbarium_sheet_db(mysql_cluster: MysqlCluster) -> Iterator[dict[str, str]]:
 
 
 def _build(creds: dict[str, str]) -> MysqlAdapter:
+    """A connected adapter that has enumerated - what per-table extraction requires.
+
+    At `lower_case_table_names=0` a table never enumerated has no spelling to bind.
+    """
+
     adapter = MysqlAdapter(creds)
     adapter.connect()
+    adapter.list_tables(include=["*"], exclude=[])
 
     return adapter
 
@@ -1264,8 +1401,7 @@ class TestYearColumn:
     """
 
     def _stats(self, creds: dict[str, str]):
-        adapter = MysqlAdapter(creds)
-        adapter.connect()
+        adapter = _build(creds)
         fqn = f"{creds['database']}.intake_record"
         columns = adapter.introspect_columns(fqn)
         _, stats = adapter.compute_statistics(fqn, columns, StatisticsConfig(), frozenset())
@@ -1370,8 +1506,7 @@ class TestTimeColumn:
     """
 
     def _stats(self, creds: dict[str, str]):
-        adapter = MysqlAdapter(creds)
-        adapter.connect()
+        adapter = _build(creds)
         fqn = f"{creds['database']}.field_round"
         columns = adapter.introspect_columns(fqn)
         _, stats = adapter.compute_statistics(fqn, columns, StatisticsConfig(), frozenset())
@@ -1470,8 +1605,8 @@ class TestHashOrderedDraw:
             cursor.close()
 
             recorder = _RecordingCursor(conn.cursor())
-            fqn = f"{mysql_test_db['database']}.sql_shape"
-            mysql_looks_like.sample_distinct(recorder, fqn, "v", n=50)
+            identity = Identity(parts=(mysql_test_db["database"], "sql_shape"))
+            mysql_looks_like.sample_distinct(recorder, identity, "v", n=50)
             flat = " ".join(" ".join(s.lower().split()) for s in recorder.statements)
 
             assert "order by" in flat and "md5(" in flat, (

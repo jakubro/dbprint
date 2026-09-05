@@ -218,6 +218,29 @@ class TestRoutes:
         assert "unrepresentable" in body.lower()
         assert "measured duplicates" in body.lower()
 
+    def test_a_degraded_read_is_marked_at_both_grains(
+        self,
+        degraded_conn: ConnectionConfig,
+    ) -> None:
+        """The one surface built for a human must not render a failed read as a blank cell."""
+
+        client = web.create_app([degraded_conn]).test_client()
+
+        body = client.get("/t/primary/seedbank.storage_reading").data.decode()
+
+        assert "attempted and lost: distribution, freshness" in body
+        assert "whether a key is declared" in body
+        assert "the census did not answer" in body
+        assert "the probe did not answer" in body
+
+    def test_a_measured_page_carries_no_lost_marker(self, rich_conn: ConnectionConfig) -> None:
+        client = web.create_app([rich_conn]).test_client()
+
+        body = client.get("/t/primary/seedbank.batch").data.decode()
+
+        assert "attempted and lost" not in body
+        assert "did not answer" not in body
+
     def test_empty_columns_table_shows_the_notice(
         self,
         empty_columns_conn: ConnectionConfig,

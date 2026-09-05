@@ -11,6 +11,7 @@ import pytest
 from psycopg import sql
 
 from dbprint.adapters import RedshiftAdapter, StatisticsConfig
+from dbprint.adapters.redshift.adapter import UnknownTable
 from dbprint.spec.sketch import low64_md5
 from tests.adapters.conftest import RedshiftDialectShim
 from tests.adapters.test_dialect_guard import _install_recorder
@@ -18,11 +19,17 @@ from tests.conftest import PostgresCluster
 
 
 def _redshift_adapter(shim: RedshiftDialectShim) -> RedshiftAdapter:
+    """A connected adapter that has enumerated - what per-table extraction requires.
+
+    The catalog stores a quoted `CREATE`'s case, so a relation never enumerated has no spelling.
+    """
+
     adapter = RedshiftAdapter(
         {"host": "redshift", "database": "seedbank", "user": "test", "password": "test"},
         cursor_factory=lambda _params: shim,
     )
     adapter.connect()
+    adapter.list_tables(include=["*"], exclude=[])
 
     return adapter
 
@@ -75,6 +82,88 @@ def redshift_scratch_db(postgres_cluster: PostgresCluster):
             sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(db_name)),
         )
         cleanup.close()
+
+
+class TestPhysicalTableIdentity:
+    """SPEC 1.3: a quoted-created relation folds into the path, and is still addressable.
+
+    The catalog stores a quoted `CREATE`'s case, so the folded path names an absent relation.
+    """
+
+    @staticmethod
+    def _seed(conn) -> None:
+        conn.execute('CREATE SCHEMA "Seedbank"')
+        conn.execute('CREATE TABLE "Seedbank"."Accession" (id int, label varchar(32))')
+        conn.execute(
+            'INSERT INTO "Seedbank"."Accession" '
+            "SELECT g, 'label-' || (g % 7) FROM generate_series(1, 120) g",
+        )
+
+    def test_both_segments_fold_into_the_path(self, redshift_scratch_db) -> None:
+        self._seed(redshift_scratch_db)
+        adapter = _redshift_adapter(RedshiftDialectShim(redshift_scratch_db))
+
+        try:
+            listed = adapter.list_tables(include=["*"], exclude=[])
+        finally:
+            adapter.close()
+
+        entry = next(t for t in listed if t.fqn == "seedbank.accession")
+        assert entry.namespace_path == ("seedbank", "accession")
+
+    def test_every_statement_carries_the_catalog_spelling(self, redshift_scratch_db) -> None:
+        self._seed(redshift_scratch_db)
+        adapter = _redshift_adapter(RedshiftDialectShim(redshift_scratch_db))
+        recorder = _install_recorder(adapter)
+
+        try:
+            cols = adapter.introspect_columns("seedbank.accession")
+            counts, stats = adapter.compute_statistics(
+                "seedbank.accession",
+                cols,
+                StatisticsConfig(),
+                frozenset(),
+            )
+            samples = adapter.sample_values("seedbank.accession", "label", n=10)
+        finally:
+            adapter.close()
+
+        assert [c.name for c in cols] == ["id", "label"]
+        assert counts.row_count == 120
+        assert stats["id"].cardinality == 120
+        assert samples, "sample_values addressed no rows on the quoted relation"
+
+        # `flattened()` case-folds, which is exactly the distinction under test here.
+        statements = recorder.statements
+        assert any('"Seedbank"."Accession"' in s for s in statements)
+        assert not any('"seedbank"."accession"' in s for s in statements)
+        assert ("Seedbank", "Accession") in [tuple(p) for _s, p in recorder.bound]
+
+    def test_ddl_extraction_shows_the_quoted_relation(self, redshift_scratch_db) -> None:
+        """`SHOW TABLE` quoting is case-significant, so the folded name would find nothing."""
+
+        self._seed(redshift_scratch_db)
+        adapter = _redshift_adapter(RedshiftDialectShim(redshift_scratch_db))
+        recorder = _install_recorder(adapter)
+
+        try:
+            adapter.extract_ddl("seedbank.accession")
+        finally:
+            adapter.close()
+
+        show = next(s for s in recorder.statements if s.lower().startswith("show table"))
+        assert show.strip() == 'SHOW TABLE "Seedbank"."Accession"'
+
+    def test_a_relation_that_was_never_enumerated_is_refused(self, redshift_scratch_db) -> None:
+        """Falling back to the folded path would read an absent relation as an empty one."""
+
+        adapter = _redshift_adapter(RedshiftDialectShim(redshift_scratch_db))
+
+        try:
+            with pytest.raises(UnknownTable, match="call list_tables"):
+                adapter.introspect_columns("public.never_listed")
+        finally:
+            adapter.close()
 
 
 class TestPhysicalLayout:

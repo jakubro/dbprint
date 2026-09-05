@@ -106,6 +106,20 @@ lowercasing adapter.
 - **Foreign key `on_delete` / `on_update`** — always `NO ACTION`. `enforced` is documented
   "Only `NO`".
 
+## The row-count estimate
+
+A rule carrying `min_rows`, and any `max_rows_scanned` ceiling, needs to know how big a table is
+before profiling it. That size comes from `INFORMATION_SCHEMA.PARTITIONS`, summed over the
+table's partitions — an unpartitioned table is a single row keyed `NULL`. It is dataset-qualified,
+which BigQuery documents for that view, and it needs `bigquery.tables.get` and
+`bigquery.tables.list`, both already carried by the `roles/bigquery.dataViewer` above.
+
+Unlike the three reads below, this one does not degrade: a refused or unavailable read fails that
+table and names `estimate_row_count` as the operation, rather than answering "no estimate". The
+two are not the same fact — an absent estimate is something the catalog said about the table,
+while a missing grant would otherwise leave every size-conditioned rule declining in silence, on
+every table, with nothing in the output saying so.
+
 Three catalog reads degrade rather than fail when the connection cannot see a column:
 `TABLES.ddl`, `COLUMNS.collation_name`, and `COLUMNS.clustering_ordinal_position`. Losing the
 third means clustering is not detected, and a clustered table may publish `partition` instead

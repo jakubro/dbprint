@@ -154,6 +154,7 @@ def build_table_view(
         "null_patterns": null_patterns,
         "physical_layout": physical_layout_view(statistics) if statistics else None,
         "dependencies": dependencies_view(statistics) if statistics else [],
+        "unmeasured": unmeasured_view(statistics) if statistics else (),
         "timeline": timeline_view(statistics) if statistics else None,
         "depends_on": depends_on,
         "columns_empty_notice": columns_empty_notice(statistics),
@@ -382,6 +383,20 @@ def timeline_view(statistics: dict[str, Any]) -> dict[str, Any] | None:
         "buckets": buckets,
         "coverage": block.get("coverage"),
     }
+
+
+def unmeasured_view(statistics: dict[str, Any]) -> tuple[str, ...]:
+    """Table-level blocks this run attempted and could not obtain (SPEC 2.2.1).
+
+    Each named block is absent from the same file, so absence alone would read as a finding.
+    """
+
+    named = statistics.get("unmeasured")
+
+    if not isinstance(named, list):
+        return ()
+
+    return tuple(name for name in named if isinstance(name, str))
 
 
 def missing_artifacts_notice(missing: tuple[str, ...]) -> str | None:
@@ -749,6 +764,8 @@ def column_view(
         "populated": col.get("populated"),
         "length": col.get("length"),
         "distribution": col.get("distribution"),
+        # SPEC 2.2.4: names the fields this run lost, so their cells are not read as forbidden.
+        "unmeasured": tuple(col.get("unmeasured") or ()),
         "notes": notes_synthesis.synthesize(
             col,
             fk_target,

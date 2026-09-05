@@ -49,6 +49,73 @@ def adapter(con: duckdb.DuckDBPyConnection) -> Iterator[DuckdbAdapter]:
         a.close()
 
 
+class TestFoldedAddressingReachesAMixedCaseObject:
+    """SPEC 1.3: duckdb keeps a quoted-created name's case in its catalog, and the format folds it.
+
+    Resolution is ASCII-case-insensitive, quoted included, so no spelling carrier is needed.
+    """
+
+    @pytest.fixture
+    def mixed_case_adapter(self) -> Iterator[DuckdbAdapter]:
+        connection = duckdb.connect(":memory:")
+        connection.execute('CREATE SCHEMA "Seedbank"')
+        connection.execute('CREATE TABLE "Seedbank"."Accession" (id INTEGER, label VARCHAR)')
+        connection.execute(
+            'INSERT INTO "Seedbank"."Accession" '
+            "SELECT i, 'label-' || (i % 7) FROM range(120) t(i)",
+        )
+        connection.execute('COMMENT ON TABLE "Seedbank"."Accession" IS \'the accession register\'')
+        a = DuckdbAdapter({"database": ":memory:"}, cursor_factory=lambda _params: connection)
+        a.connect()
+
+        try:
+            yield a
+        finally:
+            a.close()
+            connection.close()
+
+    def test_both_segments_fold_into_the_path(self, mixed_case_adapter: DuckdbAdapter) -> None:
+        listed = mixed_case_adapter.list_tables(include=["*"], exclude=[])
+        entry = next(t for t in listed if t.fqn.endswith("seedbank.accession"))
+
+        assert entry.namespace_path[-2:] == ("seedbank", "accession")
+
+    def test_the_catalog_reads_find_it(self, mixed_case_adapter: DuckdbAdapter) -> None:
+        fqn = next(
+            t.fqn
+            for t in mixed_case_adapter.list_tables(include=["*"], exclude=[])
+            if t.fqn.endswith("seedbank.accession")
+        )
+        cols = mixed_case_adapter.introspect_columns(fqn)
+        comments = mixed_case_adapter.extract_comments(fqn)
+        ddl = mixed_case_adapter.extract_ddl(fqn)
+
+        assert [c.name for c in cols] == ["id", "label"]
+        assert comments.table == "the accession register"
+        assert "Accession" in ddl
+
+    def test_the_data_statements_reach_it(self, mixed_case_adapter: DuckdbAdapter) -> None:
+        from dbprint.adapters import StatisticsConfig
+
+        fqn = next(
+            t.fqn
+            for t in mixed_case_adapter.list_tables(include=["*"], exclude=[])
+            if t.fqn.endswith("seedbank.accession")
+        )
+        cols = mixed_case_adapter.introspect_columns(fqn)
+        counts, stats = mixed_case_adapter.compute_statistics(
+            fqn,
+            cols,
+            StatisticsConfig(),
+            frozenset(),
+        )
+        samples = mixed_case_adapter.sample_values(fqn, "label", n=10)
+
+        assert counts.row_count == 120
+        assert stats["id"].cardinality == 120
+        assert samples, "sample_values addressed no rows on the quoted object"
+
+
 class TestDdlFromCatalog:
     """duckdb carries its own `CREATE` statement in the catalog - no shell-out, no GET_DDL."""
 

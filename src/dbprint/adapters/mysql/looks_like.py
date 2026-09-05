@@ -11,8 +11,9 @@ from typing import Any
 
 from . import stats
 from .connection import Cursor, exec_query
+from .identity import Identity
 from .introspect import table_rows_estimate
-from ..base import MIN_SAMPLE_DRAW, TableScope, seed_from_fqn
+from ..base import MIN_SAMPLE_DRAW, TableScope
 
 
 SAMPLE_RATE_MULTIPLIER = 10  # over-sample to compensate for the DISTINCT filter
@@ -21,7 +22,7 @@ SMALL_TABLE_FACTOR = 10  # row_count < n * factor -> direct DISTINCT path
 
 def sample_distinct(
     cursor: Cursor,
-    fqn: str,
+    identity: Identity,
     column: str,
     n: int,
     scope: TableScope | None = None,
@@ -31,11 +32,10 @@ def sample_distinct(
     Scoped like every other statistic; a predicate-starved draw is re-taken directly.
     """
 
-    quoted = stats._quote_qualified(fqn)
     cn = stats._quote_ident(column)
-    seed = seed_from_fqn(fqn, stats.SEED_MODULUS)
-    source = stats._source(quoted, scope, seed)
-    estimate = _scoped_estimate(table_rows_estimate(cursor, fqn), scope)
+    seed = stats._seed(identity)
+    source = stats._source(identity.quoted(), scope, seed)
+    estimate = _scoped_estimate(table_rows_estimate(cursor, identity), scope)
 
     if estimate <= 0 or estimate < n * SMALL_TABLE_FACTOR:
         return _distinct(cursor, source, cn, n, seed)

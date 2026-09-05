@@ -8,6 +8,7 @@ from typing import Any
 
 from . import introspect, stats
 from .connection import Cursor, exec_query
+from .identity import Identity
 from ..base import TableScope, seed_from_fqn
 from ..errors import QueryFailed
 
@@ -18,19 +19,19 @@ SAMPLE_RATE_MULTIPLIER = 10  # over-sample to compensate for the DISTINCT filter
 
 def sample_distinct(
     cursor: Cursor,
-    fqn: str,
+    identity: Identity,
     column: str,
     n: int,
     scope: TableScope | None = None,
 ) -> list[Any]:
     """Return up to n distinct non-null sampled values for the column."""
 
-    cn = stats._quote_ident(column)
-    source = stats._source(fqn, scope)
-    seed = seed_from_fqn(fqn, 2**31)
+    cn = identity.quoted_column(column)
+    source = stats._source(identity, scope)
+    seed = seed_from_fqn(identity.dotted().lower(), 2**31)
 
     if scope is None or not scope.narrows:
-        estimate = introspect.estimate_row_count(cursor, fqn)
+        estimate = introspect.estimate_row_count(cursor, identity)
 
         if estimate >= n * SMALL_TABLE_FACTOR:
             oversampled = _try_oversample(cursor, source, cn, n, seed)

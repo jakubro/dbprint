@@ -7,20 +7,20 @@ from __future__ import annotations
 import re
 
 from .connection import Cursor, exec_query
+from .identity import Identity
 
 
 _TRAILING_WHITESPACE_RE = re.compile(r"[ \t]+$", re.MULTILINE)
 
 
-def extract_ddl(cursor: Cursor, fqn: str) -> str:
+def extract_ddl(cursor: Cursor, identity: Identity) -> str:
     """Return native-dialect DDL for the object, post-normalization.
 
     `SHOW TABLE` against a view is undocumented, so a server error is caught as well as a falsy
-    row before the `SHOW VIEW` fallback.
+    row before the `SHOW VIEW` fallback. Quoting is case-significant, so a folded path would miss.
     """
 
-    schema, table = _split_fqn(fqn)
-    quoted = f'"{schema}"."{table}"'
+    quoted = identity.quoted()
 
     try:
         row = exec_query(cursor, f"SHOW TABLE {quoted}").fetchone()
@@ -31,7 +31,7 @@ def extract_ddl(cursor: Cursor, fqn: str) -> str:
         row = exec_query(cursor, f"SHOW VIEW {quoted}").fetchone()
 
     if not row or not row[0]:
-        raise ValueError(f"no DDL available for {fqn!r}; not found in catalog")
+        raise ValueError(f"no DDL available for {identity.dotted()!r}; not found in catalog")
 
     return normalize(str(row[0]))
 
@@ -43,12 +43,3 @@ def normalize(raw: str) -> str:
     text = without_trailing.strip("\n")
 
     return text + "\n" if text else ""
-
-
-def _split_fqn(fqn: str) -> tuple[str, str]:
-    if "." not in fqn:
-        raise ValueError(f"Redshift FQN must be 'schema.table', got {fqn!r}")
-
-    schema, _, table = fqn.partition(".")
-
-    return schema, table

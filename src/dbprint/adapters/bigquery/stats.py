@@ -16,7 +16,7 @@ from dbprint.spec.distribution import summarize as summarize_frequencies
 from dbprint.spec.temporal_range import is_representable
 from .connection import exec_query
 from .identity import Identity
-from .introspect import estimate_row_count
+from .introspect import row_count_hint
 from ..base import (
     BaseStats,
     CardinalityMethod,
@@ -408,7 +408,7 @@ def _table_row_count(
     if scope is None or not scope.narrows:
         return rows_scanned, "exact"
 
-    estimate = estimate_row_count(cursor, project, identity)
+    estimate = row_count_hint(cursor, project, identity)
 
     if estimate is not None:
         return estimate, "approximate"

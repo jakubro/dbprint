@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -19,9 +20,15 @@ connections:
     output: prints
 """
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+
 
 def _write_project(tmp_path: Path) -> None:
     (tmp_path / ".dbprint.yaml").write_text(PROJECT_YAML)
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
 
 
 class TestSelection:
@@ -385,3 +392,104 @@ class TestCatalogOnlyView:
 
         assert result.exit_code == 0, result.output
         assert payload["statistics"]["catalog_only"] is True
+
+
+class TestTuiRendering:
+    """`--tui` colourizes on a terminal; every other path stays the bytes `list`/`diff` share."""
+
+    def test_tui_forces_colour(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _write_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(main, ["context", "seedbank.taxon", "--tui"])
+
+        assert result.exit_code == 0
+        assert "\x1b[" in result.output
+
+    def test_tui_output_strips_to_the_piped_bytes(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _write_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        piped = CliRunner().invoke(main, ["context", "seedbank.taxon", "--no-tui"])
+        tui = CliRunner().invoke(main, ["context", "seedbank.taxon", "--tui"])
+
+        assert piped.exit_code == 0
+        assert tui.exit_code == 0
+        assert _strip_ansi(tui.output) == piped.output
+
+    def test_sql_and_headings_take_distinct_colours(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Pins real syntax highlighting, not just any SGR (`test_tui_forces_colour` covers
+        that) - unsets `NO_COLOR`, which `pytest_configure` sets globally for other tests.
+        """
+
+        _write_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        result = CliRunner().invoke(main, ["context", "seedbank.taxon", "--tui"])
+        codes = set(re.findall(r"\x1b\[([0-9;]*)m(?=CREATE)", result.output))
+        heading_codes = set(re.findall(r"\x1b\[([0-9;]*)m(?=## )", result.output))
+
+        assert codes, "no SGR code found immediately before CREATE"
+        assert heading_codes, "no SGR code found immediately before a heading"
+        assert codes.isdisjoint(heading_codes)
+
+    def test_no_tui_matches_the_default(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _write_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        default = CliRunner().invoke(main, ["context", "seedbank.taxon"])
+        no_tui = CliRunner().invoke(main, ["context", "seedbank.taxon", "--no-tui"])
+
+        assert "\x1b[" not in default.output
+        assert default.output == no_tui.output
+
+    def test_format_json_ignores_tui(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _write_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(
+            main,
+            ["context", "seedbank.taxon", "--format", "json", "--tui"],
+        )
+
+        assert result.exit_code == 0
+        assert "\x1b[" not in result.output
+        json.loads(result.output)
+
+    def test_output_flag_ignores_tui(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _write_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        out_file = tmp_path / "out.md"
+        result = CliRunner().invoke(
+            main,
+            ["context", "seedbank.taxon", "--output", str(out_file), "--tui"],
+        )
+
+        assert result.exit_code == 0
+        assert "\x1b[" not in out_file.read_text()

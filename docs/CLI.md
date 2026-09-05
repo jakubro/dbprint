@@ -347,6 +347,8 @@ after changing a command's docstring, options, or help sections.
 │ --budget                INTEGER         Soft output cap in tokens (approx chars/4); stop at the  │
 │                                         first section that would overflow. e.g. 4000             │
 │ --output                FILE            Write output to FILE instead of stdout.                  │
+│ --tui/--no-tui                          Force TTY (syntax-highlighted) or piped (plain-text)     │
+│                                         rendering. md format only.                               │
 │ --help              -h                  Show this message and exit.                              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```

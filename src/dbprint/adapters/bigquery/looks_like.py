@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 from . import stats
 from .connection import exec_query
 from .identity import Identity
-from .introspect import estimate_row_count
+from .introspect import row_count_hint
 from ..base import MIN_SAMPLE_DRAW, TableScope, seed_from_fqn
 
 
@@ -37,7 +37,7 @@ def sample_distinct(
     cn = identity.quoted_column(column)
     seed = seed_from_fqn(identity.dotted().lower(), stats.SEED_MODULUS)
     source = stats._source(quoted, scope, seed)
-    estimate = _scoped_estimate(estimate_row_count(cursor, project, identity), scope)
+    estimate = _scoped_estimate(row_count_hint(cursor, project, identity), scope)
 
     if estimate <= 0 or estimate < n * SMALL_TABLE_FACTOR:
         return _distinct(cursor, source, cn, n, seed)

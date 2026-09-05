@@ -15,6 +15,7 @@ from . import normalization as normalization_module
 from . import sketch as sketch_module
 from . import stats as stats_module
 from .connection import Connection, ConnectionParams, MysqlConnectionError, exec_query
+from .identity import Identity
 from ..base import (
     Adapter,
     BaseStats,
@@ -36,8 +37,15 @@ from ..base import (
 )
 
 
+class UnknownTable(LookupError):
+    """Raised when a table's physical identifiers were never captured."""
+
+
 class MysqlAdapter(Adapter):
-    """Concrete Adapter for MySQL / MariaDB backed by mysql-connector-python."""
+    """Concrete Adapter for MySQL / MariaDB backed by mysql-connector-python.
+
+    Precondition: `list_tables` before extraction; it records the spelling the catalog compares.
+    """
 
     REQUIRED_KEYS: ClassVar[tuple[str, ...]] = ("host", "port", "database", "user", "password")
     # RAND(seed) is undocumented across multiple references in one statement, so a
@@ -47,6 +55,7 @@ class MysqlAdapter(Adapter):
     def __init__(self, credentials: dict[str, str]) -> None:
         self._params = ConnectionParams.from_credentials(credentials)
         self._connection = Connection(self._params)
+        self._physical_tables: dict[str, tuple[str, str]] = {}
 
     def connect(self) -> None:
         self._connection.open()
@@ -55,37 +64,42 @@ class MysqlAdapter(Adapter):
         self._connection.close()
 
     def list_tables(self, include: list[str], exclude: list[str]) -> list[TableMeta]:
-        return introspect_module.list_tables(self._cursor, include, exclude)
+        selected, physical = introspect_module.list_tables(self._cursor, include, exclude)
+        self._physical_tables = physical
+
+        return selected
 
     def extract_ddl(self, fqn: str) -> str:
-        return ddl_module.extract_ddl(self._cursor, fqn)
+        return ddl_module.extract_ddl(self._cursor, self._identity(fqn))
 
     def introspect_columns(self, fqn: str) -> list[ColumnMeta]:
-        return introspect_module.columns(self._cursor, fqn)
+        return introspect_module.columns(self._cursor, self._identity(fqn))
 
     def default_collation(self) -> str:
         return introspect_module.default_collation(self._cursor)
 
     def introspect_relationships(self, fqn: str) -> list[ForeignKeyMeta]:
-        return introspect_module.relationships(self._cursor, fqn)
+        return introspect_module.relationships(self._cursor, self._identity(fqn))
 
     def introspect_indexes(self, fqn: str) -> list[IndexMeta]:
-        return introspect_module.indexes(self._cursor, fqn)
+        return introspect_module.indexes(self._cursor, self._identity(fqn))
 
     def introspect_unique_keys(self, fqn: str) -> list[UniqueKeyMeta]:
-        return introspect_module.unique_keys(self._cursor, fqn)
+        return introspect_module.unique_keys(self._cursor, self._identity(fqn))
 
     def introspect_physical_layout(self, fqn: str) -> PhysicalLayout | None:
-        return introspect_module.physical_layout(self._cursor, fqn)
+        return introspect_module.physical_layout(self._cursor, self._identity(fqn))
 
     def introspect_view_dependencies(self) -> dict[str, tuple[str, ...]] | None:
         return introspect_module.view_dependencies(self._cursor)
 
     def extract_comments(self, fqn: str) -> CommentsMeta:
-        return introspect_module.comments(self._cursor, fqn)
+        return introspect_module.comments(self._cursor, self._identity(fqn))
 
     def estimate_row_count(self, fqn: str) -> int | None:
-        return row_count_or_none(introspect_module.table_rows_estimate(self._cursor, fqn))
+        return row_count_or_none(
+            introspect_module.table_rows_estimate(self._cursor, self._identity(fqn)),
+        )
 
     def compute_base_statistics(
         self,
@@ -96,7 +110,7 @@ class MysqlAdapter(Adapter):
     ) -> tuple[TableCounts, dict[str, BaseStats]]:
         del config
 
-        return stats_module.compute_base(self._cursor, fqn, columns, scope)
+        return stats_module.compute_base(self._cursor, self._identity(fqn), columns, scope)
 
     def compute_column_statistics(
         self,
@@ -113,7 +127,7 @@ class MysqlAdapter(Adapter):
     ) -> dict[str, ColumnStats]:
         return stats_module.compute_columns(
             self._cursor,
-            fqn,
+            self._identity(fqn),
             columns,
             config,
             counts,
@@ -135,7 +149,7 @@ class MysqlAdapter(Adapter):
     ) -> NullPatterns | None:
         return stats_module.compute_null_patterns(
             self._cursor,
-            fqn,
+            self._identity(fqn),
             columns,
             config,
             counts,
@@ -151,7 +165,14 @@ class MysqlAdapter(Adapter):
         candidates: tuple[tuple[str, str], ...],
         scope: TableScope | None = None,
     ) -> tuple[tuple[str, str], ...]:
-        return stats_module.probe_grain(self._cursor, fqn, columns, counts, candidates, scope)
+        return stats_module.probe_grain(
+            self._cursor,
+            self._identity(fqn),
+            columns,
+            counts,
+            candidates,
+            scope,
+        )
 
     def probe_timeline(
         self,
@@ -162,7 +183,15 @@ class MysqlAdapter(Adapter):
         unit: Literal["day", "week", "month"],
         scope: TableScope | None = None,
     ) -> tuple[tuple[str, int], ...]:
-        return stats_module.probe_timeline(self._cursor, fqn, columns, counts, column, unit, scope)
+        return stats_module.probe_timeline(
+            self._cursor,
+            self._identity(fqn),
+            columns,
+            counts,
+            column,
+            unit,
+            scope,
+        )
 
     def compute_populated_windows(
         self,
@@ -175,7 +204,7 @@ class MysqlAdapter(Adapter):
     ) -> dict[str, tuple[str, str]]:
         return stats_module.compute_populated_windows(
             self._cursor,
-            fqn,
+            self._identity(fqn),
             columns,
             counts,
             anchor_column,
@@ -194,7 +223,7 @@ class MysqlAdapter(Adapter):
     ) -> dict[tuple[str, str], float]:
         return stats_module.probe_dependencies(
             self._cursor,
-            fqn,
+            self._identity(fqn),
             columns,
             counts,
             base,
@@ -203,7 +232,7 @@ class MysqlAdapter(Adapter):
         )
 
     def materialize_scope(self, fqn: str, scope: TableScope) -> TableScope:
-        return stats_module.materialize(self._cursor, fqn, scope)
+        return stats_module.materialize(self._cursor, self._identity(fqn), scope)
 
     def release_scope(self, fqn: str, scope: TableScope) -> None:
         del fqn
@@ -217,7 +246,13 @@ class MysqlAdapter(Adapter):
         n: int,
         scope: TableScope | None = None,
     ) -> list[Any]:
-        return looks_like_module.sample_distinct(self._cursor, fqn, column, n, scope)
+        return looks_like_module.sample_distinct(
+            self._cursor,
+            self._identity(fqn),
+            column,
+            n,
+            scope,
+        )
 
     def compute_key_sketch(
         self,
@@ -227,7 +262,14 @@ class MysqlAdapter(Adapter):
         kind: SketchKind,
         k: int,
     ) -> tuple[int, ...]:
-        return sketch_module.compute_key_sketch(self._cursor, fqn, column, sql_type, kind, k)
+        return sketch_module.compute_key_sketch(
+            self._cursor,
+            self._identity(fqn),
+            column,
+            sql_type,
+            kind,
+            k,
+        )
 
     def compute_normalized_cardinality(
         self,
@@ -237,7 +279,7 @@ class MysqlAdapter(Adapter):
     ) -> int:
         return normalization_module.compute_normalized_cardinality(
             self._cursor,
-            fqn,
+            self._identity(fqn),
             column,
             scope,
         )
@@ -252,6 +294,20 @@ class MysqlAdapter(Adapter):
         rows = cursor.fetchall()
 
         return [tuple(row) for row in rows]
+
+    def _identity(self, fqn: str) -> Identity:
+        """Physical identity for a listed table.
+
+        Raises `UnknownTable` rather than folding, which at `lower_case_table_names=0` would miss.
+        """
+
+        try:
+            return Identity(parts=self._physical_tables[fqn])
+        except KeyError:
+            raise UnknownTable(
+                f"physical identifiers for {fqn!r} are unknown; "
+                "call list_tables() before per-table extraction",
+            ) from None
 
     @property
     def _cursor(self) -> Any:

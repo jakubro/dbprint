@@ -16,6 +16,7 @@ from dbprint.spec.distribution import classify as classify_distribution
 from dbprint.spec.distribution import summarize as summarize_frequencies
 from dbprint.spec.temporal_range import is_representable
 from .connection import Cursor, exec_query
+from .identity import Identity
 from .introspect import estimate_row_count
 from ..base import (
     BaseStats,
@@ -86,7 +87,7 @@ _UNSUPPORTED_TYPES = (
 
 def compute_base(
     cursor: Cursor,
-    fqn: str,
+    identity: Identity,
     columns: list[ColumnMeta],
     scope: TableScope | None = None,
 ) -> tuple[TableCounts, dict[str, BaseStats]]:
@@ -95,20 +96,20 @@ def compute_base(
     if not columns:
         return TableCounts(row_count=0, rows_scanned=0), {}
 
-    source = _source(fqn, scope)
+    source = _source(identity, scope)
     narrows = scope is not None and scope.narrows
     # The catalog estimate describes the whole table, so a narrowed read counts instead.
-    estimate = estimate_row_count(cursor, fqn)
+    estimate = estimate_row_count(cursor, identity)
     approximate = estimate > APPROXIMATE_THRESHOLD and not narrows
     rows_scanned, base_stats = _phase_a(cursor, source, columns, approximate)
-    row_count, row_count_method = _table_row_count(cursor, fqn, rows_scanned, scope)
+    row_count, row_count_method = _table_row_count(cursor, identity, rows_scanned, scope)
 
     return TableCounts(row_count, rows_scanned, row_count_method), base_stats
 
 
 def compute_columns(
     cursor: Cursor,
-    fqn: str,
+    identity: Identity,
     columns: list[ColumnMeta],
     config: StatisticsConfig,
     counts: TableCounts,
@@ -131,7 +132,7 @@ def compute_columns(
 
         return {c.name: _empty_stats(c) for c in columns}
 
-    source = _source(fqn, scope)
+    source = _source(identity, scope)
     enriched: dict[str, ColumnStats] = {}
     total = len(columns)
 
@@ -156,7 +157,7 @@ def compute_columns(
 
 def compute_null_patterns(
     cursor: Cursor,
-    fqn: str,
+    identity: Identity,
     columns: list[ColumnMeta],
     config: StatisticsConfig,
     counts: TableCounts,
@@ -168,8 +169,8 @@ def compute_null_patterns(
     if not has_measurable_nulls(counts, base):
         return None
 
-    source = _source(fqn, scope)
-    quoted = [_quote_ident(col.name) for col in columns]
+    source = _source(identity, scope)
+    quoted = [_quote_ident(col.physical_name or col.name) for col in columns]
     cap = config.top_n_null_patterns
     rows = exec_query(
         cursor,
@@ -187,7 +188,7 @@ def compute_null_patterns(
 
 def probe_grain(
     cursor: Cursor,
-    fqn: str,
+    identity: Identity,
     columns: list[ColumnMeta],
     counts: TableCounts,
     candidates: tuple[tuple[str, str], ...],
@@ -197,14 +198,14 @@ def probe_grain(
     never the bare form, which silently drops any row where either argument is NULL (measured).
     """
 
-    del columns
-
     if not candidates:
         return ()
 
-    source = _source(fqn, scope)
+    source = _source(identity, scope)
+    physical = {col.name: col.physical_name or col.name for col in columns}
     exprs = [
-        f"uniqExact(tuple({_quote_ident(a)}, {_quote_ident(b)})) AS dbprint_grain_{i}"
+        f"uniqExact(tuple({_quote_ident(physical[a])}, {_quote_ident(physical[b])}))"
+        f" AS dbprint_grain_{i}"
         for i, (a, b) in enumerate(candidates)
     ]
     row = exec_query(cursor, f"SELECT {', '.join(exprs)} FROM {source}").fetchone()
@@ -217,7 +218,7 @@ def probe_grain(
 
 def probe_timeline(
     cursor: Cursor,
-    fqn: str,
+    identity: Identity,
     columns: list[ColumnMeta],
     counts: TableCounts,
     column: str,
@@ -228,9 +229,9 @@ def probe_timeline(
 
     del counts
 
-    source = _source(fqn, scope)
+    source = _source(identity, scope)
     by_name = {col.name: col for col in columns}
-    cn = _quote_ident(by_name[column].name)
+    cn = _quote_ident(by_name[column].physical_name or by_name[column].name)
     bucket_expr = _timeline_bucket_expr(cn, unit)
 
     rows = exec_query(
@@ -274,7 +275,7 @@ def _timeline_bucket_expr(cn: str, unit: str) -> str:
 
 def compute_populated_windows(
     cursor: Cursor,
-    fqn: str,
+    identity: Identity,
     columns: list[ColumnMeta],
     counts: TableCounts,
     anchor_column: str,
@@ -288,15 +289,15 @@ def compute_populated_windows(
     if not subject_columns:
         return {}
 
-    source = _source(fqn, scope)
+    source = _source(identity, scope)
     by_name = {col.name: col for col in columns}
     anchor = by_name[anchor_column]
-    anchor_cn = _quote_ident(anchor.name)
+    anchor_cn = _quote_ident(anchor.physical_name or anchor.name)
     day_aligned = not _matches(anchor.sql_type, ("date", "date32"))
     exprs = []
 
     for subject in subject_columns:
-        subject_cn = _quote_ident(by_name[subject].name)
+        subject_cn = _quote_ident(by_name[subject].physical_name or by_name[subject].name)
         from_expr = f"minIf({anchor_cn}, {subject_cn} IS NOT NULL)"
         to_expr = f"maxIf({anchor_cn}, {subject_cn} IS NOT NULL)"
         rendered_from = _render_temporal(from_expr) if day_aligned else f"toString({from_expr})"
@@ -322,7 +323,7 @@ def compute_populated_windows(
 
 def probe_dependencies(
     cursor: Cursor,
-    fqn: str,
+    identity: Identity,
     columns: list[ColumnMeta],
     counts: TableCounts,
     base: dict[str, BaseStats],
@@ -333,14 +334,16 @@ def probe_dependencies(
     the null-safe `uniqExact(tuple(...))` form, or null-bearing rows inflate the ratio.
     """
 
-    del columns, counts
+    del counts
 
     if not candidates:
         return {}
 
-    source = _source(fqn, scope)
+    source = _source(identity, scope)
+    physical = {col.name: col.physical_name or col.name for col in columns}
     exprs = [
-        f"uniqExact(tuple({_quote_ident(a)}, {_quote_ident(b)})) AS dbprint_dep_{i}"
+        f"uniqExact(tuple({_quote_ident(physical[a])}, {_quote_ident(physical[b])}))"
+        f" AS dbprint_dep_{i}"
         for i, (a, b) in enumerate(candidates)
     ]
     row = exec_query(cursor, f"SELECT {', '.join(exprs)} FROM {source}").fetchone()
@@ -359,13 +362,13 @@ def probe_dependencies(
     return out
 
 
-def materialize(cursor: Cursor, fqn: str, scope: TableScope) -> TableScope:
+def materialize(cursor: Cursor, identity: Identity, scope: TableScope) -> TableScope:
     """Copy the drawn fraction into a session-lifetime temp table and name it on the scope -
     `ENGINE = MergeTree` keeps a large draw off RAM, and the name is never database-qualified.
     """
 
-    name = materialized_name(fqn)
-    drawn = _sample_expr(fqn, scope)
+    name = materialized_name(identity.dotted().lower())
+    drawn = _sample_expr(identity, scope)
     exec_query(
         cursor,
         f"CREATE TEMPORARY TABLE {_quote_ident(name)} ENGINE = MergeTree ORDER BY tuple() "
@@ -384,12 +387,12 @@ def release(cursor: Cursor, scope: TableScope) -> None:
     exec_query(cursor, f"DROP TEMPORARY TABLE IF EXISTS {_quote_ident(scope.materialized)}")
 
 
-def _source(fqn: str, scope: TableScope | None) -> str:
+def _source(identity: Identity, scope: TableScope | None) -> str:
     """The FROM expression every phase reads - a `sample` scope with no materialized copy never
     reaches here, `orchestrator._materialize_scope` having refused the table first.
     """
 
-    quoted = _quote_qualified(fqn)
+    quoted = identity.quoted()
 
     if scope is None or not scope.narrows:
         return quoted
@@ -399,10 +402,10 @@ def _source(fqn: str, scope: TableScope | None) -> str:
         return f"(SELECT * FROM {quoted} WHERE ({scope.filter})) AS dbprint_scoped"
 
 
-def _sample_expr(fqn: str, scope: TableScope) -> str:
+def _sample_expr(identity: Identity, scope: TableScope) -> str:
     """The `SAMPLE`-bearing source `materialize_scope` reads once to build its copy."""
 
-    quoted = _quote_qualified(fqn)
+    quoted = identity.quoted()
 
     if scope.filter is not None:
         return f"(SELECT * FROM {quoted} WHERE ({scope.filter}))"
@@ -412,7 +415,7 @@ def _sample_expr(fqn: str, scope: TableScope) -> str:
 
 def _table_row_count(
     cursor: Cursor,
-    fqn: str,
+    identity: Identity,
     rows_scanned: int,
     scope: TableScope | None,
 ) -> tuple[int, RowCountMethod]:
@@ -423,12 +426,12 @@ def _table_row_count(
     if scope is None or not scope.narrows:
         return rows_scanned, "exact"
 
-    estimate = estimate_row_count(cursor, fqn)
+    estimate = estimate_row_count(cursor, identity)
 
     if estimate >= 0:
         return int(estimate), "approximate"
 
-    row = exec_query(cursor, f"SELECT count() FROM {_quote_qualified(fqn)}").fetchone()
+    row = exec_query(cursor, f"SELECT count() FROM {identity.quoted()}").fetchone()
 
     return (int(row[0]) if row and row[0] is not None else rows_scanned), "exact"
 
@@ -447,7 +450,7 @@ def _phase_a(
     card_fn = "uniqCombined64" if approximate else "uniqExact"
 
     for col in columns:
-        cn = _quote_ident(col.name)
+        cn = _quote_ident(col.physical_name or col.name)
         a = _alias(col.name)
         select_parts.append(f"countIf({cn} IS NULL) AS null_{a}")
 
@@ -539,7 +542,7 @@ def _settle_near_unique(
         return
 
     select_parts = [
-        f"uniqExact({_quote_ident(col.name)}) AS {_alias(f'card_{col.name}')}"
+        f"uniqExact({_quote_ident(col.physical_name or col.name)}) AS {_alias(f'card_{col.name}')}"
         for col in near_unique
     ]
     row = exec_query(cursor, f"SELECT {', '.join(select_parts)} FROM {source}").fetchone()
@@ -751,7 +754,7 @@ def _fetch_value_list(
     the cap is fetched, so truncation is observed rather than predicted (SPEC 2.2.4).
     """
 
-    cn = _quote_ident(col.name)
+    cn = _quote_ident(col.physical_name or col.name)
     n = config.top_n_values
     rows = exec_query(
         cursor,
@@ -790,7 +793,7 @@ def _fetch_numeric_block(
     float | None,
     float | None,
 ]:
-    cn = _quote_ident(col.name)
+    cn = _quote_ident(col.physical_name or col.name)
     keys = config.percentiles
     sql = (
         f"SELECT min({cn}), max({cn}), avg({cn}), sum({cn}), {_percentile_exprs(cn, keys)} "
@@ -840,7 +843,7 @@ def _fetch_temporal_block(
     `quantized_count` is omitted for `Date`, where every value already is its own day.
     """
 
-    cn = _quote_ident(col.name)
+    cn = _quote_ident(col.physical_name or col.name)
     keys = config.percentiles
     day_aligned = not _matches(col.sql_type, ("date", "date32"))
     # quantileExactInclusive rejects Date/DateTime directly (measured), so every temporal value
@@ -930,7 +933,7 @@ def _percentile_exprs(cn: str, keys: Sequence[int]) -> str:
 def _fetch_length_p95(cursor: Cursor, source: str, col: ColumnMeta) -> float | None:
     """P95 character length (SPEC 2.2.4), via `quantileExactInclusive` over `lengthUTF8`."""
 
-    cn = _quote_ident(col.name)
+    cn = _quote_ident(col.physical_name or col.name)
     row = exec_query(
         cursor,
         f"SELECT quantileExactInclusive(0.95)(lengthUTF8(toString({cn}))) "
@@ -1036,12 +1039,6 @@ def _round_numeric(v: Any, *, exact_int: bool = False) -> Any:
 
 def _quote_ident(name: str) -> str:
     return "`" + name.replace("`", "``") + "`"
-
-
-def _quote_qualified(fqn: str) -> str:
-    database, _, table = fqn.partition(".")
-
-    return f"{_quote_ident(database)}.{_quote_ident(table)}"
 
 
 def _alias(name: str) -> str:

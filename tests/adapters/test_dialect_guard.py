@@ -9,6 +9,7 @@ accepts the statement; only running it against that engine does.
 
 from __future__ import annotations
 
+import contextlib
 from collections import Counter
 from collections.abc import Callable, Iterator
 from types import ModuleType
@@ -201,8 +202,8 @@ class Sweep:
 
             columns = self.adapter.introspect_columns(table.fqn)
 
-            # The emulator has no `TABLE_CONSTRAINTS`/`KEY_COLUMN_USAGE` view (measured).
-            # `TABLE_OPTIONS` and `TABLE_STORAGE` degrade to empty/`None`, so neither needs a skip.
+            # The emulator has no `TABLE_CONSTRAINTS`/`KEY_COLUMN_USAGE` view (measured);
+            # `TABLE_OPTIONS` degrades to empty there, so only these two need a skip.
             if self.vendor == "bigquery":
                 relationships = []
             else:
@@ -215,7 +216,14 @@ class Sweep:
 
             self.adapter.introspect_physical_layout(table.fqn)
             self.adapter.extract_comments(table.fqn)
-            self.adapter.estimate_row_count(table.fqn)
+
+            if self.vendor == "bigquery":
+                # The emulator has no `PARTITIONS` view either (measured), and the estimate no
+                # longer swallows that - the statement reaches the recorder before it refuses.
+                with contextlib.suppress(Exception):
+                    self.adapter.estimate_row_count(table.fqn)
+            else:
+                self.adapter.estimate_row_count(table.fqn)
 
             if not columns:
                 continue

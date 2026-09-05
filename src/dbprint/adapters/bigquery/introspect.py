@@ -23,6 +23,7 @@ from ..base import (
     TableType,
     UniqueKeyMeta,
 )
+from ..errors import QueryFailed
 
 
 if TYPE_CHECKING:
@@ -441,24 +442,34 @@ def _unquote_option(raw: str) -> str:
 
 
 def estimate_row_count(cursor: Cursor, project: str, identity: Identity) -> int | None:
-    """`INFORMATION_SCHEMA.TABLE_STORAGE.total_rows`, read through the adapter's own SQL cursor -
-    a billed query with the 10 MB minimum, accepted to stay on the one query seam.
+    """`INFORMATION_SCHEMA.PARTITIONS.total_rows`, summed over the table's own partitions.
+
+    A refused read raises: `None` would be indistinguishable from a table with no rows.
+    """
+
+    row = exec_query(
+        cursor,
+        f"""
+        SELECT SUM(total_rows)
+        FROM `{project}`.`{identity.dataset}`.INFORMATION_SCHEMA.PARTITIONS
+        WHERE table_name = %s
+        """,
+        (identity.table,),
+    ).fetchone()
+
+    return int(row[0]) if row and row[0] is not None else None
+
+
+def row_count_hint(cursor: Cursor, project: str, identity: Identity) -> int | None:
+    """The same estimate for a caller holding its own fallback, or None where the read refuses.
+
+    Both callers have an exact alternative, so a refused read costs a round trip, not the table.
     """
 
     try:
-        row = exec_query(
-            cursor,
-            f"""
-            SELECT total_rows
-            FROM `{project}`.`{identity.dataset}`.INFORMATION_SCHEMA.TABLE_STORAGE
-            WHERE table_name = %s
-            """,
-            (identity.table,),
-        ).fetchone()
-    except Exception:  # noqa: BLE001 - no estimate rather than a failed table
+        return estimate_row_count(cursor, project, identity)
+    except QueryFailed:
         return None
-
-    return int(row[0]) if row and row[0] is not None else None
 
 
 def _enforce_identifier_rules(selected: list[_Candidate]) -> None:

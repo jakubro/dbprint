@@ -2,6 +2,8 @@
 
 `list_tables` excludes system schemas and partitioning children (`relispartition`)
 regardless of selectors: a partition is a fragment of its parent's logical table.
+
+`pg_class` compares case-sensitively, so every read past enumeration binds `Identity`'s spelling.
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ from typing import TYPE_CHECKING, cast
 
 from dbprint.config.selectors import expand
 from .connection import exec_query
+from .identity import Identity
 from ..base import (
     ColumnMeta,
     CommentsMeta,
@@ -58,8 +61,11 @@ def list_tables(
     conn: psycopg.Connection,
     include: list[str],
     exclude: list[str],
-) -> list[TableMeta]:
-    """Enumerate tables/views/matviews in user schemas, filtered by selectors."""
+) -> tuple[list[TableMeta], dict[str, tuple[str, str]]]:
+    """Enumerate tables/views/matviews in user schemas, filtered by selectors.
+
+    Also returns the fqn-to-physical map; a quoted-created relation's case is unrecoverable later.
+    """
 
     rows = exec_query(
         conn,
@@ -97,10 +103,13 @@ def list_tables(
     selected = [entry for entry in candidates if entry[0].fqn in in_scope]
     _enforce_identifier_rules(selected)
 
-    return [meta for meta, _ in selected]
+    return (
+        [meta for meta, _ in selected],
+        {meta.fqn: parts for meta, parts in selected},
+    )
 
 
-def columns(conn: psycopg.Connection, fqn: str) -> list[ColumnMeta]:
+def columns(conn: psycopg.Connection, identity: Identity) -> list[ColumnMeta]:
     """Per-column structural metadata in ordinal order.
 
     `name` is lowercased for the artifact's map key (SPEC 2.2.1), with the catalog's own
@@ -109,7 +118,6 @@ def columns(conn: psycopg.Connection, fqn: str) -> list[ColumnMeta]:
     name only when one was set explicitly - the omit-unless-it-differs rule of SPEC 2.2.2.
     """
 
-    schema, table = _split_fqn(fqn)
     rows = exec_query(
         conn,
         """
@@ -134,7 +142,7 @@ def columns(conn: psycopg.Connection, fqn: str) -> list[ColumnMeta]:
           AND NOT a.attisdropped
         ORDER BY a.attnum
         """,
-        (schema, table),
+        identity.parts,
     ).fetchall()
 
     return [
@@ -151,7 +159,7 @@ def columns(conn: psycopg.Connection, fqn: str) -> list[ColumnMeta]:
     ]
 
 
-def composite_columns(conn: psycopg.Connection, fqn: str) -> frozenset[str]:
+def composite_columns(conn: psycopg.Connection, identity: Identity) -> frozenset[str]:
     """Lowercased names of columns whose type resolves to a composite (row) type.
 
     A domain chain resolves to its ultimate base type first: a domain over a composite is
@@ -159,7 +167,6 @@ def composite_columns(conn: psycopg.Connection, fqn: str) -> frozenset[str]:
     `pg_type.typtype = 'c'`, since a composite type's name is whatever its author chose.
     """
 
-    schema, table = _split_fqn(fqn)
     rows = exec_query(
         conn,
         """
@@ -183,7 +190,7 @@ def composite_columns(conn: psycopg.Connection, fqn: str) -> frozenset[str]:
         JOIN pg_type t ON t.oid = bt.oid
         WHERE t.typtype = 'c'
         """,
-        (schema, table),
+        identity.parts,
     ).fetchall()
 
     return frozenset(name.lower() for (name,) in rows)
@@ -200,10 +207,9 @@ def default_collation(conn: psycopg.Connection) -> str:
     return row[0] if row else ""
 
 
-def relationships(conn: psycopg.Connection, fqn: str) -> list[ForeignKeyMeta]:
+def relationships(conn: psycopg.Connection, identity: Identity) -> list[ForeignKeyMeta]:
     """Declared outgoing FKs; one entry per constraint (composite as arrays)."""
 
-    schema, table = _split_fqn(fqn)
     rows = exec_query(
         conn,
         """
@@ -227,7 +233,7 @@ def relationships(conn: psycopg.Connection, fqn: str) -> list[ForeignKeyMeta]:
           AND sc.relname = %s
         ORDER BY con.conname
         """,
-        (schema, table),
+        identity.parts,
     ).fetchall()
 
     out: list[ForeignKeyMeta] = []
@@ -259,7 +265,7 @@ def relationships(conn: psycopg.Connection, fqn: str) -> list[ForeignKeyMeta]:
     return out
 
 
-def indexes(conn: psycopg.Connection, fqn: str) -> list[IndexMeta]:
+def indexes(conn: psycopg.Connection, identity: Identity) -> list[IndexMeta]:
     """Secondary indexes only; PK-backed, constraint-backed and bare-unique indexes excluded.
 
     A bare unique index (`indisunique`, no backing `pg_constraint`, `indpred IS NULL`) is
@@ -267,7 +273,6 @@ def indexes(conn: psycopg.Connection, fqn: str) -> list[IndexMeta]:
     here: it enforces uniqueness over a subset of rows, which `unique_keys` does not report.
     """
 
-    schema, table = _split_fqn(fqn)
     rows = exec_query(
         conn,
         """
@@ -292,7 +297,7 @@ def indexes(conn: psycopg.Connection, fqn: str) -> list[IndexMeta]:
           AND NOT (ix.indisunique AND ix.indpred IS NULL)
         ORDER BY ic.relname
         """,
-        (schema, table),
+        identity.parts,
     ).fetchall()
 
     out: list[IndexMeta] = []
@@ -311,10 +316,9 @@ def indexes(conn: psycopg.Connection, fqn: str) -> list[IndexMeta]:
     return out
 
 
-def comments(conn: psycopg.Connection, fqn: str) -> CommentsMeta:
+def comments(conn: psycopg.Connection, identity: Identity) -> CommentsMeta:
     """Table comment + per-column comments from pg_description."""
 
-    schema, table = _split_fqn(fqn)
     table_row = exec_query(
         conn,
         """
@@ -324,7 +328,7 @@ def comments(conn: psycopg.Connection, fqn: str) -> CommentsMeta:
         LEFT JOIN pg_description d ON d.objoid = c.oid AND d.objsubid = 0
         WHERE n.nspname = %s AND c.relname = %s
         """,
-        (schema, table),
+        identity.parts,
     ).fetchone()
     table_comment = table_row[0] if table_row else None
 
@@ -341,7 +345,7 @@ def comments(conn: psycopg.Connection, fqn: str) -> CommentsMeta:
           AND a.attnum > 0
           AND NOT a.attisdropped
         """,
-        (schema, table),
+        identity.parts,
     ).fetchall()
 
     return CommentsMeta(
@@ -352,7 +356,7 @@ def comments(conn: psycopg.Connection, fqn: str) -> CommentsMeta:
     )
 
 
-def unique_keys(conn: psycopg.Connection, fqn: str) -> list[UniqueKeyMeta]:
+def unique_keys(conn: psycopg.Connection, identity: Identity) -> list[UniqueKeyMeta]:
     """Declared-unique column groups: primary key, unique constraints, bare unique indexes.
 
     `contype` sorts 'p' before 'u', so the primary key both leads and is marked; `conkey`
@@ -362,7 +366,6 @@ def unique_keys(conn: psycopg.Connection, fqn: str) -> list[UniqueKeyMeta]:
     unique index is picked up too.
     """
 
-    schema, table = _split_fqn(fqn)
     rows = exec_query(
         conn,
         """
@@ -395,7 +398,7 @@ def unique_keys(conn: psycopg.Connection, fqn: str) -> list[UniqueKeyMeta]:
 
         ORDER BY contype, name
         """,
-        (schema, table, schema, table),
+        identity.parts * 2,
     ).fetchall()
 
     return [
@@ -413,14 +416,13 @@ _PARTKEYDEF_RE = re.compile(r"^(?:RANGE|LIST|HASH)\s*\((.*)\)$", re.IGNORECASE)
 _BASE_COLUMN_RE = re.compile(r'^"?([A-Za-z_][A-Za-z0-9_$]*)"?$')
 
 
-def physical_layout(conn: psycopg.Connection, fqn: str) -> PhysicalLayout | None:
+def physical_layout(conn: psycopg.Connection, identity: Identity) -> PhysicalLayout | None:
     """Declared partition key via `pg_get_partkeydef`; None on a non-partitioned table.
 
     Only the partitioned parent (`relkind = 'p'`) carries a key, and dbprint profiles the
     parent rather than its individual partitions.
     """
 
-    schema, table = _split_fqn(fqn)
     row = exec_query(
         conn,
         """
@@ -429,7 +431,7 @@ def physical_layout(conn: psycopg.Connection, fqn: str) -> PhysicalLayout | None
         JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = %s AND c.relname = %s AND c.relkind = 'p'
         """,
-        (schema, table),
+        identity.parts,
     ).fetchone()
 
     if not row or not row[0]:
@@ -525,10 +527,9 @@ def view_dependencies(conn: psycopg.Connection) -> dict[str, tuple[str, ...]]:
     return {k: tuple(v) for k, v in out.items()}
 
 
-def reltuples_estimate(conn: psycopg.Connection, fqn: str) -> float:
+def reltuples_estimate(conn: psycopg.Connection, identity: Identity) -> float:
     """Planner-stat row-count estimate; -1 if no stats yet (use exact path then)."""
 
-    schema, table = _split_fqn(fqn)
     row = exec_query(
         conn,
         """
@@ -537,20 +538,19 @@ def reltuples_estimate(conn: psycopg.Connection, fqn: str) -> float:
         JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = %s AND c.relname = %s
         """,
-        (schema, table),
+        identity.parts,
     ).fetchone()
 
     return float(row[0]) if row else -1.0
 
 
-def resolve_column(conn: psycopg.Connection, fqn: str, column: str) -> str:
+def resolve_column(conn: psycopg.Connection, identity: Identity, column: str) -> str:
     """The catalog's own spelling for a lowercased column name (SPEC 2.2.1's map key).
 
     For a caller holding only the artifact key, not the `columns()` read `physical_name`
     rides on: `sample_values` (SPEC 4.1.2), which the engine addresses by map key.
     """
 
-    schema, table = _split_fqn(fqn)
     row = exec_query(
         conn,
         """
@@ -564,11 +564,11 @@ def resolve_column(conn: psycopg.Connection, fqn: str, column: str) -> str:
           AND a.attnum > 0
           AND NOT a.attisdropped
         """,
-        (schema, table, column),
+        (*identity.parts, column),
     ).fetchone()
 
     if row is None:
-        raise KeyError(f"no column named {column!r} (case-insensitive) on {fqn!r}")
+        raise KeyError(f"no column named {column!r} (case-insensitive) on {identity.dotted()!r}")
 
     return row[0]
 
@@ -617,15 +617,6 @@ def _reject_message(fqn: str, reason: str, detail: str) -> str:
         f"    exclude:\n"
         f'      - "{fqn}"'
     )
-
-
-def _split_fqn(fqn: str) -> tuple[str, str]:
-    if "." not in fqn:
-        raise ValueError(f"Postgres FQN must be 'schema.table', got {fqn!r}")
-
-    schema, _, table = fqn.partition(".")
-
-    return schema, table
 
 
 def _attnums_to_names(conn: psycopg.Connection, relid: int, attnums: list[int]) -> list[str]:

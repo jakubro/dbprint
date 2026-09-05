@@ -23,6 +23,7 @@ from dbprint.spec.distribution import classify as classify_distribution
 from dbprint.spec.distribution import summarize as summarize_frequencies
 from dbprint.spec.temporal_range import is_representable
 from .connection import exec_query
+from .identity import Identity
 from .introspect import composite_columns, reltuples_estimate
 from ..base import (
     BaseStats,
@@ -91,7 +92,7 @@ _UNSUPPORTED_TYPES = ("bytea",)
 
 def compute_base(
     conn: psycopg.Connection,
-    fqn: str,
+    identity: Identity,
     columns: list[ColumnMeta],
     scope: TableScope | None = None,
 ) -> tuple[TableCounts, dict[str, BaseStats]]:
@@ -100,24 +101,36 @@ def compute_base(
     if not columns:
         return TableCounts(row_count=0, rows_scanned=0), {}
 
-    quoted = _quoted_fqn(fqn)
-    source = _table_source(fqn, quoted, scope)
+    source = _table_source(identity, scope)
     narrows = scope is not None and scope.narrows
 
-    reltuples = reltuples_estimate(conn, fqn)
+    reltuples = reltuples_estimate(conn, identity)
     # The planner's n_distinct describes the whole table, so a narrowed read counts instead.
     approximate = reltuples > APPROXIMATE_THRESHOLD and not narrows
-    composite = composite_columns(conn, fqn)
+    composite = composite_columns(conn, identity)
 
-    rows_scanned, base_stats = _phase_a(conn, quoted, source, columns, approximate, composite)
-    row_count, row_count_method = _table_row_count(conn, quoted, rows_scanned, reltuples, scope)
+    rows_scanned, base_stats = _phase_a(
+        conn,
+        identity,
+        source,
+        columns,
+        approximate,
+        composite,
+    )
+    row_count, row_count_method = _table_row_count(
+        conn,
+        identity.quoted(),
+        rows_scanned,
+        reltuples,
+        scope,
+    )
 
     return TableCounts(row_count, rows_scanned, row_count_method), base_stats
 
 
 def compute_columns(
     conn: psycopg.Connection,
-    fqn: str,
+    identity: Identity,
     columns: list[ColumnMeta],
     config: StatisticsConfig,
     counts: TableCounts,
@@ -140,7 +153,7 @@ def compute_columns(
 
         return {c.name: _empty_stats(c, base[c.name].supported) for c in columns}
 
-    source = _table_source(fqn, _quoted_fqn(fqn), scope)
+    source = _table_source(identity, scope)
     enriched: dict[str, ColumnStats] = {}
     total = len(columns)
 
@@ -171,7 +184,7 @@ def compute_columns(
 
 def compute_null_patterns(
     conn: psycopg.Connection,
-    fqn: str,
+    identity: Identity,
     columns: list[ColumnMeta],
     config: StatisticsConfig,
     counts: TableCounts,
@@ -183,7 +196,7 @@ def compute_null_patterns(
     if not has_measurable_nulls(counts, base):
         return None
 
-    source = _table_source(fqn, _quoted_fqn(fqn), scope)
+    source = _table_source(identity, scope)
     quoted = [_quote_ident(col.physical_name or col.name) for col in columns]
     cap = config.top_n_null_patterns
     rows = exec_query(
@@ -203,7 +216,7 @@ def compute_null_patterns(
 
 def probe_grain(
     conn: psycopg.Connection,
-    fqn: str,
+    identity: Identity,
     columns: list[ColumnMeta],
     counts: TableCounts,
     candidates: tuple[tuple[str, str], ...],
@@ -218,7 +231,7 @@ def probe_grain(
     if not candidates:
         return ()
 
-    source = _table_source(fqn, _quoted_fqn(fqn), scope)
+    source = _table_source(identity, scope)
     physical = {col.name: col.physical_name or col.name for col in columns}
     exprs = [
         f"COUNT(DISTINCT ({_quote_ident(physical[a])}, {_quote_ident(physical[b])}))"
@@ -235,7 +248,7 @@ def probe_grain(
 
 def probe_timeline(
     conn: psycopg.Connection,
-    fqn: str,
+    identity: Identity,
     columns: list[ColumnMeta],
     counts: TableCounts,
     column: str,
@@ -248,7 +261,7 @@ def probe_timeline(
 
     del counts
 
-    source = _table_source(fqn, _quoted_fqn(fqn), scope)
+    source = _table_source(identity, scope)
     by_name = {col.name: col for col in columns}
     col = by_name[column]
     cn = _quote_ident(col.physical_name or col.name)
@@ -285,7 +298,7 @@ def _timeline_bucket_expr(cn: str, sql_type: str, unit: str) -> str:
 
 def compute_populated_windows(
     conn: psycopg.Connection,
-    fqn: str,
+    identity: Identity,
     columns: list[ColumnMeta],
     counts: TableCounts,
     anchor_column: str,
@@ -301,7 +314,7 @@ def compute_populated_windows(
     if not subject_columns:
         return {}
 
-    source = _table_source(fqn, _quoted_fqn(fqn), scope)
+    source = _table_source(identity, scope)
     by_name = {col.name: col for col in columns}
     anchor = by_name[anchor_column]
     anchor_cn = _quote_ident(anchor.physical_name or anchor.name)
@@ -348,7 +361,7 @@ def compute_populated_windows(
 
 def probe_dependencies(
     conn: psycopg.Connection,
-    fqn: str,
+    identity: Identity,
     columns: list[ColumnMeta],
     counts: TableCounts,
     base: dict[str, BaseStats],
@@ -366,7 +379,7 @@ def probe_dependencies(
     if not candidates:
         return {}
 
-    source = _table_source(fqn, _quoted_fqn(fqn), scope)
+    source = _table_source(identity, scope)
     physical = {col.name: col.physical_name or col.name for col in columns}
     exprs = [
         f"COUNT(DISTINCT ({_quote_ident(physical[a])}, {_quote_ident(physical[b])}))"
@@ -389,16 +402,15 @@ def probe_dependencies(
     return out
 
 
-def materialize(conn: psycopg.Connection, fqn: str, scope: TableScope) -> TableScope:
+def materialize(conn: psycopg.Connection, identity: Identity, scope: TableScope) -> TableScope:
     """Copy the drawn fraction into a session-lifetime temp table and name it on the scope.
 
     Autocommit makes the CREATE outlive its own statement. The name stays unqualified: a
     temp table lives in `pg_temp`, and qualifying it addresses a different schema.
     """
 
-    name = materialized_name(fqn)
-    quoted = _quoted_fqn(fqn)
-    drawn = _source(quoted, scope, seed_from_fqn(fqn, SEED_MODULUS))
+    name = materialized_name(identity.dotted().lower())
+    drawn = _source(identity.quoted(), scope, _seed(identity))
     exec_query(
         conn,
         f"CREATE TEMPORARY TABLE {_quote_ident(name)} AS SELECT * FROM {drawn}",
@@ -416,20 +428,20 @@ def release(conn: psycopg.Connection, scope: TableScope) -> None:
     exec_query(conn, f"DROP TABLE IF EXISTS {_quote_ident(scope.materialized)}")
 
 
-def _quoted_fqn(fqn: str) -> str:
-    schema, _, table = fqn.partition(".")
-
-    return _quote_qualified(schema, table)
-
-
-def _table_source(fqn: str, quoted: str, scope: TableScope | None) -> str:
+def _table_source(identity: Identity, scope: TableScope | None) -> str:
     """The FROM expression every phase reads.
 
     A materialized scope names one copied draw; unmaterialized, the seed re-derives from
     the table's own name, so every phase builds the same text.
     """
 
-    return _source(quoted, scope, seed_from_fqn(fqn, SEED_MODULUS))
+    return _source(identity.quoted(), scope, _seed(identity))
+
+
+def _seed(identity: Identity) -> int:
+    """The table's draw seed, hashed from the FOLDED path - the artifact's own name for it."""
+
+    return seed_from_fqn(identity.dotted().lower(), SEED_MODULUS)
 
 
 def _source(quoted_fqn: str, scope: TableScope | None, seed: int | None = None) -> str:
@@ -480,7 +492,7 @@ def _table_row_count(
 
 def _phase_a(
     conn: psycopg.Connection,
-    quoted_fqn: str,
+    identity: Identity,
     source: str,
     columns: list[ColumnMeta],
     approximate: bool,
@@ -556,7 +568,7 @@ def _phase_a(
         if approximate:
             estimate = _approximate_cardinality(
                 conn,
-                quoted_fqn,
+                identity,
                 col.physical_name or col.name,
                 row_count,
                 null_count,
@@ -645,7 +657,7 @@ def _settle_near_unique(
 
 def _approximate_cardinality(
     conn: psycopg.Connection,
-    quoted_fqn: str,
+    identity: Identity,
     col_name: str,
     row_count: int,
     null_count: int,
@@ -655,7 +667,6 @@ def _approximate_cardinality(
     None is the absence of an estimate, not a zero count; the caller then counts exactly.
     """
 
-    schema, table = quoted_fqn.replace('"', "").split(".", 1)
     row = exec_query(
         conn,
         """
@@ -663,7 +674,7 @@ def _approximate_cardinality(
         FROM pg_stats
         WHERE schemaname = %s AND tablename = %s AND attname = %s
         """,
-        (schema, table, col_name),
+        (*identity.parts, col_name),
     ).fetchone()
 
     if not row or row[0] is None:
@@ -1339,10 +1350,6 @@ def _iso_or_value(v: Any) -> Any:
 
 def _quote_ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
-
-
-def _quote_qualified(schema: str, table: str) -> str:
-    return f"{_quote_ident(schema)}.{_quote_ident(table)}"
 
 
 def _alias(name: str) -> str:

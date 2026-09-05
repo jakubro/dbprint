@@ -1,0 +1,17 @@
+---
+// Starlight's MarkdownContent with the demo recording above the landing page's prose.
+// `docs/index.md` is also the repository's GitHub front door, so it gains no site-only markup.
+import Default from "@astrojs/starlight/components/MarkdownContent.astro";
+
+import DemoCast from "./DemoCast.astro";
+import { DEMO_CAST } from "../demo-cast.mjs";
+
+// The site root, whose id Starlight normalizes to the empty string; the loader's own id for
+// `docs/index.md` is "index", and it is this route that ends up serving it.
+const isLandingPage = Astro.locals.starlightRoute.id === "";
+---
+
+<Default>
+  {isLandingPage && <DemoCast {...DEMO_CAST} castUrl={`${import.meta.env.BASE_URL}demo.cast`} />}
+  <slot />
+</Default>

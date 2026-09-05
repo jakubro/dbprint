@@ -1,6 +1,6 @@
 """pg_dump shell-out + SPEC 2.1.3 DDL normalization.
 
-`extract_ddl` runs `pg_dump --schema-only --table=<fqn>` through the strip pipeline here,
+`extract_ddl` runs `pg_dump --schema-only --table=<pattern>` through the strip pipeline here,
 producing a diff-stable `ddl.sql`; SPEC 2.1.3 (Postgres section) lists the exact strips.
 """
 
@@ -18,6 +18,7 @@ from .connection import (
     ConnectionParams,
     PostgresConnectionError,
 )
+from .identity import Identity
 from .. import trace_context
 
 
@@ -64,14 +65,15 @@ _STATEMENT_DROP_HEADS = (
 )
 
 
-def extract_ddl(params: ConnectionParams, fqn: str) -> str:
-    """Run pg_dump for `fqn` and return the normalized DDL string."""
+def extract_ddl(params: ConnectionParams, identity: Identity) -> str:
+    """Run pg_dump for the relation and return the normalized DDL string."""
 
-    raw = _run_pg_dump(params, fqn)
+    raw = _run_pg_dump(params, identity)
 
     if not raw.strip():
         raise PostgresConnectionError(
-            f"pg_dump produced no output for {fqn!r}; the table may not exist or be inaccessible.",
+            f"pg_dump produced no output for {identity.dotted()!r}; "
+            "the table may not exist or be inaccessible.",
         )
 
     return normalize(raw)
@@ -95,10 +97,10 @@ def normalize(raw: str) -> str:
     return text
 
 
-def _run_pg_dump(params: ConnectionParams, fqn: str) -> str:
+def _run_pg_dump(params: ConnectionParams, identity: Identity) -> str:
     """Shell out to pg_dump; traces the invocation at DEBUG (argv + elapsed, never the env).
 
-    Credentials travel through `env` (`ConnectionParams.env_for_pg_dump`), never argv.
+    The `--table` pattern quotes each segment: pg_dump folds an unquoted one and matches nothing.
     """
 
     env = {**os.environ, **params.env_for_pg_dump()}
@@ -107,7 +109,7 @@ def _run_pg_dump(params: ConnectionParams, fqn: str) -> str:
         "--schema-only",
         "--no-owner",
         "--no-privileges",
-        f"--table={fqn}",
+        f"--table={identity.quoted()}",
         params.database,
     ]
     started = time.monotonic()
@@ -125,13 +127,14 @@ def _run_pg_dump(params: ConnectionParams, fqn: str) -> str:
         _trace_pg_dump(started, argv, failed=True)
 
         raise PostgresConnectionError(
-            f"pg_dump failed for {fqn!r}: exit {exc.returncode}; stderr: {exc.stderr.strip()}",
+            f"pg_dump failed for {identity.dotted()!r}: exit {exc.returncode}; "
+            f"stderr: {exc.stderr.strip()}",
         ) from exc
     except subprocess.TimeoutExpired as exc:
         _trace_pg_dump(started, argv, failed=True)
 
         raise PostgresConnectionError(
-            f"pg_dump timed out after {PG_DUMP_TIMEOUT_SECONDS}s for {fqn!r}",
+            f"pg_dump timed out after {PG_DUMP_TIMEOUT_SECONDS}s for {identity.dotted()!r}",
         ) from exc
 
     _trace_pg_dump(started, argv, failed=False)

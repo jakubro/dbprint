@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from dbprint.adapters import DatabricksAdapter
+from dbprint.adapters import DatabricksAdapter, StatisticsConfig
 from dbprint.adapters.databricks.introspect import UnmappedTableType
 from dbprint.spec.sketch import low64_md5
 from tests.adapters.conftest import RecordedResponseCursor
@@ -44,6 +44,41 @@ def _uc_adapter(responses: dict[str, list[tuple]]) -> DatabricksAdapter:
     adapter.connect()
 
     return adapter
+
+
+class TestTheMetastoreFoldsNamesItself:
+    """Why this adapter carries no physical spelling: neither branch can hold a mixed-case name.
+
+    Unity Catalog is documented rather than tested here; the legacy metastore folds on creation.
+    """
+
+    def test_a_mixed_case_table_is_stored_folded(self, databricks_test_schema) -> None:
+        databricks_test_schema.execute("CREATE TABLE MixedCase (id INT) USING DELTA")
+        databricks_test_schema.execute("SHOW TABLES")
+        names = {row[1] for row in databricks_test_schema.fetchall()}
+
+        assert "mixedcase" in names
+        assert "MixedCase" not in names
+
+    def test_the_folded_name_addresses_it(self, databricks_test_schema) -> None:
+        databricks_test_schema.execute("CREATE TABLE MixedRead (id INT) USING DELTA")
+        databricks_test_schema.execute("INSERT INTO MixedRead VALUES (1), (2)")
+        adapter = _databricks_adapter(databricks_test_schema)
+
+        try:
+            fqn = next(
+                t.fqn
+                for t in adapter.list_tables(include=["*"], exclude=[])
+                if t.fqn.endswith(".mixedread")
+            )
+            cols = adapter.introspect_columns(fqn)
+            counts, _base = adapter.compute_base_statistics(fqn, cols, StatisticsConfig())
+        finally:
+            adapter.close()
+
+        assert fqn.endswith(".mixedread")
+        assert [c.name for c in cols] == ["id"]
+        assert counts.row_count == 2
 
 
 class TestUnityCatalogDetection:

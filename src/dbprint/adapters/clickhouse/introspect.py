@@ -1,8 +1,7 @@
 """`system.*` catalog queries for ClickHouse structural metadata - there is no schema tier
 below the database, so the FQN is `<database>.<table>`.
 
-Column names fold to the lowercase map key and keep their spelling in `physical_name` (SPEC 2.2.1).
-Database and table names carry none, so one SPEC 1.5 cannot spell is refused (SPEC 1.5.5).
+`system.*` compares case-sensitively, so every read past enumeration binds `Identity`'s spelling.
 """
 
 from __future__ import annotations
@@ -12,6 +11,7 @@ import re
 from dbprint.config.selectors import expand
 from dbprint.spec.classification import is_nullable_type
 from .connection import Cursor, exec_query
+from .identity import Identity
 from ..base import (
     ColumnMeta,
     CommentsMeta,
@@ -36,6 +36,8 @@ _TABLE_TYPE_BY_ENGINE: dict[str, TableType] = {
     "MaterializedView": "matview",
 }
 
+_Candidate = tuple[TableMeta, tuple[str, str]]
+
 
 class IdentifierRejected(ValueError):
     """Raised when a ClickHouse identifier fails SPEC 1.5 path-segment rules; format SPEC 1.5.5."""
@@ -46,12 +48,11 @@ def list_tables(
     database: str,
     include: list[str],
     exclude: list[str],
-) -> tuple[list[TableMeta], dict[str, bool]]:
+) -> tuple[list[TableMeta], dict[str, bool], dict[str, tuple[str, str]]]:
     """Enumerate tables/views/matviews in the connected database, filtered by selectors -
     a matview's hidden `.inner_id.<uuid>` storage is excluded, never reported as its own table.
 
-    Also returns the fqn-to-samplable map: `SAMPLE` needs a `SAMPLE BY` key declared at creation,
-    which `system.tables.sampling_key` answers here rather than a failed `CREATE` later.
+    Also returns fqn-to-samplable (from `system.tables.sampling_key`) and fqn-to-physical maps.
     """
 
     rows = exec_query(
@@ -62,46 +63,52 @@ def list_tables(
         (database,),
     ).fetchall()
 
-    candidates: list[TableMeta] = []
+    candidates: list[_Candidate] = []
     samplable: dict[str, bool] = {}
 
     for name, engine, sampling_key in rows:
         table_type = _TABLE_TYPE_BY_ENGINE.get(str(engine), "table")
-        # Both segments go into the FQN verbatim: `system.*` compares case-sensitively, so a fold
-        # here would address a table that does not exist.
-        fqn = f"{database}.{name}"
+        path = (_norm(database), _norm(str(name)))
+        fqn = ".".join(path)
         candidates.append(
-            TableMeta(fqn=fqn, type=table_type, namespace_path=(database, str(name))),
+            (
+                TableMeta(fqn=fqn, type=table_type, namespace_path=path),
+                (database, str(name)),
+            ),
         )
         samplable[fqn] = bool(sampling_key)
 
     in_scope = set(
         expand(
-            [meta.fqn for meta in candidates],
+            [meta.fqn for meta, _ in candidates],
             config_include=include,
             config_exclude=exclude,
         ),
     )
-    selected = [meta for meta in candidates if meta.fqn in in_scope]
+    selected = [entry for entry in candidates if entry[0].fqn in in_scope]
     _enforce_identifier_rules(selected)
 
-    return selected, {meta.fqn: samplable[meta.fqn] for meta in selected}
+    return (
+        [meta for meta, _ in selected],
+        {meta.fqn: samplable[meta.fqn] for meta, _ in selected},
+        {meta.fqn: parts for meta, parts in selected},
+    )
 
 
-def columns(cursor: Cursor, fqn: str) -> list[ColumnMeta]:
-    """Per-column metadata in ordinal order - nullability is encoded in the type as `Nullable(T)`,
-    possibly nested (`LowCardinality(Nullable(T))`); `sql_type` keeps the raw catalog spelling.
+def columns(cursor: Cursor, identity: Identity) -> tuple[list[ColumnMeta], dict[str, str]]:
+    """Per-column metadata in ordinal order, plus a lowercase-to-physical column-name map.
+
+    Nullability is encoded in the type as `Nullable(T)`, possibly nested; `sql_type` keeps it raw.
     """
 
-    database, table = _split_fqn(fqn)
     rows = exec_query(
         cursor,
         "SELECT name, type, position, default_expression FROM system.columns "
         "WHERE database = %s AND table = %s ORDER BY position",
-        (database, table),
+        identity.parts,
     ).fetchall()
 
-    return [
+    metas = [
         ColumnMeta(
             name=_norm(name),
             sql_type=str(col_type),
@@ -113,6 +120,8 @@ def columns(cursor: Cursor, fqn: str) -> list[ColumnMeta]:
         for name, col_type, position, default_expression in rows
     ]
 
+    return metas, {_norm(row[0]): str(row[0]) for row in rows}
+
 
 def default_collation(cursor: Cursor) -> str:
     """The connection's default comparison collation (SPEC 2.2.2) - a fixed constant."""
@@ -122,27 +131,26 @@ def default_collation(cursor: Cursor) -> str:
     return DEFAULT_COLLATION
 
 
-def relationships(cursor: Cursor, fqn: str) -> list[ForeignKeyMeta]:
+def relationships(cursor: Cursor, identity: Identity) -> list[ForeignKeyMeta]:
     """No source to read: `REFERENTIAL_CONSTRAINTS` is documented permanently empty and a
     `FOREIGN KEY` clause in `CREATE TABLE` is accepted and silently discarded.
     """
 
-    del cursor, fqn
+    del cursor, identity
 
     return []
 
 
-def indexes(cursor: Cursor, fqn: str) -> list[IndexMeta]:
+def indexes(cursor: Cursor, identity: Identity) -> list[IndexMeta]:
     """Data-skipping indexes; `type` carries ClickHouse's own name (`minmax`, `bloom_filter`) -
     one covers an expression, not a column list, so `columns` is empty rather than guessed.
     """
 
-    database, table = _split_fqn(fqn)
     rows = exec_query(
         cursor,
         "SELECT name, type FROM system.data_skipping_indices "
         "WHERE database = %s AND table = %s ORDER BY name",
-        (database, table),
+        identity.parts,
     ).fetchall()
 
     return [
@@ -151,24 +159,23 @@ def indexes(cursor: Cursor, fqn: str) -> list[IndexMeta]:
     ]
 
 
-def unique_keys(cursor: Cursor, fqn: str) -> list[UniqueKeyMeta]:
+def unique_keys(cursor: Cursor, identity: Identity) -> list[UniqueKeyMeta]:
     """No declared-unique column groups: `PRIMARY KEY` admits duplicate values (SPEC 2.6.7)."""
 
-    del cursor, fqn
+    del cursor, identity
 
     return []
 
 
-def physical_layout(cursor: Cursor, fqn: str) -> PhysicalLayout | None:
+def physical_layout(cursor: Cursor, identity: Identity) -> PhysicalLayout | None:
     """Declared partitioning key via `system.tables.partition_key`; None when unpartitioned -
     it is an expression string, so the base column is recovered by parsing, as MySQL's is.
     """
 
-    database, table = _split_fqn(fqn)
     row = exec_query(
         cursor,
         "SELECT partition_key FROM system.tables WHERE database = %s AND name = %s",
-        (database, table),
+        identity.parts,
     ).fetchone()
 
     if not row or not row[0]:
@@ -200,21 +207,20 @@ def view_dependencies(cursor: Cursor) -> None:
     del cursor
 
 
-def comments(cursor: Cursor, fqn: str) -> CommentsMeta:
+def comments(cursor: Cursor, identity: Identity) -> CommentsMeta:
     """Table comment + per-column comments; ClickHouse reports an absent comment as `''`."""
 
-    database, table = _split_fqn(fqn)
     table_row = exec_query(
         cursor,
         "SELECT comment FROM system.tables WHERE database = %s AND name = %s",
-        (database, table),
+        identity.parts,
     ).fetchone()
     table_comment = table_row[0] if table_row and table_row[0] else None
 
     col_rows = exec_query(
         cursor,
         "SELECT name, comment FROM system.columns WHERE database = %s AND table = %s",
-        (database, table),
+        identity.parts,
     ).fetchall()
 
     return CommentsMeta(
@@ -223,14 +229,13 @@ def comments(cursor: Cursor, fqn: str) -> CommentsMeta:
     )
 
 
-def estimate_row_count(cursor: Cursor, fqn: str) -> float:
+def estimate_row_count(cursor: Cursor, identity: Identity) -> float:
     """Catalog row-count estimate; -1 when unavailable (a plain `View` carries none)."""
 
-    database, table = _split_fqn(fqn)
     row = exec_query(
         cursor,
         "SELECT total_rows FROM system.tables WHERE database = %s AND name = %s",
-        (database, table),
+        identity.parts,
     ).fetchone()
 
     if not row or row[0] is None:
@@ -239,14 +244,15 @@ def estimate_row_count(cursor: Cursor, fqn: str) -> float:
     return float(row[0])
 
 
-def _enforce_identifier_rules(selected: list[TableMeta]) -> None:
+def _enforce_identifier_rules(selected: list[_Candidate]) -> None:
     """Reject identifiers SPEC 1.5 cannot spell, before any artifact is written.
 
-    The segments carry the catalog's own spelling, so a capital fails here rather than folding
-    into a path that then addresses nothing - and two names differing only by case stay two.
+    Judged on folded segments (SPEC 1.5.1 after 1.3), so two names folding to one path are rejected.
     """
 
-    for meta in selected:
+    seen: dict[str, tuple[str, str]] = {}
+
+    for meta, parts in selected:
         for seg in meta.namespace_path:
             if seg.startswith("."):
                 raise IdentifierRejected(_reject_message(meta.fqn, "leading-period", seg))
@@ -256,9 +262,22 @@ def _enforce_identifier_rules(selected: list[TableMeta]) -> None:
                     _reject_message(meta.fqn, "contains-unsafe-character", seg),
                 )
 
+        previous = seen.get(meta.fqn)
+
+        if previous is not None and previous != parts:
+            raise IdentifierRejected(
+                _reject_message(
+                    meta.fqn,
+                    f"case-collides-with-{'.'.join(previous)}",
+                    ".".join(parts),
+                ),
+            )
+
+        seen[meta.fqn] = parts
+
 
 def _reject_message(fqn: str, reason: str, detail: str) -> str:
-    """SPEC 1.5.5 error format - verbatim."""
+    """SPEC 1.5.5 error format - verbatim, quoting the folded path an exclude then matches."""
 
     return (
         f"ERROR: Table identifier rejected: {fqn}\n"
@@ -271,16 +290,7 @@ def _reject_message(fqn: str, reason: str, detail: str) -> str:
     )
 
 
-def _split_fqn(fqn: str) -> tuple[str, str]:
-    if "." not in fqn:
-        raise ValueError(f"ClickHouse FQN must be 'database.table', got {fqn!r}")
-
-    database, _, table = fqn.partition(".")
-
-    return database, table
-
-
 def _norm(name: str) -> str:
-    """Lowercase an identifier - the artifact's map key (SPEC 2.2.1)."""
+    """Lowercase an identifier - the artifact's path segment and map key (SPEC 1.3, 2.2.1)."""
 
     return name.lower()

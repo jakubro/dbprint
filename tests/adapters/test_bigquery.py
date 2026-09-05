@@ -7,7 +7,10 @@ from __future__ import annotations
 import pytest
 
 from dbprint.adapters import BigqueryAdapter, StatisticsConfig
+from dbprint.adapters.bigquery import introspect
+from dbprint.adapters.bigquery.identity import Identity
 from dbprint.adapters.bigquery.introspect import IdentifierRejected
+from dbprint.adapters.errors import QueryFailed
 from dbprint.spec.sketch import low64_md5
 
 
@@ -195,6 +198,97 @@ class _RowsCursor:
 
     def close(self) -> None:
         return None
+
+
+class _RecordingCursor:
+    """Cursor returning one canned row and keeping every statement it was handed."""
+
+    def __init__(self, rows: list[tuple[object, ...]]) -> None:
+        self._rows = rows
+        self.statements: list[str] = []
+
+    def execute(self, sql: str, params: object = None) -> _RecordingCursor:
+        del params
+        self.statements.append(" ".join(sql.split()))
+
+        return self
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        return self._rows
+
+    def fetchone(self) -> object:
+        return self._rows[0] if self._rows else None
+
+    def close(self) -> None:
+        return None
+
+
+class _RefusingCursor(_RecordingCursor):
+    """Cursor that refuses every statement, as a principal without the role would."""
+
+    def execute(self, sql: str, params: object = None) -> _RecordingCursor:
+        super().execute(sql, params)
+
+        raise RuntimeError(
+            "Access Denied: Table dbprint-test:seedbank.INFORMATION_SCHEMA.PARTITIONS",
+        )
+
+
+class TestRowCountEstimateAddress:
+    """Where the row-count estimate is read from, and what happens when that read fails.
+
+    Asserted on the emitted statement: the emulator has no `PARTITIONS` view and no credentials.
+    """
+
+    def test_it_reads_the_dataset_qualified_partitions_view(self) -> None:
+        cursor = _RecordingCursor([(1234,)])
+
+        estimate = introspect.estimate_row_count(
+            cursor,
+            _PROJECT,
+            Identity(parts=("seedbank", "accession")),
+        )
+
+        assert estimate == 1234
+        sql = cursor.statements[0]
+        assert f"`{_PROJECT}`.`seedbank`.INFORMATION_SCHEMA.PARTITIONS" in sql
+        # The vendor documents no dataset-qualified `TABLE_STORAGE`, and a region qualifier
+        # would scope the read to the project rather than to this table's own dataset.
+        assert "TABLE_STORAGE" not in sql
+        assert "region-" not in sql
+
+    def test_it_sums_the_tables_partitions(self) -> None:
+        """The estimate is a sum over partition rows, never a read of one of them."""
+
+        cursor = _RecordingCursor([(9,)])
+
+        introspect.estimate_row_count(cursor, _PROJECT, Identity(parts=("seedbank", "accession")))
+
+        assert "SUM(total_rows)" in cursor.statements[0]
+
+    def test_a_table_with_no_partition_row_has_no_estimate(self) -> None:
+        """SPEC-independent, but the engine's own reading: absent is not zero."""
+
+        cursor = _RecordingCursor([(None,)])
+
+        assert (
+            introspect.estimate_row_count(
+                cursor,
+                _PROJECT,
+                Identity(parts=("seedbank", "accession")),
+            )
+            is None
+        )
+
+    def test_a_refused_read_reaches_the_caller(self) -> None:
+        """Swallowing it makes a missing grant indistinguishable from an empty table."""
+
+        with pytest.raises(QueryFailed):
+            introspect.estimate_row_count(
+                _RefusingCursor([]),
+                _PROJECT,
+                Identity(parts=("seedbank", "accession")),
+            )
 
 
 class TestMixedCaseIdentifiers:
