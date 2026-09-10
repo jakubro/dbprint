@@ -33,16 +33,25 @@ def coarsen_day_count(days: int) -> int:
     return (days // REDACTED_DAY_COUNT_GRANULARITY) * REDACTED_DAY_COUNT_GRANULARITY
 
 
-def redact_value(value: Any, primitive: Primitive, salt: str) -> Any:
+def redact_value(value: Any, primitive: Primitive, salt: str | None) -> Any:
     """Return the emitted stand-in for one literal.
 
     `drop` is the caller's to handle: it removes the field rather than substituting a value.
     """
 
     if primitive == "hash":
-        return _digest(value, salt)
+        return _digest(value, _salt_with_material(salt))
 
     return MASK_PLACEHOLDER
+
+
+def _salt_with_material(salt: str | None) -> str:
+    """The salt a digest may use; an unsalted digest is not readable as one from the artifact."""
+
+    if not salt or not salt.strip():
+        raise ValueError("hash redaction requires a redaction_salt carrying a value")
+
+    return salt
 
 
 def _digest(value: Any, salt: str) -> str:

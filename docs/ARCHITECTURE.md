@@ -392,30 +392,30 @@ every adapter.
 ### Cardinality measurement
 
 `cardinality_method` (part of `BaseStats`, [§2.2.2 of the spec](format/v1/SPEC.md#222-universal-per-column-fields))
-records how a column's distinct-value count was obtained, and Postgres, MySQL
-and Snowflake do not agree on the answer.
+records how a column's distinct-value count was obtained, and the eight
+adapters split two ways on it.
 
-Postgres and Snowflake both hold a cheap population-level estimate they can
-read instead of scanning: Postgres reads the planner's stored `n_distinct`
-from `pg_stats`, and Snowflake computes an HLL sketch via
-`APPROX_COUNT_DISTINCT`. Both report `approximate` for that estimate, and both
-re-probe a near-unique column exactly — a `COUNT(DISTINCT)` once the estimate
-crosses a threshold close to the row count — because an estimation error near
-that boundary is exactly where it would flip a `candidate_key` verdict.
+Five reach a cheap population-level estimate instead of scanning the distinct
+set: Postgres reads the planner's stored `n_distinct` from `pg_stats`;
+Snowflake and BigQuery compute an HLL sketch via `APPROX_COUNT_DISTINCT`,
+duckdb via `approx_count_distinct`, ClickHouse via `uniqCombined64`. All five
+report `approximate` for that estimate, and all five re-probe a near-unique
+column exactly — a `COUNT(DISTINCT)` once the estimate crosses a threshold
+close to the row count — because an estimation error near that boundary is
+exactly where it would flip a `candidate_key` verdict.
 
-MySQL has no equivalent to read: no stored per-column distinct-value estimate
-is exposed through SQL, and no sketch function exists. `compute_column_statistics`
-issues a `COUNT(DISTINCT)` for every column on every table there and reports
-`exact` unconditionally — not a choice between two paths, because only one
-exists. Measured against a multi-million-row table, that statement costs
-single-digit seconds per column and scales with cardinality and value width;
-on a wide table the cost is paid once per column, every run, regardless of
-table size.
+MySQL, Redshift and Databricks publish `exact` unconditionally: none exposes a
+stored per-column distinct-value estimate to read, so `compute_column_statistics`
+issues a `COUNT(DISTINCT)` for every column on every table there — not a choice
+between two paths, because only one exists. Measured on MySQL against a
+multi-million-row table, that statement costs single-digit seconds per column
+and scales with cardinality and value width; on a wide table the cost is paid
+once per column, every run, regardless of table size.
 
-The asymmetry is load-bearing for anyone reading a MySQL print: `approximate`
-never appears there, and `exact` does not carry the same weight it carries on
-the other two vendors — it means "the only measurement this adapter has,"
-not "counted because the population was small enough to count."
+The asymmetry is load-bearing for anyone reading a print from one of those
+three: `approximate` never appears there, and `exact` does not carry the same
+weight it carries on the other five — it means "the only measurement this
+adapter has," not "counted because the population was small enough to count."
 
 ### Row-level narrowing and sampling
 
@@ -543,8 +543,8 @@ the cost of a real database.
 any adapter implementation must pass. It asserts structural invariants:
 abstract method coverage, return-type shapes, `list_tables` honours include
 / exclude, `extract_ddl` returns a non-empty string for a known table, and
-so on. Each concrete adapter (mock, postgres, snowflake) runs through the
-same battery against an appropriate test substrate (see §10).
+so on. Every concrete adapter runs through the same battery against its own
+test substrate (see §10).
 
 ### Cursor-factory injection (for testability)
 

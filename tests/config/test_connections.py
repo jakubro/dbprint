@@ -99,6 +99,110 @@ secondary:
         assert resolved == {"host": "h", "port": "1", "database": "d", "user": "u", "password": "p"}
 
 
+class TestABlankValueIsNotACredential:
+    """A variable set to nothing is what an unresolved secret looks like, so it falls through."""
+
+    @pytest.mark.parametrize("exported", ["", "   "])
+    def test_a_blank_variable_falls_through_to_the_file(
+        self,
+        tmp_path: Path,
+        exported: str,
+    ) -> None:
+        cfile = _write_connections_file(
+            tmp_path / "connections.yaml",
+            "secondary:\n  host: file-host\n",
+        )
+        resolved = resolve_connection(
+            "secondary",
+            ["host"],
+            project_root=tmp_path,
+            connections_file=cfile,
+            env={"DBPRINT_SECONDARY_HOST": exported},
+        )
+
+        assert resolved["host"] == "file-host"
+
+    def test_a_blank_dotenv_entry_falls_through(self, tmp_path: Path) -> None:
+        """A bare key in `.env` and the same key with a trailing `=` are the same absence."""
+
+        cfile = _write_connections_file(
+            tmp_path / "connections.yaml",
+            "secondary:\n  host: file-host\n",
+        )
+        _write_dotenv(tmp_path, "DBPRINT_SECONDARY_HOST=\n")
+        resolved = resolve_connection(
+            "secondary",
+            ["host"],
+            project_root=tmp_path,
+            connections_file=cfile,
+            env={},
+        )
+
+        assert resolved["host"] == "file-host"
+
+    def test_an_empty_value_in_the_file_is_a_value(self, tmp_path: Path) -> None:
+        """Quotes in the connections file are typed on purpose - an empty password is sayable."""
+
+        cfile = _write_connections_file(
+            tmp_path / "connections.yaml",
+            "secondary:\n  host: file-host\n  password: ''\n",
+        )
+        resolved = resolve_connection(
+            "secondary",
+            ["host", "password"],
+            project_root=tmp_path,
+            connections_file=cfile,
+            env={},
+        )
+
+        assert resolved["password"] == ""
+
+    def test_an_empty_password_variable_is_the_credential(self, tmp_path: Path) -> None:
+        """A trust-authenticated cluster is reached with a password of none, exported as empty."""
+
+        cfile = _write_connections_file(
+            tmp_path / "connections.yaml",
+            "secondary:\n  host: file-host\n  password: file-pw\n",
+        )
+        resolved = resolve_connection(
+            "secondary",
+            ["host", "password"],
+            project_root=tmp_path,
+            connections_file=cfile,
+            env={"DBPRINT_SECONDARY_PASSWORD": ""},
+        )
+
+        assert resolved["password"] == ""
+
+    def test_an_optional_key_exported_blank_is_omitted(self, tmp_path: Path) -> None:
+        resolved = resolve_connection(
+            "secondary",
+            ["host"],
+            project_root=tmp_path,
+            connections_file=tmp_path / "missing.yaml",
+            env={"DBPRINT_SECONDARY_HOST": "h", "DBPRINT_SECONDARY_PORT": ""},
+            optional_keys=["port"],
+        )
+
+        assert "port" not in resolved
+
+    def test_a_required_key_exported_blank_names_the_variable_it_skipped(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        with pytest.raises(ConfigError) as exc_info:
+            resolve_connection(
+                "secondary",
+                ["host"],
+                project_root=tmp_path,
+                connections_file=tmp_path / "missing.yaml",
+                env={"DBPRINT_SECONDARY_HOST": ""},
+            )
+
+        assert "DBPRINT_SECONDARY_HOST" in str(exc_info.value)
+        assert "empty" in str(exc_info.value)
+
+
 class TestUnresolved:
     def test_missing_required_keys_raise_with_all_listed(self, tmp_path: Path) -> None:
         with pytest.raises(ConfigError) as exc_info:

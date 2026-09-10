@@ -161,7 +161,8 @@ tables that rule governs, and none of them can widen the connection's scope.
 
 Patterns are `fnmatch` globs over the lowercased fully-qualified name, so matching is
 case-insensitive. `*` spans dot separators. The FQN shape is the adapter's:
-`database.schema.table` (Snowflake), `schema.table` (PostgreSQL), `database.table` (MySQL).
+`database.schema.table` (Snowflake, duckdb), `schema.table` (PostgreSQL, Redshift,
+Databricks), `database.table` (MySQL, ClickHouse), `dataset.table` (BigQuery).
 
 ### `statistics`
 
@@ -305,8 +306,8 @@ rules:
   **not** apply — sampling degrades the artifact, so an unknown size takes the un-narrowed
   path, and the run says so on stderr rather than deciding silently.
 - **A config with neither `min_rows` nor `max_rows_scanned` anywhere costs nothing.** No estimate
-  is fetched and the run issues exactly the statements it issued before the keys existed. Either
-  key, at any level, turns the pre-flight on for a table — a ceiling needs the estimate to derive
+  is fetched, and the run issues no statement on a table's account beyond the ones it profiles it
+  with. Either key, at any level, turns the pre-flight on for a table — a ceiling needs the estimate to derive
   its fraction. It has no effect on a plain view, whatever this is set to: a view is never
   queried, so no estimate is fetched for one and no size rule can govern it.
 - A narrowed run takes the table's `row_count` from the catalog rather than counting it, so
@@ -447,7 +448,9 @@ connections:
   reversible by dictionary attack in minutes. The salt lives with the credentials —
   `redaction_salt` in `~/.dbprint/connections.yaml`, or
   `DBPRINT_<CONN>_REDACTION_SALT` — never in `.dbprint.yaml`, which is committed. Keep it
-  stable per project or every redacted column churns on every diff.
+  stable per project or every redacted column churns on every diff. A value that is empty or
+  only whitespace is not a salt: `DBPRINT_<CONN>_REDACTION_SALT=` is what a shell produces
+  when a secret did not resolve, and it is refused exactly as an absent one is.
 - **Detection is unaffected.** `looks_like` and `sensitivity` run over sampled values that are
   never written, so a hashed email column still reports `looks_like: email`. The shape claim
   describes the column, not the emitted literals.
@@ -553,3 +556,15 @@ Per key, first hit wins:
 
 So `DBPRINT_PRODUCTION_PASSWORD` overrides the file entry for `production`, and a `.env`
 entry serves as the fallback a checkout can carry without a user-level file.
+
+**A variable carrying no value is skipped, not used.** `DBPRINT_PRODUCTION_HOST=` — set to
+empty, or to whitespace — is what a shell produces when a secret did not resolve, so
+resolution continues to the next source rather than handing an empty credential to the
+adapter. A `.env` entry with nothing after the `=` is skipped the same way, as is a bare key
+with no `=` at all. An empty value in `~/.dbprint/connections.yaml` (`host: ""`) is
+deliberate and is used as written.
+
+**`password` is the exception, because its empty value is a credential.** A cluster
+configured for `trust` authentication is reached with no password at all, and
+`DBPRINT_<CONN>_PASSWORD=` is how a runner says so. An empty password is therefore taken as
+given, from any source.

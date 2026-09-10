@@ -354,8 +354,8 @@ _TRAPS = (
         "way. A name in a column's `unmeasured` list (SPEC 2.2.4), or a block in the file's "
         "own (SPEC 2.2.1), states that this run issued the read and did not get an answer: "
         "treat that field as unknown, never as zero, none, or a property of the data. An "
-        "artifact with no marker anywhere is not thereby complete - a producer predating the "
-        "field, or one that dropped a measurement silently, looks identical."
+        "artifact with no marker anywhere is not thereby complete - a producer that dropped a "
+        "measurement silently looks identical."
     ),
     (
         "**A timeline gap is not a zero.** `timeline.buckets` lists only a day/week/month "

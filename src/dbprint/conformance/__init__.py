@@ -192,6 +192,7 @@ def validate_print(
             issues.extend(format_version.check(diff_data, rel))
             issues.extend(schema_validation.check_diff(diff_data, rel))
             issues.extend(diff.check(diff_data, rel))
+            issues.extend(diff.check_redacted_values(print_root, manifest_data, diff_data, rel))
             issues.extend(manifest.check_selectors_agree_with_diff(manifest_data, diff_data, rel))
 
     return sorted(issues)

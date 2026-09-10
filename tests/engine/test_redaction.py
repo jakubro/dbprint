@@ -23,7 +23,7 @@ from dbprint.adapters import (
 from dbprint.config import ConfigError, load_project
 from dbprint.config.project import RedactRule, bind_redaction_salt
 from dbprint.engine import Engine
-from dbprint.spec.redaction import MASK_PLACEHOLDER
+from dbprint.spec.redaction import MASK_PLACEHOLDER, redact_value
 from tests.conftest import normalize_instants
 from tests.engine.test_orchestrator import _conn_config, _curator_fixture
 from tests.engine.test_prose_suppression import _fixture as _prose_fixture
@@ -198,6 +198,22 @@ class TestSaltIsAPrecondition:
         with pytest.raises(ConfigError, match="redaction_salt"):
             bind_redaction_salt(conn, None)
 
+    @pytest.mark.parametrize("salt", ["", "   "])
+    def test_hash_with_a_salt_carrying_no_material_is_refused(
+        self,
+        tmp_path: Path,
+        salt: str,
+    ) -> None:
+        """A variable exported empty resolves to a string, and hashes exactly as no salt does."""
+
+        conn = replace(
+            _conn_config(tmp_path),
+            redact=(RedactRule(columns=("*.herbarium_id",), with_="hash"),),
+        )
+
+        with pytest.raises(ConfigError, match="redaction_salt"):
+            bind_redaction_salt(conn, salt)
+
     def test_mask_needs_no_salt(self, tmp_path: Path) -> None:
         conn = replace(
             _conn_config(tmp_path),
@@ -205,6 +221,39 @@ class TestSaltIsAPrecondition:
         )
 
         assert bind_redaction_salt(conn, None).redaction_salt is None
+
+    def test_a_blank_salt_reaches_the_config_as_no_salt(self, tmp_path: Path) -> None:
+        """One representation downstream, whichever spelling of "nothing" arrived."""
+
+        conn = replace(
+            _conn_config(tmp_path),
+            redact=(RedactRule(columns=("*.herbarium_id",), with_="mask"),),
+        )
+
+        assert bind_redaction_salt(conn, "   ").redaction_salt is None
+
+    def test_a_salt_is_stored_as_configured(self, tmp_path: Path) -> None:
+        """Trimming it would change every digest of a secret whose whitespace is its own."""
+
+        conn = replace(
+            _conn_config(tmp_path),
+            redact=(RedactRule(columns=("*.herbarium_id",), with_="hash"),),
+        )
+
+        assert bind_redaction_salt(conn, " pepper ").redaction_salt == " pepper "
+
+
+class TestTheDigestRefusesASaltWithNoMaterial:
+    """The config gate makes this unreachable from the CLI, and the artifact cannot show it."""
+
+    @pytest.mark.parametrize("salt", [None, "", "   "])
+    def test_hashing_without_material_raises(self, salt: str | None) -> None:
+        with pytest.raises(ValueError, match="redaction_salt"):
+            redact_value("alpha", "hash", salt)
+
+    @pytest.mark.parametrize("salt", [None, ""])
+    def test_masking_is_unaffected(self, salt: str | None) -> None:
+        assert redact_value("alpha", "mask", salt) == MASK_PLACEHOLDER
 
 
 class TestTargeting:
@@ -523,6 +572,7 @@ class TestBoundsUnderARedactedColumn:
         conn = replace(
             _conn_config(tmp_path),
             redact=(RedactRule(columns=("*.observed_at",), with_=primitive),),
+            redaction_salt="pepper",
         )
         Engine(MockAdapter(_dated_fixture()), conn, tmp_path).generate()
         payload = yaml.safe_load(
@@ -660,6 +710,7 @@ class TestRedactedDayCounts:
         conn = replace(
             _conn_config(tmp_path),
             redact=(RedactRule(columns=("*.observed_at",), with_=primitive),),
+            redaction_salt="pepper",
         )
         Engine(MockAdapter(_stale_dated_fixture()), conn, tmp_path).generate()
 

@@ -59,7 +59,7 @@ That samples every table over half a billion rows without naming any of them —
 
 Two consequences worth knowing before relying on it. The size comes from the catalog's own estimate, which lags writes on PostgreSQL and is approximate by design on InnoDB, so a table sitting near the threshold can fall either side of it between runs. And where the catalog has no estimate at all the rule does **not** apply: an unknown size takes the un-narrowed path, and the run says so on stderr rather than deciding silently.
 
-Because `check` and `list` never connect, a size condition cannot be re-evaluated offline. They do not need to: the run that wrote the print resolved the threshold *with* the row count in hand and recorded the result on each table's manifest entry, so a `min_rows` rule that applied online still governs the offline verdict. Only an entry that records no threshold at all — one written before the key existed, or by another producer — falls back to the rules that match by name alone, and both commands warn when that happens.
+Because `check` and `list` never connect, a size condition cannot be re-evaluated offline. They do not need to: the run that wrote the print resolved the threshold *with* the row count in hand and recorded the result on each table's manifest entry, so a `min_rows` rule that applied online still governs the offline verdict. Only an entry that records no threshold at all falls back to the rules that match by name alone, and both commands warn when that happens.
 
 ## What a narrowed read does to the artifact
 

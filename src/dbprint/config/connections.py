@@ -1,7 +1,7 @@
 """Connection credential resolution: env > ~/.dbprint/connections.yaml > .env.
 
-The first hit across the three sources wins per (connection_name, key); missing required
-keys raise `ConfigError` listing every unresolved one at once.
+The first source carrying a value wins per (connection_name, key); missing required keys
+raise `ConfigError` listing every unresolved one at once.
 """
 
 from __future__ import annotations
@@ -18,6 +18,10 @@ from .project import ConfigError
 
 CONNECTIONS_FILE_DEFAULT = Path("~/.dbprint/connections.yaml")
 DOTENV_FILE = ".env"
+
+# The keys whose empty value is itself the credential: a trust-authenticated cluster is reached
+# with a password of none, and a variable set to empty is how a runner supplies exactly that.
+_EMPTY_IS_A_VALUE = frozenset({"password"})
 
 
 def resolve(
@@ -52,7 +56,16 @@ def resolve(
             resolved[key] = value
 
     if unresolved:
-        raise ConfigError(_unresolved_message(connection_name, unresolved, cfile, project_root))
+        blank = [
+            _env_var_name(connection_name, key)
+            for key in unresolved
+            if _env_var_name(connection_name, key) in env_map
+            or _env_var_name(connection_name, key) in dotenv_map
+        ]
+
+        raise ConfigError(
+            _unresolved_message(connection_name, unresolved, cfile, project_root, blank),
+        )
 
     for key in optional_keys or []:
         value = _resolve_one(connection_name, key, env_map, file_entry, dotenv_map)
@@ -70,16 +83,37 @@ def _resolve_one(
     file_entry: dict[str, Any],
     dotenv_map: dict[str, str | None],
 ) -> str | None:
-    env_key = _env_var_name(connection_name, key)
+    """The first source carrying a value, or None.
 
-    if env_key in env_map:
-        return str(env_map[env_key])
+    An empty value in the connections file is deliberate and kept; `_carries_value` rules on
+    an empty variable.
+    """
+
+    env_key = _env_var_name(connection_name, key)
+    exported = env_map.get(env_key)
+    carried = dotenv_map.get(env_key)
+
+    if _carries_value(exported, key):
+        return str(exported)
     elif key in file_entry and file_entry[key] is not None:
         return str(file_entry[key])
-    elif env_key in dotenv_map and dotenv_map[env_key] is not None:
-        return str(dotenv_map[env_key])
+    elif _carries_value(carried, key):
+        return str(carried)
     else:
         return None
+
+
+def _carries_value(value: str | None, key: str) -> bool:
+    """Whether a variable supplies this key.
+
+    Blank is what a shell leaves when a secret did not resolve, so it falls through outside
+    `_EMPTY_IS_A_VALUE`.
+    """
+
+    if value is None:
+        return False
+
+    return key in _EMPTY_IS_A_VALUE or bool(value.strip())
 
 
 def _env_var_name(connection_name: str, key: str) -> str:
@@ -122,8 +156,16 @@ def _unresolved_message(
     unresolved: list[str],
     connections_file: Path,
     project_root: Path,
+    blank: list[str] | None = None,
 ) -> str:
+    """Name the sources, and any variable that was skipped for carrying no value."""
+
     env_vars = ", ".join(_env_var_name(connection_name, k) for k in unresolved)
+    skipped = (
+        f"\nSet but empty, so skipped: {', '.join(blank)}. An empty value is not a credential."
+        if blank
+        else ""
+    )
 
     return (
         f"Connection {connection_name!r}: missing required credentials: {unresolved}.\n"
@@ -131,4 +173,5 @@ def _unresolved_message(
         f"  - environment variables: {env_vars}\n"
         f"  - {connections_file} under {connection_name!r}\n"
         f"  - {project_root / DOTENV_FILE} entries: {env_vars}"
+        f"{skipped}"
     )

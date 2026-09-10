@@ -454,7 +454,7 @@ def _issue_codes(payload: str) -> set[str]:
 class TestTheSaltRefusalHoldsOnEveryCommand:
     """`with: hash` and no salt is a config error, and every entry point says so.
 
-    SPEC 2.2.9 forbids defaulting the salt; hashing without one produces an empty digest.
+    SPEC 2.2.9 forbids defaulting the salt; an unsalted digest is reversible by dictionary.
     """
 
     @pytest.mark.parametrize(
@@ -470,6 +470,28 @@ class TestTheSaltRefusalHoldsOnEveryCommand:
         _credentials(monkeypatch, salt="seed")
         _seed_baseline(tmp_path, monkeypatch, _project(HASH_RULE))
         _credentials(monkeypatch)
+        result = _run(tmp_path, monkeypatch, *command, config=_project(HASH_RULE))
+
+        assert result.exit_code == EXIT_GENERIC, result.output
+        assert "redaction_salt" in result.output
+
+    @pytest.mark.parametrize(
+        "command",
+        [["generate", "--force"], ["diff"], ["check", "--online"]],
+    )
+    @pytest.mark.parametrize("salt", ["", "   "])
+    def test_a_hash_rule_whose_salt_carries_nothing_is_refused(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        command: list[str],
+        salt: str,
+    ) -> None:
+        """An exported variable that resolved to nothing is the shape a missing secret takes."""
+
+        _credentials(monkeypatch, salt="seed")
+        _seed_baseline(tmp_path, monkeypatch, _project(HASH_RULE))
+        _credentials(monkeypatch, salt=salt)
         result = _run(tmp_path, monkeypatch, *command, config=_project(HASH_RULE))
 
         assert result.exit_code == EXIT_GENERIC, result.output

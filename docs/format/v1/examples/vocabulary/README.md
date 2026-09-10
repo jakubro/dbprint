@@ -146,8 +146,8 @@ value corroboration is arithmetic rather than a heuristic (SPEC 4.4.1).
 | `mac_address` | `online_identifier` | Both a strong name token and its own `looks_like: mac_address` corroborates |
 | `device_id` | `online_identifier` | A strong name token; its own `looks_like: imei` is unrelated evidence on the other axis |
 
-Both columns already existed for the `looks_like` axis; neither needed a new fixture value
-to carry the second signal. `mac_address` demonstrates the shape-reading path SPEC 4.4.3
+Both columns carry a `looks_like` verdict as well, so one fixture value demonstrates both
+axes. `mac_address` demonstrates the shape-reading path SPEC 4.4.3
 gives this category (the same mechanism `contact` and `financial_account` use); `device_id`
 demonstrates the name-only path. A `session_token` column is deliberately not demonstrated
 here - it is a `sensitivity: credential` example instead, since a live session token is a
@@ -159,8 +159,8 @@ bearer credential first and the two vocabularies do not claim the same column.
 |---|---|---|
 | `coordinates` | `geolocation` | Its own `looks_like: latlon` corroborates - the column name carries no geolocation token |
 
-`coordinates` already existed for the `looks_like` axis; it needed no new fixture value to
-carry the second signal. This is the shape-only path - a `latitude`/`longitude` pair split
+`coordinates` carries a `looks_like` verdict as well, so one fixture value demonstrates
+both axes. This is the shape-only path - a `latitude`/`longitude` pair split
 across two numeric columns would instead be the name-only path, which this fixture cannot
 carry (no sample is drawn for a `numeric` column, so no shape evidence exists there either
 way) - see "Not demonstrated" below for where that path is covered.
@@ -171,8 +171,8 @@ way) - see "Not demonstrated" below for where that path is covered.
 |---|---|---|
 | `bearer_token` | `credential` | Its own `looks_like: jwt` corroborates unconditionally - the column name carries no credential token |
 
-`bearer_token` already existed for the `looks_like` axis; it needed no new fixture value to
-carry the second signal. This is the unconditional shape path (`jwt` flags independent of
+`bearer_token` carries a `looks_like` verdict as well, so one fixture value demonstrates
+both axes. This is the unconditional shape path (`jwt` flags independent of
 the name, the same mechanism `contact` gets from `email`/`phone`) - see "Not demonstrated"
 below for the strong-name path, the weak-name-plus-`hex` path, and the settings-table
 negative.

@@ -184,11 +184,12 @@ def context_command(
 
         rendered_chunks.append(result.text)
 
-    text = (
-        ("\n\n---\n\n".join(c.rstrip() for c in rendered_chunks if c.strip()))
-        if rendered_chunks
-        else ""
-    )
+    # Nothing assembled means nothing to write: an unconditional write would truncate the
+    # user's own file on a mistyped FQN. `diff` guards its own `--output` the same way.
+    if not rendered_chunks:
+        ctx.exit(overall_exit)
+
+    text = "\n\n---\n\n".join(c.rstrip() for c in rendered_chunks if c.strip())
 
     if text and not text.endswith("\n"):
         text += "\n"

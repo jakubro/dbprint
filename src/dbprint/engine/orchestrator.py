@@ -987,7 +987,7 @@ class Engine:
             counts,
             enriched,
             scope,
-            self._conn.redaction_salt or "",
+            self._conn.redaction_salt,
             null_patterns,
             physical_layout,
             default_collation,
@@ -2728,7 +2728,7 @@ def _serialize_statistics(
     counts: TableCounts,
     enriched: dict[str, _EnrichedColumnStats],
     scope: TableScope | None = None,
-    salt: str = "",
+    salt: str | None = None,
     null_patterns: NullPatterns | None = None,
     physical_layout: PhysicalLayout | None = None,
     default_collation: str = "",
@@ -2972,7 +2972,7 @@ def _drop_forbidden_fields(
         )
 
 
-def _emitted_extras(e: _EnrichedColumnStats, rows_scanned: int, salt: str = ""):
+def _emitted_extras(e: _EnrichedColumnStats, rows_scanned: int, salt: str | None = None):
     """Every value-bearing field for one column, redacted where a rule covers it.
 
     The value list, range bounds and percentiles are the cell values a primitive acts on;
@@ -3130,7 +3130,7 @@ def _mark_unmeasured(
         col_dict["unmeasured"] = named
 
 
-def _redacted_entry(value_count: Any, primitive: str | None, salt: str) -> dict[str, Any]:
+def _redacted_entry(value_count: Any, primitive: str | None, salt: str | None) -> dict[str, Any]:
     """One `values` entry, with its literal replaced, dropped, or left alone.
 
     Under `drop` the `value` key is absent and the count remains - how many rows shared some
@@ -3150,7 +3150,7 @@ def _redacted_entry(value_count: Any, primitive: str | None, salt: str) -> dict[
     }
 
 
-def _redacted_scalar(value: Any, primitive: str | None, salt: str) -> Any:
+def _redacted_scalar(value: Any, primitive: str | None, salt: str | None) -> Any:
     if primitive is None or value is None:
         return value
 

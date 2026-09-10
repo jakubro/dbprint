@@ -860,7 +860,7 @@ def _fetch_numeric_block(
         cn,
         non_null,
         config,
-        _round_numeric,
+        _measured_value,
     )
 
     return rng, percentiles, distribution, frequencies, values, mean, total
@@ -1234,7 +1234,28 @@ def _round_numeric(v: Any, *, exact_int: bool = False) -> Any:
         return int(v)
 
     try:
-        return round(float(v), 6)
+        f = float(v)
+    except (TypeError, ValueError):
+        return v
+
+    rounded = round(f, 6)
+
+    # Six decimals annihilate a measurement below half of one, and 2.2.6 promises to leave a
+    # value's magnitude intact - so such a value goes to six significant figures instead.
+    if rounded == 0.0 and f != 0.0:
+        return float(f"{f:.6g}")
+
+    return rounded
+
+
+def _measured_value(v: Any) -> Any:
+    """One listed value, normalized but never rounded - a cell is not a statistic (SPEC 2.2.7)."""
+
+    if v is None or isinstance(v, int):
+        return v
+
+    try:
+        return float(v)
     except (TypeError, ValueError):
         return v
 

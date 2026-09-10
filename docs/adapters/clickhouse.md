@@ -35,8 +35,8 @@ GRANT CREATE ARBITRARY TEMPORARY TABLE ON *.* TO dbprint_ro;
 Independently of every grant above, the `readonly` server setting gates the write: `readonly
 = 1` refuses the sampled copy outright; `readonly = 2` permits it. Two of ClickHouse's own
 documentation pages disagree on whether the `system` database is always readable — the
-server-settings page is the more specific and more recently maintained, and is the one that
-matches what `system.tables`/`system.columns` actually do here.
+server-settings page is the more specific, and is the one that matches what
+`system.tables`/`system.columns` actually do here.
 
 ### What an under-privileged user does
 

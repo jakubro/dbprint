@@ -521,18 +521,22 @@ def _diff_relationships(
 
     for key in sorted(set(after_by_key) - set(before_by_key)):
         fk = after_by_key[key]
-        out.append(
-            {
-                "kind": "relationship_added",
-                "source_table": fqn,
-                "source_column": list(fk.source_columns),
-                "target_table": fk.target_table,
-                "target_column": list(fk.target_columns),
-                "on_delete": fk.on_delete,
-                "on_update": fk.on_update,
-                "detection": fk.detection,
-            },
-        )
+        event = {
+            "kind": "relationship_added",
+            "source_table": fqn,
+            "source_column": list(fk.source_columns),
+            "target_table": fk.target_table,
+            "target_column": list(fk.target_columns),
+        }
+
+        # A guessed edge declares no referential action, so the keys are omitted rather than
+        # nulled - the same write-time rule `relationships.yaml` follows (SPEC 2.3.8).
+        if fk.detection == "declared":
+            event["on_delete"] = fk.on_delete
+            event["on_update"] = fk.on_update
+        event["detection"] = fk.detection
+
+        out.append(event)
 
     for key in sorted(set(before_by_key) - set(after_by_key)):
         fk = before_by_key[key]
@@ -810,6 +814,20 @@ _POPULATION_ABSOLUTE_STATS = frozenset(
 )
 
 
+# Cell values under SPEC 2.2.9: a marker either side withholds them, so comparing republishes
+# whichever side still holds one. `mean`/`sum`/`length` join - their exemption reads `rows_scanned`.
+_REDACTED_EXCLUDED_STATS = frozenset(
+    {
+        "values",
+        "range",
+        "percentiles",
+        "mean",
+        "sum",
+        "length",
+    },
+)
+
+
 def _unmeasured_of(col: dict[str, Any]) -> frozenset[str]:
     """The field names one side declares it could not measure (SPEC 2.2.4)."""
 
@@ -840,12 +858,20 @@ def _diff_one_column_stats(
     # SPEC 2.2.4: a field either side declares unmeasured has no reading to compare - and only the
     # artifact's own marker can tell a hydrated baseline's failed read from a value that moved.
     unmeasured = _unmeasured_of(before) | _unmeasured_of(after)
+    # Either side, not both: a hydrated baseline carries whatever primitive and salt wrote it, so
+    # which of the two still holds a plain literal is not a fact the comparison can establish.
+    redacted = "redacted" in before or "redacted" in after
 
     for path in sorted(paths):
+        head = path.split(".")[0]
+
         if path in _UNCOMPARED_STATS or path in _MARKER_STATS:
             continue
 
-        if path.split(".")[0] in unmeasured:
+        if head in unmeasured:
+            continue
+
+        if redacted and head in _REDACTED_EXCLUDED_STATS:
             continue
 
         if approximate and path in _APPROXIMATE_EXCLUDED_STATS:

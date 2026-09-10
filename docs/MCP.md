@@ -53,7 +53,7 @@ pip install "dbprint[mcp]"
 
 The extra adds a dependency on the official Anthropic Python `mcp` SDK. Without the extra, `dbprint serve` MUST exit with code 1 and a clear install hint at command invocation time; no MCP handshake is attempted.
 
-The server is read-only against committed prints — no database connection is opened. Adapter extras (`[snowflake]`, `[postgres]`, `[mysql]`) are NOT required for `dbprint serve`.
+The server is read-only against committed prints — no database connection is opened. No adapter extra is required for `dbprint serve`.
 
 ---
 

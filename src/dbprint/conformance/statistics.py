@@ -278,6 +278,7 @@ def check(data: Any, path: str, tbl_fqn: str) -> list[Issue]:
         issues.extend(_check_span_days(col, col_path))
         issues.extend(_check_percentiles_order(col, col_path))
         issues.extend(_check_percentiles_containment(col, col_path))
+        issues.extend(_check_mean_containment(col, col_path))
         issues.extend(_check_length_order(col, col_path))
         issues.extend(_check_normalized_cardinality_order(col, col_path))
         issues.extend(_check_looks_like_candidate(col, col_path))
@@ -2133,6 +2134,45 @@ def _check_percentiles_containment(col: dict, col_path: str) -> list[Issue]:
             )
 
     return issues
+
+
+def _check_mean_containment(col: dict, col_path: str) -> list[Issue]:
+    """SPEC 2.2.4: `mean` lies within `[range.min, range.max]`.
+
+    Impossible over a nonempty column, so only a lost magnitude publishes one. Skipped under
+    any `redacted` marker, whose bounds carry no literal to compare.
+    """
+
+    if col.get("redacted") is not None:
+        return []
+
+    rng = col.get("range")
+    mean = col.get("mean")
+
+    if not isinstance(rng, dict) or not _is_real_number(mean):
+        return []
+
+    lo, hi = rng.get("min"), rng.get("max")
+
+    if not (_is_real_number(lo) and _is_real_number(hi)):
+        return []
+
+    if lo - _PERCENTILE_CONTAINMENT_TOLERANCE <= mean <= hi + _PERCENTILE_CONTAINMENT_TOLERANCE:
+        return []
+
+    return [
+        Issue(
+            col_path,
+            "stats.mean-outside-range",
+            "error",
+            f"mean={mean!r} lies outside range [{lo!r}, {hi!r}].",
+            "§2.2.4",
+        ),
+    ]
+
+
+def _is_real_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def _check_length_order(col: dict, col_path: str) -> list[Issue]:

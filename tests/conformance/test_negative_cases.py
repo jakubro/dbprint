@@ -1582,6 +1582,73 @@ def test_diff_statistic_changed_delta_on_non_numeric(print_dir: Path) -> None:
     assert "diff.statistic-changed-delta-on-non-numeric" in _codes(validate_print(print_dir))
 
 
+def test_stats_mean_outside_range(print_dir: Path) -> None:
+    stats_path = print_dir / "seedbank/accession/statistics.yaml"
+    stats = _load_yaml_file(stats_path)
+    column = next(
+        c for c in stats["columns"].values() if isinstance(c.get("range"), dict) and "mean" in c
+    )
+    column["mean"] = column["range"]["max"] + 1000
+    _write_yaml_file(stats_path, stats)
+
+    assert "stats.mean-outside-range" in _codes(validate_print(print_dir))
+
+
+def test_a_mean_within_its_bounds_is_not_reported(print_dir: Path) -> None:
+    """The control: the reference example's own averages sit inside their own ranges."""
+
+    assert "stats.mean-outside-range" not in _codes(validate_print(print_dir))
+
+
+def test_privacy_redacted_value_compared(print_dir: Path) -> None:
+    stats_path = print_dir / "seedbank/accession/statistics.yaml"
+    stats = _load_yaml_file(stats_path)
+    stats["columns"]["accession_id"]["redacted"] = "mask"
+    _write_yaml_file(stats_path, stats)
+
+    target = print_dir / "diff.yaml"
+    data = _load_yaml_file(target)
+    data["changes"].append(
+        {
+            "kind": "statistic_changed",
+            "table": "seedbank.accession",
+            "column": "accession_id",
+            "stat": "values",
+            "before": [{"value": 4271, "count": 1}],
+            "after": [{"value": "[redacted]", "count": 1}],
+        },
+    )
+    _write_yaml_file(target, data)
+
+    assert "privacy.redacted-value-compared" in _codes(validate_print(print_dir))
+
+
+def test_a_count_on_a_redacted_column_is_not_reported(print_dir: Path) -> None:
+    """The control: SPEC 2.2.9 leaves every measurement comparable, only the literals withheld."""
+
+    stats_path = print_dir / "seedbank/accession/statistics.yaml"
+    stats = _load_yaml_file(stats_path)
+    stats["columns"]["accession_id"]["redacted"] = "mask"
+    _write_yaml_file(stats_path, stats)
+
+    target = print_dir / "diff.yaml"
+    data = _load_yaml_file(target)
+    data["changes"].append(
+        {
+            "kind": "statistic_changed",
+            "table": "seedbank.accession",
+            "column": "accession_id",
+            "stat": "null_count",
+            "before": 0,
+            "after": 4,
+            "delta": 4,
+        },
+    )
+    _write_yaml_file(target, data)
+
+    assert "privacy.redacted-value-compared" not in _codes(validate_print(print_dir))
+
+
 def test_diff_statistic_changed_delta_pct_sign_mismatch(print_dir: Path) -> None:
     target = print_dir / "diff.yaml"
     data = _load_yaml_file(target)

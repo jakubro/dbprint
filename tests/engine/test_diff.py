@@ -188,6 +188,61 @@ class TestRelationshipChanges:
         change = next(c for c in diff["changes"] if c["kind"] == "relationship_modified")
         assert change["on_delete"] == {"before": "CASCADE", "after": "SET NULL"}
 
+    def _inferred(self) -> FkState:
+        return FkState(
+            source_columns=("collector_id",),
+            target_table="public.collector",
+            target_columns=("collector_id",),
+            on_delete=None,
+            on_update=None,
+            detection="inferred",
+        )
+
+    def test_an_added_inferred_edge_omits_the_actions_it_never_had(self) -> None:
+        """SPEC 2.3.8: absence says a guessed edge has none; `null` would say it declared one."""
+
+        diff = _compute(
+            {"public.t": _table(relationships=[])},
+            {"public.t": _table(relationships=[self._inferred()])},
+        )
+        change = next(c for c in diff["changes"] if c["kind"] == "relationship_added")
+
+        assert change["detection"] == "inferred"
+        assert "on_delete" not in change
+        assert "on_update" not in change
+
+    def test_an_added_declared_edge_still_carries_them(self) -> None:
+        diff = _compute(
+            {"public.t": _table(relationships=[])},
+            {"public.t": _table(relationships=[self._fk()])},
+        )
+        change = next(c for c in diff["changes"] if c["kind"] == "relationship_added")
+
+        assert change["on_delete"] == "CASCADE"
+        assert change["detection"] == "declared"
+
+    def test_an_inferred_edge_becoming_declared_reports_the_transition(self) -> None:
+        """The edge is matched on columns and target, so this is one event, not two."""
+
+        before = _table(relationships=[self._inferred()])
+        after = _table(
+            relationships=[
+                FkState(
+                    source_columns=("collector_id",),
+                    target_table="public.collector",
+                    target_columns=("collector_id",),
+                    on_delete="NO ACTION",
+                    on_update="NO ACTION",
+                    detection="declared",
+                ),
+            ],
+        )
+        diff = _compute({"public.t": before}, {"public.t": after})
+        change = next(c for c in diff["changes"] if c["kind"] == "relationship_modified")
+
+        assert change["on_delete"] == {"before": None, "after": "NO ACTION"}
+        assert "relationship_added" not in _kinds(diff)
+
 
 class TestIndexChanges:
     def test_index_added(self) -> None:
@@ -1189,6 +1244,92 @@ class TestPopulationSuppression:
         stats_changed = {c["stat"] for c in diff["changes"] if c["kind"] == "statistic_changed"}
 
         assert stats_changed == {"zero_count"}
+
+
+class TestRedactedValueSuppression:
+    """A `redacted` marker on either side withholds that column's cell values (SPEC 2.6.6)."""
+
+    @staticmethod
+    def _sides(before_payload: dict[str, Any], after_payload: dict[str, Any]) -> dict[str, Any]:
+        before = _table(
+            columns={"email": ColumnState("email", "text", True, None)},
+            statistics={"email": before_payload},
+        )
+        after = _table(
+            columns={"email": ColumnState("email", "text", True, None)},
+            statistics={"email": after_payload},
+        )
+
+        return _compute({"public.t": before}, {"public.t": after})
+
+    def test_the_literal_a_marker_withholds_never_reaches_an_event(self) -> None:
+        """The leak this gate exists for: a baseline written unredacted still holds the literal."""
+
+        diff = self._sides(
+            {
+                "values": [{"value": "collector@example.invalid", "count": 5}],
+                "range": {"min": "aaa", "max": "zzz"},
+                "percentiles": {"p50": "mmm"},
+                "mean": 12.0,
+                "sum": 60.0,
+                "length": {"min": 3, "max": 3, "avg": 3.0, "p95": 3.0},
+            },
+            {
+                "values": [{"value": "[redacted]", "count": 5}],
+                "range": {"min": "[redacted]", "max": "[redacted]"},
+                "percentiles": {"p50": "[redacted]"},
+                "redacted": "mask",
+            },
+        )
+        stats_changed = {c["stat"] for c in diff["changes"] if c["kind"] == "statistic_changed"}
+
+        assert stats_changed == {"redacted"}
+        assert "collector@example.invalid" not in repr(diff)
+
+    def test_the_marker_change_itself_still_reports(self) -> None:
+        """It names a primitive, not a value - and it is why the rest of the column went quiet."""
+
+        diff = self._sides(
+            {"values": [{"value": "collector@example.invalid", "count": 5}]},
+            {"values": [{"value": "[redacted]", "count": 5}], "redacted": "mask"},
+        )
+        marker = [c for c in diff["changes"] if c["stat"] == "redacted"]
+
+        assert [(c["before"], c["after"]) for c in marker] == [(None, "mask")]
+
+    def test_counts_and_ratios_still_compare(self) -> None:
+        """SPEC 2.2.9 leaves every measurement unaffected; only the literals are withheld."""
+
+        diff = self._sides(
+            {"null_count": 5, "cardinality": 100, "redacted": "mask", "mean": 12.0},
+            {"null_count": 9, "cardinality": 140, "redacted": "mask", "mean": 30.0},
+        )
+        stats_changed = {c["stat"] for c in diff["changes"] if c["kind"] == "statistic_changed"}
+
+        assert stats_changed == {"null_count", "cardinality"}
+
+    def test_a_marker_on_the_baseline_alone_holds_the_gate(self) -> None:
+        """Removing the rule points the same leak the other way."""
+
+        diff = self._sides(
+            {"values": [{"value": "[redacted]", "count": 5}], "redacted": "mask"},
+            {"values": [{"value": "collector@example.invalid", "count": 5}]},
+        )
+        stats_changed = {c["stat"] for c in diff["changes"] if c["kind"] == "statistic_changed"}
+
+        assert stats_changed == {"redacted"}
+        assert "collector@example.invalid" not in repr(diff)
+
+    def test_an_unmarked_column_compares_as_before(self) -> None:
+        """The control: the gate is marker-conditional, not blanket."""
+
+        diff = self._sides(
+            {"values": [{"value": "one", "count": 5}], "mean": 12.0},
+            {"values": [{"value": "two", "count": 5}], "mean": 30.0},
+        )
+        stats_changed = {c["stat"] for c in diff["changes"] if c["kind"] == "statistic_changed"}
+
+        assert stats_changed == {"values", "mean"}
 
 
 class TestCatalogOnlySuppression:

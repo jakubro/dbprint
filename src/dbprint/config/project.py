@@ -352,18 +352,24 @@ class ProjectConfig:
 
 
 def bind_redaction_salt(conn: ConnectionConfig, salt: str | None) -> ConnectionConfig:
-    """Attach the resolved salt; a `hash` rule without one is refused, never defaulted."""
+    """Attach the resolved salt; a `hash` rule without one is refused, never defaulted.
 
-    if salt is None and any(rule.with_ == "hash" for rule in conn.redact):
+    A variable exported empty resolves to `""`, so the test is for material, not for presence.
+    """
+
+    material = bool(salt and salt.strip())
+
+    if not material and any(rule.with_ == "hash" for rule in conn.redact):
         raise ConfigError(
             f"connection {conn.name!r}: a `redact` rule uses `with: hash` but no "
-            f"`{REDACTION_SALT_KEY}` is configured. Add it to the connection's entry in "
+            f"`{REDACTION_SALT_KEY}` carries a value. Add it to the connection's entry in "
             f"~/.dbprint/connections.yaml, or set "
-            f"DBPRINT_{conn.name.upper()}_{REDACTION_SALT_KEY.upper()}. An unsalted digest is "
-            f"reversible by dictionary attack, so it is refused rather than defaulted.",
+            f"DBPRINT_{conn.name.upper()}_{REDACTION_SALT_KEY.upper()} to something other than "
+            f"an empty value. An unsalted digest is reversible by dictionary attack, so it is "
+            f"refused rather than defaulted.",
         )
 
-    return replace(conn, redaction_salt=salt)
+    return replace(conn, redaction_salt=salt if material else None)
 
 
 def load_project(start: Path | None = None) -> ProjectConfig:

@@ -10,7 +10,7 @@ A print conforms when no `error` is raised against it. A `warning` records an an
 gate conformance; [SPEC 6.1](../format/v1/SPEC.md#61-severity-model) defines both, and
 [SPEC 6.2](../format/v1/SPEC.md#62-issue-document-shape) defines the issue each one is reported in.
 
-133 codes: 105 error, 28 warning.
+135 codes: 107 error, 28 warning.
 
 | Code | Severity | Specified in | Trigger |
 |---|---|---|---|
@@ -45,6 +45,7 @@ gate conformance; [SPEC 6.1](../format/v1/SPEC.md#61-severity-model) defines bot
 | `manifest.orphaned-artifact` | warning | [Manifest cross-checks (§2.5)](../format/v1/SPEC.md#manifest-cross-checks-25) | File on disk not listed in any manifest entry (could be in-progress write; not strictly a violation) |
 | `manifest.selectors-mismatch-diff` | error | [Manifest cross-checks (§2.5)](../format/v1/SPEC.md#manifest-cross-checks-25) | `selectors` disagrees with `diff.yaml`'s `target.selectors` when both are present (§2.5, §2.6.3) |
 | `manifest.table-fqn-mismatch` | error | [Manifest cross-checks (§2.5)](../format/v1/SPEC.md#manifest-cross-checks-25) | Manifest's `table` FQN doesn't match the `table` field in the referenced statistics.yaml / relationships.yaml |
+| `privacy.redacted-value-compared` | error | [Privacy (§4.4)](../format/v1/SPEC.md#privacy-44) | `diff.yaml` carries a `statistic_changed` event for `values`, `range`, `percentiles`, `mean`, `sum` or `length` on a column whose `statistics.yaml` declares a `redacted` marker (§2.6.6). ERROR, not WARNING: the marker is a producer's own declaration, so no inference is being second-guessed |
 | `privacy.unredacted-sensitive` | warning | [Privacy (§4.4)](../format/v1/SPEC.md#privacy-44) | Column carries `inferred.sensitivity` and publishes at least one of `values`, `range`, `percentiles`, with no `redacted` primitive covering it (§4.4.2) |
 | `relationships.broken-reciprocity` | error | [Relationships invariants (§2.3)](../format/v1/SPEC.md#relationships-invariants-23) | A `referenced_by` entry points to a source table that's in the manifest BUT lacks the matching `refers_to` entry |
 | `relationships.column-array-length-mismatch` | error | [Relationships invariants (§2.3)](../format/v1/SPEC.md#relationships-invariants-23) | `column` and `target_column` (in refers_to) or `column` and `referencer_column` (in referenced_by) have different array lengths |
@@ -89,6 +90,7 @@ gate conformance; [SPEC 6.1](../format/v1/SPEC.md#61-severity-model) defines bot
 | `stats.looks-like-candidate-at-verdict-threshold` | error | [Statistics invariants (§2.2)](../format/v1/SPEC.md#statistics-invariants-22) | `inferred.looks_like_candidate_share` is at or above the 95% verdict threshold - a share that high would have been `inferred.looks_like` instead (§4.1.3) |
 | `stats.looks-like-candidate-with-verdict` | error | [Statistics invariants (§2.2)](../format/v1/SPEC.md#statistics-invariants-22) | `inferred.looks_like_candidate` is present alongside `inferred.looks_like`; the near-miss and the verdict are mutually exclusive (§4.1.3) |
 | `stats.max-age-days-mismatch` | error | [Statistics invariants (§2.2)](../format/v1/SPEC.md#statistics-invariants-22) | `freshness.max_age_days` disagrees with `max(0, day_count(range.max, profiled_at))` (§2.2.4). Skipped when the column carries any `redacted` marker, `max` is named in `unrepresentable`, or `range.max` is not a parseable instant |
+| `stats.mean-outside-range` | error | [Statistics invariants (§2.2)](../format/v1/SPEC.md#statistics-invariants-22) | `mean` lies outside `[range.min, range.max]` (§2.2.4). An average outside its own bounds is impossible over any nonempty column, so it reports a producer that lost the magnitude of one of the three |
 | `stats.measurement-under-catalog-only` | error | [Statistics invariants (§2.2)](../format/v1/SPEC.md#statistics-invariants-22) | A column carries a field beyond `sql_type`, `nullable`, `classification`, `physical_name`, `collation`, `physical_layout_key` on a file that also carries `catalog_only` - a measurement published where none was queried (§2.2.15) |
 | `stats.missing-required-field-for-classification` | error | [Statistics invariants (§2.2)](../format/v1/SPEC.md#statistics-invariants-22) | Column missing a field marked R in the §2.2.3 matrix for its classification |
 | `stats.normalized-cardinality-exceeds-cardinality` | error | [Statistics invariants (§2.2)](../format/v1/SPEC.md#statistics-invariants-22) | `normalized_cardinality` exceeds `cardinality`; folding case and trimming whitespace cannot increase distinctness (§2.2.4). Not checked when `cardinality_method` is `approximate` - the comparison is approximate on both sides there |

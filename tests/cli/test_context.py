@@ -296,6 +296,43 @@ class TestOutput:
         assert out_file.is_file()
         assert "# Table: seedbank.accession" in out_file.read_text()
 
+    def test_a_run_that_assembled_nothing_leaves_the_target_alone(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A mistyped FQN would otherwise truncate the file the flag points at."""
+
+        _write_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        out_file = tmp_path / "out.md"
+        out_file.write_text("hand-written notes\n")
+        result = CliRunner().invoke(
+            main,
+            ["context", "seedbank.accesion", "--output", str(out_file)],
+        )
+
+        assert result.exit_code != 0
+        assert out_file.read_text() == "hand-written notes\n"
+
+    def test_a_run_that_assembled_nothing_creates_no_target(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _write_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        out_file = tmp_path / "absent.md"
+        result = CliRunner().invoke(
+            main,
+            ["context", "seedbank.accesion", "--output", str(out_file)],
+        )
+
+        assert result.exit_code != 0
+        assert not out_file.exists()
+
 
 class TestMissingManifest:
     def test_no_manifest_exits_nonzero(

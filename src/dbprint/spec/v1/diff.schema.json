@@ -23,6 +23,15 @@
       "type": "string",
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"
     },
+    "Detection": {
+      "enum": ["declared", "inferred", "measured"]
+    },
+    "NullableReferentialAction": {
+      "oneOf": [
+        {"$ref": "#/$defs/ReferentialAction"},
+        {"type": "null"}
+      ]
+    },
     "ReferentialAction": {
       "enum": ["NO ACTION", "CASCADE", "SET NULL", "SET DEFAULT", "RESTRICT"]
     },
@@ -272,9 +281,15 @@
         "target_column": {"type": "array", "items": {"type": "string"}, "minItems": 1},
         "on_delete": {"$ref": "#/$defs/ReferentialAction"},
         "on_update": {"$ref": "#/$defs/ReferentialAction"},
-        "detection": {"enum": ["declared", "inferred"]}
+        "detection": {"$ref": "#/$defs/Detection"}
       },
-      "required": ["kind", "source_table", "source_column", "target_table", "target_column", "on_delete", "on_update", "detection"],
+      "required": ["kind", "source_table", "source_column", "target_table", "target_column", "detection"],
+      "if": {
+        "properties": {"detection": {"const": "declared"}}
+      },
+      "then": {
+        "required": ["on_delete", "on_update"]
+      },
       "type": "object"
     },
     "RelationshipRemoved": {
@@ -299,16 +314,16 @@
           "type": "object",
           "required": ["before", "after"],
           "properties": {
-            "before": {"$ref": "#/$defs/ReferentialAction"},
-            "after": {"$ref": "#/$defs/ReferentialAction"}
+            "before": {"$ref": "#/$defs/NullableReferentialAction"},
+            "after": {"$ref": "#/$defs/NullableReferentialAction"}
           }
         },
         "on_update": {
           "type": "object",
           "required": ["before", "after"],
           "properties": {
-            "before": {"$ref": "#/$defs/ReferentialAction"},
-            "after": {"$ref": "#/$defs/ReferentialAction"}
+            "before": {"$ref": "#/$defs/NullableReferentialAction"},
+            "after": {"$ref": "#/$defs/NullableReferentialAction"}
           }
         }
       },

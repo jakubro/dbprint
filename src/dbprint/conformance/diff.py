@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 from collections import Counter
+from pathlib import Path
 from typing import Any, TypeGuard
 
+import yaml
+
 from .issue import Issue
+from .layout import declared_artifacts, walkable_tables
+from .yaml_utils import load_yaml
 
 
 _NON_NUMERIC_STATS = {
@@ -13,6 +18,18 @@ _NON_NUMERIC_STATS = {
     "classification",
     "values",
 }
+
+# The cell-value statistics a `redacted` marker withholds (SPEC 2.2.9), by path head.
+_VALUE_BEARING_STATS = frozenset(
+    {
+        "values",
+        "range",
+        "percentiles",
+        "mean",
+        "sum",
+        "length",
+    },
+)
 
 _KIND_TO_SUMMARY_KEY: dict[str, str] = {
     "table_added": "tables_added",
@@ -80,6 +97,84 @@ def check(data: Any, path: str) -> list[Issue]:
             issues.extend(_check_depends_on_changed(change, where))
 
     return issues
+
+
+def check_redacted_values(
+    print_root: Path,
+    manifest_data: dict,
+    data: Any,
+    path: str,
+) -> list[Issue]:
+    """SPEC 2.6.6: a column whose statistics declare `redacted` has no comparable cell values.
+
+    Cross-artifact by necessity - the marker is in `statistics.yaml`, the event that leaks is here.
+    """
+
+    if not isinstance(data, dict):
+        return []
+
+    marked = _redacted_columns(print_root, manifest_data)
+
+    if not marked:
+        return []
+
+    issues: list[Issue] = []
+
+    for i, change in enumerate(data.get("changes", []) or []):
+        if not isinstance(change, dict) or change.get("kind") != "statistic_changed":
+            continue
+
+        stat = change.get("stat")
+
+        if not isinstance(stat, str) or stat.split(".")[0] not in _VALUE_BEARING_STATS:
+            continue
+
+        if (change.get("table"), change.get("column")) not in marked:
+            continue
+
+        issues.append(
+            Issue(
+                f"{path}::changes[{i}]",
+                "privacy.redacted-value-compared",
+                "error",
+                f"stat {stat!r} is compared on {change.get('column')!r}, whose statistics "
+                f"declare a `redacted` marker over that value.",
+                "§2.6.6",
+            ),
+        )
+
+    return issues
+
+
+def _redacted_columns(print_root: Path, manifest_data: dict) -> set[tuple[str, str]]:
+    """Every `(table, column)` whose committed statistics carry a `redacted` marker."""
+
+    marked: set[tuple[str, str]] = set()
+
+    for tbl_fqn, tbl_entry in walkable_tables(manifest_data).items():
+        artifacts = declared_artifacts(tbl_entry)
+
+        if "statistics" not in artifacts:
+            continue
+
+        stats_path = print_root / tbl_entry.get("path", "") / artifacts["statistics"]
+
+        if not stats_path.is_file():
+            continue
+
+        try:
+            stats = load_yaml(stats_path)
+        except yaml.YAMLError:
+            continue
+
+        if not isinstance(stats, dict):
+            continue
+
+        for name, column in (stats.get("columns") or {}).items():
+            if isinstance(column, dict) and column.get("redacted") is not None:
+                marked.add((tbl_fqn, name))
+
+    return marked
 
 
 def _check_summary_counts(changes: list[Any], summary: dict, path: str) -> list[Issue]:

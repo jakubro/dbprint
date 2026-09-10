@@ -80,7 +80,7 @@ Two severities, and only one of them gates:
 
 [SPEC 6.1](format/v1/SPEC.md#61-severity-model) defines both.
 
-Passing validation is not proof that every normative MUST in the specification was checked. A small number of cross-field rules are not yet mechanically enforced by `validate_print()`; where that gap matters, correctness is on the producer alone until the validator catches up.
+Passing validation is not proof that every normative MUST in the specification was checked: some cross-field rules are not mechanically enforced by `validate_print()`, and where that gap matters, correctness is on the producer alone.
 
 ## Versioning, and what a consumer has to tolerate
 

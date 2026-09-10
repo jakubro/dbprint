@@ -63,7 +63,7 @@ The server states three things unprompted, as its own MCP `instructions` on ever
 >
 > Start from search_columns to locate a fact across the print; the reading guide resource covers the rest.
 
-**Get the rescaling direction right — it inverted between releases.** A count on a column carrying a population marker scales to table grain by `count * (row_count / rows_scanned)`. A ratio, a bound, a percentile or an aggregate is not scalable at all, under any formula. An earlier release stated the reciprocal ratio and also licensed rescaling ratios the current server forbids — both numerically plausible, both wrong for the current server, and not something reading alone will catch, since the two ratios are reciprocals of each other. If your own rules file or prompt still says `rows_scanned / row_count`, or that ratios may be rescaled, it predates this and needs updating.
+**Get the rescaling direction right.** A count on a column carrying a population marker scales to table grain by `count * (row_count / rows_scanned)`. A ratio, a bound, a percentile or an aggregate is not scalable at all, under any formula.
 
 The inference paragraph distinguishes three cases rather than treating every `inferred` field alike: `looks_like` publishes the evidence it rests on, `candidate_key` is independently recomputable, and `sensitivity` publishes no evidence at all — an agent that has learned to trust `looks_like`'s published evidence should not extend the same trust to a `sensitivity` flag with nothing behind it.
 
@@ -121,4 +121,4 @@ Three things are worth stating in your own rules file, because they are the misr
 
 - **A sampled table's ratios are denominated in `rows_scanned`, not in `row_count`.** A `null_rate` under a `scope` block describes the sample. [Choosing what to profile](scoping.md) covers the block; the print's own `reading.md` says the same thing to whoever opens it.
 - **An absent field is not a zero.** The format distinguishes "measured and absent" from "never measured", and [SPEC 7](../format/v1/SPEC.md#7-reading-an-absence) is written from the reader's side specifically for this.
-- **Only a count rescales to table grain, and only by multiplying.** See "Get the rescaling direction right" above — this is the one an agent trained on an older release is most likely to get backwards.
+- **Only a count rescales to table grain, and only by multiplying.** See "Get the rescaling direction right" above — the two ratios are reciprocals, so an agent that reaches for the wrong one gets a plausible number rather than an obvious error.
