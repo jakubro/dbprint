@@ -5,6 +5,7 @@ No healthy run exercises a degrade; regenerate with `python -m tests.fixtures.un
 
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 
@@ -29,6 +30,13 @@ COMMITTED = Path(__file__).resolve().parent / "unmeasured_print"
 CONNECTION = "degraded"
 TABLE = "seedbank.accession"
 ROW_COUNT = 400
+
+# The engine stamps the real run instant, so an unfrozen restage rewrites four files that
+# carry no other change - and the gate normalizes instants on both sides, so nothing reads it.
+FROZEN_INSTANT = "2026-09-04T14:00:17Z"
+
+_INSTANT_KEYS = frozenset({"generated_at", "profiled_at", "scanned_at"})
+_INSTANT_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z")
 
 
 class CensusFails(MockAdapter):
@@ -66,13 +74,13 @@ def build(target: Path) -> Path:
 
 
 def restage() -> None:
-    """Rebuild the committed copy from scratch."""
+    """Rebuild the committed copy from scratch, with its run instants frozen."""
 
     if COMMITTED.exists():
         shutil.rmtree(COMMITTED)
 
     COMMITTED.mkdir(parents=True)
-    build(COMMITTED)
+    _freeze_instants(build(COMMITTED))
 
 
 def _fixture() -> dict[str, MockTable]:
@@ -146,6 +154,27 @@ def _measured() -> ColumnStats:
         values_coverage=0.111111,
         distribution="long_tail",
     )
+
+
+def _freeze_instants(print_root: Path) -> None:
+    """Rewrite every run instant to `FROZEN_INSTANT`, the same freeze the shipped examples take."""
+
+    for path in print_root.rglob("*.yaml"):
+        lines = path.read_text().splitlines(keepends=True)
+        changed = False
+
+        for i, line in enumerate(lines):
+            if line.lstrip().split(":", 1)[0] not in _INSTANT_KEYS:
+                continue
+
+            frozen = _INSTANT_RE.sub(FROZEN_INSTANT, line)
+
+            if frozen != line:
+                lines[i] = frozen
+                changed = True
+
+        if changed:
+            path.write_text("".join(lines))
 
 
 if __name__ == "__main__":

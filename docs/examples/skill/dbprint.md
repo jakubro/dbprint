@@ -1,26 +1,35 @@
-# dbprint: reading a print from disk
+---
+name: dbprint
+description: Read the committed dbprint print of a database - DDL, columns, per-column statistics, keys, relationships - before writing SQL or answering a question about the data. Use whenever a question touches tables, columns, enum values, null rates, grain, join paths or data distributions in a project carrying a prints/ directory.
+---
 
-A dbprint print lives under `prints/<connection_name>/` inside a project. Start at that
-directory's `manifest.yaml`: its `tables` map is keyed by fully-qualified table name, and
-each entry's `path` is where that table's own directory lives, relative to the connection
-root.
+# Schema Intelligence
 
-Each table directory holds up to six files:
+**MANDATORY: open every database question in the committed dbprint print.** `prints/<connection>/` carries DDL, per-column statistics, relationships and hand-authored descriptions for the printed tables. The tools named below are its MCP surface; with no MCP server connected, `dbprint context <fqn>` renders the same material in a shell, from anywhere at or below the directory holding `.dbprint.yaml`. Where that command is missing too, `pip install dbprint` supplies it. It is offline — no connection, no credentials, no database time. Orientation comes first; what to do about the answer is decided after reading the print, not before.
 
-- `ddl.sql` - the table's DDL. Always present.
-- `statistics.yaml` - per-column measurements. Catalog-only for plain views: columns and
-  their SQL type, nothing measured.
-- `relationships.yaml` - foreign keys in and out. May be absent for plain views.
-- `description.md` - optional human-authored narrative.
-- `statistics.annotations.yaml`, `relationships.annotations.yaml` - optional
-  human-authored corrections and claims.
+| Orientation gives you | Tool |
+|---|---|
+| Which table holds a fact | `search_columns` (start here), `list_tables` |
+| Columns, types, nullability, DDL | `get_table_context` |
+| Enum values, null rates, ranges, cardinality, key detection | `get_table_context` (Cardinality table) |
+| What identifies a row | `get_table_context` (`Grain:` — declared keys at any arity, plus a measured search) |
+| The filters and de-duplication a correct query needs | `get_table_context` (description + annotations) |
+| Foreign keys and join paths, each stating how it was found | `get_table_context` (Relationships) |
+| Columns found by shape rather than by name — contact data, uuid/email/phone, candidate keys | `search_columns` filters: `sensitivity`, `looks_like`, `candidate_key`, `classification`, `sql_type`, `redacted` |
+| Which statistics moved on the last run, and so which numbers are stable | `get_diff` |
+| Whether the print is too old to lean on | `dbprint check --max-age <window>` (offline; exit 2 = stale) |
+| What a field in the print actually means | `get_reference`, and the `dbprint://<connection>/reading` resource |
 
-`statistics.yaml` wins over `description.md` on any question both answer - the prose may
-describe a schema a later run already changed underneath it.
+Resources sit alongside the tools and carry what the tools omit: `dbprint://<connection>/reading` (the traps guide), `.../manifest_annotations` (connection-wide facts — never visible through `get_table_context`, which renders one table and drops the connection header), and per-table `.../statistics`, the only place a column's sketch payload is reachable.
 
-To find where a column is used, search every table's `relationships.yaml` for it as a
-`column` entry, or scan the manifest's own table names - there is no cross-table index on
-disk.
+**Three things decide whether a number taken from the print is right**, and none of them is visible on the number itself:
 
-Read `prints/<connection_name>/reading.md` next. It teaches how to interpret what these
-files say, not just where they are.
+- **Population.** A `statistics.yaml` carrying a `scope` block was not read whole. Read which cause it names: `sample` (a fraction, to bound cost) or `filter` (a row predicate, verbatim) — never both. Every field in the file except `row_count` is measured over `rows_scanned`. Under `sample`, a count may be scaled to table grain by multiplying by `row_count / rows_scanned`; under `filter` nothing rescales, because the scanned set was chosen, not drawn. A ratio, a percentile, a bound, a mean and `sum` never rescale at all. Where `row_count_method` is `approximate`, the ratio is itself an estimate.
+- **Inference.** Everything under `inferred` is dbprint's guess, not the catalog's assertion — `candidate_key`, `looks_like`, `sensitivity`, `epoch_unit`. Relationships carry the same axis explicitly: only `detection: declared` comes from the catalog, `inferred` is proposed from naming, `measured` from value containment. An absent `sensitivity` is not a statement that a column is safe.
+- **Absence.** An absent field has a cause, and the causes are enumerated per field — fetch them with `get_reference` (`spec`, sections 7.2 and 7.3) rather than guessing. Three shapes to keep straight: `unmeasured` is the only marker meaning a run attempted a measurement and failed; some absences are assertions, not gaps (no `scope` means every row was read, no `null_patterns` block means no column carries a null, no `redacted` marker means no redaction rule matched); and the rest are forbidden-for-this-classification, readable off `classification` and `sql_type`.
+
+`values_coverage: 1.0` licenses an exact-match predicate over what was scanned; anything less is a frequent-value sample, and a value's absence from that list is not its absence from the column. A text column whose `looks_like` is `prose` publishes no value list at all — that is a rule, not a truncation.
+
+**Freshness is not automatic.** The print is regenerated by hand (`dbprint generate`), and every field in it — DDL and relationships included — is as of that run's `profiled_at`, not as of now. Check it before leaning on any of them: `list_tables` with `detail: true` and a pattern projects `profiled_at` per table, which is cheaper than `get_manifest`'s whole index. Schema and statistics go stale on different clocks but neither announces it; `dbprint check --max-age` is what turns "old" into an answer.
+
+**Self-check before querying the database**: have I read the print for every table in this query? Discovering a schema by query is slower, costs a round-trip per attempt, and answers only the question asked. The print is what reveals the question was the wrong one. Anything the print does not publish — an exact row (it publishes none: value lists are frequencies, not rows), a live aggregate, anything newer than the last run — is outside it; everything before that point is not. Delegating database work to a sub-agent means restating this section in its prompt — it inherits none of it.

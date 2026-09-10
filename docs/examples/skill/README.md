@@ -1,15 +1,15 @@
 # dbprint context skill - install guide
 
-This directory contains a markdown skill that teaches an AI agent where a dbprint print's files live and which to open, then points it at that print's own `reading.md` for how to interpret them. Useful for clients that don't speak MCP (or where you prefer markdown-instruction-style integration over a running server).
+This directory contains a markdown skill that teaches an AI agent to open a committed print before it queries a database: which tool answers which question, and what the number it gets back does and does not cover. It names the MCP tools, and falls back to `dbprint context` in a shell where no server is connected.
 
 ## When to use this vs. the MCP server
 
 | Surface | Use when |
 |---|---|
-| **Skill (this directory)** | The client supports markdown rules / skills / custom instructions. The project's `prints/` is committed and the agent can read files in the workspace directly. Zero processes to run. |
-| **MCP server (`dbprint serve`)** | The client supports MCP and you want native tool / resource primitives, multi-connection routing, and the bundled token-budgeted `get_table_context` tool. |
+| **Skill (this directory)** | The client supports markdown rules / skills / custom instructions. It supplies the judgement — when to reach for a print, and how to read a scoped or inferred number — which no tool description can carry. |
+| **MCP server (`dbprint serve`)** | The client supports MCP and you want the tools themselves: native tool / resource primitives, multi-connection routing, and the token-budgeted `get_table_context`. |
 
-Both surfaces read the same on-disk artifacts; pick whichever fits the client and workflow best.
+They are complements rather than alternatives — the skill tells an agent what to reach for, the server is what it reaches. Installed together, the skill's tool names resolve; installed alone, its shell route still works.
 
 ## Installing in Claude Code
 
@@ -28,6 +28,6 @@ Both surfaces read the same on-disk artifacts; pick whichever fits the client an
 
 ## Installing in any other client
 
-Most agent clients accept markdown instructions in some shape (system prompt, custom instructions, project rules). The skill file is small, self-contained, and references only files inside `prints/`, so it transplants cleanly.
+Most agent clients accept markdown instructions in some shape (system prompt, custom instructions, project rules). The skill file is small and self-contained, and names nothing outside a print and the commands that read one, so it transplants cleanly.
 
-For larger setups (multi-connection projects, token-budgeted context assembly, structured tool calls), prefer `dbprint serve` and the MCP integration documented in [`../../MCP.md`](../../MCP.md).
+The tools it points at are specified in [`../../MCP.md`](../../MCP.md); serve them with `dbprint serve`.

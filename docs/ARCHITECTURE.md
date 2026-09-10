@@ -1612,12 +1612,20 @@ the same fragment shape per the same options.
 
 ### Skill companion
 
-`docs/examples/skill/dbprint.md` ships a markdown instruction skill for
-clients that don't speak MCP. It teaches the agent to read
-`prints/<conn>/manifest.yaml` and drill into per-table directories
-directly. Drop-in compatible with Claude Code (`.claude/skills/`),
-Cursor (`.cursor/rules/`), Cline (custom instructions). See
-`docs/examples/skill/README.md` for per-client install steps.
+`docs/examples/skill/dbprint.md` ships a markdown instruction skill: it
+tells an agent which question a committed print answers, which tool
+answers it, and what the resulting number does and does not cover. The
+tools it names are the MCP surface; `dbprint context` is the shell
+route where no server is connected. Drop-in compatible with Claude Code
+(`.claude/skills/`), Cursor (`.cursor/rules/`), Cline (custom
+instructions). See `docs/examples/skill/README.md` for per-client
+install steps.
+
+Hand-written, unlike `reading.md` beside it - prose aimed at an agent
+rather than a rendering of SPEC. `tests/test_skill_claims_agreement.py`
+holds it to the code instead: every tool it names is served, every
+`detection` value is accounted for, every field it leans on is still in
+the schemas.
 
 ---
 

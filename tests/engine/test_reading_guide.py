@@ -1,7 +1,8 @@
 """The shipped consumer guide is generated, not hand-written (SPEC 1.2.1).
 
-Golden-tests both shipped copies against a fresh run of the generator, since a hand-edited
-copy drifts from SPEC invisibly.
+Golden-tests the shipped copy against a fresh run of the generator, since a hand-edited copy
+drifts from SPEC invisibly. The example skill is hand-written and pinned separately, by
+tests/test_skill_claims_agreement.py.
 """
 
 from __future__ import annotations
@@ -16,7 +17,6 @@ from dbprint.engine.reading_guide import READING_GUIDE_TEXT
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GUIDE_PATH = REPO_ROOT / "src/dbprint/engine/reading_guide.md"
-SKILL_PATH = REPO_ROOT / "docs/examples/skill/dbprint.md"
 
 # SPEC 3.1's classification table, parsed rather than hardcoded, so a new classification
 # there fails this file instead of shipping a guide that never mentions it.
@@ -49,10 +49,6 @@ def test_the_shipped_package_copy_matches_the_generator() -> None:
     assert GUIDE_PATH.read_text() == gen.build_document()
 
 
-def test_the_shipped_skill_matches_the_generator() -> None:
-    assert SKILL_PATH.read_text() == gen.build_skill_document()
-
-
 def test_the_runtime_loader_matches_the_shipped_copy() -> None:
     """`READING_GUIDE_TEXT` ships via importlib.resources - confirm it reads the same bytes."""
 
@@ -75,24 +71,6 @@ def test_the_sketch_signal_names_the_decoder_and_carries_no_percentage() -> None
     assert "%" not in signals
     assert "exhaustive" in signals
     assert "membership" in signals
-
-
-def test_the_skill_is_a_layout_protocol_not_a_guide_copy() -> None:
-    """SPEC 1.2/1.4: the skill says where a print's files live, the guide how to read them."""
-
-    skill = gen.build_skill_document()
-
-    assert "`manifest.yaml`" in skill
-    assert "`tables`" in skill
-    assert "`path`" in skill
-    assert "`ddl.sql`" in skill
-    assert "`statistics.yaml`" in skill
-    assert "`prints/<connection_name>/reading.md`" in skill
-
-    # None of the guide's own sections leaked back in - this is a protocol, not a copy.
-    assert "## Vocabulary" not in skill
-    assert "## Residual traps" not in skill
-    assert "## Signals nobody points at" not in skill
 
 
 def test_the_generator_raises_if_an_anchor_no_longer_holds() -> None:

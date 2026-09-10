@@ -1,9 +1,9 @@
-"""Regenerate the print-root consumer guide (reading.md) and the shipped skill.
+"""Regenerate the print-root consumer guide (reading.md).
 
 The guide's vocabulary and residual-traps sections are anchored to SPEC.md and checked here,
 so a moved fact fails the run; the unanchored sections stay hand-written. A further check
 fails the run unless the guide cites every consumer-facing MUST or `_GUIDE_EXEMPT_SECTIONS`
-records why not. The skill is a shorter layout protocol; both files are golden-tested.
+records why not. The file is golden-tested against a fresh run.
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SPEC_PATH = REPO_ROOT / "docs/format/v1/SPEC.md"
 GUIDE_PATH = REPO_ROOT / "src/dbprint/engine/reading_guide.md"
-SKILL_PATH = REPO_ROOT / "docs/examples/skill/dbprint.md"
 RELATIONSHIPS_SCHEMA_PATH = REPO_ROOT / "src/dbprint/spec/v1/relationships.schema.json"
 
 _BACKTICKED = re.compile(r"`([^`]+)`")
@@ -654,71 +653,13 @@ def build_document() -> str:
     return "\n\n".join(sections) + "\n"
 
 
-def _check_skill_anchors() -> None:
-    _require_contains(
-        SPEC_PATH,
-        "REQUIRED for all object types; catalog-only for plain views",
-        "SPEC 1.4's statistics.yaml presence rule moved",
-    )
-    _require_contains(
-        SPEC_PATH,
-        "MAY be absent for plain views",
-        "SPEC 1.4's relationships.yaml presence rule moved",
-    )
-    _require_contains(
-        SPEC_PATH,
-        "the measured layer wins",
-        "SPEC's description.md precedence sentence moved",
-    )
-
-
-_SKILL_PROTOCOL = """\
-# dbprint: reading a print from disk
-
-A dbprint print lives under `prints/<connection_name>/` inside a project. Start at that
-directory's `manifest.yaml`: its `tables` map is keyed by fully-qualified table name, and
-each entry's `path` is where that table's own directory lives, relative to the connection
-root.
-
-Each table directory holds up to six files:
-
-- `ddl.sql` - the table's DDL. Always present.
-- `statistics.yaml` - per-column measurements. Catalog-only for plain views: columns and
-  their SQL type, nothing measured.
-- `relationships.yaml` - foreign keys in and out. May be absent for plain views.
-- `description.md` - optional human-authored narrative.
-- `statistics.annotations.yaml`, `relationships.annotations.yaml` - optional
-  human-authored corrections and claims.
-
-`statistics.yaml` wins over `description.md` on any question both answer - the prose may
-describe a schema a later run already changed underneath it.
-
-To find where a column is used, search every table's `relationships.yaml` for it as a
-`column` entry, or scan the manifest's own table names - there is no cross-table index on
-disk.
-
-Read `prints/<connection_name>/reading.md` next. It teaches how to interpret what these
-files say, not just where they are.
-"""
-
-
-def build_skill_document() -> str:
-    """Return the full text of the shipped skill - a layout protocol, not a guide copy."""
-
-    _check_skill_anchors()
-
-    return _SKILL_PROTOCOL
-
-
 def write_document() -> None:
-    """Render the guide and the skill, and write each to its shipped location."""
+    """Render the guide and write it to its shipped location."""
 
     GUIDE_PATH.parent.mkdir(parents=True, exist_ok=True)
     GUIDE_PATH.write_text(build_document())
-    SKILL_PATH.write_text(build_skill_document())
 
 
 if __name__ == "__main__":
     write_document()
     print(f"wrote {GUIDE_PATH}")
-    print(f"wrote {SKILL_PATH}")
