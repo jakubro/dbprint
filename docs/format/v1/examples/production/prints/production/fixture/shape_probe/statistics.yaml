@@ -83,7 +83,48 @@ columns:
       count: 1
     - value: 36
       count: 1
-    values_coverage: 0.6
+    - value: 37
+      count: 1
+    - value: 38
+      count: 1
+    - value: 39
+      count: 1
+    - value: 4
+      count: 1
+    - value: 40
+      count: 1
+    - value: 41
+      count: 1
+    - value: 42
+      count: 1
+    - value: 43
+      count: 1
+    - value: 44
+      count: 1
+    - value: 45
+      count: 1
+    - value: 46
+      count: 1
+    - value: 47
+      count: 1
+    - value: 48
+      count: 1
+    - value: 49
+      count: 1
+    - value: 5
+      count: 1
+    - value: 50
+      count: 1
+    - value: 6
+      count: 1
+    - value: 7
+      count: 1
+    - value: 8
+      count: 1
+    - value: 9
+      count: 1
+    values_coverage: 1.0
+    values_coverage_method: measured
     distribution: uniform
     sketch:
       method: kmv_md5_lo64
@@ -207,7 +248,48 @@ columns:
       count: 1
     - value: '{"reading": 40.30, "unit": "C", "ok": true}'
       count: 1
-    values_coverage: 0.6
+    - value: '{"reading": 41.31, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 42.32, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 43.33, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 44.34, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 45.35, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 46.36, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 47.37, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 48.38, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 49.39, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 50.40, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 51.41, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 52.42, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 53.43, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 54.44, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 55.45, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 56.46, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 57.47, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 58.48, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 59.49, "unit": "C", "ok": true}'
+      count: 1
+    - value: '{"reading": 60.50, "unit": "C", "ok": true}'
+      count: 1
+    values_coverage: 1.0
+    values_coverage_method: measured
     distribution: uniform
     length:
       min: 43

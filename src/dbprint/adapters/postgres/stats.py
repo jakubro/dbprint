@@ -18,7 +18,7 @@ from dbprint.spec.classification import (
     compute_cardinality_ratio,
     compute_null_rate,
 )
-from dbprint.spec.coverage import coverage_share
+from dbprint.spec.coverage import coverage_share, enumeration_limit
 from dbprint.spec.distribution import classify as classify_distribution
 from dbprint.spec.distribution import summarize as summarize_frequencies
 from dbprint.spec.temporal_range import is_representable
@@ -901,13 +901,13 @@ def _fetch_value_list(
 ) -> tuple[tuple[ValueCount, ...], float, bool]:
     """Ordered value list, its coverage, and whether it enumerates the column.
 
-    Fetches one row beyond the cap so truncation is observed, not predicted from a cardinality
+    Fetches one row beyond the bound so truncation is observed, not predicted from a cardinality
     that may be an estimate (SPEC 2.2.4). A tz-bearing timestamp routes through the same
     UTC-pinning renderer as `range`, so its literals never carry the session zone.
     """
 
     cn = _quote_ident(col.physical_name or col.name)
-    n = config.top_n_values
+    limit = enumeration_limit(config.enumeration_threshold, config.top_n_values)
     select_expr = (
         _render_calendar_bound(cn, col.sql_type) if _matches(col.sql_type, _TZ_TYPES) else cn
     )
@@ -921,12 +921,13 @@ def _fetch_value_list(
         ORDER BY cnt DESC, CAST({select_expr} AS text) ASC
         LIMIT %s
         """,
-        (n + 1,),
+        (limit + 1,),
     ).fetchall()
-    exhaustive = len(rows) <= n
+    exhaustive = len(rows) <= limit
+    kept = rows if exhaustive else rows[: config.top_n_values]
     # SPEC 2.2.4 ties break on the string form: the cast fixes the cutoff, this sort the order.
     entries = sorted(
-        (ValueCount(value=_iso_or_value(value), count=int(cnt)) for value, cnt in rows[:n]),
+        (ValueCount(value=_iso_or_value(value), count=int(cnt)) for value, cnt in kept),
         key=lambda v: (-v.count, str(v.value)),
     )
     values = tuple(entries)
@@ -1246,7 +1247,7 @@ def _approximate_distribution_via_top_n(
     grouping stays on the raw column, so a rendered expression cannot split one value in two.
     """
 
-    n = config.top_n_values
+    limit = enumeration_limit(config.enumeration_threshold, config.top_n_values)
     rows = exec_query(
         conn,
         f"""
@@ -1257,11 +1258,12 @@ def _approximate_distribution_via_top_n(
         ORDER BY cnt DESC, CAST({select_expr} AS text) ASC
         LIMIT %s
         """,
-        (n + 1,),
+        (limit + 1,),
     ).fetchall()
-    exhaustive = len(rows) <= n
+    exhaustive = len(rows) <= limit
+    kept = rows if exhaustive else rows[: config.top_n_values]
     entries = sorted(
-        (ValueCount(value=value_transform(value), count=int(cnt)) for value, cnt in rows[:n]),
+        (ValueCount(value=value_transform(value), count=int(cnt)) for value, cnt in kept),
         key=lambda v: (-v.count, str(v.value)),
     )
     values = tuple(entries)

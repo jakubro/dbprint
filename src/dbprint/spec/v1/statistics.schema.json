@@ -484,6 +484,9 @@
         "count": {
           "type": "integer",
           "minimum": 0
+        },
+        "spelling_of": {
+          "description": "The listed value this entry is another spelling of; absent on the canonical member and on every ungrouped value. See SPEC.md section 2.2.4."
         }
       }
     },

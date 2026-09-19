@@ -76,6 +76,29 @@ A table with no `description.md` has no human-authored context - grain, units an
 exclusions are then whatever the DDL and statistics alone can support. Do not infer a
 business rule the artifact does not state.
 
+## Writing a query against a printed table
+
+For each table the query touches, read `ddl.sql`; the `refers_to` and `referenced_by`
+edges in `relationships.yaml`, which are the join paths - each marked `declared`,
+`inferred` or `measured` (SPEC 2.3): an inferred edge is a guess from a column name, a
+measured one a value containment seen at the read, neither a constraint, and a declared
+edge wins where one exists; each column's `values` with its counts and `values_coverage`;
+and the column notes in `statistics.annotations.yaml`. Leave the rest of
+`statistics.yaml` - counts, ratios, percentiles, distributions - unread: they describe
+the data, not what a predicate needs.
+
+Write a literal in a listed value's exact spelling. A list at `values_coverage` `1.0` is
+the whole column; below it, or on a `numeric`/`temporal` column whose `frequencies.listed`
+is short of `cardinality`, a phrase absent from the list is not evidence it is absent from
+the column. An entry carrying `spelling_of` is another spelling of the value it names
+(SPEC 2.2.4) - one category stored several ways, so a predicate needs every spelling in
+the group.
+
+With dbprint installed, `dbprint context <table> --purpose query` renders exactly this
+selection off the print, join paths included, with no server running. Served over MCP,
+`get_table_context` with `purpose: query` is the same selection and `resolve_value`
+answers the spelling question; the server's instructions say when to call it.
+
 ## Signals nobody points at
 
 `diff.yaml` is the latest structured diff only, overwritten every run (SPEC 1.2) - a

@@ -101,13 +101,24 @@ $ dbprint context seedbank.accession
 $ dbprint context 'seedbank.*' --budget 4000
 ```
 
+### What the fragment is for
+
+`--purpose` selects the fragment, and the choice is between describing the data and querying it:
+
+| `--purpose` | Sections | Read it when |
+|---|---|---|
+| `profile` (default) | Header, DDL, Description, Annotations, Cardinality table, Relationships | You want to know what is in the table and how much of it was measured |
+| `query` | Header, DDL, Joins, Data dictionary, Column values | You are about to write SQL against the table |
+
+`query` drops every statistic and renders instead what a query writer needs a literal from: the columns whose value list a predicate can be written from, each with its counts, and a coverage cell saying whether that list is the column's whole domain or the share of it the five most frequent values cover. A value with a note in `statistics.annotations.yaml` carries it inline, so what a code means sits beside the code itself. The join paths are the `## Joins` list: the DDL's foreign keys and the edges the print inferred or measured, each with its detection, so a table whose catalog declares no key still says what it joins to.
+
 When the fragment is over budget, dropping a whole section usually beats letting `--budget` truncate, because you choose what goes:
 
 | Flag | Drops |
 |---|---|
 | `--no-ddl` | the `CREATE TABLE` — the largest section on a wide table, and the one an agent reading migrations already has |
 | `--no-stats` | every per-column measurement, leaving structure and prose |
-| `--no-relationships` | the foreign keys, declared and inferred |
+| `--no-relationships` | the foreign keys, declared and inferred - the Relationships section, or the Joins list under `--purpose query` |
 | `--no-annotations` | human-written notes and claims |
 | `--no-description` | the table's `description.md` |
 

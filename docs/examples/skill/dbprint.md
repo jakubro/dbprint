@@ -14,8 +14,9 @@ description: Read the committed dbprint print of a database - DDL, columns, per-
 | Enum values, null rates, ranges, cardinality, key detection | `get_table_context` (Cardinality table) |
 | What identifies a row | `get_table_context` (`Grain:` — declared keys at any arity, plus a measured search) |
 | The filters and de-duplication a correct query needs | `get_table_context` (description + annotations) |
-| Foreign keys and join paths, each stating how it was found | `get_table_context` (Relationships) |
+| Foreign keys and join paths, each stating how it was found | `get_table_context` (Relationships; the Joins list under `purpose: query`) |
 | Columns found by shape rather than by name — contact data, uuid/email/phone, candidate keys | `search_columns` filters: `sensitivity`, `looks_like`, `candidate_key`, `classification`, `sql_type`, `redacted` |
+| How a phrase in the question is actually spelled in a column | `resolve_value` (the stored spelling, a value whose note defines the phrase, or the nearest listed values) |
 | Which statistics moved on the last run, and so which numbers are stable | `get_diff` |
 | Whether the print is too old to lean on | `dbprint check --max-age <window>` (offline; exit 2 = stale) |
 | What a field in the print actually means | `get_reference`, and the `dbprint://<connection>/reading` resource |

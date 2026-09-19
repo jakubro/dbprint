@@ -20,6 +20,7 @@ from tests.fixtures.adversarial import (
     FUTURE_DATED_COLUMN,
     INCOMPLETE_GRAIN_TABLE,
     NEVER_DECLARED_KIND,
+    REDACTED_COLUMN,
     REDACTED_PRIMITIVE,
     SCOPED_TABLE,
     TRUNCATED_FK_COLUMN,
@@ -59,6 +60,31 @@ def _render(adversarial_print: AdversarialPrint, table: str) -> str:
     assert result.exit_code == 0, result.output
 
     return result.output
+
+
+def _render_query(adversarial_print: AdversarialPrint, table: str) -> str:
+    """The same fragment under `--purpose query`, which renders the value lists directly."""
+
+    runner = CliRunner()
+    old_cwd = Path.cwd()
+    os.chdir(adversarial_print.conn.output.parent)
+
+    try:
+        result = runner.invoke(main, ["context", table, "--purpose", "query"])
+    finally:
+        os.chdir(old_cwd)
+
+    assert result.exit_code == 0, result.output
+
+    return result.output
+
+
+def _value_row(text: str, column: str) -> str:
+    """The `## Column values` row for `column`."""
+
+    section = text.split("## Column values", 1)[-1]
+
+    return next(line for line in section.splitlines() if line.startswith(f"| {column} |"))
 
 
 def _cardinality_row(text: str, column: str) -> str:
@@ -156,3 +182,36 @@ def test_declared_missing_artifact_is_named_not_conflated_with_never_declared(
 
     assert f"Missing: {DECLARED_MISSING_KIND}" in text
     assert NEVER_DECLARED_KIND not in text
+
+
+class TestTheQueryPurposeHonoursTheSameRegister:
+    """The value table states what the Notes summary used to state in prose."""
+
+    def test_a_scoped_exhaustive_list_is_exhaustive_over_the_rows_scanned(
+        self,
+        adversarial_print: AdversarialPrint,
+    ) -> None:
+        text = _render_query(adversarial_print, SCOPED_TABLE)
+
+        assert "Scanned: 250 of 1,000 rows (25.0%)" in text
+        assert "the whole domain over the rows scanned" in text
+        assert "1.0 - the list is the whole domain |" not in text
+
+    def test_a_redacted_column_publishes_counts_and_no_literal(
+        self,
+        adversarial_print: AdversarialPrint,
+    ) -> None:
+        text = _render_query(adversarial_print, SCOPED_TABLE)
+
+        assert "a@example.com" not in text
+        assert f"values withheld ({REDACTED_PRIMITIVE})" in _value_row(text, REDACTED_COLUMN)
+
+    def test_a_truncated_list_says_so_beside_the_values_it_shows(
+        self,
+        adversarial_print: AdversarialPrint,
+    ) -> None:
+        row = _value_row(_render_query(adversarial_print, SCOPED_TABLE), TRUNCATED_FK_COLUMN)
+
+        assert "rank-00 (1)" in row
+        assert "rank-05" not in row
+        assert "0.0667 - a sample of the most frequent values" in row

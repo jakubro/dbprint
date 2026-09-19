@@ -327,29 +327,41 @@ after changing a command's docstring, options, or help sections.
   • dbprint context 'public.*': every public table (pattern)
   • dbprint context --all --no-ddl: every table, skip DDL
   • dbprint context accession --budget 4000: cap output near 4000 tokens
+  • dbprint context accession --purpose query: DDL, join paths, definitions and value lists, for
+    writing SQL against the table
 
 ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
-│ --project               TEXT            Exact project locator: a directory whose direct child is │
-│                                         .dbprint.yaml, that .dbprint.yaml file itself, or a git  │
-│                                         address (a forge URL, an SSH remote, or                  │
-│                                         <git-url>#<ref>:<subpath>). No upward walk, no downward  │
-│                                         scan. Omit it to walk up from the working directory      │
-│                                         instead.                                                 │
-│ --all                                   Render every table in the manifest.                      │
-│ --format                [md|json|yaml]  Output format. json and yaml omit each column's sketch   │
-│                                         payload; the table's own statistics.yaml carries it.     │
-│                                         [default: md]                                            │
-│ --no-ddl                                Omit the DDL section.                                    │
-│ --no-relationships                      Omit the Relationships section.                          │
-│ --no-description                        Omit the Description section.                            │
-│ --no-annotations                        Omit the Annotations section.                            │
-│ --no-stats                              Omit the Cardinality table.                              │
-│ --budget                INTEGER         Soft output cap in tokens (approx chars/4); stop at the  │
-│                                         first section that would overflow. e.g. 4000             │
-│ --output                FILE            Write output to FILE instead of stdout.                  │
-│ --tui/--no-tui                          Force TTY (syntax-highlighted) or piped (plain-text)     │
-│                                         rendering. md format only.                               │
-│ --help              -h                  Show this message and exit.                              │
+│ --project               TEXT             Exact project locator: a directory whose direct child   │
+│                                          is .dbprint.yaml, that .dbprint.yaml file itself, or a  │
+│                                          git address (a forge URL, an SSH remote, or             │
+│                                          <git-url>#<ref>:<subpath>). No upward walk, no downward │
+│                                          scan. Omit it to walk up from the working directory     │
+│                                          instead.                                                │
+│ --all                                    Render every table in the manifest.                     │
+│ --format                [md|json|yaml]   Output format. json and yaml omit each column's sketch  │
+│                                          payload; the table's own statistics.yaml carries it.    │
+│                                          [default: md]                                           │
+│ --purpose               [profile|query]  What the fragment is for. profile describes the data:   │
+│                                          DDL, a per-column Notes summary of the statistics,      │
+│                                          relationships. query is for writing SQL against the     │
+│                                          table: DDL, the join paths, a data dictionary, and the  │
+│                                          value lists a predicate can be written from, with       │
+│                                          counts and coverage - and none of the statistics, which │
+│                                          describe the data rather than what a predicate needs.   │
+│                                          [default: profile]                                      │
+│ --no-ddl                                 Omit the DDL section.                                   │
+│ --no-relationships                       Omit the Relationships section (profile) or the Joins   │
+│                                          list (query).                                           │
+│ --no-description                         Omit the Description section.                           │
+│ --no-annotations                         Omit the Annotations section.                           │
+│ --no-stats                               Omit the Cardinality table. No effect under --purpose   │
+│                                          query, which carries none.                              │
+│ --budget                INTEGER          Soft output cap in tokens (approx chars/4); stop at the │
+│                                          first section that would overflow. e.g. 4000            │
+│ --output                FILE             Write output to FILE instead of stdout.                 │
+│ --tui/--no-tui                           Force TTY (syntax-highlighted) or piped (plain-text)    │
+│                                          rendering. md format only.                              │
+│ --help              -h                   Show this message and exit.                             │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 

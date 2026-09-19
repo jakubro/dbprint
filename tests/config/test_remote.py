@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -79,6 +81,32 @@ def _push_update(
     _run_git(["add", relpath], cwd=work)
     _run_git(["commit", "-m", "update"], cwd=work)
     _run_git(["push", "--quiet", str(bare), f"{branch}:{branch}"], cwd=work)
+
+
+def _rewrite_remote(work: Path, bare: Path, content: str, *, branch: str = "main") -> None:
+    """Replace the tip commit and force-push it - the move `pull --ff-only` cannot follow."""
+
+    (work / "prints" / "primary" / "manifest.yaml").write_text(content)
+    _run_git(["add", "."], cwd=work)
+    _run_git(["commit", "--amend", "-m", "rewritten"], cwd=work)
+    _run_git(["push", "--force", "--quiet", str(bare), f"{branch}:{branch}"], cwd=work)
+
+
+def _head_sha(work: Path) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=work,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _tag(work: Path, bare: Path, name: str, *, force: bool = False) -> None:
+    """Point `name` at the working repository's tip and publish it to `bare`."""
+
+    _run_git(["tag", "-f", name] if force else ["tag", name], cwd=work)
+    _run_git(["push", "--force", "--quiet", str(bare), name], cwd=work)
 
 
 @pytest.fixture(autouse=True)
@@ -266,6 +294,240 @@ class TestMaterialize:
 
         with pytest.raises(ConfigError, match="git failed"):
             materialize(RemoteAddress(remote=str(missing)))
+
+    def test_a_rewritten_history_is_followed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A force-push leaves the cache on a commit the remote no longer descends from."""
+
+        bare, work = _bare_repo(tmp_path)
+        address = RemoteAddress(remote=str(bare))
+        materialize(address)
+
+        _rewrite_remote(work, bare, "format_version: 1\ntables: {rewritten: {}}\n")
+        monkeypatch.setattr(remote_module, "CACHE_TTL_SECONDS", 0)
+
+        local = materialize(address)
+
+        assert "rewritten" in (local / "prints" / "primary" / "manifest.yaml").read_text()
+
+    def test_a_tag_ref_refreshes_once_its_ttl_has_elapsed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A tag checkout is detached, where `git pull` cannot run at all."""
+
+        bare, work = _bare_repo(tmp_path)
+        _tag(work, bare, "v1.2.0")
+        address = RemoteAddress(remote=str(bare), ref="v1.2.0")
+        materialize(address)
+        monkeypatch.setattr(remote_module, "CACHE_TTL_SECONDS", 0)
+
+        local = materialize(address)
+
+        assert (local / ".dbprint.yaml").is_file()
+
+    def test_a_moved_tag_is_followed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        bare, work = _bare_repo(tmp_path)
+        _tag(work, bare, "v1.2.0")
+        address = RemoteAddress(remote=str(bare), ref="v1.2.0")
+        materialize(address)
+
+        _push_update(
+            work,
+            bare,
+            "prints/primary/manifest.yaml",
+            "format_version: 1\ntables: {moved: {}}\n",
+        )
+        _tag(work, bare, "v1.2.0", force=True)
+        monkeypatch.setattr(remote_module, "CACHE_TTL_SECONDS", 0)
+
+        local = materialize(address)
+
+        assert "moved" in (local / "prints" / "primary" / "manifest.yaml").read_text()
+
+    def test_an_unreachable_remote_over_a_usable_cache_reports_and_serves_it(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A network that is down is no reason to refuse a print fifteen minutes old."""
+
+        bare, _work = _bare_repo(tmp_path)
+        address = RemoteAddress(remote=str(bare))
+        materialize(address)
+        shutil.rmtree(bare)
+        monkeypatch.setattr(remote_module, "CACHE_TTL_SECONDS", 0)
+        reported: list[str] = []
+
+        local = materialize(address, on_degraded=reported.append)
+
+        assert (local / ".dbprint.yaml").is_file()
+        assert reported and str(bare) in reported[0]
+
+    def test_the_warning_ages_the_content_not_the_attempt(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The freshness stamp advances on a failed attempt, so it cannot date the copy."""
+
+        bare, _work = _bare_repo(tmp_path)
+        address = RemoteAddress(remote=str(bare))
+        local = materialize(address)
+        shutil.rmtree(bare)
+        monkeypatch.setattr(remote_module, "CACHE_TTL_SECONDS", 0)
+
+        fresh = local / remote_module._FRESH_FILENAME
+        aged = time.time() - 3 * 60 * 60
+        os.utime(fresh, (aged, aged))
+        reported: list[str] = []
+
+        materialize(address, on_degraded=reported.append)
+
+        assert "180 minutes ago" in reported[0], reported
+
+    def test_a_failed_refresh_records_the_attempt(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The stamp bounds attempts, not successes - otherwise every later run retries."""
+
+        bare, _work = _bare_repo(tmp_path)
+        address = RemoteAddress(remote=str(bare))
+        materialize(address)
+        shutil.rmtree(bare)
+        monkeypatch.setattr(remote_module, "CACHE_TTL_SECONDS", 0)
+        materialize(address, on_degraded=lambda _message: None)
+
+        monkeypatch.setattr(remote_module, "CACHE_TTL_SECONDS", 15 * 60)
+
+        def _fail(_args: list[str]) -> None:
+            raise AssertionError("git ran again inside the TTL after a failed refresh")
+
+        monkeypatch.setattr(remote_module, "_run_git", _fail)
+
+        assert (materialize(address) / ".dbprint.yaml").is_file()
+
+    def test_a_full_sha_ref_is_checked_out(self, tmp_path: Path) -> None:
+        """What a forge's permalink carries; `clone --branch` cannot take it."""
+
+        bare, work = _bare_repo(tmp_path)
+        pinned = _head_sha(work)
+        _push_update(
+            work,
+            bare,
+            "prints/primary/manifest.yaml",
+            "format_version: 1\ntables: {later: {}}\n",
+        )
+
+        local = materialize(RemoteAddress(remote=str(bare), ref=pinned))
+
+        assert "later" not in (local / "prints" / "primary" / "manifest.yaml").read_text()
+
+    def test_a_short_sha_ref_is_checked_out(self, tmp_path: Path) -> None:
+        bare, work = _bare_repo(tmp_path)
+        pinned = _head_sha(work)[:7]
+
+        local = materialize(RemoteAddress(remote=str(bare), ref=pinned))
+
+        assert (local / ".dbprint.yaml").is_file()
+
+    def test_a_branch_named_like_a_hash_resolves_as_the_branch(self, tmp_path: Path) -> None:
+        """git owns the ambiguity; a "looks like a SHA" predicate would take this branch away."""
+
+        bare, work = _bare_repo(tmp_path)
+        _run_git(["checkout", "-b", "abc1234"], cwd=work)
+        _push_update(
+            work,
+            bare,
+            "prints/primary/manifest.yaml",
+            "format_version: 1\ntables: {branch_named_like_a_hash: {}}\n",
+            branch="abc1234",
+        )
+
+        local = materialize(RemoteAddress(remote=str(bare), ref="abc1234"))
+
+        manifest = (local / "prints" / "primary" / "manifest.yaml").read_text()
+        assert "branch_named_like_a_hash" in manifest
+
+    def test_a_commit_pinned_cache_is_never_refreshed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A commit cannot move, so a refresh could only refetch what is already on disk."""
+
+        bare, work = _bare_repo(tmp_path)
+        address = RemoteAddress(remote=str(bare), ref=_head_sha(work))
+        materialize(address)
+        monkeypatch.setattr(remote_module, "CACHE_TTL_SECONDS", 0)
+
+        calls: list[list[str]] = []
+        real_run_git = remote_module._run_git
+
+        def _record(args: list[str]) -> str:
+            calls.append(args)
+
+            return real_run_git(args)
+
+        monkeypatch.setattr(remote_module, "_run_git", _record)
+        materialize(address)
+
+        assert not any("fetch" in args for args in calls), calls
+
+    def test_an_unresolvable_ref_names_the_ref(self, tmp_path: Path) -> None:
+        bare, _work = _bare_repo(tmp_path)
+
+        with pytest.raises(ConfigError, match="'no-such-ref' could not be resolved"):
+            materialize(RemoteAddress(remote=str(bare), ref="no-such-ref"))
+
+    def test_a_ref_that_names_a_path_is_refused(self, tmp_path: Path) -> None:
+        """Without `--`, git reads a name no ref carries as a pathspec and exits 0 on the
+        default branch - a wrong clone served with nothing said.
+        """
+
+        bare, _work = _bare_repo(tmp_path)
+
+        with pytest.raises(ConfigError, match="'prints' could not be resolved"):
+            materialize(RemoteAddress(remote=str(bare), ref="prints"))
+
+    def test_a_failed_checkout_leaves_no_cache_behind(self, tmp_path: Path) -> None:
+        """Half a clone would otherwise be served, stamped and fresh, on every later run."""
+
+        bare, _work = _bare_repo(tmp_path)
+        address = RemoteAddress(remote=str(bare), ref="no-such-ref")
+
+        with pytest.raises(ConfigError):
+            materialize(address)
+
+        assert not remote_module._cache_dir_for(address).exists()
+
+    def test_a_cache_directory_that_cannot_be_read_is_re_cloned(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """What a clone killed mid-flight leaves behind: a stamped directory git cannot read."""
+
+        bare, _work = _bare_repo(tmp_path)
+        address = RemoteAddress(remote=str(bare))
+        local = materialize(address)
+        shutil.rmtree(local / ".git")
+        (local / ".dbprint.yaml").unlink()
+        monkeypatch.setattr(remote_module, "CACHE_TTL_SECONDS", 0)
+
+        again = materialize(address)
+
+        assert (again / ".dbprint.yaml").is_file()
 
 
 class TestWatchForRefresh:

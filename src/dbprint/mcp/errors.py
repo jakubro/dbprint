@@ -37,6 +37,17 @@ def unknown_table(table: str, connection: str) -> McpError:
     )
 
 
+def unknown_column(column: str, table: str, columns: list[str]) -> McpError:
+    """The requested column is absent from that table's statistics; the names it has are listed."""
+
+    known = ", ".join(columns) if columns else "none - the table's statistics list no columns"
+
+    return McpError(
+        -32602,
+        f"column {column!r} not found in table {table!r}. Columns: {known}.",
+    )
+
+
 def unknown_connection(connection: str, configured: list[str]) -> McpError:
     """The requested connection is not configured in .dbprint.yaml."""
 
@@ -62,10 +73,10 @@ def malformed_pattern(pattern: str) -> McpError:
     return McpError(-32602, f"pattern {pattern!r} is malformed fnmatch.")
 
 
-def missing_table_argument(value: str) -> McpError:
-    """`table` must be a non-empty string; the SDK runs no inputSchema check before dispatch."""
+def missing_argument(field: str, value: str) -> McpError:
+    """A required argument must be a non-empty string; the SDK runs no inputSchema check first."""
 
-    return McpError(-32602, f"table {value!r} must be a non-empty string.")
+    return McpError(-32602, f"{field} {value!r} must be a non-empty string.")
 
 
 def no_default_connection(configured: list[str]) -> McpError:

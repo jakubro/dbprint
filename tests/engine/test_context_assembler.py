@@ -2233,3 +2233,460 @@ class TestARedactedColumnReadsAsRedacted:
 
         assert "trainee / certified / senior" in row
         assert "redacted" not in row
+
+
+def _query(print_root: Path, table: str, manifest: dict[str, Any], **kwargs: Any) -> str:
+    return assemble_context(
+        manifest,
+        print_root,
+        [table],
+        AssemblyOptions(purpose="query", **kwargs),
+        "primary",
+    ).text
+
+
+class TestQueryPurpose:
+    """The selection a query writer reads: what the columns mean and what they hold."""
+
+    def test_values_render_with_their_counts(self, tmp_path: Path) -> None:
+        text = _query(_seed_print(tmp_path), "herbarium.public.collector", MANIFEST)
+
+        assert "## Column values" in text
+        assert _row_for(text, "rank").startswith(
+            "| rank | trainee (60) / certified (30) / senior (10) |",
+        )
+
+    def test_an_exhaustive_list_states_the_whole_domain(self, tmp_path: Path) -> None:
+        text = _query(_seed_print(tmp_path), "herbarium.public.collector", MANIFEST)
+
+        assert "1.0 - the list is the whole domain" in _row_for(text, "rank")
+
+    def test_a_truncated_list_states_that_it_is_a_sample(self, tmp_path: Path) -> None:
+        text = _query(_seed_print(tmp_path), "herbarium.public.collector", MANIFEST)
+
+        assert "0.02 - a sample of the most frequent values" in _row_for(text, "collector_id")
+
+    def test_a_column_without_values_has_no_row(self, tmp_path: Path) -> None:
+        """`seed_count` is numeric with no value list; an empty cell would read as no values."""
+
+        text = _query(_seed_print(tmp_path), "herbarium.public.collector", MANIFEST)
+
+        assert "| seed_count |" not in text
+
+    def test_the_statistics_and_relationships_are_absent(self, tmp_path: Path) -> None:
+        text = _query(_seed_print(tmp_path), "herbarium.public.collector", MANIFEST)
+
+        for absent in ("Cardinality", "## Relationships", "p50", "distribution"):
+            assert absent not in text, absent
+
+    def test_the_data_dictionary_carries_the_description_and_the_column_notes(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        print_root = _seed_print_with_annotations(tmp_path)
+        manifest = yaml.safe_load((print_root / "manifest.yaml").read_text())
+        text = _query(print_root, "herbarium.public.collector", manifest)
+        dictionary = text.split("## Data dictionary", 1)[-1].split("## Column values", 1)[0]
+
+        assert "Collector roster" in dictionary
+        assert "- rank:" in dictionary
+
+    def test_a_value_note_renders_beside_its_value(self, tmp_path: Path) -> None:
+        print_root = _seed_print_with_value_note(tmp_path)
+        manifest = yaml.safe_load((print_root / "manifest.yaml").read_text())
+        text = _query(print_root, "herbarium.public.collector", manifest)
+
+        assert "trainee (60) = not yet field-certified" in _row_for(text, "rank")
+
+    def test_a_redacted_column_publishes_counts_and_no_literal(self, tmp_path: Path) -> None:
+        """SPEC 2.2.9: the counts are real under redaction; the values are withheld."""
+
+        text = _query(_seed_redacted_print(tmp_path), "herbarium.public.collector", MANIFEST)
+        row = _row_for(text, "status")
+
+        assert "values withheld (drop), counts 60 / 30 / 10" in row
+
+    def test_a_scoped_table_states_the_domain_over_the_rows_scanned(self, tmp_path: Path) -> None:
+        """SPEC 2.2.4: under `scope`, an exhaustive list is exhaustive over what was scanned."""
+
+        print_root = _seed_scoped_print(tmp_path, {"rows_scanned": 400_000, "sample": 0.1})
+        statistics_path = print_root / "herbarium" / "public" / "field_log" / "statistics.yaml"
+        statistics = yaml.safe_load(statistics_path.read_text())
+        statistics["columns"]["region"]["values"] = [{"value": "north", "count": 400_000}]
+        statistics_path.write_text(yaml.safe_dump(statistics))
+
+        text = _query(print_root, "herbarium.public.field_log", SCOPED_MANIFEST)
+
+        assert "1.0 - the list is the whole domain over the rows scanned" in _row_for(
+            text,
+            "region",
+        )
+        assert "Scanned: 400,000 of 4,000,000 rows (10.0%)" in text
+
+    def test_a_budget_keeps_the_ddl_before_the_prose(self, tmp_path: Path) -> None:
+        text = _query(_seed_print(tmp_path), "herbarium.public.collector", MANIFEST, budget=20)
+
+        assert "## DDL" in text
+        assert "## Data dictionary" not in text
+        assert "truncated:" in text
+
+    def test_the_structured_payload_carries_values_and_no_statistics(self, tmp_path: Path) -> None:
+        print_root = _seed_print(tmp_path)
+        payload = assemble_structured_context(
+            MANIFEST,
+            print_root,
+            "herbarium.public.collector",
+            AssemblyOptions(format="json", purpose="query"),
+        )
+
+        assert payload["values"]["rank"]["entries"][0] == {"value": "trainee", "count": 60}
+        assert payload["values"]["rank"]["coverage_statement"] == "the list is the whole domain"
+        assert "statistics" not in payload
+        assert "relationships" not in payload
+
+
+def _seed_print_with_a_spelling_group(tmp_path: Path) -> Path:
+    """`rank`'s three values become four entries, two of them one category."""
+
+    print_root = _seed_print(tmp_path)
+    stats_path = print_root / "herbarium" / "public" / "collector" / "statistics.yaml"
+    stats = yaml.safe_load(stats_path.read_text())
+    stats["columns"]["rank"]["values"] = [
+        {"value": "trainee", "count": 60},
+        {"value": "certified", "count": 25},
+        {"value": "senior", "count": 10},
+        {"value": "Certified", "count": 5, "spelling_of": "certified"},
+    ]
+    stats["columns"]["rank"]["cardinality"] = 4
+    stats_path.write_text(yaml.safe_dump(stats))
+
+    return print_root
+
+
+class TestSpellingGroupRendering:
+    """A group is one category stored twice, so it reads as one row (SPEC 2.2.4)."""
+
+    def test_the_query_value_table_renders_the_group_as_one_row(self, tmp_path: Path) -> None:
+        text = _query(
+            _seed_print_with_a_spelling_group(tmp_path),
+            "herbarium.public.collector",
+            MANIFEST,
+        )
+        row = _row_for(text.split("## Column values", 1)[-1], "rank")
+
+        assert "certified (30) {certified 25, Certified 5}" in row
+        assert "| Certified |" not in text
+
+    def test_the_notes_summary_marks_the_group(self, tmp_path: Path) -> None:
+        result = assemble_context(
+            MANIFEST,
+            _seed_print_with_a_spelling_group(tmp_path),
+            ["herbarium.public.collector"],
+            AssemblyOptions(),
+            "primary",
+        )
+        row = _row_for(result.text, "rank")
+
+        assert "certified (30, 2 spellings)" in row
+        assert "/ Certified" not in row
+
+    def test_the_structured_payload_carries_the_link(self, tmp_path: Path) -> None:
+        payload = assemble_structured_context(
+            MANIFEST,
+            _seed_print_with_a_spelling_group(tmp_path),
+            "herbarium.public.collector",
+            AssemblyOptions(format="json", purpose="query"),
+        )
+        entries = payload["values"]["rank"]["entries"]
+
+        assert entries[-1] == {"value": "Certified", "count": 5, "spelling_of": "certified"}
+
+
+class TestTheStructuredQueryPayloadStatesItsPopulation:
+    """SPEC 2.2.8: `query` drops `statistics`, which is where `scope` rode on the profile path."""
+
+    def test_a_scoped_table_carries_the_scope_block(self, tmp_path: Path) -> None:
+        print_root = _seed_scoped_print(tmp_path, {"rows_scanned": 400_000, "sample": 0.1})
+
+        payload = assemble_structured_context(
+            SCOPED_MANIFEST,
+            print_root,
+            "herbarium.public.field_log",
+            AssemblyOptions(format="json", purpose="query"),
+        )
+
+        assert payload["scope"] == {"rows_scanned": 400_000, "sample": 0.1}
+        assert "statistics" not in payload
+
+    def test_an_unscoped_table_carries_no_scope_key(self, tmp_path: Path) -> None:
+        payload = assemble_structured_context(
+            MANIFEST,
+            _seed_print(tmp_path),
+            "herbarium.public.collector",
+            AssemblyOptions(format="json", purpose="query"),
+        )
+
+        assert "scope" not in payload
+
+
+def _seed_print_with_a_sampled_column(tmp_path: Path) -> Path:
+    """`institution` lists eight of many values, a spelling pair among them, at coverage 0.8."""
+
+    print_root = _seed_print(tmp_path)
+    stats_path = print_root / "herbarium" / "public" / "collector" / "statistics.yaml"
+    stats = yaml.safe_load(stats_path.read_text())
+    stats["columns"]["institution"] = {
+        "sql_type": "varchar(80)",
+        "nullable": False,
+        "null_count": 0,
+        "null_rate": 0.0,
+        "cardinality": 90,
+        "cardinality_ratio": 0.9,
+        "cardinality_method": "exact",
+        "classification": "text",
+        "values": [
+            {"value": "Kew", "count": 30},
+            {"value": "Leiden", "count": 20},
+            {"value": "KEW", "count": 10, "spelling_of": "Kew"},
+            {"value": "Geneva", "count": 5},
+            {"value": "Meise", "count": 5},
+            {"value": "Paris", "count": 5},
+            {"value": "Uppsala", "count": 5},
+        ],
+        "values_coverage": 0.8,
+        "distribution": "imbalanced",
+    }
+    stats["columns"]["seed_count"]["values"] = [{"value": 42, "count": 3}, {"value": 7, "count": 2}]
+    stats_path.write_text(yaml.safe_dump(stats))
+
+    return print_root
+
+
+class TestTheQueryValueTableShowsWhatAPredicateCanUse:
+    """An exhaustive list whole, a sampled one cut to its most frequent, an uncovered one absent."""
+
+    def test_a_sampled_list_shows_five_categories_and_their_own_share(self, tmp_path: Path) -> None:
+        text = _query(
+            _seed_print_with_a_sampled_column(tmp_path),
+            "herbarium.public.collector",
+            MANIFEST,
+        )
+        row = _row_for(text.split("## Column values", 1)[-1], "institution")
+
+        assert "Kew (40) {Kew 30, KEW 10} / Leiden (20) / Geneva (5) / Meise (5) / Paris (5)" in row
+        assert "Uppsala" not in row
+        assert "0.75 - a sample of the most frequent values" in row
+
+    def test_a_column_with_values_but_no_coverage_has_no_row(self, tmp_path: Path) -> None:
+        """A numeric list is a frequency sample with no stated share (SPEC 2.2.3) - not a domain."""
+
+        text = _query(
+            _seed_print_with_a_sampled_column(tmp_path),
+            "herbarium.public.collector",
+            MANIFEST,
+        )
+
+        assert "| seed_count |" not in text
+        assert "coverage not published" not in text
+
+    def test_a_member_of_an_unlisted_value_stands_as_its_own_row(self, tmp_path: Path) -> None:
+        """Dropping it would hide a literal the column holds; the validator reports the entry."""
+
+        print_root = _seed_print(tmp_path)
+        stats_path = print_root / "herbarium" / "public" / "collector" / "statistics.yaml"
+        stats = yaml.safe_load(stats_path.read_text())
+        stats["columns"]["rank"]["values"] = [
+            {"value": "trainee", "count": 60},
+            {"value": "Senior", "count": 10, "spelling_of": "senior"},
+        ]
+        stats_path.write_text(yaml.safe_dump(stats))
+
+        row = _row_for(_query(print_root, "herbarium.public.collector", MANIFEST), "rank")
+
+        assert "trainee (60) / Senior (10)" in row
+
+    def test_the_structured_payload_shows_the_same_five_and_their_share(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        payload = assemble_structured_context(
+            MANIFEST,
+            _seed_print_with_a_sampled_column(tmp_path),
+            "herbarium.public.collector",
+            AssemblyOptions(format="json", purpose="query"),
+        )
+        institution = payload["values"]["institution"]
+
+        assert [e["value"] for e in institution["entries"]] == [
+            "Kew",
+            "KEW",
+            "Leiden",
+            "Geneva",
+            "Meise",
+            "Paris",
+        ]
+        assert institution["coverage"] == 0.8
+        assert institution["shown_coverage"] == 0.75
+        assert "seed_count" not in payload["values"]
+        assert "shown_coverage" not in payload["values"]["rank"]
+
+
+EDGES_OF_EVERY_DETECTION: dict[str, object] = {
+    "refers_to": [
+        {
+            "column": ["seed_count"],
+            "target_table": "public.batch",
+            "target_column": ["batch_no"],
+            "detection": "measured",
+            "observed": {"fanout_avg": 3.0, "target_coverage": 0.5},
+        },
+        {
+            "column": ["garden_id"],
+            "target_table": "public.garden",
+            "target_column": ["garden_code"],
+            "detection": "inferred",
+        },
+        {
+            "column": ["site_id", "plot_no"],
+            "target_table": "public.field_site",
+            "target_column": ["site_id", "plot_no"],
+            "detection": "declared",
+            "on_delete": "CASCADE",
+        },
+    ],
+    "referenced_by": [
+        {
+            "column": ["collector_id"],
+            "referencer_table": "public.accession",
+            "referencer_column": ["collector_id"],
+            "detection": "inferred",
+        },
+    ],
+}
+
+
+class TestTheQueryJoinsList:
+    """Every edge the print knows, the surest first, and nothing measured about any of them."""
+
+    def test_edges_render_declared_first_with_their_detection(self) -> None:
+        from dbprint.engine.context_assembler import _markdown_joins
+
+        rendered = _markdown_joins(TestRelationshipsMarkdown._artifacts(EDGES_OF_EVERY_DETECTION))
+
+        assert rendered.splitlines() == [
+            "## Joins",
+            "- (site_id, plot_no) -> public.field_site.(site_id, plot_no) (declared)",
+            "- garden_id -> public.garden.garden_code (inferred)",
+            "- seed_count -> public.batch.batch_no (measured)",
+            "- collector_id <- public.accession.collector_id (inferred)",
+        ]
+
+    def test_a_rejected_edge_carries_the_marker(self) -> None:
+        from dbprint.engine.context_assembler import _markdown_joins
+
+        annotations = [
+            {
+                "column": ["garden_id"],
+                "target_table": "public.garden",
+                "target_column": ["garden_code"],
+                "verdict": "rejected",
+                "note": "garden_id names a code, not a key into garden",
+            },
+        ]
+        rendered = _markdown_joins(
+            TestRelationshipsMarkdown._artifacts(EDGES_OF_EVERY_DETECTION, annotations),
+        )
+
+        assert "[REJECTED by human annotation: garden_id names a code" in rendered
+
+    def test_a_table_with_no_edge_has_no_section(self, tmp_path: Path) -> None:
+        text = _query(_seed_print(tmp_path), "herbarium.public.collector", MANIFEST)
+
+        assert "## Joins" not in text
+
+    def test_the_structured_payload_carries_the_edges_and_a_rejection(self) -> None:
+        from dbprint.engine.context_assembler import _structured_joins
+
+        annotations = [
+            {
+                "column": ["garden_id"],
+                "target_table": "public.garden",
+                "target_column": ["garden_code"],
+                "verdict": "rejected",
+            },
+        ]
+        joins = _structured_joins(
+            TestRelationshipsMarkdown._artifacts(EDGES_OF_EVERY_DETECTION, annotations),
+        )
+
+        assert joins["refers_to"][0] == {
+            "column": ["site_id", "plot_no"],
+            "target_table": "public.field_site",
+            "target_column": ["site_id", "plot_no"],
+            "detection": "declared",
+        }
+        assert joins["refers_to"][1]["rejected"] is True
+        assert "observed" not in joins["refers_to"][2]
+        assert joins["referenced_by"] == [
+            {
+                "column": ["collector_id"],
+                "referencer_table": "public.accession",
+                "referencer_column": ["collector_id"],
+                "detection": "inferred",
+            },
+        ]
+
+
+def _seed_print_with_edges(tmp_path: Path) -> Path:
+    print_root = _seed_print_with_annotations(tmp_path)
+    table_dir = print_root / "herbarium" / "public" / "collector"
+    (table_dir / "relationships.yaml").write_text(
+        yaml.safe_dump({**RELATIONSHIPS, **EDGES_OF_EVERY_DETECTION}),
+    )
+
+    return print_root
+
+
+class TestTheSectionFlagsNarrowTheQuerySelection:
+    """A flag whose section exists under `query` is honoured; `include_stats` drops nothing."""
+
+    def test_each_flag_drops_its_section(self, tmp_path: Path) -> None:
+        print_root = _seed_print_with_edges(tmp_path)
+        manifest = yaml.safe_load((print_root / "manifest.yaml").read_text())
+        table = "herbarium.public.collector"
+        everything = _query(print_root, table, manifest)
+
+        for marker in ("## DDL", "## Joins", "Collector roster", "- rank:", "## Column values"):
+            assert marker in everything, marker
+
+        assert "## DDL" not in _query(print_root, table, manifest, include_ddl=False)
+        assert "## Joins" not in _query(print_root, table, manifest, include_relationships=False)
+        assert "Collector roster" not in _query(
+            print_root,
+            table,
+            manifest,
+            include_description=False,
+        )
+        assert "- rank:" not in _query(print_root, table, manifest, include_annotations=False)
+        assert "## Column values" in _query(print_root, table, manifest, include_stats=False)
+
+    def test_the_structured_payload_honours_the_same_flags(self, tmp_path: Path) -> None:
+        print_root = _seed_print_with_edges(tmp_path)
+        manifest = yaml.safe_load((print_root / "manifest.yaml").read_text())
+        payload = assemble_structured_context(
+            manifest,
+            print_root,
+            "herbarium.public.collector",
+            AssemblyOptions(
+                format="json",
+                purpose="query",
+                include_ddl=False,
+                include_relationships=False,
+                include_description=False,
+                include_annotations=False,
+            ),
+        )
+
+        assert "values" in payload
+        for absent in ("ddl", "joins", "description", "dictionary"):
+            assert absent not in payload, absent

@@ -173,7 +173,10 @@ SELECT
      substr(md5('collector-' || (1 + ((k * 3) % 400))::text), 5, 3) || '-a' ||
      substr(md5('collector-' || (1 + ((k * 3) % 400))::text), 8, 3) || '-' ||
      substr(md5('collector-' || (1 + ((k * 3) % 400))::text || 'x'), 1, 12))::uuid,
+    -- Two spellings of one medium, as a second intake source would record them: the
+    -- capitalized minority groups under the stored majority via `spelling_of` (SPEC 2.2.4).
     CASE WHEN k % 41 = 0 THEN 'control'
+         WHEN k % 5 = 2 AND k % 7 = 0 THEN 'Sand Tray'
          ELSE (ARRAY['moist filter paper', 'agar medium', 'sand tray', 'vermiculite mix',
                      'sterile grit']
               )[1 + (k % 5)] END,

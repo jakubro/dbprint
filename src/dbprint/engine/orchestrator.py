@@ -123,6 +123,7 @@ from .result import (
     TableResult,
     TableStatus,
 )
+from .value_resolution import spelling_groups
 from .writer import (
     DESCRIPTION_FILENAME,
     MANIFEST_ANNOTATIONS_FILENAME,
@@ -3022,7 +3023,7 @@ def _emitted_extras(e: _EnrichedColumnStats, rows_scanned: int, salt: str | None
             yield "inferred", inf
 
     if s.values is not None:
-        yield "values", [_redacted_entry(v, e.redaction, salt) for v in s.values]
+        yield "values", _value_entries(s.values, e.redaction, salt)
 
     if s.values_coverage is not None:
         yield "values_coverage", s.values_coverage
@@ -3128,6 +3129,29 @@ def _mark_unmeasured(
 
     if named := sorted(owed - col_dict.keys()):
         col_dict["unmeasured"] = named
+
+
+def _value_entries(
+    values: Any,
+    primitive: str | None,
+    salt: str | None,
+) -> list[dict[str, Any]]:
+    """The `values` list as published: redacted as configured, then grouped by spelling.
+
+    A redacted column is never grouped: `spelling_of` names a literal redaction withholds.
+    """
+
+    entries = [_redacted_entry(v, primitive, salt) for v in values]
+
+    if primitive is not None:
+        return entries
+
+    grouped = spelling_groups([(v.value, v.count) for v in values])
+
+    for index, canonical in grouped.items():
+        entries[index]["spelling_of"] = canonical
+
+    return entries
 
 
 def _redacted_entry(value_count: Any, primitive: str | None, salt: str | None) -> dict[str, Any]:

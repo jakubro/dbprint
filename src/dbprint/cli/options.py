@@ -42,7 +42,7 @@ def resolve_project(project: str | None) -> ProjectConfig:
     if address is None:
         return load_project_at(project)
 
-    return load_project_at(materialize(address))
+    return load_project_at(materialize(address, on_degraded=_warn))
 
 
 def keep_fresh(project: str | None) -> None:
@@ -69,3 +69,12 @@ def refuse_if_remote(project: str | None, command: str) -> None:
             f"local one to write to (or query live) - clone it yourself first, or point "
             f"{command.split()[0]!r} at a local checkout instead.",
         )
+
+
+def _warn(message: str) -> None:
+    """Report a degraded remote cache where the CLI's other refusals are reported.
+
+    `config` attaches no handler and the run log opens only after the project resolves.
+    """
+
+    click.echo(f"warning: {message}", err=True)

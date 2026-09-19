@@ -10,7 +10,7 @@ import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
@@ -22,6 +22,20 @@ from .yaml_dumper import spell_inline
 
 HEADER_TOKEN_OVERHEAD = 8  # conservative reserve for the multi-table document header
 NULL_PATTERN_DISPLAY_LIMIT = 8  # combinations rendered before the rest are summarised
+
+Purpose = Literal["profile", "query"]
+
+# Fixed sentences, so a consumer can key on them rather than parse a number it also gets.
+WHOLE_DOMAIN_STATEMENT = "the list is the whole domain"
+SCANNED_DOMAIN_STATEMENT = "the list is the whole domain over the rows scanned"
+SAMPLED_STATEMENT = "a sample of the most frequent values"
+
+QUERY_SAMPLE_LIMIT = 5  # most frequent values of a sampled column the query purpose shows
+
+_DETECTION_RANK = {"declared": 0, "inferred": 1, "measured": 2}
+
+# Which sections a budget keeps first under `query`; the render order is a different thing.
+_QUERY_SECTION_PRIORITY = ("ddl", "values", "joins", "dictionary", "header")
 
 
 @dataclass(frozen=True)
@@ -35,6 +49,7 @@ class AssemblyOptions:
     include_stats: bool = True
     include_relationships: bool = True
     budget: int | None = None  # total tokens; None = unbounded
+    purpose: Purpose = "profile"
 
 
 @dataclass
@@ -187,6 +202,9 @@ def _render_table_markdown(
     false when the budget missed even the header - `text` is then the bare truncation marker.
     """
 
+    if options.purpose == "query":
+        return _render_query_markdown(a, options, budget, adapter)
+
     include_qualifiers = options.include_stats and bool(a.statistics)
     sections: list[Section] = []
     sections.append(
@@ -240,16 +258,333 @@ def _render_table_markdown(
     return text, selection.truncated, bool(selection.included)
 
 
-def _markdown_header(
+def _render_query_markdown(
     a: TableArtifacts,
-    include_qualifiers: bool,
-    connection_statistics_params: dict[str, Any],
+    options: AssemblyOptions,
+    budget: int | None,
     adapter: str | None,
-) -> str:
-    """The identity line, then one line per table-level qualifier that applies.
+) -> tuple[str, bool, bool]:
+    """The `query` purpose: what a query writer reads, and nothing measured about the data.
 
-    Missing-artifact and adapter lines are ungated by `include_qualifiers` - every fragment
-    states its own SQL dialect (SPEC 2.5).
+    Sections render in reading order and drop in `_QUERY_SECTION_PRIORITY` order.
+    """
+
+    rendered = (
+        ("header", _query_markdown_header(a, adapter)),
+        ("ddl", _markdown_ddl(a) if options.include_ddl else ""),
+        ("joins", _markdown_joins(a) if options.include_relationships else ""),
+        ("dictionary", _markdown_data_dictionary(a, options)),
+        ("values", _markdown_column_values(a)),
+    )
+    sections = {name: make_section(name, text) for name, text in rendered if text}
+    selection = select([sections[n] for n in _QUERY_SECTION_PRIORITY if n in sections], budget)
+    included = {s.name for s in selection.included}
+    text = "\n\n".join(sections[name].text for name, _ in rendered if name in included)
+    marker = truncation_marker(selection)
+
+    if marker:
+        text = f"{text}\n\n{marker}" if text else marker
+
+    return text, selection.truncated, bool(selection.included)
+
+
+def _query_markdown_header(a: TableArtifacts, adapter: str | None) -> str:
+    """Identity plus the scope marker - what the value lists below cover, and no other measure."""
+
+    lines = _identity_lines(a, adapter)
+    scope = _scope_summary(a.statistics or {})
+
+    if scope:
+        lines.append(scope)
+
+    return "\n".join(lines)
+
+
+def _markdown_joins(a: TableArtifacts) -> str:
+    """Every edge the print knows with how it was found (SPEC 2.3): the join paths.
+
+    An inferred or measured edge is here and nowhere else a query writer reads.
+    """
+
+    refers_to, referenced_by = _edges(a)
+
+    if not refers_to and not referenced_by:
+        return ""
+
+    rejected = _rejected_edges(a.relationship_annotations)
+    lines = ["## Joins"]
+
+    for entry in refers_to:
+        target = f"{entry.get('target_table', '?')}.{_join_columns(entry.get('target_column'))}"
+        lines.append(
+            f"- {_join_columns(entry.get('column'))} -> {target} ({_edge_detection(entry)})",
+        )
+        lines.extend(_rejection_line(rejected.get(_edge_key(entry))))
+
+    for entry in referenced_by:
+        source = (
+            f"{entry.get('referencer_table', '?')}.{_join_columns(entry.get('referencer_column'))}"
+        )
+        lines.append(
+            f"- {_join_columns(entry.get('column'))} <- {source} ({_edge_detection(entry)})",
+        )
+
+    return "\n".join(lines)
+
+
+def _edges(a: TableArtifacts) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The table's `refers_to` and `referenced_by` edges, the surest first.
+
+    Declared, then inferred, then measured (SPEC 2.3); the artifact's own order within a rank.
+    """
+
+    relationships = a.relationships or {}
+
+    def ranked(edges: Any) -> list[dict[str, Any]]:
+        listed = [e for e in edges or [] if isinstance(e, dict)]
+
+        return sorted(
+            listed,
+            key=lambda e: _DETECTION_RANK.get(_edge_detection(e), len(_DETECTION_RANK)),
+        )
+
+    return ranked(relationships.get("refers_to")), ranked(relationships.get("referenced_by"))
+
+
+def _join_columns(columns: Any) -> str:
+    """One column bare, a composite key in parentheses, so `a, b -> t.c, d` cannot be misread."""
+
+    names = [str(c) for c in columns] if isinstance(columns, list) else []
+
+    if not names:
+        return "?"
+
+    return names[0] if len(names) == 1 else "(" + ", ".join(names) + ")"
+
+
+def _markdown_data_dictionary(a: TableArtifacts, options: AssemblyOptions) -> str:
+    """The table's description and every column a human has defined (SPEC 2.7.1)."""
+
+    description = a.description if options.include_description else None
+    notes = (
+        [
+            f"- {name}: {' '.join(entry['note'].split())}"
+            for name, entry in (a.annotations or {}).items()
+            if isinstance(entry.get("note"), str) and entry["note"].strip()
+        ]
+        if options.include_annotations
+        else []
+    )
+
+    if not notes and not description:
+        return ""
+
+    lines = ["## Data dictionary"]
+
+    if description:
+        lines += ["", description.rstrip()]
+
+    if notes:
+        lines += ["", *notes]
+
+    return "\n".join(lines)
+
+
+def _markdown_column_values(a: TableArtifacts) -> str:
+    """Every column whose list a predicate can rely on: the whole domain, or a stated share."""
+
+    columns = (a.statistics or {}).get("columns")
+
+    if not isinstance(columns, dict):
+        return ""
+
+    scoped = isinstance((a.statistics or {}).get("scope"), dict)
+    annotations = a.annotations or {}
+    rows = []
+
+    for name in _ordered_column_names(columns):
+        col = columns[name]
+        listed = _covered_values(col)
+
+        if listed is None:
+            continue
+
+        entries, coverage = listed
+        shown, share = _shown_values(entries, coverage)
+        values_cell = _values_cell(col, shown, annotations.get(name))
+        statement = _coverage_statement(coverage, scoped=scoped)
+        rows.append(f"| {name} | {values_cell} | {share} - {statement} |")
+
+    if not rows:
+        return ""
+
+    return "\n".join(
+        ["## Column values", "", "| Column | Values (count) | Coverage |", "|---|---|---|", *rows],
+    )
+
+
+def _covered_values(col: Any) -> tuple[list[dict[str, Any]], float] | None:
+    """The value entries and the coverage describing them; None without both (SPEC 2.2.3).
+
+    A `numeric`/`temporal` list carries no coverage: a frequency sample, never a domain.
+    """
+
+    if not isinstance(col, dict):
+        return None
+
+    entries = col.get("values")
+    coverage = col.get("values_coverage")
+
+    if not isinstance(entries, list) or not entries or not _is_number(coverage):
+        return None
+
+    return [e for e in entries if isinstance(e, dict)], float(coverage)
+
+
+def _shown_values(
+    entries: list[dict[str, Any]],
+    coverage: float,
+) -> tuple[list[dict[str, Any]], float]:
+    """The entries `query` shows and the share of the column they cover.
+
+    A sampled list is cut to `QUERY_SAMPLE_LIMIT` categories, a spelling group counting as one.
+    """
+
+    if coverage == 1.0:
+        return entries, coverage
+
+    groups = _spelling_groups(entries)[:QUERY_SAMPLE_LIMIT]
+    shown = [entry for canonical, members in groups for entry in (canonical, *members)]
+    listed = sum(_count_of(e) for e in entries)
+    kept = sum(_count_of(e) for e in shown)
+
+    return shown, round(coverage * kept / listed, 4) if listed else coverage
+
+
+def _count_of(entry: dict[str, Any]) -> int:
+    """An entry's count; 0 where the artifact carries no integer."""
+
+    count = entry.get("count")
+
+    return count if isinstance(count, int) and not isinstance(count, bool) else 0
+
+
+def _is_number(value: Any) -> bool:
+    """A real number - `bool` is an `int` to Python and never a coverage."""
+
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _values_cell(
+    col: dict[str, Any],
+    entries: list[Any],
+    annotation: dict[str, Any] | None,
+) -> str:
+    """One column's listed values; a redacted column publishes its counts and no literal."""
+
+    redaction = col.get("redacted")
+    counts = [entry.get("count") for entry in entries if isinstance(entry, dict)]
+
+    if isinstance(redaction, str) and redaction:
+        return f"values withheld ({redaction}), counts " + " / ".join(str(c) for c in counts)
+
+    notes = _value_notes(annotation)
+    cells = []
+
+    for entry, members in _spelling_groups(entries):
+        value = entry.get("value")
+        spelled = "NULL" if value is None else spell_inline(value)
+        counted = [entry, *members]
+        total = sum(e.get("count") or 0 for e in counted)
+        cell = f"{_escape_cell(spelled)} ({total})"
+
+        if members:
+            spellings = ", ".join(
+                f"{_escape_cell(spell_inline(e.get('value')))} {e.get('count')}" for e in counted
+            )
+            cell += f" {{{spellings}}}"
+
+        note = notes.get(_value_key(value))
+
+        if note:
+            cell += f" = {_escape_cell(note)}"
+
+        cells.append(cell)
+
+    return " / ".join(cells)
+
+
+def _spelling_groups(entries: list[Any]) -> list[tuple[dict[str, Any], list[dict[str, Any]]]]:
+    """Canonical entries in the list's own order, each with the lesser spellings of it.
+
+    A member naming a value the list lacks stands alone: dropped, its literal would vanish.
+    """
+
+    listed = {
+        _value_key(entry.get("value"))
+        for entry in entries
+        if isinstance(entry, dict) and entry.get("spelling_of") is None
+    }
+    members: dict[str, list[dict[str, Any]]] = {}
+
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("spelling_of") is not None:
+            members.setdefault(_value_key(entry["spelling_of"]), []).append(entry)
+
+    return [
+        (entry, members.get(_value_key(entry.get("value")), []))
+        for entry in entries
+        if isinstance(entry, dict)
+        and (entry.get("spelling_of") is None or _value_key(entry["spelling_of"]) not in listed)
+    ]
+
+
+def _coverage_statement(coverage: float, *, scoped: bool) -> str:
+    """What the list is: the column's whole domain, or its most frequent values (SPEC 2.2.4).
+
+    Under `scope` an exhaustive list is exhaustive over the rows scanned, never over the table.
+    """
+
+    if coverage == 1.0:
+        return SCANNED_DOMAIN_STATEMENT if scoped else WHOLE_DOMAIN_STATEMENT
+
+    return SAMPLED_STATEMENT
+
+
+def _value_notes(annotation: dict[str, Any] | None) -> dict[str, str]:
+    """A column's per-value notes (SPEC 2.7.1), keyed for lookup beside the value itself."""
+
+    if not isinstance(annotation, dict):
+        return {}
+
+    entries = annotation.get("values")
+
+    if not isinstance(entries, list):
+        return {}
+
+    return {
+        _value_key(entry.get("value")): " ".join(entry["note"].split())
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("note"), str) and entry["note"].strip()
+    }
+
+
+def _value_key(value: Any) -> str:
+    """YAML reads `1` and `'1'` as different scalars; the string form matches either spelling."""
+
+    return str(value)
+
+
+def _escape_cell(text: str) -> str:
+    """A pipe inside a value would end the table cell it sits in."""
+
+    return text.replace("|", "\\|")
+
+
+def _identity_lines(a: TableArtifacts, adapter: str | None) -> list[str]:
+    """What every header opens with: the table, its dialect, and what is missing from it.
+
+    The adapter and missing-artifact lines are unconditional (SPEC 2.5).
     """
 
     parts = []
@@ -268,6 +603,19 @@ def _markdown_header(
 
     if a.corrupted:
         lines.append(_corrupted_summary(a.corrupted))
+
+    return lines
+
+
+def _markdown_header(
+    a: TableArtifacts,
+    include_qualifiers: bool,
+    connection_statistics_params: dict[str, Any],
+    adapter: str | None,
+) -> str:
+    """The identity lines, then one line per table-level qualifier that applies."""
+
+    lines = _identity_lines(a, adapter)
 
     if not include_qualifiers:
         return "\n".join(lines)
@@ -1189,6 +1537,16 @@ def _budgeted_structured_payload(
 
     candidates: list[tuple[str, Any]] = []
 
+    if options.purpose == "query":
+        scope = (a.statistics or {}).get("scope")
+
+        if isinstance(scope, dict):
+            # The counts below it describe the scanned set; `statistics` carried this on the
+            # profile path, and `query` drops that object (SPEC 2.2.8).
+            header["scope"] = scope
+
+        return _payload_from(header, _query_candidates(a, options), budget)
+
     if options.include_ddl:
         candidates.append(("ddl", a.ddl))
 
@@ -1210,6 +1568,16 @@ def _budgeted_structured_payload(
     if options.include_relationships and a.relationship_annotations:
         candidates.append(("relationship_annotations", a.relationship_annotations))
 
+    return _payload_from(header, candidates, budget)
+
+
+def _payload_from(
+    header: dict[str, Any],
+    candidates: list[tuple[str, Any]],
+    budget: int | None,
+) -> dict[str, Any]:
+    """Apply the budget to an ordered candidate list; the identity fields never drop."""
+
     sections = [make_section(name, _measure_for_budget(value)) for name, value in candidates]
     selection = select(sections, budget)
     included_names = {s.name for s in selection.included}
@@ -1224,6 +1592,145 @@ def _budgeted_structured_payload(
         payload["_truncated"] = [name for name, _ in candidates if name not in included_names]
 
     return payload
+
+
+def _query_candidates(a: TableArtifacts, options: AssemblyOptions) -> list[tuple[str, Any]]:
+    """The `query` selection as structured data, ordered as a budget should keep it."""
+
+    candidates: list[tuple[str, Any]] = []
+
+    if options.include_ddl:
+        candidates.append(("ddl", a.ddl))
+
+    values = _structured_values(a)
+
+    if values:
+        candidates.append(("values", values))
+
+    joins = _structured_joins(a) if options.include_relationships else {}
+
+    if joins:
+        candidates.append(("joins", joins))
+
+    dictionary = (
+        {
+            name: " ".join(entry["note"].split())
+            for name, entry in (a.annotations or {}).items()
+            if isinstance(entry.get("note"), str) and entry["note"].strip()
+        }
+        if options.include_annotations
+        else {}
+    )
+
+    if dictionary:
+        candidates.append(("dictionary", dictionary))
+
+    if options.include_description and a.description is not None:
+        candidates.append(("description", a.description))
+
+    return candidates
+
+
+def _structured_joins(a: TableArtifacts) -> dict[str, Any]:
+    """The Joins list as data: each edge's columns and detection, and a human's rejection."""
+
+    refers_to, referenced_by = _edges(a)
+
+    if not refers_to and not referenced_by:
+        return {}
+
+    rejected = _rejected_edges(a.relationship_annotations)
+    out: dict[str, Any] = {"refers_to": [], "referenced_by": []}
+
+    for entry in refers_to:
+        edge = _edge_fields(entry, ("column", "target_table", "target_column"))
+        rejection = rejected.get(_edge_key(entry))
+
+        if rejection is not None:
+            note = rejection.get("note")
+            edge["rejected"] = note if isinstance(note, str) and note.strip() else True
+
+        out["refers_to"].append(edge)
+
+    for entry in referenced_by:
+        out["referenced_by"].append(
+            _edge_fields(entry, ("column", "referencer_table", "referencer_column")),
+        )
+
+    return out
+
+
+def _edge_fields(entry: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
+    """The named keys of an edge as the artifact spells them, plus its detection."""
+
+    edge = {key: entry[key] for key in keys if key in entry}
+    edge["detection"] = _edge_detection(entry)
+
+    return edge
+
+
+def _structured_values(a: TableArtifacts) -> dict[str, Any]:
+    """Per column: the entries the `query` purpose shows, their notes, and what they cover."""
+
+    columns = (a.statistics or {}).get("columns")
+
+    if not isinstance(columns, dict):
+        return {}
+
+    scoped = isinstance((a.statistics or {}).get("scope"), dict)
+    annotations = a.annotations or {}
+    out: dict[str, Any] = {}
+
+    for name in _ordered_column_names(columns):
+        col = columns[name]
+        listed = _covered_values(col)
+
+        if listed is None:
+            continue
+
+        entries, coverage = listed
+        shown, share = _shown_values(entries, coverage)
+        block: dict[str, Any] = {
+            "coverage": coverage,
+            "coverage_statement": _coverage_statement(coverage, scoped=scoped),
+        }
+
+        if coverage != 1.0:
+            block["shown_coverage"] = share
+
+        redaction = col.get("redacted")
+
+        if isinstance(redaction, str) and redaction:
+            block["redacted"] = redaction
+            block["counts"] = [e.get("count") for e in shown]
+        else:
+            block["entries"] = _structured_entries(shown, annotations.get(name))
+
+        out[name] = block
+
+    return out
+
+
+def _structured_entries(entries: list[Any], annotation: dict[str, Any] | None) -> list[Any]:
+    notes = _value_notes(annotation)
+    rendered = []
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+
+        item = {"value": entry.get("value"), "count": entry.get("count")}
+        note = notes.get(_value_key(entry.get("value")))
+
+        if note:
+            item["note"] = note
+
+        if entry.get("spelling_of") is not None:
+            item["spelling_of"] = entry["spelling_of"]
+
+        rendered.append(item)
+
+    return rendered
 
 
 def _stripped_statistics(statistics: dict[str, Any]) -> dict[str, Any]:

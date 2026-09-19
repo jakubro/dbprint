@@ -160,13 +160,14 @@ def _categorical_notes(
         return f"{cardinality} distinct{distribution}{length}"
 
     if _is_exhaustive(stats):
-        keys = [_format_value(value) for value, _ in entries]
-
-        return f"{cardinality} distinct: " + " / ".join(keys) + distribution + length
+        return (
+            f"{cardinality} distinct: " + _exhaustive_keys(stats, entries) + distribution + length
+        )
 
     total = _non_null_total(stats, entries)
     parts = [
-        f"{_format_value(value)} ({round(100 * count / total)}%)" for value, count in entries[:3]
+        f"{_format_value(value)} ({round(100 * count / total)}%{_spelling_suffix(spellings)})"
+        for value, count, spellings in _grouped_entries(stats, entries)[:3]
     ]
 
     return (
@@ -290,14 +291,17 @@ def _text_notes(
         return f"{_redacted_label(redaction)}, top counts {counts}{distribution}{census_suffix}{length}"
 
     if _is_exhaustive(stats):
-        keys = [_format_value(value) for value, _ in entries]
-
         return (
-            f"{cardinality} distinct: " + " / ".join(keys) + distribution + census_suffix + length
+            f"{cardinality} distinct: "
+            + _exhaustive_keys(stats, entries)
+            + distribution
+            + census_suffix
+            + length
         )
 
     parts = [
-        f"{_format_value(value)} ({count})" for value, count in entries[:TEXT_TOP_VALUES_LIMIT]
+        f"{_format_value(value)} ({count}{_spelling_suffix(spellings)})"
+        for value, count, spellings in _grouped_entries(stats, entries)[:TEXT_TOP_VALUES_LIMIT]
     ]
 
     return (
@@ -590,6 +594,53 @@ def _non_null_total(stats: dict[str, Any], entries: list[tuple[Any, int]]) -> in
         return max(round(listed / coverage), listed)
 
     return listed or 1
+
+
+def _grouped_entries(
+    stats: dict[str, Any],
+    entries: list[tuple[Any, int]],
+) -> list[tuple[Any, int, int]]:
+    """`(value, total, spellings)` per category - a spelling group reading as the one value it is.
+
+    Members fold into their canonical entry (SPEC 2.2.4), so a reader counting categories is
+    not counting spellings; an ungrouped value reports one spelling.
+    """
+
+    members: dict[str, list[int]] = {}
+    grouped_away: set[str] = set()
+
+    for raw in stats.get("values") or []:
+        if isinstance(raw, dict) and raw.get("spelling_of") is not None:
+            members.setdefault(str(raw["spelling_of"]), []).append(int(raw.get("count") or 0))
+            grouped_away.add(str(raw.get("value")))
+
+    out = []
+
+    for value, count in entries:
+        if str(value) in grouped_away:
+            continue
+
+        counts = members.get(str(value)) or []
+        out.append((value, count + sum(counts), len(counts) + 1))
+
+    return out
+
+
+def _spelling_suffix(spellings: int) -> str:
+    return f", {spellings} spellings" if spellings > 1 else ""
+
+
+def _exhaustive_keys(stats: dict[str, Any], entries: list[tuple[Any, int]]) -> str:
+    """The whole domain, one key per category."""
+
+    keys = [
+        _format_value(value)
+        if spellings == 1
+        else f"{_format_value(value)} ({total}{_spelling_suffix(spellings)})"
+        for value, total, spellings in _grouped_entries(stats, entries)
+    ]
+
+    return " / ".join(keys)
 
 
 def _value_entries(stats: dict[str, Any]) -> list[tuple[Any, int]]:

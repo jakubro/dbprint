@@ -80,6 +80,8 @@ Value lists appear in all three shapes:
 - **Truncated** — every `foreign_key_candidate` column above (30 entries against the connection's `top_n_values: 30`); `accession.sheet_number` similarly
 - **Empty** — `accession.storage_temperature_c`, the drift-added column, 100% null: `values: []`, `values_coverage: 1.0`, `classification: categorical`, `cardinality: 0` — SPEC §2.2.7's all-null-column resolution, exercised by a real schema change rather than an authored fixture
 
+**A spelling group** (SPEC §2.2.4): `germination_trial.medium` lists `Sand Tray` carrying `spelling_of: sand tray` — one medium recorded two ways, published as two entries that say they are one category. Both stay listed and both count toward `cardinality`, so a consumer reading literals and a consumer reading categories each get what they came for.
+
 ## Inferred semantics
 
 15 of the format's 32 `looks_like` patterns appear; the remaining 17 have no honest column in this domain and are demonstrated in `vocabulary/` instead (see [`vocabulary/README.md`](vocabulary/README.md)):

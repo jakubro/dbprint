@@ -874,12 +874,49 @@ class TestStatistics:
                 if s.cardinality is None:
                     continue
 
-                if s.cardinality <= empty_stats_config.top_n_values and counts.rows_scanned:
+                inside_bound = s.cardinality <= empty_stats_config.enumeration_threshold
+
+                if inside_bound and counts.rows_scanned:
                     assert len(s.values) == s.cardinality, (
-                        f"{t.fqn}.{name}: {s.cardinality} distinct values under the cap "
+                        f"{t.fqn}.{name}: {s.cardinality} distinct values inside the bound "
                         f"but only {len(s.values)} listed"
                     )
                     assert s.values_coverage == 1.0
+
+    def test_a_closed_domain_above_top_n_values_is_still_enumerated_in_full(
+        self,
+        sql_adapter_factory: tuple[str, Callable[[], Adapter]],
+    ) -> None:
+        """SPEC 2.2.4: `enumeration_threshold` bounds the list, `top_n_values` only samples."""
+
+        _, factory = sql_adapter_factory
+        adapter = factory()
+        config = StatisticsConfig(enumeration_threshold=WIDE_DISTINCT, top_n_values=5)
+        banded = 0
+
+        for t in _tables_with_columns(adapter):
+            cols = adapter.introspect_columns(t.fqn)
+            counts, stats = adapter.compute_statistics(t.fqn, cols, config, frozenset())
+
+            for name, s in stats.items():
+                if s.values is None or s.cardinality is None or not counts.rows_scanned:
+                    continue
+
+                if not config.top_n_values < s.cardinality <= config.enumeration_threshold:
+                    continue
+
+                banded += 1
+                assert len(s.values) == s.cardinality, (
+                    f"{t.fqn}.{name}: {s.cardinality} distinct values inside the bound "
+                    f"but only {len(s.values)} listed"
+                )
+
+                if s.values_coverage is not None:
+                    assert s.values_coverage == 1.0, (
+                        f"{t.fqn}.{name}: complete list reports coverage {s.values_coverage}"
+                    )
+
+        assert banded, "no column sat between top_n_values and enumeration_threshold"
 
     def test_values_tie_break_lexicographic(
         self,

@@ -991,15 +991,36 @@ local checkout before the loader above is given a path at all.
 a local path is never mistaken for a remote one; `materialize` is the impure
 half.
 
-dbprint shells out to `git` - clone once, `git pull --ff-only` to refresh -
-so credentials are git's own: an SSH agent or a credential helper already
-configured on the machine. dbprint holds none of its own, and `git` must be
-on `PATH`, behind the same `shutil.which` guard the postgres adapter puts in
-front of `pg_dump`.
+dbprint shells out to `git` - clone once, then fetch the address's ref and
+reset the cache onto it - so credentials are git's own: an SSH agent or a
+credential helper already configured on the machine. dbprint holds none of
+its own, and `git` must be on `PATH`, behind the same `shutil.which` guard
+the postgres adapter puts in front of `pg_dump`.
+
+Refreshing by fetch-and-reset rather than by merge is what makes a branch, a
+tag and a history rewritten upstream one path: the cache is a disposable
+mirror, nothing writes into it, and a ref that moved sideways is followed
+rather than merged. Every git call names the cache's own repository through
+`--git-dir`, never `-C`, so git cannot discover an enclosing checkout and
+reset that instead.
+
+An address's ref is checked out after the clone rather than selected during
+it, so a branch, a tag, a short SHA and a full SHA are one path - `clone
+--branch` takes a ref name and refuses a commit id, which is exactly what a
+forge permalink carries. Whether that ref can move is then git's answer too:
+`rev-parse --symbolic-full-name` names a branch or a tag and says nothing for
+a commit, and a commit-pinned entry is cloned once and never refreshed, since
+a fetch could only ever return what is already on disk. A branch named like a
+hash therefore stays a branch.
 
 Clones land under `CACHE_ROOT` (`~/.dbprint/cache/`), keyed by remote and
 ref, and are reused for `CACHE_TTL_SECONDS` - 15 minutes - before the next
 command refreshes them. The TTL is fixed: no override, no `--refresh` flag.
+The freshness stamp records the attempt, not the success, so one unreachable
+remote costs one fetch per TTL rather than one per invocation; a refresh that
+fails over a cache still readable is reported on stderr and the run continues
+against it, while one whose cache cannot answer a read at all discards the
+directory and clones again, and a failure there is fatal.
 A long-lived process (`dbprint serve`, `dbprint docs serve`) calls
 `keep_fresh` once at startup, which refreshes its clone in the background on
 that schedule rather than fetching per request.

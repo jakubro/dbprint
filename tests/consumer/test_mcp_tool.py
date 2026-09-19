@@ -96,6 +96,32 @@ def test_redacted_column_carries_no_real_literal(adversarial_print: AdversarialP
     assert "a@example.com" not in _md(adversarial_print, SCOPED_TABLE)
 
 
+def test_resolve_value_refuses_a_redacted_column(adversarial_print: AdversarialPrint) -> None:
+    """The lookup reads the same value list; a redacted one has no literal to resolve against."""
+
+    result = _dict_result(
+        adversarial_print,
+        "resolve_value",
+        {"table": SCOPED_TABLE, "column": REDACTED_COLUMN, "text": "a@example.com"},
+    )
+
+    assert result["match"] == "unavailable"
+    assert "redacted" in result["reason"]
+
+
+def test_resolve_value_says_a_truncated_list_is_a_sample(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    result = _dict_result(
+        adversarial_print,
+        "resolve_value",
+        {"table": SCOPED_TABLE, "column": TRUNCATED_FK_COLUMN, "text": "rank-00"},
+    )
+
+    assert result["match"] == "stored"
+    assert "not evidence" in result["sample_caveat"]
+
+
 def test_future_dated_temporal_freshness_reads_live(adversarial_print: AdversarialPrint) -> None:
     statistics = _statistics(adversarial_print, SCOPED_TABLE)
     shipped_at = statistics["columns"][FUTURE_DATED_COLUMN]

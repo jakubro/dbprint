@@ -42,8 +42,8 @@ class TestErrorConstructors:
         err = errors.malformed_uri("not://a/dbprint/uri")
         assert err.code == -32602
 
-    def test_missing_table_argument(self) -> None:
-        err = errors.missing_table_argument("")
+    def test_missing_argument(self) -> None:
+        err = errors.missing_argument("table", "")
         assert err.code == -32602
         assert "non-empty string" in err.detail
 

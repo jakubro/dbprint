@@ -10,7 +10,7 @@ A print conforms when no `error` is raised against it. A `warning` records an an
 gate conformance; [SPEC 6.1](../format/v1/SPEC.md#61-severity-model) defines both, and
 [SPEC 6.2](../format/v1/SPEC.md#62-issue-document-shape) defines the issue each one is reported in.
 
-135 codes: 107 error, 28 warning.
+137 codes: 109 error, 28 warning.
 
 | Code | Severity | Specified in | Trigger |
 |---|---|---|---|
@@ -127,6 +127,8 @@ gate conformance; [SPEC 6.1](../format/v1/SPEC.md#61-severity-model) defines bot
 | `stats.sketch-oversized` | error | [Statistics invariants (§2.2)](../format/v1/SPEC.md#statistics-invariants-22) | A decoded `sketch.values` carries more entries than `method`'s own k (§2.2.14) |
 | `stats.sketch-unknown-method` | error | [Statistics invariants (§2.2)](../format/v1/SPEC.md#statistics-invariants-22) | `sketch.method` is not a value this MAJOR defines (§2.2.14) |
 | `stats.span-days-mismatch` | error | [Statistics invariants (§2.2)](../format/v1/SPEC.md#statistics-invariants-22) | `range.span_days` disagrees with `day_count(range.min, range.max)` (§2.2.4). Skipped when either bound is redacted (`mask`/`hash`), named in `unrepresentable`, or not a parseable ISO date/instant |
+| `stats.spelling-of-key-mismatch` | error | [Statistics invariants (§2.2)](../format/v1/SPEC.md#statistics-invariants-22) | A `values` entry's `value` and its `spelling_of` do not fold to one key - trimmed and case-folded, the key `normalized_cardinality` is measured with - so the group was formed under a key §2.2.4 forbids |
+| `stats.spelling-of-target-unlisted` | error | [Statistics invariants (§2.2)](../format/v1/SPEC.md#statistics-invariants-22) | A `values` entry's `spelling_of` names a value the same list does not carry as a canonical member - an entry with no `spelling_of` of its own (§2.2.4) |
 | `stats.timeline-anchor-not-temporal` | error | [Statistics invariants (§2.2)](../format/v1/SPEC.md#statistics-invariants-22) | `timeline.column` names a column whose `classification` is not `temporal` (§2.2.16) |
 | `stats.timeline-anchor-redacted` | error | [Statistics invariants (§2.2)](../format/v1/SPEC.md#statistics-invariants-22) | `timeline.column` names a column carrying a `redacted` marker - the anchor rule MUST NOT choose a redacted column (§2.2.16) |
 | `stats.timeline-buckets-unordered` | error | [Statistics invariants (§2.2)](../format/v1/SPEC.md#statistics-invariants-22) | `timeline.buckets` is not ascending by `start` (§2.2.16) |

@@ -963,7 +963,48 @@ columns:
       count: 1
     - value: 27
       count: 1
-    values_coverage: 0.5
+    - value: 28
+      count: 1
+    - value: 29
+      count: 1
+    - value: 3
+      count: 1
+    - value: 30
+      count: 1
+    - value: 31
+      count: 1
+    - value: 32
+      count: 1
+    - value: 33
+      count: 1
+    - value: 34
+      count: 1
+    - value: 35
+      count: 1
+    - value: 36
+      count: 1
+    - value: 37
+      count: 1
+    - value: 38
+      count: 1
+    - value: 39
+      count: 1
+    - value: 4
+      count: 1
+    - value: 40
+      count: 1
+    - value: 5
+      count: 1
+    - value: 6
+      count: 1
+    - value: 7
+      count: 1
+    - value: 8
+      count: 1
+    - value: 9
+      count: 1
+    values_coverage: 1.0
+    values_coverage_method: measured
     distribution: uniform
     sketch:
       method: kmv_md5_lo64

@@ -1,4 +1,4 @@
-"""Shared `values_coverage` arithmetic per SPEC 2.2.4.
+"""Shared `values_coverage` arithmetic and value-list bound per SPEC 2.2.4.
 
 One definition for both adapters and the conformance validator, so they cannot round apart.
 """
@@ -8,6 +8,15 @@ from __future__ import annotations
 
 # Clamps a truncated list below 1.0 so a validator's tolerance can never read it as exhaustive.
 TRUNCATED_CLAMP = 0.999999
+
+
+def enumeration_limit(enumeration_threshold: int, top_n_values: int) -> int:
+    """The distinct count up to which a column's values are published in full (SPEC 2.2.4).
+
+    The greater of the two settings, so neither can cut a list the other one admits.
+    """
+
+    return max(enumeration_threshold, top_n_values)
 
 
 def coverage_share(listed: int, non_null: int, *, exhaustive: bool) -> float:

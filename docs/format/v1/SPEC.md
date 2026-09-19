@@ -450,15 +450,24 @@ inferred:
 ```yaml
 values:
   - { value: <scalar>, count: <int> }
+  - { value: <scalar>, count: <int>, spelling_of: <scalar> }   # OPTIONAL; see below
 ```
 
 One ordered list describes every column that carries value data. Entries are ordered by `count` DESC, with ties broken by lexicographic order on the string form of `value` — deterministic across runs. Values MUST be strings, numbers, or booleans. NULL MUST NOT appear (NULL is tracked separately via `null_count`). On `numeric` and `temporal`, `value` is rendered exactly as `range`/`percentiles` render it (§2.2.4's domain-rendering rule below), and the list is drawn from the same top-N fetch `frequencies` (below) already issues — a producer MUST NOT issue a second statement to obtain it.
 
-**How much of the column the list describes is decided by cardinality, not by classification.** When the column's distinct count is at most `top_n_values` (config; default 20) the list is exhaustive and carries every distinct non-null value. Above it, the list carries the `top_n_values` most frequent entries. A producer MUST NOT decide this from the classification: a low-cardinality column is enumerated in full whether it is `boolean`, `categorical`, `foreign_key_candidate` or `text`.
+**How much of the column the list describes is decided by cardinality, not by classification.** The bound is `enumeration_threshold` (config; default 50), or `top_n_values` (config; default 20) where that is larger. When the column's distinct count is at most the bound the list is exhaustive and carries every distinct non-null value; above it, the list carries the `top_n_values` most frequent entries. The two settings therefore divide one question between them: `enumeration_threshold` is what makes a domain closed (§3.1), so it is how far a closed domain is published, and `top_n_values` is how much of an open one is sampled. A producer MUST NOT decide this from the classification: a low-cardinality column is enumerated in full whether it is `boolean`, `categorical`, `foreign_key_candidate` or `text`.
 
 **An exhaustive list's entry count equals `cardinality`.** "Carries every distinct non-null value" means the number of entries IS the distinct count - a producer publishing `values_coverage: 1.0` with a list shorter or longer than `cardinality` has broken this obligation regardless of what its row-level counts sum to.
 
 A list rather than a map, because YAML and JSON mappings are unordered by definition — an ordering rule on a mapping asks consumers to honor something their parsers may discard.
+
+**`spelling_of`** (OPTIONAL, on an entry): the listed value this entry is another spelling of. A column filled from more than one source holds `Active`, `ACTIVE` and `active` as three values, and a consumer reading three entries reads three categories; this field says which of them are one category stored several ways.
+
+- Two entries group when their values are strings that fold to one key: trimmed and case-folded, the same normalization `normalized_cardinality` (§2.2.3) measures with. A producer MUST NOT group under any other key — a consumer that reads a group as one category is entitled to the same rule the count beside it was measured under.
+- The canonical member is the group's most frequent spelling; ties go to the order §2.2.4 already fixes. It carries no `spelling_of`; every other member carries one naming it.
+- Grouping applies to the entries a producer lists, exhaustive and sampled alike, and never changes what is listed: both spellings stay entries, and both count toward `cardinality` and `values_coverage`. A consumer wanting the category adds their counts; one wanting the literal has each spelling as stored.
+- A producer MUST NOT emit `spelling_of` on a redacted column (§2.2.9): the field names another entry's literal, which is what redaction withholds.
+- Where the recorded `collation` (§2.2.3) already folded two spellings before the count, there is one entry and no group — `spelling_of` describes what the producer listed, never what the database considers equal.
 
 **`values_coverage`** (present alongside `values` on every classification that admits it except `numeric` and `temporal`, where the matrix forbids it — `frequencies.total` (below) already carries the listed counts' sum, and a second name for that number is the rederivation §2.2.4 elsewhere exists to avoid):
 
@@ -643,7 +652,7 @@ frequencies:
   total: <int>     # the listed counts added up
 ```
 
-A fixed-size summary of the same top-N frequency fetch `distribution` (§2.2.5) is computed from. Both classifications carry a `values` list (above), but that list is truncated by construction — `cardinality` exceeds `enumeration_threshold` on every `numeric`/`temporal` column, so `values_coverage` is never emitted on either (above) and a validator has no exhaustive list to recompute `distribution` from. `frequencies` is what a validator checks it against instead: an exact, four-integer summary of the same fetch, never a share, so a consumer recomputes any ratio itself against the `non_null` and `cardinality` the column already publishes rather than trusting a rounded one.
+A fixed-size summary of the same top-N frequency fetch `distribution` (§2.2.5) is computed from. Both classifications carry a `values` list (above), but `values_coverage` is forbidden on either (above), so a validator has no exhaustive list to recompute `distribution` from. `frequencies` is what a validator checks it against instead: an exact, four-integer summary of the same fetch, never a share, so a consumer recomputes any ratio itself against the `non_null` and `cardinality` the column already publishes rather than trusting a rounded one.
 
 **`unrepresentable`** (temporal only, optional):
 
@@ -740,7 +749,7 @@ Enum: `uniform` | `imbalanced` | `dominant_value` | `long_tail`.
 Producers MUST evaluate the rules in this priority order; first match wins:
 
 1. `dominant_value` — top value's count / (rows_scanned - null_count) ≥ 0.95
-2. `long_tail` — cardinality > `top_n_values` AND sum of the listed counts / (rows_scanned - null_count) < 0.30
+2. `long_tail` — cardinality > the value-list bound (§2.2.4) AND sum of the listed counts / (rows_scanned - null_count) < 0.30
 3. `imbalanced` — max-frequency / min-frequency > 2× (over non-null values)
 4. `uniform` — fallthrough (max/min ratio ≤ 2×)
 
@@ -748,7 +757,7 @@ Where the `values` list is exhaustive (`values_coverage` of `1.0`), `long_tail` 
 
 A validator was not present at the scan and cannot see `rows_scanned` directly, so it checks steps 1 and 2 only where `values` is exhaustive, against the sum of the listed counts - which then equals `rows_scanned - null_count` exactly, since an exhaustive list already accounts for every non-null value the scan produced. A truncated list is not checked against this rule at all.
 
-`numeric` and `temporal` carry a `values` list (§2.2.4) but never an exhaustive one - `values_coverage` is forbidden on both, so the check above, which fires only where the list is exhaustive, cannot reach them; `frequencies` (§2.2.4) exists to close that gap. Its four integers reproduce the same priority order over the scanned set (`non_null`) and `cardinality` the column already publishes: `top` decides step 1, `total` decides step 2's ratio, and the `top`-to-`bottom` spread decides steps 3 and 4. A validator reads the fetch's own exhaustiveness from `listed == cardinality`, when `cardinality_method` is `exact` - an approximate cardinality is not guaranteed to equal the fetch's own count of distinct groups, so a validator MUST NOT check `distribution` against `frequencies` on such a column.
+`numeric` and `temporal` carry a `values` list (§2.2.4), but `values_coverage` is forbidden on both, so the check above, which fires only where the list is exhaustive, cannot reach them; `frequencies` (§2.2.4) exists to close that gap. Its four integers reproduce the same priority order over the scanned set (`non_null`) and `cardinality` the column already publishes: `top` decides step 1, `total` decides step 2's ratio, and the `top`-to-`bottom` spread decides steps 3 and 4. A validator reads the fetch's own exhaustiveness from `listed == cardinality`, when `cardinality_method` is `exact` - an approximate cardinality is not guaranteed to equal the fetch's own count of distinct groups, so a validator MUST NOT check `distribution` against `frequencies` on such a column.
 
 #### 2.2.6 Numerical precision
 
@@ -2371,6 +2380,8 @@ Grouped by concern. `E` = error, `W` = warning.
 | `stats.values-list-short-of-cardinality-bounded` | W | The same disagreement as `stats.values-list-short-of-cardinality`, where `values_coverage_method: bounded` (§2.2.4) already discloses that `values_coverage` is a clamp, not a measurement read at the same instant as `cardinality`. WARNING because the producer has already named the cause this error exists to catch |
 | `stats.values-list-exceeds-cardinality` | W | An exhaustive `values` list carries more entries than `cardinality`, `cardinality_method: exact`. WARNING for the same cross-phase reason as `stats.values-sum-mismatch` |
 | `stats.values-not-ordered` | E | `values` entries are not ordered by `count` DESC with a lexicographic tie-break (§2.2.4) |
+| `stats.spelling-of-target-unlisted` | E | A `values` entry's `spelling_of` names a value the same list does not carry as a canonical member - an entry with no `spelling_of` of its own (§2.2.4) |
+| `stats.spelling-of-key-mismatch` | E | A `values` entry's `value` and its `spelling_of` do not fold to one key - trimmed and case-folded, the key `normalized_cardinality` is measured with - so the group was formed under a key §2.2.4 forbids |
 | `stats.distribution-mismatch` | W | When verifiable from an exhaustive `values` list, distribution value doesn't match §2.2.5 rules. WARNING because heuristic-prone for truncated lists and exact-match boundaries. |
 | `stats.distribution-contradicts-frequencies` | E | On a `numeric`/`temporal` column with `cardinality_method: exact`, `distribution` disagrees with the verdict recomputed from `frequencies` (§2.2.5). ERROR because the two come from the same fetch and are exact arithmetic, not a heuristic over a possibly-truncated list |
 | `stats.scope-not-a-mapping` | E | `scope` is present but is not a mapping (§2.2.8) |
@@ -2497,8 +2508,8 @@ Grouped by concern. `E` = error, `W` = warning.
 
 ### 6.4 Catalog totals
 
-- **135 codes** across 10 groups
-- **107 error** codes (gate conformance)
+- **137 codes** across 10 groups
+- **109 error** codes (gate conformance)
 - **28 warning** codes (recoverable anomalies)
 
 The catalog MAY grow in MINOR releases (additive only). Existing codes' semantics MUST NOT change.

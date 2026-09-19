@@ -111,8 +111,8 @@ Sampling is not the only lever. Two `statistics` keys cut cost on wide tables wi
 
 | Key | Default | Effect |
 |---|---|---|
-| `enumeration_threshold` | `50` | Cardinality at or below this makes a column `categorical`; above it, the column classifies by type and may carry a range instead of a value list |
-| `top_n_values` | `20` | Cap on the `values` list; `values_coverage` states how much of the column the listed entries account for |
+| `enumeration_threshold` | `50` | Cardinality at or below this makes a column `categorical` and publishes its values in full; above it, the column classifies by type and may carry a range instead of a value list |
+| `top_n_values` | `20` | How many entries a `values` list samples once cardinality passes `enumeration_threshold`; `values_coverage` states how much of the column the listed entries account for |
 
 Lowering `enumeration_threshold` is the cheapest single change on a wide table.
 

@@ -170,14 +170,15 @@ Tuning for [SPEC 2.2](format/v1/SPEC.md). Every key is optional.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `enumeration_threshold` | int | `50` | Cardinality ≤ this makes a column `categorical`; above it the column classifies by type and may carry a range instead |
-| `top_n_values` | int | `20` | Cap on the `values` list. A column with at most this many distinct values is enumerated in full, whatever its classification |
+| `enumeration_threshold` | int | `50` | Cardinality ≤ this makes a column `categorical`; above it the column classifies by type and may carry a range instead. It is also how far a `values` list enumerates: a column at or below it publishes every distinct value, whatever its classification |
+| `top_n_values` | int | `20` | How many entries the `values` list samples on a column whose cardinality exceeds `enumeration_threshold`. Raise it above that threshold and it becomes the enumeration bound instead |
 | `top_n_null_patterns` | int | `20` | Cap on the `null_patterns` list — how many distinct combinations of null columns a table publishes. `null_patterns.coverage` states what share of the rows the listed combinations account for |
 | `looks_like_sample_size` | int | `1000` | Distinct non-null values sampled for `inferred.looks_like` detection |
 | `percentiles` | list of int | `[1, 25, 50, 75, 99]` | **Integer percents in 1..99.** Fractions such as `0.25` are rejected at load |
 
-Lowering `enumeration_threshold` is the cheapest way to cut cost on a wide table: the
-`values` list is bounded by `top_n_values`, and `values_coverage` states how much of the column it covers.
+Lowering `enumeration_threshold` is the cheapest way to cut cost on a wide table: fewer columns
+are enumerated in full, and the ones that still are carry fewer values. `values_coverage` states
+how much of the column the listed entries cover.
 
 ### `rules`
 
@@ -507,6 +508,11 @@ without cloning it by hand first:
 GitLab (`/-/blob/<ref>/<path>`) and Bitbucket (`/src/<ref>/<path>`) web URLs parse the same way.
 A bare remote always means the repository root at its default branch - a `.dbprint.yaml` nested
 under one is never discovered from the bare form.
+
+`<ref>` is anything git can check out: a branch, a tag, a full commit SHA or a short one - so a
+permalink copied from a forge, which pins a commit, resolves like any other address. A branch
+and a tag are re-read at most once every 15 minutes; a commit cannot move, so an address pinned
+to one is fetched when it is first cached and never again.
 
 ---
 

@@ -136,6 +136,24 @@ class TestFlags:
         assert result.exit_code == 0
         assert "## DDL" not in result.output
 
+    def test_purpose_query_swaps_the_statistics_for_the_value_table(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _write_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(
+            main,
+            ["context", "seedbank.accession", "--purpose", "query"],
+        )
+
+        assert result.exit_code == 0
+        assert "## Column values" in result.output
+        assert "## DDL" in result.output
+        assert "Cardinality" not in result.output
+
     def test_no_annotations_omits_annotations_section(
         self,
         tmp_path: Path,

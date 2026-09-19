@@ -75,7 +75,7 @@ At MCP handshake the server MUST advertise:
 }
 ```
 
-MCP's `InitializeResult` carries no `description` field - `serverInfo` is name/version only, and free-text server description travels as the top-level `instructions` string instead. `instructions` is delivered unprompted on every connect, so it carries the floor a consumer needs before any tool call: which population a number describes (`scope`), that `inferred` fields are guesses rendered like measurements, and that an absent field was never measured rather than safe to assume zero - then points at `search_columns` as the entry point and the `reading` resource for the rest. Some clients ignore `instructions` entirely, so every tool description below stands alone rather than depending on it having been read.
+MCP's `InitializeResult` carries no `description` field - `serverInfo` is name/version only, and free-text server description travels as the top-level `instructions` string instead. `instructions` is delivered unprompted on every connect, so it carries the floor a consumer needs before any tool call: which population a number describes (`scope`), that `inferred` fields are guesses rendered like measurements, and that an absent field was never measured rather than safe to assume zero. It then states the two rules for the task most agents open the server for - read `get_table_context` with `purpose: query` before writing SQL and join through its Joins list, which carries the edges the catalog never declared beside the DDL's own keys, and call `resolve_value` before writing a literal the context does not list in full - and points at `search_columns` as the entry point and the `reading` resource for the rest. The shipped reading guide states the same two facts in the print's own files and fields, for a reader holding the print and no server. Some clients ignore `instructions` entirely, so every tool description below stands alone rather than depending on it having been read.
 
 `version` MUST equal the installed dbprint package version (`importlib.metadata.version("dbprint")`).
 
@@ -166,7 +166,20 @@ Resource entries returned by `resources/list` include `uri`, `name` (human-reada
 
 ### 4.1 `get_table_context`
 
-Returns an assembled context fragment for one table — DDL + statistics + relationships + description + annotations, formatted for direct insertion into an LLM prompt. A budgeted call may omit sections to fit and never returns empty on success; the truncation marker in the result names what was dropped, down to the whole table when nothing fits.
+Returns an assembled context fragment for one table, formatted for direct insertion into an LLM prompt. A budgeted call may omit sections to fit and never returns empty on success; the truncation marker in the result names what was dropped, down to the whole table when nothing fits.
+
+`purpose` selects what the fragment is for, and is the first thing a caller decides:
+
+| `purpose` | Sections | For |
+|---|---|---|
+| `profile` (default) | Header, DDL, Description, Annotations, Cardinality table, Relationships | Describing the data: what was measured and how much of it |
+| `query` | Header (identity + scope), DDL, Joins, Data dictionary, Column values | Writing SQL against the table: what the columns mean, what they join to, and which literals they hold |
+
+Under `query` the fragment carries no statistics, no null patterns and no physical layout. The join paths are the `## Joins` list: every edge in `relationships.yaml`, one line each as `<column> -> <table>.<column> (<detection>)` or `<column> <- <table>.<column> (<detection>)`, so an edge the print inferred or measured on a table whose catalog declares no key is still on the surface - and nothing measured about an edge (fan-out, coverage, referential actions) rides along. An edge a human rejected in `relationships.annotations.yaml` carries the rejection marker. The section is absent on a table with no edge.
+
+The value table is what licenses an exact-match predicate, and it carries only the lists a predicate can be written from: a column whose `values_coverage` is `1.0` is rendered in full, one `<value> (<count>)` entry per value, with the coverage cell stating that the list is the column's whole domain; a column with a coverage below `1.0` shows its five most frequent values (a spelling group counting as one), with the coverage cell stating the share of the column those five cover and that they are a sample. A column with no `values_coverage` - `numeric` and `temporal`, whose list is a frequency sample and never a domain (SPEC 2.2.3) - has no row. A value carrying a note in `statistics.annotations.yaml` renders it inline (`<value> (<count>) = <note>`); a redacted column publishes its counts and no literal; a scoped table's exhaustive list says so over the rows scanned, never over the table.
+
+`include_ddl`, `include_description`, `include_annotations` and `include_relationships` narrow the `query` selection the way they narrow `profile` - `include_relationships` governs the Joins list; `include_stats` has nothing to drop there.
 
 ```json
 {
@@ -176,9 +189,10 @@ Returns an assembled context fragment for one table — DDL + statistics + relat
     "properties": {
       "table": { "type": "string", "description": "Fully-qualified table name" },
       "conn": { "type": "string", "description": "Optional; falls back to default connection" },
-      "format": { "enum": ["md", "json", "yaml"], "default": "md", "description": "md renders DDL, description, annotations and a per-column Notes summary only - not the raw statistics/relationships fields json and yaml carry. Both omit each column's sketch payload; the verbatim statistics.yaml, sketch included, is reachable as the dbprint://<conn>/<fqn>/statistics resource." },
-      "include_stats": { "type": "boolean", "default": true, "description": "Include the Cardinality table (md) or statistics object (json/yaml)" },
-      "include_relationships": { "type": "boolean", "default": true, "description": "Include the Relationships section (md) or relationships object (json/yaml)" },
+      "purpose": { "enum": ["profile", "query"], "default": "profile", "description": "profile: the table described - statistics, relationships, notes. query: what to read before writing SQL - DDL, the Joins list, data dictionary, and the value lists with counts and coverage, and nothing measured" },
+      "format": { "enum": ["md", "json", "yaml"], "default": "md", "description": "md renders the chosen purpose as Markdown - under `profile`, a per-column Notes summary rather than the raw statistics fields json and yaml carry. All three omit each column's sketch payload; the verbatim statistics.yaml, sketch included, is reachable as the dbprint://<conn>/<fqn>/statistics resource." },
+      "include_stats": { "type": "boolean", "default": true, "description": "Include the Cardinality table (md) or statistics object (json/yaml); no effect under `query`, which carries neither" },
+      "include_relationships": { "type": "boolean", "default": true, "description": "Include the Relationships section (md) or relationships object (json/yaml); under `query`, the Joins list" },
       "include_description": { "type": "boolean", "default": true, "description": "Include the table's description.md, when authored" },
       "include_annotations": { "type": "boolean", "default": true, "description": "Include statistics.annotations.yaml notes and claims, when authored" },
       "budget_tokens": { "type": "integer", "minimum": 1, "description": "Soft cap in tokens; sections drop whole in priority order once exceeded, never truncated mid-section" }
@@ -190,11 +204,11 @@ Returns an assembled context fragment for one table — DDL + statistics + relat
 
 Return:
 
-- `format: "md"` -> a markdown string with the standard sections (Header, DDL, Description, Annotations, Cardinality table, Relationships).
-- `format: "json"` -> a structured object with `table`, `ddl`, `description`, `annotations`, `statistics`, `relationships`, `relationship_annotations` keys.
+- `format: "md"` -> a markdown string carrying the chosen purpose's sections.
+- `format: "json"` -> a structured object. Under `profile`: `table`, `ddl`, `description`, `annotations`, `statistics`, `relationships`, `relationship_annotations`. Under `query`: `table`, `ddl`, `values` (per column: the `entries` the Markdown shows with counts and notes, the column's `coverage`, the same coverage statement the Markdown renders, and for a sampled list `shown_coverage` - the share the shown entries cover), `joins` (`refers_to` and `referenced_by`, each edge as its columns, its table and its `detection`, plus `rejected` where a human overruled it), `dictionary` (column -> note) and `description`.
 - `format: "yaml"` -> the same structured object emitted as YAML.
 
-`budget_tokens` is a soft cap; sections drop in priority order when the budget would be exceeded. Token counting MAY be approximate.
+`budget_tokens` is a soft cap; sections drop in priority order when the budget would be exceeded. Token counting MAY be approximate. Under `query` that order is DDL, then the value table, then the Joins list, then the data dictionary, then the header.
 
 `format: "json"` or `"yaml"` carries a `_corrupted` field naming every declared artifact (`statistics`, `relationships`, `statistics_annotations`, `relationships_annotations`) that failed to parse, mapped to the parse-error message; absent when nothing was corrupt. `format: "md"` prepends the same information as a note before the rendered sections. A corrupt artifact still degrades that one section rather than failing the call - this field is what tells a corrupt file from one the object's type never had.
 
@@ -343,6 +357,42 @@ Return: a markdown string.
 
 ---
 
+### 4.7 `resolve_value`
+
+Resolves a phrase, a code or a spelling against one column's published values — what a caller reads before writing a literal into a filter. Offline: the column's `values` list, its counts, and any `values[].note` in `statistics.annotations.yaml`. No database, and no second artifact.
+
+```json
+{
+  "name": "resolve_value",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "table": { "type": "string", "description": "Fully-qualified table name" },
+      "column": { "type": "string", "description": "Column name as the print spells it" },
+      "text": { "type": "string", "description": "The phrase, code or spelling to resolve" },
+      "conn": { "type": "string", "description": "Optional; falls back to default connection" }
+    },
+    "required": ["table", "column", "text"]
+  }
+}
+```
+
+The reply carries `table`, `column`, `text` and a `match`, which is the first of these that applies:
+
+| `match` | Meaning | Carries |
+|---|---|---|
+| `stored` | `text` is a listed value, or folds to one under the normalization key (SPEC 2.2.4: trimmed, lower-cased) | `spellings` — every listed spelling that folds to it, each with its count and its note. Several means one category stored several ways: a predicate needs all of them |
+| `definition` | `text` names what a value's note says it means, matched on word boundaries either way round | `candidates` — every value whose note matches, with counts and notes |
+| `nearest` | Neither, but listed values resemble `text` | `candidates` — up to five, ranked by trigram similarity above a floor, each carrying its `score` |
+| `none` | Nothing resembled it | — |
+| `unavailable` | The column publishes no values, or publishes them redacted | `reason` |
+
+Every reply carries `coverage` (the column's `values_coverage`, `null` where the classification publishes none), `exhaustive` (whether the list carries every distinct value the column has - `values_coverage` of `1.0`, or on a `numeric`/`temporal` column `frequencies.listed` equal to an exact `cardinality`, SPEC 2.2.5) and `listed` (how many entries the print carries). Where the list is not exhaustive the reply also carries `sample_caveat`, a fixed sentence stating that a spelling absent from a sample is not evidence it is absent from the column. Where the list IS exhaustive and at most fifty entries long, the reply carries `domain`: the whole list with counts and notes, so a small vocabulary needs exactly one call.
+
+A `match: "none"` is an answer, not an error. An unknown table fails per §8.2 as `get_table_context` does; an unknown column fails the same way, its detail naming the columns that table's statistics do carry. A `statistics.yaml` the manifest declares but that is absent from disk, or that does not parse, fails with the same errors §8.2 lists for those conditions - never as an unknown column; a `statistics.annotations.yaml` that does not parse fails the same way, since the notes it would carry are part of the answer. A table that declares no statistics artifact answers `match: "unavailable"` with that reason.
+
+---
+
 ## 5. Multi-connection model
 
 ### 5.1 Default connection resolution
@@ -450,6 +500,10 @@ Two channels, not one. `resources/read` failures are genuine JSON-RPC protocol e
 | `get_table_context` called with `format` outside its declared enum | `"format 'yml' must be one of ['md', 'json', 'yaml']."` |
 | `get_table_context` called with `budget_tokens` below its declared minimum | `"budget_tokens 0 must be an integer >= 1."` |
 | `search_columns` called with an empty `pattern` | `"pattern '' is malformed fnmatch."` |
+| `resolve_value` called with an empty `table`, `column` or `text` | `"text '' must be a non-empty string."` |
+| `resolve_value` called with a `column` the table's statistics do not carry | `"column 'rnk' not found in table 'seedbank.taxon'. Columns: rank, scientific_name, taxon_id."` |
+| `resolve_value` on a table whose declared `statistics.yaml` is absent from disk | `"manifest references statistics.yaml but file is absent at <path>. Re-run dbprint generate."` |
+| `resolve_value` on a table whose `statistics.yaml` or `statistics.annotations.yaml` does not parse | `"<path>: YAML parse error: <message>"` |
 | No `conn` given when no default exists | `"no default connection; pass conn explicitly. Configured: ['a', 'b', 'c']"` |
 | Manifest references a file that is absent on disk | `"manifest references statistics.yaml but file is absent at <path>. Re-run dbprint generate."` |
 | `get_diff` with no committed diff for the connection | `"no diff available at <path>. Run dbprint diff or dbprint generate first."` |

@@ -18,6 +18,7 @@ from dbprint.spec.classification import (
 )
 from dbprint.spec.coverage import coverage_share, is_incoherent
 from dbprint.spec.looks_like import MATCH_THRESHOLD
+from dbprint.spec.normalization import fold
 from dbprint.spec.redaction import REDACTED_DAY_COUNT_GRANULARITY
 from dbprint.spec.sketch import METHOD as SKETCH_METHOD
 from dbprint.spec.sketch import K as SKETCH_K
@@ -269,6 +270,7 @@ def check(data: Any, path: str, tbl_fqn: str) -> list[Issue]:
             _check_population_marker(col, col_path, scoped=scoped, rows_scanned=rows_scanned),
         )
         issues.extend(_check_value_order(col, col_path))
+        issues.extend(_check_spelling_groups(col, col_path))
         issues.extend(_check_redaction_marker(col, col_path))
         issues.extend(_check_unredacted_sensitive(col, col_path))
         issues.extend(_check_distribution(col, col_path))
@@ -1594,6 +1596,53 @@ def _check_value_order(col: dict, col_path: str) -> list[Issue]:
             "§2.2.4",
         ),
     ]
+
+
+def _check_spelling_groups(col: dict, col_path: str) -> list[Issue]:
+    """A `spelling_of` names a canonical entry of the same list, and folds to it (SPEC 2.2.4)."""
+
+    values = col.get("values")
+
+    if not isinstance(values, list):
+        return []
+
+    entries = [e for e in values if isinstance(e, dict)]
+    canonical = {str(e["value"]) for e in entries if "value" in e and "spelling_of" not in e}
+    issues = []
+
+    for entry in entries:
+        if "spelling_of" not in entry:
+            continue
+
+        target = entry["spelling_of"]
+        value = entry.get("value")
+
+        if str(target) not in canonical:
+            issues.append(
+                Issue(
+                    col_path,
+                    "stats.spelling-of-target-unlisted",
+                    "error",
+                    f"values entry {value!r} carries spelling_of={target!r}, which is not a "
+                    "listed value without a spelling_of of its own.",
+                    "§2.2.4",
+                ),
+            )
+        elif not (isinstance(value, str) and isinstance(target, str)) or fold(value) != fold(
+            target,
+        ):
+            issues.append(
+                Issue(
+                    col_path,
+                    "stats.spelling-of-key-mismatch",
+                    "error",
+                    f"values entry {value!r} carries spelling_of={target!r} but the two do not "
+                    "fold to one key (trimmed, lower-cased).",
+                    "§2.2.4",
+                ),
+            )
+
+    return issues
 
 
 def _listed_total(values: list) -> int:

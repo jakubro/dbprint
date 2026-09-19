@@ -7,7 +7,7 @@ vocabulary, including codes only the CLI returns.
 
 from __future__ import annotations
 
-from .context_assembler import AssemblyOptions, AssemblyResult
+from .context_assembler import AssemblyOptions, AssemblyResult, Purpose
 from .context_assembler import assemble as assemble_context
 from .context_assembler import assemble_structured as assemble_structured_context
 from .freshness import DurationError, StaleEntry, parse_duration
@@ -56,6 +56,7 @@ __all__ = [
     "GenerateResult",
     "ProgressCallback",
     "ProgressEvent",
+    "Purpose",
     "SketchFailure",
     "StaleEntry",
     "SummaryCounts",

@@ -337,13 +337,11 @@ columns:
     null_count: 0
     null_rate: 0.0
     classification: categorical
-    cardinality: 6
-    cardinality_ratio: 0.006667
+    cardinality: 7
+    cardinality_ratio: 0.007778
     cardinality_method: exact
     values:
     - value: moist filter paper
-      count: 176
-    - value: sand tray
       count: 176
     - value: sterile grit
       count: 176
@@ -351,6 +349,11 @@ columns:
       count: 176
     - value: agar medium
       count: 175
+    - value: sand tray
+      count: 151
+    - value: Sand Tray
+      count: 25
+      spelling_of: sand tray
     - value: control
       count: 21
     values_coverage: 1.0
@@ -363,7 +366,7 @@ columns:
       p95: 18.0
     sketch:
       method: kmv_md5_lo64
-      values: VFJr7K0TbUtadk7z3CDFom7YqhNZMMR7qaQ6N9AAKEe7btn/Zv2B58weIEQagElf
+      values: VFJr7K0TbUtadk7z3CDFom7YqhNZMMR7qaQ6N9AAKEerKcMInyw9kbtu2f9m/YHnzB4gRBqASV8=
   sown_count:
     sql_type: integer
     nullable: false

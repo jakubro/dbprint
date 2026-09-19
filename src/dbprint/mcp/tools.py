@@ -10,7 +10,13 @@ from typing import Any, cast, get_args
 import yaml
 
 from dbprint.config import ConnectionConfig
-from dbprint.engine import AssemblyOptions, assemble_context, assemble_structured_context
+from dbprint.engine import (
+    AssemblyOptions,
+    Purpose,
+    assemble_context,
+    assemble_structured_context,
+    value_resolution,
+)
 from dbprint.engine.baseline import (
     declared_artifacts,
     manifest_shape_error,
@@ -30,6 +36,7 @@ TOOL_NAMES = (
     "get_table_context",
     "list_tables",
     "search_columns",
+    "resolve_value",
     "get_manifest",
     "get_diff",
     "get_reference",
@@ -49,9 +56,15 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
     ToolDef(
         name="get_table_context",
         description=(
-            "Return one table's DDL, statistics, relationships, description and "
-            "annotations as an assembled context fragment. A budgeted call may "
-            "omit sections to fit, and never returns empty on success - a "
+            "Return one table as an assembled context fragment, selected for what "
+            "the read is for. `purpose: profile` describes the data - DDL, "
+            "statistics, relationships, description and annotations. `purpose: "
+            "query` is what to read before writing SQL against the table - DDL, the "
+            "Joins list (every edge the print knows, declared or not, with its "
+            "detection), a data dictionary, and the value lists a predicate can be "
+            "written from, with their counts and coverage. A profile's statistics "
+            "describe the data rather than what a predicate needs. A budgeted "
+            "call may omit sections to fit, and never returns empty on success - a "
             "truncation marker names what was dropped or, for json/yaml, a "
             "`_corrupted` field names any declared artifact that failed to parse."
         ),
@@ -63,27 +76,41 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                     "type": "string",
                     "description": "Optional; falls back to default connection",
                 },
+                "purpose": {
+                    "enum": ["profile", "query"],
+                    "default": "profile",
+                    "description": (
+                        "profile: the table described - statistics, relationships, notes. "
+                        "query: what to read before writing SQL - DDL, the Joins list, data "
+                        "dictionary, and the value lists with counts and coverage, and "
+                        "nothing measured"
+                    ),
+                },
                 "format": {
                     "enum": ["md", "json", "yaml"],
                     "default": "md",
                     "description": (
-                        "md renders DDL, description, annotations and a per-column Notes "
-                        "summary only - not the raw statistics/relationships fields json "
-                        "and yaml carry. Both omit each column's sketch payload; the "
-                        "verbatim statistics.yaml, sketch included, is reachable as the "
+                        "md renders the chosen purpose as Markdown - under `profile`, a "
+                        "per-column Notes summary rather than the raw statistics fields "
+                        "json and yaml carry. All three omit each column's sketch payload; "
+                        "the verbatim statistics.yaml, sketch included, is reachable as the "
                         "dbprint://<conn>/<fqn>/statistics resource."
                     ),
                 },
                 "include_stats": {
                     "type": "boolean",
                     "default": True,
-                    "description": "Include the Cardinality table (md) or statistics object (json/yaml)",
+                    "description": (
+                        "Include the Cardinality table (md) or statistics object (json/yaml); "
+                        "no effect under `query`, which carries neither"
+                    ),
                 },
                 "include_relationships": {
                     "type": "boolean",
                     "default": True,
                     "description": (
-                        "Include the Relationships section (md) or relationships object (json/yaml)"
+                        "Include the Relationships section (md) or relationships object "
+                        "(json/yaml); under `query`, the Joins list"
                     ),
                 },
                 "include_description": {
@@ -218,6 +245,41 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
         },
     ),
     ToolDef(
+        name="resolve_value",
+        description=(
+            "Resolve a phrase, a code or a spelling against one column's published "
+            "values, before writing a literal into a filter. Answers, in order of "
+            "preference: `stored` - the text is a listed value, or folds to one, and "
+            "the reply carries the spelling a predicate must use; `definition` - the "
+            "text names what a value's note says it means; `nearest` - the listed "
+            "values closest to the text, ranked; `none`; or `unavailable` where the "
+            "column publishes no values. Every reply carries the column's `coverage` "
+            "and how many values the print `listed`, plus a caveat sentence wherever "
+            "that list is a sample - a spelling absent from a sample is not evidence "
+            "it is absent from the column. An exhaustive list of at most fifty values "
+            "rides along whole as `domain`, so a small vocabulary needs one call."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "table": {"type": "string", "description": "Fully-qualified table name"},
+                "column": {
+                    "type": "string",
+                    "description": "Column name as the print spells it",
+                },
+                "text": {
+                    "type": "string",
+                    "description": "The phrase, code or spelling to resolve",
+                },
+                "conn": {
+                    "type": "string",
+                    "description": "Optional; falls back to default connection",
+                },
+            },
+            "required": ["table", "column", "text"],
+        },
+    ),
+    ToolDef(
         name="get_manifest",
         description=(
             "Return the parsed manifest.yaml for a connection - an index of "
@@ -296,6 +358,9 @@ def dispatch(
     if name == "search_columns":
         return _tool_search_columns(state, arguments)
 
+    if name == "resolve_value":
+        return _tool_resolve_value(state, arguments)
+
     if name == "get_manifest":
         return _tool_get_manifest(state, arguments)
 
@@ -316,7 +381,7 @@ def _tool_get_table_context(
     table = arguments.get("table")
 
     if not table or not isinstance(table, str):
-        raise errors.missing_table_argument(str(table))
+        raise errors.missing_argument("table", str(table))
 
     manifest = _load_manifest(conn)
     entry = (manifest.get("tables") or {}).get(table) if manifest else None
@@ -326,9 +391,11 @@ def _tool_get_table_context(
 
     fmt = _validate_format(arguments.get("format"))
     budget = _validate_budget_tokens(arguments.get("budget_tokens"))
+    purpose = _validate_purpose(arguments.get("purpose"))
 
     options = AssemblyOptions(
         format=fmt,
+        purpose=purpose,
         include_ddl=True,
         include_description=bool(arguments.get("include_description", True)),
         include_annotations=bool(arguments.get("include_annotations", True)),
@@ -588,6 +655,126 @@ def _tool_search_columns(state: ServedConnections, arguments: dict[str, Any]) ->
     return result
 
 
+def _tool_resolve_value(state: ServedConnections, arguments: dict[str, Any]) -> dict[str, Any]:
+    """MCP.md 4.7: one column's answer to a phrase, read off the print alone."""
+
+    conn = state.resolve(arguments.get("conn"))
+    table = _required_string(arguments, "table")
+    column = _required_string(arguments, "column")
+    text = _required_string(arguments, "text")
+    manifest = _load_manifest(conn)
+    entry = (manifest.get("tables") or {}).get(table) if manifest else None
+
+    if manifest is None or entry is None:
+        raise errors.unknown_table(table, conn.name)
+
+    artifacts = declared_artifacts(entry)
+    table_dir = table_directory(_print_root(conn), table, entry)
+
+    if "statistics" not in artifacts:
+        return {
+            "table": table,
+            "column": column,
+            "text": text,
+            **value_resolution.resolve(
+                text,
+                [],
+                {},
+                coverage=None,
+                unavailable_reason=f"table {table!r} declares no statistics artifact",
+            ),
+        }
+
+    stats_path = table_dir / artifacts["statistics"]
+
+    if not stats_path.is_file():
+        raise errors.manifest_references_missing_file(artifacts["statistics"], str(stats_path))
+
+    stats_columns, stats_error = _load_statistics_columns(table_dir, artifacts)
+
+    if stats_error is not None:
+        raise errors.yaml_parse_error(str(stats_path), stats_error)
+
+    annotation_columns, annotation_error = _load_annotation_columns(table_dir, artifacts)
+
+    if annotation_error is not None:
+        annotation_path = table_dir / artifacts["statistics_annotations"]
+
+        raise errors.yaml_parse_error(str(annotation_path), annotation_error)
+
+    if column not in stats_columns:
+        raise errors.unknown_column(column, table, sorted(stats_columns))
+
+    col = stats_columns[column] or {}
+    entries = col.get("values")
+    redaction = col.get("redacted")
+    reason = None
+
+    if not isinstance(entries, list) or not entries:
+        reason = f"column {column!r} publishes no values"
+    elif isinstance(redaction, str) and redaction:
+        reason = f"column {column!r} is redacted ({redaction}), so its values are withheld"
+
+    resolution = value_resolution.resolve(
+        text,
+        entries if isinstance(entries, list) else [],
+        _column_value_notes(annotation_columns.get(column)),
+        coverage=col.get("values_coverage"),
+        exhaustive=_list_is_exhaustive(col),
+        unavailable_reason=reason,
+    )
+
+    return {"table": table, "column": column, "text": text, **resolution}
+
+
+def _list_is_exhaustive(col: dict[str, Any]) -> bool:
+    """Whether `values` carries every distinct value the column has (SPEC 2.2.4, 2.2.5).
+
+    Without a `values_coverage`, `frequencies.listed` against an exact `cardinality` decides.
+    """
+
+    if col.get("values_coverage") == 1.0:
+        return True
+
+    frequencies = col.get("frequencies")
+
+    return (
+        isinstance(frequencies, dict)
+        and col.get("cardinality_method") == "exact"
+        and frequencies.get("listed") == col.get("cardinality")
+        and isinstance(col.get("cardinality"), int)
+    )
+
+
+def _column_value_notes(annotation: Any) -> dict[str, str]:
+    """A column's per-value notes (SPEC 2.7.1), keyed by the value's string form."""
+
+    if not isinstance(annotation, dict):
+        return {}
+
+    entries = annotation.get("values")
+
+    if not isinstance(entries, list):
+        return {}
+
+    return {
+        str(entry.get("value")): " ".join(entry["note"].split())
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("note"), str) and entry["note"].strip()
+    }
+
+
+def _required_string(arguments: dict[str, Any], field: str) -> str:
+    """A required string argument, refused the way a missing `table` already is."""
+
+    value = arguments.get(field)
+
+    if not value or not isinstance(value, str):
+        raise errors.missing_argument(field, str(value))
+
+    return value
+
+
 def _tool_get_manifest(state: ServedConnections, arguments: dict[str, Any]) -> dict[str, Any]:
     conn = state.resolve(arguments.get("conn"))
     manifest = _load_manifest(conn)
@@ -669,6 +856,18 @@ def _validate_format(value: Any) -> str:
         raise errors.invalid_enum_argument("format", fmt, allowed)
 
     return fmt
+
+
+def _validate_purpose(value: Any) -> Purpose:
+    """`purpose` against `get_table_context`'s own declared enum (default `profile`)."""
+
+    purpose = str(value or "profile").lower()
+    allowed = _tool_schema("get_table_context")["purpose"]["enum"]
+
+    if purpose not in allowed:
+        raise errors.invalid_enum_argument("purpose", purpose, allowed)
+
+    return cast(Purpose, purpose)
 
 
 def _validate_budget_tokens(value: Any) -> int | None:

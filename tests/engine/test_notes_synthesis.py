@@ -858,3 +858,38 @@ class TestHintsOnly:
         s = _stats("numeric", range={"min": 0, "max": 9}, percentiles={"p50": 4}, null_rate=0.1)
 
         assert synthesize(s, hints_only=True) == ""
+
+
+class TestSpellingGroups:
+    """SPEC 2.2.4: a group is one category, on a sampled list as much as an exhaustive one."""
+
+    def test_an_exhaustive_list_folds_the_member_into_its_canonical(self) -> None:
+        s = _stats(
+            "categorical",
+            cardinality=3,
+            values=[
+                {"value": "Active", "count": 90},
+                {"value": "Retired", "count": 50},
+                {"value": "ACTIVE", "count": 10, "spelling_of": "Active"},
+            ],
+            values_coverage=1.0,
+        )
+
+        assert synthesize(s) == "3 distinct: Active (100, 2 spellings) / Retired"
+
+    def test_a_sampled_list_marks_the_group_too(self) -> None:
+        s = _stats(
+            "categorical",
+            cardinality=40,
+            rows_scanned=200,
+            values=[
+                {"value": "Active", "count": 90},
+                {"value": "Retired", "count": 50},
+                {"value": "ACTIVE", "count": 10, "spelling_of": "Active"},
+            ],
+            values_coverage=0.75,
+        )
+        notes = synthesize(s)
+
+        assert "Active (50%, 2 spellings)" in notes
+        assert "ACTIVE" not in notes.replace("Active", "")

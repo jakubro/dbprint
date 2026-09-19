@@ -693,6 +693,50 @@ def test_stats_values_not_ordered(print_dir: Path) -> None:
     assert "stats.values-not-ordered" in _codes(validate_print(print_dir))
 
 
+def _rewrite_spelling_member(print_dir: Path, value: str, spelling_of: str) -> None:
+    """The example's `Sand Tray` entry (a spelling of `sand tray`) rewritten as given."""
+
+    target = print_dir / "seedbank/germination_trial/statistics.yaml"
+    data = _load_yaml_file(target)
+    entry = next(
+        e for e in data["columns"]["medium"]["values"] if e.get("spelling_of") == "sand tray"
+    )
+    entry["value"] = value
+    entry["spelling_of"] = spelling_of
+    _write_yaml_file(target, data)
+
+
+def test_stats_spelling_of_target_unlisted(print_dir: Path) -> None:
+    _rewrite_spelling_member(print_dir, "Sand Tray", "sand box")
+    issues = validate_print(print_dir)
+
+    assert "stats.spelling-of-target-unlisted" in _codes(issues)
+    assert "stats.spelling-of-key-mismatch" not in _codes(issues)
+
+
+def test_stats_spelling_of_naming_another_member_is_unlisted(print_dir: Path) -> None:
+    """A member is not a canonical entry, so a chain of spellings names nothing listed."""
+
+    _rewrite_spelling_member(print_dir, "Sand Tray", "Sand Tray")
+
+    assert "stats.spelling-of-target-unlisted" in _codes(validate_print(print_dir))
+
+
+def test_stats_spelling_of_key_mismatch(print_dir: Path) -> None:
+    _rewrite_spelling_member(print_dir, "Sand Trey", "sand tray")
+    issues = validate_print(print_dir)
+
+    assert "stats.spelling-of-key-mismatch" in _codes(issues)
+    assert "stats.spelling-of-target-unlisted" not in _codes(issues)
+
+
+def test_stats_spelling_of_is_clean_on_the_example(print_dir: Path) -> None:
+    codes = _codes(validate_print(print_dir))
+
+    assert "stats.spelling-of-target-unlisted" not in codes
+    assert "stats.spelling-of-key-mismatch" not in codes
+
+
 def test_stats_percentiles_not_ordered_reversed(print_dir: Path) -> None:
     target = print_dir / "seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)

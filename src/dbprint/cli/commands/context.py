@@ -5,14 +5,14 @@ from __future__ import annotations
 import fnmatch
 from difflib import get_close_matches
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import rich_click as click
 import yaml
 from rich.console import Console
 
 from dbprint.config import ConnectionConfig
-from dbprint.engine import EXIT_GENERIC, EXIT_OK, AssemblyOptions, assemble_context
+from dbprint.engine import EXIT_GENERIC, EXIT_OK, AssemblyOptions, Purpose, assemble_context
 from dbprint.engine.baseline import manifest_shape_error
 from ..options import project_option, resolve_project
 from ..rendering import resolve_render_mode
@@ -40,12 +40,23 @@ from ..resolution import ConnectionResolutionError, resolve
     help="Output format. json and yaml omit each column's sketch payload; the table's "
     "own statistics.yaml carries it.",
 )
+@click.option(
+    "--purpose",
+    type=click.Choice(["profile", "query"], case_sensitive=False),
+    default="profile",
+    show_default=True,
+    help="What the fragment is for. `profile` describes the data: DDL, a per-column Notes "
+    "summary of the statistics, relationships. `query` is for writing SQL against the table: "
+    "DDL, the join paths, a data dictionary, and the value lists a predicate can be written "
+    "from, with counts and coverage - and none of the statistics, which describe the data "
+    "rather than what a predicate needs.",
+)
 @click.option("--no-ddl", is_flag=True, default=False, help="Omit the DDL section.")
 @click.option(
     "--no-relationships",
     is_flag=True,
     default=False,
-    help="Omit the Relationships section.",
+    help="Omit the Relationships section (`profile`) or the Joins list (`query`).",
 )
 @click.option("--no-description", is_flag=True, default=False, help="Omit the Description section.")
 @click.option(
@@ -54,7 +65,12 @@ from ..resolution import ConnectionResolutionError, resolve
     default=False,
     help="Omit the Annotations section.",
 )
-@click.option("--no-stats", is_flag=True, default=False, help="Omit the Cardinality table.")
+@click.option(
+    "--no-stats",
+    is_flag=True,
+    default=False,
+    help="Omit the Cardinality table. No effect under `--purpose query`, which carries none.",
+)
 @click.option(
     "--budget",
     "budget",
@@ -83,6 +99,7 @@ def context_command(
     project: str | None,
     select_all: bool,
     fmt: str,
+    purpose: str,
     no_ddl: bool,
     no_relationships: bool,
     no_description: bool,
@@ -120,6 +137,8 @@ def context_command(
     - `dbprint context 'public.*'`: every public table (pattern)
     - `dbprint context --all --no-ddl`: every table, skip DDL
     - `dbprint context accession --budget 4000`: cap output near 4000 tokens
+    - `dbprint context accession --purpose query`: DDL, join paths, definitions
+      and value lists, for writing SQL against the table
     """
 
     if select_all and target is not None:
@@ -143,6 +162,7 @@ def context_command(
 
     options = AssemblyOptions(
         format=fmt.lower(),
+        purpose=cast(Purpose, purpose.lower()),
         include_ddl=not no_ddl,
         include_description=not no_description,
         include_annotations=not no_annotations,

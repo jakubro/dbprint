@@ -54,6 +54,58 @@ class TestToolDispatch:
         assert exc_info.value.code == -32601
 
 
+class TestResolveValue:
+    """MCP.md 4.7: one column's answer to a phrase, read off the print alone."""
+
+    def test_a_stored_value_comes_back_in_the_columns_own_spelling(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        state = _state_for(primary_conn)
+        result = dispatch(
+            state,
+            "resolve_value",
+            {"table": "seedbank.taxon", "column": "rank", "text": "GENUS"},
+        )
+
+        assert isinstance(result, dict)
+        assert result["match"] == "stored"
+        assert result["spellings"][0]["value"] == "genus"
+
+    def test_an_unknown_column_names_the_columns_the_table_has(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        state = _state_for(primary_conn)
+
+        with pytest.raises(McpError) as excinfo:
+            dispatch(
+                state,
+                "resolve_value",
+                {"table": "seedbank.taxon", "column": "rnk", "text": "genus"},
+            )
+
+        assert "rank" in excinfo.value.detail
+
+    def test_an_unknown_table_is_refused(self, primary_conn: ConnectionConfig) -> None:
+        state = _state_for(primary_conn)
+
+        with pytest.raises(McpError):
+            dispatch(
+                state,
+                "resolve_value",
+                {"table": "seedbank.nowhere", "column": "rank", "text": "genus"},
+            )
+
+    def test_a_missing_argument_is_refused(self, primary_conn: ConnectionConfig) -> None:
+        state = _state_for(primary_conn)
+
+        with pytest.raises(McpError) as excinfo:
+            dispatch(state, "resolve_value", {"table": "seedbank.taxon", "column": "rank"})
+
+        assert "text" in excinfo.value.detail
+
+
 class TestGetTableContext:
     def test_md_format(self, primary_conn: ConnectionConfig) -> None:
         """MCP.md 4.1: md returns a bare markdown string, not an envelope."""
@@ -68,6 +120,43 @@ class TestGetTableContext:
         assert isinstance(result, str)
         assert "seedbank.collector" in result
         assert "CREATE TABLE" in result
+
+    def test_purpose_query_returns_the_value_table_and_no_statistics(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        """MCP.md 4.1: `query` is the selection a caller reads before writing SQL."""
+
+        state = _state_for(primary_conn)
+        result = dispatch(
+            state,
+            "get_table_context",
+            {"table": "seedbank.collector", "purpose": "query"},
+        )
+
+        assert isinstance(result, str)
+        assert "## Column values" in result
+        assert "Cardinality" not in result
+
+    def test_purpose_defaults_to_profile(self, primary_conn: ConnectionConfig) -> None:
+        state = _state_for(primary_conn)
+        result = dispatch(state, "get_table_context", {"table": "seedbank.collector"})
+
+        assert isinstance(result, str)
+        assert "Cardinality" in result
+        assert "## Column values" not in result
+
+    def test_an_unknown_purpose_is_refused(self, primary_conn: ConnectionConfig) -> None:
+        state = _state_for(primary_conn)
+
+        with pytest.raises(McpError) as excinfo:
+            dispatch(
+                state,
+                "get_table_context",
+                {"table": "seedbank.collector", "purpose": "explain"},
+            )
+
+        assert "purpose" in excinfo.value.detail
 
     def test_md_carries_the_scanned_set_of_a_narrowed_read(
         self,
@@ -903,3 +992,118 @@ class TestGetReference:
 
         with pytest.raises(McpError):
             dispatch(self._EMPTY_STATE, "get_reference", {"document": "spec", "section": ""})
+
+
+class TestResolveValueReadsTheStatisticsItWasPromised:
+    """A broken statistics file reports as broken, never as an unknown column (MCP.md 4.7)."""
+
+    @staticmethod
+    def _statistics_path(conn: ConnectionConfig, table_dir: str) -> Any:
+        return conn.output / conn.name / table_dir / "statistics.yaml"
+
+    def test_a_corrupt_statistics_file_is_a_parse_error(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        self._statistics_path(primary_conn, "seedbank/taxon").write_text("columns: [unbalanced\n")
+
+        with pytest.raises(McpError) as excinfo:
+            dispatch(
+                _state_for(primary_conn),
+                "resolve_value",
+                {"table": "seedbank.taxon", "column": "rank", "text": "genus"},
+            )
+
+        assert "YAML parse error" in excinfo.value.detail
+        assert "not found" not in excinfo.value.detail
+
+    def test_an_absent_statistics_file_names_the_manifest_reference(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        self._statistics_path(primary_conn, "seedbank/taxon").unlink()
+
+        with pytest.raises(McpError) as excinfo:
+            dispatch(
+                _state_for(primary_conn),
+                "resolve_value",
+                {"table": "seedbank.taxon", "column": "rank", "text": "genus"},
+            )
+
+        assert "manifest references statistics.yaml but file is absent" in excinfo.value.detail
+
+    def test_a_corrupt_annotations_file_is_a_parse_error(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        """The notes are part of the answer; losing them silently is the same defect."""
+
+        path = primary_conn.output / primary_conn.name / "seedbank/germination_trial"
+        (path / "statistics.annotations.yaml").write_text("columns: {medium: [\n")
+
+        with pytest.raises(McpError) as excinfo:
+            dispatch(
+                _state_for(primary_conn),
+                "resolve_value",
+                {"table": "seedbank.germination_trial", "column": "medium", "text": "control"},
+            )
+
+        assert "statistics.annotations.yaml" in excinfo.value.detail
+        assert "YAML parse error" in excinfo.value.detail
+
+    def test_a_table_without_a_statistics_artifact_is_unavailable(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        manifest_path = primary_conn.output / primary_conn.name / "manifest.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text())
+        del manifest["tables"]["seedbank.taxon"]["artifacts"]["statistics"]
+        manifest_path.write_text(yaml.safe_dump(manifest))
+
+        result = _dict_result(
+            _state_for(primary_conn),
+            "resolve_value",
+            {"table": "seedbank.taxon", "column": "rank", "text": "genus"},
+        )
+
+        assert result["match"] == "unavailable"
+        assert "declares no statistics artifact" in result["reason"]
+
+    def test_a_numeric_list_equal_to_its_exact_cardinality_is_exhaustive(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        """SPEC 2.2.5: no `values_coverage` on a numeric column; `frequencies.listed` decides."""
+
+        path = self._statistics_path(primary_conn, "seedbank/germination_trial")
+        statistics = yaml.safe_load(path.read_text())
+        column = statistics["columns"]["sown_count"]
+        column["cardinality"] = column["frequencies"]["listed"]
+        column["cardinality_method"] = "exact"
+        path.write_text(yaml.safe_dump(statistics))
+
+        result = _dict_result(
+            _state_for(primary_conn),
+            "resolve_value",
+            {"table": "seedbank.germination_trial", "column": "sown_count", "text": "20"},
+        )
+
+        assert result["coverage"] is None
+        assert result["exhaustive"] is True
+        assert "sample_caveat" not in result
+        assert len(result["domain"]) == column["frequencies"]["listed"]
+
+    def test_a_numeric_list_short_of_its_cardinality_is_a_sample(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        result = _dict_result(
+            _state_for(primary_conn),
+            "resolve_value",
+            {"table": "seedbank.germination_trial", "column": "sown_count", "text": "20"},
+        )
+
+        assert result["coverage"] is None
+        assert result["exhaustive"] is False
+        assert "not evidence" in result["sample_caveat"]
+        assert "domain" not in result

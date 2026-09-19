@@ -375,6 +375,40 @@ class TestHandshakeAdvertisesInstructions:
         assert self._instructions(primary_conn) == SERVER_DESCRIPTION
 
 
+class TestTheInstructionsCarryTheQueryWriterRules:
+    """The two decisions an agent makes badly untold: which context to read, and when to ask."""
+
+    def test_it_names_the_query_purpose_and_what_profile_costs(self) -> None:
+        from dbprint.mcp.server import SERVER_DESCRIPTION
+
+        assert "purpose: query" in SERVER_DESCRIPTION
+        assert "Join through the Joins list" in SERVER_DESCRIPTION
+        assert "the edges the catalog never declared" in SERVER_DESCRIPTION
+        assert "offers no other" not in SERVER_DESCRIPTION
+
+    def test_it_names_the_lookup_and_when_not_to_call_it(self) -> None:
+        from dbprint.mcp.server import SERVER_DESCRIPTION
+
+        assert "resolve_value" in SERVER_DESCRIPTION
+        assert "Do not call it for a value the context already lists in full" in SERVER_DESCRIPTION
+
+    def test_the_guide_states_the_same_facts_in_the_prints_own_files(self) -> None:
+        """The guide's reader holds files, not tools; the tools are its closing sentence."""
+
+        from dbprint.engine.reading_guide import READING_GUIDE_TEXT
+
+        section = READING_GUIDE_TEXT.split("## Writing a query against a printed table", 1)[-1]
+        section = section.split("\n## ", 1)[0]
+
+        for needle in ("`relationships.yaml`", "`values_coverage`", "`spelling_of`"):
+            assert needle in section, needle
+
+        assert "dbprint context <table> --purpose query" in section
+        assert section.count("resolve_value") == 1
+        assert "Joins list" not in section
+        assert "offers no other" not in section
+
+
 # `SERVER_DESCRIPTION` is delivered unprompted on every connect, so each entry anchors one of its
 # claims to the SPEC sentence behind it: a moved or reworded sentence fails here instead.
 _SPEC_PATH = Path(__file__).resolve().parents[2] / "docs/format/v1/SPEC.md"

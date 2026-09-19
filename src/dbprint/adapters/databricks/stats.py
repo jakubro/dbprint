@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from dbprint.config import StatisticsConfig
 from dbprint.spec.classification import base_type, compute_cardinality_ratio, compute_null_rate
-from dbprint.spec.coverage import coverage_share
+from dbprint.spec.coverage import coverage_share, enumeration_limit
 from dbprint.spec.distribution import classify as classify_distribution
 from dbprint.spec.distribution import summarize as summarize_frequencies
 from dbprint.spec.temporal_range import is_representable
@@ -681,7 +681,7 @@ def _fetch_value_list(
     config: StatisticsConfig,
 ) -> tuple[tuple[ValueCount, ...], float, bool]:
     cn = _quote_ident(col.name)
-    n = config.top_n_values
+    limit = enumeration_limit(config.enumeration_threshold, config.top_n_values)
     select_expr = (
         _render_calendar_bound(cn, col.sql_type) if _matches(col.sql_type, _TZ_TYPES) else cn
     )
@@ -695,11 +695,12 @@ def _fetch_value_list(
         ORDER BY cnt DESC, CAST({select_expr} AS STRING) ASC
         LIMIT ?
         """,
-        (n + 1,),
+        (limit + 1,),
     ).fetchall()
-    exhaustive = len(rows) <= n
+    exhaustive = len(rows) <= limit
+    kept = rows if exhaustive else rows[: config.top_n_values]
     entries = sorted(
-        (ValueCount(value=_iso_or_value(value), count=int(cnt)) for value, cnt in rows[:n]),
+        (ValueCount(value=_iso_or_value(value), count=int(cnt)) for value, cnt in kept),
         key=lambda v: (-v.count, str(v.value)),
     )
     values = tuple(entries)
@@ -911,7 +912,7 @@ def _approximate_distribution_via_top_n(
     config: StatisticsConfig,
     value_transform: Any,
 ) -> tuple[Distribution, Frequencies, tuple[ValueCount, ...]]:
-    n = config.top_n_values
+    limit = enumeration_limit(config.enumeration_threshold, config.top_n_values)
     rows = exec_query(
         cursor,
         f"""
@@ -922,11 +923,12 @@ def _approximate_distribution_via_top_n(
         ORDER BY cnt DESC, CAST({select_expr} AS STRING) ASC
         LIMIT ?
         """,
-        (n + 1,),
+        (limit + 1,),
     ).fetchall()
-    exhaustive = len(rows) <= n
+    exhaustive = len(rows) <= limit
+    kept = rows if exhaustive else rows[: config.top_n_values]
     entries = sorted(
-        (ValueCount(value=value_transform(value), count=int(cnt)) for value, cnt in rows[:n]),
+        (ValueCount(value=value_transform(value), count=int(cnt)) for value, cnt in kept),
         key=lambda v: (-v.count, str(v.value)),
     )
     values = tuple(entries)
