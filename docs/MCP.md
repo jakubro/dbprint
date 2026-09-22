@@ -186,16 +186,17 @@ The value table is what licenses an exact-match predicate, and it carries only t
   "name": "get_table_context",
   "inputSchema": {
     "type": "object",
+    "additionalProperties": false,
     "properties": {
-      "table": { "type": "string", "description": "Fully-qualified table name" },
+      "table": { "type": "string", "minLength": 1, "description": "Fully-qualified table name" },
       "conn": { "type": "string", "description": "Optional; falls back to default connection" },
-      "purpose": { "enum": ["profile", "query"], "default": "profile", "description": "profile: the table described - statistics, relationships, notes. query: what to read before writing SQL - DDL, the Joins list, data dictionary, and the value lists with counts and coverage, and nothing measured" },
-      "format": { "enum": ["md", "json", "yaml"], "default": "md", "description": "md renders the chosen purpose as Markdown - under `profile`, a per-column Notes summary rather than the raw statistics fields json and yaml carry. All three omit each column's sketch payload; the verbatim statistics.yaml, sketch included, is reachable as the dbprint://<conn>/<fqn>/statistics resource." },
+      "purpose": { "type": "string", "enum": ["profile", "query"], "default": "profile", "description": "profile: the table described - statistics, relationships, notes. query: what to read before writing SQL - DDL, the Joins list, data dictionary, and the value lists with counts and coverage, and nothing measured" },
+      "format": { "type": "string", "enum": ["md", "json", "yaml"], "default": "md", "description": "md renders the chosen purpose as Markdown - under `profile`, a per-column Notes summary rather than the raw statistics fields json and yaml carry. All three omit each column's sketch payload; the verbatim statistics.yaml, sketch included, is reachable as the dbprint://<conn>/<fqn>/statistics resource." },
       "include_stats": { "type": "boolean", "default": true, "description": "Include the Cardinality table (md) or statistics object (json/yaml); no effect under `query`, which carries neither" },
       "include_relationships": { "type": "boolean", "default": true, "description": "Include the Relationships section (md) or relationships object (json/yaml); under `query`, the Joins list" },
       "include_description": { "type": "boolean", "default": true, "description": "Include the table's description.md, when authored" },
       "include_annotations": { "type": "boolean", "default": true, "description": "Include statistics.annotations.yaml notes and claims, when authored" },
-      "budget_tokens": { "type": "integer", "minimum": 1, "description": "Soft cap in tokens; sections drop whole in priority order once exceeded, never truncated mid-section" }
+      "budget_tokens": { "type": "integer", "minimum": 1, "description": "Soft cap in tokens, defaulting to 8000. Sections drop whole, never truncated mid-section: the table's identity is charged first, then each section in priority order is measured against what is left, so one that does not fit is skipped rather than closing the door behind it" }
     },
     "required": ["table"]
   }
@@ -208,7 +209,7 @@ Return:
 - `format: "json"` -> a structured object. Under `profile`: `table`, `ddl`, `description`, `annotations`, `statistics`, `relationships`, `relationship_annotations`. Under `query`: `table`, `ddl`, `values` (per column: the `entries` the Markdown shows with counts and notes, the column's `coverage`, the same coverage statement the Markdown renders, and for a sampled list `shown_coverage` - the share the shown entries cover), `joins` (`refers_to` and `referenced_by`, each edge as its columns, its table and its `detection`, plus `rejected` where a human overruled it), `dictionary` (column -> note) and `description`.
 - `format: "yaml"` -> the same structured object emitted as YAML.
 
-`budget_tokens` is a soft cap; sections drop in priority order when the budget would be exceeded. Token counting MAY be approximate. Under `query` that order is DDL, then the value table, then the Joins list, then the data dictionary, then the header.
+`budget_tokens` is a soft cap. The table's identity is charged first, then each remaining section in priority order is measured against what is left, so one that does not fit is skipped rather than closing the door behind it. Sections drop whole, never truncated mid-section. Token counting MAY be approximate. Under `query` that priority is DDL, then the value table, then the Joins list, then the data dictionary - identity is not ranked among them, being pinned instead.
 
 `format: "json"` or `"yaml"` carries a `_corrupted` field naming every declared artifact (`statistics`, `relationships`, `statistics_annotations`, `relationships_annotations`) that failed to parse, mapped to the parse-error message; absent when nothing was corrupt. `format: "md"` prepends the same information as a note before the rendered sections. A corrupt artifact still degrades that one section rather than failing the call - this field is what tells a corrupt file from one the object's type never had.
 
@@ -223,9 +224,10 @@ Returns the FQNs of tables matching a pattern.
   "name": "list_tables",
   "inputSchema": {
     "type": "object",
+    "additionalProperties": false,
     "properties": {
       "conn": { "type": "string", "description": "Optional; falls back to default connection" },
-      "pattern": { "type": "string", "description": "fnmatch glob; defaults to '*'" },
+      "pattern": { "type": "string", "minLength": 1, "description": "fnmatch glob; defaults to '*'" },
       "detail": { "type": "boolean", "default": false, "description": "Project each entry's type/row_count/columns/profiled_at from the manifest; false returns bare FQN strings, unchanged" }
     }
   }
@@ -233,6 +235,8 @@ Returns the FQNs of tables matching a pattern.
 ```
 
 Return: `{ "tables": ["arboretum.seedbank.accession", "arboretum.seedbank.germination_trial", ...] }`. Sorted lexicographically; deterministic across calls.
+
+**Capped at 500 entries.** A reply the cap cut carries `truncated: true` and the `total` it was cut from; narrow with `pattern` to reach past it. A bare `truncated` would say a caller missed something without saying whether it missed ten entries or ten thousand.
 
 `detail: true` returns `{ "tables": [{ "fqn": ..., "type": ..., "row_count": ..., "columns": ..., "profiled_at": ... }, ...] }` instead - the manifest entry's own fields, projected alongside the FQN, still sorted lexicographically by FQN. `row_count` is absent for a plain view, the same as in the manifest itself.
 
@@ -245,8 +249,9 @@ The entry point for locating a fact across the print - a name glob plus optional
   "name": "search_columns",
   "inputSchema": {
     "type": "object",
+    "additionalProperties": false,
     "properties": {
-      "pattern": { "type": "string", "description": "fnmatch glob over column names; optional - omit to filter by the other predicates alone" },
+      "pattern": { "type": "string", "minLength": 1, "description": "fnmatch glob over column names; optional - omit to filter by the other predicates alone" },
       "classification": { "type": "string", "description": "fnmatch glob against the column's classification (boolean, categorical, foreign_key_candidate, json, numeric, temporal, text, unsupported)" },
       "sql_type": { "type": "string", "description": "fnmatch glob against the column's sql_type" },
       "sensitivity": { "type": "string", "description": "fnmatch glob against inferred.sensitivity (contact, credential, date_of_birth, demographic, employment, financial_account, geolocation, health, national_id, online_identifier, personal_name, postal_address) - a glob of '*' sweeps every column carrying any detection. A detection, never a verdict; its absence on a column is not an assertion that the column is safe" },
@@ -301,14 +306,18 @@ Returns the parsed `manifest.yaml` content as a JSON object - an index of tables
   "name": "get_manifest",
   "inputSchema": {
     "type": "object",
+    "additionalProperties": false,
     "properties": {
-      "conn": { "type": "string", "description": "Optional; falls back to default connection" }
+      "conn": { "type": "string", "description": "Optional; falls back to default connection" },
+      "pattern": { "type": "string", "minLength": 1, "description": "fnmatch glob over the FQN keys of `tables`, the same spelling `list_tables` takes; filters that map only" }
     }
   }
 }
 ```
 
 Return: the parsed manifest dict per [SPEC §2.5](format/v1/SPEC.md#25-manifestyaml).
+
+**The `tables` map is capped at 500 entries; every other key of the document is returned whole.** `pattern` filters that map by the same fnmatch spelling `list_tables` takes, so one spelling means one thing across the surface. A capped reply carries `truncated: true` and the `total` the cap was taken from. A reply that dropped a header key to save bytes would be a different artifact, not a truncated one.
 
 ### 4.5 `get_diff`
 
@@ -319,14 +328,21 @@ Returns the parsed `diff.yaml` content as a JSON object - a per-column reliabili
   "name": "get_diff",
   "inputSchema": {
     "type": "object",
+    "additionalProperties": false,
     "properties": {
-      "conn": { "type": "string", "description": "Optional; falls back to default connection" }
+      "conn": { "type": "string", "description": "Optional; falls back to default connection" },
+      "table": { "type": "string", "minLength": 1, "description": "Keep only changes naming this fully-qualified table, including the relationship events that name it as source or target" },
+      "kind": { "type": "string", "enum": ["table_added", "table_removed", "column_added", "column_removed", "column_type_changed", "column_nullable_changed", "column_default_changed", "statistic_changed", "table_row_count_changed", "grain_changed", "physical_layout_changed", "depends_on_changed", "relationship_added", "relationship_removed", "relationship_modified", "index_added", "index_removed", "index_modified", "comment_changed"], "description": "Keep only changes of this kind" }
     }
   }
 }
 ```
 
 Return: the parsed diff dict per [SPEC §2.6](format/v1/SPEC.md#26-diffyaml). The diff is the one produced by the last successful `dbprint generate` for the connection.
+
+**The `changes` list is capped at 500 events; every other key of the document is returned whole.** Two filters narrow it, ANDed: `table` keeps the events naming that fully-qualified table - including the three relationship events, which carry `source_table` and `target_table` where every other event carries `table`, so a filter reading one field alone would silently drop them - and `kind` keeps one event kind, declared as the packaged `diff.schema.json` enum so the list cannot drift from the format. A capped reply carries `truncated: true` and the `total` the cap was taken from.
+
+**The schema guarantees none of those fields.** `$defs/Change` requires `kind` alone and no variant declares a table field, so these are producer facts: an event carrying none of the three is simply not matched by a `table` filter.
 
 ### 4.6 `get_reference`
 
@@ -337,9 +353,10 @@ Returns a slice of the format spec or the assertion DSL spec, addressed by secti
   "name": "get_reference",
   "inputSchema": {
     "type": "object",
+    "additionalProperties": false,
     "properties": {
-      "document": { "enum": ["assertions", "spec"], "description": "Which specification - the format spec, or the assertion DSL" },
-      "section": { "type": "string", "description": "A section number in the document's own scheme (e.g. '3', '2.2.4'), or a spec_ref citation copied verbatim from a finding ('\u00a72.2.4', 'ASSERTIONS.md \u00a71.4') - any heading depth. Omit for the table of contents." }
+      "document": { "type": "string", "enum": ["assertions", "spec"], "description": "Which specification - the format spec, or the assertion DSL" },
+      "section": { "type": "string", "minLength": 1, "description": "A section number in the document's own scheme (e.g. '3', '2.2.4'), or a spec_ref citation copied verbatim from a finding ('\u00a72.2.4', 'ASSERTIONS.md \u00a71.4') - any heading depth. Omit for the table of contents." }
     },
     "required": ["document"]
   }
@@ -366,10 +383,11 @@ Resolves a phrase, a code or a spelling against one column's published values �
   "name": "resolve_value",
   "inputSchema": {
     "type": "object",
+    "additionalProperties": false,
     "properties": {
-      "table": { "type": "string", "description": "Fully-qualified table name" },
-      "column": { "type": "string", "description": "Column name as the print spells it" },
-      "text": { "type": "string", "description": "The phrase, code or spelling to resolve" },
+      "table": { "type": "string", "minLength": 1, "description": "Fully-qualified table name" },
+      "column": { "type": "string", "minLength": 1, "description": "Column name as the print spells it" },
+      "text": { "type": "string", "minLength": 1, "description": "The phrase, code or spelling to resolve" },
       "conn": { "type": "string", "description": "Optional; falls back to default connection" }
     },
     "required": ["table", "column", "text"]
@@ -491,16 +509,19 @@ Two channels, not one. `resources/read` failures are genuine JSON-RPC protocol e
 
 ### 8.2 Tool errors (`tools/call`) — `isError: true`, not a protocol error
 
+Every call is checked against the tool's own advertised `inputSchema` before the tool body sees it, so an argument fault names the key, the value that arrived, and what the tool accepts. Two arguments fold case before that check - `get_table_context`'s `format` and `purpose` - so `MD` and `QUERY` are accepted; `get_reference`'s `document` does not fold, and the asymmetry is deliberate rather than an oversight. A non-string value is a type fault, never an enum one: `str(7).lower()` would name the wrong failure.
+
 | Trigger | Detail format example |
 |---|---|
 | Unknown `table` | `"table 'foo' not found in connection 'bar'. Run dbprint list bar for valid names."` |
 | Unknown `conn` | `"connection 'bar' not in .dbprint.yaml. Configured: ['a', 'b', 'c']"` |
 | `conn` configured but not served by this server instance | `"connection 'staging' is configured but not served by this instance. Served: ['arboretum']. Restart the server naming it to serve it."` |
-| `get_table_context` called with an empty `table` | `"table '' must be a non-empty string."` |
-| `get_table_context` called with `format` outside its declared enum | `"format 'yml' must be one of ['md', 'json', 'yaml']."` |
-| `get_table_context` called with `budget_tokens` below its declared minimum | `"budget_tokens 0 must be an integer >= 1."` |
-| `search_columns` called with an empty `pattern` | `"pattern '' is malformed fnmatch."` |
-| `resolve_value` called with an empty `table`, `column` or `text` | `"text '' must be a non-empty string."` |
+| A key the tool does not declare | `"list_tables takes no argument 'schema'. Accepted: ['conn', 'detail', 'pattern']."` |
+| A required key absent | `"get_table_context requires 'table'."` |
+| A key of the wrong type | `"pattern 7 must be of type string."` |
+| An empty string where one is required | `"table '' must be a non-empty string."` |
+| A value outside a declared enum | `"format 'yml' must be one of ['md', 'json', 'yaml']."` |
+| A value below a declared minimum | `"budget_tokens 0 must be an integer >= 1."` |
 | `resolve_value` called with a `column` the table's statistics do not carry | `"column 'rnk' not found in table 'seedbank.taxon'. Columns: rank, scientific_name, taxon_id."` |
 | `resolve_value` on a table whose declared `statistics.yaml` is absent from disk | `"manifest references statistics.yaml but file is absent at <path>. Re-run dbprint generate."` |
 | `resolve_value` on a table whose `statistics.yaml` or `statistics.annotations.yaml` does not parse | `"<path>: YAML parse error: <message>"` |

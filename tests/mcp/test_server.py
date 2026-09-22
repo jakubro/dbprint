@@ -197,6 +197,36 @@ class TestBuildServer:
         assert server.get_request_handler("tools/call") is not None
 
 
+class TestAnArgumentFaultReachesTheWireAsAFault:
+    """The shape a wire client hits: an unchecked key is a fault, not a silent drop."""
+
+    def test_an_unknown_key_is_an_error_result_naming_it(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        result = _call_tool(primary_conn, "search_columns", {"query": "taxon"})
+        content = result.content[0]
+
+        assert result.is_error
+        assert isinstance(content, TextContent)
+        assert "query" in content.text
+
+    def test_a_string_boolean_is_an_error_result_not_an_enabled_section(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        result = _call_tool(
+            primary_conn,
+            "get_table_context",
+            {"table": "seedbank.taxon", "include_stats": "false"},
+        )
+        content = result.content[0]
+
+        assert result.is_error
+        assert isinstance(content, TextContent)
+        assert "include_stats" in content.text
+
+
 class TestReadResourceErrorsReachTheWire:
     """MCP.md 8: a resources/read failure carries the code its trigger publishes."""
 

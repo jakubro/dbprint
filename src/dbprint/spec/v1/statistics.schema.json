@@ -812,6 +812,11 @@
           "$ref": "#/$defs/Sketch"
         }
       },
+      "allOf": [
+        {
+          "$ref": "#/$defs/NoSketchWhenRedacted"
+        }
+      ],
       "oneOf": [
         {
           "$ref": "#/$defs/BooleanRules"
@@ -2126,6 +2131,22 @@
         "drop",
         "hash"
       ]
+    },
+    "NoSketchWhenRedacted": {
+      "description": "A column declaring any redacted primitive carries no sketch: the digests are of the very cell values the primitive withheld. See SPEC.md section 2.2.14.",
+      "if": {
+        "type": "object",
+        "required": [
+          "redacted"
+        ]
+      },
+      "then": {
+        "not": {
+          "required": [
+            "sketch"
+          ]
+        }
+      }
     },
     "Unrepresentable": {
       "type": "array",

@@ -9,6 +9,7 @@ from collections.abc import Iterable
 
 import rich_click as click
 
+from dbprint.config import ConnectionConfig
 from dbprint.engine import SketchFailure, TableResult
 
 
@@ -22,6 +23,27 @@ def connection_error_text(connection_name: str, cause: str) -> str:
     """A per-connection failure cause, naming the connection."""
 
     return f"{connection_name}: {cause}"
+
+
+def no_tables_matched_text(
+    conn: ConnectionConfig,
+    cli_include: tuple[str, ...],
+    cli_exclude: tuple[str, ...],
+) -> str:
+    """Why a run scanned nothing, in the two parts the scope is made of.
+
+    The CLI pair is reported beside the config's, never folded into it: it can only narrow.
+    """
+
+    parts = [f"include={list(conn.include)}", f"exclude={list(conn.exclude)}"]
+
+    if cli_include:
+        parts.append(f"--include={list(cli_include)}")
+
+    if cli_exclude:
+        parts.append(f"--exclude={list(cli_exclude)}")
+
+    return f"{conn.name}: no tables matched selectors ({', '.join(parts)})"
 
 
 def failure_group_texts(tables: Iterable[TableResult], *, debug: bool = False) -> list[str]:

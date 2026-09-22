@@ -10,7 +10,7 @@ A print conforms when no `error` is raised against it. A `warning` records an an
 gate conformance; [SPEC 6.1](../format/v1/SPEC.md#61-severity-model) defines both, and
 [SPEC 6.2](../format/v1/SPEC.md#62-issue-document-shape) defines the issue each one is reported in.
 
-137 codes: 109 error, 28 warning.
+138 codes: 110 error, 28 warning.
 
 | Code | Severity | Specified in | Trigger |
 |---|---|---|---|
@@ -124,6 +124,7 @@ gate conformance; [SPEC 6.1](../format/v1/SPEC.md#61-severity-model) defines bot
 | `stats.scope-sample-out-of-range` | error | [Statistics invariants (§2.2)](../format/v1/SPEC.md#statistics-invariants-22) | `scope.sample` outside the interval (0, 1] |
 | `stats.sketch-invalid-encoding` | error | [Statistics invariants (§2.2)](../format/v1/SPEC.md#statistics-invariants-22) | `sketch.values` is not valid base64 of a length that is a multiple of 8 bytes (§2.2.14) |
 | `stats.sketch-not-ascending` | error | [Statistics invariants (§2.2)](../format/v1/SPEC.md#statistics-invariants-22) | A decoded `sketch.values` is not sorted ascending (§2.2.14) |
+| `stats.sketch-on-redacted-column` | error | [Statistics invariants (§2.2)](../format/v1/SPEC.md#statistics-invariants-22) | A column declaring a `redacted` primitive carries a `sketch` - the digests enumerate the cell values that primitive withheld (§2.2.14) |
 | `stats.sketch-oversized` | error | [Statistics invariants (§2.2)](../format/v1/SPEC.md#statistics-invariants-22) | A decoded `sketch.values` carries more entries than `method`'s own k (§2.2.14) |
 | `stats.sketch-unknown-method` | error | [Statistics invariants (§2.2)](../format/v1/SPEC.md#statistics-invariants-22) | `sketch.method` is not a value this MAJOR defines (§2.2.14) |
 | `stats.span-days-mismatch` | error | [Statistics invariants (§2.2)](../format/v1/SPEC.md#statistics-invariants-22) | `range.span_days` disagrees with `day_count(range.min, range.max)` (§2.2.4). Skipped when either bound is redacted (`mask`/`hash`), named in `unrepresentable`, or not a parseable ISO date/instant |

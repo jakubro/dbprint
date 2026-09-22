@@ -7,8 +7,9 @@ vocabulary, including codes only the CLI returns.
 
 from __future__ import annotations
 
-from .context_assembler import AssemblyOptions, AssemblyResult, Purpose
+from .context_assembler import AssemblyOptions, AssemblyResult, PayloadResult, Purpose
 from .context_assembler import assemble as assemble_context
+from .context_assembler import assemble_payloads as assemble_context_payloads
 from .context_assembler import assemble_structured as assemble_structured_context
 from .freshness import DurationError, StaleEntry, parse_duration
 from .freshness import evaluate as evaluate_freshness
@@ -54,6 +55,7 @@ __all__ = [
     "Engine",
     "GenerateRequest",
     "GenerateResult",
+    "PayloadResult",
     "ProgressCallback",
     "ProgressEvent",
     "Purpose",
@@ -62,6 +64,7 @@ __all__ = [
     "SummaryCounts",
     "TableResult",
     "assemble_context",
+    "assemble_context_payloads",
     "assemble_structured_context",
     "evaluate_freshness",
     "format_freshness_age",

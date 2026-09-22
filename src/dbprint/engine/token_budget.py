@@ -1,8 +1,7 @@
 """Soft token-budget allocator for `dbprint context` output.
 
-Sections are filled greedily in declared priority order; the first that would exceed the
-budget stops emission, and a truncation marker records what was dropped. Token counts are
-the `len(text) // 4` heuristic. Pure: no I/O, no state.
+Sections are offered in priority order, pinned first, and one that does not fit is skipped
+rather than closing the door behind it. Token counts are `len(text) // 4`. Pure: no I/O.
 """
 
 from __future__ import annotations
@@ -15,11 +14,15 @@ CHARS_PER_TOKEN = 4  # universal approximation; no tokenizer dep
 
 @dataclass(frozen=True)
 class Section:
-    """A named, ordered section of rendered text plus its token cost."""
+    """A named, ordered section of rendered text plus its token cost.
+
+    `pinned` decides the order a section is offered in, never whether the budget applies to it.
+    """
 
     name: str
     text: str
     tokens: int
+    pinned: bool = False
 
 
 @dataclass(frozen=True)
@@ -42,17 +45,17 @@ def tokens_of(text: str) -> int:
     return max(1, len(text) // CHARS_PER_TOKEN)
 
 
-def make_section(name: str, text: str) -> Section:
+def make_section(name: str, text: str, *, pinned: bool = False) -> Section:
     """Build a Section, measuring its token cost from the text."""
 
-    return Section(name=name, text=text, tokens=tokens_of(text))
+    return Section(name=name, text=text, tokens=tokens_of(text), pinned=pinned)
 
 
 def select(sections: list[Section], budget: int | None) -> Selection:
-    """Apply the stop-at-boundary budget algorithm.
+    """Fill the budget in priority order, pinned sections first.
 
-    `budget=None` includes everything. Otherwise sections are included until one would exceed
-    the budget; that one and every section after it are omitted.
+    `budget=None` includes everything; otherwise a section that does not fit is skipped and a
+    later, smaller one can still land. Both lists keep the caller's order, the render order.
     """
 
     if budget is None:
@@ -67,18 +70,18 @@ def select(sections: list[Section], budget: int | None) -> Selection:
         )
 
     used = 0
-    included: list[Section] = []
-    omitted: list[Section] = []
-    blocked = False
+    chosen: set[int] = set()
 
-    for sec in sections:
-        if blocked or used + sec.tokens > budget:
-            omitted.append(sec)
-            blocked = True
-            continue
+    for pinned_pass in (True, False):
+        for index, sec in enumerate(sections):
+            if index in chosen or sec.pinned is not pinned_pass or used + sec.tokens > budget:
+                continue
 
-        included.append(sec)
-        used += sec.tokens
+            chosen.add(index)
+            used += sec.tokens
+
+    included = [sec for index, sec in enumerate(sections) if index in chosen]
+    omitted = [sec for index, sec in enumerate(sections) if index not in chosen]
 
     return Selection(
         included=tuple(included),

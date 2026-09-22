@@ -90,6 +90,11 @@ stop running:
 - **`sketch`** is absent on every column, and with it every `detection: measured` relationship
   edge into or out of the table - a measured edge needs the sketch pass, which a scoped read
   never takes.
+- **`observed`** carries `scope_compatible: false` and nothing else on every edge touching the
+  table, in either direction. The join costs it would otherwise publish divide a table-wide
+  count by one measured over the rows scanned, so the fanout, the coverage and the coherence
+  verdict would each answer a question neither operand asked. An equal sample rate on both
+  endpoints does not rescue it - two draws at one rate are still two draws.
 
 `normalized_cardinality` is the deliberate exception: it is computed over the same scanned set
 `cardinality` already is, so it stays eligible under `scope` like every other per-column field.

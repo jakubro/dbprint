@@ -10,7 +10,13 @@ import yaml
 from dbprint.config import ConnectionConfig
 from dbprint.engine import AssemblyOptions, assemble_context
 from dbprint.mcp import McpError, ServedConnections, dispatch
-from dbprint.mcp.tools import TOOL_DEFINITIONS, TOOL_NAMES
+from dbprint.mcp.tools import (
+    MANIFEST_TABLE_CAP,
+    SEARCH_MATCH_CAP,
+    TABLE_LISTING_CAP,
+    TOOL_DEFINITIONS,
+    TOOL_NAMES,
+)
 
 
 def _state_for(conn: ConnectionConfig) -> ServedConnections:
@@ -37,6 +43,301 @@ def _dict_result(state: ServedConnections, name: str, arguments: dict[str, Any])
     assert isinstance(result, dict)
 
     return result
+
+
+class TestNoToolReturnsAnUnboundedReply:
+    """A reply past a client's ceiling is not a large answer but no answer, plus a turn."""
+
+    @staticmethod
+    def _wide_manifest(conn: ConnectionConfig, tables: int) -> None:
+        """Grow the manifest past every listing cap, reusing one seeded table's entry."""
+
+        path = conn.output / conn.name / "manifest.yaml"
+        manifest = yaml.safe_load(path.read_text())
+        entry = next(iter(manifest["tables"].values()))
+        manifest["tables"] = {f"seedbank.t{i:04d}": dict(entry) for i in range(tables)}
+        path.write_text(yaml.safe_dump(manifest))
+
+    def test_a_catalogue_listing_is_capped_and_says_what_it_was_cut_from(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        self._wide_manifest(primary_conn, 600)
+        result = _dict_result(_state_for(primary_conn), "list_tables", {})
+
+        assert len(result["tables"]) == TABLE_LISTING_CAP
+        assert result["truncated"] is True
+        assert result["total"] == 600
+
+    def test_a_narrowed_listing_under_the_cap_carries_no_marker(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        self._wide_manifest(primary_conn, 600)
+        result = _dict_result(
+            _state_for(primary_conn),
+            "list_tables",
+            {"pattern": "seedbank.t000*"},
+        )
+
+        assert len(result["tables"]) == 10
+        assert "truncated" not in result
+
+    def test_a_manifest_caps_its_table_map_and_keeps_the_rest_whole(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        self._wide_manifest(primary_conn, 600)
+        result = _dict_result(_state_for(primary_conn), "get_manifest", {})
+
+        assert len(result["tables"]) == MANIFEST_TABLE_CAP
+        assert result["truncated"] is True
+        assert result["total"] == 600
+        assert result["format_version"] == 1
+        assert "generated_at" in result
+
+    def test_a_manifest_narrowed_by_pattern_reaches_past_the_cap(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        self._wide_manifest(primary_conn, 600)
+        result = _dict_result(
+            _state_for(primary_conn),
+            "get_manifest",
+            {"pattern": "seedbank.t059*"},
+        )
+
+        assert sorted(result["tables"]) == [f"seedbank.t059{i}" for i in range(10)]
+        assert "truncated" not in result
+
+    def test_a_column_search_is_capped_and_an_explicit_limit_wins(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        state = _state_for(primary_conn)
+        default = _dict_result(state, "search_columns", {})
+        explicit = _dict_result(state, "search_columns", {"limit": 5})
+
+        assert len(default["matches"]) <= SEARCH_MATCH_CAP
+        assert len(explicit["matches"]) == 5
+        assert explicit["truncated"] is True
+        assert explicit["total"] == len(default["matches"])
+
+    def test_a_diff_filters_by_table_including_the_relationship_events(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        """The three relationship events carry `source_table`/`target_table`, never `table`."""
+
+        path = primary_conn.output / primary_conn.name / "diff.yaml"
+        diff = yaml.safe_load(path.read_text())
+        diff["changes"] = [
+            {"kind": "table_added", "table": "seedbank.taxon"},
+            {"kind": "table_added", "table": "seedbank.other"},
+            {
+                "kind": "relationship_added",
+                "source_table": "seedbank.taxon",
+                "target_table": "seedbank.other",
+            },
+        ]
+        path.write_text(yaml.safe_dump(diff))
+
+        result = _dict_result(
+            _state_for(primary_conn),
+            "get_diff",
+            {"table": "seedbank.taxon"},
+        )
+
+        assert [c["kind"] for c in result["changes"]] == ["table_added", "relationship_added"]
+
+    def test_a_diff_filters_by_kind(self, primary_conn: ConnectionConfig) -> None:
+        path = primary_conn.output / primary_conn.name / "diff.yaml"
+        diff = yaml.safe_load(path.read_text())
+        diff["changes"] = [
+            {"kind": "table_added", "table": "seedbank.taxon"},
+            {"kind": "table_removed", "table": "seedbank.other"},
+        ]
+        path.write_text(yaml.safe_dump(diff))
+
+        result = _dict_result(
+            _state_for(primary_conn),
+            "get_diff",
+            {"kind": "table_removed"},
+        )
+
+        assert [c["table"] for c in result["changes"]] == ["seedbank.other"]
+
+    def test_a_misspelled_kind_is_refused_by_the_packaged_enum(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        with pytest.raises(McpError) as caught:
+            dispatch(_state_for(primary_conn), "get_diff", {"kind": "colum_added"})
+
+        assert caught.value.code == -32602
+        assert "column_added" in caught.value.detail
+
+    def test_a_table_context_call_carries_a_default_budget(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        """An unbudgeted caller gets a truncation marker rather than an unbounded reply."""
+
+        result = dispatch(
+            _state_for(primary_conn),
+            "get_table_context",
+            {"table": "seedbank.taxon"},
+        )
+
+        assert isinstance(result, str)
+        assert "# Table: seedbank.taxon" in result
+
+
+class TestEveryCallIsCheckedAgainstTheToolsOwnSchema:
+    """MCP.md 8.2: the SDK runs no `inputSchema` check, so `dispatch` is where one has to be."""
+
+    def test_an_unknown_key_is_refused_by_name(self, primary_conn: ConnectionConfig) -> None:
+        with pytest.raises(McpError) as caught:
+            dispatch(_state_for(primary_conn), "search_columns", {"query": "curator"})
+
+        assert caught.value.code == -32602
+        assert "query" in caught.value.detail
+        assert "pattern" in caught.value.detail
+
+    def test_a_misspelled_required_key_names_what_was_sent(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        with pytest.raises(McpError) as caught:
+            dispatch(
+                _state_for(primary_conn),
+                "get_table_context",
+                {"table_name": "seedbank.taxon"},
+            )
+
+        assert "table_name" in caught.value.detail
+
+    def test_a_missing_required_key_names_the_key_not_its_value(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        with pytest.raises(McpError) as caught:
+            dispatch(_state_for(primary_conn), "get_table_context", {})
+
+        assert "requires 'table'" in caught.value.detail
+        assert "None" not in caught.value.detail
+
+    def test_a_wrong_type_names_the_declared_type(self, primary_conn: ConnectionConfig) -> None:
+        with pytest.raises(McpError) as caught:
+            dispatch(_state_for(primary_conn), "list_tables", {"pattern": 7})
+
+        assert "string" in caught.value.detail
+
+    def test_a_string_boolean_never_silently_enables_a_section(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        """`bool("false")` is True, so a string would turn the flag on."""
+
+        with pytest.raises(McpError) as caught:
+            dispatch(
+                _state_for(primary_conn),
+                "get_table_context",
+                {"table": "seedbank.taxon", "include_stats": "false"},
+            )
+
+        assert caught.value.code == -32602
+
+    def test_a_string_boolean_on_a_filter_never_silently_empties_a_result(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        """`"false"` equals neither True nor False, so a strict comparison matches nothing."""
+
+        with pytest.raises(McpError) as caught:
+            dispatch(_state_for(primary_conn), "search_columns", {"candidate_key": "false"})
+
+        assert caught.value.code == -32602
+
+    def test_a_value_below_a_declared_minimum_is_refused(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        with pytest.raises(McpError) as caught:
+            dispatch(_state_for(primary_conn), "search_columns", {"limit": 0})
+
+        assert ">= 1" in caught.value.detail
+
+    def test_a_value_outside_an_enum_names_the_accepted_set(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        with pytest.raises(McpError) as caught:
+            dispatch(
+                _state_for(primary_conn),
+                "get_table_context",
+                {"table": "seedbank.taxon", "format": "yml"},
+            )
+
+        assert "'md'" in caught.value.detail
+
+    def test_an_enum_in_the_wrong_case_is_still_accepted(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        """`format` and `purpose` fold; the schema check must not take that away."""
+
+        result = dispatch(
+            _state_for(primary_conn),
+            "get_table_context",
+            {"table": "seedbank.taxon", "format": "MD", "purpose": "QUERY"},
+        )
+
+        assert isinstance(result, str)
+
+    def test_a_non_string_where_an_enum_is_declared_names_the_type(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        """`str(7).lower()` would turn a type error into an enum error and name the wrong fault."""
+
+        with pytest.raises(McpError) as caught:
+            dispatch(
+                _state_for(primary_conn),
+                "get_table_context",
+                {"table": "seedbank.taxon", "format": 7},
+            )
+
+        assert "'md'" not in caught.value.detail
+
+    def test_a_boolean_is_not_an_integer(self, primary_conn: ConnectionConfig) -> None:
+        """jsonschema's own type checker refuses it, so no extra guard is needed."""
+
+        with pytest.raises(McpError) as caught:
+            dispatch(
+                _state_for(primary_conn),
+                "get_table_context",
+                {"table": "seedbank.taxon", "budget_tokens": True},
+            )
+
+        assert caught.value.code == -32602
+
+    def test_every_tool_still_answers_a_valid_call(self, primary_conn: ConnectionConfig) -> None:
+        """The enforcement is a gate, not a narrowing: each tool's own valid call still works."""
+
+        state = _state_for(primary_conn)
+        calls = {
+            "list_tables": {},
+            "search_columns": {"pattern": "*"},
+            "get_manifest": {},
+            "get_diff": {},
+            "get_reference": {"document": "spec", "section": "2.2.3"},
+            "get_table_context": {"table": "seedbank.taxon"},
+            "resolve_value": {"table": "seedbank.taxon", "column": "rank", "text": "genus"},
+        }
+
+        for name, arguments in calls.items():
+            assert dispatch(state, name, arguments) is not None, name
 
 
 class TestToolDispatch:

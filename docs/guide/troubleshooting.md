@@ -40,7 +40,8 @@ The account reached the database but can do nothing with it. Check the grants on
 | A table shows `- rows` | It is a view. No query is ever issued against one; its `statistics.yaml` comes from the catalog and says `catalog_only`. |
 | `generate` reports skips and writes nothing new | Every table is still inside its `max_age_days` window, seven days by default. `--force` re-profiles regardless. This is also why a newly created annotation file stays invisible — see [annotating a print](annotations.md). |
 | Ratios look wrong for the table size | The table was narrowed. Every ratio in a file carrying a `scope` block is denominated in `rows_scanned`, not `row_count` — see [choosing what to profile](scoping.md). |
-| A column has no sketch | Sketches are skipped entirely for a narrowed table and for a view. |
+| A column has no sketch | A redaction rule covers the column — a sketch is a set of digests of the values the rule withheld — or the whole table is narrowed, or it is a view. |
+| A join edge the last print carried is gone | It was a `detection: measured` edge, and measured edges are built from sketches. Redacting or narrowing either endpoint removes the sketch, and the edge with it. |
 | `check` exits non-zero with nothing obviously wrong on screen | Warnings are reported as a count, not by code. Take `--format json` and filter on severity — see [gating CI](ci.md). |
 | A config key seems to do nothing | An unrecognised or mis-nested key is dropped silently. Compare against the nesting in [Configuration](../CONFIG.md); the common error is a `rules` entry indented under the wrong parent. |
 | A print is silently short of tables on Databricks | Unity Catalog's `information_schema` is privilege-filtered, not privilege-gated — an under-privileged principal gets fewer rows, not an error. Check the table count against what you expect; see the [Databricks page](../adapters/databricks.md). |

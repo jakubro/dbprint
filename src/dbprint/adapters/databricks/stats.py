@@ -220,7 +220,7 @@ def probe_timeline(
     rows = exec_query(
         cursor,
         f"""
-        SELECT DATE_FORMAT(bucket_start, 'yyyy-MM-dd') AS bucket_text, cnt
+        SELECT {_render_calendar_bound("bucket_start", col.sql_type, already_utc=True)} AS bucket_text, cnt
         FROM (
             SELECT DATE_TRUNC('{spark_unit}', {normalized}) AS bucket_start, COUNT(*) AS cnt
             FROM {source}
@@ -844,12 +844,15 @@ def _epoch_to_rendered(cursor: Cursor, epoch: float, sql_type: str) -> str | Non
     return row[0] if row else None
 
 
-def _render_calendar_bound(expr: str, sql_type: str) -> str:
-    """SQL text rendering `expr` per SPEC 2.2.4's domain-rendering rule."""
+def _render_calendar_bound(expr: str, sql_type: str, *, already_utc: bool = False) -> str:
+    """SQL text rendering `expr` per SPEC 2.2.4's domain-rendering rule.
+
+    `already_utc` marks an expression a subquery converted; a second conversion would shift it.
+    """
 
     is_tz = _matches(sql_type, _TZ_TYPES)
     is_date_only = _matches(sql_type, _DATE_ONLY_TYPES)
-    source_expr = _to_utc_ntz(expr) if is_tz else expr
+    source_expr = _to_utc_ntz(expr) if is_tz and not already_utc else expr
 
     if is_date_only:
         return f"DATE_FORMAT({expr}, 'yyyy-MM-dd')"

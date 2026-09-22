@@ -36,9 +36,27 @@ class TestMatch:
     def test_exclude_pattern_wildcard(self) -> None:
         assert match("garden.seedbank.storage_reading", ["garden.*"], ["*.storage_*"]) is False
 
-    def test_case_sensitive_no_match_on_uppercase(self) -> None:
-        # Matching is case-sensitive against lowercased FQNs per ARCHITECTURE 6.
+    def test_an_unfolded_fqn_still_does_not_match(self) -> None:
+        # Only the pattern is folded; an adapter owes a lowercased FQN (ARCHITECTURE 6).
         assert match("Garden.Seedbank.Accession", ["garden.seedbank.*"], []) is False
+
+    def test_an_uppercase_include_matches(self) -> None:
+        assert match("garden.seedbank.accession", ["GARDEN.SEEDBANK.ACCESSION"], []) is True
+
+    def test_a_mixed_case_include_matches(self) -> None:
+        assert match("garden.seedbank.accession", ["Garden.Seedbank.Accession"], []) is True
+
+    def test_an_uppercase_glob_matches(self) -> None:
+        assert match("garden.seedbank.accession", ["GARDEN.*"], []) is True
+
+    def test_an_uppercase_exclude_excludes(self) -> None:
+        assert match("garden.seedbank.accession", ["*"], ["GARDEN.SEEDBANK.ACCESSION"]) is False
+
+    def test_an_uppercase_glob_exclude_excludes(self) -> None:
+        assert match("garden.seedbank.storage_reading", ["*"], ["*.STORAGE_*"]) is False
+
+    def test_an_uppercase_character_class_matches(self) -> None:
+        assert match("a.b.c", ["a.[A-Z].c"], []) is True
 
 
 class TestExpand:

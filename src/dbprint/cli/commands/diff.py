@@ -37,7 +37,7 @@ from ..rendering import (
 )
 from ..rendering.diff_data import DiffRenderOptions, render_data, render_human_text
 from ..rendering.diff_tty import render_human as render_human_tty
-from ..rendering.errors import connection_error_text, emit_error
+from ..rendering.errors import connection_error_text, emit_error, no_tables_matched_text
 from ..rendering.progress import ConnectionSummary
 from ..resolution import ConnectionResolutionError, resolve
 from ..run_log import close_run_log, log_run_header, log_run_summary, open_run_log
@@ -262,9 +262,11 @@ def diff_command(
                         # failure - reported at the exit code the run would otherwise earn.
                         if result.target_scanned_tables == 0 and result.exit_code == EXIT_OK:
                             deferred.append(
-                                f"{conn_config.name}: no tables matched selectors "
-                                f"(include={_effective_include(conn_config, include_patterns)}, "
-                                f"exclude={_effective_exclude(conn_config, exclude_patterns)})",
+                                no_tables_matched_text(
+                                    conn_config,
+                                    include_patterns,
+                                    exclude_patterns,
+                                ),
                             )
 
                         if renderer is not None:
@@ -388,14 +390,6 @@ def _options_for(pair: _ConnectionDiff, threshold: float | None) -> DiffRenderOp
 
 def _baseline_present(conn_config: ConnectionConfig) -> bool:
     return (conn_config.output / conn_config.name / "manifest.yaml").is_file()
-
-
-def _effective_include(conn_config: ConnectionConfig, cli_include: tuple[str, ...]) -> list[str]:
-    return list(cli_include) if cli_include else list(conn_config.include)
-
-
-def _effective_exclude(conn_config: ConnectionConfig, cli_exclude: tuple[str, ...]) -> list[str]:
-    return list(conn_config.exclude) + [e for e in cli_exclude if e not in conn_config.exclude]
 
 
 def _run_one(

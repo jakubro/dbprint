@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,18 @@ connections:
   production:
     adapter: postgres
     output: prints
+"""
+
+TWO_CONNECTION_YAML = """\
+connections:
+  production:
+    adapter: postgres
+    output: prints
+    auto: true
+  staging:
+    adapter: postgres
+    output: prints
+    auto: true
 """
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
@@ -548,3 +561,73 @@ class TestTuiRendering:
 
         assert result.exit_code == 0
         assert "\x1b[" not in out_file.read_text()
+
+
+class TestSeveralConnections:
+    """Two connections answering one FQN: nothing else in a fragment tells them apart."""
+
+    @staticmethod
+    def _two_connections(tmp_path: Path, committed_print: Path) -> None:
+        shutil.copytree(committed_print / "production", committed_print / "staging")
+        (tmp_path / ".dbprint.yaml").write_text(TWO_CONNECTION_YAML)
+
+    def test_each_markdown_chunk_names_its_connection(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._two_connections(tmp_path, committed_print)
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(main, ["context", "seedbank.accession"])
+
+        assert result.exit_code == 0
+        assert "# Context for connection production (1 table)" in result.output
+        assert "# Context for connection staging (1 table)" in result.output
+
+    def test_json_is_one_array_keyed_by_connection(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._two_connections(tmp_path, committed_print)
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(main, ["context", "seedbank.accession", "--format", "json"])
+        payload = json.loads(result.output)
+
+        assert [entry["connection"] for entry in payload] == ["production", "staging"]
+        assert [t["table"] for entry in payload for t in entry["tables"]] == [
+            "seedbank.accession",
+            "seedbank.accession",
+        ]
+
+    def test_yaml_is_one_document_per_connection(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._two_connections(tmp_path, committed_print)
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(main, ["context", "seedbank.accession", "--format", "yaml"])
+        documents = list(yaml.safe_load_all(result.output))
+
+        assert [d["connection"] for d in documents] == ["production", "staging"]
+        assert all(d["tables"][0]["table"] == "seedbank.accession" for d in documents)
+
+    def test_one_connection_gains_neither_a_banner_nor_a_wrapper(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The common case is what every golden and the MCP tool pin."""
+
+        _write_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        markdown = CliRunner().invoke(main, ["context", "seedbank.accession"])
+        structured = CliRunner().invoke(main, ["context", "seedbank.accession", "--format", "json"])
+
+        assert "# Context for connection" not in markdown.output
+        assert json.loads(structured.output)["table"] == "seedbank.accession"

@@ -63,6 +63,11 @@ DECLARED_MISSING_KIND = "statistics"
 # No fixture table declares one - the manifest never lists it, so it stays absent everywhere.
 NEVER_DECLARED_KIND = "description"
 
+DELIMITER_TABLE = "public.curation_event"
+DELIMITER_COLUMN = "condition"
+DELIMITER_VALUE = "fair|poor"
+LINE_BREAK_VALUE = "sound\nbut small"
+
 _CREDENTIAL_ENV = {
     "DBPRINT_PRIMARY_HOST": "h",
     "DBPRINT_PRIMARY_PORT": "5432",
@@ -357,6 +362,57 @@ def _fixture_tables() -> dict[str, MockTable]:
         row_count=3,
     )
 
+    curation_event = MockTable(
+        type="table",
+        namespace_path=("public", "curation_event"),
+        ddl="CREATE TABLE public.curation_event (id uuid PRIMARY KEY, condition text);\n",
+        columns=[
+            ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1),
+            ColumnMeta(name="condition", sql_type="text", nullable=False, default=None, ordinal=2),
+        ],
+        relationships=[],
+        indexes=[],
+        comments=CommentsMeta(table=None, columns={}),
+        stats={
+            "id": ColumnStats(
+                sql_type="uuid",
+                nullable=False,
+                null_count=0,
+                null_rate=0.0,
+                cardinality=100,
+                cardinality_ratio=1.0,
+                cardinality_method="exact",
+                values=tuple(
+                    ValueCount(value=f"00000000-0000-7000-8000-{i:012d}", count=1) for i in range(5)
+                ),
+                values_coverage=0.05,
+                distribution="uniform",
+                empty_count=0,
+                length=_UUID_LENGTH,
+                inferred=Inferred(candidate_key=True),
+            ),
+            "condition": ColumnStats(
+                sql_type="text",
+                nullable=False,
+                null_count=0,
+                null_rate=0.0,
+                cardinality=2,
+                cardinality_ratio=0.02,
+                cardinality_method="exact",
+                values=(
+                    ValueCount(value=DELIMITER_VALUE, count=50),
+                    ValueCount(value=LINE_BREAK_VALUE, count=50),
+                ),
+                values_coverage=1.0,
+                distribution="uniform",
+                empty_count=0,
+                length=Length(min=9, max=15, avg=12.0, p95=15.0),
+            ),
+        },
+        samples={"condition": [DELIMITER_VALUE, LINE_BREAK_VALUE]},
+        row_count=100,
+    )
+
     return {
         "public.sowing_trial": sowing_trial,
         "public.cultivar": cultivar,
@@ -365,6 +421,7 @@ def _fixture_tables() -> dict[str, MockTable]:
         "public.empty_scan": empty_scan,
         "public.wide_lookup": wide_lookup,
         "public.dropped_statistics": dropped_statistics,
+        "public.curation_event": curation_event,
     }
 
 

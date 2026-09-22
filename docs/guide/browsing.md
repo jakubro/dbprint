@@ -34,7 +34,7 @@ Two sections in the overview panel read the newer per-table fields directly:
 
 Beside the null-rate bar, a column carrying `zero_count`, `negative_count` or `empty_count` shows a dot-separated line — `<n> zero`, `<n> negative`, `<n> empty` — under the null figure. Each sub-count is gated on being truthy, so an explicit `0` renders nothing there, reading the same as a field the classification forbids or the run never measured. If you need to tell those apart, read `statistics.yaml` directly for that column.
 
-Further down the same cell: `mean`/`sum` render as `mean X · sum Y` whenever either is present, independent of whether the column also carries a redacted range — a redacted `numeric` column can show `bounds withheld` and its mean and sum together, because redaction is cell-level and aggregates are governed by their own rule (mean, sum and length are withheld only where the scanned set holds at most one non-null value; above that they are never touched). A `length` block renders as `length <min>-<max> · avg <avg> · p95 <p95>`.
+Further down the same cell: `mean`/`sum` render as `mean X · sum Y` whenever either is present, independent of whether the column also carries a redacted range — a redacted `numeric` column can show `bounds withheld` and its mean and sum together, because redaction is cell-level and aggregates are governed by their own rule (mean, sum and length are withheld in two states only — a scanned set holding at most one non-null value, and one holding a single distinct value however many rows carry it; outside those two they are never touched). A `length` block renders as `length <min>-<max> · avg <avg> · p95 <p95>`.
 
 ### The relationships panel
 

@@ -16,9 +16,13 @@ from tests.fixtures.adversarial import (
     APPROXIMATE_ROW_COUNT_TABLE,
     DECLARED_MISSING_KIND,
     DECLARED_MISSING_TABLE,
+    DELIMITER_COLUMN,
+    DELIMITER_TABLE,
+    DELIMITER_VALUE,
     EMPTY_COLUMNS_TABLE,
     FUTURE_DATED_COLUMN,
     INCOMPLETE_GRAIN_TABLE,
+    LINE_BREAK_VALUE,
     NEVER_DECLARED_KIND,
     REDACTED_COLUMN,
     SCOPED_TABLE,
@@ -40,6 +44,7 @@ COVERS = frozenset(
         "incomplete_grain_search",
         "catalog_only_table",
         "declared_missing_artifact",
+        "delimiter_in_a_value",
     },
 )
 
@@ -192,3 +197,13 @@ def test_declared_missing_optional_kind_reads_a_different_error_than_never_decla
         assert declared_missing.value.code != never_declared.value.code
     finally:
         manifest_path.write_text(original)
+
+
+def test_a_delimiter_in_a_value_is_served_verbatim(adversarial_print: AdversarialPrint) -> None:
+    """The resource channel serves the file as committed, so the literal arrives intact."""
+
+    statistics = _statistics(adversarial_print, DELIMITER_TABLE)
+    values = [entry["value"] for entry in statistics["columns"][DELIMITER_COLUMN]["values"]]
+
+    assert DELIMITER_VALUE in values
+    assert LINE_BREAK_VALUE in values

@@ -48,6 +48,7 @@ COVERS = frozenset(
         "incomplete_grain_search",
         "catalog_only_table",
         "declared_missing_artifact",
+        "delimiter_in_a_value",
     },
 )
 
@@ -66,6 +67,7 @@ ANCHORS: dict[str, tuple[str, str]] = {
     # a catalog_only object's absent fields read as unasked, never as a measured emptiness.
     "catalog_only_table": ("2.2.15", "catalog_only"),
     "declared_missing_artifact": ("7.3", "artifacts"),
+    "delimiter_in_a_value": ("2.2.3", "values"),
 }
 
 

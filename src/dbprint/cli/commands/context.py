@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import json
 from difflib import get_close_matches
 from pathlib import Path
 from typing import Any, cast
@@ -12,7 +13,14 @@ import yaml
 from rich.console import Console
 
 from dbprint.config import ConnectionConfig
-from dbprint.engine import EXIT_GENERIC, EXIT_OK, AssemblyOptions, Purpose, assemble_context
+from dbprint.engine import (
+    EXIT_GENERIC,
+    EXIT_OK,
+    AssemblyOptions,
+    Purpose,
+    assemble_context,
+    assemble_context_payloads,
+)
 from dbprint.engine.baseline import manifest_shape_error
 from ..options import project_option, resolve_project
 from ..rendering import resolve_render_mode
@@ -76,8 +84,8 @@ from ..resolution import ConnectionResolutionError, resolve
     "budget",
     type=int,
     default=None,
-    help="Soft output cap in tokens (approx chars/4); stop at the first section that "
-    "would overflow. e.g. 4000",
+    help="Soft output cap in tokens (approx chars/4); the table's identity is charged first "
+    "and a section that does not fit is skipped, never truncated. e.g. 4000",
 )
 @click.option(
     "--output",
@@ -116,8 +124,8 @@ def context_command(
     `--output`.
     Offline - reads only committed prints. Select one table by FQN, a set by
     fnmatch pattern, or every table with `--all`. Markdown by default;
-    `--budget` caps the output and stops at the first section that would
-    overflow.
+    `--budget` caps the output, charging the table's identity first and
+    skipping any later section that does not fit.
 
     **Arguments:**
 
@@ -171,45 +179,53 @@ def context_command(
         budget=budget,
     )
 
-    rendered_chunks: list[str] = []
-    overall_exit = EXIT_OK
+    resolved, overall_exit = _resolve_connections(connections, target, select_all)
 
-    for conn_config in connections:
-        manifest = _load_manifest(conn_config)
+    # An unconditional write would truncate the user's own `--output` file on a mistyped FQN.
+    if not resolved:
+        ctx.exit(overall_exit)
 
-        if manifest is None:
-            click.echo(f"{conn_config.name}: {_unusable_manifest_cause(conn_config)}", err=True)
-            overall_exit = max(overall_exit, EXIT_GENERIC)
-            continue
+    multi_connection = len(resolved) > 1
+    chunks: list[str] = []
+    entries: list[dict[str, Any]] = []
 
-        try:
-            resolved_tables = _resolve_tables(manifest, target, select_all)
-        except _NoMatch as exc:
-            click.echo(str(exc), err=True)
-            overall_exit = max(overall_exit, EXIT_GENERIC)
-            continue
+    for conn_config, manifest, resolved_tables in resolved:
+        if multi_connection and options.format in ("json", "yaml"):
+            payloads = assemble_context_payloads(
+                manifest,
+                print_root=_print_root(conn_config),
+                tables=resolved_tables,
+                options=options,
+            )
+            included, chunk = payloads.tables_included, None
+        else:
+            result = assemble_context(
+                manifest,
+                print_root=_print_root(conn_config),
+                tables=resolved_tables,
+                options=options,
+                connection_name=conn_config.name,
+                multi_connection=multi_connection,
+            )
+            included, chunk = result.tables_included, result.text
 
-        result = assemble_context(
-            manifest,
-            print_root=_print_root(conn_config),
-            tables=resolved_tables,
-            options=options,
-            connection_name=conn_config.name,
-        )
-
-        if result.tables_included == 0:
+        if included == 0:
             click.echo(f"{conn_config.name}: budget too small to include any table.", err=True)
             overall_exit = max(overall_exit, EXIT_GENERIC)
             continue
 
-        rendered_chunks.append(result.text)
+        if chunk is None:
+            entries.append({"connection": conn_config.name, "tables": payloads.payloads})
+        else:
+            chunks.append(chunk)
 
-    # Nothing assembled means nothing to write: an unconditional write would truncate the
-    # user's own file on a mistyped FQN. `diff` guards its own `--output` the same way.
-    if not rendered_chunks:
+    if not chunks and not entries:
         ctx.exit(overall_exit)
 
-    text = "\n\n---\n\n".join(c.rstrip() for c in rendered_chunks if c.strip())
+    if entries:
+        text = _render_connection_documents(entries, options.format)
+    else:
+        text = "\n\n---\n\n".join(c.rstrip() for c in chunks if c.strip())
 
     if text and not text.endswith("\n"):
         text += "\n"
@@ -232,6 +248,47 @@ def context_command(
             click.echo(text, nl=False)
 
     ctx.exit(overall_exit)
+
+
+def _resolve_connections(
+    connections: list[ConnectionConfig],
+    target: str | None,
+    select_all: bool,
+) -> tuple[list[tuple[ConnectionConfig, dict[str, Any], list[str]]], int]:
+    """Every connection that can answer, with its manifest and matched tables, plus the exit code
+    the rest earned. All resolve before any renders - the count decides how each chunk renders.
+    """
+
+    resolved: list[tuple[ConnectionConfig, dict[str, Any], list[str]]] = []
+    exit_code = EXIT_OK
+
+    for conn_config in connections:
+        manifest = _load_manifest(conn_config)
+
+        if manifest is None:
+            click.echo(f"{conn_config.name}: {_unusable_manifest_cause(conn_config)}", err=True)
+            exit_code = max(exit_code, EXIT_GENERIC)
+            continue
+
+        try:
+            resolved_tables = _resolve_tables(manifest, target, select_all)
+        except _NoMatch as exc:
+            click.echo(str(exc), err=True)
+            exit_code = max(exit_code, EXIT_GENERIC)
+            continue
+
+        resolved.append((conn_config, manifest, resolved_tables))
+
+    return resolved, exit_code
+
+
+def _render_connection_documents(entries: list[dict[str, Any]], fmt: str) -> str:
+    """One entry per connection, the shape `list` and `check` already emit for several."""
+
+    if fmt == "yaml":
+        return yaml.safe_dump_all(entries, sort_keys=False, default_flow_style=False)
+
+    return json.dumps(entries, indent=2, default=str, sort_keys=False) + "\n"
 
 
 class _NoMatch(ValueError):

@@ -60,6 +60,9 @@ _DATE_ONLY_TYPES = ("date",)
 _TIME_ONLY_TYPES = ("time",)
 _TZ_TYPES = ("timestamp",)  # the only instant-based temporal type; datetime/date/time are naive
 
+# Engine units as BigQuery date parts (SPEC 2.2.16); its `WEEK` opens on Sunday, so `ISOWEEK`.
+_TIMELINE_DATE_PARTS = {"day": "DAY", "week": "ISOWEEK", "month": "MONTH"}
+
 _BOOLEAN_TYPES = ("bool", "boolean")
 _JSON_TYPES = ("json",)
 _UNSUPPORTED_TYPES = ("bytes", "geography", "array", "struct", "record")
@@ -225,18 +228,20 @@ def probe_timeline(
 ) -> tuple[tuple[str, int], ...]:
     """One grouped statement bucketing `column` at `unit` grain. See SPEC 2.2.16."""
 
-    del counts, columns
+    del counts
 
     source = _table_source(identity, scope)
+    col = {c.name: c for c in columns}[column]
     cn = identity.quoted_column(column)
-    bq_unit = unit.upper()
+    bq_unit = _TIMELINE_DATE_PARTS[unit]
+    truncate = _timeline_truncation(col.sql_type)
 
     rows = exec_query(
         cursor,
         f"""
         SELECT bucket_start, cnt
         FROM (
-            SELECT DATE_TRUNC(DATE({cn}), {bq_unit}) AS bucket_start, COUNT(*) AS cnt
+            SELECT {truncate}({cn}, {bq_unit}) AS bucket_start, COUNT(*) AS cnt
             FROM {source}
             WHERE {cn} IS NOT NULL
             GROUP BY bucket_start
@@ -246,6 +251,18 @@ def probe_timeline(
     ).fetchall()
 
     return tuple((_iso_or_value(row[0]), int(row[1])) for row in rows)
+
+
+def _timeline_truncation(sql_type: str) -> str:
+    """BigQuery's truncation function for the anchor's own type (SPEC 2.2.16).
+
+    Each returns its argument's type; casting to DATE first would discard a time nothing recovers.
+    """
+
+    if _matches(sql_type, _DATE_ONLY_TYPES):
+        return "DATE_TRUNC"
+
+    return "TIMESTAMP_TRUNC" if _matches(sql_type, _TZ_TYPES) else "DATETIME_TRUNC"
 
 
 def compute_populated_windows(

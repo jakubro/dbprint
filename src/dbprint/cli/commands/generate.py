@@ -32,6 +32,7 @@ from ..rendering.errors import (
     connection_error_text,
     emit_error,
     failure_group_texts,
+    no_tables_matched_text,
     sketch_failure_texts,
 )
 from ..resolution import ConnectionResolutionError, resolve
@@ -203,9 +204,11 @@ def generate_command(
                             )
                         elif not result.tables and result.exit_code == EXIT_OK:
                             deferred.append(
-                                f"{conn_config.name}: no tables matched selectors "
-                                f"(include={_effective_include(conn_config, include_patterns)}, "
-                                f"exclude={_effective_exclude(conn_config, exclude_patterns)})",
+                                no_tables_matched_text(
+                                    conn_config,
+                                    include_patterns,
+                                    exclude_patterns,
+                                ),
                             )
 
                         deferred.extend(
@@ -246,14 +249,6 @@ def generate_command(
         ctx.exit(exit_code)
     finally:
         close_run_log(run_log)
-
-
-def _effective_include(conn_config: ConnectionConfig, cli_include: tuple[str, ...]) -> list[str]:
-    return list(cli_include) if cli_include else list(conn_config.include)
-
-
-def _effective_exclude(conn_config: ConnectionConfig, cli_exclude: tuple[str, ...]) -> list[str]:
-    return list(conn_config.exclude) + [e for e in cli_exclude if e not in conn_config.exclude]
 
 
 def _run_one(

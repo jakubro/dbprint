@@ -129,7 +129,7 @@ def _load_connections_file(path: Path) -> dict[str, dict[str, Any]]:
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
-        raise ConfigError(f"{path}: invalid YAML — {exc}") from exc
+        raise ConfigError(f"{path}: {_yaml_fault(exc)}") from exc
 
     if data is None:
         return {}
@@ -140,6 +140,21 @@ def _load_connections_file(path: Path) -> dict[str, dict[str, Any]]:
         )
 
     return data
+
+
+def _yaml_fault(exc: yaml.YAMLError) -> str:
+    """Where the parse failed, never what it read - this file holds credentials.
+
+    PyYAML's snippet quotes the line and its `problem` embeds the token; only position is safe.
+    """
+
+    mark = getattr(exc, "problem_mark", None)
+    where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark is not None else ""
+
+    return (
+        f"invalid YAML{where}. The parser's own message is withheld because this file "
+        f"holds credentials - open it at that position to see what is wrong."
+    )
 
 
 def _load_dotenv(path: Path) -> dict[str, str | None]:

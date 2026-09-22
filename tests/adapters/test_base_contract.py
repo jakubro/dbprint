@@ -402,6 +402,53 @@ class TestProbeTimeline:
         starts = [start for start, _ in buckets]
         assert starts == sorted(starts), starts
 
+    def test_week_buckets_open_on_the_same_weekday_everywhere(
+        self,
+        sql_adapter_factory: tuple[str, Callable[[], Adapter]],
+        empty_stats_config: StatisticsConfig,
+    ) -> None:
+        """SPEC 2.2.16: another opening day is a different population of rows, not a label."""
+
+        vendor, factory = sql_adapter_factory
+        adapter = factory()
+        fqn, columns, counts = _viability_check_probe_context(adapter, empty_stats_config)
+
+        buckets = adapter.probe_timeline(fqn, columns, counts, "observed_at", "week")
+        weekdays = {_weekday_of(start) for start, _ in buckets}
+
+        assert buckets, vendor
+        assert weekdays == {0}, (vendor, sorted(start for start, _ in buckets)[:3])
+
+    def test_a_bucket_start_is_rendered_in_the_anchors_own_domain(
+        self,
+        sql_adapter_factory: tuple[str, Callable[[], Adapter]],
+        empty_stats_config: StatisticsConfig,
+    ) -> None:
+        """Per adapter, not across them: SPEC 2.2.14 lets one adapter omit a `Z` another emits."""
+
+        vendor, factory = sql_adapter_factory
+        adapter = factory()
+        fqn, columns, counts = _viability_check_probe_context(adapter, empty_stats_config)
+        _, base = adapter.compute_base_statistics(fqn, columns, empty_stats_config)
+        stats = adapter.compute_column_statistics(
+            fqn,
+            columns,
+            empty_stats_config,
+            counts,
+            base,
+            frozenset(),
+        )
+        buckets = adapter.probe_timeline(fqn, columns, counts, "observed_at", "day")
+        bound = stats["observed_at"].range
+
+        assert buckets, vendor
+        assert bound is not None, vendor
+        assert ("T" in buckets[0][0]) == ("T" in str(bound.min)), (
+            vendor,
+            buckets[0][0],
+            bound.min,
+        )
+
     def test_every_real_adapter_agrees_on_bucket_count(
         self,
         all_sql_adapters: dict[str, Adapter],
@@ -1160,6 +1207,15 @@ def _curator_probe_context(
     counts, _ = adapter.compute_base_statistics(fqn, columns, config)
 
     return fqn, columns, counts
+
+
+def _weekday_of(rendered: str) -> int:
+    """The weekday a rendered bucket start falls on, Monday being 0."""
+
+    instant = parse_instant(rendered)
+    assert instant is not None, rendered
+
+    return instant.weekday()
 
 
 def _viability_check_probe_context(

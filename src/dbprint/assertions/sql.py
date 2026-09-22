@@ -5,6 +5,8 @@ Each result is compared against the declared `expect` (0 or empty) per ASSERTION
 
 from __future__ import annotations
 
+import math
+from decimal import Decimal
 from typing import Any, Protocol
 
 from dbprint.conformance.issue import Issue
@@ -106,7 +108,7 @@ def _evaluate_expect_zero(
                 spec_ref=SPEC_REF,
             ),
         ]
-    elif isinstance(actual, bool) or not isinstance(actual, (int, float)):
+    elif not _is_finite_number(actual):
         return [
             Issue(
                 path=path,
@@ -124,7 +126,7 @@ def _evaluate_expect_zero(
                 path=path,
                 code=codes.SQL_NON_ZERO,
                 severity=query.severity,
-                detail=f"actual: {actual} (expected: 0)",
+                detail=f"actual: {_spell_count(actual)} (expected: 0)",
                 spec_ref=SPEC_REF,
             ),
         ]
@@ -153,3 +155,31 @@ def _evaluate_expect_empty(
             spec_ref=SPEC_REF,
         ),
     ]
+
+
+def _is_finite_number(value: Any) -> bool:
+    """Whether a count can be read off `value`.
+
+    `numbers.Real` is the trap: `Decimal` registers only as `numbers.Number`, which admits
+    `complex` too. A boolean is refused because `True == 1` would pass a wrong-shaped query.
+    """
+
+    if isinstance(value, bool):
+        return False
+
+    if isinstance(value, Decimal):
+        return value.is_finite()
+
+    if isinstance(value, (int, float)):
+        return math.isfinite(value)
+
+    return False
+
+
+def _spell_count(value: Any) -> str:
+    """The scale a driver carried is not part of the count, so an integral decimal sheds it."""
+
+    if isinstance(value, Decimal) and value == value.to_integral_value():
+        return str(int(value))
+
+    return str(value)

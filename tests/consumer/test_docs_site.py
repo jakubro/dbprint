@@ -12,9 +12,13 @@ from tests.fixtures.adversarial import (
     APPROXIMATE_ROW_COUNT_TABLE,
     DECLARED_MISSING_KIND,
     DECLARED_MISSING_TABLE,
+    DELIMITER_COLUMN,
+    DELIMITER_TABLE,
+    DELIMITER_VALUE,
     EMPTY_COLUMNS_TABLE,
     FUTURE_DATED_COLUMN,
     INCOMPLETE_GRAIN_TABLE,
+    LINE_BREAK_VALUE,
     NEVER_DECLARED_KIND,
     REDACTED_COLUMN,
     SCOPED_TABLE,
@@ -36,6 +40,7 @@ COVERS = frozenset(
         "incomplete_grain_search",
         "catalog_only_table",
         "declared_missing_artifact",
+        "delimiter_in_a_value",
     },
 )
 
@@ -172,3 +177,15 @@ def test_declared_missing_artifact_is_named_and_distinguished(
     assert notice is not None
     assert DECLARED_MISSING_KIND in notice
     assert NEVER_DECLARED_KIND not in notice
+
+
+def test_a_delimiter_in_a_value_survives_the_view(adversarial_print: AdversarialPrint) -> None:
+    """The page is HTML, so the literal reaches it whole and its own escaping renders it."""
+
+    statistics = _statistics(adversarial_print, DELIMITER_TABLE)
+    assert statistics is not None
+
+    values = view.values_view(statistics["columns"][DELIMITER_COLUMN])
+
+    assert values is not None
+    assert {bar["value"] for bar in values["bars"]} == {DELIMITER_VALUE, LINE_BREAK_VALUE}

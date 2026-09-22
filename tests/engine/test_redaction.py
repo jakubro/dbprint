@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -15,6 +16,7 @@ from dbprint.adapters import (
     ColumnStats,
     CommentsMeta,
     Frequencies,
+    Length,
     MockAdapter,
     MockTable,
     Range,
@@ -23,7 +25,7 @@ from dbprint.adapters import (
 from dbprint.config import ConfigError, load_project
 from dbprint.config.project import RedactRule, bind_redaction_salt
 from dbprint.engine import Engine
-from dbprint.spec.redaction import MASK_PLACEHOLDER, redact_value
+from dbprint.spec.redaction import MASK_PLACEHOLDER, Primitive, redact_value
 from tests.conftest import normalize_instants
 from tests.engine.test_orchestrator import _conn_config, _curator_fixture
 from tests.engine.test_prose_suppression import _fixture as _prose_fixture
@@ -402,8 +404,11 @@ class TestConformance:
         # The control: a column the matrix permits it on, under the same rule.
         assert columns["phone"]["redacted"] == "mask"
 
-    def test_a_rule_reaching_a_prose_text_column_emits_no_marker(self, tmp_path: Path) -> None:
-        """`field_notes` and `institution` are both `text`; only the sampled shape tells them apart."""
+    def test_a_rule_reaching_a_prose_text_column_marks_it_and_lists_nothing(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """`field_notes` publishes no literal at all, and the marker still reports its cover."""
 
         conn = replace(
             _conn_config(tmp_path),
@@ -416,7 +421,7 @@ class TestConformance:
 
         assert columns["field_notes"]["classification"] == "text"
         assert columns["field_notes"]["inferred"]["looks_like"] == "prose"
-        assert "redacted" not in columns["field_notes"]
+        assert columns["field_notes"]["redacted"] == "mask"
         assert "values" not in columns["field_notes"]
         assert "range" not in columns["field_notes"]
         assert "percentiles" not in columns["field_notes"]
@@ -436,7 +441,8 @@ class TestConformance:
             (tmp_path / "primary" / "public" / "curator_note" / "statistics.yaml").read_text(),
         )["columns"]
 
-        assert "redacted" not in columns["field_notes"]
+        assert columns["field_notes"]["redacted"] == "mask"
+        assert "values" not in columns["field_notes"]
         assert columns["status"]["redacted"] == "mask"
         assert columns["status"]["values"]
 
@@ -444,7 +450,7 @@ class TestConformance:
         self,
         tmp_path: Path,
     ) -> None:
-        """The exemption follows the column, not the rule: `phone` loses it, `institution` keeps."""
+        """The exemption follows the column: `phone` loses its list, `institution` keeps one."""
 
         conn = replace(
             _conn_config(tmp_path),
@@ -458,7 +464,7 @@ class TestConformance:
         assert columns["phone"]["classification"] == "text"
         assert columns["phone"]["inferred"]["looks_like"] == "prose"
         assert columns["phone"]["inferred"]["sensitivity"] == "contact"
-        assert "redacted" not in columns["phone"]
+        assert columns["phone"]["redacted"] == "mask"
         assert "values" not in columns["phone"]
         assert columns["institution"]["inferred"]["sensitivity"] == "contact"
         assert columns["institution"]["redacted"] == "mask"
@@ -497,6 +503,80 @@ class TestConformance:
 
         errors = [i for i in validate_print(tmp_path / "primary") if i.severity == "error"]
         assert errors == [], "\n".join(f"  {e.code} at {e.path}: {e.detail}" for e in errors)
+
+
+class TestACoveredColumnIsNeverSketched:
+    """SPEC 2.2.14: a sketch is a set of digests of the very cell values a rule withheld."""
+
+    @staticmethod
+    def _columns(tmp_path: Path, **kwargs: Any) -> dict[str, Any]:
+        conn = replace(_conn_config(tmp_path, enumeration_threshold=0), **kwargs)
+        Engine(MockAdapter(_sketchable_prose_fixture()), conn, tmp_path).generate()
+
+        return yaml.safe_load(
+            (tmp_path / "primary" / "seedbank" / "collector" / "statistics.yaml").read_text(),
+        )["columns"]
+
+    def test_a_covered_prose_column_carries_no_sketch(self, tmp_path: Path) -> None:
+        """`field_notes` publishes no literal, so only the marker can exclude it."""
+
+        columns = self._columns(
+            tmp_path,
+            redact=(RedactRule(columns=("*.field_notes",), with_="mask"),),
+        )
+
+        assert columns["field_notes"]["redacted"] == "mask"
+        assert "values" not in columns["field_notes"]
+        assert "sketch" not in columns["field_notes"]
+        assert columns["institution"]["sketch"]["method"] == "kmv_md5_lo64"
+        assert "redacted" not in columns["institution"]
+
+    @pytest.mark.parametrize("primitive", ["mask", "drop", "hash"])
+    def test_every_primitive_withholds_the_sketch(
+        self,
+        tmp_path: Path,
+        primitive: Primitive,
+    ) -> None:
+        columns = self._columns(
+            tmp_path,
+            redact=(RedactRule(columns=("*.field_notes",), with_=primitive),),
+            redaction_salt="pepper",
+        )
+
+        assert columns["field_notes"]["redacted"] == primitive
+        assert "sketch" not in columns["field_notes"]
+
+    def test_the_flag_that_widens_the_population_does_not_widen_the_exclusion(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        columns = self._columns(
+            tmp_path,
+            redact=(RedactRule(columns=("*.field_notes",), with_="mask"),),
+            sketch_all_columns=True,
+        )
+
+        assert "sketch" not in columns["field_notes"]
+        assert columns["institution"]["sketch"]["method"] == "kmv_md5_lo64"
+
+    def test_a_covered_column_whose_value_read_failed_still_declares_its_cover(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """No literal survived to be redacted and none was measured either."""
+
+        conn = replace(
+            _conn_config(tmp_path),
+            redact=(RedactRule(columns=("*.field_notes",), with_="mask"),),
+        )
+        Engine(MockAdapter(_unmeasured_values_fixture()), conn, tmp_path).generate()
+        field_notes = yaml.safe_load(
+            (tmp_path / "primary" / "seedbank" / "accession" / "statistics.yaml").read_text(),
+        )["columns"]["field_notes"]
+
+        assert field_notes["unmeasured"] == ["distribution", "values", "values_coverage"]
+        assert field_notes["redacted"] == "mask"
+        assert "sketch" not in field_notes
 
 
 class TestBoundsUnderARedactedColumn:
@@ -590,7 +670,11 @@ class TestAggregatesUnderARedactedColumn:
     """
 
     def _amount(self, tmp_path: Path, *, values: tuple[int, ...]) -> dict[str, Any]:
+        """`values` is the scanned rows themselves, so repeats decide `cardinality`."""
+
+        counts = Counter(values)
         non_null = len(values)
+        distinct = len(counts)
         total = float(sum(values))
         mean = total / non_null
         table = MockTable(
@@ -615,8 +699,8 @@ class TestAggregatesUnderARedactedColumn:
                     nullable=True,
                     null_count=0,
                     null_rate=0.0,
-                    cardinality=non_null,
-                    cardinality_ratio=1.0,
+                    cardinality=distinct,
+                    cardinality_ratio=round(distinct / non_null, 6),
                     cardinality_method="exact",
                     range=Range(min=min(values), max=max(values)),
                     percentiles={"p50": sorted(values)[non_null // 2]},
@@ -625,9 +709,14 @@ class TestAggregatesUnderARedactedColumn:
                     zero_count=0,
                     negative_count=0,
                     quantized_count=non_null,
-                    values=tuple(ValueCount(value=v, count=1) for v in values),
-                    distribution="dominant_value" if non_null == 1 else "uniform",
-                    frequencies=Frequencies(top=1, bottom=1, listed=non_null, total=non_null),
+                    values=tuple(ValueCount(value=v, count=c) for v, c in counts.items()),
+                    distribution="dominant_value" if distinct == 1 else "uniform",
+                    frequencies=Frequencies(
+                        top=max(counts.values()),
+                        bottom=min(counts.values()),
+                        listed=distinct,
+                        total=non_null,
+                    ),
                 ),
             },
             samples={},
@@ -663,6 +752,91 @@ class TestAggregatesUnderARedactedColumn:
         assert amount["redacted"] == "mask"
         assert amount["mean"] == 20.0
         assert amount["sum"] == 60.0
+
+    def _institution(self, tmp_path: Path, *, distinct: int) -> dict[str, Any]:
+        rows = 480
+        values = tuple(f"institute {i:012d}" for i in range(distinct))
+        per_value = rows // distinct
+        collector = MockTable(
+            type="table",
+            namespace_path=("seedbank", "collector"),
+            ddl="CREATE TABLE seedbank.collector (institution text);\n",
+            columns=[
+                ColumnMeta(
+                    name="institution",
+                    sql_type="text",
+                    nullable=False,
+                    default=None,
+                    ordinal=1,
+                ),
+            ],
+            relationships=[],
+            indexes=[],
+            comments=CommentsMeta(table=None, columns={}),
+            stats={
+                "institution": ColumnStats(
+                    sql_type="text",
+                    nullable=False,
+                    null_count=0,
+                    null_rate=0.0,
+                    cardinality=distinct,
+                    cardinality_ratio=round(distinct / rows, 6),
+                    cardinality_method="exact",
+                    values=tuple(ValueCount(value=v, count=per_value) for v in values),
+                    values_coverage=1.0,
+                    distribution="dominant_value" if distinct == 1 else "uniform",
+                    length=Length(min=23, max=23, avg=23.0, p95=23.0),
+                    empty_count=0,
+                ),
+            },
+            samples={},
+            row_count=rows,
+        )
+        conn = replace(
+            _conn_config(tmp_path),
+            redact=(RedactRule(columns=("*.institution",), with_="mask"),),
+        )
+        Engine(MockAdapter({"seedbank.collector": collector}), conn, tmp_path).generate()
+        payload = yaml.safe_load(
+            (tmp_path / "primary" / "seedbank" / "collector" / "statistics.yaml").read_text(),
+        )
+
+        return payload["columns"]["institution"]
+
+    def test_length_is_withheld_on_one_distinct_value(self, tmp_path: Path) -> None:
+        """`min == max == avg` over one value is the withheld literal's own character count."""
+
+        institution = self._institution(tmp_path, distinct=1)
+
+        assert institution["classification"] == "categorical"
+        assert institution["redacted"] == "mask"
+        assert "length" not in institution
+
+    def test_length_survives_on_two_distinct_values(self, tmp_path: Path) -> None:
+        institution = self._institution(tmp_path, distinct=2)
+
+        assert institution["redacted"] == "mask"
+        assert institution["length"]["min"] == 23
+
+    def test_withheld_on_many_rows_carrying_one_distinct_value(self, tmp_path: Path) -> None:
+        """480 rows of one number: the mean is that number and the sum divides back to it."""
+
+        amount = self._amount(tmp_path, values=(85,) * 480)
+
+        assert amount["cardinality"] == 1
+        assert amount["redacted"] == "mask"
+        assert "mean" not in amount
+        assert "sum" not in amount
+
+    def test_survives_once_a_second_distinct_value_appears(self, tmp_path: Path) -> None:
+        """The threshold is distinctness, not size: one more value and neither lands on it."""
+
+        amount = self._amount(tmp_path, values=(85,) * 479 + (86,))
+
+        assert amount["cardinality"] == 2
+        assert amount["redacted"] == "mask"
+        assert 85 < amount["mean"] < 86
+        assert amount["sum"] > 85
 
 
 class TestRedactedDayCounts:
@@ -913,5 +1087,103 @@ def _dated_fixture() -> dict[str, MockTable]:
             },
             samples={},
             row_count=100,
+        ),
+    }
+
+
+def _unmeasured_values_fixture() -> dict[str, MockTable]:
+    """A text column whose value read failed: no literal published, and `unmeasured` says so."""
+
+    return {
+        "seedbank.accession": MockTable(
+            type="table",
+            namespace_path=("seedbank", "accession"),
+            ddl="CREATE TABLE seedbank.accession (field_notes text);\n",
+            columns=[
+                ColumnMeta(
+                    name="field_notes",
+                    sql_type="text",
+                    nullable=False,
+                    default=None,
+                    ordinal=1,
+                ),
+            ],
+            relationships=[],
+            indexes=[],
+            comments=CommentsMeta(table=None, columns={}),
+            stats={
+                "field_notes": ColumnStats(
+                    sql_type="text",
+                    nullable=False,
+                    null_count=0,
+                    null_rate=0.0,
+                    cardinality=100,
+                    cardinality_ratio=0.5,
+                    cardinality_method="exact",
+                    values=None,
+                    empty_count=0,
+                    unmeasured=("values", "values_coverage", "distribution"),
+                ),
+            },
+            samples={},
+            row_count=200,
+        ),
+    }
+
+
+def _sketchable_prose_fixture() -> dict[str, MockTable]:
+    """Two text columns with exhaustive value lists, so both are sketched; one reads as prose."""
+
+    notes = tuple(
+        f"the specimen in tray {i} was rehoused and has recovered since" for i in range(20)
+    )
+    institutions = tuple(f"institute-{i:02d}" for i in range(20))
+
+    def stats(values: tuple[str, ...], width: int) -> ColumnStats:
+        return ColumnStats(
+            sql_type="text",
+            nullable=False,
+            null_count=0,
+            null_rate=0.0,
+            cardinality=20,
+            cardinality_ratio=0.5,
+            cardinality_method="exact",
+            values=tuple(ValueCount(value=v, count=2) for v in values),
+            values_coverage=1.0,
+            distribution="uniform",
+            empty_count=0,
+            length=Length(min=width, max=width, avg=float(width), p95=float(width)),
+        )
+
+    return {
+        "seedbank.collector": MockTable(
+            type="table",
+            namespace_path=("seedbank", "collector"),
+            ddl="CREATE TABLE seedbank.collector (field_notes text, institution text);\n",
+            columns=[
+                ColumnMeta(
+                    name="field_notes",
+                    sql_type="text",
+                    nullable=False,
+                    default=None,
+                    ordinal=1,
+                ),
+                ColumnMeta(
+                    name="institution",
+                    sql_type="text",
+                    nullable=False,
+                    default=None,
+                    ordinal=2,
+                ),
+            ],
+            relationships=[],
+            indexes=[],
+            comments=CommentsMeta(table=None, columns={}),
+            stats={
+                "field_notes": stats(notes, 58),
+                "institution": stats(institutions, 13),
+            },
+            samples={"field_notes": list(notes), "institution": list(institutions)},
+            row_count=40,
         ),
     }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 from dbprint.assertions import AssertionSet, QueryAssertion, evaluate_sql_assertions
@@ -61,6 +62,65 @@ class TestExpectZero:
         aset = _set((QueryAssertion(name="q1", sql="SELECT 'x'", expect="0"),))
         issues = evaluate_sql_assertions(aset, "primary", adapter)
         assert issues[0].code == "assertion.sql-type-mismatch"
+
+    def test_a_decimal_zero_passes(self) -> None:
+        """Every driver here returns DECIMAL, NUMERIC, SUM and AVG as `decimal.Decimal`."""
+
+        adapter = _FakeAdapter({"SELECT SUM(x)": [(Decimal("0.00"),)]})
+        aset = _set((QueryAssertion(name="q1", sql="SELECT SUM(x)", expect="0"),))
+
+        assert evaluate_sql_assertions(aset, "primary", adapter) == []
+
+    def test_a_non_zero_decimal_reports_the_count_without_its_scale(self) -> None:
+        adapter = _FakeAdapter({"SELECT SUM(x)": [(Decimal("5.00"),)]})
+        aset = _set((QueryAssertion(name="q1", sql="SELECT SUM(x)", expect="0"),))
+        issues = evaluate_sql_assertions(aset, "primary", adapter)
+
+        assert issues[0].code == "assertion.sql-non-zero"
+        assert "actual: 5 " in issues[0].detail
+
+    def test_a_fractional_decimal_keeps_its_spelling(self) -> None:
+        adapter = _FakeAdapter({"SELECT AVG(x)": [(Decimal("0.5"),)]})
+        aset = _set((QueryAssertion(name="q1", sql="SELECT AVG(x)", expect="0"),))
+        issues = evaluate_sql_assertions(aset, "primary", adapter)
+
+        assert issues[0].code == "assertion.sql-non-zero"
+        assert "actual: 0.5 " in issues[0].detail
+
+    def test_a_boolean_is_still_refused(self) -> None:
+        """`True == 1`, so admitting it would pass an assertion whose query returned a flag."""
+
+        adapter = _FakeAdapter({"SELECT true": [(True,)]})
+        aset = _set((QueryAssertion(name="q1", sql="SELECT true", expect="0"),))
+        issues = evaluate_sql_assertions(aset, "primary", adapter)
+
+        assert issues[0].code == "assertion.sql-type-mismatch"
+
+    def test_a_non_finite_value_is_a_type_fault(self) -> None:
+        for sql, value in (
+            ("SELECT nan", Decimal("NaN")),
+            ("SELECT inf", float("inf")),
+            ("SELECT fnan", float("nan")),
+        ):
+            adapter = _FakeAdapter({sql: [(value,)]})
+            aset = _set((QueryAssertion(name="q1", sql=sql, expect="0"),))
+            issues = evaluate_sql_assertions(aset, "primary", adapter)
+
+            assert issues[0].code == "assertion.sql-type-mismatch", value
+
+    def test_an_integer_and_a_float_report_exactly_as_before(self) -> None:
+        """The detail string of the common case is what an operator already reads."""
+
+        adapter = _FakeAdapter({"SELECT 7": [(7,)], "SELECT 7.5": [(7.5,)]})
+        aset = _set(
+            (
+                QueryAssertion(name="q1", sql="SELECT 7", expect="0"),
+                QueryAssertion(name="q2", sql="SELECT 7.5", expect="0"),
+            ),
+        )
+        details = sorted(i.detail for i in evaluate_sql_assertions(aset, "primary", adapter))
+
+        assert details == ["actual: 7 (expected: 0)", "actual: 7.5 (expected: 0)"]
 
 
 class TestExpectEmpty:

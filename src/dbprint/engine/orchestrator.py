@@ -145,8 +145,8 @@ _PROSE = "prose"
 # The classifications whose SPEC 2.2.3 row carries a value list.
 _VALUE_LIST_CLASSIFICATIONS = {"boolean", "categorical", "foreign_key_candidate", "text"}
 
-# Classifications whose SPEC 2.2.3 row carries no cell values at all - no value list, no
-# range, no percentiles. A cheap pre-filter, not the per-column verdict.
+# Classifications whose SPEC 2.2.3 row carries no cell value and forbids the `redacted`
+# marker itself, so a rule covering such a column resolves to no primitive.
 _NO_CELL_VALUE_CLASSIFICATIONS = {"json", "unsupported"}
 
 # Per-table cap on measured grain candidate pairs (SPEC 2.2.12) - a producer constant, never a
@@ -499,14 +499,9 @@ class Engine:
 
         not_attempted = total - len(per_table_results)
 
-        include, exclude = _effective_selectors(self._conn, cli_include, cli_exclude)
+        scope = _run_scope(self._conn, cli_include, cli_exclude)
         carried_matched = _carried_matched(matched_fqns, per_table_meta, baseline_manifest)
-        carried_out_of_scope = _carried_out_of_scope(
-            baseline_manifest,
-            matched_fqns,
-            include,
-            exclude,
-        )
+        carried_out_of_scope = _carried_out_of_scope(baseline_manifest, matched_fqns, scope)
         # A carried entry whose declared artifacts are missing is dropped rather than
         # re-indexed; computed once for both the manifest and the preserved edges.
         baseline_tables = (baseline_manifest or {}).get("tables") or {}
@@ -578,8 +573,8 @@ class Engine:
             carried_out_of_scope=carried_out_of_scope,
             dropped_carried=dropped_carried,
             resolved_thresholds=resolved_thresholds,
-            include=tuple(include),
-            exclude=tuple(exclude),
+            include=tuple(self._conn.include),
+            exclude=tuple(self._conn.exclude),
             default_collation=default_collation,
             sketch_failures=sketch_failures,
         )
@@ -2976,17 +2971,12 @@ def _drop_forbidden_fields(
 def _emitted_extras(e: _EnrichedColumnStats, rows_scanned: int, salt: str | None = None):
     """Every value-bearing field for one column, redacted where a rule covers it.
 
-    The value list, range bounds and percentiles are the cell values a primitive acts on;
-    counts, ratios, coverage, cardinality and distribution pass through. `redacted` is yielded
-    only when the column carries one of those three - declaring a redaction over nothing to
-    redact is a claim the artifact cannot support.
+    `redacted` reports the rule covering the column, not what survived it (SPEC 2.2.9).
     """
 
     s = e.stats
 
-    if e.redaction is not None and (
-        s.values is not None or s.range is not None or s.percentiles is not None
-    ):
+    if e.redaction is not None:
         yield "redacted", e.redaction
 
     if e.inferred is not None:
@@ -3063,9 +3053,9 @@ def _emitted_extras(e: _EnrichedColumnStats, rows_scanned: int, salt: str | None
             {k: _redacted_scalar(v, e.redaction, salt) for k, v in s.percentiles.items()},
         )
 
-    # Aggregates, not cell values (SPEC 2.2.9) - passed through unredacted, except where the
-    # scanned set is too small for the aggregate to be anything but the one cell it withholds.
-    if not (e.redaction is not None and rows_scanned - s.null_count <= 1):
+    # Aggregates, not cell values (SPEC 2.2.9) - passed through unredacted, except where too
+    # few rows or too few distinct values leave the aggregate equal to the cell it withholds.
+    if not (e.redaction is not None and (rows_scanned - s.null_count <= 1 or s.cardinality == 1)):
         if s.mean is not None:
             yield "mean", s.mean
 
@@ -3370,17 +3360,13 @@ def _top_count(values: Any) -> int | None:
 
 
 def _scope_compatible(child: _ColumnSnapshot, parent: _ColumnSnapshot) -> bool:
-    """SPEC 2.3.10: comparable only when neither side is scoped, or both at a known equal rate."""
+    """SPEC 2.3.10: comparable only where neither endpoint is scoped.
 
-    if not child.scoped and not parent.scoped:
-        return True
+    `row_count` counts the table while `cardinality` counts the rows scanned, so their ratio
+    answers neither question at any sample rate.
+    """
 
-    return (
-        child.scoped
-        and parent.scoped
-        and child.sample is not None
-        and child.sample == parent.sample
-    )
+    return not child.scoped and not parent.scoped
 
 
 def _compute_observed(
@@ -3565,17 +3551,19 @@ def _manifest_unchanged(manifest: dict[str, Any], baseline: dict[str, Any] | Non
     }
 
 
-def _effective_selectors(
+def _run_scope(
     conn: ConnectionConfig,
     cli_include: tuple[str, ...],
     cli_exclude: tuple[str, ...],
-) -> tuple[list[str], list[str]]:
-    """Config scope merged with the CLI overrides: include narrows, exclude unions."""
+) -> diff_module.DiffSelectors:
+    """The scope this run applied: the connection's own lists plus the CLI's narrowing."""
 
-    include = list(cli_include) if cli_include else list(conn.include)
-    exclude = list(conn.exclude) + [e for e in cli_exclude if e not in conn.exclude]
-
-    return include, exclude
+    return diff_module.DiffSelectors(
+        include=tuple(conn.include),
+        exclude=tuple(conn.exclude),
+        cli_include=cli_include,
+        cli_exclude=cli_exclude,
+    )
 
 
 def _carried_matched(
@@ -3648,8 +3636,7 @@ def _merge_incoming(
 def _carried_out_of_scope(
     baseline_manifest: dict[str, Any] | None,
     matched_fqns: tuple[str, ...],
-    include: list[str],
-    exclude: list[str],
+    scope: diff_module.DiffSelectors,
 ) -> tuple[str, ...]:
     """Committed tables this run's selectors never covered.
 
@@ -3660,9 +3647,7 @@ def _carried_out_of_scope(
     entries = (baseline_manifest or {}).get("tables") or {}
     matched = set(matched_fqns)
 
-    return tuple(
-        f for f in entries if f not in matched and not selectors.match(f, include, exclude)
-    )
+    return tuple(f for f in entries if f not in matched and not scope.covers(f))
 
 
 def _baseline_only_tables(
@@ -3717,10 +3702,7 @@ def _compute_diff_dict(
         if baseline_states and fqn in baseline_states:
             current_states[fqn] = baseline_states[fqn]
 
-    # The effective scope (config merged with the CLI overrides), so the diff filters the
-    # baseline by what was actually scanned rather than by the config alone (SPEC 2.6.8).
-    include, exclude = _effective_selectors(conn, cli_include, cli_exclude)
-    diff_selectors = diff_module.DiffSelectors(include=tuple(include), exclude=tuple(exclude))
+    scope = _run_scope(conn, cli_include, cli_exclude)
     baseline_generated_at = baseline_manifest.get("generated_at") if baseline_manifest else None
     baseline_dbprint_version = (
         baseline_manifest.get("dbprint_version") if baseline_manifest else None
@@ -3735,7 +3717,7 @@ def _compute_diff_dict(
         baseline_generated_at=baseline_generated_at,
         baseline_dbprint_version=baseline_dbprint_version,
         scanned_at=generated_at,
-        selectors=diff_selectors,
+        selectors=scope,
         generated_at=generated_at,
         carried=frozenset(carried_matched),
     )
@@ -3772,10 +3754,7 @@ def _empty_diff_dict(
         baseline_generated_at=None,
         baseline_dbprint_version=None,
         scanned_at=generated_at,
-        selectors=diff_module.DiffSelectors(
-            include=tuple(conn.include),
-            exclude=tuple(conn.exclude),
-        ),
+        selectors=_run_scope(conn, (), ()),
         generated_at=generated_at,
     )
 

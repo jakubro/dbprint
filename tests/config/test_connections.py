@@ -277,6 +277,57 @@ other:
                 env={},
             )
 
+    @pytest.mark.parametrize(
+        ("body", "line"),
+        [
+            ("primary:\n  host: a\n  password: *Hunter2Placeholder\n", 3),
+            ("primary:\n  host: &Hunter2Placeholder a\nb:\n  host: &Hunter2Placeholder c\n", 4),
+            ('primary:\n  host: a\n  password: "Hunter2Placeholder\n', 4),
+        ],
+        ids=["undefined-alias", "duplicate-anchor", "unterminated-quote"],
+    )
+    def test_a_parse_failure_names_the_position_and_not_the_credential(
+        self,
+        tmp_path: Path,
+        body: str,
+        line: int,
+    ) -> None:
+        cfile = tmp_path / "connections.yaml"
+        _write_connections_file(cfile, body)
+
+        with pytest.raises(ConfigError) as caught:
+            resolve_connection(
+                "primary",
+                ["host"],
+                project_root=tmp_path,
+                connections_file=cfile,
+                env={},
+            )
+
+        message = str(caught.value)
+        assert "Hunter2Placeholder" not in message
+        assert "invalid YAML" in message
+        assert str(cfile) in message
+        assert f"line {line}" in message
+
+    def test_a_fault_carrying_no_position_still_names_the_file(self, tmp_path: Path) -> None:
+        cfile = tmp_path / "connections.yaml"
+        _write_connections_file(cfile, "primary:\n  host: a\x07\n")
+
+        with pytest.raises(ConfigError) as caught:
+            resolve_connection(
+                "primary",
+                ["host"],
+                project_root=tmp_path,
+                connections_file=cfile,
+                env={},
+            )
+
+        message = str(caught.value)
+        assert "invalid YAML" in message
+        assert str(cfile) in message
+        assert "line" not in message
+
     def test_empty_connections_file_treated_as_absent(self, tmp_path: Path) -> None:
         cfile = tmp_path / "connections.yaml"
         _write_connections_file(cfile, "")

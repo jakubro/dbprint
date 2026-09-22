@@ -42,10 +42,10 @@ class TestErrorConstructors:
         err = errors.malformed_uri("not://a/dbprint/uri")
         assert err.code == -32602
 
-    def test_missing_argument(self) -> None:
-        err = errors.missing_argument("table", "")
+    def test_invalid_argument(self) -> None:
+        err = errors.invalid_argument("list_tables takes no argument 'schema'.")
         assert err.code == -32602
-        assert "non-empty string" in err.detail
+        assert "takes no argument" in err.detail
 
     def test_no_diff_available(self) -> None:
         err = errors.no_diff_available("/tmp/x/diff.yaml")

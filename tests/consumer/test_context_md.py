@@ -7,6 +7,7 @@ per-state properties against the same rendering path.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -16,9 +17,12 @@ from tests.fixtures.adversarial import (
     APPROXIMATE_ROW_COUNT_TABLE,
     DECLARED_MISSING_KIND,
     DECLARED_MISSING_TABLE,
+    DELIMITER_TABLE,
+    DELIMITER_VALUE,
     EMPTY_COLUMNS_TABLE,
     FUTURE_DATED_COLUMN,
     INCOMPLETE_GRAIN_TABLE,
+    LINE_BREAK_VALUE,
     NEVER_DECLARED_KIND,
     REDACTED_COLUMN,
     REDACTED_PRIMITIVE,
@@ -41,6 +45,7 @@ COVERS = frozenset(
         "incomplete_grain_search",
         "catalog_only_table",
         "declared_missing_artifact",
+        "delimiter_in_a_value",
     },
 )
 
@@ -215,3 +220,21 @@ class TestTheQueryPurposeHonoursTheSameRegister:
         assert "rank-00 (1)" in row
         assert "rank-05" not in row
         assert "0.0667 - a sample of the most frequent values" in row
+
+
+def test_a_delimiter_in_a_value_does_not_split_a_row(adversarial_print: AdversarialPrint) -> None:
+    """A pipe in a value would open a cell the header never declared."""
+
+    fragment = _render(adversarial_print, DELIMITER_TABLE)
+    rows = [l for l in fragment.splitlines() if l.startswith("|") and not set(l) <= set("|- ")]
+
+    assert rows, "the fragment drew no table at all"
+    assert all(len(_cells(row)) == 3 for row in rows), rows
+    assert DELIMITER_VALUE.replace("|", "\\|") in fragment
+    assert "\n".join(LINE_BREAK_VALUE.splitlines()) not in fragment
+
+
+def _cells(row: str) -> list[str]:
+    """The row's cells, splitting on delimiters a reader would act on, not escaped ones."""
+
+    return [c for c in re.split(r"(?<!\\)\|", row.strip()) if c.strip()]

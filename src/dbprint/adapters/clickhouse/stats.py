@@ -70,6 +70,7 @@ _NUMERIC_TYPES = (
 )
 
 _TEMPORAL_TYPES = ("date", "date32", "datetime", "datetime64")
+_DATE_ONLY_TYPES = ("date", "date32")
 
 _JSON_TYPES = ("json",)
 
@@ -231,13 +232,16 @@ def probe_timeline(
 
     source = _source(identity, scope)
     by_name = {col.name: col for col in columns}
-    cn = _quote_ident(by_name[column].physical_name or by_name[column].name)
-    bucket_expr = _timeline_bucket_expr(cn, unit)
+    col = by_name[column]
+    cn = _quote_ident(col.physical_name or col.name)
+    date_only = _matches(col.sql_type, _DATE_ONLY_TYPES)
+    bucket_expr = _timeline_bucket_expr(cn, unit, date_only=date_only)
+    rendered = "toString(bucket_start)" if date_only else _render_temporal("bucket_start")
 
     rows = exec_query(
         cursor,
         f"""
-        SELECT toString(bucket_start) AS bucket_text, cnt
+        SELECT {rendered} AS bucket_text, cnt
         FROM (
             SELECT {bucket_expr} AS bucket_start, count() AS cnt
             FROM {source}
@@ -252,25 +256,26 @@ def probe_timeline(
 
 
 def _render_temporal(expr: str) -> str:
-    """SQL text rendering a DateTime expression per SPEC 2.2.4's ISO domain rule - `T` separator
-    and no trailing `.000000`, so two adapters render one instant to the identical string.
-    """
+    """Render a DateTime expression per SPEC 2.2.4: `T` separator, no trailing `.000000`."""
 
     rendered = f"formatDateTime(toDateTime64({expr}, 6), '%Y-%m-%dT%H:%i:%S.%f')"
 
     return f"replaceRegexpOne({rendered}, '\\\\.000000$', '')"
 
 
-def _timeline_bucket_expr(cn: str, unit: str) -> str:
-    """Native truncation function for `probe_timeline`'s GROUP BY key. See SPEC 2.2.16."""
+def _timeline_bucket_expr(cn: str, unit: str, *, date_only: bool) -> str:
+    """Native truncation function for `probe_timeline`'s GROUP BY key. See SPEC 2.2.16.
 
-    if unit == "day":
-        return f"toStartOfDay(toDateTime({cn}))"
+    A `Date` anchor buckets as a date; widening to `DateTime` publishes a midnight it lacks.
+    """
 
     if unit == "week":
-        return f"toStartOfWeek(toDateTime({cn}), 1)"
+        return f"toStartOfWeek({cn}, 1)"
 
-    return f"toStartOfMonth(toDateTime({cn}))"
+    if unit == "month":
+        return f"toStartOfMonth({cn})"
+
+    return f"toDate({cn})" if date_only else f"toStartOfDay({cn})"
 
 
 def compute_populated_windows(

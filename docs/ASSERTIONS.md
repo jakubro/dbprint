@@ -240,9 +240,9 @@ The query MUST return at least one row; the assertion subject is the value in ro
 
 Type coercion rules:
 
-- An integer or float `0` (or `0.0`) PASSES.
+- A finite number equal to `0` PASSES, whatever numeric type the driver returned it as - `0`, `0.0` and `DECIMAL('0.00')` alike. `DECIMAL` and `NUMERIC` columns, and the `SUM` and `AVG` of them, reach a Python evaluator as `decimal.Decimal`.
 - A `NULL` FAILS (treated as non-zero).
-- A non-numeric value (string, boolean, etc.) emits `assertion.sql-type-mismatch`, at the query's own severity.
+- A value no integer can be read off emits `assertion.sql-type-mismatch`, at the query's own severity: a string, a date, a boolean (`True == 1` in Python, so a query returning the wrong shape would otherwise pass), or a non-finite number - `NaN` and either infinity, in any numeric type.
 
 If the query returns zero rows, evaluators MUST emit `assertion.sql-empty-result`, at the query's own severity - `expect: 0` requires a scalar result.
 
@@ -272,7 +272,8 @@ Queries MUST be read-only. Evaluators MUST run them in a read-only session where
 | Case | Resolution |
 |---|---|
 | Query raises a DB error at execution time | `assertion.sql-execution-error`, at the query's own severity (default `error`); Issue detail carries the DB error message |
-| `expect: 0` query returns a column type the producer cannot coerce to integer | `assertion.sql-type-mismatch`, at the query's own severity (default `error`) |
+| `expect: 0` query returns a value no integer can be read off - a string, a date, a boolean, or a non-finite number | `assertion.sql-type-mismatch`, at the query's own severity (default `error`) |
+| `expect: 0` query returns a non-zero `DECIMAL` | FAIL with `assertion.sql-non-zero`; the detail carries the count without the driver's scale (`5`, not `5.00`), and a fractional value as the driver spelled it |
 | `expect: 0` query returns NULL in row 0, column 0 | FAIL with `assertion.sql-non-zero`; Issue detail records `actual: null` |
 | `expect: empty` query returns rows | FAIL with `assertion.sql-non-empty`; up to producer-defined N rows listed in Issue detail |
 | Multi-statement SQL where intermediate statements have side-effects | Disallowed - read-only session SHOULD reject; producer behavior in non-read-only sessions is implementation-defined and out of scope |
@@ -346,7 +347,7 @@ class Issue:
 | `assertion.accepted-values-violated` | error | `accepted_values` set predicate failed |
 | `assertion.looks-like-mismatch` | error | `looks_like` predicate failed |
 | `assertion.candidate-key-mismatch` | error | `candidate_key` predicate failed |
-| `assertion.sql-type-mismatch` | error | a `sql_type` predicate failed, **or** an `expect: 0` query returned a non-numeric first value |
+| `assertion.sql-type-mismatch` | error | a `sql_type` predicate failed, **or** an `expect: 0` query returned a first value no integer can be read off - non-numeric, boolean, or non-finite |
 | `assertion.nullable-mismatch` | error | `nullable` predicate failed |
 | `assertion.range-out-of-bounds` | error | `range.min` / `range.max` predicate failed |
 | `assertion.percentile-mismatch` | error | `percentiles.<key>` predicate failed |

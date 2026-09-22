@@ -25,6 +25,10 @@ def render_tool_block(tool: ToolDef) -> str:
 
     schema = tool.input_schema
     inner: list[str] = [f'    "type": {json.dumps(schema["type"])}']
+
+    if "additionalProperties" in schema:
+        inner.append(f'    "additionalProperties": {json.dumps(schema["additionalProperties"])}')
+
     properties = schema.get("properties")
 
     if properties:

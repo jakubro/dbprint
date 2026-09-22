@@ -3154,6 +3154,53 @@ class TestSelectors:
         fqns = {t.fqn for t in result.tables}
         assert fqns == {"public.curator"}
 
+    def test_a_cli_include_cannot_reach_a_table_the_config_excludes(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """`--include '*'` is documented as unable to widen a run, so the two runs agree."""
+
+        narrow = replace(_conn_config(tmp_path), include=("public.curator",))
+        Engine(MockAdapter(_curator_fixture()), narrow, tmp_path).generate()
+
+        flagged = Engine(MockAdapter(_curator_fixture()), narrow, tmp_path).generate(
+            GenerateRequest(force=True, cli_include=("*",)),
+        )
+
+        assert {t.fqn for t in flagged.tables} == {"public.curator"}
+
+    def test_a_committed_table_outside_the_config_scope_is_carried_not_removed(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        wide = _conn_config(tmp_path)
+        Engine(MockAdapter(_curator_fixture()), wide, tmp_path).generate()
+
+        narrow = replace(wide, include=("public.curator",))
+        Engine(MockAdapter(_curator_fixture()), narrow, tmp_path).generate(
+            GenerateRequest(force=True, cli_include=("*",)),
+        )
+
+        manifest = yaml.safe_load((tmp_path / "primary" / "manifest.yaml").read_text())
+        diff = yaml.safe_load((tmp_path / "primary" / "diff.yaml").read_text())
+
+        assert "public.herbarium" in manifest["tables"]
+        assert [c for c in diff["changes"] if c["kind"] == "table_removed"] == []
+
+    def test_both_artifacts_record_the_configured_scope(self, tmp_path: Path) -> None:
+        """A recorded pattern the run could not have reached is a scope it never scanned."""
+
+        narrow = replace(_conn_config(tmp_path), include=("public.curator",))
+        Engine(MockAdapter(_curator_fixture()), narrow, tmp_path).generate(
+            GenerateRequest(cli_include=("*",)),
+        )
+
+        manifest = yaml.safe_load((tmp_path / "primary" / "manifest.yaml").read_text())
+        diff = yaml.safe_load((tmp_path / "primary" / "diff.yaml").read_text())
+
+        assert manifest["selectors"] == {"include": ["public.curator"], "exclude": []}
+        assert diff["target"]["selectors"] == manifest["selectors"]
+
 
 def _added_table_fixture() -> dict[str, MockTable]:
     """Variant adding a brand-new `public.curation_event` table to the baseline two."""
@@ -4899,6 +4946,29 @@ class TestMeasuredOverlap:
         second = self._refers_to(tmp_path, "partial_child")["observed"]
 
         assert first == second
+
+    def test_a_sampled_pair_publishes_no_ratio_in_either_direction(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """SPEC 2.3.10: a ratio over a table-wide count and a scanned-set one, at any rate."""
+
+        fixture = _observed_fixture()
+        fixture["public.child"] = replace(fixture["public.child"], rows_scanned=20)
+        fixture["public.parent"] = replace(fixture["public.parent"], rows_scanned=5)
+        conn = replace(
+            _conn_config(tmp_path),
+            rules=(RuleConfig(include=("public.child", "public.parent"), sample=0.5),),
+        )
+        Engine(MockAdapter(fixture), conn, tmp_path).generate()
+
+        observed = self._refers_to(tmp_path, "child")["observed"]
+        mirror = yaml.safe_load(
+            (tmp_path / "primary" / "public" / "parent" / "relationships.yaml").read_text(),
+        )["referenced_by"][0]["observed"]
+
+        assert observed == {"scope_compatible": False}
+        assert mirror == {"scope_compatible": False}
 
     def test_an_exhaustive_child_against_a_truncated_parent_needs_no_scale_up(
         self,

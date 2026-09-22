@@ -399,7 +399,7 @@ Every field this matrix marks anything but **R** can therefore be absent from a 
 
 This is the only cell conditional on a field of `inferred`, and it reaches `text` alone. `categorical` runs the same detection (§4.1.5) and can also report `prose`, but its cardinality is bounded by construction: the scan is cheap there, and the enumeration is what the classification is for. A column that is prose in one run and not the next therefore changes its emitted field set, which `diff` reports like any other change.
 
-¶ **An aggregate over a redacted column's last row is the cell it withholds.** `mean`, `sum` and `length` are aggregates, not cell values, and §2.2.9 leaves aggregates unaffected by a `redacted` marker — but where the scanned set holds at most one non-null value (`rows_scanned - null_count ≤ 1`), the aggregate equals (or is computed over) that one value, and publishing it inverts whichever primitive declared it withheld. A `numeric` column carrying any `redacted` marker over such a scanned set MUST NOT emit `mean` or `sum`; a `text`, `categorical` or `foreign_key_candidate` column in the same state MUST NOT emit `length`. Every other column of these classifications MUST emit the field(s) it otherwise carries, redacted or not.
+¶ **An aggregate over a redacted column's one value is the cell it withholds.** `mean`, `sum` and `length` are aggregates, not cell values, and §2.2.9 leaves aggregates unaffected by a `redacted` marker — but where the scanned set holds at most one non-null value (`rows_scanned - null_count ≤ 1`) or holds one distinct value however many rows carry it (`cardinality = 1`), the aggregate equals (or is computed over) that one value, and publishing it inverts whichever primitive declared it withheld. An average over four hundred copies of a withheld number is that number, and a `length` whose `min`, `max` and `avg` agree is the withheld literal's own. A `numeric` column carrying any `redacted` marker over such a scanned set MUST NOT emit `mean` or `sum`; a `text`, `categorical` or `foreign_key_candidate` column in the same state MUST NOT emit `length`. Every other column of these classifications MUST emit the field(s) it otherwise carries, redacted or not.
 
 ‖ **`length` follows the value's type, not the classification, and needs a non-null value to describe.** `categorical` (priority 4) and `foreign_key_candidate` (priority 3) match before any type-based branch runs (§3.2), so either can carry a boolean, JSON, temporal, numeric, or string-valued column alike. `length` is REQUIRED on one of these two classifications only where the column's `sql_type` could hold a string value — not boolean, not JSON, not a temporal type, not a numeric type — by the same elimination `text`'s own fallback (priority 7) already applies, AND the scanned set holds at least one non-null value: an all-null column (§2.2.7, §3.3) reaches `categorical` at priority 4 regardless of type, leaving nothing for the aggregate to describe. A `categorical` column backed by `INTEGER` or `TIMESTAMP` MUST NOT emit `length`, and neither may an all-null one of any type; one backed by `VARCHAR`, `UUID`, or any type outside those four families, carrying at least one non-null row, MUST. `text` needs no footnote of its own here: priority 7 only matches after eliminating the same four families and the cardinality-0 fallthrough to `categorical`, so every `text` column already qualifies on both counts.
 
@@ -542,7 +542,7 @@ Two additional expressions on the same statement that already computes `range` a
 
 `temporal` never carries either — a mean instant is definable and useless, and the dialects disagree on how to express one; `range` and `percentiles` already answer where a temporal column sits.
 
-**Aggregates, not cell values.** §2.2.9 leaves `mean` and `sum` unaffected by a `redacted` marker, except where the scanned set holds at most one non-null value — see the ¶ footnote above.
+**Aggregates, not cell values.** §2.2.9 leaves `mean` and `sum` unaffected by a `redacted` marker, except where the scanned set holds at most one non-null value or one distinct value — see the ¶ footnote above.
 
 **`zero_count`, `negative_count`, `empty_count`** (`numeric`: the first two; `text`: the third):
 
@@ -601,7 +601,7 @@ Producers MUST measure the column's own character-length function, never a byte 
 
 An empty string measures `0` — a measurement, not an error (§2.2.7). A column with `null_rate: 1.0` emits no `length`, the same terms `range` follows.
 
-**Aggregates, not cell values.** §2.2.9 leaves `length` unaffected by a `redacted` marker, except where the scanned set holds at most one non-null value — see the ¶ footnote above.
+**Aggregates, not cell values.** §2.2.9 leaves `length` unaffected by a `redacted` marker, except where the scanned set holds at most one non-null value or one distinct value — see the ¶ footnote above.
 
 **`normalized_cardinality`** (int ≥ 0, OPTIONAL; `categorical`, `foreign_key_candidate`, `text` when the column's `sql_type` could hold a string value, and only for the population §2.2.14 defines for `sketch` — a single-column FK edge, a declared single-column unique key, or `inferred.candidate_key` — minus that section's own cardinality-exhaustive widening bullet, which this field does not carry forward):
 
@@ -842,13 +842,13 @@ A producer MAY replace or omit cell values, and MUST declare it with a column-le
 
 **Scope is cell values only.** `null_count`, `null_rate`, `cardinality`, `cardinality_ratio`, `cardinality_method`, the value counts, `values_coverage`, `distribution`, `mean` and `sum` MUST be unaffected. They describe the data without disclosing a row. This is cell-level privacy, not aggregation-level privacy, and a consumer may rely on every measurement in a redacted print being the true one.
 
-**Three aggregates are the exception, and it is narrow.** `mean`, `sum` and `length` (§2.2.4) are aggregates, not cell values — but where the scanned set holds at most one non-null value, each equals (or is computed over) that one value, and publishing it inverts whichever primitive declared the cell withheld. A `numeric` column carrying any `redacted` marker over such a scanned set MUST NOT emit `mean` or `sum`; a `text`, `categorical` or `foreign_key_candidate` column in the same state MUST NOT emit `length`. Above that threshold none inverts, and every field a column otherwise carries stays (§2.2.3's ¶ footnote).
+**Three aggregates are the exception, and it is narrow.** `mean`, `sum` and `length` (§2.2.4) are aggregates, not cell values — but where the scanned set holds at most one non-null value, or holds one distinct value however many rows carry it, each equals (or is computed over) that one value, and publishing it inverts whichever primitive declared the cell withheld. The condition is distinctness rather than size: an average over four hundred rows of one repeated value is that value, and a `sum` divides back to it. A `numeric` column carrying any `redacted` marker over such a scanned set MUST NOT emit `mean` or `sum`; a `text`, `categorical` or `foreign_key_candidate` column in the same state MUST NOT emit `length`. Above that threshold none inverts, and every field a column otherwise carries stays (§2.2.3's ¶ footnote).
 
 **Bounds and percentiles are cell values too.** Under `mask` and `hash`, `range.min`, `range.max` and every `percentiles` entry carry the substituted form; under `drop` the `range` and `percentiles` fields are omitted, the one primitive where redacting a bound and omitting it coincide. A consumer MUST NOT order, compare, or perform arithmetic on a bound in a column carrying the marker — a masked maximum still looks like a maximum, and two hashed bounds sort by digest rather than by value, so `min` may sort above `max`.
 
 **A derived value is a cell value whenever the derivation can be run backwards.** `freshness.max_age_days` and `range.span_days` (§2.2.4) are computed by arithmetic rather than read from a cell, but arithmetic that inverts is not exempt on that account: `range.max = profiled_at - max_age_days`, and `profiled_at` is always present (§2.2.1), so an uncoarsened `max_age_days` recovers the maximum a `mask`/`hash`/`drop` marker declares withheld — to the day, from any artifact. `range.min = range.max - span_days` recovers the minimum the same way wherever `range` is still present (`mask`/`hash`; `drop` omits it already). A `temporal` column carrying any `redacted` marker MUST therefore emit both fields floored to the nearest 90 days: `coarsened = 90 * floor(value / 90)`. This holds under every primitive, `drop` included — `freshness` stays REQUIRED there (§2.2.3's matrix footnote), so the coarsening is the only thing standing between a fully dropped column and a birth date recovered to the day. `freshness.classification` is unaffected and still reads the true age: the bucket is coarse enough on its own (§2.2.4) that coarsening it too would only relabel a `dormant` column, not protect one.
 
-**The marker is mandatory whenever a literal was altered or withheld.** An artifact that substitutes values silently is worse than one that omits them, because a consumer cannot tell measurement from fabrication — the same principle the `scope` block (§2.2.8) rests on. A `values` entry carrying no `value` in a column that declares no marker is an error.
+**The marker is mandatory wherever a redaction rule covers the column.** An artifact that substitutes values silently is worse than one that omits them, because a consumer cannot tell measurement from fabrication — the same principle the `scope` block (§2.2.8) rests on. The marker reports the cover, not what survived it: a covered column carries it even where it publishes no literal at all — a `text` column detected as prose (§2.2.3), or one naming `values` in its own `unmeasured` (§2.2.4) — so a reader can tell a withheld column from an ordinary one wherever both publish nothing, and so the rules that read the marker (§2.2.14) read a reliable signal. `json` and `unsupported` are outside it: their §2.2.3 row carries no cell value to withhold and forbids the marker itself. A `values` entry carrying no `value` in a column that declares no marker is an error.
 
 **Detection is unaffected.** `looks_like` and `sensitivity` are computed over sampled values that are never persisted, so a hashed email column still reports `looks_like: email`. That is correct: the shape claim describes the column, not the emitted literals.
 
@@ -1280,13 +1280,13 @@ does, from the referencer's own column.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `fanout_avg` | number | R | Child `row_count` / child column's `cardinality`, rounded per §2.2.6 — average rows per distinct key on the referencing side |
+| `fanout_avg` | number | R | Child `row_count` / child column's `cardinality`, rounded per §2.2.6 — average rows per distinct key on the referencing side. Both operands describe the same rows only where the child was read whole, which is what `scope_compatible` guarantees: under a `scope` (§2.2.8) `row_count` counts the table while `cardinality` counts the rows scanned, and their ratio answers neither question |
 | `fanout_max` | number | O | The referencing column's own `values[0].count` (§2.2.4 orders by count descending) — the true worst-case group size, not the mean. Absent wherever `values` itself is (§7.2) |
 | `target_coverage` | number | R | The fraction of the parent's distinct values this edge actually reaches. Measured from both endpoints' `sketch` (§2.2.14) when both carry one and the measurement has evidence to report; cardinality-derived (child `cardinality` / parent `cardinality`) otherwise — the same field, silently upgraded to the sharper number when the sketches exist to support it, never a second field carrying the other formula |
 | `containment` | number | O | The fraction of the *child's* distinct values found in the parent's set, measured from both endpoints' `sketch` (§2.2.14) — the question `target_coverage` cannot answer, since a small `target_coverage` and a `containment` near 1 both hold whenever a few child values reach a much larger parent. Present only when both endpoints carry a `sketch` and the measurement has evidence to report; no cardinality-derived fallback exists for it |
 | `answerable_count` | integer | O | The count of the child's own retained hashes below the shared threshold both sketches can speak to (§2.2.14) — the denominator §2.2.14's `1/sqrt(answerable count)` margin is sized against, so a consumer computes that margin from the print alone. Present exactly where `containment` is; absent under the same fallback |
 | `coherent` | bool | O | `false` when the child's cardinality exceeds the parent's — arithmetically impossible for a real containment. Present only when both sides measured `cardinality_method: exact` (§2.2.6); a scoped or sampled comparison cannot support the claim either way, so the field is omitted rather than guessed |
-| `scope_compatible` | bool | R | `false` when the two endpoints cannot be compared on equal terms — one scoped and the other not, or scoped at rates that are not known to match. Every other field in this table is absent whenever this is `false`; no ratio is ever published across a mismatched pair |
+| `scope_compatible` | bool | R | `false` whenever either endpoint carries a `scope` block (§2.2.8). Every other field in this table is absent whenever this is `false`; no ratio is ever published across a mismatched pair — and a scoped endpoint is a mismatch even where both sides carry the same `sample`, since two draws at one rate are still two draws and a value-identity comparison across them is not measurable. That is the position §2.2.14 already takes in withholding `sketch` from a scoped table; a consumer wanting these numbers profiles the two endpoints unscoped |
 
 **Absence of the whole block.** A composite edge (`column`/`target_column` longer than one) and an
 edge where either endpoint carries no `cardinality` — a plain view's catalog-only file (§2.2.15),
@@ -1395,7 +1395,7 @@ statistics_params:                        # the connection's resolved Statistics
   top_n_null_patterns: <int>
   looks_like_sample_size: <int>
   percentiles: [<int>, ...]
-selectors:                                # include/exclude as applied, config merged with any CLI override
+selectors:                                # the connection's own include/exclude, as configured
   include: [<glob>, ...]
   exclude: [<glob>, ...]
 redaction_rules_configured: <int>         # count of `redact` rules in force; 0 means none configured
@@ -1425,7 +1425,7 @@ tables:
 **Provenance: what produced the print, so it decodes itself.** Four top-level fields, all REQUIRED, carry the parameters that decide what every number underneath them means:
 
 - **`statistics_params`** is the connection's resolved `StatisticsConfig` for this run — the parameters that decide how much of a column's domain a `values` list carries, which columns classify `categorical` versus fall through to a bounded scan, how much evidence a `looks_like` verdict rests on, and which percentile keys exist at all. Per-table rules can override any of these; a table whose resolved parameters differ from the connection default carries its own `statistics_params` block naming only the differing keys, per the same absence-means-default convention `scope` (§2.2.8) already uses. A table with no override carries no block.
-- **`selectors`** is the `include`/`exclude` glob set actually applied to this run — config merged with any CLI narrowing (CLI `include` narrows, CLI `exclude` unions). This is the same information `diff.yaml`'s `target.selectors` (§2.6.3) carries for a live comparison; the manifest is where a consumer asks "what was deliberately left out of this print" without needing to know the drift-detection protocol. The two MUST NOT disagree where both are present (§6.3).
+- **`selectors`** is the connection's own configured `include`/`exclude` glob set — the scope a regeneration of this print would cover. A CLI narrowing (`--include` intersects, `--exclude` unions) applies to one invocation and is NOT recorded: two glob lists have no glob intersection, so no pattern list can express the narrowed scope, and a reader who saw one could not tell it from a configuration. A run narrowed that way therefore scans fewer tables than this value implies, and the artifact does not say so. This is the same information `diff.yaml`'s `target.selectors` (§2.6.3) carries for a live comparison; the manifest is where a consumer asks "what was deliberately left out of this print" without needing to know the drift-detection protocol. The two MUST NOT disagree where both are present (§6.3).
 - **`redaction_rules_configured`** is the count of `redact` rules in force for this connection. It tells a consumer whether a column's absent `redacted` marker means "no rule matched" (rules exist, none applied here) or "no rules configured" (the connection redacts nothing at all) — a distinction the column itself cannot express. The redaction salt and the rules' own shapes are never recorded here.
 - **`default_collation`** is the connection's own name for the collation a string column compares under when it carries no explicit override (§2.2.2, §2.2.4). Every producer resolves and records one, even where the source engine has no session- or database-level concept of a default — the field then states what an unspecified column behaves as.
 
@@ -1474,13 +1474,13 @@ The "after" side. Always the live database.
 target:
   source: live_database               # the only defined value; a future value may add `committed_prints` for snapshot-to-snapshot diffs
   scanned_at: <ISO8601>
-  selectors:                          # effective scope after merging config + CLI overrides
+  selectors:                          # the connection's own include/exclude, as configured
     include: [<pattern>, ...]
     exclude: [<pattern>, ...]
   tables_scanned: <int>               # informational; count of tables matched by selectors
 ```
 
-`selectors` reflects the EFFECTIVE scope after merging `.dbprint.yaml` config with any CLI `--include` / `--exclude` overrides (intersect / union rules per CLI spec).
+`selectors` records the connection's own configured scope, matching `manifest.yaml`'s own copy (§2.5). A CLI `--include` / `--exclude` narrows the invocation and is not recorded here either: it cannot widen what the config allows, and no pattern list expresses the intersection of two glob lists.
 
 #### 2.6.4 `summary` sub-object
 
@@ -1731,7 +1731,7 @@ Detection of secondary indexes is best-effort: baseline indexes are parsed from 
 
 Events are emitted only for tables in `target.selectors` scope. Tables outside the selectors are NOT reported as added / removed / modified — they're unknown to this diff.
 
-- For full-scope runs (no CLI `--include` / `--exclude` overrides), `target.selectors` mirrors `.dbprint.yaml`; the diff covers all configured tables.
+- `target.selectors` mirrors `.dbprint.yaml` on every run, narrowed or not (§2.6.3) — a CLI `--include` / `--exclude` applies to one invocation and is recorded nowhere, since no pattern list can express the intersection of two glob lists. A run narrowed that way therefore produces events for fewer tables than the recorded scope covers, and the artifact does not say so.
 - For partial runs (e.g., `--include arboretum.fieldwork.*`), only matching tables produce events; unrelated tables are not in this diff (even if their committed prints differ from live).
 
 Consumers reading a partial diff understand: "this is what changed within the scope listed in `target.selectors`; the rest is unknown to this artifact."
@@ -2446,6 +2446,7 @@ Grouped by concern. `E` = error, `W` = warning.
 | `stats.sketch-invalid-encoding` | E | `sketch.values` is not valid base64 of a length that is a multiple of 8 bytes (§2.2.14) |
 | `stats.sketch-oversized` | E | A decoded `sketch.values` carries more entries than `method`'s own k (§2.2.14) |
 | `stats.sketch-not-ascending` | E | A decoded `sketch.values` is not sorted ascending (§2.2.14) |
+| `stats.sketch-on-redacted-column` | E | A column declaring a `redacted` primitive carries a `sketch` - the digests enumerate the cell values that primitive withheld (§2.2.14) |
 | `stats.measurement-under-catalog-only` | E | A column carries a field beyond `sql_type`, `nullable`, `classification`, `physical_name`, `collation`, `physical_layout_key` on a file that also carries `catalog_only` - a measurement published where none was queried (§2.2.15) |
 | `stats.depends-on-on-table` | E | `depends_on` is present but `type` is `table` - the field names what a view/matview reads and MUST NOT appear on a plain table (§2.2.17) |
 
@@ -2508,8 +2509,8 @@ Grouped by concern. `E` = error, `W` = warning.
 
 ### 6.4 Catalog totals
 
-- **137 codes** across 10 groups
-- **109 error** codes (gate conformance)
+- **138 codes** across 10 groups
+- **110 error** codes (gate conformance)
 - **28 warning** codes (recoverable anomalies)
 
 The catalog MAY grow in MINOR releases (additive only). Existing codes' semantics MUST NOT change.
@@ -2583,11 +2584,11 @@ Every field the §2.2.3 matrix marks anything but **R** on at least one classifi
 | `distribution` | The same two causes as `values`, which it is derived from wherever a value list exists | `classification`, then `inferred.looks_like` |
 | `frequencies` | Forbidden outside `numeric` and `temporal` (§2.2.3) | `classification` |
 | `range`, `range.span_days`, `percentiles` | Forbidden for this classification (§2.2.3) — or withheld, since `redacted: drop` emits no literal and a bound is nothing but a literal (§2.2.3 †) | `classification`, then `redacted` |
-| `mean`, `sum` | Forbidden outside `numeric` (§2.2.3) — or withheld, since a redacted column's scanned set held at most one non-null value and the aggregate would republish it (§2.2.3 ¶) | `classification`, then `redacted` and `null_count` against `rows_scanned` |
+| `mean`, `sum` | Forbidden outside `numeric` (§2.2.3) — or withheld, since a redacted column's scanned set held at most one non-null value, or one distinct value, and the aggregate would republish it (§2.2.3 ¶) | `classification`, then `redacted` with `cardinality`, and `null_count` against `rows_scanned` |
 | `zero_count`, `negative_count` | Forbidden outside `numeric` (§2.2.3) | `classification` |
 | `empty_count` | Forbidden outside `text` (§2.2.3) | `classification` |
 | `quantized_count` | Forbidden outside `numeric` and `temporal` (§2.2.3) - or the column is `temporal` and its `sql_type` has no day to truncate to: `DATE`/`DATE32` (already their own truncation), `TIME`/`TIME WITH TIME ZONE`, or MySQL's `YEAR` (§2.2.3 ※) | `classification`, then `sql_type` for the second cause |
-| `length` | Forbidden outside `text`, `categorical` and `foreign_key_candidate` (§2.2.3) - or the column is `categorical`/`foreign_key_candidate` and either its `sql_type` carries no string value or the column is all-null (§2.2.3 ‖) - or withheld, since a redacted column's scanned set held at most one non-null value and the aggregate would republish it (§2.2.3 ¶) | `classification`, then `sql_type` and `null_rate` for the second cause, `redacted` and `null_count` against `rows_scanned` for the third |
+| `length` | Forbidden outside `text`, `categorical` and `foreign_key_candidate` (§2.2.3) - or the column is `categorical`/`foreign_key_candidate` and either its `sql_type` carries no string value or the column is all-null (§2.2.3 ‖) - or withheld, since a redacted column's scanned set held at most one non-null value, or one distinct value, and the aggregate would republish it (§2.2.3 ¶) | `classification`, then `sql_type` and `null_rate` for the second cause, `redacted` with `cardinality` and `null_count` against `rows_scanned` for the third |
 | `normalized_cardinality` | Forbidden outside `text`, `categorical` and `foreign_key_candidate` (§2.2.3) - the column's `sql_type` carries no string value (§2.2.4) - or it is not a member of the join-key population §2.2.4 restricts this field to (edge, declared single-column unique key, `inferred.candidate_key`) | `classification`, then `sql_type`, then `relationships.yaml`'s `refers_to`/`referenced_by`, this table's own declared unique keys, and `inferred.candidate_key` |
 | `freshness` | Forbidden outside `temporal` (§2.2.3). Never withheld: it survives every redaction primitive, coarsened rather than omitted (§2.2.9) | `classification` |
 | `unmeasured` | Every field this column owed, it measured - the ordinary case (§2.2.4) | Nothing to distinguish: the marker has exactly one absent meaning |

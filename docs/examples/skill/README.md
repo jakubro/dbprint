@@ -13,7 +13,7 @@ They are complements rather than alternatives — the skill tells an agent what 
 
 ## Installing in Claude Code
 
-1. Place the skill at `.claude/skills/dbprint.md` in the project root, OR drop `dbprint.md` directly into your global `~/.claude/skills/` directory.
+1. Copy the file to `.claude/skills/dbprint/SKILL.md` in the project root, or to `~/.claude/skills/dbprint/SKILL.md` to install it for every project.
 2. Claude Code surfaces it as a discoverable skill when the user asks database-related questions.
 
 ## Installing in Cursor

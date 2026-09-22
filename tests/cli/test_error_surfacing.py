@@ -6,6 +6,7 @@ manifest, uncaught exception: in each, stdout stays data-only and no password is
 
 from __future__ import annotations
 
+import json
 from contextlib import AbstractContextManager
 from pathlib import Path
 from unittest.mock import patch
@@ -97,6 +98,35 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     for k, v in _CREDS.items():
         monkeypatch.setenv(k, v)
+
+    return tmp_path
+
+
+_UNPARSEABLE_PROJECT_YAML = PROJECT_YAML.replace("  primary:", "  production:")
+
+
+@pytest.fixture
+def unparseable_credentials(
+    tmp_path: Path,
+    committed_print: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Path:
+    """A project whose credentials file fails to parse on the line holding the password.
+
+    Named for the shipped print's connection, so `check` reaches the online phase at all.
+    """
+
+    del committed_print
+    (tmp_path / ".dbprint.yaml").write_text(_UNPARSEABLE_PROJECT_YAML)
+    monkeypatch.chdir(tmp_path)
+
+    for key in (*_CREDS, *(k.replace("PRIMARY", "PRODUCTION") for k in _CREDS)):
+        monkeypatch.delenv(key, raising=False)
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    creds = tmp_path / ".dbprint" / "connections.yaml"
+    creds.parent.mkdir(parents=True, exist_ok=True)
+    creds.write_text(f"production:\n  host: a\n  password: *{_PASSWORD}\n", encoding="utf-8")
 
     return tmp_path
 
@@ -601,6 +631,46 @@ class TestPerTableFailureContext:
 
         assert _PASSWORD not in result.stderr
         assert _PASSWORD not in result.output
+
+
+class TestAnUnparseableCredentialsFile:
+    """The file that fails to parse is the one holding secrets, so its text stays unquoted."""
+
+    def test_generate_reports_the_position_and_not_the_credential(
+        self,
+        unparseable_credentials: Path,
+    ) -> None:
+        runner = CliRunner()
+
+        with _registry(MockAdapter):
+            result = runner.invoke(main, ["generate", "--no-tui"])
+
+        assert _PASSWORD not in result.stderr
+        assert _PASSWORD not in result.output
+        assert "invalid YAML" in result.stderr
+        assert "line 3" in result.stderr
+
+    def test_the_json_envelope_carries_no_credential(
+        self,
+        unparseable_credentials: Path,
+    ) -> None:
+        del unparseable_credentials
+        runner = CliRunner()
+
+        with _registry(MockAdapter):
+            result = runner.invoke(
+                main,
+                ["check", "--online", "--max-age", "36500d", "--format", "json"],
+            )
+
+        assert _PASSWORD not in result.stdout
+        assert _PASSWORD not in result.stderr
+
+        causes = [n["cause"] for entry in json.loads(result.stdout) for n in entry["not_run"]]
+
+        assert causes
+        assert all(_PASSWORD not in cause for cause in causes)
+        assert any("invalid YAML" in cause for cause in causes)
 
 
 class _OneOfThreeFails(MockAdapter):

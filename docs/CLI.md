@@ -307,7 +307,8 @@ after changing a command's docstring, options, or help sections.
  Assembles per-table artifacts (DDL, statistics, relationships, description, annotations) into a
  single prompt-ready block and writes it to stdout or --output. Offline - reads only committed
  prints. Select one table by FQN, a set by fnmatch pattern, or every table with --all. Markdown by
- default; --budget caps the output and stops at the first section that would overflow.
+ default; --budget caps the output, charging the table's identity first and skipping any later
+ section that does not fit.
 
  Arguments:
 
@@ -356,8 +357,9 @@ after changing a command's docstring, options, or help sections.
 │ --no-annotations                         Omit the Annotations section.                           │
 │ --no-stats                               Omit the Cardinality table. No effect under --purpose   │
 │                                          query, which carries none.                              │
-│ --budget                INTEGER          Soft output cap in tokens (approx chars/4); stop at the │
-│                                          first section that would overflow. e.g. 4000            │
+│ --budget                INTEGER          Soft output cap in tokens (approx chars/4); the table's │
+│                                          identity is charged first and a section that does not   │
+│                                          fit is skipped, never truncated. e.g. 4000              │
 │ --output                FILE             Write output to FILE instead of stdout.                 │
 │ --tui/--no-tui                           Force TTY (syntax-highlighted) or piped (plain-text)    │
 │                                          rendering. md format only.                              │

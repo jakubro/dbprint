@@ -34,8 +34,8 @@ QUERY_SAMPLE_LIMIT = 5  # most frequent values of a sampled column the query pur
 
 _DETECTION_RANK = {"declared": 0, "inferred": 1, "measured": 2}
 
-# Which sections a budget keeps first under `query`; the render order is a different thing.
-_QUERY_SECTION_PRIORITY = ("ddl", "values", "joins", "dictionary", "header")
+# Budget-keep order under `query`, not render order; the header is pinned rather than ranked.
+_QUERY_SECTION_PRIORITY = ("ddl", "values", "joins", "dictionary")
 
 
 @dataclass(frozen=True)
@@ -81,12 +81,22 @@ class AssemblyResult:
     truncated: tuple[str, ...] = field(default_factory=tuple)
 
 
+@dataclass(frozen=True)
+class PayloadResult:
+    """One connection's structured payloads, before a caller renders or wraps them."""
+
+    payloads: list[dict[str, Any]]
+    tables_included: int
+    truncated: tuple[str, ...]
+
+
 def assemble(
     manifest: dict[str, Any],
     print_root: Path,
     tables: list[str],
     options: AssemblyOptions,
     connection_name: str | None = None,
+    multi_connection: bool = False,
 ) -> AssemblyResult:
     """Assemble the requested table fragments; `tables` is the caller's resolved FQN order."""
 
@@ -100,7 +110,34 @@ def assemble(
     elif options.format == "yaml":
         return _assemble_yaml(loaded, options)
     else:
-        return _assemble_markdown(loaded, options, connection_name, print_root, manifest)
+        return _assemble_markdown(
+            loaded,
+            options,
+            connection_name,
+            print_root,
+            manifest,
+            multi_connection,
+        )
+
+
+def assemble_payloads(
+    manifest: dict[str, Any],
+    print_root: Path,
+    tables: list[str],
+    options: AssemblyOptions,
+) -> PayloadResult:
+    """The per-table structured payloads the json and yaml formats carry, before rendering.
+
+    A multi-connection caller wraps these, so the connection name rides the wrapper (MCP.md 4.1).
+    """
+
+    if not tables:
+        return PayloadResult(payloads=[], tables_included=0, truncated=())
+
+    loaded = [_load_table_artifacts(manifest, print_root, fqn) for fqn in tables]
+    payloads, included, truncated = _budgeted_structured_payloads(loaded, options)
+
+    return PayloadResult(payloads=payloads, tables_included=included, truncated=truncated)
 
 
 def _assemble_markdown(
@@ -109,24 +146,28 @@ def _assemble_markdown(
     connection_name: str | None,
     print_root: Path,
     manifest: dict[str, Any],
+    multi_connection: bool = False,
 ) -> AssemblyResult:
-    """Connection notes (SPEC 2.7.3) and provenance ride the document header, which only a
-    multi-table render has; a single-table fragment states its own dialect instead (SPEC 2.5).
+    """Header provenance rides a multi-table or multi-connection render; a lone fragment states
+    its own dialect instead (SPEC 2.5). Connection notes appear on the multi-table case alone.
     """
 
-    multi = len(artifacts) > 1
+    multi_table = len(artifacts) > 1
     header = ""
     header_tokens = 0
 
-    if multi and connection_name:
-        header = f"# Context for connection {connection_name} ({len(artifacts)} tables)"
-        notes, notes_reason = _load_connection_notes(print_root)
+    if (multi_table or multi_connection) and connection_name:
+        table_word = "table" if len(artifacts) == 1 else "tables"
+        header = f"# Context for connection {connection_name} ({len(artifacts)} {table_word})"
 
-        if notes:
-            header += "\n\n" + notes
+        if multi_table:
+            notes, notes_reason = _load_connection_notes(print_root)
 
-        if notes_reason is not None:
-            header += "\n\n" + _corrupted_summary({"manifest_annotations": notes_reason})
+            if notes:
+                header += "\n\n" + notes
+
+            if notes_reason is not None:
+                header += "\n\n" + _corrupted_summary({"manifest_annotations": notes_reason})
 
         provenance = _provenance_block(manifest, connection_name)
 
@@ -211,6 +252,7 @@ def _render_table_markdown(
         make_section(
             "header",
             _markdown_header(a, include_qualifiers, connection_statistics_params, adapter),
+            pinned=True,
         ),
     )
 
@@ -276,8 +318,11 @@ def _render_query_markdown(
         ("dictionary", _markdown_data_dictionary(a, options)),
         ("values", _markdown_column_values(a)),
     )
-    sections = {name: make_section(name, text) for name, text in rendered if text}
-    selection = select([sections[n] for n in _QUERY_SECTION_PRIORITY if n in sections], budget)
+    sections = {
+        name: make_section(name, text, pinned=name == "header") for name, text in rendered if text
+    }
+    offered = [sections[n] for n in ("header", *_QUERY_SECTION_PRIORITY) if n in sections]
+    selection = select(offered, budget)
     included = {s.name for s in selection.included}
     text = "\n\n".join(sections[name].text for name, _ in rendered if name in included)
     marker = truncation_marker(selection)
@@ -413,7 +458,7 @@ def _markdown_column_values(a: TableArtifacts) -> str:
         shown, share = _shown_values(entries, coverage)
         values_cell = _values_cell(col, shown, annotations.get(name))
         statement = _coverage_statement(coverage, scoped=scoped)
-        rows.append(f"| {name} | {values_cell} | {share} - {statement} |")
+        rows.append(f"| {_escape_cell(name)} | {values_cell} | {share} - {statement} |")
 
     if not rows:
         return ""
@@ -576,9 +621,14 @@ def _value_key(value: Any) -> str:
 
 
 def _escape_cell(text: str) -> str:
-    """A pipe inside a value would end the table cell it sits in."""
+    """Make `text` safe to interpolate into one Markdown table cell.
 
-    return text.replace("|", "\\|")
+    Order is load-bearing: escaping the pipe first leaves a live delimiter behind a backslash.
+    """
+
+    escaped = text.replace("\\", "\\\\").replace("|", "\\|")
+
+    return escaped.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
 
 
 def _identity_lines(a: TableArtifacts, adapter: str | None) -> list[str]:
@@ -1026,7 +1076,11 @@ def _markdown_catalog_only_columns(a: TableArtifacts) -> str:
 
     for name in _ordered_column_names(columns):
         col = columns[name]
-        lines.append(f"| {name} | {col.get('sql_type', '?')} | {col.get('classification', '?')} |")
+        lines.append(
+            f"| {_escape_cell(name)} "
+            f"| {_escape_cell(str(col.get('sql_type', '?')))} "
+            f"| {_escape_cell(str(col.get('classification', '?')))} |",
+        )
 
     return "\n".join(lines)
 
@@ -1054,7 +1108,9 @@ def _markdown_cardinality_table(a: TableArtifacts, statistics_params: dict[str, 
             fk_targets.get(name),
             statistics_params=statistics_params,
         )
-        lines.append(f"| {name} | {cardinality} | {notes} |")
+        lines.append(
+            f"| {_escape_cell(name)} | {_escape_cell(cardinality)} | {_escape_cell(notes)} |",
+        )
 
     return "\n".join(lines)
 
@@ -1091,7 +1147,7 @@ def _markdown_null_patterns(a: TableArtifacts) -> str:
 
     for entry in patterns[:NULL_PATTERN_DISPLAY_LIMIT]:
         names = ", ".join(entry.get("columns") or []) or "(none - fully populated)"
-        lines.append(f"| {int(entry.get('count') or 0):,} | {names} |")
+        lines.append(f"| {int(entry.get('count') or 0):,} | {_escape_cell(names)} |")
 
     remainder = len(patterns) - NULL_PATTERN_DISPLAY_LIMIT
 

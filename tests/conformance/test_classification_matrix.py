@@ -357,8 +357,7 @@ class TestRedactedFollowsTheMatrix:
 
     @pytest.mark.parametrize("classification", REDACTABLE)
     def test_a_marker_is_accepted_where_cell_values_exist(self, classification: str) -> None:
-        column = _column(classification)
-        column["redacted"] = "mask"
+        column = _marked(_column(classification), "mask")
 
         if classification == "temporal":
             # A real producer coarsens both day counts under any marker (SPEC 2.2.9).
@@ -420,8 +419,7 @@ class TestBoundsAreConditionalOnDrop:
     ) -> None:
         """Only `drop` removes a field; the other two replace the literal in place."""
 
-        column = _column(classification)
-        column["redacted"] = primitive
+        column = _marked(_column(classification), primitive)
 
         if classification == "temporal":
             # A real producer coarsens both day counts under any marker (SPEC 2.2.9).
@@ -460,8 +458,7 @@ class TestBoundsAreConditionalOnDrop:
     def test_a_dropped_value_list_keeps_its_counts(self, classification: str) -> None:
         """The control: elsewhere `drop` empties the literals and removes no field."""
 
-        column = _column(classification)
-        column["redacted"] = "drop"
+        column = _marked(_column(classification), "drop")
         column["values"] = [{"count": 10}]
 
         assert _errors(_payload(classification, column)) == []
@@ -891,11 +888,23 @@ def _prose(classification: str) -> dict[str, Any]:
     return column
 
 
+def _marked(column: dict[str, Any], primitive: str) -> dict[str, Any]:
+    """Apply a marker as a producer would: `_column` holds one distinct value, so the three
+    aggregates leave with it (SPEC 2.2.3).
+    """
+
+    column["redacted"] = primitive
+
+    for field in ("mean", "sum", "length"):
+        column.pop(field, None)
+
+    return column
+
+
 def _dropped(classification: str) -> dict[str, Any]:
     """A column of `classification` as a producer emits it under `redacted: drop`."""
 
-    column = _column(classification)
-    column["redacted"] = "drop"
+    column = _marked(_column(classification), "drop")
     del column["range"], column["percentiles"]
 
     return column

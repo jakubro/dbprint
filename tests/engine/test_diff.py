@@ -70,6 +70,94 @@ def _kinds(diff: dict[str, Any]) -> list[str]:
     return [c["kind"] for c in diff["changes"]]
 
 
+class TestTheComparedScopeIsTheConfiguredOne:
+    """A CLI narrowing filters the baseline; it can never widen what the config covers."""
+
+    def test_a_cli_include_wider_than_the_config_reports_no_removal(self) -> None:
+        scope = DiffSelectors(
+            include=("public.curator",),
+            exclude=(),
+            cli_include=("*",),
+        )
+        diff = _compute(
+            {"public.herbarium": _table("public.herbarium")},
+            {},
+            selectors=scope,
+        )
+
+        assert _kinds(diff) == []
+
+    def test_a_cli_include_still_narrows_within_the_config_scope(self) -> None:
+        """A table the config covers and the flag excludes is out of scope, not removed."""
+
+        scope = DiffSelectors(
+            include=("*",),
+            exclude=(),
+            cli_include=("public.curator",),
+        )
+        diff = _compute(
+            {"public.herbarium": _table("public.herbarium")},
+            {},
+            selectors=scope,
+        )
+
+        assert _kinds(diff) == []
+
+    def test_a_table_inside_both_scopes_is_still_a_removal(self) -> None:
+        """The control: narrowing must not swallow a table that really went away."""
+
+        scope = DiffSelectors(include=("*",), exclude=(), cli_include=("*",))
+        diff = _compute(
+            {"public.herbarium": _table("public.herbarium")},
+            {},
+            selectors=scope,
+        )
+
+        assert _kinds(diff) == ["table_removed"]
+
+    def test_an_uppercase_cli_exclude_takes_the_table_out_of_scope(self) -> None:
+        scope = DiffSelectors(
+            include=("*",),
+            exclude=(),
+            cli_exclude=("PUBLIC.HERBARIUM",),
+        )
+        diff = _compute(
+            {"public.herbarium": _table("public.herbarium")},
+            {},
+            selectors=scope,
+        )
+
+        assert _kinds(diff) == []
+
+    def test_an_uppercase_cli_include_still_narrows(self) -> None:
+        scope = DiffSelectors(
+            include=("*",),
+            exclude=(),
+            cli_include=("PUBLIC.CURATOR",),
+        )
+        diff = _compute(
+            {"public.herbarium": _table("public.herbarium")},
+            {},
+            selectors=scope,
+        )
+
+        assert _kinds(diff) == []
+
+    def test_the_recorded_scope_is_the_configured_one(self) -> None:
+        scope = DiffSelectors(
+            include=("public.curator",),
+            exclude=("public.batch",),
+            cli_include=("*",),
+            cli_exclude=("public.other",),
+        )
+        diff = _compute({}, {}, selectors=scope)
+
+        assert diff["target"]["selectors"] == {
+            "include": ["public.curator"],
+            "exclude": ["public.batch"],
+        }
+
+
 class TestEmpty:
     def test_empty_baseline_empty_current(self) -> None:
         diff = _compute({}, {})

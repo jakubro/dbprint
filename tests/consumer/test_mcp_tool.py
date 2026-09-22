@@ -6,11 +6,15 @@ out, not wire framing, which tests/mcp/test_server.py owns.
 
 from __future__ import annotations
 
+import re
+
 from dbprint.mcp import ServedConnections, dispatch
 from tests.fixtures.adversarial import (
     APPROXIMATE_ROW_COUNT_TABLE,
     DECLARED_MISSING_KIND,
     DECLARED_MISSING_TABLE,
+    DELIMITER_TABLE,
+    DELIMITER_VALUE,
     EMPTY_COLUMNS_TABLE,
     FUTURE_DATED_COLUMN,
     INCOMPLETE_GRAIN_TABLE,
@@ -35,6 +39,7 @@ COVERS = frozenset(
         "incomplete_grain_search",
         "catalog_only_table",
         "declared_missing_artifact",
+        "delimiter_in_a_value",
     },
 )
 
@@ -213,3 +218,16 @@ def test_declared_missing_artifact_is_named_not_conflated_with_never_declared(
 
     assert f"Missing: {DECLARED_MISSING_KIND}" in md
     assert NEVER_DECLARED_KIND not in md
+
+
+def test_a_delimiter_in_a_value_does_not_split_a_row(adversarial_print: AdversarialPrint) -> None:
+    """The tool renders the same Markdown the CLI does, so it owes the same guarantee."""
+
+    fragment = _md(adversarial_print, DELIMITER_TABLE)
+    rows = [l for l in fragment.splitlines() if l.startswith("|") and not set(l) <= set("|- ")]
+
+    assert rows, "the tool returned no table at all"
+    assert all(
+        len([c for c in re.split(r"(?<!\\)\|", row.strip()) if c.strip()]) == 3 for row in rows
+    )
+    assert DELIMITER_VALUE.replace("|", "\\|") in fragment

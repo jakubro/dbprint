@@ -103,11 +103,16 @@ def _inferred_of(col: dict) -> dict:
 
 def _redacted_single_row_aggregate(col: dict, rows_scanned: int) -> bool:
     """Whether `mean`/`sum`/`length` would republish the one cell a redacted marker withholds -
-    an aggregate over at most one non-null row equals that row (SPEC 2.2.9).
+    an aggregate over one non-null row, or over one distinct value, is that value (SPEC 2.2.9).
     """
 
     if col.get("redacted") is None:
         return False
+
+    cardinality = col.get("cardinality")
+
+    if isinstance(cardinality, int) and not isinstance(cardinality, bool) and cardinality == 1:
+        return True
 
     null_count = col.get("null_count")
 
@@ -173,8 +178,8 @@ _CONDITIONAL_CELLS: tuple[_ConditionalCell, ...] = (
         classifications=frozenset({"numeric"}),
         fields=frozenset({"mean", "sum"}),
         reason=(
-            "the column carries a redacted marker over at most one non-null scanned row, "
-            "so the aggregate would republish the cell it withholds"
+            "the column carries a redacted marker over at most one non-null scanned row, or "
+            "over one distinct value, so the aggregate would republish the cell it withholds"
         ),
         spec_ref="§2.2.9",
         holds=_redacted_single_row_aggregate,
@@ -197,8 +202,8 @@ _CONDITIONAL_CELLS: tuple[_ConditionalCell, ...] = (
         classifications=frozenset({"text", "categorical", "foreign_key_candidate"}),
         fields=frozenset({"length"}),
         reason=(
-            "the column carries a redacted marker over at most one non-null scanned row, "
-            "so the aggregate would republish the cell it withholds"
+            "the column carries a redacted marker over at most one non-null scanned row, or "
+            "over one distinct value, so the aggregate would republish the cell it withholds"
         ),
         spec_ref="§2.2.9",
         holds=_redacted_single_row_aggregate,
@@ -2424,8 +2429,8 @@ def _check_physical_name(col: dict, col_path: str, col_name: str) -> list[Issue]
 
 
 def _check_sketch(col: dict, col_path: str) -> list[Issue]:
-    """SPEC 2.2.14 shape and determinism, not overlap: a well-formed sketch may still be
-    wrong, but judging that needs a second column to check it against.
+    """SPEC 2.2.14 eligibility, shape and determinism, not overlap: a well-formed sketch may
+    still be wrong, but judging that needs a second column to check it against.
     """
 
     sketch = col.get("sketch")
@@ -2434,6 +2439,19 @@ def _check_sketch(col: dict, col_path: str) -> list[Issue]:
         return []
 
     issues: list[Issue] = []
+
+    if col.get("redacted") is not None:
+        issues.append(
+            Issue(
+                col_path,
+                "stats.sketch-on-redacted-column",
+                "error",
+                f"column declares redacted={col['redacted']!r} and carries a sketch; the "
+                "digests enumerate the very values the primitive withheld.",
+                "§2.2.14",
+            ),
+        )
+
     method = sketch.get("method")
 
     if method != SKETCH_METHOD:

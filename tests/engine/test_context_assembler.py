@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -13,6 +14,8 @@ from dbprint.engine import AssemblyOptions, assemble_context, assemble_structure
 from dbprint.engine.context_assembler import (
     TableArtifacts,
     _build_fk_target_map,
+    _escape_cell,
+    _markdown_catalog_only_columns,
     _markdown_null_patterns,
     _markdown_relationships,
     _stripped_statistics,
@@ -2323,9 +2326,17 @@ class TestQueryPurpose:
         )
         assert "Scanned: 400,000 of 4,000,000 rows (10.0%)" in text
 
-    def test_a_budget_keeps_the_ddl_before_the_prose(self, tmp_path: Path) -> None:
+    def test_identity_rides_a_budget_too_small_for_anything_else(self, tmp_path: Path) -> None:
         text = _query(_seed_print(tmp_path), "herbarium.public.collector", MANIFEST, budget=20)
 
+        assert "# Table: herbarium.public.collector" in text
+        assert "## DDL" not in text
+        assert "truncated:" in text
+
+    def test_a_budget_keeps_the_ddl_before_the_prose(self, tmp_path: Path) -> None:
+        text = _query(_seed_print(tmp_path), "herbarium.public.collector", MANIFEST, budget=40)
+
+        assert "# Table: herbarium.public.collector" in text
         assert "## DDL" in text
         assert "## Data dictionary" not in text
         assert "truncated:" in text
@@ -2690,3 +2701,87 @@ class TestTheSectionFlagsNarrowTheQuerySelection:
         assert "values" in payload
         for absent in ("ddl", "joins", "description", "dictionary"):
             assert absent not in payload, absent
+
+
+class TestDatabaseContentCannotReshapeTheTableQuotingIt:
+    """Every cell a row interpolates is escaped where the row is assembled (SPEC 2.2.3)."""
+
+    def test_a_pipe_is_escaped(self) -> None:
+        assert _escape_cell("fair|poor") == "fair\\|poor"
+
+    def test_the_backslash_is_escaped_first(self) -> None:
+        """Escaping the pipe first leaves a live delimiter behind an escaped backslash."""
+
+        assert _escape_cell("a\\|b") == "a\\\\\\|b"
+
+    def test_a_line_break_becomes_one_space(self) -> None:
+        assert _escape_cell("sound\nbut small") == "sound but small"
+        assert _escape_cell("sound\r\nbut small") == "sound but small"
+
+    def test_a_value_carrying_neither_is_untouched(self) -> None:
+        assert _escape_cell("sound  but   small") == "sound  but   small"
+
+    def test_a_pipe_in_a_column_name_does_not_split_the_null_pattern_row(self) -> None:
+        artifacts = _artifacts_with_null_patterns(["a|b", "plain"])
+        rows = [l for l in _markdown_null_patterns(artifacts).splitlines() if l.startswith("| ")]
+        body_rows = [r for r in rows if not set(r) <= set("|- ")]
+
+        assert body_rows
+        assert all(len(_unescaped_cells(row)) == 2 for row in body_rows)
+
+    def test_a_pipe_in_a_type_name_does_not_split_the_catalog_only_row(self) -> None:
+        """A MySQL `enum('a|b','c')` reaches the catalog-only table as its own sql_type."""
+
+        artifacts = _artifacts_catalog_only("enum('a|b','c')")
+        rows = [
+            l
+            for l in _markdown_catalog_only_columns(artifacts).splitlines()
+            if l.startswith("| ") and not set(l) <= set("|- ")
+        ]
+
+        assert rows
+        assert all(len(_unescaped_cells(row)) == 3 for row in rows)
+
+
+def _unescaped_cells(row: str) -> list[str]:
+    """The cells a Markdown reader sees: an escaped pipe does not end one."""
+
+    return [c for c in re.split(r"(?<!\\)\|", row.strip()) if c.strip()]
+
+
+def _artifacts_with_null_patterns(columns: list[str]) -> TableArtifacts:
+    return _bare_artifacts(
+        {
+            "row_count": 10,
+            "columns": {},
+            "null_patterns": {"patterns": [{"columns": columns, "count": 4}], "coverage": 1.0},
+        },
+    )
+
+
+def _artifacts_catalog_only(sql_type: str) -> TableArtifacts:
+    return _bare_artifacts(
+        {
+            "catalog_only": True,
+            "columns": {"condition": {"sql_type": sql_type, "classification": "unsupported"}},
+        },
+    )
+
+
+def _bare_artifacts(statistics: dict[str, Any]) -> TableArtifacts:
+    return TableArtifacts(
+        fqn="herbarium.public.curation_event",
+        table_type="table",
+        row_count=10,
+        column_count=1,
+        ddl="",
+        statistics=statistics,
+        relationships=None,
+        description=None,
+        annotations=None,
+        annotated_grain=None,
+        relationship_annotations=None,
+        missing=(),
+        corrupted={},
+        statistics_params_override=None,
+    )

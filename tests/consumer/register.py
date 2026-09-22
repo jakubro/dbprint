@@ -67,6 +67,11 @@ REGISTER: tuple[ClaimState, ...] = (
         "Names a declared artifact kind whose file is absent from disk, distinguishably "
         "from a kind the manifest never declared for that table.",
     ),
+    ClaimState(
+        "delimiter_in_a_value",
+        "Renders a value carrying a table delimiter or a line break without letting it add, "
+        "end or split a cell of the table the surface draws around it.",
+    ),
 )
 
 REGISTER_KEYS: frozenset[str] = frozenset(state.key for state in REGISTER)

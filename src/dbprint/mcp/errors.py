@@ -73,10 +73,10 @@ def malformed_pattern(pattern: str) -> McpError:
     return McpError(-32602, f"pattern {pattern!r} is malformed fnmatch.")
 
 
-def missing_argument(field: str, value: str) -> McpError:
-    """A required argument must be a non-empty string; the SDK runs no inputSchema check first."""
+def invalid_argument(detail: str) -> McpError:
+    """A call whose arguments do not match the tool's own advertised `inputSchema`."""
 
-    return McpError(-32602, f"{field} {value!r} must be a non-empty string.")
+    return McpError(-32602, detail)
 
 
 def no_default_connection(configured: list[str]) -> McpError:

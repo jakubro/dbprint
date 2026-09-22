@@ -1310,6 +1310,15 @@ def test_stats_sketch_not_ascending(print_dir: Path) -> None:
     assert "stats.sketch-not-ascending" in _codes(validate_print(print_dir))
 
 
+def test_stats_sketch_on_redacted_column(print_dir: Path) -> None:
+    target = print_dir / "seedbank/collector/statistics.yaml"
+    data = _load_yaml_file(target)
+    data["columns"]["collector_id"]["redacted"] = "mask"
+    _write_yaml_file(target, data)
+
+    assert "stats.sketch-on-redacted-column" in _codes(validate_print(print_dir))
+
+
 # --- Relationships invariants ---------------------------------------
 
 
@@ -1373,6 +1382,15 @@ def test_out_of_scope_referencer_does_not_break_reciprocity(print_dir: Path) -> 
     _write_yaml_file(target, data)
 
     assert "relationships.broken-reciprocity" not in _codes(validate_print(print_dir))
+
+
+def test_a_target_coverage_above_one_fails_the_packaged_schema(print_dir: Path) -> None:
+    target = print_dir / "seedbank/accession/relationships.yaml"
+    data = _load_yaml_file(target)
+    data["refers_to"][0]["observed"]["target_coverage"] = 5.60177
+    _write_yaml_file(target, data)
+
+    assert "schema.type-mismatch" in _codes(validate_print(print_dir))
 
 
 def test_relationships_ineligible_target_is_referenced(print_dir: Path) -> None:

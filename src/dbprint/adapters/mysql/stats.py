@@ -258,9 +258,7 @@ def probe_timeline(
     unit: Literal["day", "week", "month"],
     scope: TableScope | None = None,
 ) -> tuple[tuple[str, int], ...]:
-    """One grouped statement bucketing `column` at `unit` grain (SPEC 2.2.16) - grouping is on
-    the truncated value, which is always a bare DATE, so the outer render is `DATE_FORMAT`.
-    """
+    """One grouped statement bucketing `column` at `unit` grain. See SPEC 2.2.16."""
 
     del counts
 
@@ -273,7 +271,7 @@ def probe_timeline(
     rows = exec_query(
         cursor,
         f"""
-        SELECT DATE_FORMAT(bucket_start, '%Y-%m-%d') AS bucket_text, cnt
+        SELECT {_render_calendar_bound("bucket_start", col.sql_type, already_utc=True)} AS bucket_text, cnt
         FROM (
             SELECT {bucket_expr} AS bucket_start, COUNT(*) AS cnt
             FROM {source}
@@ -288,20 +286,24 @@ def probe_timeline(
 
 
 def _timeline_bucket_expr(cn: str, sql_type: str, unit: str) -> str:
-    """Truncation expression for `probe_timeline`'s GROUP BY key (SPEC 2.2.16) - MySQL has no
-    `date_trunc`, and a TIMESTAMP normalizes to UTC first; the result is always a bare DATE.
+    """Truncation expression for `probe_timeline`'s GROUP BY key (SPEC 2.2.16): MySQL has no
+    `date_trunc`, a TIMESTAMP normalizes to UTC first, and the bucket keeps the anchor's domain.
     """
 
     is_timestamp = _matches(sql_type, _TZ_TYPES)
+    is_date_only = _matches(sql_type, _DATE_ONLY_TYPES)
     normalized = f"CONVERT_TZ({cn}, @@session.time_zone, '+00:00')" if is_timestamp else cn
 
     if unit == "day":
-        return f"CAST({normalized} AS DATE)"
+        truncated = f"CAST({normalized} AS DATE)"
+    elif unit == "week":
+        truncated = f"DATE_SUB(CAST({normalized} AS DATE), INTERVAL WEEKDAY({normalized}) DAY)"
+    else:
+        truncated = (
+            f"DATE_SUB(CAST({normalized} AS DATE), INTERVAL (DAYOFMONTH({normalized}) - 1) DAY)"
+        )
 
-    if unit == "week":
-        return f"DATE_SUB(CAST({normalized} AS DATE), INTERVAL WEEKDAY({normalized}) DAY)"
-
-    return f"DATE_SUB(CAST({normalized} AS DATE), INTERVAL (DAYOFMONTH({normalized}) - 1) DAY)"
+    return truncated if is_date_only else f"CAST({truncated} AS DATETIME)"
 
 
 def compute_populated_windows(
@@ -1031,15 +1033,14 @@ def _fetch_calendar_temporal_block(
     return rng, percentiles, distribution, unrepresentable, frequencies, values, quantized_count
 
 
-def _render_calendar_bound(expr: str, sql_type: str) -> str:
+def _render_calendar_bound(expr: str, sql_type: str, *, already_utc: bool = False) -> str:
     """SQL text rendering `expr` per SPEC 2.2.4's domain-rendering rule.
 
-    TIMESTAMP is stored UTC and converted to the session `time_zone` on the way out, so it
-    is converted back to a fixed UTC offset first; DATE/DATETIME are naive. `%f` always
-    renders six digits, stripped to match `isoformat()`'s all-or-nothing form.
+    TIMESTAMP converts back to a fixed UTC offset (DATE/DATETIME are naive) and `%f`'s six digits
+    are stripped to `isoformat()`'s form; `already_utc` skips a second, shifting conversion.
     """
 
-    is_timestamp = _matches(sql_type, _TZ_TYPES)
+    is_timestamp = _matches(sql_type, _TZ_TYPES) and not already_utc
     is_date_only = _matches(sql_type, _DATE_ONLY_TYPES)
     picture = "%Y-%m-%d" if is_date_only else "%Y-%m-%dT%H:%i:%s.%f"
     source_expr = f"CONVERT_TZ({expr}, @@session.time_zone, '+00:00')" if is_timestamp else expr

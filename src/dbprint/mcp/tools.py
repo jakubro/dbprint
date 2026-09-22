@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import fnmatch
+import importlib.resources
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast, get_args
 
 import yaml
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import ValidationError
 
 from dbprint.config import ConnectionConfig
 from dbprint.engine import (
@@ -30,6 +34,22 @@ from dbprint.spec.sensitivity import Sensitivity
 from . import errors, reference
 from .reference import ReferenceDocument
 from .state import ServedConnections
+
+
+# Reply caps count items, not bytes; each tool's own argument raises its own cap.
+SEARCH_MATCH_CAP = 200
+TABLE_LISTING_CAP = 500
+MANIFEST_TABLE_CAP = 500
+DIFF_CHANGE_CAP = 500
+CONTEXT_BUDGET_TOKENS = 8000
+
+# The three relationship events carry `source_table`/`target_table` where every other event
+# carries `table`; a filter reading one field alone drops them silently (engine/diff.py).
+_DIFF_TABLE_FIELDS = ("table", "source_table", "target_table")
+
+_DIFF_KINDS: list[str] = json.loads(
+    importlib.resources.files("dbprint.spec.v1").joinpath("diff.schema.json").read_text("utf-8"),
+)["$defs"]["Kind"]["enum"]
 
 
 TOOL_NAMES = (
@@ -70,13 +90,19 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
         ),
         input_schema={
             "type": "object",
+            "additionalProperties": False,
             "properties": {
-                "table": {"type": "string", "description": "Fully-qualified table name"},
+                "table": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Fully-qualified table name",
+                },
                 "conn": {
                     "type": "string",
                     "description": "Optional; falls back to default connection",
                 },
                 "purpose": {
+                    "type": "string",
                     "enum": ["profile", "query"],
                     "default": "profile",
                     "description": (
@@ -87,6 +113,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                     ),
                 },
                 "format": {
+                    "type": "string",
                     "enum": ["md", "json", "yaml"],
                     "default": "md",
                     "description": (
@@ -127,8 +154,11 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                     "type": "integer",
                     "minimum": 1,
                     "description": (
-                        "Soft cap in tokens; sections drop whole in priority order once "
-                        "exceeded, never truncated mid-section"
+                        "Soft cap in tokens, defaulting to 8000. Sections drop whole, never "
+                        "truncated mid-section: "
+                        "the table's identity is charged first, then each section in priority "
+                        "order is measured against what is left, so one that does not fit is "
+                        "skipped rather than closing the door behind it"
                     ),
                 },
             },
@@ -140,10 +170,13 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
         description=(
             "List tables matching an fnmatch pattern across a connection. "
             "`detail: true` projects each entry's type, row_count, columns and "
-            "profiled_at from the manifest alongside its FQN, in one call."
+            "profiled_at from the manifest alongside its FQN, in one call. "
+            "Capped at 500 entries; narrow with `pattern` to reach past the cap, and a capped "
+            "reply carries `truncated: true` with the `total` it was cut from."
         ),
         input_schema={
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "conn": {
                     "type": "string",
@@ -151,6 +184,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                 },
                 "pattern": {
                     "type": "string",
+                    "minLength": 1,
                     "description": "fnmatch glob; defaults to '*'",
                 },
                 "detail": {
@@ -176,8 +210,9 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
             "identically to one from ten thousand otherwise. A match carries "
             "sensitivity/redacted/candidate_key (and candidate_key_exception where the "
             "ratio falls short of 1.0) whenever the column does, so filtering on any of "
-            "them returns the matched category, not just a bare column name. `limit` caps the result, "
-            "must be a positive integer, and the response says so when it caps. A "
+            "them returns the matched category, not just a bare column name. `limit` caps "
+            "the result and defaults to 200; a capped reply carries `truncated: true` with "
+            "the `total` it was cut from, and an explicit larger `limit` is honoured. A "
             "result carries `unreadable_tables` only when a table's own statistics or "
             "annotations failed to parse: a statistics failure drops that table's "
             "columns from `matches` entirely; an annotations-only failure still "
@@ -185,9 +220,11 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
         ),
         input_schema={
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "pattern": {
                     "type": "string",
+                    "minLength": 1,
                     "description": (
                         "fnmatch glob over column names; optional - omit to filter by "
                         "the other predicates alone"
@@ -261,14 +298,21 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
         ),
         input_schema={
             "type": "object",
+            "additionalProperties": False,
             "properties": {
-                "table": {"type": "string", "description": "Fully-qualified table name"},
+                "table": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Fully-qualified table name",
+                },
                 "column": {
                     "type": "string",
+                    "minLength": 1,
                     "description": "Column name as the print spells it",
                 },
                 "text": {
                     "type": "string",
+                    "minLength": 1,
                     "description": "The phrase, code or spelling to resolve",
                 },
                 "conn": {
@@ -283,14 +327,26 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
         name="get_manifest",
         description=(
             "Return the parsed manifest.yaml for a connection - an index of "
-            "tables and their artifacts, not a semantic catalogue of what they mean."
+            "tables and their artifacts, not a semantic catalogue of what they mean. "
+            "The `tables` map is capped at 500 entries and every other key of "
+            "the document is returned whole; narrow with `pattern` to reach past the cap, and "
+            "a capped reply carries `truncated: true` with the `total` it was cut from."
         ),
         input_schema={
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "conn": {
                     "type": "string",
                     "description": "Optional; falls back to default connection",
+                },
+                "pattern": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "fnmatch glob over the FQN keys of `tables`, the same spelling "
+                        "`list_tables` takes; filters that map only"
+                    ),
                 },
             },
         },
@@ -300,14 +356,30 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
         description=(
             "Return the parsed diff.yaml for a connection - a per-column "
             "reliability signal for which statistics are stable and which "
-            "drift run to run."
+            "drift run to run. The `changes` list is capped at 500 events and every other key "
+            "of the document is returned whole; narrow with `table` or `kind` to reach past the "
+            "cap, and a capped reply carries `truncated: true` with the `total` it was cut from."
         ),
         input_schema={
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "conn": {
                     "type": "string",
                     "description": "Optional; falls back to default connection",
+                },
+                "table": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Keep only changes naming this fully-qualified table, including the "
+                        "relationship events that name it as source or target"
+                    ),
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": _DIFF_KINDS,
+                    "description": "Keep only changes of this kind",
                 },
             },
         },
@@ -321,13 +393,16 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
         ),
         input_schema={
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "document": {
+                    "type": "string",
                     "enum": ["assertions", "spec"],
                     "description": "Which specification - the format spec, or the assertion DSL",
                 },
                 "section": {
                     "type": "string",
+                    "minLength": 1,
                     "description": (
                         "A section number in the document's own scheme (e.g. '3', '2.2.4'), or "
                         "a spec_ref citation copied verbatim from a finding ('§2.2.4', "
@@ -347,7 +422,17 @@ def dispatch(
     name: str,
     arguments: dict[str, Any],
 ) -> dict[str, Any] | str:
-    """Route a tool call; `get_table_context` returns a bare string for md/yaml (MCP.md 4.1)."""
+    """Route a tool call; `get_table_context` returns a bare string for md/yaml (MCP.md 4.1).
+
+    The pinned SDK checks no arguments, so every call is validated against the tool's own schema.
+    """
+
+    definition = next((t for t in TOOL_DEFINITIONS if t.name == name), None)
+
+    if definition is None:
+        raise errors.unknown_tool(name, list(TOOL_NAMES))
+
+    arguments = _validated(definition, arguments)
 
     if name == "get_table_context":
         return _tool_get_table_context(state, arguments)
@@ -367,10 +452,59 @@ def dispatch(
     if name == "get_diff":
         return _tool_get_diff(state, arguments)
 
-    if name == "get_reference":
-        return _tool_get_reference(arguments)
+    return _tool_get_reference(arguments)
 
-    raise errors.unknown_tool(name, list(TOOL_NAMES))
+
+# Deliberate: `format`/`purpose` fold before validation; `get_reference`'s `document` does not.
+_CASE_FOLDED_ARGUMENTS = frozenset({"format", "purpose"})
+
+
+def _validated(definition: ToolDef, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Case-fold what folds, then check the call against the tool's own declared schema."""
+
+    folded = {
+        key: value.lower() if key in _CASE_FOLDED_ARGUMENTS and isinstance(value, str) else value
+        for key, value in arguments.items()
+    }
+    validator = Draft202012Validator(definition.input_schema)
+    violations = sorted(validator.iter_errors(folded), key=lambda e: list(e.absolute_path))
+
+    if violations:
+        raise errors.invalid_argument(_argument_fault(definition, violations[0]))
+
+    return folded
+
+
+def _argument_fault(definition: ToolDef, error: ValidationError) -> str:
+    """One violation as the caller needs it: the key, what arrived, and what is accepted."""
+
+    properties = definition.input_schema["properties"]
+
+    if error.validator == "additionalProperties":
+        unknown = sorted(set(error.instance) - set(properties))
+
+        return (
+            f"{definition.name} takes no argument {unknown[0]!r}. Accepted: {sorted(properties)}."
+        )
+
+    if error.validator == "required":
+        missing = error.message.split("'")[1]
+
+        return f"{definition.name} requires {missing!r}."
+
+    key = str(next(iter(error.absolute_path))) if error.absolute_path else "(argument)"
+    schema = properties.get(key, {})
+
+    if error.validator == "enum":
+        return f"{key} {error.instance!r} must be one of {schema['enum']}."
+
+    if error.validator == "minimum":
+        return f"{key} {error.instance!r} must be an integer >= {schema['minimum']}."
+
+    if error.validator == "minLength":
+        return f"{key} {error.instance!r} must be a non-empty string."
+
+    return f"{key} {error.instance!r} must be of type {schema.get('type', 'the declared type')}."
 
 
 def _tool_get_table_context(
@@ -378,20 +512,16 @@ def _tool_get_table_context(
     arguments: dict[str, Any],
 ) -> dict[str, Any] | str:
     conn = state.resolve(arguments.get("conn"))
-    table = arguments.get("table")
-
-    if not table or not isinstance(table, str):
-        raise errors.missing_argument("table", str(table))
-
+    table = arguments["table"]
     manifest = _load_manifest(conn)
     entry = (manifest.get("tables") or {}).get(table) if manifest else None
 
     if manifest is None or entry is None:
         raise errors.unknown_table(table, conn.name)
 
-    fmt = _validate_format(arguments.get("format"))
-    budget = _validate_budget_tokens(arguments.get("budget_tokens"))
-    purpose = _validate_purpose(arguments.get("purpose"))
+    fmt = arguments.get("format", "md")
+    budget = arguments.get("budget_tokens", CONTEXT_BUDGET_TOKENS)
+    purpose = cast(Purpose, arguments.get("purpose", "profile"))
 
     options = AssemblyOptions(
         format=fmt,
@@ -442,12 +572,10 @@ def _tool_list_tables(state: ServedConnections, arguments: dict[str, Any]) -> di
     entries = manifest.get("tables") or {}
     # fnmatch.fnmatchcase never raises for a string pattern - no parse error to catch.
     matched = sorted(fqn for fqn in entries if fnmatch.fnmatchcase(fqn, pattern))
+    kept = matched[:TABLE_LISTING_CAP]
 
-    if not detail:
-        return {"tables": matched}
-
-    return {
-        "tables": [
+    if detail:
+        listing: list[Any] = [
             {
                 "fqn": fqn,
                 "type": entries[fqn].get("type"),
@@ -455,9 +583,12 @@ def _tool_list_tables(state: ServedConnections, arguments: dict[str, Any]) -> di
                 "columns": entries[fqn].get("columns"),
                 "profiled_at": entries[fqn].get("profiled_at"),
             }
-            for fqn in matched
-        ],
-    }
+            for fqn in kept
+        ]
+    else:
+        listing = list(kept)
+
+    return _capped({"tables": listing}, kept=len(kept), total=len(matched))
 
 
 @dataclass(frozen=True)
@@ -591,19 +722,15 @@ def _search_match(
 
 def _tool_search_columns(state: ServedConnections, arguments: dict[str, Any]) -> dict[str, Any]:
     pattern = arguments.get("pattern")
-
-    if pattern is not None and (not isinstance(pattern, str) or not pattern):
-        raise errors.malformed_pattern(str(pattern))
-
     filters = _column_filters(arguments)
-    limit = _validate_limit(arguments.get("limit"))
+    limit = arguments.get("limit", SEARCH_MATCH_CAP)
     conn = state.resolve(arguments.get("conn"))
     manifest = _load_manifest(conn) or {}
     print_root = _print_root(conn)
 
     matches: list[dict[str, Any]] = []
     unreadable: list[str] = []
-    truncated = False
+    total = 0
 
     # Every declared table is loaded regardless of the cap, so corruption past it is still
     # named (MCP.md 4.3) - only match COLLECTION stops once `limit` is reached.
@@ -625,9 +752,6 @@ def _tool_search_columns(state: ServedConnections, arguments: dict[str, Any]) ->
             column_names = set(annotation_columns)
 
         for col_name in sorted(column_names):
-            if truncated:
-                break
-
             if pattern is not None and not fnmatch.fnmatchcase(col_name, pattern):
                 continue
 
@@ -636,18 +760,20 @@ def _tool_search_columns(state: ServedConnections, arguments: dict[str, Any]) ->
             if not _column_matches(col, filters):
                 continue
 
-            if limit is not None and len(matches) >= limit:
-                truncated = True
-                break
+            total += 1
 
-            matches.append(
-                _search_match(fqn, entry, col_name, col, annotation_columns.get(col_name) or {}),
-            )
+            if len(matches) < limit:
+                matches.append(
+                    _search_match(
+                        fqn,
+                        entry,
+                        col_name,
+                        col,
+                        annotation_columns.get(col_name) or {},
+                    ),
+                )
 
-    result: dict[str, Any] = {"matches": matches}
-
-    if truncated:
-        result["truncated"] = True
+    result = _capped({"matches": matches}, kept=len(matches), total=total)
 
     if unreadable:
         result["unreadable_tables"] = sorted(unreadable)
@@ -659,9 +785,9 @@ def _tool_resolve_value(state: ServedConnections, arguments: dict[str, Any]) -> 
     """MCP.md 4.7: one column's answer to a phrase, read off the print alone."""
 
     conn = state.resolve(arguments.get("conn"))
-    table = _required_string(arguments, "table")
-    column = _required_string(arguments, "column")
-    text = _required_string(arguments, "text")
+    table = arguments["table"]
+    column = arguments["column"]
+    text = arguments["text"]
     manifest = _load_manifest(conn)
     entry = (manifest.get("tables") or {}).get(table) if manifest else None
 
@@ -764,17 +890,6 @@ def _column_value_notes(annotation: Any) -> dict[str, str]:
     }
 
 
-def _required_string(arguments: dict[str, Any], field: str) -> str:
-    """A required string argument, refused the way a missing `table` already is."""
-
-    value = arguments.get(field)
-
-    if not value or not isinstance(value, str):
-        raise errors.missing_argument(field, str(value))
-
-    return value
-
-
 def _tool_get_manifest(state: ServedConnections, arguments: dict[str, Any]) -> dict[str, Any]:
     conn = state.resolve(arguments.get("conn"))
     manifest = _load_manifest(conn)
@@ -785,7 +900,16 @@ def _tool_get_manifest(state: ServedConnections, arguments: dict[str, Any]) -> d
             str(_print_root(conn) / "manifest.yaml"),
         )
 
-    return manifest
+    pattern = arguments.get("pattern")
+    tables = manifest.get("tables") or {}
+    matched = {
+        fqn: entry
+        for fqn, entry in tables.items()
+        if pattern is None or fnmatch.fnmatchcase(fqn, pattern)
+    }
+    kept = dict(list(matched.items())[:MANIFEST_TABLE_CAP])
+
+    return _capped({**manifest, "tables": kept}, kept=len(kept), total=len(matched))
 
 
 def _tool_get_diff(state: ServedConnections, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -800,26 +924,39 @@ def _tool_get_diff(state: ServedConnections, arguments: dict[str, Any]) -> dict[
     except yaml.YAMLError as exc:
         raise errors.yaml_parse_error(str(diff_path), str(exc)) from exc
 
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+
+    changes = [c for c in (data.get("changes") or []) if isinstance(c, dict)]
+    matched = [c for c in changes if _change_matches(c, arguments)]
+    kept = matched[:DIFF_CHANGE_CAP]
+
+    return _capped({**data, "changes": kept}, kept=len(kept), total=len(matched))
+
+
+def _change_matches(change: dict[str, Any], arguments: dict[str, Any]) -> bool:
+    """One diff event against the `table` and `kind` filters, both optional and ANDed."""
+
+    table = arguments.get("table")
+    kind = arguments.get("kind")
+
+    if kind is not None and change.get("kind") != kind:
+        return False
+
+    if table is None:
+        return True
+
+    return any(change.get(field) == table for field in _DIFF_TABLE_FIELDS)
 
 
 def _tool_get_reference(arguments: dict[str, Any]) -> str:
     """No `conn` - the two reference documents depend on no connection or print."""
 
-    document = arguments.get("document")
-    allowed = _tool_schema("get_reference")["document"]["enum"]
-
-    if document not in allowed:
-        raise errors.invalid_enum_argument("document", document, allowed)
-
-    document_ = cast(ReferenceDocument, document)
+    document_ = cast(ReferenceDocument, arguments["document"])
     section_number = arguments.get("section")
 
     if section_number is None:
         return reference.heading_tree(document_)
-
-    if not isinstance(section_number, str) or not section_number:
-        raise errors.invalid_enum_argument("section", section_number, ["a non-empty string"])
 
     result = reference.section(document_, section_number)
 
@@ -836,66 +973,17 @@ def _tool_get_reference(arguments: dict[str, Any]) -> str:
 # Helpers.
 
 
+def _capped(payload: dict[str, Any], *, kept: int, total: int) -> dict[str, Any]:
+    """Mark a reply the cap cut, with the total it was cut from."""
+
+    if kept >= total:
+        return payload
+
+    return {**payload, "truncated": True, "total": total}
+
+
 def _print_root(conn: ConnectionConfig) -> Path:
     return conn.output / conn.name
-
-
-def _tool_schema(name: str) -> dict[str, Any]:
-    """One tool's own advertised `inputSchema` properties - the source `tools/list` sends."""
-
-    return next(t.input_schema["properties"] for t in TOOL_DEFINITIONS if t.name == name)
-
-
-def _validate_format(value: Any) -> str:
-    """`format` against `get_table_context`'s own declared enum (default `md`)."""
-
-    fmt = str(value or "md").lower()
-    allowed = _tool_schema("get_table_context")["format"]["enum"]
-
-    if fmt not in allowed:
-        raise errors.invalid_enum_argument("format", fmt, allowed)
-
-    return fmt
-
-
-def _validate_purpose(value: Any) -> Purpose:
-    """`purpose` against `get_table_context`'s own declared enum (default `profile`)."""
-
-    purpose = str(value or "profile").lower()
-    allowed = _tool_schema("get_table_context")["purpose"]["enum"]
-
-    if purpose not in allowed:
-        raise errors.invalid_enum_argument("purpose", purpose, allowed)
-
-    return cast(Purpose, purpose)
-
-
-def _validate_budget_tokens(value: Any) -> int | None:
-    """`budget_tokens` against `get_table_context`'s own declared minimum; None passes through."""
-
-    if value is None:
-        return None
-
-    minimum = _tool_schema("get_table_context")["budget_tokens"]["minimum"]
-
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-        raise errors.invalid_minimum_argument("budget_tokens", value, minimum)
-
-    return value
-
-
-def _validate_limit(value: Any) -> int | None:
-    """`limit` against `search_columns`'s own declared minimum; None passes through."""
-
-    if value is None:
-        return None
-
-    minimum = _tool_schema("search_columns")["limit"]["minimum"]
-
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-        raise errors.invalid_minimum_argument("limit", value, minimum)
-
-    return value
 
 
 def _load_manifest(conn: ConnectionConfig) -> dict[str, Any] | None:

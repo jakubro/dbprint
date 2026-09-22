@@ -11,7 +11,7 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
-from dbprint.config.selectors import match as selector_match
+from dbprint.config import selectors as selectors_module
 from dbprint.spec.v1 import FORMAT_VERSION
 
 
@@ -34,10 +34,27 @@ DATA_CHANGE_KINDS = frozenset({DATA_CHANGE_KIND, ROW_COUNT_CHANGE_KIND})
 
 @dataclass(frozen=True)
 class DiffSelectors:
-    """Table filters for one diff run, already merged from config and CLI."""
+    """The scope one run compared, as the four lists the config and the CLI each carry.
+
+    `include`/`exclude` are the connection's own and are what an artifact records; the CLI pair
+    narrows this run and is recorded nowhere.
+    """
 
     include: tuple[str, ...]
     exclude: tuple[str, ...]
+    cli_include: tuple[str, ...] = ()
+    cli_exclude: tuple[str, ...] = ()
+
+    def covers(self, fqn: str) -> bool:
+        """Whether this run would have scanned `fqn`."""
+
+        return selectors_module.covers(
+            fqn,
+            list(self.include),
+            list(self.exclude),
+            list(self.cli_include),
+            list(self.cli_exclude),
+        )
 
 
 @dataclass
@@ -176,12 +193,7 @@ def compute(
     """
 
     # Baseline scoped like current, so an out-of-scope table is not a removal (SPEC 2.6.8).
-    include, exclude = list(selectors.include), list(selectors.exclude)
-    baseline_map = {
-        fqn: state
-        for fqn, state in (baseline or {}).items()
-        if selector_match(fqn, include, exclude)
-    }
+    baseline_map = {fqn: state for fqn, state in (baseline or {}).items() if selectors.covers(fqn)}
     changes: list[dict[str, Any]] = []
 
     added_fqns = sorted(set(current) - set(baseline_map))

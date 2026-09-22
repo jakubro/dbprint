@@ -921,8 +921,12 @@ streaming or disk-spill machinery is needed.
 ## 6. Selector matching
 
 Selectors are stdlib fnmatch globs (`*` matches any run of characters
-including dot separators; `?` matches a single character). Matching is
-case-sensitive against the lowercased FQN that the adapter emits.
+including dot separators; `?` matches a single character). The pattern is
+lowercased before it is matched, so a selector means the same thing
+whichever case it is written in, from `.dbprint.yaml` or from a CLI flag.
+The other operand is the lowercased FQN that the adapter emits, and it is
+not folded again here — an adapter handing back the catalog's own case
+still fails to match, which is a defect in that adapter.
 
 A pattern of `arboretum.*` matches every table under the `arboretum`
 namespace at any depth (`arboretum.seedbank.accession`,
@@ -948,9 +952,13 @@ effective_include = config.include   intersected with   cli.include  (if cli.inc
 effective_exclude = config.exclude   unioned with        cli.exclude  (always)
 ```
 
-In code, `selectors.expand()` returns the effective sets. A table is in
-scope iff at least one `effective_include` pattern matches AND no
-`effective_exclude` pattern matches.
+In code, `selectors.covers()` answers this for one FQN and `selectors.expand()`
+filters a list through the same rule. A table is in scope iff at least one config
+`include` pattern matches, no config `exclude` matches, and - where the CLI passed
+any - at least one `--include` matches and no `--exclude` does. The two stages stay
+separate, which is what makes a CLI include unable to widen the configured scope;
+every decision that asks "would this run have scanned it" routes through the same
+`DiffSelectors`, including the manifest's carry set and the diff's baseline filter.
 
 ```mermaid
 flowchart LR

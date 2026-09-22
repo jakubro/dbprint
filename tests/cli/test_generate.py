@@ -324,6 +324,65 @@ class TestCliSelectorNarrowing:
         assert "seedbank.viability_check" in result.output
         assert "fixture.staging" not in result.output
 
+    @pytest.mark.parametrize("pattern", ["FIXTURE.*", "Fixture.*", "FIXTURE.STAGING"])
+    def test_an_uppercase_cli_exclude_still_drops_the_table(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        pattern: str,
+    ) -> None:
+        _setup_multi_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        for k, v in _credential_env().items():
+            monkeypatch.setenv(k, v)
+
+        runner = CliRunner()
+
+        with _patch_registry_multi():
+            result = runner.invoke(main, ["generate", "--no-tui", "--exclude", pattern])
+
+        assert "seedbank.viability_check" in result.output
+        assert "fixture.staging" not in result.output
+
+    def test_an_uppercase_cli_include_still_narrows(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _setup_multi_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        for k, v in _credential_env().items():
+            monkeypatch.setenv(k, v)
+
+        runner = CliRunner()
+
+        with _patch_registry_multi():
+            result = runner.invoke(main, ["generate", "--no-tui", "--include", "SEEDBANK.*"])
+
+        assert "seedbank.viability_check" in result.output
+        assert "fixture.staging" not in result.output
+
+    def test_an_uppercase_cli_include_cannot_widen_beyond_config(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _setup_multi_project(tmp_path, config_include=["seedbank.*"])
+        monkeypatch.chdir(tmp_path)
+
+        for k, v in _credential_env().items():
+            monkeypatch.setenv(k, v)
+
+        runner = CliRunner()
+
+        with _patch_registry_multi():
+            result = runner.invoke(main, ["generate", "--no-tui", "--include", "FIXTURE.*"])
+
+        assert "seedbank.viability_check" not in result.output.split("summary")[0]
+        assert "fixture.staging" not in result.output.split("summary")[0]
+
 
 # Run log. `run_log.LOGS_ROOT` is redirected to a session-scoped scratch dir by the
 # autouse `_redirect_run_log` fixture in tests/conftest.py.
