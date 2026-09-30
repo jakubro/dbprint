@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 from . import stats
 from .connection import exec_query
 from ..base import TableScope, seed_from_fqn
+from ..identifiers import Identity
+from ..sql_layout import indented
 
 
 if TYPE_CHECKING:
@@ -17,20 +19,27 @@ if TYPE_CHECKING:
 
 def compute_normalized_cardinality(
     cursor: Cursor,
-    fqn: str,
+    identity: Identity,
     column: str,
     scope: TableScope | None = None,
 ) -> int:
     """The distinct count of `column` once trimmed and case-folded (SPEC 2.2.4)."""
 
-    quoted_table = stats._quote_qualified(fqn)
-    cn = stats._quote_ident(column)
+    quoted_table = identity.quoted()
+    cn = stats._qualified(column)
     normalized = f"LOWER(TRIM(CAST({cn} AS STRING)))"
-    source = stats._source(fqn, quoted_table, scope, seed_from_fqn(fqn, stats.SEED_MODULUS))
+    source = stats._source(quoted_table, scope, seed_from_fqn(identity.fqn, stats.SEED_MODULUS))
 
     row = exec_query(
         cursor,
-        f"SELECT COUNT(DISTINCT {normalized}) AS n FROM {source} WHERE {cn} IS NOT NULL",
+        f"""
+        SELECT
+          COUNT(DISTINCT {normalized}) AS n
+        FROM
+          {indented(source, 10)}
+        WHERE
+          {cn} IS NOT NULL
+        """,
     ).fetchone()
 
     return int(row[0]) if row and row[0] is not None else 0

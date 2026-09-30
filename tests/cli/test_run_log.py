@@ -110,26 +110,20 @@ class TestOpenClose:
             finally:
                 run_log.close_run_log(handle)
 
-    def test_open_raises_the_dbprint_logger_to_debug_and_close_restores_it(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        logger = logging.getLogger("dbprint")
-        before_level = logger.level
+    def test_a_debug_record_lands_while_open_and_not_after_close(self, tmp_path: Path) -> None:
+        engine_logger = logging.getLogger("dbprint.engine.orchestrator")
 
         with patch.object(run_log, "LOGS_ROOT", tmp_path / "logs"):
             handle = run_log.open_run_log(tmp_path / "project", "generate")
             assert handle is not None
-            assert logger.level == logging.DEBUG
-            assert handle.handler in logger.handlers
-
+            engine_logger.debug("read while open: %s", "alpha")
             run_log.close_run_log(handle)
+            engine_logger.debug("read after close: %s", "beta")
 
-        assert logger.level == before_level
-        assert handle.handler not in logger.handlers
+        text = next((tmp_path / "logs").rglob("*.log")).read_text()
 
-    def test_close_of_none_is_a_no_op(self) -> None:
-        run_log.close_run_log(None)
+        assert "read while open: alpha" in text
+        assert "read after close: beta" not in text
 
     def test_unopenable_root_warns_once_on_stderr_and_returns_none(
         self,
@@ -149,29 +143,22 @@ class TestOpenClose:
 
 
 class TestStderrWarningHandler:
-    def test_installs_and_removes_from_the_dbprint_logger(self) -> None:
-        logger = logging.getLogger("dbprint")
-
-        handler = run_log.install_stderr_warning_handler()
-        try:
-            assert handler in logger.handlers
-            assert handler.level == logging.WARNING
-        finally:
-            run_log.remove_stderr_warning_handler(handler)
-
-        assert handler not in logger.handlers
-
-    def test_a_warning_raised_while_installed_reaches_stderr(
+    def test_a_warning_reaches_stderr_while_installed_and_not_after(
         self,
         capsys: pytest.CaptureFixture,
     ) -> None:
         """The mechanism `check --online` relies on to keep its stderr warnings visible."""
 
+        engine_logger = logging.getLogger("dbprint.engine.orchestrator")
         handler = run_log.install_stderr_warning_handler()
 
         try:
-            logging.getLogger("dbprint.engine.orchestrator").warning("table %r: no estimate", "t")
+            engine_logger.warning("table %r: no estimate", "t")
         finally:
             run_log.remove_stderr_warning_handler(handler)
 
-        assert "table 't': no estimate" in capsys.readouterr().err
+        engine_logger.warning("table %r: after removal", "u")
+        err = capsys.readouterr().err
+
+        assert "table 't': no estimate" in err
+        assert "table 'u': after removal" not in err

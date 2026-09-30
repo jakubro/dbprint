@@ -2,24 +2,10 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
-
-
-_DURATION_RE = re.compile(r"^(\d+)([dhms])$", re.IGNORECASE)
-_UNIT_TO_DAYS = {
-    "d": 1.0,
-    "h": 1.0 / 24.0,
-    "m": 1.0 / (24.0 * 60.0),
-    "s": 1.0 / (24.0 * 3600.0),
-}
-
-
-class DurationError(ValueError):
-    """Raised when a duration string does not match the `Nd`/`Nh`/`Nm`/`Ns` grammar."""
 
 
 @dataclass(frozen=True)
@@ -32,25 +18,6 @@ class StaleEntry:
     fqn: str
     age_days: float
     max_age_days: float
-
-
-def parse_duration(value: str) -> float:
-    """Convert `Nd` / `Nh` / `Nm` / `Ns` into days (float).
-
-    Raises DurationError on anything else, compound forms like `1d12h` included.
-    """
-
-    match = _DURATION_RE.match(value.strip())
-
-    if not match:
-        raise DurationError(
-            f"invalid duration {value!r}. Expected `Nd`, `Nh`, `Nm`, or `Ns` (e.g. `7d`, `12h`).",
-        )
-
-    n = int(match.group(1))
-    unit = match.group(2).lower()
-
-    return n * _UNIT_TO_DAYS[unit]
 
 
 def evaluate(
@@ -72,7 +39,7 @@ def evaluate(
 
     for fqn, entry in (manifest.get("tables") or {}).items():
         threshold = threshold_for(fqn) if threshold_for is not None else max_age_days
-        age = _age_days(entry.get("profiled_at"), current) if isinstance(entry, dict) else None
+        age = age_days(entry.get("profiled_at"), current) if isinstance(entry, dict) else None
 
         if age is None:
             out.append(StaleEntry(fqn=fqn, age_days=float("inf"), max_age_days=threshold))
@@ -84,23 +51,6 @@ def evaluate(
     out.sort(key=lambda s: (-s.age_days if s.age_days != float("inf") else float("-inf"), s.fqn))
 
     return out
-
-
-def format_threshold(days: float) -> str:
-    """Render a threshold in the single-unit form `--max-age`/`parse_duration` accepts back - a
-    configured value owes the reader a typeable form, unlike `format_age`'s compound `Xd Yh`.
-    """
-
-    total_seconds = round(days * 86400)
-
-    if total_seconds % 86400 == 0:
-        return f"{total_seconds // 86400}d"
-    elif total_seconds % 3600 == 0:
-        return f"{total_seconds // 3600}h"
-    elif total_seconds % 60 == 0:
-        return f"{total_seconds // 60}m"
-    else:
-        return f"{total_seconds}s"
 
 
 def format_age(days: float) -> str:
@@ -116,16 +66,28 @@ def format_age(days: float) -> str:
         return f"{int(days)}d {int((days - int(days)) * 24)}h"
 
 
-def _age_days(profiled_at: str | None, now: datetime) -> float | None:
-    if not profiled_at:
-        return None
+def age_days(profiled_at: Any, now: datetime) -> float | None:
+    """Days between `profiled_at` and `now`, None when the stamp is absent or unreadable."""
 
-    try:
-        prior = datetime.fromisoformat(profiled_at)
-    except (ValueError, AttributeError):
-        return None
+    prior = parse_profiled_at(profiled_at)
 
-    if prior.tzinfo is None:
-        prior = prior.replace(tzinfo=UTC)
+    if prior is None:
+        return None
 
     return (now - prior).total_seconds() / 86400.0
+
+
+def parse_profiled_at(profiled_at: Any) -> datetime | None:
+    """A `profiled_at` stamp as an aware instant, an offset-less one read as UTC."""
+
+    if isinstance(profiled_at, datetime):
+        prior = profiled_at
+    elif isinstance(profiled_at, str) and profiled_at:
+        try:
+            prior = datetime.fromisoformat(profiled_at)
+        except ValueError:
+            return None
+    else:
+        return None
+
+    return prior if prior.tzinfo is not None else prior.replace(tzinfo=UTC)

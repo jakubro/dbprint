@@ -1,13 +1,13 @@
 """Shared pytest fixtures and helpers spanning multiple test suites.
 
-`postgres_cluster` is session-scoped and shared by the adapter-contract and integration
-suites; it runs local `initdb` + `pg_ctl` as the system `postgres` user, so it needs a
-postgresql-server install but no Docker.
+`postgres_cluster` is one cluster per run for every xdist worker, run by local `initdb` + `pg_ctl`
+as the system `postgres` user - a postgresql-server install, no Docker.
 """
 
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import re
 import secrets
@@ -20,16 +20,37 @@ import tempfile
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import psycopg
 import pytest
+from hypothesis import HealthCheck, settings
+from hypothesis.configuration import set_hypothesis_home_dir
+from hypothesis.database import DirectoryBasedExampleDatabase
 
 from dbprint.cli import run_log
-from tests import _containment
+from tests import _containment, _substrates
 from tests._provisioning import INSTALL_LOCK_PATH, discover_or_install, in_container
 
+
+# `check` must not vary between runs, so its profile derandomizes; `local` searches wider and keeps
+# what it finds. DBPRINT_HYPOTHESIS_PROFILE picks one; Hypothesis' own state lives under /tmp.
+set_hypothesis_home_dir("/tmp/.hypothesis-dbprint")
+settings.register_profile("check", derandomize=True, database=None, deadline=None)
+# mutmut runs the suite several times in one process, so a test method meets a new `self` each run.
+settings.register_profile(
+    "mutate",
+    parent=settings.get_profile("check"),
+    suppress_health_check=[HealthCheck.differing_executors],
+)
+settings.register_profile(
+    "local",
+    max_examples=2000,
+    deadline=None,
+    database=DirectoryBasedExampleDatabase("/tmp/.hypothesis-dbprint/examples"),
+)
+settings.load_profile(os.environ.get("DBPRINT_HYPOTHESIS_PROFILE", "check"))
 
 # Not a plausible timestamp, so a normalized payload cannot pass for one a producer wrote.
 INSTANT_PLACEHOLDER = "<instant>"
@@ -62,10 +83,15 @@ _WORKER_MEMORY_MB = 2 * 1024
 
 _MEMORY_CEILING_ENV = "DBPRINT_TEST_MEMORY_MB"
 
+# Every worker opens its own sessions to the one shared server, several per test at once.
+_MAX_CONNECTIONS = 400
+
+# Both servers are deleted at session end, so nothing they write needs to survive a crash.
+_NO_DURABILITY = "-c fsync=off -c synchronous_commit=off -c full_page_writes=off"
+
 _MEM_AVAILABLE_RE = re.compile(r"^MemAvailable:\s+(\d+) kB$", re.MULTILINE)
 
-# Vendors whose substrate is a server or a container: one xdist group each, so `--dist load` runs
-# a single live instance per vendor. duckdb and the mock are absent - in-process, cheap to repeat.
+# Vendors a test can be parameterised on; the value names the substrate it reads.
 _SUBSTRATE_VENDORS = frozenset(
     {
         "postgres",
@@ -77,6 +103,31 @@ _SUBSTRATE_VENDORS = frozenset(
         "bigquery",
     },
 )
+
+# Parameterised fixtures that build a connected adapter for the vendor they are given.
+_VENDOR_FIXTURES = frozenset({"adapter_factory", "sql_adapter_factory"})
+
+_SUBSTRATE_FIXTURES = {
+    "postgres_cluster": "postgres",
+    "mysql_cluster": "mysql",
+    "databricks_spark_session": "databricks",
+    "bigquery_emulator": "bigquery",
+}
+
+# xdist groups per substrate, one instance each: a Spark session lives in its worker's JVM, and the
+# BigQuery emulator times out under concurrent workers and slows per dataset held (both measured).
+_GROUPED_SUBSTRATES = {"databricks": 6, "bigquery": 8}
+
+_EVERY_SUBSTRATE_MARK = "every_substrate"
+
+# Vendors whose substrate is a server, a container or a JVM - what `just test-fast` never starts.
+_SERVER_VENDORS = frozenset({"postgres", "mysql", "redshift", "databricks", "bigquery"})
+
+_LIVE_SERVER_MARK = "live_server"
+
+# Where a worker finds the process that owns the run's shared servers - xdist's controller, or
+# the only process of a run without it.
+_RUN_OWNER_ENV = "DBPRINT_TEST_RUN_OWNER"
 
 # Set on the re-exec, so the sandboxed process does not sandbox itself again.
 _SANDBOX_MARKER = "DBPRINT_TEST_SANDBOXED"
@@ -96,8 +147,16 @@ _SANDBOX_ARGV = (
     "--tmpfs",
     "/tmp",
     "--unshare-net",
+    "--unshare-pid",
     "--die-with-parent",
 )
+
+_STOPPERS = {
+    "postgres": lambda handle, _owner: _substrates.stop_postgres(handle, _run_as_postgres),
+    "mariadb": _substrates.stop_mariadb,
+    "bigquery": _substrates.stop_bigquery,
+    "spark-warehouse": _substrates.stop_directory,
+}
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -109,9 +168,13 @@ def pytest_configure(config: pytest.Config) -> None:
     renderer selects on a dumb terminal and pinning it would decide tests about that choice.
     """
 
-    del config
-
     _reexec_under_sandbox()
+
+    config.addinivalue_line(
+        "markers",
+        f"{_EVERY_SUBSTRATE_MARK}: the test reads every vendor's substrate in one run",
+    )
+    config.addinivalue_line("markers", f"{_LIVE_SERVER_MARK}: set by conftest; needs a server")
 
     os.environ["NO_COLOR"] = "1"
 
@@ -142,6 +205,23 @@ def _reexec_under_sandbox() -> None:
     os.environ[_SANDBOX_MARKER] = "1"
 
     os.execv(bwrap, [bwrap, *_SANDBOX_ARGV, sys.executable, "-m", "pytest", *sys.argv[1:]])
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Reclaim what an interrupted run left running, before any worker starts a substrate.
+
+    Only the controller sweeps, and it runs ahead of xdist's own hook, which spawns the workers.
+    """
+
+    if hasattr(session.config, "workerinput"):
+        return
+
+    os.environ[_RUN_OWNER_ENV] = json.dumps(asdict(_substrates.current_owner()))
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    write = reporter.write_line if reporter is not None else print
+
+    for line in _substrates.sweep(_scratch_root(), _STOPPERS):
+        write(f"substrate sweep: {line}")
 
 
 def pytest_xdist_auto_num_workers() -> int:
@@ -188,41 +268,64 @@ def _available_mb() -> int | None:
     return int(match.group(1)) // 1024 if match is not None else None
 
 
+@pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
-    """Pin every vendor-parameterised test to that vendor's xdist group."""
+    """Mark tests that need a live server; spread each `_GROUPED_SUBSTRATES` vendor over its groups.
+
+    Runs first: xdist's own hook reads the group into the node id, and sees no marker added later.
+    """
+
+    placed = dict.fromkeys(_GROUPED_SUBSTRATES, 0)
 
     for item in items:
-        vendor = _substrate_vendor(item)
+        substrates = _substrates_of(item)
+
+        if substrates & _SERVER_VENDORS:
+            item.add_marker(_LIVE_SERVER_MARK)
+
+        vendor = next((vendor for vendor in _GROUPED_SUBSTRATES if vendor in substrates), None)
 
         if vendor is not None:
-            item.add_marker(pytest.mark.xdist_group(vendor))
+            group = placed[vendor] % _GROUPED_SUBSTRATES[vendor]
+            item.add_marker(pytest.mark.xdist_group(f"{vendor}-{group}"))
+            placed[vendor] += 1
 
 
-def _substrate_vendor(item: pytest.Item) -> str | None:
-    """Return the out-of-process substrate an item is parameterised on, or None."""
+def _substrates_of(item: pytest.Item) -> frozenset[str]:
+    """Return every vendor whose substrate an item reads - by parameter, fixture or mark."""
 
+    fixturenames = frozenset(getattr(item, "fixturenames", ()))
+
+    if item.get_closest_marker(_EVERY_SUBSTRATE_MARK) or "all_sql_adapters" in fixturenames:
+        return _SUBSTRATE_VENDORS
+
+    # A vendor parameter reaches a substrate only through a fixture that resolves it; elsewhere
+    # (a registry sweep, a credentials unit) it is just a name.
     callspec = getattr(item, "callspec", None)
+    params = callspec.params.items() if callspec is not None else ()
+    resolves = "request" in getattr(getattr(item, "_fixtureinfo", None), "argnames", ())
+    named = {
+        value
+        for key, value in params
+        if isinstance(value, str)
+        and value in _SUBSTRATE_VENDORS
+        and (resolves or key in _VENDOR_FIXTURES)
+    }
+    fixtures = {vendor for name, vendor in _SUBSTRATE_FIXTURES.items() if name in fixturenames}
 
-    if callspec is None:
-        return None
-
-    for value in callspec.params.values():
-        if isinstance(value, str) and value in _SUBSTRATE_VENDORS:
-            return value
-
-    return None
+    return frozenset(named | fixtures)
 
 
 def pytest_sessionfinish(session: pytest.Session) -> None:
-    """Remove the lock files and containment claims the run created, once no worker can still
-    need one.
+    """Stop the run's shared servers and delete the lock files and containment claims it created.
 
-    Only the controller does it. xdist finishes the controller after every worker, so a peer
-    cannot be holding a lock, or still checking a claim, this deletes.
+    Controller only: xdist finishes it after every worker, so no peer still holds what this deletes.
     """
 
     if hasattr(session.config, "workerinput"):
         return
+
+    _substrates.stop_owned(_scratch_root(), _STOPPERS, _run_owner())
 
     for path in (_CLUSTER_BOOTSTRAP_LOCK_PATH, INSTALL_LOCK_PATH):
         path.unlink(missing_ok=True)
@@ -388,15 +491,28 @@ class PostgresCluster:
 
 
 @pytest.fixture(scope="session")
-def postgres_cluster() -> Iterator[PostgresCluster]:
-    """Start an ephemeral cluster once per session; tear down on session end."""
+def postgres_cluster() -> PostgresCluster:
+    """The run's one ephemeral cluster, started by whichever process needs it first.
 
+    Every test takes its own database in it, so workers share it; the run's owner stops it.
+    """
+
+    handle = _substrates.shared(_scratch_root(), "postgres", _run_owner(), _start_postgres)
+
+    return PostgresCluster(port=int(handle["port"]))
+
+
+def _start_postgres() -> dict[str, str]:
     bin_dir = _discover_postgres_bin_dir()
-    data_dir = _scratch_root() / ("dbprint-test-postgres-" + secrets.token_hex(4))
+    root = _scratch_root()
+    name = "dbprint-test-postgres-" + secrets.token_hex(4)
+    data_dir = root / name
     port = _free_port()
+    handle = {"path": str(data_dir), "bin_dir": str(bin_dir), "port": str(port)}
+    marker = _substrates.register(root, name, "postgres", _run_owner(), **handle)
 
-    # `initdb` refuses a directory it does not own, hence the mode-0700 create as the
-    # account the server runs as.
+    # `initdb` refuses a directory it does not own, hence the mode-0700 create as the account the
+    # server runs as.
     try:
         with _serialize_cluster_bootstrap():
             _run_as_postgres(["mkdir", "-p", str(data_dir)])
@@ -419,7 +535,7 @@ def postgres_cluster() -> Iterator[PostgresCluster]:
                     "-D",
                     str(data_dir),
                     "-o",
-                    f"-p {port} -h 127.0.0.1",
+                    f"-p {port} -h 127.0.0.1 -c max_connections={_MAX_CONNECTIONS} {_NO_DURABILITY}",
                     "-l",
                     str(data_dir / "postgres.log"),
                     "-w",
@@ -428,14 +544,24 @@ def postgres_cluster() -> Iterator[PostgresCluster]:
             )
 
             _wait_for_postgres("127.0.0.1", port, timeout=10.0)
+    except (subprocess.CalledProcessError, RuntimeError) as exc:
+        said = _server_said(exc, data_dir / "postgres.log")
+        message = _substrates.start_failure("postgres", said, root, port)
+        _STOPPERS["postgres"](handle, _run_owner())
+        marker.unlink(missing_ok=True)
 
-        yield PostgresCluster(port=port)
-    finally:
-        _run_as_postgres(
-            [str(bin_dir / "pg_ctl"), "-D", str(data_dir), "-m", "immediate", "stop"],
-            check=False,
-        )
-        _run_as_postgres(["rm", "-rf", str(data_dir)], check=False)
+        raise RuntimeError(message) from exc
+
+    return handle
+
+
+def _server_said(exc: BaseException, log: Path) -> str:
+    captured = ""
+
+    if isinstance(exc, subprocess.CalledProcessError):
+        captured = "\n".join(part.strip() for part in (exc.stdout, exc.stderr) if part)
+
+    return "\n".join(part for part in (str(exc), captured, _substrates.tail(log)) if part)
 
 
 def _scratch_root() -> Path:
@@ -537,18 +663,26 @@ class MysqlCluster:
 
 
 @pytest.fixture(scope="session")
-def mysql_cluster() -> Iterator[MysqlCluster]:
-    """Start an ephemeral MariaDB instance once per session; tear down on session end."""
+def mysql_cluster() -> MysqlCluster:
+    """The run's one ephemeral MariaDB server, shared by every worker like `postgres_cluster`."""
 
+    handle = _substrates.shared(_scratch_root(), "mariadb", _run_owner(), _start_mariadb)
+
+    return MysqlCluster(port=int(handle["port"]))
+
+
+def _start_mariadb() -> dict[str, str]:
     install_db = _discover_mysql_tool("mariadb-install-db")
     mariadbd = _discover_mysql_tool("mariadbd", candidate_globs=("/usr/sbin/mariadbd",))
-    data_dir = _scratch_root() / ("dbprint-test-mariadb-" + secrets.token_hex(4))
+    root = _scratch_root()
+    name = "dbprint-test-mariadb-" + secrets.token_hex(4)
+    data_dir = root / name
     port = _free_port()
     socket_path = data_dir / "mysqld.sock"
-
-    # Bound before the `try` so the `finally` can tell "never started" from "started and
-    # must be killed" - a readiness wait that expires would otherwise leave the server up.
-    proc: subprocess.Popen[bytes] | None = None
+    handle = {"path": str(data_dir), "port": str(port)}
+    marker = _substrates.register(root, name, "mariadb", _run_owner(), **handle)
+    # Held so a readiness wait that expires before the pid file exists can still kill the server.
+    server: subprocess.Popen[bytes] | None = None
 
     try:
         data_dir.mkdir(parents=True, exist_ok=True)
@@ -568,7 +702,8 @@ def mysql_cluster() -> Iterator[MysqlCluster]:
                 text=True,
             )
 
-            proc = subprocess.Popen(
+            # Outlives the worker that starts it; the run's owner stops it through the pid file.
+            server = subprocess.Popen(
                 [
                     str(mariadbd),
                     "--no-defaults",
@@ -578,26 +713,38 @@ def mysql_cluster() -> Iterator[MysqlCluster]:
                     f"--port={port}",
                     "--bind-address=127.0.0.1",
                     "--user=root",
+                    f"--max-connections={_MAX_CONNECTIONS}",
+                    "--innodb-flush-log-at-trx-commit=0",
+                    "--innodb-doublewrite=0",
+                    "--skip-log-bin",
                     f"--pid-file={data_dir / 'mariadb.pid'}",
                     f"--log-error={data_dir / 'mariadb.err'}",
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                start_new_session=True,
             )
 
             _wait_for_mysql("127.0.0.1", port, timeout=30.0)
+    except (subprocess.CalledProcessError, RuntimeError) as exc:
+        said = _server_said(exc, data_dir / "mariadb.err")
+        message = _substrates.start_failure("mariadb", said, root, port)
 
-        yield MysqlCluster(port=port)
-    finally:
-        if proc is not None:
-            proc.terminate()
+        if server is not None:
+            server.kill()
 
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+        _STOPPERS["mariadb"](handle, _run_owner())
+        marker.unlink(missing_ok=True)
 
-        shutil.rmtree(data_dir, ignore_errors=True)
+        raise RuntimeError(message) from exc
+
+    return handle
+
+
+def _run_owner() -> _substrates.Owner:
+    """Return the process that owns this run's shared servers, as `pytest_sessionstart` published it."""
+
+    return _substrates.Owner(**json.loads(os.environ[_RUN_OWNER_ENV]))
 
 
 def _discover_mysql_tool(binary: str, candidate_globs: tuple[str, ...] = ()) -> Path:

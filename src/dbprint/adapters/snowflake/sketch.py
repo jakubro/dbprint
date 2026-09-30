@@ -8,9 +8,10 @@ with no widening trick.
 from __future__ import annotations
 
 from dbprint.spec.sketch import SketchKind
-from . import stats
 from .connection import Cursor, exec_query
-from .identity import Identity
+from .rendering import render_canonical
+from ..identifiers import SOURCE_ALIAS, Identity
+from ..sql_layout import indented
 
 
 _HEX_FORMAT = "X" * 16  # 16 hex digits = 64 bits
@@ -26,39 +27,31 @@ def compute_key_sketch(
 ) -> tuple[int, ...]:
     """The k smallest low-64-bit MD5 hashes of the column's distinct non-null values."""
 
-    quoted_col = identity.quoted_column(column)
-    canonical = _canonical_expr(quoted_col, kind, sql_type)
-    low64 = _low64_expr("v")
+    quoted_col = identity.source_column(column)
+    canonical = render_canonical(quoted_col, sql_type, kind)
+    low64 = _low64_expr("dst.v")
 
     rows = exec_query(
         cursor,
         f"""
-        SELECT {low64} AS h
-        FROM (
-            SELECT DISTINCT {canonical} AS v
-            FROM {identity.quoted()}
-            WHERE {quoted_col} IS NOT NULL
-        ) t
-        ORDER BY h
+        SELECT
+          {low64} AS h
+        FROM
+          (
+            SELECT DISTINCT
+              {indented(canonical, 14)} AS v
+            FROM
+              {identity.quoted()} {SOURCE_ALIAS}
+            WHERE
+              {quoted_col} IS NOT NULL
+          ) dst
+        ORDER BY
+          h
         LIMIT {int(k)}
         """,
     ).fetchall()
 
     return tuple(int(r[0]) for r in rows)
-
-
-def _canonical_expr(quoted_col: str, kind: SketchKind, sql_type: str) -> str:
-    """SPEC 2.2.14's canonical byte form for one SQL value, as a SQL expression.
-
-    Snowflake's default `TO_VARCHAR` rendering already matches the canonical form for
-    every non-temporal kind. Temporal reuses `_render_calendar_bound`: Snowflake appends
-    `Z` itself, so SPEC 2.2.4 and SPEC 2.2.14 coincide and need no sketch-specific override.
-    """
-
-    if kind == "temporal":
-        return stats._render_calendar_bound(quoted_col, sql_type)
-
-    return f"TO_VARCHAR({quoted_col})"
 
 
 def _low64_expr(value_expr: str) -> str:

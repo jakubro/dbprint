@@ -85,6 +85,12 @@ def ensure_java() -> Path:
     )
 
 
+def delta_jars_cached() -> bool:
+    """Whether Delta's Spark jar has been resolved into the shared Ivy cache."""
+
+    return any((SPARK_IVY_CACHE_PATH / "jars").glob("io.delta_delta-spark_*.jar"))
+
+
 def warm_delta_ivy_cache() -> int:
     """Resolve and cache Delta Lake's Maven/Ivy jars once, returning the process exit code.
 

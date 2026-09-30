@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from dbprint.adapters.base import ColumnMeta, null_flags, null_patterns_from_rows
+from dbprint.adapters.base import ColumnMeta, null_patterns_from_rows
 
 
 CAP = 3
@@ -66,6 +66,10 @@ class TestDecoding:
         )
 
         assert all("a" in pattern.columns for pattern in census.patterns)
+
+    def test_a_flag_string_short_of_the_columns_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="zip"):
+            null_patterns_from_rows([("01", 7)], _columns("a", "b", "c"), rows_scanned=7, cap=CAP)
 
 
 class TestOrdering:
@@ -169,21 +173,3 @@ class TestCoverageMethod:
         census = null_patterns_from_rows([], _columns("a"), rows_scanned=0, cap=CAP)
 
         assert census.coverage_method == "measured"
-
-
-class TestFlagExpression:
-    def test_the_operator_form_chains_without_an_argument_limit(self) -> None:
-        """Postgres rejects a function call past 100 arguments; a wide table has more."""
-
-        expression = null_flags(['"a"', '"b"'], concat=False)
-
-        assert expression == (
-            "CASE WHEN \"a\" IS NULL THEN '1' ELSE '0' END || "
-            "CASE WHEN \"b\" IS NULL THEN '1' ELSE '0' END"
-        )
-
-    def test_the_function_form_is_used_where_the_operator_means_or(self) -> None:
-        expression = null_flags(["`a`", "`b`"], concat=True)
-
-        assert expression.startswith("CONCAT(")
-        assert "||" not in expression

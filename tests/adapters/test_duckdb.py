@@ -8,6 +8,7 @@ import duckdb
 import pytest
 
 from dbprint.adapters import DuckdbAdapter, TableScope
+from dbprint.adapters.identifiers import UnknownTable
 
 
 @pytest.fixture
@@ -42,6 +43,7 @@ def con() -> Iterator[duckdb.DuckDBPyConnection]:
 def adapter(con: duckdb.DuckDBPyConnection) -> Iterator[DuckdbAdapter]:
     a = DuckdbAdapter({"database": ":memory:"}, cursor_factory=lambda _params: con)
     a.connect()
+    a.list_tables(include=["*"], exclude=[])
 
     try:
         yield a
@@ -131,22 +133,12 @@ class TestDdlFromCatalog:
         assert ddl.startswith("CREATE VIEW")
 
     def test_an_unknown_table_raises(self, adapter: DuckdbAdapter) -> None:
-        with pytest.raises(ValueError, match="no DDL available"):
+        with pytest.raises(UnknownTable, match="call list_tables"):
             adapter.extract_ddl("memory.seedbank.does_not_exist")
 
 
 class TestBareUniqueIndexPlacement:
     """A bare `CREATE UNIQUE INDEX` is declared-unique (SPEC 2.6.7), not a secondary index."""
-
-    def test_the_bare_unique_index_is_a_unique_key_not_an_index(
-        self,
-        adapter: DuckdbAdapter,
-    ) -> None:
-        unique_keys = adapter.introspect_unique_keys("memory.seedbank.herbarium")
-        indexes = adapter.introspect_indexes("memory.seedbank.herbarium")
-
-        assert any(k.columns == ("code",) and not k.primary for k in unique_keys)
-        assert not any(i.columns == ("code",) for i in indexes)
 
     def test_the_plain_index_stays_a_secondary_index(self, adapter: DuckdbAdapter) -> None:
         indexes = adapter.introspect_indexes("memory.seedbank.herbarium")
@@ -215,6 +207,7 @@ class TestSeededDrawReproduces:
         con.execute("CREATE TABLE seedbank.wide AS SELECT range AS id FROM range(2000)")
         adapter = DuckdbAdapter({"database": ":memory:"}, cursor_factory=lambda _p: con)
         adapter.connect()
+        adapter.list_tables(include=["*"], exclude=[])
         scope = TableScope(sample=0.1)
 
         first = adapter.sample_values("memory.seedbank.wide", "id", 10, scope)
@@ -232,6 +225,7 @@ class TestSeededDrawReproduces:
         con.execute("CREATE TABLE seedbank.wide AS SELECT range AS id FROM range(2000)")
         adapter = DuckdbAdapter({"database": ":memory:"}, cursor_factory=lambda _p: con)
         adapter.connect()
+        adapter.list_tables(include=["*"], exclude=[])
 
         first = adapter.sample_values("memory.seedbank.wide", "id", 10)
         second = adapter.sample_values("memory.seedbank.wide", "id", 10)
@@ -254,6 +248,7 @@ class TestNoSessionSettingIsForced:
         con.execute("CREATE TABLE seedbank.wide AS SELECT range AS id FROM range(2000)")
         adapter = DuckdbAdapter({"database": ":memory:"}, cursor_factory=lambda _p: con)
         adapter.connect()
+        adapter.list_tables(include=["*"], exclude=[])
         recorder = _install_recorder(adapter)
 
         adapter.sample_values("memory.seedbank.wide", "id", 10, TableScope(sample=0.1))

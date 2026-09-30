@@ -14,14 +14,14 @@ CREATE SCHEMA seedbank;
 CREATE SCHEMA fixture;
 
 CREATE TABLE seedbank.taxon (
-    taxon_id integer NOT NULL,
-    parent_taxon_id integer,
-    scientific_name character varying(120) NOT NULL,
-    rank character varying(16) NOT NULL,
-    vernacular_name character varying(120) NOT NULL,
-    description text NOT NULL,
-    is_endangered boolean NOT NULL DEFAULT false,
-    created_at timestamp(0) with time zone NOT NULL DEFAULT now()
+    taxon_id INTEGER NOT NULL,
+    parent_taxon_id INTEGER,
+    scientific_name CHARACTER VARYING(120) NOT NULL,
+    rank CHARACTER VARYING(16) NOT NULL,
+    vernacular_name CHARACTER VARYING(120) NOT NULL,
+    description TEXT NOT NULL,
+    is_endangered BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMP(0) WITH TIME ZONE NOT NULL DEFAULT NOW()
 );
 
 ALTER TABLE ONLY seedbank.taxon
@@ -34,19 +34,19 @@ ALTER TABLE ONLY seedbank.taxon
     ADD CONSTRAINT taxon_parent_taxon_id_fkey FOREIGN KEY (parent_taxon_id)
     REFERENCES seedbank.taxon(taxon_id) ON DELETE SET NULL;
 
-CREATE INDEX taxon_parent_taxon_id_idx ON seedbank.taxon USING btree (parent_taxon_id);
+CREATE INDEX taxon_parent_taxon_id_idx ON seedbank.taxon USING BTREE (parent_taxon_id);
 
 CREATE TABLE seedbank.collector (
-    collector_id uuid NOT NULL,
-    full_name character varying(120) NOT NULL,
-    email character varying(320) NOT NULL,
-    phone character varying(24) NOT NULL,
-    institution character varying(120) NOT NULL,
-    institution_email character varying(320) NOT NULL,
-    street_address character varying(200) NOT NULL,
-    postal_code character varying(12) NOT NULL,
-    country_code character(2) NOT NULL,
-    hired_on date NOT NULL
+    collector_id UUID NOT NULL,
+    full_name CHARACTER VARYING(120) NOT NULL,
+    email CHARACTER VARYING(320) NOT NULL,
+    phone CHARACTER VARYING(24) NOT NULL,
+    institution CHARACTER VARYING(120) NOT NULL,
+    institution_email CHARACTER VARYING(320) NOT NULL,
+    street_address CHARACTER VARYING(200) NOT NULL,
+    postal_code CHARACTER VARYING(12) NOT NULL,
+    country_code CHARACTER(2) NOT NULL,
+    hired_on DATE NOT NULL
 );
 
 ALTER TABLE ONLY seedbank.collector
@@ -56,33 +56,33 @@ ALTER TABLE ONLY seedbank.collector
     ADD CONSTRAINT collector_email_key UNIQUE (email);
 
 CREATE TABLE seedbank.vault (
-    vault_id integer NOT NULL,
-    shelf_code character varying(8) NOT NULL,
-    site_name character varying(80) NOT NULL,
-    target_temperature_c numeric(4,1) NOT NULL,
-    opens_at time NOT NULL,
-    closes_at time NOT NULL
+    vault_id INTEGER NOT NULL,
+    shelf_code CHARACTER VARYING(8) NOT NULL,
+    site_name CHARACTER VARYING(80) NOT NULL,
+    target_temperature_c NUMERIC(4,1) NOT NULL,
+    opens_at TIME NOT NULL,
+    closes_at TIME NOT NULL
 );
 
 ALTER TABLE ONLY seedbank.vault
     ADD CONSTRAINT vault_pkey PRIMARY KEY (vault_id, shelf_code);
 
 CREATE TABLE seedbank.accession (
-    accession_id bigint NOT NULL,
-    accession_code character varying(24) NOT NULL,
-    taxon_id integer NOT NULL,
-    collector_id uuid NOT NULL,
-    vault_id integer NOT NULL,
-    shelf_code character varying(8) NOT NULL,
-    sheet_number character varying(12) NOT NULL,
-    provenance_country character(2) NOT NULL,
-    catalogue_url character varying(200) NOT NULL,
-    traits jsonb,
-    field_notes text NOT NULL,
-    viability_pct numeric(5,2) NOT NULL,
-    seed_count integer NOT NULL,
-    collected_on date NOT NULL,
-    received_at timestamp(0) with time zone NOT NULL
+    accession_id BIGINT NOT NULL,
+    accession_code CHARACTER VARYING(24) NOT NULL,
+    taxon_id INTEGER NOT NULL,
+    collector_id UUID NOT NULL,
+    vault_id INTEGER NOT NULL,
+    shelf_code CHARACTER VARYING(8) NOT NULL,
+    sheet_number CHARACTER VARYING(12) NOT NULL,
+    provenance_country CHARACTER(2) NOT NULL,
+    catalogue_url CHARACTER VARYING(200) NOT NULL,
+    traits JSONB,
+    field_notes TEXT NOT NULL,
+    viability_pct NUMERIC(5,2) NOT NULL,
+    seed_count INTEGER NOT NULL,
+    collected_on DATE NOT NULL,
+    received_at TIMESTAMP(0) WITH TIME ZONE NOT NULL
 );
 
 ALTER TABLE ONLY seedbank.accession
@@ -103,21 +103,21 @@ ALTER TABLE ONLY seedbank.accession
     ADD CONSTRAINT accession_vault_shelf_fkey FOREIGN KEY (vault_id, shelf_code)
     REFERENCES seedbank.vault(vault_id, shelf_code) ON DELETE RESTRICT;
 
-CREATE INDEX accession_taxon_id_idx ON seedbank.accession USING btree (taxon_id);
-CREATE INDEX accession_collector_id_idx ON seedbank.accession USING btree (collector_id);
-CREATE INDEX accession_vault_shelf_idx ON seedbank.accession USING btree (vault_id, shelf_code);
+CREATE INDEX accession_taxon_id_idx ON seedbank.accession USING BTREE (taxon_id);
+CREATE INDEX accession_collector_id_idx ON seedbank.accession USING BTREE (collector_id);
+CREATE INDEX accession_vault_shelf_idx ON seedbank.accession USING BTREE (vault_id, shelf_code);
 
 COMMENT ON COLUMN seedbank.accession.taxon_id IS 'FK to taxon.taxon_id';
 
 CREATE TABLE seedbank.germination_trial (
-    trial_id integer NOT NULL,
-    accession_id bigint NOT NULL,
-    collector_id uuid NOT NULL,
-    medium character varying(40) NOT NULL,
-    sown_count integer NOT NULL,
-    germinated_count integer NOT NULL,
-    started_on date NOT NULL,
-    observed_at timestamp(0) with time zone NOT NULL
+    trial_id INTEGER NOT NULL,
+    accession_id BIGINT NOT NULL,
+    collector_id UUID NOT NULL,
+    medium CHARACTER VARYING(40) NOT NULL,
+    sown_count INTEGER NOT NULL,
+    germinated_count INTEGER NOT NULL,
+    started_on DATE NOT NULL,
+    observed_at TIMESTAMP(0) WITH TIME ZONE NOT NULL
 );
 
 ALTER TABLE ONLY seedbank.germination_trial
@@ -128,17 +128,17 @@ ALTER TABLE ONLY seedbank.germination_trial
     REFERENCES seedbank.accession(accession_id) ON DELETE CASCADE;
 
 CREATE INDEX germination_trial_accession_id_idx
-    ON seedbank.germination_trial USING btree (accession_id);
+    ON seedbank.germination_trial USING BTREE (accession_id);
 
 CREATE TABLE seedbank.specimen_image (
-    image_id integer NOT NULL,
-    accession_id bigint NOT NULL,
-    storage_path character varying(200) NOT NULL,
-    file_name character varying(80) NOT NULL,
-    content_type character varying(60) NOT NULL,
-    thumbnail_b64 text NOT NULL,
-    byte_size bigint NOT NULL,
-    captured_at timestamp(0) with time zone NOT NULL
+    image_id INTEGER NOT NULL,
+    accession_id BIGINT NOT NULL,
+    storage_path CHARACTER VARYING(200) NOT NULL,
+    file_name CHARACTER VARYING(80) NOT NULL,
+    content_type CHARACTER VARYING(60) NOT NULL,
+    thumbnail_b64 TEXT NOT NULL,
+    byte_size BIGINT NOT NULL,
+    captured_at TIMESTAMP(0) WITH TIME ZONE NOT NULL
 );
 
 ALTER TABLE ONLY seedbank.specimen_image
@@ -149,17 +149,17 @@ ALTER TABLE ONLY seedbank.specimen_image
     REFERENCES seedbank.accession(accession_id) ON DELETE CASCADE;
 
 CREATE INDEX specimen_image_accession_id_idx
-    ON seedbank.specimen_image USING btree (accession_id);
+    ON seedbank.specimen_image USING BTREE (accession_id);
 
 -- Declared but unattached: no partition yet holds a row, which is itself a
 -- legitimate declared-but-empty state - the key is a schema fact independent
 -- of data (SPEC 2.2.11), so this table stays at zero rows by design.
 CREATE TABLE seedbank.storage_reading (
-    reading_id bigint NOT NULL,
-    vault_id integer NOT NULL,
-    shelf_code character varying(8) NOT NULL,
-    reading_date date NOT NULL,
-    temperature_c numeric(4,1) NOT NULL
+    reading_id BIGINT NOT NULL,
+    vault_id INTEGER NOT NULL,
+    shelf_code CHARACTER VARYING(8) NOT NULL,
+    reading_date DATE NOT NULL,
+    temperature_c NUMERIC(4,1) NOT NULL
 ) PARTITION BY RANGE (reading_date);
 
 -- No `ONLY`: a partitioned table holds no rows of its own, so a constraint on
@@ -173,11 +173,11 @@ ALTER TABLE seedbank.storage_reading
     REFERENCES seedbank.vault(vault_id, shelf_code) ON DELETE RESTRICT;
 
 CREATE TABLE fixture.shape_probe (
-    probe_id integer NOT NULL,
-    logger_ipv4 character varying(45) NOT NULL,
-    json_text text NOT NULL,
-    payload_bytes bytea,
-    tag_list text[] NOT NULL
+    probe_id INTEGER NOT NULL,
+    logger_ipv4 CHARACTER VARYING(45) NOT NULL,
+    json_text TEXT NOT NULL,
+    payload_bytes BYTEA,
+    tag_list TEXT[] NOT NULL
 );
 
 ALTER TABLE ONLY fixture.shape_probe

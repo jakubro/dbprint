@@ -186,7 +186,13 @@ def test_both_statistics_phases_read_the_same_source(
     try:
         table = next(t for t in adapter.list_tables(include=["*.viability_check"], exclude=[]))
         columns = adapter.introspect_columns(table.fqn)
-        counts, base = adapter.compute_base_statistics(table.fqn, columns, SAMPLED_CONFIG, SAMPLE)
+        counts, phase_a = adapter.compute_base_statistics(
+            table.fqn,
+            columns,
+            SAMPLED_CONFIG,
+            SAMPLE,
+        )
+        base = phase_a.stats
         phase_a = list(recorder.flattened())
         adapter.compute_column_statistics(
             table.fqn,

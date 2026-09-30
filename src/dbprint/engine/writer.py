@@ -1,10 +1,6 @@
-"""Per-table atomic writer (temp + os.replace).
+"""Per-table atomic writer (temp + os.replace), called only by the run's stage (`staging.py`).
 
-`write_atomic` is all-or-nothing: either every artifact lands in `tbl_dir` under its final
-name, or none do and the existing ones are untouched. User content - the description and
-annotation files - is never in the write set, for a per-table directory or a connection
-root alike. Each artifact goes to a `<name>.tmp` sibling first (same filesystem, so
-`os.replace` is atomic); a failure before the rename phase deletes the temps and re-raises.
+All-or-nothing per directory; description and annotation files are never in the write set.
 """
 
 from __future__ import annotations
@@ -17,6 +13,7 @@ DESCRIPTION_FILENAME = "description.md"
 STATISTICS_ANNOTATIONS_FILENAME = "statistics.annotations.yaml"
 RELATIONSHIPS_ANNOTATIONS_FILENAME = "relationships.annotations.yaml"
 MANIFEST_ANNOTATIONS_FILENAME = "manifest.annotations.yaml"
+PRODUCER_ARTIFACTS = ("ddl.sql", "statistics.yaml", "relationships.yaml")
 
 
 class WriterError(RuntimeError):
@@ -31,7 +28,7 @@ def write_atomic(tbl_dir: Path, artifacts: dict[str, str | bytes]) -> None:
     """
 
     for name in artifacts:
-        _validate_name(name)
+        validate_artifact_name(name)
 
     tbl_dir.mkdir(parents=True, exist_ok=True)
 
@@ -59,6 +56,21 @@ def write_atomic(tbl_dir: Path, artifacts: dict[str, str | bytes]) -> None:
         raise WriterError(f"failed renaming temp artifacts in {tbl_dir}: {exc}") from exc
 
 
+def validate_artifact_name(name: str) -> None:
+    """Raise `WriterError` for a name naming user content or not a bare file name."""
+
+    if name in (
+        DESCRIPTION_FILENAME,
+        STATISTICS_ANNOTATIONS_FILENAME,
+        RELATIONSHIPS_ANNOTATIONS_FILENAME,
+        MANIFEST_ANNOTATIONS_FILENAME,
+    ):
+        raise WriterError(f"writer must not touch {name} — user content")
+
+    if "/" in name or "\\" in name or name in (".", ".."):
+        raise WriterError(f"invalid artifact filename: {name!r}")
+
+
 def _write_one(path: Path, content: str | bytes) -> None:
     mode = "wb" if isinstance(content, bytes) else "w"
     encoding = None if isinstance(content, bytes) else "utf-8"
@@ -75,16 +87,3 @@ def _cleanup(paths) -> None:
             p.unlink()
         except FileNotFoundError:
             pass
-
-
-def _validate_name(name: str) -> None:
-    if name in (
-        DESCRIPTION_FILENAME,
-        STATISTICS_ANNOTATIONS_FILENAME,
-        RELATIONSHIPS_ANNOTATIONS_FILENAME,
-        MANIFEST_ANNOTATIONS_FILENAME,
-    ):
-        raise WriterError(f"writer must not touch {name} — user content")
-
-    if "/" in name or "\\" in name or name in (".", ".."):
-        raise WriterError(f"invalid artifact filename: {name!r}")

@@ -7,7 +7,7 @@ from __future__ import annotations
 import re
 
 from .connection import Cursor, exec_query
-from .identity import Identity
+from ..identifiers import Identity
 
 
 _TRAILING_WHITESPACE_RE = re.compile(r"[ \t]+$", re.MULTILINE)
@@ -24,14 +24,18 @@ def extract_ddl(cursor: Cursor, identity: Identity) -> str:
 
     try:
         row = exec_query(cursor, f"SHOW TABLE {quoted}").fetchone()
-    except Exception:  # noqa: BLE001 - the object may be a view; SHOW VIEW is the real fallback
+    except Exception as exc:
+        # A statement the limit cancelled says nothing about the object's kind.
+        if getattr(exc, "timed_out", False):
+            raise
+
         row = None
 
     if not row or not row[0]:
         row = exec_query(cursor, f"SHOW VIEW {quoted}").fetchone()
 
     if not row or not row[0]:
-        raise ValueError(f"no DDL available for {identity.dotted()!r}; not found in catalog")
+        raise ValueError(f"no DDL available for {identity.fqn!r}; not found in catalog")
 
     return normalize(str(row[0]))
 

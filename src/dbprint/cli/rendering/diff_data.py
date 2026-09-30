@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from decimal import Decimal
 from io import StringIO
 from typing import Any, TextIO
 
 import yaml
 
-from dbprint.engine.yaml_dumper import ArtifactDumper
+from dbprint.engine.yaml_dumper import ArtifactDumper, spell_inline
+from dbprint.spec.value_text import spell_number, spell_percent
 
 
 _FOOTER = "Run `dbprint generate` to refresh — the new diff.yaml will capture this."
@@ -207,11 +209,14 @@ def _emit_simple_section(buf: StringIO, title: str, lines: list[str]) -> None:
 
 
 _DDL_KINDS = {
+    "table_type_changed",
     "column_added",
     "column_removed",
     "column_type_changed",
     "column_nullable_changed",
     "column_default_changed",
+    "column_physical_name_changed",
+    "column_collation_changed",
     "comment_changed",
 }
 
@@ -235,7 +240,9 @@ def _format_ddl_event(ev: dict[str, Any]) -> str:
     kind = ev["kind"]
     column = ev.get("column", "")
 
-    if kind == "column_added":
+    if kind == "table_type_changed":
+        return f"~ object type {ev.get('before')} -> {ev.get('after')}"
+    elif kind == "column_added":
         sql_type = ev.get("sql_type", "")
         nullable = ev.get("nullable")
         suffix = "" if nullable is None else f" (nullable={nullable})"
@@ -249,6 +256,10 @@ def _format_ddl_event(ev: dict[str, Any]) -> str:
         return f"~ {column}: nullable {ev.get('before')} -> {ev.get('after')}"
     elif kind == "column_default_changed":
         return f"~ {column}: default {ev.get('before')!r} -> {ev.get('after')!r}"
+    elif kind == "column_physical_name_changed":
+        return f"~ {column}: spelled {ev.get('before')!r} -> {ev.get('after')!r}"
+    elif kind == "column_collation_changed":
+        return f"~ {column}: collation {ev.get('before')!r} -> {ev.get('after')!r}"
     elif kind == "comment_changed":
         target = ev.get("target", "table")
         before = ev.get("before")
@@ -281,7 +292,10 @@ def _format_row_count_event(ev: dict[str, Any]) -> str:
     approximate = "approximate" in (ev.get("before_method"), ev.get("after_method"))
     suffix = " (approximate)" if approximate else ""
 
-    return f"~ row_count: {before} -> {after} ({sign}{delta}){suffix}"
+    return (
+        f"~ row_count: {_spelled(before, after)} -> {_spelled(after, before)} "
+        f"({sign}{_spelled(delta, delta)}){suffix}"
+    )
 
 
 def _grain_lines_by_table(changes: list[dict[str, Any]]) -> dict[str, list[str]]:
@@ -431,10 +445,10 @@ def _format_statistic_event(ev: dict[str, Any]) -> str:
     delta_pct = ev.get("delta_pct")
     suffix = ""
 
-    if isinstance(delta_pct, (int, float)):
-        suffix = f" ({delta_pct * 100:+.1f}%)"
+    if isinstance(delta_pct, (int, float)) and not isinstance(delta_pct, bool):
+        suffix = f" ({spell_percent(delta_pct, signed=True)})"
 
-    return f"{column} {stat}: {before} -> {after}{suffix}"
+    return f"{column} {stat}: {_spelled(before, after)} -> {_spelled(after, before)}{suffix}"
 
 
 _REL_KINDS = {"relationship_added", "relationship_removed", "relationship_modified"}
@@ -586,3 +600,14 @@ def _added_lines(changes: list[dict[str, Any]]) -> list[str]:
 
 def _removed_lines(changes: list[dict[str, Any]]) -> list[str]:
     return [ev.get("table") or "" for ev in changes if ev.get("kind") == "table_removed"]
+
+
+def _spelled(value: Any, other: Any) -> str:
+    if _is_number(value) and _is_number(other):
+        return spell_number(value)
+
+    return spell_inline(value)
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, int | float | Decimal) and not isinstance(value, bool)

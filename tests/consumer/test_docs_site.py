@@ -6,8 +6,13 @@ is a claim against the site.
 
 from __future__ import annotations
 
+import html
+import re
+
+import yaml
+
 from dbprint.config import ConnectionConfig
-from dbprint.docs import catalogue, view
+from dbprint.docs import catalogue, view, web
 from tests.fixtures.adversarial import (
     APPROXIMATE_ROW_COUNT_TABLE,
     DECLARED_MISSING_KIND,
@@ -16,12 +21,19 @@ from tests.fixtures.adversarial import (
     DELIMITER_TABLE,
     DELIMITER_VALUE,
     EMPTY_COLUMNS_TABLE,
+    EXPONENT_FORM,
+    EXTREME_TABLE,
     FUTURE_DATED_COLUMN,
     INCOMPLETE_GRAIN_TABLE,
     LINE_BREAK_VALUE,
     NEVER_DECLARED_KIND,
     REDACTED_COLUMN,
+    SCOPED_COMPLETE_LIST_COLUMN,
+    SCOPED_KEY_COLUMN,
+    SCOPED_LATEST_COLUMN,
     SCOPED_TABLE,
+    SPELLING_COLUMN,
+    SPELLING_VALUES,
     TRUNCATED_FK_COLUMN,
     UNEVALUATED_TABLE,
     AdversarialPrint,
@@ -41,6 +53,12 @@ COVERS = frozenset(
         "catalog_only_table",
         "declared_missing_artifact",
         "delimiter_in_a_value",
+        "value_spelling",
+        "scoped_complete_list",
+        "scoped_candidate_key",
+        "scoped_latest_value",
+        "extreme_number_statistics",
+        "near_boundary_share",
     },
 )
 
@@ -70,7 +88,7 @@ def test_scoped_table_states_the_population(adversarial_print: AdversarialPrint)
     assert scope is not None
     assert scope["rows_scanned"] == 250
     assert scope["row_count"] == 1000
-    assert scope["share_pct"] == 25.0
+    assert scope["share"] == 0.25
 
 
 def test_redacted_column_carries_no_real_literal(adversarial_print: AdversarialPrint) -> None:
@@ -103,8 +121,7 @@ def test_truncated_fk_values_are_never_flagged_exhaustive(
     values = view.values_view(statistics["columns"][TRUNCATED_FK_COLUMN])
 
     assert values is not None
-    assert values["exhaustive"] is False
-    assert values["coverage"] < 1.0
+    assert values["coverage_text"] == "40% covered"
 
 
 def test_unevaluated_diff_table_carries_no_statistics_to_call_unchanged(
@@ -180,7 +197,7 @@ def test_declared_missing_artifact_is_named_and_distinguished(
 
 
 def test_a_delimiter_in_a_value_survives_the_view(adversarial_print: AdversarialPrint) -> None:
-    """The page is HTML, so the literal reaches it whole and its own escaping renders it."""
+    """Each bar is spelled on one line and loads back to exactly the stored literal."""
 
     statistics = _statistics(adversarial_print, DELIMITER_TABLE)
     assert statistics is not None
@@ -188,4 +205,82 @@ def test_a_delimiter_in_a_value_survives_the_view(adversarial_print: Adversarial
     values = view.values_view(statistics["columns"][DELIMITER_COLUMN])
 
     assert values is not None
-    assert {bar["value"] for bar in values["bars"]} == {DELIMITER_VALUE, LINE_BREAK_VALUE}
+    assert all("\n" not in bar["value"] for bar in values["bars"])
+    assert {yaml.safe_load(bar["value"]) for bar in values["bars"]} == {
+        DELIMITER_VALUE,
+        LINE_BREAK_VALUE,
+    }
+
+
+def test_scoped_complete_list_carries_the_clause(adversarial_print: AdversarialPrint) -> None:
+    page = _page(adversarial_print, SCOPED_TABLE)
+    column = next(c for c in page["columns"] if c["name"] == SCOPED_COMPLETE_LIST_COLUMN)
+
+    assert column["value_list"]["coverage_text"] == "100% covered over the rows scanned"
+
+
+def test_scoped_candidate_key_carries_the_clause(adversarial_print: AdversarialPrint) -> None:
+    page = _page(adversarial_print, SCOPED_TABLE)
+    column = next(c for c in page["columns"] if c["name"] == SCOPED_KEY_COLUMN)
+
+    assert "candidate key over the rows scanned" in column["notes"]
+
+
+def test_scoped_latest_value_carries_the_clause(adversarial_print: AdversarialPrint) -> None:
+    page = _page(adversarial_print, SCOPED_TABLE)
+    column = next(c for c in page["columns"] if c["name"] == SCOPED_LATEST_COLUMN)
+
+    assert page["cards"]["freshest"]["clause"] == "over the rows scanned"
+    assert column["range"]["freshness_clause"] == "over the rows scanned"
+
+
+def test_an_unscoped_page_carries_no_clause(adversarial_print: AdversarialPrint) -> None:
+    page = _page(adversarial_print, "public.cultivar")
+    [column] = page["columns"]
+
+    assert column["value_list"]["coverage_text"] == "100% covered"
+    assert "over the rows scanned" not in column["notes"]
+
+
+def _page(adversarial_print: AdversarialPrint, table: str) -> dict:
+    found = catalogue.load_connections([_conn(adversarial_print)])[0]
+
+    return view.build_table_view(found, _artifacts(adversarial_print, table))
+
+
+def test_a_bar_is_spelled_so_it_reads_back_as_itself(adversarial_print: AdversarialPrint) -> None:
+    statistics = _statistics(adversarial_print, DELIMITER_TABLE)
+    assert statistics is not None
+
+    values = view.values_view(statistics["columns"][SPELLING_COLUMN])
+
+    assert values is not None
+    assert [yaml.safe_load(bar["value"]) for bar in values["bars"]] == list(SPELLING_VALUES)
+    assert all("\n" not in bar["value"] for bar in values["bars"])
+
+
+def _page_text(adversarial_print: AdversarialPrint, table: str) -> str:
+    client = web.create_app([_conn(adversarial_print)]).test_client()
+    page = client.get(f"/t/{_conn(adversarial_print).name}/{table}").data.decode()
+    page = re.sub(r"<(script|style)\b.*?</\1>|style=\"[^\"]*\"", " ", page, flags=re.DOTALL)
+
+    return html.unescape(re.sub(r"<[^>]+>", " ", page))
+
+
+def test_an_extreme_statistic_is_spelled_as_the_artifact_spells_it(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    text = _page_text(adversarial_print, EXTREME_TABLE)
+
+    assert EXPONENT_FORM.findall(text) == []
+    assert "mean 18446744073709548000.0" in text
+    assert "sum 0.00049" in text
+
+
+def test_a_share_near_a_boundary_is_not_rounded_onto_it(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    text = _page_text(adversarial_print, EXTREME_TABLE)
+
+    assert "99.98% covered" in text
+    assert "99.96% of scanned rows" in text

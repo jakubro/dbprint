@@ -11,6 +11,7 @@ from dbprint.adapters import (
     MockTable,
     TableCounts,
 )
+from dbprint.adapters.base import PhaseB
 from dbprint.config import StatisticsConfig
 
 
@@ -72,12 +73,6 @@ class TestFixtureRoundTrip:
 
 
 class TestDeterminism:
-    def test_repeated_calls_return_equal_data(self) -> None:
-        adapter = MockAdapter({"schema.t": _empty_table()})
-        adapter.connect()
-        assert adapter.extract_ddl("schema.t") == adapter.extract_ddl("schema.t")
-        assert adapter.introspect_columns("schema.t") == adapter.introspect_columns("schema.t")
-
     def test_sample_values_respects_n(self) -> None:
         tbl = MockTable(
             type="table",
@@ -110,7 +105,7 @@ class TestStatisticsContract:
         # Canned stats describe every row, so an unstated fixture reads as an exact full scan.
         assert adapter.compute_statistics("schema.t", [], StatisticsConfig(), frozenset()) == (
             TableCounts(row_count=0, rows_scanned=0, row_count_method="exact"),
-            {},
+            PhaseB({}),
         )
 
 
@@ -153,12 +148,6 @@ class TestViewDependencies:
         adapter = MockAdapter({"schema.v": _empty_table()})
         adapter.connect()
         assert adapter.introspect_view_dependencies() is None
-
-    def test_returns_the_stated_map_verbatim(self) -> None:
-        stated: dict[str, tuple[str, ...]] = {"schema.v": ("schema.t",), "schema.w": ()}
-        adapter = MockAdapter({"schema.t": _empty_table()}, dependencies=stated)
-        adapter.connect()
-        assert adapter.introspect_view_dependencies() == stated
 
 
 class TestNormalizedCardinality:

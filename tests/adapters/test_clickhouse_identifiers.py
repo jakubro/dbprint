@@ -10,8 +10,8 @@ from typing import Any
 import pytest
 
 from dbprint.adapters import ClickhouseAdapter, StatisticsConfig
-from dbprint.adapters.clickhouse.identity import Identity
-from dbprint.adapters.clickhouse.introspect import IdentifierRejected, columns, list_tables
+from dbprint.adapters.clickhouse.introspect import list_tables
+from dbprint.adapters.identifiers import IdentifierRejected
 
 
 class _Cursor:
@@ -40,9 +40,14 @@ def _enumerate(database: str, *names: str) -> tuple[list[str], _Cursor, dict[str
     """List `names` in `database` and hand back the paths, the cursor and the physical map."""
 
     cursor = _Cursor([(name, "MergeTree", "") for name in names])
-    metas, _samplable, physical = list_tables(cursor, database, include=["*"], exclude=[])
+    selected, _samplable, _skipped = list_tables(
+        cursor,
+        (database,),
+        include=["*"],
+        exclude=[],
+    )
 
-    return [meta.fqn for meta in metas], cursor, physical
+    return [meta.fqn for meta, _ in selected], cursor, {m.fqn: p for m, p in selected}
 
 
 class TestTheCatalogSpellingFoldsIntoThePath:
@@ -56,55 +61,18 @@ class TestTheCatalogSpellingFoldsIntoThePath:
 
         assert paths == ["seedbank_2.accession_v2"]
 
-    def test_a_capitalised_database_folds(self) -> None:
-        paths, _cursor, _physical = _enumerate("Seedbank", "accession")
-
-        assert paths == ["seedbank.accession"]
-
-    def test_a_capitalised_table_folds(self) -> None:
-        paths, _cursor, _physical = _enumerate("seedbank", "Accession")
-
-        assert paths == ["seedbank.accession"]
-
     def test_the_namespace_path_folds_with_the_fqn(self) -> None:
         """The path segments are what the artifact is written under (SPEC 1.3)."""
 
         cursor = _Cursor([("Accession", "MergeTree", "")])
-        metas, _samplable, _physical = list_tables(cursor, "Seedbank", include=["*"], exclude=[])
+        selected, _samplable, _skipped = list_tables(
+            cursor,
+            ("Seedbank",),
+            include=["*"],
+            exclude=[],
+        )
 
-        assert metas[0].namespace_path == ("seedbank", "accession")
-
-
-class TestTheCatalogSpellingSurvivesForTheStatements:
-    """Folding without a carrier would address a table `system.*` does not have."""
-
-    def test_enumeration_hands_back_the_physical_pair(self) -> None:
-        _paths, _cursor, physical = _enumerate("Seedbank", "Accession")
-
-        assert physical == {"seedbank.accession": ("Seedbank", "Accession")}
-
-    def test_a_catalog_read_binds_the_native_spelling(self) -> None:
-        cursor = _Cursor([("Id", "UUID", 1, "")])
-
-        columns(cursor, Identity(parts=("Seedbank", "Accession")))
-
-        _sql, params = cursor.bound[-1]
-        assert params == ("Seedbank", "Accession")
-
-    def test_a_column_keeps_its_catalog_spelling(self) -> None:
-        cursor = _Cursor([("Id", "UUID", 1, "")])
-
-        metas, physical = columns(cursor, Identity(parts=("seedbank", "accession")))
-
-        assert metas[0].name == "id"
-        assert metas[0].physical_name == "Id"
-        assert physical == {"id": "Id"}
-
-    def test_a_data_statement_quotes_the_column_the_catalog_holds(self) -> None:
-        identity = Identity(parts=("Seedbank", "Accession"), columns={"id": "Id"})
-
-        assert identity.quoted() == "`Seedbank`.`Accession`"
-        assert identity.quoted_column("id") == "`Id`"
+        assert selected[0][0].namespace_path == ("seedbank", "accession")
 
 
 class TestTwoSpellingsOfOneNameAreRefused:
@@ -128,14 +96,14 @@ class TestTwoSpellingsOfOneNameAreRefused:
         cursor = _Cursor(
             [(name, "MergeTree", "") for name in ("accession", "Accession", "vault")],
         )
-        metas, _samplable, _physical = list_tables(
+        selected, _samplable, _skipped = list_tables(
             cursor,
-            "seedbank",
+            ("seedbank",),
             include=["*"],
             exclude=["seedbank.accession"],
         )
 
-        assert [meta.fqn for meta in metas] == ["seedbank.vault"]
+        assert [meta.fqn for meta, _ in selected] == ["seedbank.vault"]
 
 
 class TestAnIdentifierTheFormatCannotSpellIsStillRefused:
@@ -146,7 +114,7 @@ class TestAnIdentifierTheFormatCannotSpellIsStillRefused:
             _enumerate("seedbank", "field notes")
 
     def test_a_hidden_storage_name_is_rejected_by_its_own_reason(self) -> None:
-        with pytest.raises(IdentifierRejected, match="leading-period"):
+        with pytest.raises(IdentifierRejected, match="contains-period"):
             _enumerate("seedbank", ".hidden")
 
     def test_the_resolution_quotes_the_path_an_exclude_would_match(self) -> None:
@@ -159,14 +127,14 @@ class TestAnIdentifierTheFormatCannotSpellIsStillRefused:
 
     def test_a_lowercase_exclude_matches_a_capitalised_table(self) -> None:
         cursor = _Cursor([(name, "MergeTree", "") for name in ("Accession", "vault")])
-        metas, _samplable, _physical = list_tables(
+        selected, _samplable, _skipped = list_tables(
             cursor,
-            "seedbank",
+            ("seedbank",),
             include=["*"],
             exclude=["seedbank.accession"],
         )
 
-        assert [meta.fqn for meta in metas] == ["seedbank.vault"]
+        assert [meta.fqn for meta, _ in selected] == ["seedbank.vault"]
 
 
 class TestAgainstTheLiveEngine:
@@ -258,11 +226,12 @@ class TestAgainstTheLiveEngine:
         try:
             adapter.list_tables(include=["*"], exclude=[])
             read = adapter.introspect_columns("seedbank.pair_probe")
-            counts, base = adapter.compute_base_statistics(
+            counts, phase_a = adapter.compute_base_statistics(
                 "seedbank.pair_probe",
                 read,
                 StatisticsConfig(),
             )
+            base = phase_a.stats
             grain = adapter.probe_grain("seedbank.pair_probe", read, counts, pair)
             dependencies = adapter.probe_dependencies(
                 "seedbank.pair_probe",

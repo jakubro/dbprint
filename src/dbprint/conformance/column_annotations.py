@@ -7,14 +7,19 @@ from typing import Any
 
 import yaml
 
-from dbprint.assertions.predicate import (
+from dbprint.spec.absence import column_value, read_column_field
+from dbprint.spec.predicate import (
     MalformedPredicate,
+    inapplicable_reason,
     is_assertable_stat,
     is_value_bearing_stat,
+    with_evidence,
 )
-from dbprint.assertions.predicate import evaluate as eval_predicate
-from dbprint.assertions.predicate import parse as parse_predicate
-from dbprint.assertions.predicate import resolve as resolve_stat
+from dbprint.spec.predicate import evaluate as eval_predicate
+from dbprint.spec.predicate import parse as parse_predicate
+from dbprint.spec.predicate import resolve as resolve_stat
+from dbprint.spec.redaction import is_redacted
+from dbprint.spec.scope import ScanScope, list_is_table_domain, scope_of
 from .issue import Issue
 from .layout import declared_artifacts, walkable_tables
 from .progress import TableSink
@@ -242,7 +247,9 @@ def check_claims(
                 continue
 
             for stat, raw in claims.items():
-                issues.extend(_check_claim(rel, col_name, stat, raw, col_stats))
+                issues.extend(
+                    _check_claim(rel, col_name, stat, raw, col_stats, scope_of(stats_data)),
+                )
 
     return issues
 
@@ -253,6 +260,7 @@ def _check_claim(
     stat: str,
     raw: Any,
     col_stats: dict[str, Any],
+    scope: ScanScope | None = None,
 ) -> list[Issue]:
     """Evaluate one `claims` predicate; emit at most one Issue.
 
@@ -265,30 +273,38 @@ def _check_claim(
     if not isinstance(stat, str) or not is_assertable_stat(stat):
         return [_unassertable(path, f"{stat!r} is not a checkable stat")]
 
-    if is_value_bearing_stat(stat) and col_stats.get("redacted") is not None:
-        return [_unassertable(path, f"column is redacted ({col_stats['redacted']!r})")]
+    if is_value_bearing_stat(stat) and is_redacted(col_stats):
+        marker = read_column_field(col_stats, "redacted").value
+
+        return [_unassertable(path, f"column is redacted ({marker!r})")]
 
     predicate = parse_predicate(stat, raw)
 
     if isinstance(predicate, MalformedPredicate):
         return [_unassertable(path, predicate.reason)]
 
-    ref = resolve_stat(col_stats, stat)
+    ref = resolve_stat(col_stats, stat, scope)
+    inapplicable = inapplicable_reason(col_stats, col_name, stat, predicate, ref)
 
-    if not ref.found:
-        return [_unassertable(path, f"{stat!r} not emitted for column {col_name!r}")]
+    if inapplicable is not None:
+        return [_unassertable(path, inapplicable)]
 
     outcome = eval_predicate(predicate, ref.value)
 
     if outcome.passed:
         return []
 
+    if outcome.malformed:
+        return [_unassertable(path, outcome.detail)]
+
+    detail = with_evidence(col_stats, stat, outcome.detail)
+
     return [
         Issue(
             path,
             "annotations.claim-contradicts-statistic",
             "warning",
-            f"claims.{stat}={raw!r} contradicts the measured value: {outcome.detail}",
+            f"claims.{stat}={raw!r} contradicts the measured value: {detail}",
             "§2.7.1",
         ),
     ]
@@ -362,7 +378,9 @@ def check_value_notes(
             if not isinstance(col_stats, dict):
                 continue
 
-            issues.extend(_check_value_notes(rel, col_name, values, col_stats))
+            issues.extend(
+                _check_value_notes(rel, col_name, values, col_stats, scope_of(stats_data)),
+            )
 
     return issues
 
@@ -372,26 +390,24 @@ def _check_value_notes(
     col_name: str,
     values: list[Any],
     col_stats: dict[str, Any],
+    scope: ScanScope | None = None,
 ) -> list[Issue]:
     issues: list[Issue] = []
 
-    if col_stats.get("redacted") is not None:
+    if is_redacted(col_stats):
         for i, entry in enumerate(values):
             if isinstance(entry, dict):
                 issues.append(_value_unassertable(rel, col_name, i, "column is redacted"))
 
         return issues
 
-    coverage = col_stats.get("values_coverage")
-    exhaustive = (
-        isinstance(coverage, (int, float)) and not isinstance(coverage, bool) and coverage == 1.0
-    )
-
-    if not exhaustive:
+    if not list_is_table_domain(col_stats, scope):
         return issues
 
     published = {
-        entry.get("value") for entry in (col_stats.get("values") or []) if isinstance(entry, dict)
+        entry.get("value")
+        for entry in (column_value(col_stats, "values") or [])
+        if isinstance(entry, dict)
     }
 
     for i, entry in enumerate(values):

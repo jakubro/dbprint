@@ -47,6 +47,11 @@ dev = [
   "pyspark>=4.0",
   "delta-spark>=4.0",
   "google-cloud-bigquery>=3.27",
+  "deptry>=0.25",
+  "import-linter>=2.15",
+  "hypothesis>=6.168",
+  "mutmut>=3.8",
+  "sqlglot>=30.20",
 ]
 postgres = [
   "psycopg[binary]>=3.2",
@@ -75,11 +80,16 @@ bigquery = [
 ]
 mcp = [
   "mcp>=2,<3",
+  "anyio>=4.13",
+  "starlette>=1.2",
+  "uvicorn>=0.49",
 ]
 docs = [
   "flask>=3.0",
   "markdown>=3.6",
   "inflect>=7.0",
+  "jinja2>=3.1",
+  "markupsafe>=3.0",
 ]
 
 [project.scripts]
@@ -102,6 +112,124 @@ packages = ["src/dbprint"]
 
 [tool.hatch.build.targets.wheel.hooks.custom]
 
+[tool.deptry]
+known_first_party = ["dbprint"]
+package_module_name_map = { "snowflake-connector-python" = "snowflake" }
+
+[tool.deptry.per_rule_ignores]
+# Vendor connectors are imported through importlib, which deptry cannot see; tzdata is data
+# zoneinfo reads; the rest is the test and build toolchain, imported by nothing under src/.
+DEP002 = [
+  "tzdata",
+  "psycopg",
+  "mysql-connector-python",
+  "snowflake-connector-python",
+  "duckdb",
+  "clickhouse-connect",
+  "redshift-connector",
+  "databricks-sql-connector",
+  "google-cloud-bigquery",
+  "pytest",
+  "pytest-cov",
+  "pytest-xdist",
+  "ruff",
+  "ty",
+  "hatchling",
+  "chdb",
+  "pyspark",
+  "delta-spark",
+  "deptry",
+  "import-linter",
+  "hypothesis",
+  "mutmut",
+  "sqlglot",
+]
+
+[tool.importlinter]
+root_package = "dbprint"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "packages depend downward only (ARCHITECTURE.md 1)"
+type = "layers"
+containers = ["dbprint"]
+layers = [
+  "cli",
+  "mcp | docs",
+  "engine",
+  "adapters",
+  "config",
+  "spec",
+]
+
+[[tool.importlinter.contracts]]
+name = "conformance is a leaf over spec"
+type = "forbidden"
+source_modules = ["dbprint.conformance"]
+forbidden_modules = [
+  "dbprint.cli",
+  "dbprint.mcp",
+  "dbprint.docs",
+  "dbprint.engine",
+  "dbprint.adapters",
+  "dbprint.config",
+  "dbprint.assertions",
+]
+
+[[tool.importlinter.contracts]]
+name = "engine never calls the validator"
+type = "forbidden"
+source_modules = ["dbprint.engine"]
+forbidden_modules = ["dbprint.conformance"]
+
+[[tool.importlinter.contracts]]
+name = "assertions reach a database through a protocol, not an adapter"
+type = "forbidden"
+source_modules = ["dbprint.assertions"]
+forbidden_modules = ["dbprint.adapters"]
+
+[[tool.importlinter.contracts]]
+name = "the run path reads the committed print only through engine.carried"
+type = "forbidden"
+source_modules = ["dbprint.engine.orchestrator"]
+forbidden_modules = ["dbprint.engine.baseline"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "cli builds adapters through adapter_registry alone"
+type = "forbidden"
+source_modules = ["dbprint.cli"]
+forbidden_modules = ["dbprint.adapters"]
+allow_indirect_imports = true
+# The adapter ABC names a parameter type and trace_context tags statements with the run's context;
+# neither constructs or reaches a concrete adapter.
+ignore_imports = [
+  "dbprint.cli.adapter_registry -> dbprint.adapters",
+  "dbprint.cli.engine_setup -> dbprint.adapters",
+  "dbprint.cli.commands.check -> dbprint.adapters.trace_context",
+  "dbprint.cli.rendering.progress -> dbprint.adapters.trace_context",
+]
+
+[[tool.importlinter.contracts]]
+name = "only mcp/server.py imports the MCP SDK"
+type = "forbidden"
+source_modules = ["dbprint"]
+forbidden_modules = ["mcp"]
+allow_indirect_imports = true
+ignore_imports = ["dbprint.mcp.server -> mcp"]
+
+[[tool.importlinter.contracts]]
+name = "only docs/web.py imports Flask"
+type = "forbidden"
+source_modules = ["dbprint"]
+forbidden_modules = ["flask"]
+allow_indirect_imports = true
+# build.py names FlaskClient in one annotation; the client it drives comes from web.create_app.
+ignore_imports = [
+  "dbprint.docs.web -> flask",
+  "dbprint.docs.build -> flask",
+]
+
 [tool.coverage.run]
 data_file = "/tmp/.coverage-dbprint"
 branch = true
@@ -114,3 +242,187 @@ fail_under = 80
 testpaths = ["tests"]
 pythonpath = ["src"]
 cache_dir = "/tmp/.pytest_cache-dbprint"
+
+# `just mutate PACKAGE` runs mutmut in a /tmp copy of the tree and appends that package's
+# `only_mutate` and `pytest_add_cli_args_test_selection`, so this table must stay last.
+[tool.mutmut]
+source_paths = ["src"]
+also_copy = ["docs", "scripts"]
+pytest_add_cli_args = ["-p", "no:cacheprovider"]
+use_git_change_detection = false
+do_not_mutate_patterns = [
+  # guarded by len(values) != cardinality, so the equal case never reaches it
+  "^\\s+if len\\(values\\) < cardinality:$",
+  # a smallest count of 1 divides by 1 either way
+  "bot = min\\(counts\\) if min\\(counts\\) > 0 else 1",
+  # False and None are both falsy to every reader of the flag
+  "^\\s+measured_present = False$",
+  # both operands come from one column's classification, so both are numbers or neither is
+  "if isinstance\\(earlier, \\(int, float\\)\\) and isinstance\\(later, \\(int, float\\)\\):",
+  # decode_sketch already reads a non-string as undecodable
+  "hashes = decode_sketch\\(sketch\\.get\\(\"values\"\\)\\) if isinstance",
+  # an absent key and a None default both fall back to the empty list
+  "for i, entry in enumerate\\(data\\.get\\(section, \\[\\]\\) or \\[\\]\\):",
+  # an absent key and a None default both fall back to the empty list
+  "for i, entry in enumerate\\(rel_data\\.get\\(\"refers_to\", \\[\\]\\) or \\[\\]\\):",
+  # an absent key and a None default both fall back to the empty list
+  "for j, entry in enumerate\\(data\\.get\\(\"refers_to\", \\[\\]\\) or \\[\\]\\):",
+  # an absent key and a None default both fall back to the empty list
+  "for j, entry in enumerate\\(data\\.get\\(\"referenced_by\", \\[\\]\\) or \\[\\]\\):",
+  # a match rate never exceeds 1, so no cap above it binds
+  "expected_containment = min\\(1\\.0, round\\(ratio, 6\\)\\)",
+  # no table is keyed by an empty or placeholder name
+  "target_entry = tables\\.get\\(entry\\.get\\(\"target_table\", \"\"\\)\\)",
+  # a missing endpoint name matches no table, whatever it defaults to
+  "^                    entry\\.get\\(\"target_table\", \"\"\\),$",
+  # a missing endpoint name matches no table, whatever it defaults to
+  "^                    entry\\.get\\(\"referencer_table\", \"\"\\),$",
+  # reached only once some table was read, so the manifest has a tables map
+  "if referencer_table not in manifest_data\\.get\\(\"tables\", \\{\\}\\):",
+  # an absent key and a None default both fall back to the empty list
+  "for i, entry in enumerate\\(data\\.get\\(\"refers_to\", \\[\\]\\) or \\[\\]\\):",
+  # an absent key and a None default both fall back to the empty list
+  "^    for entry in rel_data\\.get\\(\"refers_to\", \\[\\]\\) or \\[\\]:$",
+  # an unaddressable entry looks up None, which no emitted edge is keyed by
+  "edge = \\(emitted\\.get\\(key\\) if key is not None else None\\) or \\{\\}",
+  # an unaddressable entry looks up None, which no emitted edge is keyed by
+  "detection = emitted\\.get\\(key\\) if key is not None else None",
+  # only `declared` and a missing edge are read; any other detection passes alike
+  "out\\[key\\] = entry\\.get\\(\"detection\", \"\"\\)",
+  # every pass has a sink exactly when on_table is set, so any index answers alike
+  "if sinks\\[1\\] is not None:",
+  # no content checker reads the table name it is handed
+  "^                    tbl_fqn,$",
+  # no content checker reads the table name it is handed
+  "issues\\.extend\\(content_checker\\(data, rel, tbl_fqn\\)\\)",
+  # the comprehension keeps only entries whose path is set, so the default is never read
+  "dir_to_fqn = \\{entry\\.get\\(\"path\", \"\"\\): fqn for fqn, entry in tables\\.items\\(\\) if entry\\.get\\(\"path\"\\)\\}",
+  # runs once at import, before any mutant is selected
+  "text = importlib\\.resources\\.files\\(\"dbprint\\.spec\\.v1\"\\)\\.joinpath\\(name\\)\\.read_text\\(encoding=\"utf-8\"\\)",
+  # runs once at import, before any mutant is selected
+  "^    return json\\.loads\\(text\\)$",
+  # runs once at import, before any mutant is selected
+  "base = ArtifactLoader\\.construct_yaml_int if kind is int else ArtifactLoader\\.construct_yaml_float",
+  # runs once at import, before any mutant is selected
+  "wrapper = SourcedInt if kind is int else SourcedFloat",
+  # the constructor is built once at import, before any mutant is selected
+  "value = wrapper\\(base\\(loader, node\\)\\)",
+  # the constructor is built once at import, before any mutant is selected
+  "value\\.source = node\\.value",
+  # codec names are case-insensitive and the locale default is UTF-8 wherever the suite runs
+  "^    text = path\\.read_text\\(encoding=\"utf-8\"\\)$",
+  # an absent key and a None default both fall back to the empty list
+  "changes = data\\.get\\(\"changes\", \\[\\]\\) or \\[\\]",
+  # an absent key and a None default both fall back to the empty mapping
+  "summary = data\\.get\\(\"summary\", \\{\\}\\) or \\{\\}",
+  # an absent key and a None default both fall back to the empty list
+  "for i, change in enumerate\\(data\\.get\\(\"changes\", \\[\\]\\) or \\[\\]\\):",
+  # no measured column statistic ends in .classification, so only the name set decides
+  "is_non_numeric = stat in _NON_NUMERIC_STATS or stat\\.endswith\\(\"\\.classification\"\\)",
+  # both sides of the zip hold exactly the four table counters
+  "for key, value in zip\\(_TABLE_TOTAL_KEYS, counted, strict=True\\)",
+  # typing.cast returns its argument whatever type it names
+  "entry_dict = cast\\(\"dict\\[str, Any\\]\", entry\\)",
+  # an unknown severity falls back to warning, so a warning read as unknown stays warning
+  "if severity not in \\{\"error\", \"warning\"\\}:",
+  # row_count parses by shape alone, whatever stat name the parse is handed
+  "outcome := _check_predicate\\(\"row_count\", ",
+  # an empty stat and None both leave the column path bare
+  "path=_column_path\\(connection_name, predicates\\.fqn, col_name, \"\"\\),",
+  # a split's first element ignores maxsplit
+  "\\.split\\(\"\\.\", 1\\)\\[0\\]",
+  # a reading that is not known carries value None
+  "return reading\\.value if reading\\.known else None",
+  # the family labels are only compared with each other
+  "return \"(bool|number|string|other)\"$",
+  # a clock key is only ever compared with another clock key
+  "return _Temporal\\(\"clock\", \\(0, _micros\\(on_day\\)\\)\\)",
+  # parse_instant answers every date and datetime
+  "return None if instant is None else _Temporal\\(\"instant\"",
+  # only the key's sign orders an unrepresentable year; year 1 is representable
+  "return _Temporal\\(\"instant\", \\(-1 if year\\.year < 1 else 1, year\\.year\\)\\)",
+  # __str__ is overridden, so args reach no message
+  "super\\(\\)\\.__init__\\(value\\)",
+  # a float repr has no trailing zero past the `.0` restored anyway
+  "text = f\"\\{_stripped\\(exact\\):f\\}\" if isinstance\\(value, Decimal\\)",
+  # 1 never rounds to zero, so either comparison takes the same branch
+  "if rounded == 0(\\.0)? and (number|value) != 0(\\.0)?:",
+  # the context already rounds half-even; quantize reads only the exponent
+  "rounding=ROUND_HALF_EVEN\\)$",
+  # an integral or one-digit value spells the same stripped or not
+  "while exponent < 0 and len\\(digits\\) > 1 and digits\\[-1\\] == 0:",
+  # only an infinity reaches this line
+  "return \"\\.inf\" if value > 0 else \"-\\.inf\"",
+  # a one-decimal percent is exact at one place, so the loop never runs
+  "own_digits = max\\(-exponent, 1\\)",
+  # spare precision changes no quantized result
+  "context\\.prec = max\\(context\\.prec, percent\\.adjusted\\(\\) \\+ own_digits \\+ 2\\)",
+  # at own_digits places the quantized value is the percent itself
+  "and shown != percent and places < own_digits:",
+  # rstrip strips a character set, and a positional decimal holds no X
+  "\\.rstrip\\(\"0\"\\)\\.rstrip\\(\"\\.\"\\)",
+  # only group removal could differ, and a trailing group leaves no suffix
+  "elif char in \"\\\\\"'",
+  # the name is lower-cased first, so no X is left to strip
+  "return re\\.sub\\(r\"\\[\\^a-z0-9\\]\\+\", \"_\", spaced\\.lower\\(\\)\\)\\.strip\\(\"_\"\\)",
+  # no capitalized person token begins or ends in X
+  "t\\.strip\\(\"\\.,\"\\)\\.lower\\(\\)",
+  # the hex regex already refused any X
+  "return any\\(c in \"abcdefABCDEF\" for c in s\\)",
+  # the lenient decoder ignores excess padding
+  "decoded = base64\\.urlsafe_b64decode\\(header \\+ \"=\" \\* \\(-len\\(header\\) % 4\\)\\)",
+  # a string both alphabets accept decodes the same in either branch
+  "if _BASE64_URLSAFE\\.match\\(s\\) and not _BASE64_STD\\.match\\(s\\):",
+  # the alphabet regex already refused what validation rejects
+  "base64\\.b64decode\\(s, validate=True\\)",
+  # strict=None is falsy like False
+  "ipaddress\\.ip_network\\(s, strict=False\\)",
+  # a sum and its negation are divisible by 11 together
+  "total \\+= value \\* \\(10 - i\\)",
+  # a sum and its negation are divisible by 10 together
+  "total \\+= d if i % 2 == 0 else d \\* 3",
+  # the regex fixes 17 characters, the weights' own length
+  "for ch, weight in zip\\(upper, _VIN_WEIGHTS, strict=True\\)",
+  # a doubled digit is even, never exactly 9
+  "if d > 9:",
+  # a sum and its negation are divisible by 10 together
+  "^\\s+total \\+= d$",
+  # str() of a string is the string
+  "stringified = \\(v if isinstance\\(v, str\\) else str\\(v\\) for v in sample\\)",
+  # without a candidate the share is never read
+  "candidate_share = candidate_count / len\\(sample\\) if candidate is not None else 0\\.0",
+  # an empty-string candidate has a zero count the floor refuses like None
+  "best: LooksLike \\| None = None",
+  # both date regexes capture exactly three groups
+  "date\\(\\*\\(int\\(g\\) for g in match\\.groups\\(\\)\\[:3\\]\\)\\)",
+  # the IBAN regex already caps the length at 34
+  "if not 15 <= len\\(stripped\\) <= 34 or not _IBAN_RE\\.match\\(stripped\\):",
+  # a time's fixed offset is the same on any anchor date
+  "value = dt\\.datetime\\.combine\\(dt\\.date\\(2000, 1, 1\\), value\\)\\.astimezone\\(dt\\.UTC\\)\\.timetz\\(\\)",
+  # codec names are case-insensitive
+  "digest = hashlib\\.md5\\(canonical\\.encode\\(\"utf-8\"\\)\\)\\.digest\\(\\)",
+  # from_bytes defaults to big-endian
+  "return int\\.from_bytes\\(digest\\[8:\\], \"big\"\\)",
+  # big-endian and unsigned are the defaults; None is falsy
+  "raw = b\"\"\\.join\\(h\\.to_bytes\\(8, \"big\", signed=False\\) for h in ordered\\)",
+  # codec names are case-insensitive
+  "return base64\\.b64encode\\(raw\\)\\.decode\\(\"ascii\"\\)",
+  # from_bytes defaults to big-endian
+  "return \\[int\\.from_bytes\\(raw\\[i : i \\+ 8\\], \"big\"\\) for i in range\\(0, len\\(raw\\), 8\\)\\]",
+  # theta never exceeds the hash space, and scaling by it is identity
+  "if theta >= _HASH_SPACE:",
+  # a negative integer lies outside both epoch windows
+  "s = value\\.removeprefix\\(\"-\"\\)",
+  # an empty path joins back to the same empty key
+  "parts = path\\.split\\(\"\\.\"\\) if path else \\[\\]",
+  # a slice ending at -1 repeats a prefix already looked up
+  "for end in range\\(len\\(parts\\), -1, -1\\):",
+  # an empty string is no more a real number than None
+  "previous: Any = None",
+  # a percentile equal to its bound is repaired onto itself
+  "and value (<|>) (low|high) and within_steps\\(value, (low|high)\\):",
+  # flattening onto an equal predecessor writes the same float
+  "and value < previous$",
+  # a representable low bound is its own float and never steps
+  "return stepped if low <= stepped <= high else candidate",
+]

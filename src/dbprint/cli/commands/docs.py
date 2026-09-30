@@ -1,7 +1,7 @@
 """`dbprint docs` - browsable HTML view of a print: `serve` (live) and `build` (static).
 
 Gates on the `[docs]` extra at invocation time, exiting 1 with an install hint when missing.
-`CONN` omitted resolves as every other command does, with an explicit `--all` to widen.
+`CONNECTION` omitted resolves as every other command does, with an explicit `--all` to widen.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ def docs_group() -> None:
 
 
 @docs_group.command(name="serve")
-@click.argument("conn", required=False)
+@click.argument("connection", required=False)
 @project_option
 @click.option("--all", "select_all", is_flag=True, default=False, help="Serve every connection.")
 @click.option(
@@ -54,7 +54,7 @@ def docs_group() -> None:
 @click.pass_context
 def serve_command(
     ctx: click.Context,
-    conn: str | None,
+    connection: str | None,
     project: str | None,
     select_all: bool,
     host: str,
@@ -67,7 +67,7 @@ def serve_command(
 
     **Arguments:**
 
-    - `CONN`: connection(s) to serve; resolved from `.dbprint.yaml` when omitted (the
+    - `CONNECTION`: connection(s) to serve; resolved from `.dbprint.yaml` when omitted (the
       `auto: true` set, or the sole connection). Pass `--all` for completeness instead.
 
     **Exit codes:**
@@ -86,14 +86,14 @@ def serve_command(
         ctx.exit(EXIT_GENERIC)
 
     docs_pkg = _import_docs(ctx)
-    connections = _resolve(ctx, conn, project, select_all)
+    connections = _resolve(ctx, connection, project, select_all)
     keep_fresh(project)
 
     docs_pkg.serve(connections, host, port)
 
 
 @docs_group.command(name="build")
-@click.argument("conn", required=False)
+@click.argument("connection", required=False)
 @project_option
 @click.option("--all", "select_all", is_flag=True, default=False, help="Build every connection.")
 @click.option(
@@ -113,7 +113,7 @@ def serve_command(
 @click.pass_context
 def build_command(
     ctx: click.Context,
-    conn: str | None,
+    connection: str | None,
     project: str | None,
     select_all: bool,
     output_path: Path,
@@ -127,7 +127,7 @@ def build_command(
 
     **Arguments:**
 
-    - `CONN`: connection(s) to build; resolved from `.dbprint.yaml` when omitted (the
+    - `CONNECTION`: connection(s) to build; resolved from `.dbprint.yaml` when omitted (the
       `auto: true` set, or the sole connection). Pass `--all` for completeness instead.
 
     **Exit codes:**
@@ -144,7 +144,7 @@ def build_command(
     """
 
     docs_pkg = _import_docs(ctx)
-    connections = _resolve(ctx, conn, project, select_all)
+    connections = _resolve(ctx, connection, project, select_all)
 
     try:
         result = docs_pkg.build_site(connections, output_path, force=force)
@@ -177,14 +177,14 @@ def _import_docs(ctx: click.Context) -> ModuleType:
 
 def _resolve(
     ctx: click.Context,
-    conn: str | None,
+    connection: str | None,
     project: str | None,
     select_all: bool,
 ) -> list[ConnectionConfig]:
     """Every connection to render: `--all` widens past `resolve()`'s auto-set/single default."""
 
-    if select_all and conn is not None:
-        click.echo("Pass either CONN or --all, not both.", err=True)
+    if select_all and connection is not None:
+        click.echo("Pass either CONNECTION or --all, not both.", err=True)
         ctx.exit(EXIT_GENERIC)
 
     project_config = resolve_project(project)
@@ -193,7 +193,7 @@ def _resolve(
         return list(project_config.connections.values())
 
     try:
-        return resolve_connections(project_config, conn)
+        return resolve_connections(project_config, connection)
     except ConnectionResolutionError as exc:
         click.echo(str(exc), err=True)
         ctx.exit(EXIT_GENERIC)

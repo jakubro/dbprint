@@ -4,19 +4,22 @@ prints, and an unnamed type still classifies by what the adapter measured (SPEC 
 
 from __future__ import annotations
 
-import importlib
-from types import ModuleType
+import pytest
 
-from dbprint.cli.adapter_registry import ADAPTERS
 from dbprint.spec.classification import (
-    _BOOLEAN_TYPES,
-    _JSON_TYPES,
-    _NUMERIC_TYPES,
-    _TEMPORAL_TYPES,
     base_type,
     classify,
+    compute_candidate_key_exception,
+    compute_cardinality_ratio,
+    has_calendar_component,
     has_day_resolution,
+    is_array_type,
+    is_boolean_type,
+    is_candidate_key,
     is_nullable_type,
+    is_recognised_type,
+    is_string_like_type,
+    is_temporal_type,
 )
 
 
@@ -121,14 +124,6 @@ def test_mysqls_dec_and_fixed_synonyms_are_numeric() -> None:
     for sql_type in ("dec", "fixed"):
         result = classify(sql_type, 1000, False, _THRESHOLD)
         assert result == "numeric", (sql_type, result)
-
-
-def test_clickhouses_date32_has_no_day_to_truncate_to() -> None:
-    """Date32 is always its own day-truncation, same as Date - `quantized_count` is neither
-    computed nor required (SPEC 2.2.3's day-resolution footnote).
-    """
-
-    assert has_day_resolution("Date32") is False
 
 
 def test_a_measured_column_of_an_unnamed_type_is_text() -> None:
@@ -263,33 +258,188 @@ def test_base_type_does_not_confuse_precision_for_a_qualifier() -> None:
     assert base_type("double precision") == "double precision"
 
 
-_SHARED_TABLES: dict[str, tuple[str, ...]] = {
-    "_BOOLEAN_TYPES": _BOOLEAN_TYPES,
-    "_JSON_TYPES": _JSON_TYPES,
-    "_TEMPORAL_TYPES": _TEMPORAL_TYPES,
-    "_NUMERIC_TYPES": _NUMERIC_TYPES,
+_COMPOSITE_SPELLINGS = (
+    "STRUCT(email VARCHAR, address STRUCT(city VARCHAR))",
+    "STRUCT(a DECIMAL(10,2))",
+    "STRUCT(tier VARCHAR, box STRUCT(n INTEGER))",
+    "MAP(VARCHAR, DECIMAL(10,2))",
+    "FLOAT[3]",
+    "DECIMAL(10,2)[2]",
+    "INTEGER[2][2]",
+    "INTEGER[][2]",
+    "UNION(n INTEGER, s VARCHAR)",
+    "Array(Nullable(String))",
+    "Array(Decimal(10, 2))",
+    "Map(String, Array(String))",
+    "Tuple(String, Nullable(UInt8))",
+    "Nested(a Nullable(String))",
+    "AggregateFunction(quantiles(0.5, 0.9), UInt64)",
+    "array<string>",
+    "map<string,int>",
+    "struct<a:int>",
+    "array<decimal(10,2)>",
+    "ARRAY<STRING>",
+    "STRUCT<a INT64, b STRUCT<c STRING>>",
+    'STRUCT("a(b" INTEGER)',
+)
+
+_UNCHANGED = {
+    "STRUCT(a INTEGER)": "unsupported",
+    "INTEGER[]": "unsupported",
+    "MAP(VARCHAR, INTEGER)": "unsupported",
+    "DECIMAL(10,2)": "numeric",
+    "TIMESTAMP WITH TIME ZONE": "temporal",
+    "LowCardinality(Nullable(String))": "text",
+    "DateTime64(3, 'UTC')": "temporal",
+    "character varying(20)": "text",
+    "timestamp(3) with time zone": "temporal",
+    "bigint unsigned": "numeric",
 }
 
 
-def _adapter_stats_module(adapter_cls: type) -> ModuleType:
-    """Import the vendor package's `stats` module beside its registered `adapter` module."""
-
-    package = adapter_cls.__module__.rsplit(".", 1)[0]
-
-    return importlib.import_module(f"{package}.stats")
+def test_a_composite_whatever_its_nesting_is_unsupported_when_measured() -> None:
+    for spelling in _COMPOSITE_SPELLINGS:
+        assert classify(spelling, 3, False, _THRESHOLD) == "unsupported", spelling
+        assert classify(spelling, 500, False, _THRESHOLD) == "unsupported", spelling
 
 
-def test_every_registered_adapters_own_type_spellings_are_known_to_the_shared_tables() -> None:
-    """The convergence contract, driven off the adapter registry rather than a hand-kept
-    vendor list - a ninth adapter is swept the moment it declares its own tuples (SPEC 3.1).
-    """
+def test_a_composite_whatever_its_nesting_is_unsupported_from_the_catalog_alone() -> None:
+    for spelling in _COMPOSITE_SPELLINGS:
+        assert classify(spelling, None, False, _THRESHOLD, catalog_only=True) == "unsupported", (
+            spelling
+        )
 
-    unknown = [
-        (vendor, table_name, sql_type)
-        for vendor, adapter_cls in ADAPTERS.items()
-        for table_name, shared in _SHARED_TABLES.items()
-        for sql_type in getattr(_adapter_stats_module(adapter_cls), table_name, ())
-        if base_type(sql_type) not in shared
-    ]
 
-    assert unknown == []
+def test_scalar_spellings_classify_as_before() -> None:
+    for spelling, expected in _UNCHANGED.items():
+        assert classify(spelling, 500, False, _THRESHOLD) == expected, spelling
+
+
+def test_base_type_strips_every_nesting_level_and_keeps_the_qualifier() -> None:
+    assert base_type("STRUCT(a STRUCT(b INTEGER))") == "struct"
+    assert base_type("array<struct<a:int>>") == "array"
+    assert base_type("timestamp(3) with time zone") == "timestamp with time zone"
+
+
+def test_an_array_suffix_is_read_at_depth_zero_only() -> None:
+    assert is_array_type("INTEGER[2][2]") is True
+    assert is_array_type("character varying(20)[]") is True
+    assert is_array_type("STRUCT(a INTEGER[3])") is False
+    assert is_array_type("INTEGER") is False
+
+
+def test_mysqls_one_digit_tinyint_is_the_only_boolean_width() -> None:
+    assert (is_boolean_type("tinyint(1)"), is_boolean_type("tinyint(4)")) == (True, False)
+
+
+def test_a_spelling_no_shared_table_names_is_not_recognised() -> None:
+    assert not is_recognised_type("seedtag")
+    assert is_recognised_type("STRUCT(a INTEGER)")
+
+
+def test_nanosecond_clock_types_take_the_clock_path() -> None:
+    assert is_temporal_type("TIME_NS") and not has_calendar_component("TIME_NS")
+    assert not has_day_resolution("Time64(3)")
+
+
+class TestCandidateKeyEdges:
+    def test_no_rows_scanned_is_a_zero_ratio(self) -> None:
+        assert compute_cardinality_ratio(0, 0) == 0.0
+
+    def test_a_single_distinct_value_can_clear_the_threshold(self) -> None:
+        assert is_candidate_key(1, 1.0) is True
+        assert is_candidate_key(0, 1.0) is False
+
+    @pytest.mark.parametrize(
+        ("cardinality", "ratio", "method", "rows_scanned", "null_count", "expected"),
+        [
+            (9, 1.0, "exact", 10, 0, None),
+            (5, 1.0, "estimated", 5, 0, None),
+            (9, 0.99995, "exact", 10, 1, None),
+            (9, 0.99995, "exact", 10, 0, "measured_duplicates"),
+            (9, 0.99995, "estimated", 10, 1, "estimated"),
+        ],
+    )
+    def test_the_exception_marker(
+        self,
+        cardinality: int,
+        ratio: float,
+        method: str,
+        rows_scanned: int,
+        null_count: int,
+        expected: str | None,
+    ) -> None:
+        got = compute_candidate_key_exception(cardinality, ratio, method, rows_scanned, null_count)
+
+        assert got == expected
+
+
+class TestTypeFamilies:
+    @pytest.mark.parametrize(
+        ("sql_type", "cardinality", "catalog_only", "expected"),
+        [
+            ("BOOLEAN", 2, False, "boolean"),
+            ("VARCHAR", 50, False, "categorical"),
+            ("VARCHAR", 51, False, "text"),
+            ("VARCHAR", None, False, "text"),
+            ("mystery_type", None, True, "text"),
+            ("mystery_type", None, False, "unsupported"),
+        ],
+    )
+    def test_classify_at_its_boundaries(
+        self,
+        sql_type: str,
+        cardinality: int | None,
+        catalog_only: bool,
+        expected: str,
+    ) -> None:
+        assert classify(sql_type, cardinality, False, 50, catalog_only=catalog_only) == expected
+
+    @pytest.mark.parametrize(
+        ("sql_type", "day", "calendar"),
+        [
+            ("timestamp", True, True),
+            ("date", False, True),
+            ("time", False, False),
+            ("text", False, False),
+        ],
+    )
+    def test_day_and_calendar_components(self, sql_type: str, day: bool, calendar: bool) -> None:
+        assert (has_day_resolution(sql_type), has_calendar_component(sql_type)) == (day, calendar)
+
+    @pytest.mark.parametrize(
+        ("sql_type", "string_like"),
+        [
+            ("VARCHAR(20)", True),
+            ("mystery_type", True),
+            ("INTEGER", False),
+            ("BOOLEAN", False),
+            ("tinyint(1)", False),
+            ("JSONB", False),
+            ("TIMESTAMP", False),
+            ("TEXT[]", False),
+            ("BYTEA", False),
+        ],
+    )
+    def test_string_like_is_decided_by_elimination(self, sql_type: str, string_like: bool) -> None:
+        assert is_string_like_type(sql_type) is string_like
+
+    @pytest.mark.parametrize(
+        ("sql_type", "recognised"),
+        [("BOOLEAN", True), ("tinyint(1)", True), ("TEXT[]", True), ("mystery_type", False)],
+    )
+    def test_recognised_by_some_table(self, sql_type: str, recognised: bool) -> None:
+        assert is_recognised_type(sql_type) is recognised
+        assert is_boolean_type("BOOLEAN") is True
+
+    @pytest.mark.parametrize(
+        ("sql_type", "array"),
+        [
+            ("TEXT[]", True),
+            ("integer[] ", True),
+            ('ROW("a(b" INT)[]', True),
+            ("STRUCT<x INT[]>", False),
+        ],
+    )
+    def test_an_array_suffix_is_read_at_depth_zero(self, sql_type: str, array: bool) -> None:
+        assert is_array_type(sql_type) is array

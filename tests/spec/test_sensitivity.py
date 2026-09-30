@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib.resources
 import json
-from typing import get_args
+from typing import cast, get_args
 
 import pytest
 
@@ -17,6 +17,7 @@ from dbprint.spec.sensitivity import (
     _ONLINE_IDENTIFIER_SHAPES,
     _WEAK_CREDENTIAL_SHAPES,
     Sensitivity,
+    _matches,
     detect,
 )
 
@@ -57,7 +58,14 @@ class TestShapeSetGuard:
 class TestPersonalName:
     @pytest.mark.parametrize(
         "column",
-        ["first_name", "last_name", "surname", "full_name", "customer_name", "recipient"],
+        [
+            "FirstName",
+            "billing_last_name",
+            "CUSTOMER_SURNAME",
+            "curator-full-name",
+            "legalGivenName",
+            "parcel_recipient",
+        ],
     )
     def test_an_unambiguous_column_name_is_enough(self, column: str) -> None:
         """No value agreement required: initials and placeholders are still a name column."""
@@ -158,7 +166,7 @@ class TestPostalAddress:
 class TestGeolocation:
     @pytest.mark.parametrize(
         "column",
-        ["latitude", "longitude", "lat", "lon", "lng", "coordinates", "geo_location", "geohash"],
+        ["Latitude", "pickup_lat", "dropoffLng", "store-longitude", "GPS", "venue_geohash"],
     )
     def test_an_unambiguous_column_name_is_enough(self, column: str) -> None:
         """No sample is drawn for `numeric`, so name evidence alone must be enough."""
@@ -185,19 +193,7 @@ class TestGeolocation:
 class TestDateOfBirth:
     @pytest.mark.parametrize(
         "column",
-        [
-            "date_of_birth",
-            "dob",
-            "birth_date",
-            "birthdate",
-            "birthday",
-            "born_on",
-            "born_at",
-            "customer_date_of_birth",
-            "patient_date_of_birth",
-            "user_dob",
-            "employee_dob",
-        ],
+        ["DateOfBirth", "member_dob", "PATIENT_BIRTH_DATE", "applicant-birthday", "bornOn"],
     )
     def test_an_unambiguous_column_name_is_enough(self, column: str) -> None:
         """No value agreement or sample required - the whole vocabulary is unambiguous."""
@@ -222,17 +218,12 @@ class TestNationalId:
     @pytest.mark.parametrize(
         "column",
         [
-            "ssn",
-            "social_security_number",
-            "national_id",
-            "national_insurance_number",
-            "nino",
-            "tax_id",
-            "vat_number",
-            "passport_number",
-            "passport_no",
-            "drivers_license",
-            "driving_licence",
+            "SSN",
+            "employee_tax_id",
+            "holderPassportNumber",
+            "customer-nino",
+            "vendor_vat_number",
+            "DriversLicense",
         ],
     )
     def test_an_unambiguous_column_name_is_enough(self, column: str) -> None:
@@ -288,19 +279,7 @@ class TestNationalId:
 class TestFinancialAccount:
     @pytest.mark.parametrize(
         "column",
-        [
-            "iban",
-            "bank_account_number",
-            "bank_account",
-            "card_number",
-            "card_no",
-            "credit_card",
-            "debit_card",
-            "cc_number",
-            "cvv",
-            "cvc",
-            "card_security_code",
-        ],
+        ["IBAN", "payout_bank_account_number", "cardNumber", "billing-credit-card", "stored_cvv"],
     )
     def test_an_unambiguous_column_name_is_enough(self, column: str) -> None:
         """No value agreement, or even a sample, required - the strong tier's whole point."""
@@ -351,15 +330,12 @@ class TestCredential:
     @pytest.mark.parametrize(
         "column",
         [
-            "password",
-            "password_hash",
-            "api_key",
-            "secret_key",
-            "access_token",
-            "refresh_token",
-            "session_token",
-            "private_key",
-            "client_secret",
+            "Password",
+            "user_password_hash",
+            "partnerApiKey",
+            "OAUTH_REFRESH_TOKEN",
+            "signing-private-key",
+            "appClientSecret",
         ],
     )
     def test_an_unambiguous_column_name_is_enough(self, column: str) -> None:
@@ -396,21 +372,12 @@ class TestHealth:
     @pytest.mark.parametrize(
         "column",
         [
-            "diagnosis",
-            "diagnoses",
-            "diagnosis_code",
-            "diagnosis_notes",
-            "icd10",
-            "icd10_code",
-            "blood_type",
-            "blood_group",
-            "medical_condition",
-            "medication",
-            "prescription",
-            "allergy",
-            "allergies",
-            "disability",
-            "disability_status",
+            "Diagnosis",
+            "primary_diagnosis_code",
+            "patientAllergies",
+            "BLOOD_TYPE",
+            "current-medication",
+            "icd10Code",
         ],
     )
     def test_an_unambiguous_column_name_is_enough(self, column: str) -> None:
@@ -432,15 +399,11 @@ class TestDemographic:
     @pytest.mark.parametrize(
         "column",
         [
-            "ethnicity",
-            "ethnic_group",
-            "race",
-            "religion",
-            "religious_affiliation",
-            "sexual_orientation",
-            "gender_identity",
-            "political_affiliation",
-            "union_membership",
+            "Ethnicity",
+            "self_reported_race",
+            "memberReligion",
+            "SEXUAL_ORIENTATION",
+            "declared-gender-identity",
         ],
     )
     def test_an_unambiguous_column_name_is_enough(self, column: str) -> None:
@@ -463,18 +426,12 @@ class TestEmployment:
     @pytest.mark.parametrize(
         "column",
         [
-            "salary",
-            "annual_salary",
-            "base_salary",
-            "wage",
-            "hourly_rate",
-            "pay",
-            "base_pay",
-            "gross_pay",
-            "net_pay",
-            "compensation",
-            "bonus",
-            "commission",
+            "Salary",
+            "employee_annual_salary",
+            "hourlyWage",
+            "GROSS_PAY",
+            "sales-commission",
+            "quarterly_bonus",
         ],
     )
     def test_an_unambiguous_column_name_is_enough(self, column: str) -> None:
@@ -558,19 +515,7 @@ class TestContact:
 class TestOnlineIdentifier:
     @pytest.mark.parametrize(
         "column",
-        [
-            "ip_address",
-            "ipaddr",
-            "client_ip",
-            "remote_addr",
-            "mac_address",
-            "device_id",
-            "advertising_id",
-            "idfa",
-            "session_id",
-            "cookie_id",
-            "visitor_id",
-        ],
+        ["IpAddress", "last_login_ip", "deviceId", "MAC_ADDRESS", "ga_cookie_id", "web-visitor-id"],
     )
     def test_an_unambiguous_column_name_is_enough(self, column: str) -> None:
         assert detect(column, []) == "online_identifier"
@@ -609,19 +554,32 @@ class TestOnlineIdentifier:
 
 
 class TestDetectionChain:
-    """`detect()` checks most-specific first; the order is asserted, not assumed."""
+    """`detect()` checks most-specific first: a name one category claims outranks a shape that
+    would put the column in a later one.
+    """
 
-    def test_the_chain_is_name_address_national_id_financial_account_contact(self) -> None:
-        assert detect("first_name", []) == "personal_name"
-        assert detect("street_address", ["221B Baker Street"]) == "postal_address"
-        assert detect("latitude", []) == "geolocation"
-        assert detect("dob", []) == "date_of_birth"
-        assert detect("ssn", []) == "national_id"
-        assert detect("card_number", []) == "financial_account"
-        assert detect("api_key", []) == "credential"
-        assert detect("salary", []) == "employment"
-        assert detect("email", ["a@b.com"]) == "contact"
-        assert detect("device_id", []) == "online_identifier"
+    @pytest.mark.parametrize(
+        ("name", "shape", "expected"),
+        [
+            ("first_name", "iban", "personal_name"),
+            ("first_name", "email", "personal_name"),
+            ("street_address", "email", "postal_address"),
+            ("latitude", "email", "geolocation"),
+            ("dob", "email", "date_of_birth"),
+            ("ssn", "email", "national_id"),
+            ("card_number", "jwt", "financial_account"),
+            ("api_key", "email", "credential"),
+            ("salary", "email", "employment"),
+            ("device_id", "email", "contact"),
+        ],
+    )
+    def test_an_earlier_category_outranks_a_later_shape(
+        self,
+        name: str,
+        shape: str,
+        expected: str,
+    ) -> None:
+        assert detect(name, [], shape) == expected
 
 
 class TestTailAnchorReachesEveryTierButWeakCredentials:
@@ -659,3 +617,53 @@ class TestNothingDetected:
     )
     def test_an_ordinary_column_reports_nothing(self, column: str) -> None:
         assert detect(column, ["1", "2", "3"]) is None
+
+
+class TestValueCorroborationBoundaries:
+    def test_a_non_string_or_blank_value_corroborates_nothing(self) -> None:
+        assert detect("name", [5, "  ", None, "Ada Lovelace"]) == "personal_name"
+
+    def test_half_the_sample_is_enough(self) -> None:
+        assert detect("name", ["Ada Lovelace", "acme"]) == "personal_name"
+        assert detect("street", ["12 Main St", "n/a"]) == "postal_address"
+        assert detect("tin", ["123-45-6789", "x"]) == "national_id"
+
+    def test_a_third_of_the_sample_is_not(self) -> None:
+        assert detect("name", ["Ada Lovelace", "acme", "x1"]) is None
+
+    def test_an_ambiguous_name_with_no_sample_is_not_flagged(self) -> None:
+        assert detect("name", []) is None
+
+    def test_an_address_column_of_non_street_values_is_not_an_address(self) -> None:
+        assert detect("street", ["n/a", "hello world"]) != "postal_address"
+        assert detect("street", ["12 Main"]) == "postal_address"
+
+    @pytest.mark.parametrize(
+        ("value", "person"),
+        [
+            ("Ada King Lovelace", True),
+            ("Ada Byron King Lovelace", False),
+            ("Madonna", False),
+            ("Acme Inc.", False),
+        ],
+    )
+    def test_a_person_is_two_or_three_capitalized_tokens(self, value: str, person: bool) -> None:
+        assert (detect("name", [value]) == "personal_name") is person
+
+
+class TestTokenRuns:
+    def test_separators_at_either_end_are_dropped(self) -> None:
+        assert detect("__first_name__", []) == "personal_name"
+
+    def test_only_the_token_before_the_run_can_disqualify(self) -> None:
+        assert detect("brand_x_name", ["Ada Lovelace", "Alan Turing"]) == "personal_name"
+
+    def test_a_disqualified_strong_run_falls_back_to_corroboration(self) -> None:
+        assert detect("company_full_name", ["Acme Ltd", "Initech Llc"]) is None
+
+    def test_a_disqualified_run_does_not_stop_the_next_token(self) -> None:
+        people = ["Ada Lovelace", "Alan Turing"]
+        ordered = cast(frozenset[str], ("display_name", "name"))
+
+        assert detect("company_display_name", people) == "personal_name"
+        assert _matches("company_display_name", ordered, frozenset({"company"})) is True

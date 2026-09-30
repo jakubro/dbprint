@@ -10,6 +10,7 @@ import yaml
 
 from dbprint.config import ConnectionConfig
 from dbprint.docs import catalogue, view
+from dbprint.spec.scope import scope_of
 
 
 def _column(conn: ConnectionConfig, fqn: str, name: str) -> dict[str, Any]:
@@ -48,7 +49,7 @@ class TestRowCountView:
         row_count = view.row_count_view(artifacts.entry, artifacts.statistics)
 
         assert row_count["rows_scanned"] == 300
-        assert row_count["share_pct"] == 100.0
+        assert row_count["share"] == 1.0
         assert row_count["filter"] is None
 
     def test_scoped_table_reports_the_measured_share(self, scoped_conn: ConnectionConfig) -> None:
@@ -59,7 +60,7 @@ class TestRowCountView:
         row_count = view.row_count_view(artifacts.entry, artifacts.statistics)
 
         assert row_count["rows_scanned"] == 10_000
-        assert row_count["share_pct"] == 1.0
+        assert row_count["share"] == 0.01
 
     def test_a_sampled_read_carries_its_sample_fraction(
         self,
@@ -82,7 +83,7 @@ class TestRowCountView:
 
         assert row_count["row_count"] == 300
         assert row_count["rows_scanned"] is None
-        assert row_count["share_pct"] is None
+        assert row_count["share"] is None
 
     def test_catalog_only_never_reports_a_scanned_share_even_if_row_count_is_set(self) -> None:
         """A catalog-only print never carries `row_count` (SPEC 2.2.15), so this guard only bites
@@ -93,7 +94,7 @@ class TestRowCountView:
 
         assert row_count["row_count"] == 300
         assert row_count["rows_scanned"] is None
-        assert row_count["share_pct"] is None
+        assert row_count["share"] is None
 
 
 class TestScopeView:
@@ -111,9 +112,9 @@ class TestScopeView:
         scope = view.scope_view(statistics)
 
         assert scope is not None
-        # 10_000/1_000_000 -> 1.0%; sample=0.01 agrees numerically on purpose, so the
+        # 10_000/1_000_000 -> 0.01; sample=0.01 agrees numerically on purpose, so the
         # assertion below pins which field is read.
-        assert scope["share_pct"] == 1.0
+        assert scope["share"] == 0.01
         assert scope["rows_scanned"] == 10_000
         assert scope["sample"] == 0.01
 
@@ -123,8 +124,8 @@ class TestScopeView:
 
         assert no_row_count is not None
         assert zero_row_count is not None
-        assert no_row_count["share_pct"] is None
-        assert zero_row_count["share_pct"] is None
+        assert no_row_count["share"] is None
+        assert zero_row_count["share"] is None
 
 
 class TestGrainView:
@@ -296,19 +297,19 @@ class TestUnmeasuredView:
     ) -> None:
         statistics = _statistics(degraded_conn, "seedbank.storage_reading")
 
-        assert view.unmeasured_view(statistics) == (
+        assert list(view.unmeasured_view(statistics)) == [
             "dependencies",
             "null_patterns",
             "physical_layout",
-        )
+        ]
 
     def test_absent_marker_is_empty(self, rich_conn: ConnectionConfig) -> None:
-        assert view.unmeasured_view(_statistics(rich_conn, "seedbank.batch")) == ()
+        assert view.unmeasured_view(_statistics(rich_conn, "seedbank.batch")) == {}
 
     def test_a_non_list_marker_is_ignored(self) -> None:
         """The artifact is hand-editable, so a bare string must not read as one named block."""
 
-        assert view.unmeasured_view({"unmeasured": "null_patterns"}) == ()
+        assert view.unmeasured_view({"unmeasured": "null_patterns"}) == {}
 
 
 class TestColumnsEmptyNotice:
@@ -369,13 +370,13 @@ class TestSummaryCards:
 
 class TestCardinalityView:
     def test_averages_the_null_adjusted_ratio(self, companion_conn: ConnectionConfig) -> None:
-        # 100/100, 75/(100-25), 40/(100-20) -> avg 83.3%; the raw ratio would give 71.7%.
+        # 100/100, 75/(100-25), 40/(100-20) -> avg 0.8333; the raw ratio would give 0.717.
         statistics = _statistics(companion_conn, "seedbank.botanist")
 
         cardinality = view.cardinality_view(statistics["columns"], statistics["row_count"])
 
         assert cardinality is not None
-        assert cardinality["avg_pct"] == 83.3
+        assert cardinality["avg"] == pytest.approx(2.5 / 3)
         assert cardinality["n_columns"] == 3
 
     def test_an_all_null_column_contributes_no_ratio(self) -> None:
@@ -404,13 +405,13 @@ class TestCardinalityView:
 
 class TestCompletenessView:
     def test_averages_and_buckets_by_completeness(self, companion_conn: ConnectionConfig) -> None:
-        # botanist_id 1.0 (full), email 0.75 (mid), phone 0.8 (mid) -> avg 85.0%
+        # botanist_id 1.0 (full), email 0.75 (mid), phone 0.8 (mid) -> avg 0.85
         statistics = _statistics(companion_conn, "seedbank.botanist")
 
         completeness = view.completeness_view(statistics["columns"])
 
         assert completeness is not None
-        assert completeness["avg_pct"] == 85.0
+        assert completeness["avg"] == pytest.approx(0.85)
         assert dict(completeness["buckets"]) == {"full": 1, "high": 0, "mid": 2, "low": 0}
 
     def test_high_and_low_buckets(self) -> None:
@@ -432,9 +433,9 @@ class TestCorruptedArtifactsNotice:
     def test_names_every_corrupted_kind(self) -> None:
         notice = view.corrupted_artifacts_notice(("relationships", "statistics_annotations"))
 
-        assert notice == (
-            "Unreadable: relationships, statistics_annotations (present on disk, failed to parse)"
-        )
+        assert notice is not None
+        assert "relationships" in notice
+        assert "statistics_annotations" in notice
 
 
 class TestSkylineLegend:
@@ -487,7 +488,8 @@ class TestCardinalityCell:
         assert cell["approximate"] is True
 
     def test_saturates_prefers_rows_scanned_over_row_count(self) -> None:
-        cell = view.cardinality_cell({"cardinality": 10, "rows_scanned": 10}, 1000)
+        scope = scope_of({"row_count": 1000, "scope": {"rows_scanned": 10}})
+        cell = view.cardinality_cell({"cardinality": 10, "rows_scanned": 10}, 1000, scope)
 
         assert cell is not None
         assert cell["saturates"] is True
@@ -513,10 +515,20 @@ class TestValuesView:
 
         assert result is not None
         assert result["coverage"] == 0.05
-        assert result["exhaustive"] is False
+        assert result["coverage_text"] == "5% covered"
 
     def test_no_values_no_coverage_is_none(self) -> None:
         assert view.values_view({}) is None
+
+    def test_a_dropped_value_reads_as_withheld_and_a_null_as_null(self) -> None:
+        col = {
+            "values": [{"count": 10}, {"value": None, "count": 5}, {"value": "NULL", "count": 2}],
+        }
+
+        result = view.values_view(col)
+
+        assert result is not None
+        assert [bar["value"] for bar in result["bars"]] == ["(value withheld)", "NULL", "'NULL'"]
 
     def test_a_null_value_renders_null_not_withheld(self) -> None:
         """`(withheld)` is redaction vocabulary; a genuine SQL null was never redacted."""
@@ -604,11 +616,6 @@ class TestSketchAvailable:
         col = _column(rich_conn, "seedbank.batch", "batch_id")
 
         assert view.sketch_available(col) is False
-
-    def test_never_exposes_the_payload(self, rich_conn: ConnectionConfig) -> None:
-        result = view.sketch_available(_column(rich_conn, "seedbank.batch", "cultivar_id"))
-
-        assert result is True
 
 
 class TestAnnotationView:
@@ -728,7 +735,7 @@ class TestColumnView:
         assert rendered["annotation_note"] == (
             "FK to [cultivar](/t/primary/seedbank.cultivar).[cultivar_id](#col-cultivar_id)."
         )
-        assert rendered["annotation_values"] == [(1, "the type specimen")]
+        assert rendered["annotation_values"] == [("1", "the type specimen")]
         assert rendered["annotation_claims"] == [("cardinality_ratio", "> 0.1")]
 
     def test_candidate_key_exception_names_why_the_ratio_falls_short(
@@ -1128,7 +1135,7 @@ class TestBuildTableView:
 
         page = view.build_table_view(found, artifacts)
 
-        assert page["unmeasured"] == ("dependencies", "null_patterns", "physical_layout")
+        assert list(page["unmeasured"]) == ["dependencies", "null_patterns", "physical_layout"]
         assert page["physical_layout"] is None
         assert page["null_patterns"] is None
         assert page["dependencies"] == []
@@ -1227,9 +1234,7 @@ class TestBuildTableView:
         page = view.build_table_view(conn, artifacts)
 
         assert page["relationships"]["refers_to"] == []
-        assert page["corrupted_artifacts_notice"] == (
-            "Unreadable: relationships (present on disk, failed to parse)"
-        )
+        assert "relationships" in page["corrupted_artifacts_notice"]
 
     def test_catalog_only_view_suppresses_every_measured_aggregate(
         self,

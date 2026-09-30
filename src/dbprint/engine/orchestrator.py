@@ -6,14 +6,16 @@ diverging at the "write or not" boundary per ARCHITECTURE 3.
 
 from __future__ import annotations
 
+import copy
 import itertools
 import logging
 import time
 import traceback
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -34,7 +36,9 @@ from dbprint.adapters.base import (
     GrainKey,
     IndexMeta,
     Inferred,
+    Length,
     NullPatterns,
+    PhaseA,
     PhysicalLayout,
     Populated,
     TableCounts,
@@ -46,26 +50,36 @@ from dbprint.adapters.base import (
     UniqueKeyMeta,
 )
 from dbprint.adapters.errors import QueryFailed
-from dbprint.config import ConfigError, ConnectionConfig, StatisticsConfig, TableSettings, selectors
-
-# Private names: SPEC 4.1.5's numeric-type suppression below reads the classifier's own type
-# membership test directly, rather than hold a second list of numeric SQL types to drift.
+from dbprint.adapters.identifiers import IdentifierRejected, reject_column_collisions
+from dbprint.config import ConfigError, ConnectionConfig, TableSettings, selectors
+from dbprint.config.duration import format_duration_seconds
+from dbprint.spec import artifact_yaml
+from dbprint.spec.absence import SAMPLED_CLASSIFICATIONS, SAMPLE_VERDICTS, emits
+from dbprint.spec.artifact_yaml import ArtifactLoader
 from dbprint.spec.classification import (
-    _NUMERIC_TYPES,
     Classification,
-    _matches,
-    base_type,
     classify,
     compute_candidate_key_exception,
     compute_cardinality_ratio,
+    compute_null_rate,
     has_calendar_component,
+    has_day_resolution,
     is_candidate_key,
+    is_numeric_type,
     is_string_like_type,
 )
 from dbprint.spec.coverage import coverage_share, is_incoherent
 from dbprint.spec.epoch import bounds_epoch_unit, sample_epoch_unit
 from dbprint.spec.looks_like import detect_with_evidence
-from dbprint.spec.redaction import Primitive, coarsen_day_count, redact_value
+from dbprint.spec.redaction import (
+    WITHHELD_UNDER_REDACTION,
+    Primitive,
+    apply_redaction_rule,
+    coarsen_day_count,
+    is_redacted,
+    redact_value,
+)
+from dbprint.spec.rounding import UnrepresentableValue, round_statistic
 from dbprint.spec.sensitivity import detect as detect_sensitivity
 from dbprint.spec.sketch import METHOD as SKETCH_METHOD
 from dbprint.spec.sketch import K as SKETCH_K
@@ -82,25 +96,28 @@ from dbprint.spec.statistics_matrix import FORBIDDEN_FIELDS, REQUIRED_FIELDS
 from dbprint.spec.temporal_age import freshness_classification
 from dbprint.spec.temporal_age import max_age_days as derive_max_age_days
 from dbprint.spec.v1 import FORMAT_VERSION
+from dbprint.spec.value_text import value_order_key
 from . import diff as diff_module
 from . import inference, relationship_graph
-from .baseline import (
-    baseline_states_from_manifest as _baseline_states_from_manifest,
+from .carried import (
+    CarriedTable,
+    CarrySet,
+    CommittedPrint,
+    CommittedTable,
+    RedactionMismatch,
+    carried_entry,
+    freshness,
+    plan_carry,
+    redaction_mismatches,
+    resolved_redaction,
 )
-from .baseline import (
-    declared_artifacts as _declared_artifacts,
+from .manifest_builder import (
+    ManifestTableEntry,
+    profiling_params_dict,
+    statistics_params_dict,
 )
-from .baseline import (
-    hydrate_baseline_states as _hydrate_baseline_states,
-)
-from .baseline import (
-    load_baseline_manifest as _load_baseline_manifest,
-)
-from .baseline import (
-    load_incoming_edges as _load_incoming_edges,
-)
-from .manifest_builder import ManifestTableEntry, entry_from_payload
 from .manifest_builder import build as build_manifest
+from .pool import SessionPool
 from .reading_guide import READING_GUIDE_FILENAME, READING_GUIDE_TEXT
 from .result import (
     EXIT_CONNECTION,
@@ -123,20 +140,20 @@ from .result import (
     TableResult,
     TableStatus,
 )
+from .staging import RunStage, StageRefused
 from .value_resolution import spelling_groups
 from .writer import (
     DESCRIPTION_FILENAME,
     MANIFEST_ANNOTATIONS_FILENAME,
+    PRODUCER_ARTIFACTS,
     RELATIONSHIPS_ANNOTATIONS_FILENAME,
     STATISTICS_ANNOTATIONS_FILENAME,
-    write_atomic,
 )
 from .yaml_dumper import dump_yaml as _dump_yaml
 
 
 _LOG = logging.getLogger(__name__)
 
-_LOOKS_LIKE_CLASSIFICATIONS = {"categorical", "text", "foreign_key_candidate"}
 
 # The `looks_like` pattern whose columns publish no value list (SPEC 2.2.3). A literal, not
 # an import: the conformance validator states the same exemption independently.
@@ -144,10 +161,6 @@ _PROSE = "prose"
 
 # The classifications whose SPEC 2.2.3 row carries a value list.
 _VALUE_LIST_CLASSIFICATIONS = {"boolean", "categorical", "foreign_key_candidate", "text"}
-
-# Classifications whose SPEC 2.2.3 row carries no cell value and forbids the `redacted`
-# marker itself, so a rule covering such a column resolves to no primitive.
-_NO_CELL_VALUE_CLASSIFICATIONS = {"json", "unsupported"}
 
 # Per-table cap on measured grain candidate pairs (SPEC 2.2.12) - a producer constant, never a
 # `.dbprint.yaml` key: the honesty marker it produces is not tunable.
@@ -162,12 +175,27 @@ _DEPENDENCY_STRENGTH_THRESHOLD = 0.95
 
 _LOW_CARDINALITY_CLASSIFICATIONS = {"categorical", "boolean"}
 
+# SPEC 2.2.2's universal fields: required on every column, so never named unmeasured.
+_UNIVERSAL_FIELDS = frozenset({"sql_type", "nullable", "null_count", "null_rate", "classification"})
+
 # Map per-table outcome to the terminal progress status (`ok` -> `done`).
 _TERMINAL_STATUS: dict[TableStatus, ProgressStatus] = {
     "ok": "done",
     "failed": "failed",
     "skipped": "skipped",
 }
+
+
+class ListingSharesNothingWithBaseline(Exception):
+    """The target lists none of the committed tables in scope; they are not recorded removed."""
+
+    def __init__(self, committed: int, target: str) -> None:
+        super().__init__(
+            f"the target lists none of the {committed} committed tables in scope "
+            f"({target or 'no target recorded'}); refusing to record them as removed. Check the "
+            f"connection's path or database and the role's grants; if every table really was "
+            f"dropped, rerun generate with --confirm-all-removed.",
+        )
 
 
 class Engine:
@@ -200,9 +228,40 @@ class Engine:
         req = request or GenerateRequest()
         started = time.monotonic()
         generated_at = _utc_iso_now()
-
         prints_root = self._conn.output / self._conn.name
-        baseline_manifest = _load_baseline_manifest(prints_root)
+
+        if req.dry_run:
+            return self._generate(req, None, started, generated_at)
+
+        # Opened before the baseline is read, so a roll-forward is what the baseline sees.
+        try:
+            stage = RunStage.open(prints_root)
+        except StageRefused as exc:
+            failure = _connection_error_generate(
+                self._conn.name,
+                generated_at,
+                started,
+                exc,
+                exit_code=EXIT_GENERIC,
+            )
+            self._log_connection(0, failure.elapsed_ms, failure.exit_code)
+
+            return failure
+
+        try:
+            return self._generate(req, stage, started, generated_at)
+        finally:
+            stage.close()
+
+    def _generate(
+        self,
+        req: GenerateRequest,
+        stage: RunStage | None,
+        started: float,
+        generated_at: str,
+    ) -> GenerateResult:
+        prints_root = self._conn.output / self._conn.name
+        committed = CommittedPrint.load(prints_root)
         emitter = _ProgressEmitter(req.on_progress, self._conn.name)
 
         emitter.connecting("start")
@@ -226,31 +285,52 @@ class Engine:
         conn_token = trace_context.connection.set(self._conn.name)
 
         try:
-            outcome = self._run_extraction(
-                force=req.force,
-                write_artifacts=not req.dry_run,
-                baseline_manifest=baseline_manifest,
-                cli_include=req.cli_include,
-                cli_exclude=req.cli_exclude,
-                generated_at=generated_at,
-                emitter=emitter,
-                fail_fast=req.fail_fast,
-            )
+            try:
+                outcome = self._run_extraction(
+                    force=req.force,
+                    stage=stage,
+                    committed=committed,
+                    cli_include=req.cli_include,
+                    cli_exclude=req.cli_exclude,
+                    generated_at=generated_at,
+                    emitter=emitter,
+                    fail_fast=req.fail_fast,
+                    confirm_all_removed=req.confirm_all_removed,
+                )
+            except ListingSharesNothingWithBaseline as exc:
+                failure = _connection_error_generate(self._conn.name, generated_at, started, exc)
+                self._log_connection(0, failure.elapsed_ms, failure.exit_code)
+
+                return failure
+            except IdentifierRejected as exc:
+                failure = _connection_error_generate(
+                    self._conn.name,
+                    generated_at,
+                    started,
+                    ValueError(_refusal_text(exc, committed)),
+                    exit_code=EXIT_GENERIC,
+                )
+                self._log_connection(0, failure.elapsed_ms, failure.exit_code)
+
+                return failure
+
             per_table_results = outcome.per_table_results
             diff_dict = outcome.diff_dict
             not_attempted = outcome.not_attempted
             sketch_failures = outcome.sketch_failures
 
-            # A truncated run saw only part of the database; leaving the previous manifest
-            # in place keeps the baseline truthful. Keyed on tables left unattempted, not on
-            # whether the loop broke (ARCHITECTURE.md 9).
-            if not req.dry_run and not outcome.not_attempted:
-                self._write_manifest_artifacts(
+            # A truncated run saw only part of the database, so it commits nothing at all.
+            # Keyed on tables left unattempted, not on whether the loop broke (ARCHITECTURE.md 9).
+            if stage is not None and not outcome.not_attempted:
+                entries = self._write_manifest_artifacts(
                     prints_root,
                     outcome,
-                    baseline_manifest,
+                    committed,
                     generated_at,
+                    stage,
                 )
+                _sweep_undeclared(prints_root, entries, stage)
+                stage.commit()
 
             emitter.finalizing("done", len(per_table_results))
         finally:
@@ -283,10 +363,9 @@ class Engine:
         )
 
     def compute_diff(self, request: DiffRequest | None = None) -> DiffResult:
-        """Run extract -> graph -> diff, returning the diff dict only.
+        """Run extract -> graph -> diff and return the diff dict alone, writing nothing to disk.
 
-        Writes nothing to disk. With no `prints/<conn>/manifest.yaml` the result is
-        DiffResult(exit_code=EXIT_GENERIC, diff=empty) and the CLI surfaces the error.
+        With no `prints/<connection>/manifest.yaml` it returns `EXIT_GENERIC` and an empty diff.
         """
 
         req = request or DiffRequest()
@@ -294,9 +373,9 @@ class Engine:
         generated_at = _utc_iso_now()
 
         prints_root = self._conn.output / self._conn.name
-        baseline_manifest = _load_baseline_manifest(prints_root)
+        committed = CommittedPrint.load(prints_root)
 
-        if baseline_manifest is None:
+        if committed.manifest is None:
             elapsed_ms = int((time.monotonic() - started) * 1000)
             self._log_connection(0, elapsed_ms, EXIT_GENERIC)
 
@@ -336,15 +415,32 @@ class Engine:
         conn_token = trace_context.connection.set(self._conn.name)
 
         try:
-            outcome = self._run_extraction(
-                force=True,
-                write_artifacts=False,
-                baseline_manifest=baseline_manifest,
-                cli_include=req.cli_include,
-                cli_exclude=req.cli_exclude,
-                generated_at=generated_at,
-                emitter=emitter,
-            )
+            try:
+                outcome = self._run_extraction(
+                    force=True,
+                    stage=None,
+                    committed=committed,
+                    cli_include=req.cli_include,
+                    cli_exclude=req.cli_exclude,
+                    generated_at=generated_at,
+                    emitter=emitter,
+                )
+            except (ListingSharesNothingWithBaseline, IdentifierRejected) as exc:
+                refused = isinstance(exc, IdentifierRejected)
+                exit_code = EXIT_GENERIC if refused else EXIT_CONNECTION
+                cause = _refusal_text(exc, committed) if refused else str(exc)
+                elapsed_ms = int((time.monotonic() - started) * 1000)
+                self._log_connection(0, elapsed_ms, exit_code)
+
+                return DiffResult(
+                    connection_name=self._conn.name,
+                    diff=_empty_diff_dict(self._conn, generated_at, self._project_root),
+                    target_scanned_tables=0,
+                    elapsed_ms=elapsed_ms,
+                    exit_code=exit_code,
+                    failed_tables=(cause,),
+                )
+
             diff_dict = outcome.diff_dict
             per_table_results = outcome.per_table_results
             per_table_meta = outcome.per_table_meta
@@ -397,34 +493,45 @@ class Engine:
         self,
         *,
         force: bool,
-        write_artifacts: bool,
-        baseline_manifest: dict[str, Any] | None,
+        stage: RunStage | None,
+        committed: CommittedPrint,
         cli_include: tuple[str, ...],
         cli_exclude: tuple[str, ...],
         generated_at: str,
         emitter: _ProgressEmitter | None = None,
         fail_fast: bool = False,
+        confirm_all_removed: bool = False,
     ) -> _ExtractionOutcome:
         """Run list_tables -> per-table extract -> relationship graph -> diff compute.
 
-        `write_artifacts` toggles the per-table writes and the pass-2 relationships rewrite;
-        manifest.yaml and diff.yaml are the caller's. `fail_fast` stops the table loop at the
-        first failure, off by default so run-all-then-report stays intact.
+        Writes only into `stage`; a baseline-disjoint listing raises unless `confirm_all_removed`.
         """
 
         emitter = emitter or _ProgressEmitter(None, self._conn.name)
-        prints_root = self._conn.output / self._conn.name
-        # Read before the loop, which overwrites what it reads: a baseline hydrated after the
-        # fact would compare the new state against itself and emit no per-table event.
-        baseline_states = _baseline_states_from_manifest(baseline_manifest)
-        _hydrate_baseline_states(baseline_states, prints_root, baseline_manifest)
         # Constant for the whole run; a config with no size condition issues no estimate.
         read_row_counts = self._conn.rules_read_row_counts
         # Constant for the whole run too (SPEC 2.2.2) - one catalog scalar, reused for every
         # column's omit-if-matches comparison and the manifest's own record.
         default_collation = self._adapter.default_collation()
-        # One catalog read for every view/matview this connection has. Any read failure degrades
-        # to omitting `depends_on` this run rather than failing the whole connection.
+
+        emitter.listing("start")
+        tables = self._adapter.list_tables(
+            include=list(self._conn.include),
+            exclude=list(self._conn.exclude),
+        )
+
+        skipped_namespaces = self._adapter.skipped_namespaces()
+
+        for skipped in skipped_namespaces:
+            _LOG.warning(
+                "connection %r: namespace %r could not be listed and is skipped: %s",
+                self._conn.name,
+                skipped.name,
+                skipped.cause,
+            )
+
+        # Read over the namespaces the listing selected from; a namespace that fails costs its own
+        # views' `depends_on`, and a failure outside any namespace costs every view's.
         try:
             with _operation("introspect_view_dependencies"):
                 dependencies_map = self._adapter.introspect_view_dependencies()
@@ -436,39 +543,104 @@ class Engine:
                 exc,
             )
             dependencies_map = None
-        per_table_results: list[TableResult] = []
-        per_table_refers_to: dict[str, list[ForeignKeyMeta]] = {}
-        per_table_meta: dict[str, _PerTableContext] = {}
-        resolved_thresholds: dict[str, int] = {}
 
-        emitter.listing("start")
-        tables = self._adapter.list_tables(
-            include=list(self._conn.include),
-            exclude=list(self._conn.exclude),
-        )
+        for unread in self._adapter.unread_dependency_namespaces():
+            _LOG.warning(
+                "connection %r: view dependencies in namespace %r could not be read; its "
+                "views omit depends_on this run: %s",
+                self._conn.name,
+                unread.name,
+                unread.cause,
+            )
+
         tables = _apply_cli_narrowing(tables, cli_include, cli_exclude)
+        emitter.listing("done", len(tables))
+        scope = _run_scope(self._conn, cli_include, cli_exclude)
+        in_scope = [fqn for fqn in committed.tables if scope.covers(fqn)]
+
+        if in_scope and not confirm_all_removed and not {t.fqn for t in tables} & set(in_scope):
+            raise ListingSharesNothingWithBaseline(len(in_scope), self._target)
+
+        # Only now: every session reads the identities `list_tables` just registered.
+        pool = self._open_pool()
+
+        try:
+            return self._run_pool(
+                pool,
+                tables,
+                force=force,
+                stage=stage,
+                committed=committed,
+                cli_include=cli_include,
+                cli_exclude=cli_exclude,
+                generated_at=generated_at,
+                emitter=emitter,
+                fail_fast=fail_fast,
+                read_row_counts=read_row_counts,
+                default_collation=default_collation,
+                dependencies_map=dependencies_map,
+                unlisted_namespaces=tuple(skipped.name for skipped in skipped_namespaces),
+            )
+        finally:
+            self._close_pool(pool)
+
+    def _run_pool(
+        self,
+        pool: SessionPool[Engine],
+        tables: list[TableMeta],
+        *,
+        force: bool,
+        stage: RunStage | None,
+        committed: CommittedPrint,
+        cli_include: tuple[str, ...],
+        cli_exclude: tuple[str, ...],
+        generated_at: str,
+        emitter: _ProgressEmitter,
+        fail_fast: bool,
+        read_row_counts: bool,
+        default_collation: str,
+        dependencies_map: dict[str, tuple[str, ...]] | None,
+        unlisted_namespaces: tuple[str, ...],
+    ) -> _ExtractionOutcome:
+        prints_root = self._conn.output / self._conn.name
         matched_fqns = tuple(t.fqn for t in tables)
         total = len(tables)
-        emitter.listing("done", total)
+        baseline_states = committed.baseline_states()
+        plan = plan_carry(
+            committed,
+            listed=matched_fqns,
+            scope=_run_scope(self._conn, cli_include, cli_exclude),
+            unlisted_namespaces=unlisted_namespaces,
+        )
+        # A committed edge naming a table the target stopped listing is re-read, not carried.
+        stale_neighbours = {
+            fqn
+            for fqn in matched_fqns
+            if fqn in committed.tables and _names_any(committed.tables[fqn], set(plan.removed))
+        }
         # Naming inference is global and needs the whole table universe before any one table
         # is classified: the committed print's table set, not just this run's matched tables.
         inventory = self._build_inventory(
-            tables + _baseline_only_tables(baseline_manifest, matched_fqns),
+            tables + committed.stand_ins(matched_fqns),
             emitter,
+            pool,
         )
 
-        for index, tbl in enumerate(tables, start=1):
-            emitter.table_start(index, total, tbl.fqn)
+        def extract(
+            engine: Engine,
+            item: tuple[int, TableMeta],
+        ) -> tuple[TableResult, _PerTableContext | None, int | None, tuple[str, ...]]:
+            index, tbl = item
             # Read by exec_query's own trace record; scoped to this table alone.
             fqn_token = trace_context.fqn.set(tbl.fqn)
 
             try:
-                result, ctx, max_age_days, matched_rules = self._process_table(
+                return engine._process_table(
                     tbl,
                     prints_root,
-                    baseline_manifest,
-                    force=force,
-                    dry_run=not write_artifacts,
+                    committed.tables.get(tbl.fqn),
+                    force=force or tbl.fqn in stale_neighbours,
+                    stage=stage,
                     generated_at=generated_at,
                     emitter=emitter,
                     index=index,
@@ -481,86 +653,117 @@ class Engine:
             finally:
                 trace_context.fqn.reset(fqn_token)
 
-            per_table_results.append(result)
+        finished: dict[int, tuple[TableResult, _PerTableContext | None, int | None]] = {}
+        # The session each extracted table's materialized sample lives on, for every later read.
+        owner: dict[str, int] = {}
+
+        for (index, tbl), worker, outcome in pool.free(
+            enumerate(tables, start=1),
+            extract,
+            on_submit=lambda item: emitter.table_start(item[0], total, item[1].fqn),
+            stop=lambda outcome: fail_fast and outcome[0].status == "failed",
+        ):
+            result, ctx, max_age_days, matched_rules = outcome
             emitter.table_done(index, total, result, ctx)
             _log_table_result(result, ctx, matched_rules)
+            finished[index] = (result, ctx, max_age_days)
+            owner[tbl.fqn] = worker
+
+        per_table_results: list[TableResult] = []
+        per_table_refers_to: dict[str, list[ForeignKeyMeta]] = {}
+        per_table_meta: dict[str, _PerTableContext] = {}
+        resolved_thresholds: dict[str, int] = {}
+
+        for index in sorted(finished):
+            result, ctx, max_age_days = finished[index]
+            per_table_results.append(result)
 
             if max_age_days is not None:
-                resolved_thresholds[tbl.fqn] = max_age_days
+                resolved_thresholds[result.fqn] = max_age_days
 
             if ctx is not None:
-                per_table_refers_to[tbl.fqn] = ctx.relationships
-                per_table_meta[tbl.fqn] = ctx
-
-            if fail_fast and result.status == "failed":
-                break
+                per_table_refers_to[result.fqn] = ctx.relationships
+                per_table_meta[result.fqn] = ctx
 
         emitter.finalizing("start", total)
 
         not_attempted = total - len(per_table_results)
+        carry = plan.settle(per_table_results)
+        per_table_results = _fail_unredacted_carries(per_table_results, carry, self._conn)
+        run_scope = _run_scope(self._conn, cli_include, cli_exclude)
+        failed_tables = _failed_tables(per_table_results, committed, run_scope, self._conn)
 
-        scope = _run_scope(self._conn, cli_include, cli_exclude)
-        carried_matched = _carried_matched(matched_fqns, per_table_meta, baseline_manifest)
-        carried_out_of_scope = _carried_out_of_scope(baseline_manifest, matched_fqns, scope)
-        # A carried entry whose declared artifacts are missing is dropped rather than
-        # re-indexed; computed once for both the manifest and the preserved edges.
-        baseline_tables = (baseline_manifest or {}).get("tables") or {}
-        dropped_carried = tuple(
-            fqn
-            for fqn in carried_matched + carried_out_of_scope
-            if fqn in baseline_tables and not _artifacts_present(prints_root, baseline_tables[fqn])
-        )
-
-        for fqn in dropped_carried:
+        for fqn in carry.missing_artifact:
             _LOG.warning(
                 "carried table %r has a missing artifact; dropping it from the manifest",
                 fqn,
             )
 
-        present_carried = tuple(
-            fqn for fqn in carried_matched + carried_out_of_scope if fqn not in dropped_carried
-        )
-
         # Pass 2 rewrites each relationships.yaml in full, so every table must have finished
         # pass 1. Sketches go first; the reverse index goes after both passes that read them.
         sketch_failures: tuple[SketchFailure, ...] = ()
+        carried = {c.table.fqn: c.table for c in carry.carried if c.table.relationships is not None}
+        carried_proposals: dict[str, list[ForeignKeyMeta]] = {}
 
         try:
-            if write_artifacts and not not_attempted:
-                sketch_failures = self._write_key_sketches(per_table_meta, emitter=emitter)
-                self._add_value_derived_edges(per_table_meta)
-                self._write_normalized_cardinalities(per_table_meta)
+            if stage is not None and not not_attempted:
+                sketch_failures = self._write_key_sketches(per_table_meta, pool, emitter=emitter)
+                carried_proposals = self._add_value_derived_edges(per_table_meta, carried)
+                self._write_normalized_cardinalities(per_table_meta, pool, owner)
         finally:
             # Every extracted table's materialized sample outlives extraction for
             # `_write_normalized_cardinalities` to read, so it is released here regardless.
-            for ctx in per_table_meta.values():
-                self._release_scope(ctx.fqn, ctx.read_scope)
+            list(
+                pool.pinned(
+                    ((owner[ctx.fqn], ctx) for ctx in per_table_meta.values()),
+                    lambda engine, ctx: engine._release_scope(ctx.fqn, ctx.read_scope),
+                ),
+            )
 
+        # Every referenced_by comes from its referencers' own refers_to: this run's list for a
+        # re-extracted table, the committed one (its measured edges re-proposed) for a carried one.
+        reread = {fqn for fqn, ctx in per_table_meta.items() if ctx.relationships_known}
+        carried_refers_to = {
+            fqn: _carried_refers_to(table, carried_proposals.get(fqn, []), reread)
+            for fqn, table in carried.items()
+        }
         incoming = relationship_graph.resolve(per_table_refers_to)
-        # A referencer this run left alone never had its relationships.yaml rewritten, so it
-        # still records what it refers to, provided its print exists (`present_carried`).
-        preserved = _preserved_incoming(
-            prints_root,
-            baseline_manifest,
-            present_carried,
-        )
+        from_carried = _incoming_from_carried(carried_refers_to)
 
         for fqn, ctx in per_table_meta.items():
-            ctx.referenced_by = _merge_incoming(incoming.get(fqn, []), preserved.get(fqn, []))
+            ctx.referenced_by = _merge_incoming(incoming.get(fqn, []), from_carried.get(fqn, []))
 
-        if write_artifacts and not not_attempted:
-            self._write_relationships_artifacts(prints_root, per_table_meta, baseline_states)
+        if stage is not None and not not_attempted:
+            self._write_relationships_artifacts(per_table_meta, committed, stage)
+
+            for fqn, table in carried.items():
+                artifact = _serialize_carried_relationships(
+                    table,
+                    carried_refers_to[fqn],
+                    incoming.get(fqn, []),
+                    reread,
+                    per_table_meta,
+                    committed,
+                )
+                # Compared through the one dumper rather than re-read: the committed file is
+                # already parsed, and the carry model reads each artifact once.
+                if artifact != _dump_yaml(table.relationships):
+                    stage.write(table.directory, {"relationships.yaml": artifact})
 
         diff_dict = _compute_diff_dict(
             project_root=self._project_root,
-            baseline_manifest=baseline_manifest,
+            committed=committed,
             baseline_states=baseline_states,
             per_table_meta=per_table_meta,
-            carried_matched=carried_matched,
+            not_reread=carry.not_reread,
+            unread=frozenset(
+                fqn for fqn in failed_tables if fqn in matched_fqns and fqn not in committed.tables
+            ),
             conn=self._conn,
             cli_include=cli_include,
             cli_exclude=cli_exclude,
             generated_at=generated_at,
+            default_collation=default_collation,
         )
 
         return _ExtractionOutcome(
@@ -569,15 +772,58 @@ class Engine:
             diff_dict=diff_dict,
             not_attempted=not_attempted,
             matched_fqns=matched_fqns,
-            carried_matched=carried_matched,
-            carried_out_of_scope=carried_out_of_scope,
-            dropped_carried=dropped_carried,
+            carry=carry,
             resolved_thresholds=resolved_thresholds,
             include=tuple(self._conn.include),
             exclude=tuple(self._conn.exclude),
             default_collation=default_collation,
             sketch_failures=sketch_failures,
+            failed_tables=failed_tables,
         )
+
+    def _open_pool(self) -> SessionPool[Engine]:
+        workers = [self]
+        wanted = self._conn.parallelism
+
+        for _ in range(wanted - 1):
+            session = self._adapter.new_session()
+
+            try:
+                session.connect()
+            except Exception as exc:  # noqa: BLE001 - fewer sessions is a warning, not a failure
+                _LOG.warning(
+                    "connection %r: an extra session could not open: %s",
+                    self._conn.name,
+                    _one_line(exc, self._conn.statement_timeout),
+                )
+                continue
+
+            workers.append(self._on_session(session))
+
+        if len(workers) < wanted:
+            _LOG.warning(
+                "connection %r: ran with %d of %d sessions",
+                self._conn.name,
+                len(workers),
+                wanted,
+            )
+
+        return SessionPool(workers)
+
+    def _close_pool(self, pool: SessionPool[Engine]) -> None:
+        pool.shutdown()
+
+        for worker in pool.workers[1:]:
+            try:
+                worker._adapter.close()
+            except Exception as exc:  # noqa: BLE001 - close-time failure is uninteresting
+                _LOG.warning("session close failed for connection %r: %s", self._conn.name, exc)
+
+    def _on_session(self, session: Adapter) -> Engine:
+        worker = copy.copy(self)
+        worker._adapter = session
+
+        return worker
 
     # Per-table processing.
 
@@ -585,10 +831,10 @@ class Engine:
         self,
         tbl: TableMeta,
         prints_root: Path,
-        baseline_manifest: dict[str, Any] | None,
+        committed: CommittedTable | None,
         *,
         force: bool,
-        dry_run: bool,
+        stage: RunStage | None,
         generated_at: str,
         emitter: _ProgressEmitter,
         index: int,
@@ -622,7 +868,7 @@ class Engine:
                         fqn=tbl.fqn,
                         status="failed",
                         elapsed_ms=int((time.monotonic() - started) * 1000),
-                        **_error_fields(exc),
+                        **_error_fields(exc, self._conn.statement_timeout),
                     ),
                     None,
                     None,
@@ -647,7 +893,7 @@ class Engine:
                     fqn=tbl.fqn,
                     status="failed",
                     elapsed_ms=int((time.monotonic() - started) * 1000),
-                    **_error_fields(exc),
+                    **_error_fields(exc, self._conn.statement_timeout),
                 ),
                 None,
                 None,
@@ -661,18 +907,20 @@ class Engine:
                 tbl.fqn,
             )
 
-        if not force and _is_fresh(
-            baseline_manifest,
-            tbl.fqn,
-            settings.max_age_days,
-            generated_at,
-        ):
+        verdict = (
+            None
+            if force
+            else freshness(committed, settings, generated_at=generated_at, conn=self._conn)
+        )
+
+        if verdict is not None and verdict.fresh:
             return (
                 TableResult(
                     fqn=tbl.fqn,
                     status="skipped",
                     error=None,
                     elapsed_ms=int((time.monotonic() - started) * 1000),
+                    reason=verdict.reason,
                 ),
                 None,
                 settings.max_age_days,
@@ -694,27 +942,34 @@ class Engine:
                 dependencies_map,
             )
         except Exception as exc:  # noqa: BLE001 - run-all-then-report; fails this table only
+            cause = exc.cause if isinstance(exc, _OperationFailed) else exc
+
+            if isinstance(cause, UnrepresentableValue):
+                cause.table = tbl.fqn
+
             return (
                 TableResult(
                     fqn=tbl.fqn,
                     status="failed",
                     elapsed_ms=int((time.monotonic() - started) * 1000),
-                    **_error_fields(exc),
+                    reason=verdict.reason if verdict is not None else None,
+                    **_error_fields(exc, self._conn.statement_timeout),
                 ),
                 None,
                 settings.max_age_days,
                 settings.matched_rules,
             )
 
-        if not dry_run:
+        if stage is not None:
             emitter.table_phase(index, total, tbl.fqn, "write")
             artifacts: dict[str, str | bytes] = {"ddl.sql": ctx.ddl}
 
             if ctx.statistics_yaml is not None:
                 artifacts["statistics.yaml"] = ctx.statistics_yaml
-            write_atomic(tbl_dir, artifacts)
+            stage.write(tbl_dir, artifacts)
 
         ctx.tbl_dir = tbl_dir
+        ctx.stage = stage
         ctx.has_description = (tbl_dir / DESCRIPTION_FILENAME).is_file()
         ctx.has_statistics_annotations = (tbl_dir / STATISTICS_ANNOTATIONS_FILENAME).is_file()
         ctx.has_relationships_annotations = (tbl_dir / RELATIONSHIPS_ANNOTATIONS_FILENAME).is_file()
@@ -725,6 +980,7 @@ class Engine:
                 status="ok",
                 error=None,
                 elapsed_ms=int((time.monotonic() - started) * 1000),
+                reason=verdict.reason if verdict is not None else None,
             ),
             ctx,
             settings.max_age_days,
@@ -774,7 +1030,7 @@ class Engine:
             _LOG.warning(
                 "introspect_relationships failed for %r: %s",
                 tbl.fqn,
-                _one_line(exc.cause),
+                _one_line(exc.cause, self._conn.statement_timeout),
             )
             relationships = []
             relationships_known = False
@@ -788,7 +1044,11 @@ class Engine:
 
             indexes_known = True
         except _OperationFailed as exc:
-            _LOG.warning("introspect_indexes failed for %r: %s", tbl.fqn, _one_line(exc.cause))
+            _LOG.warning(
+                "introspect_indexes failed for %r: %s",
+                tbl.fqn,
+                _one_line(exc.cause, self._conn.statement_timeout),
+            )
             indexes = []
             indexes_known = False
 
@@ -798,7 +1058,11 @@ class Engine:
 
             comments_known = True
         except _OperationFailed as exc:
-            _LOG.warning("extract_comments failed for %r: %s", tbl.fqn, _one_line(exc.cause))
+            _LOG.warning(
+                "extract_comments failed for %r: %s",
+                tbl.fqn,
+                _one_line(exc.cause, self._conn.statement_timeout),
+            )
             comments = CommentsMeta(table=None, columns={})
             comments_known = False
 
@@ -851,7 +1115,7 @@ class Engine:
             _LOG.warning(
                 "introspect_physical_layout failed for %r: %s",
                 tbl.fqn,
-                _one_line(exc.cause),
+                _one_line(exc.cause, self._conn.statement_timeout),
             )
             physical_layout = None
             physical_layout_known = False
@@ -865,7 +1129,7 @@ class Engine:
             _LOG.warning(
                 "introspect_unique_keys failed for %r: %s",
                 tbl.fqn,
-                _one_line(exc.cause),
+                _one_line(exc.cause, self._conn.statement_timeout),
             )
             declared_keys = None
 
@@ -876,18 +1140,25 @@ class Engine:
 
         try:
             with _operation("compute_base_statistics"):
-                counts, base = self._adapter.compute_base_statistics(
+                counts, phase_a = self._adapter.compute_base_statistics(
                     tbl.fqn,
                     columns,
                     settings.statistics,
                     read_scope,
                 )
 
+            _warn_degraded_phase_a(tbl.fqn, phase_a, self._conn.statement_timeout)
+            base = phase_a.stats
+            # SPEC 2.2.4: every later pass reads measured columns only, so no block claims
+            # anything about a column phase A could not measure.
+            measured = [c for c in columns if c.name not in phase_a.unmeasured]
+            degraded = bool(phase_a.unmeasured)
+
             # Detection sits between the phases: `looks_like` decides whether a value list
             # is worth enumerating before Phase B pays for the scan.
             detected = self._detect_columns(
                 tbl.fqn,
-                columns,
+                measured,
                 base,
                 counts,
                 fk_source_columns,
@@ -895,11 +1166,12 @@ class Engine:
                 read_scope,
             )
             suppressed = _suppressed_columns(detected)
+            unsampled = {name for name, d in detected.items() if d.sample_error is not None}
 
             with _operation("compute_column_statistics"):
-                stats = self._adapter.compute_column_statistics(
+                phase_b = self._adapter.compute_column_statistics(
                     tbl.fqn,
-                    columns,
+                    [c for c in measured if c.name not in unsampled],
                     settings.statistics,
                     counts,
                     base,
@@ -909,30 +1181,44 @@ class Engine:
                     scope=read_scope,
                 )
 
-            try:
-                with _operation("compute_null_patterns"):
-                    null_patterns = self._adapter.compute_null_patterns(
-                        tbl.fqn,
-                        columns,
-                        settings.statistics,
-                        counts,
-                        base,
-                        read_scope,
-                    )
-            except _OperationFailed as exc:
-                _LOG.warning(
-                    "compute_null_patterns failed for %r: %s",
-                    tbl.fqn,
-                    _one_line(exc.cause),
-                )
+            stats = dict(phase_b.stats)
+            unread = unsampled | set(phase_b.unmeasured)
+            _warn_degraded_blocks(tbl.fqn, stats, self._conn.statement_timeout)
+            _warn_degraded_phase_b(
+                tbl.fqn,
+                [c.name for c in measured if c.name in unread],
+                [*(detected[n].sample_error for n in sorted(unsampled)), *phase_b.failures],
+                self._conn.statement_timeout,
+            )
+
+            if degraded:
                 null_patterns = None
                 null_patterns_known = False
             else:
-                null_patterns_known = True
+                try:
+                    with _operation("compute_null_patterns"):
+                        null_patterns = self._adapter.compute_null_patterns(
+                            tbl.fqn,
+                            measured,
+                            settings.statistics,
+                            counts,
+                            base,
+                            read_scope,
+                        )
+                except _OperationFailed as exc:
+                    _LOG.warning(
+                        "compute_null_patterns failed for %r: %s",
+                        tbl.fqn,
+                        _one_line(exc.cause, self._conn.statement_timeout),
+                    )
+                    null_patterns = None
+                    null_patterns_known = False
+                else:
+                    null_patterns_known = True
 
             grain, grain_probe_ok = self._compute_grain(
                 tbl.fqn,
-                columns,
+                measured,
                 base,
                 counts,
                 detected,
@@ -940,18 +1226,25 @@ class Engine:
                 read_scope,
             )
 
-            dependencies, dependencies_known = self._compute_dependencies(
-                tbl.fqn,
-                columns,
-                base,
-                counts,
-                detected,
-                read_scope,
+            if degraded and grain.search_exhausted:
+                grain = replace(grain, search_exhausted=False)
+
+            dependencies, dependencies_known = (
+                ((), False)
+                if degraded
+                else self._compute_dependencies(
+                    tbl.fqn,
+                    measured,
+                    base,
+                    counts,
+                    detected,
+                    read_scope,
+                )
             )
 
             timeline = self._compute_timeline(
                 tbl.fqn,
-                columns,
+                measured,
                 base,
                 stats,
                 counts,
@@ -962,7 +1255,7 @@ class Engine:
 
             populated_windows = self._compute_populated_windows(
                 tbl.fqn,
-                columns,
+                measured,
                 base,
                 counts,
                 timeline,
@@ -974,7 +1267,28 @@ class Engine:
             self._release_scope(tbl.fqn, read_scope)
             raise
 
-        enriched = _assemble_stats(tbl.fqn, columns, stats, detected, suppressed, generated_at)
+        enriched = _assemble_stats(tbl.fqn, measured, stats, detected, suppressed, generated_at)
+
+        if unread:
+            enriched = _with_phase_b_unread(
+                columns,
+                enriched,
+                unread,
+                base,
+                detected,
+                counts.rows_scanned,
+            )
+
+        if degraded:
+            enriched = _with_unmeasured_columns(
+                columns,
+                enriched,
+                phase_a.unmeasured,
+                counts.rows_scanned,
+                fk_source_columns,
+                settings.statistics.enumeration_threshold,
+            )
+
         _stamp_values_coverage_method(tbl.fqn, counts.rows_scanned, enriched)
         statistics_yaml = _serialize_statistics(
             tbl.fqn,
@@ -1038,6 +1352,7 @@ class Engine:
         self,
         tables: list[TableMeta],
         emitter: _ProgressEmitter | None = None,
+        pool: SessionPool[Engine] | None = None,
     ) -> dict[str, inference.TableInventory]:
         """Read columns and declared keys for every object in `tables`, ahead of statistics.
 
@@ -1050,59 +1365,69 @@ class Engine:
         if not self._conn.infer_relationships:
             return {}
 
-        out: dict[str, inference.TableInventory] = {}
+        pool = pool or SessionPool([self])
+        read: dict[int, inference.TableInventory] = {}
         total = len(tables)
 
         if emitter is not None:
             emitter.inventory_phase("start", total)
 
-        for index, tbl in enumerate(tables, start=1):
-            if emitter is not None:
-                emitter.inventory_tick(index, total, tbl.fqn)
-
-            # Read by exec_query's own trace record; scoped to this table alone.
-            fqn_token = trace_context.fqn.set(tbl.fqn)
-
-            try:
-                try:
-                    with _operation("introspect_columns"):
-                        columns = self._adapter.introspect_columns(tbl.fqn)
-                except Exception as exc:  # noqa: BLE001 - degrade to no pre-read columns
-                    _LOG.warning(
-                        "catalog pre-pass introspect_columns failed for %r: %s",
-                        tbl.fqn,
-                        exc,
-                    )
-                    columns = []
-
-                keys_known = True
-
-                try:
-                    with _operation("introspect_unique_keys"):
-                        unique_keys = self._adapter.introspect_unique_keys(tbl.fqn)
-                except Exception as exc:  # noqa: BLE001 - degrade to no pre-read keys
-                    _LOG.warning(
-                        "catalog pre-pass introspect_unique_keys failed for %r: %s",
-                        tbl.fqn,
-                        exc,
-                    )
-                    unique_keys = []
-                    keys_known = False
-            finally:
-                trace_context.fqn.reset(fqn_token)
-
-            out[tbl.fqn] = inference.TableInventory.from_catalog(
-                tbl.fqn,
-                tbl.type,
-                columns,
-                unique_keys,
-                keys_known=keys_known,
-            )
+        # Ticked at submission, which runs in listing order however the reads finish.
+        for (index, _tbl), _worker, entry in pool.free(
+            enumerate(tables, start=1),
+            lambda engine, item: engine._inventory_entry(item[1]),
+            on_submit=(
+                (lambda item: emitter.inventory_tick(item[0], total, item[1].fqn))
+                if emitter is not None
+                else None
+            ),
+        ):
+            read[index] = entry
 
         if emitter is not None:
             emitter.inventory_phase("done", total)
 
-        return out
+        return {read[index].fqn: read[index] for index in sorted(read)}
+
+    def _inventory_entry(self, tbl: TableMeta) -> inference.TableInventory:
+        # Read by exec_query's own trace record; scoped to this table alone.
+        fqn_token = trace_context.fqn.set(tbl.fqn)
+
+        try:
+            try:
+                with _operation("introspect_columns"):
+                    columns = self._introspect_columns(tbl.fqn)
+            except Exception as exc:  # noqa: BLE001 - degrade to no pre-read columns
+                _LOG.warning(
+                    "catalog pre-pass introspect_columns failed for %r: %s",
+                    tbl.fqn,
+                    exc,
+                )
+                columns = []
+
+            keys_known = True
+
+            try:
+                with _operation("introspect_unique_keys"):
+                    unique_keys = self._adapter.introspect_unique_keys(tbl.fqn)
+            except Exception as exc:  # noqa: BLE001 - degrade to no pre-read keys
+                _LOG.warning(
+                    "catalog pre-pass introspect_unique_keys failed for %r: %s",
+                    tbl.fqn,
+                    exc,
+                )
+                unique_keys = []
+                keys_known = False
+        finally:
+            trace_context.fqn.reset(fqn_token)
+
+        return inference.TableInventory.from_catalog(
+            tbl.fqn,
+            tbl.type,
+            columns,
+            unique_keys,
+            keys_known=keys_known,
+        )
 
     def _columns_for(
         self,
@@ -1121,7 +1446,25 @@ class Engine:
         if entry is not None and entry.columns:
             return list(entry.columns)
 
-        return self._adapter.introspect_columns(fqn)
+        return self._introspect_columns(fqn)
+
+    def _introspect_columns(self, fqn: str) -> list[ColumnMeta]:
+        """The catalog's columns for `fqn`, refused when two fold to one map key (SPEC 1.5.2)."""
+
+        columns = self._adapter.introspect_columns(fqn)
+        reject_column_collisions(fqn, columns)
+
+        for col in columns:
+            if not self._adapter.recognises_type(col.classified_type):
+                _LOG.warning(
+                    "table %r, column %r: SQL type %r is not recognised; "
+                    "classified by measurement as text",
+                    fqn,
+                    col.name,
+                    col.sql_type,
+                )
+
+        return columns
 
     def _inferred_edges(
         self,
@@ -1187,11 +1530,15 @@ class Engine:
                 if measured
                 else None
             )
-            classification = classify(
-                sql_type=col.sql_type,
-                cardinality=stats.cardinality if measured else None,
-                has_declared_fk=col.name in fk_source_columns,
-                enumeration_threshold=settings.statistics.enumeration_threshold,
+            classification = (
+                classify(
+                    sql_type=col.classified_type,
+                    cardinality=stats.cardinality,
+                    has_declared_fk=col.name in fk_source_columns,
+                    enumeration_threshold=settings.statistics.enumeration_threshold,
+                )
+                if measured
+                else "unsupported"
             )
 
             looks_like_value = None
@@ -1204,15 +1551,22 @@ class Engine:
 
             # Sampling is what `looks_like` costs, so it is gated on the classifications
             # SPEC 4.1.5 names; `sensitivity` reads catalog metadata plus the sample if drawn.
-            if classification in _LOOKS_LIKE_CLASSIFICATIONS:
-                with _operation("sample_values"):
-                    samples = self._adapter.sample_values(
-                        fqn,
-                        col.name,
-                        settings.statistics.looks_like_sample_size,
-                        scope,
-                    )
+            sample_error = None
 
+            if classification in SAMPLED_CLASSIFICATIONS:
+                try:
+                    with _operation("sample_values"):
+                        samples = self._adapter.sample_values(
+                            fqn,
+                            col.name,
+                            settings.statistics.looks_like_sample_size,
+                            scope,
+                            sql_type=col.classified_type,
+                        )
+                except _OperationFailed as exc:
+                    sample_error = exc.cause if isinstance(exc.cause, Exception) else exc
+
+            if sample_error is None and classification in SAMPLED_CLASSIFICATIONS:
                 try:
                     match = detect_with_evidence(samples)
                     looks_like_value = match.pattern
@@ -1225,7 +1579,7 @@ class Engine:
                         exc,
                     )
                 else:
-                    is_numeric_sql_type = _matches(base_type(col.sql_type), _NUMERIC_TYPES)
+                    is_numeric_sql_type = is_numeric_type(col.classified_type)
 
                     # SPEC 4.1.5: `numeric_string` on a numeric-typed column restates the type it
                     # already carries, so verdict and near-miss alike are withheld.
@@ -1298,15 +1652,18 @@ class Engine:
             ):
                 inferred = None
 
-            redaction = (
-                None
-                if classification in _NO_CELL_VALUE_CLASSIFICATIONS
-                else self._conn.redaction_for(f"{fqn}.{col.name}", sensitivity, looks_like_value)
+            redaction = resolved_redaction(
+                self._conn,
+                f"{fqn}.{col.name}",
+                classification,
+                sensitivity,
+                looks_like_value,
             )
             out[col.name] = _ColumnDetection(
                 classification=classification,
                 inferred=inferred,
                 redaction=redaction,
+                sample_error=sample_error,
             )
 
         return out
@@ -1352,7 +1709,11 @@ class Engine:
             except _OperationFailed as exc:
                 # A self-contained optional field: the declared keys above still stand, only
                 # the measured search is lost, and the table is not.
-                _LOG.warning("probe_grain failed for %r: %s", fqn, _one_line(exc.cause))
+                _LOG.warning(
+                    "probe_grain failed for %r: %s",
+                    fqn,
+                    _one_line(exc.cause, self._conn.statement_timeout),
+                )
 
                 return Grain(keys=keys, search_exhausted=None), False
 
@@ -1397,7 +1758,11 @@ class Engine:
         except _OperationFailed as exc:
             # A self-contained optional field: nothing else depends on it, so its own loss
             # never costs the table.
-            _LOG.warning("probe_dependencies failed for %r: %s", fqn, _one_line(exc.cause))
+            _LOG.warning(
+                "probe_dependencies failed for %r: %s",
+                fqn,
+                _one_line(exc.cause, self._conn.statement_timeout),
+            )
 
             return (), False
 
@@ -1438,6 +1803,11 @@ class Engine:
         if column is None:
             return None
 
+        if column not in stats:
+            _LOG.warning("table %r: timeline anchor %r was not measured; no timeline", fqn, column)
+
+            return None
+
         col_range = stats[column].range
         unit = _timeline_unit(col_range.span_days if col_range is not None else None)
 
@@ -1445,9 +1815,16 @@ class Engine:
             with _operation("probe_timeline"):
                 rows = self._adapter.probe_timeline(fqn, columns, counts, column, unit, scope)
         except _OperationFailed as exc:
+            if isinstance(exc.cause, UnrepresentableValue):
+                raise
+
             # A self-contained optional field: `populated` (below) requires it, so its own
             # loss cascades to that one too, but never past both.
-            _LOG.warning("probe_timeline failed for %r: %s", fqn, _one_line(exc.cause))
+            _LOG.warning(
+                "probe_timeline failed for %r: %s",
+                fqn,
+                _one_line(exc.cause, self._conn.statement_timeout),
+            )
 
             return None
 
@@ -1500,12 +1877,15 @@ class Engine:
                     scope,
                 )
         except _OperationFailed as exc:
+            if isinstance(exc.cause, UnrepresentableValue):
+                raise
+
             # A self-contained optional field: nothing else depends on it, so its own loss
             # never costs the table.
             _LOG.warning(
                 "compute_populated_windows failed for %r: %s",
                 fqn,
-                _one_line(exc.cause),
+                _one_line(exc.cause, self._conn.statement_timeout),
             )
 
             return {}
@@ -1537,10 +1917,12 @@ class Engine:
         try:
             return self._adapter.materialize_scope(fqn, scope)
         except Exception as exc:  # refuse or degrade, per adapter coherence
+            cause = _one_line(exc, self._conn.statement_timeout)
+
             if not self._adapter.SAMPLE_FALLBACK_COHERENT:
                 raise SampleFallbackIncoherent(
                     f"table {fqn!r}: connection {self._conn.name!r} ({self._conn.adapter}) "
-                    f"could not materialize its sample of {scope.sample} ({exc}), and this "
+                    f"could not materialize its sample of {scope.sample} ({cause}), and this "
                     f"adapter's per-statement fallback cannot be seeded into agreement across "
                     f"statements. Narrow with a filter instead of a sample fraction.",
                 ) from exc
@@ -1550,7 +1932,7 @@ class Engine:
                 "is measured over its own draw of the rows",
                 fqn,
                 scope.sample,
-                exc,
+                cause,
             )
 
             return scope
@@ -1579,9 +1961,9 @@ class Engine:
 
     def _write_relationships_artifacts(
         self,
-        prints_root: Path,
         per_table_meta: dict[str, _PerTableContext],
-        baseline_states: dict[str, diff_module.TableState] | None,
+        committed: CommittedPrint,
+        stage: RunStage,
     ) -> None:
         for fqn, ctx in per_table_meta.items():
             if not ctx.relationships_known:
@@ -1589,12 +1971,13 @@ class Engine:
                 # declaration, so writing the file would leave one the manifest does not name.
                 continue
 
-            artifact = _serialize_relationships(fqn, ctx, per_table_meta, baseline_states)
-            write_atomic(ctx.tbl_dir, {"relationships.yaml": artifact})
+            artifact = _serialize_relationships(fqn, ctx, per_table_meta, committed)
+            stage.write(ctx.tbl_dir, {"relationships.yaml": artifact})
 
     def _write_key_sketches(
         self,
         per_table_meta: dict[str, _PerTableContext],
+        pool: SessionPool[Engine] | None = None,
         *,
         emitter: _ProgressEmitter | None = None,
     ) -> tuple[SketchFailure, ...]:
@@ -1607,7 +1990,7 @@ class Engine:
         """
 
         emitter = emitter or _ProgressEmitter(None, self._conn.name)
-        failures: list[SketchFailure] = []
+        pool = pool or SessionPool([self])
         candidates: dict[str, set[str]] = {}
 
         for ctx in per_table_meta.values():
@@ -1661,13 +2044,17 @@ class Engine:
             if not isinstance(cols_payload, dict):
                 continue
 
-            sql_types = {c.name: c.sql_type for c in ctx.columns}
+            sql_types = {c.name: c.classified_type for c in ctx.columns}
             eligible_columns: list[tuple[str, str, SketchKind]] = []
 
             for column in sorted(columns):
                 col_payload = cols_payload.get(column)
 
-                if not isinstance(col_payload, dict) or col_payload.get("redacted") is not None:
+                if not isinstance(col_payload, dict) or is_redacted(col_payload):
+                    continue
+
+                # Unmeasured by phase A: no cardinality, and no redaction marker to consult either.
+                if not isinstance(col_payload.get("cardinality"), int):
                     continue
 
                 sql_type = sql_types.get(column)
@@ -1691,89 +2078,156 @@ class Engine:
         if table_total == 0:
             # No eligible column anywhere - the pass never starts, so the renderer sees no bar
             # switch, no banner and no sketch event at all.
-            return tuple(failures)
+            return ()
 
         emitter.sketch_phase("start", table_total)
+        failures: dict[str, list[SketchFailure]] = {}
 
-        for table_index, fqn in enumerate(sorted_fqns, start=1):
-            ctx = per_table_meta[fqn]
-            payload = ctx.statistics_payload
-            cols_payload = payload.get("columns")
-
-            if not isinstance(cols_payload, dict):
-                continue  # already proven true by the eligibility pass; narrows the type
-
-            columns = eligible[fqn]
-            column_total = len(columns)
-            changed = False
-            table_error: str | None = None
-            started = time.monotonic()
-
-            emitter.sketch_table("start", table_index, table_total, fqn)
-
-            for column_index, (column, sql_type, kind) in enumerate(columns, start=1):
-                emitter.sketch_column(
-                    table_index,
-                    table_total,
-                    fqn,
-                    column,
-                    column_index,
-                    column_total,
-                )
-                col_payload = cols_payload[column]
-
-                try:
-                    with _operation("compute_key_sketch"):
-                        hashes = self._adapter.compute_key_sketch(
-                            fqn,
-                            column,
-                            sql_type,
-                            kind,
-                            SKETCH_K,
-                        )
-                except Exception as exc:  # noqa: BLE001 - run-all-then-report; this column only
-                    cause = exc.cause if isinstance(exc, _OperationFailed) else exc
-                    error_text = _one_line(cause)
-                    failures.append(SketchFailure(table=fqn, column=column, error=error_text))
-                    table_error = table_error or error_text
-                    continue
-
-                if not hashes and col_payload.get("cardinality") != 0:
-                    continue  # adapter declined (e.g. an unreadable column) - no honest answer
-
-                col_payload["sketch"] = {
-                    "method": SKETCH_METHOD,
-                    "values": pack_sketch(list(hashes)),
-                }
-                changed = True
-
-            elapsed_ms = int((time.monotonic() - started) * 1000)
-            emitter.sketch_table(
-                "failed" if table_error is not None else "done",
-                table_index,
+        for (_table_index, fqn), _worker, table_failures in pool.free(
+            enumerate(sorted_fqns, start=1),
+            lambda engine, item: engine._sketch_table(
+                per_table_meta[item[1]],
+                eligible[item[1]],
+                item[0],
                 table_total,
-                fqn,
-                elapsed_ms=elapsed_ms,
-                error=table_error,
-            )
-
-            if changed:
-                ctx.statistics_yaml = _dump_yaml(payload)
-                write_atomic(ctx.tbl_dir, {"statistics.yaml": ctx.statistics_yaml})
+                emitter,
+            ),
+        ):
+            failures[fqn] = table_failures
 
         emitter.sketch_phase("done", table_total)
 
-        return tuple(failures)
+        return tuple(failure for fqn in sorted_fqns for failure in failures.get(fqn, ()))
 
-    def _add_value_derived_edges(self, per_table_meta: dict[str, _PerTableContext]) -> None:
-        """SPEC 2.3: propose an edge from measured value containment alone, no query issued -
-        appended into `ctx.relationships`, so it feeds the same writer every other edge does.
+    def _sketch_table(
+        self,
+        ctx: _PerTableContext,
+        columns: list[tuple[str, str, SketchKind]],
+        table_index: int,
+        table_total: int,
+        emitter: _ProgressEmitter,
+    ) -> list[SketchFailure]:
+        fqn = ctx.fqn
+        payload = ctx.statistics_payload
+        cols_payload = payload.get("columns")
+        failures: list[SketchFailure] = []
+
+        if not isinstance(cols_payload, dict):
+            return failures  # already proven true by the eligibility pass; narrows the type
+
+        column_total = len(columns)
+        added: dict[str, dict[str, Any]] = {}
+        table_error: str | None = None
+        started = time.monotonic()
+
+        emitter.sketch_table("start", table_index, table_total, fqn)
+
+        for column_index, (column, sql_type, kind) in enumerate(columns, start=1):
+            emitter.sketch_column(
+                table_index,
+                table_total,
+                fqn,
+                column,
+                column_index,
+                column_total,
+            )
+            col_payload = cols_payload[column]
+
+            try:
+                with _operation("compute_key_sketch"):
+                    hashes = self._adapter.compute_key_sketch(
+                        fqn,
+                        column,
+                        sql_type,
+                        kind,
+                        SKETCH_K,
+                    )
+            except Exception as exc:  # noqa: BLE001 - run-all-then-report; this column only
+                cause = exc.cause if isinstance(exc, _OperationFailed) else exc
+                error_text = _one_line(cause, self._conn.statement_timeout)
+                failures.append(SketchFailure(table=fqn, column=column, error=error_text))
+                table_error = table_error or error_text
+                continue
+
+            if not hashes and col_payload.get("cardinality") != 0:
+                continue  # adapter declined (e.g. an unreadable column) - no honest answer
+
+            added[column] = {
+                "sketch": {"method": SKETCH_METHOD, "values": pack_sketch(list(hashes))},
+            }
+
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        emitter.sketch_table(
+            "failed" if table_error is not None else "done",
+            table_index,
+            table_total,
+            fqn,
+            elapsed_ms=elapsed_ms,
+            error=table_error,
+        )
+
+        if added:
+            _rewrite_statistics(ctx, added)
+
+        return failures
+
+    def _add_value_derived_edges(
+        self,
+        per_table_meta: dict[str, _PerTableContext],
+        carried: Mapping[str, CommittedTable],
+    ) -> dict[str, list[ForeignKeyMeta]]:
+        """SPEC 2.3: propose an edge from measured value containment alone, no query issued.
+
+        Carried children's proposals are returned, not joined; two carried tables never compare.
         """
 
         threshold = self._conn.statistics.enumeration_threshold
         children: list[inference.SketchCandidate] = []
         parents: list[inference.SketchCandidate] = []
         existing: set[tuple[str, str, str, str]] = set()
+
+        for fqn, table in carried.items():
+            for entry in table.refers_to:
+                columns, targets = entry.get("column"), entry.get("target_column")
+
+                if (
+                    entry.get("detection") != "measured"
+                    and isinstance(columns, list)
+                    and isinstance(targets, list)
+                    and len(columns) == len(targets) == 1
+                ):
+                    existing.add((fqn, columns[0], str(entry.get("target_table")), targets[0]))
+
+            statistics = table.statistics or {}
+
+            if isinstance(statistics.get("scope"), dict):
+                continue  # a sketch is never computed under scope (SPEC 2.2.14)
+
+            declared = _declared_single_keys(statistics)
+
+            for column, committed_column in table.columns.items():
+                sketch = _decode_column_sketch(committed_column.sketch)
+                cardinality = committed_column.cardinality
+
+                if sketch is None or committed_column.sql_type is None:
+                    continue
+
+                if not isinstance(cardinality, int):
+                    continue
+
+                candidate = inference.SketchCandidate(
+                    fqn,
+                    column,
+                    committed_column.sql_type,
+                    cardinality,
+                    sketch,
+                )
+
+                if column in declared or committed_column.candidate_key:
+                    parents.append(candidate)
+
+                if committed_column.candidate_key or cardinality > threshold:
+                    children.append(candidate)
 
         for fqn, ctx in per_table_meta.items():
             for fk in ctx.relationships:
@@ -1787,7 +2241,7 @@ class Engine:
                 continue  # a sketch is never computed under scope (SPEC 2.2.14)
 
             single_col_keys = {uk.columns[0] for uk in ctx.unique_keys if len(uk.columns) == 1}
-            sql_types = {c.name: c.sql_type for c in ctx.columns}
+            sql_types = {c.name: c.classified_type for c in ctx.columns}
 
             for column, col_payload in cols_payload.items():
                 if not isinstance(col_payload, dict):
@@ -1815,13 +2269,24 @@ class Engine:
                     children.append(candidate)
 
         proposed = inference.infer_value_derived_edges(children, parents, frozenset(existing))
+        carried_children: dict[str, list[ForeignKeyMeta]] = {}
 
-        for target_fqn, edges in proposed.items():
-            per_table_meta[target_fqn].relationships.extend(edges)
+        for child_fqn, edges in proposed.items():
+            if child_fqn in per_table_meta:
+                per_table_meta[child_fqn].relationships.extend(edges)
+            elif kept := [e for e in edges if e.target_table in per_table_meta]:
+                carried_children[child_fqn] = kept
 
-    def _write_normalized_cardinalities(self, per_table_meta: dict[str, _PerTableContext]) -> None:
+        return carried_children
+
+    def _write_normalized_cardinalities(
+        self,
+        per_table_meta: dict[str, _PerTableContext],
+        pool: SessionPool[Engine] | None = None,
+        owner: dict[str, int] | None = None,
+    ) -> None:
         """SPEC 2.2.4: the trimmed/case-folded distinct count for the join-key population - second
-        pass, like `_write_key_sketches`, but a redacted or scoped column stays eligible here.
+        pass, like `_write_key_sketches`; a scoped column stays eligible, a redacted one withholds it.
         """
 
         candidates: dict[str, set[str]] = {}
@@ -1849,84 +2314,90 @@ class Engine:
             if declared:
                 candidates.setdefault(ctx.fqn, set()).update(declared)
 
-        for fqn in sorted(candidates):
-            ctx = per_table_meta.get(fqn)
+        pool = pool or SessionPool([self])
+        owner = owner or {}
+        # A target's own table not re-extracted this run has nothing to measure.
+        units = [
+            (owner.get(fqn, 0), (per_table_meta[fqn], sorted(columns)))
+            for fqn, columns in sorted(candidates.items())
+            if fqn in per_table_meta
+        ]
 
-            if ctx is None:
-                continue  # target's own table wasn't re-extracted this run
+        list(pool.pinned(units, lambda engine, unit: engine._normalize_table(*unit)))
 
-            payload = ctx.statistics_payload
+    def _normalize_table(self, ctx: _PerTableContext, columns: list[str]) -> None:
+        payload = ctx.statistics_payload
 
-            if not payload or payload.get("catalog_only") is True:
-                continue  # nothing was queried at all (SPEC 2.2.15) - no live read to re-take
+        if not payload or payload.get("catalog_only") is True:
+            return  # nothing was queried at all (SPEC 2.2.15) - no live read to re-take
 
-            cols_payload = payload.get("columns")
+        cols_payload = payload.get("columns")
 
-            if not isinstance(cols_payload, dict):
+        if not isinstance(cols_payload, dict):
+            return
+
+        sql_types = {c.name: c.classified_type for c in ctx.columns}
+        added: dict[str, dict[str, Any]] = {}
+
+        for column in columns:
+            col_payload = cols_payload.get(column)
+
+            if not isinstance(col_payload, dict) or not isinstance(
+                col_payload.get("cardinality"),
+                int,
+            ):
                 continue
 
-            sql_types = {c.name: c.sql_type for c in ctx.columns}
-            changed = False
+            if is_redacted(col_payload) or not is_string_like_type(sql_types.get(column, "")):
+                continue
 
-            for column in sorted(candidates[fqn]):
-                col_payload = cols_payload.get(column)
-
-                if not isinstance(col_payload, dict) or not isinstance(
-                    col_payload.get("cardinality"),
-                    int,
-                ):
-                    continue
-
-                if not is_string_like_type(sql_types.get(column, "")):
-                    continue
-
-                try:
-                    with _operation("compute_normalized_cardinality"):
-                        normalized = self._adapter.compute_normalized_cardinality(
-                            fqn,
-                            column,
-                            ctx.read_scope,
-                        )
-                except Exception as exc:  # noqa: BLE001 - run-all-then-report; this column only
-                    cause = exc.cause if isinstance(exc, _OperationFailed) else exc
-                    _LOG.warning(
-                        "compute_normalized_cardinality failed for %r.%r: %s",
-                        fqn,
+            try:
+                with _operation("compute_normalized_cardinality"):
+                    normalized = self._adapter.compute_normalized_cardinality(
+                        ctx.fqn,
                         column,
-                        _one_line(cause),
+                        ctx.read_scope,
                     )
-                    continue
+            except Exception as exc:  # noqa: BLE001 - run-all-then-report; this column only
+                cause = exc.cause if isinstance(exc, _OperationFailed) else exc
+                _LOG.warning(
+                    "compute_normalized_cardinality failed for %r.%r: %s",
+                    ctx.fqn,
+                    column,
+                    _one_line(cause, self._conn.statement_timeout),
+                )
+                continue
 
-                col_payload["normalized_cardinality"] = normalized
-                changed = True
+            added[column] = {"normalized_cardinality": normalized}
 
-            if changed:
-                ctx.statistics_yaml = _dump_yaml(payload)
-                write_atomic(ctx.tbl_dir, {"statistics.yaml": ctx.statistics_yaml})
+        if added:
+            _rewrite_statistics(ctx, added)
 
     def _write_manifest_artifacts(
         self,
         prints_root: Path,
         outcome: _ExtractionOutcome,
-        baseline_manifest: dict[str, Any] | None,
+        committed: CommittedPrint,
         generated_at: str,
-    ) -> None:
+        stage: RunStage,
+    ) -> list[ManifestTableEntry]:
         """Write the connection-root manifest.yaml, diff.yaml and reading.md atomically.
 
-        The manifest is left in place when this run reproduced it exactly, so a no-op run does
-        not land a commit under a fresh `generated_at`. `reading.md` is always included.
+        A manifest this run reproduced is left untouched; returns the entries it declares.
         """
 
-        entries = _build_manifest_entries(outcome, baseline_manifest, self._conn)
+        entries = _build_manifest_entries(outcome, self._conn)
         manifest_dict = build_manifest(
             connection_name=self._conn.name,
             adapter_kind=self._conn.adapter,
             entries=entries,
             generated_at=generated_at,
-            statistics_params=_statistics_params_dict(self._conn.statistics),
+            statistics_params=statistics_params_dict(self._conn.statistics),
+            profiling_params=profiling_params_dict(self._conn),
             selectors=diff_module.DiffSelectors(include=outcome.include, exclude=outcome.exclude),
             redaction_rules_configured=len(self._conn.redact),
             default_collation=outcome.default_collation,
+            failed_tables=outcome.failed_tables,
             has_manifest_annotations=(prints_root / MANIFEST_ANNOTATIONS_FILENAME).is_file(),
         )
         artifacts: dict[str, str | bytes] = {
@@ -1934,11 +2405,12 @@ class Engine:
             READING_GUIDE_FILENAME: READING_GUIDE_TEXT,
         }
 
-        if not _manifest_unchanged(manifest_dict, baseline_manifest):
+        if not _manifest_unchanged(manifest_dict, committed.manifest):
             artifacts["manifest.yaml"] = _dump_yaml(manifest_dict)
 
-        prints_root.mkdir(parents=True, exist_ok=True)
-        write_atomic(prints_root, artifacts)
+        stage.write(prints_root, artifacts)
+
+        return entries
 
 
 # Auxiliary dataclasses.
@@ -1948,25 +2420,21 @@ class Engine:
 class _ExtractionOutcome:
     """Result of running the shared extract+graph+diff pipeline.
 
-    `not_attempted` non-zero means fail-fast left matched tables unreached, so no
-    connection-level artifact may be written. `carried_*` are baseline tables the manifest
-    inherits and `dropped_carried` the subset it omits; the rest record what this run judged
-    each table under (SPEC 2.2.2, 2.5).
+    `not_attempted` non-zero means fail-fast left tables unreached, so no connection-level artifact is written.
     """
 
     per_table_results: list[TableResult]
     per_table_meta: dict[str, _PerTableContext]
     diff_dict: dict[str, Any]
+    carry: CarrySet
     not_attempted: int = 0
     matched_fqns: tuple[str, ...] = ()
-    carried_matched: tuple[str, ...] = ()
-    carried_out_of_scope: tuple[str, ...] = ()
-    dropped_carried: tuple[str, ...] = ()
     resolved_thresholds: dict[str, int] = field(default_factory=dict)
     include: tuple[str, ...] = ()
     exclude: tuple[str, ...] = ()
     default_collation: str = ""
     sketch_failures: tuple[SketchFailure, ...] = ()
+    failed_tables: tuple[str, ...] = ()
 
 
 @dataclass
@@ -1980,6 +2448,8 @@ class _ColumnDetection:
     classification: Classification
     inferred: Inferred | None
     redaction: str | None = None
+    # The value sample could not be drawn: no `looks_like`, so no value may be published either.
+    sample_error: Exception | None = None
 
 
 @dataclass
@@ -2033,6 +2503,7 @@ class _PerTableContext:
     has_statistics_annotations: bool = False
     has_relationships_annotations: bool = False
     tbl_dir: Path = field(default=Path("/dev/null"))
+    stage: RunStage | None = None
     referenced_by: list[Any] = field(default_factory=list)
     unique_keys: tuple[UniqueKeyMeta, ...] = field(default_factory=tuple)
     # False when `introspect_relationships` failed for this table - the manifest must not
@@ -2168,6 +2639,7 @@ class _ProgressEmitter:
             elapsed_ms=result.elapsed_ms,
             row_count=ctx.row_count if ctx is not None else None,
             error=result.error,
+            reason=result.reason if result.status == "skipped" else None,
         )
 
     def column_hook(self, index: int, total: int, fqn: str) -> ColumnProgress:
@@ -2245,6 +2717,7 @@ class _ProgressEmitter:
         elapsed_ms: int | None = None,
         row_count: int | None = None,
         error: str | None = None,
+        reason: str | None = None,
     ) -> None:
         if self._cb is None:
             return
@@ -2262,6 +2735,7 @@ class _ProgressEmitter:
             elapsed_ms=elapsed_ms,
             row_count=row_count,
             error=error,
+            reason=reason,
         )
 
         try:
@@ -2317,9 +2791,10 @@ def _log_table_result(
     """Run-log record for one table: outcome, rules, counts, elapsed, traceback on failure."""
 
     _LOG.info(
-        "table %r: outcome=%s rules=%s row_count=%s rows_scanned=%s elapsed_ms=%d",
+        "table %r: outcome=%s reason=%s rules=%s row_count=%s rows_scanned=%s elapsed_ms=%d",
         result.fqn,
         result.status,
+        result.reason or "-",
         ",".join(matched_rules) or "-",
         ctx.row_count if ctx is not None else None,
         ctx.rows_scanned if ctx is not None else None,
@@ -2330,7 +2805,10 @@ def _log_table_result(
         _LOG.info("table %r failed:\n%s", result.fqn, result.error_traceback.rstrip())
 
 
-def _error_fields(exc: BaseException) -> dict[str, str | None]:
+def _error_fields(
+    exc: BaseException,
+    statement_timeout: int | None = None,
+) -> dict[str, str | None]:
     """Build the one-line cause, the detail block, and the traceback text."""
 
     operation: str | None = None
@@ -2341,17 +2819,22 @@ def _error_fields(exc: BaseException) -> dict[str, str | None]:
         cause = exc.cause
 
     return {
-        "error": _one_line(cause),
+        "error": _one_line(cause, statement_timeout),
         "error_operation": operation,
         "error_detail": cause.detail() if isinstance(cause, QueryFailed) else None,
         "error_traceback": "".join(traceback.format_exception(exc)),
     }
 
 
-def _one_line(cause: BaseException) -> str:
-    """`<ExcType>: <message>` - QueryFailed already renders exactly that form."""
+def _one_line(cause: BaseException, statement_timeout: int | None = None) -> str:
+    """`<ExcType>: <message>` - QueryFailed already renders exactly that form - or, for a statement
+    the connection's own limit cancelled, `timed out after <limit>`.
+    """
 
     if isinstance(cause, QueryFailed):
+        if cause.timed_out and statement_timeout is not None:
+            return f"timed out after {format_duration_seconds(statement_timeout)}"
+
         return str(cause)
 
     return f"{type(cause).__name__}: {cause}"
@@ -2359,31 +2842,6 @@ def _one_line(cause: BaseException) -> str:
 
 def _utc_iso_now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
-def _is_fresh(
-    baseline_manifest: dict[str, Any] | None,
-    fqn: str,
-    max_age_days: int,
-    generated_at: str,
-) -> bool:
-    if not baseline_manifest:
-        return False
-
-    entry = (baseline_manifest.get("tables") or {}).get(fqn)
-
-    if not isinstance(entry, dict) or "profiled_at" not in entry:
-        return False
-
-    try:
-        prior = datetime.fromisoformat(entry["profiled_at"])
-        now = datetime.fromisoformat(generated_at)
-    except (ValueError, AttributeError):
-        return False
-
-    age_days = (now - prior).total_seconds() / 86400.0
-
-    return age_days < max_age_days
 
 
 def _suppressed_columns(detected: dict[str, _ColumnDetection]) -> frozenset[str]:
@@ -2467,6 +2925,202 @@ def _assemble_stats(
         )
 
     return out
+
+
+def _warn_degraded_phase_a(fqn: str, phase_a: PhaseA, statement_timeout: int | None) -> None:
+    if phase_a.unmeasured:
+        _LOG.warning(
+            "compute_base_statistics could not measure %d column(s) of %r (%s): %s",
+            len(phase_a.unmeasured),
+            fqn,
+            ", ".join(phase_a.unmeasured),
+            _one_line(phase_a.failures[0], statement_timeout),
+        )
+
+    if phase_a.recount_failure is not None:
+        _LOG.warning(
+            "exact recount failed for %r; cardinality stays approximate: %s",
+            fqn,
+            _one_line(phase_a.recount_failure, statement_timeout),
+        )
+
+
+def _warn_degraded_blocks(
+    fqn: str,
+    stats: dict[str, ColumnStats],
+    statement_timeout: int | None,
+) -> None:
+    for name, column in stats.items():
+        cause = column.unmeasured_cause
+
+        if cause is None:
+            continue
+
+        block = "temporal statistics" if "range" in (column.unmeasured or ()) else "top values"
+        reason = _one_line(cause, statement_timeout)
+        _LOG.warning(
+            "table %r: column %r %s %s",
+            fqn,
+            name,
+            block,
+            reason if reason.startswith("timed out") else f"failed: {reason}",
+        )
+
+
+def _warn_degraded_phase_b(
+    fqn: str,
+    names: list[str],
+    causes: list[Exception | None],
+    statement_timeout: int | None,
+) -> None:
+    first = next((c for c in causes if c is not None), None)
+
+    if names and first is not None:
+        _LOG.warning(
+            "compute_column_statistics could not measure %d column(s) of %r (%s): %s",
+            len(names),
+            fqn,
+            ", ".join(names),
+            _one_line(first, statement_timeout),
+        )
+
+
+def _with_phase_b_unread(
+    columns: list[ColumnMeta],
+    enriched: dict[str, _EnrichedColumnStats],
+    unread: set[str],
+    base: dict[str, BaseStats],
+    detected: dict[str, _ColumnDetection],
+    rows_scanned: int,
+) -> dict[str, _EnrichedColumnStats]:
+    out: dict[str, _EnrichedColumnStats] = {}
+
+    for col in columns:
+        if col.name not in unread:
+            if col.name in enriched:
+                out[col.name] = enriched[col.name]
+
+            continue
+
+        phase_a, detection = base[col.name], detected[col.name]
+        owed = set(
+            _owed_fields(detection.classification, col.sql_type, phase_a.null_count, rows_scanned),
+        )
+        counts_kept = {
+            name: value
+            for name in ("zero_count", "negative_count", "empty_count", "quantized_count")
+            if name in owed and (value := getattr(phase_a, name)) is not None
+        }
+        length = (
+            Length(
+                min=phase_a.length_min,
+                max=phase_a.length_max,
+                avg=round_statistic(phase_a.length_avg),
+                p95=round_statistic(phase_a.length_p95),
+            )
+            if "length" in owed
+            and phase_a.length_min is not None
+            and phase_a.length_max is not None
+            else None
+        )
+        obtained = {"cardinality", "cardinality_ratio", "cardinality_method", *counts_kept}
+
+        if detection.sample_error is not None:
+            owed |= SAMPLE_VERDICTS
+
+        out[col.name] = _EnrichedColumnStats(
+            stats=ColumnStats(
+                sql_type=col.sql_type,
+                nullable=col.nullable,
+                null_count=phase_a.null_count,
+                null_rate=compute_null_rate(phase_a.null_count, rows_scanned),
+                cardinality=phase_a.cardinality,
+                cardinality_ratio=compute_cardinality_ratio(phase_a.cardinality, rows_scanned),
+                cardinality_method=phase_a.cardinality_method,
+                length=length,
+                **counts_kept,
+                unmeasured=tuple(sorted(owed - obtained - ({"length"} if length else set()))),
+            ),
+            classification=detection.classification,
+            inferred=detection.inferred,
+            redaction=detection.redaction,
+            physical_name=col.physical_name,
+            collation=col.collation,
+        )
+
+    return out
+
+
+def _with_unmeasured_columns(
+    columns: list[ColumnMeta],
+    enriched: dict[str, _EnrichedColumnStats],
+    unmeasured: dict[str, int],
+    rows_scanned: int,
+    fk_source_columns: frozenset[str],
+    enumeration_threshold: int,
+) -> dict[str, _EnrichedColumnStats]:
+    """Classified from the type alone - with no cardinality, `categorical` is unreachable."""
+
+    out: dict[str, _EnrichedColumnStats] = {}
+
+    for col in columns:
+        if col.name in enriched:
+            out[col.name] = enriched[col.name]
+
+        if col.name not in unmeasured:
+            continue
+
+        classification = classify(
+            sql_type=col.classified_type,
+            cardinality=None,
+            has_declared_fk=col.name in fk_source_columns,
+            enumeration_threshold=enumeration_threshold,
+            catalog_only=True,
+        )
+        null_count = unmeasured[col.name]
+        out[col.name] = _EnrichedColumnStats(
+            stats=ColumnStats(
+                sql_type=col.sql_type,
+                nullable=col.nullable,
+                null_count=null_count,
+                null_rate=compute_null_rate(null_count, rows_scanned),
+                cardinality=None,
+                cardinality_ratio=None,
+                cardinality_method=None,
+                unmeasured=_owed_fields(
+                    classification,
+                    col.sql_type,
+                    null_count,
+                    rows_scanned,
+                ),
+            ),
+            classification=classification,
+            inferred=None,
+            physical_name=col.physical_name,
+            collation=col.collation,
+        )
+
+    return out
+
+
+def _owed_fields(
+    classification: Classification,
+    sql_type: str,
+    null_count: int,
+    rows_scanned: int,
+) -> tuple[str, ...]:
+    owed = REQUIRED_FIELDS.get(classification, frozenset()) - _UNIVERSAL_FIELDS
+
+    # The two SPEC 2.2.3 conditional cells an unredacted, uninferred column can still meet.
+    if classification in ("categorical", "foreign_key_candidate") and (
+        not is_string_like_type(sql_type) or null_count >= rows_scanned
+    ):
+        owed -= {"length"}
+
+    if classification == "temporal" and not has_day_resolution(sql_type):
+        owed -= {"quantized_count"}
+
+    return tuple(sorted(owed))
 
 
 def _derive_freshness(range_max: Any, profiled_at: str) -> Freshness:
@@ -2660,7 +3314,7 @@ def _choose_timeline_anchor(
     ties break by higher cardinality, then column name; a table may have no anchor at all.
     """
 
-    sql_types = {col.name: col.sql_type for col in columns}
+    sql_types = {col.name: col.classified_type for col in columns}
 
     def eligible(name: str) -> bool:
         detection = detected.get(name)
@@ -2761,7 +3415,7 @@ def _serialize_statistics(
         if e.collation is not None and e.collation != default_collation:
             col_dict["collation"] = e.collation
 
-        if e.classification != "unsupported":
+        if e.classification != "unsupported" and "cardinality" not in (e.stats.unmeasured or ()):
             col_dict["cardinality"] = e.stats.cardinality
             col_dict["cardinality_ratio"] = e.stats.cardinality_ratio
             col_dict["cardinality_method"] = e.stats.cardinality_method
@@ -2779,9 +3433,10 @@ def _serialize_statistics(
         if window is not None:
             col_dict["populated"] = {"from": window.from_, "to": window.to}
 
-        for field_name, value in _emitted_extras(e, counts.rows_scanned, salt):
+        for field_name, value in _emitted_extras(e, salt):
             col_dict[field_name] = value
 
+        apply_redaction_rule(col_dict)
         _drop_forbidden_fields(fqn, name, e.classification, col_dict)
         _mark_unmeasured(col_dict, e.stats.unmeasured, e.classification)
         columns_payload[name] = col_dict
@@ -2901,7 +3556,7 @@ def _serialize_catalog_only_statistics(
 
     for col in columns:
         classification = classify(
-            sql_type=col.sql_type,
+            sql_type=col.classified_type,
             cardinality=None,
             has_declared_fk=col.name in fk_source_columns,
             enumeration_threshold=enumeration_threshold,
@@ -2968,10 +3623,10 @@ def _drop_forbidden_fields(
         )
 
 
-def _emitted_extras(e: _EnrichedColumnStats, rows_scanned: int, salt: str | None = None):
-    """Every value-bearing field for one column, redacted where a rule covers it.
+def _emitted_extras(e: _EnrichedColumnStats, salt: str | None = None):
+    """Every value-bearing field for one column, its literals substituted where a rule covers it.
 
-    `redacted` reports the rule covering the column, not what survived it (SPEC 2.2.9).
+    `redacted` reports the covering rule; `apply_redaction_rule` then removes what the marker withholds.
     """
 
     s = e.stats
@@ -3053,27 +3708,23 @@ def _emitted_extras(e: _EnrichedColumnStats, rows_scanned: int, salt: str | None
             {k: _redacted_scalar(v, e.redaction, salt) for k, v in s.percentiles.items()},
         )
 
-    # Aggregates, not cell values (SPEC 2.2.9) - passed through unredacted, except where too
-    # few rows or too few distinct values leave the aggregate equal to the cell it withholds.
-    if not (e.redaction is not None and (rows_scanned - s.null_count <= 1 or s.cardinality == 1)):
-        if s.mean is not None:
-            yield "mean", s.mean
+    if s.mean is not None:
+        yield "mean", s.mean
 
-        if s.sum is not None:
-            yield "sum", s.sum
+    if s.sum is not None:
+        yield "sum", s.sum
 
-        if s.length is not None:
-            yield (
-                "length",
-                {
-                    "min": s.length.min,
-                    "max": s.length.max,
-                    "avg": s.length.avg,
-                    "p95": s.length.p95,
-                },
-            )
+    if s.length is not None:
+        yield (
+            "length",
+            {
+                "min": s.length.min,
+                "max": s.length.max,
+                "avg": s.length.avg,
+                "p95": s.length.p95,
+            },
+        )
 
-    # A count discloses no literal (SPEC 2.2.9), so redaction never suppresses these.
     if s.zero_count is not None:
         yield "zero_count", s.zero_count
 
@@ -3095,10 +3746,14 @@ def _emitted_extras(e: _EnrichedColumnStats, rows_scanned: int, salt: str | None
             },
         )
 
-    # A name pointing at a dropped bound fails conformance's "names an emitted field" check
-    # (SPEC 2.2.4), so this follows `range`/`percentiles` under `drop` too.
-    if s.unrepresentable and e.redaction != "drop":
+    if s.unrepresentable:
         yield "unrepresentable", list(s.unrepresentable)
+
+
+def _apply_redaction_rule_to(payload: dict[str, Any]) -> None:
+    for column in (payload.get("columns") or {}).values():
+        if isinstance(column, dict):
+            apply_redaction_rule(column)
 
 
 def _mark_unmeasured(
@@ -3106,7 +3761,7 @@ def _mark_unmeasured(
     names: tuple[str, ...] | None,
     classification: str,
 ) -> None:
-    """Name the REQUIRED fields this column owed and did not obtain (SPEC 2.2.4).
+    """Name the fields this column owed and did not obtain (SPEC 2.2.4).
 
     Intersected with what the column carries rather than trusted from the adapter: a name it also
     emits is a contradiction, and one the matrix never required is an absence SPEC 7.2 explains.
@@ -3115,9 +3770,22 @@ def _mark_unmeasured(
     if not names:
         return
 
-    owed = set(names) & REQUIRED_FIELDS.get(classification, frozenset())
+    owed = set(names) & (
+        REQUIRED_FIELDS.get(classification, frozenset())
+        | (SAMPLE_VERDICTS if classification in SAMPLED_CLASSIFICATIONS else frozenset())
+    )
 
-    if named := sorted(owed - col_dict.keys()):
+    if is_redacted(col_dict):
+        owed -= WITHHELD_UNDER_REDACTION
+
+    # The SPEC 2.2.9 and 2.2.3 conditional cells: fields the column never owed, so never unmeasured.
+    if col_dict.get("redacted") == "drop":
+        owed -= {"range", "percentiles"}
+
+    if (col_dict.get("inferred") or {}).get("looks_like") == "prose":
+        owed -= {"values", "values_coverage", "distribution"}
+
+    if named := sorted(f for f in owed if not emits(col_dict, f)):
         col_dict["unmeasured"] = named
 
 
@@ -3132,6 +3800,10 @@ def _value_entries(
     """
 
     entries = [_redacted_entry(v, primitive, salt) for v in values]
+
+    # SPEC 2.2.4 breaks a count tie on the published value, which under `hash` is the digest.
+    if primitive == "hash":
+        entries.sort(key=lambda entry: value_order_key(entry["count"], entry["value"]))
 
     if primitive is not None:
         return entries
@@ -3185,7 +3857,7 @@ def _serialize_relationships(
     fqn: str,
     ctx: _PerTableContext,
     per_table_meta: dict[str, _PerTableContext],
-    baseline_states: dict[str, diff_module.TableState] | None,
+    committed: CommittedPrint,
 ) -> str:
     # `constraint_name` is OPTIONAL per SPEC 2.3.2 and is omitted rather than nulled: an
     # inferred edge has no constraint to name, and a null there is a type error.
@@ -3204,7 +3876,7 @@ def _serialize_relationships(
                     fk.target_table,
                     fk.target_column,
                     per_table_meta,
-                    baseline_states,
+                    committed,
                 ),
             },
         )
@@ -3226,7 +3898,7 @@ def _serialize_relationships(
                     fqn,
                     e.column,
                     per_table_meta,
-                    baseline_states,
+                    committed,
                 ),
             },
         )
@@ -3248,7 +3920,11 @@ def _serialize_relationships(
     return _dump_yaml(payload)
 
 
-def _fk_action_fields(detection: str, on_delete: str, on_update: str) -> dict[str, str]:
+def _fk_action_fields(
+    detection: str,
+    on_delete: str | None,
+    on_update: str | None,
+) -> dict[str, str | None]:
     """SPEC 2.3.8: a guessed edge carries no referential action; only a declared one does -
     emitting `NO ACTION` would dress a guess in the clothing of a real constraint.
     """
@@ -3267,15 +3943,10 @@ def _without_none(entry: dict[str, Any]) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class _ColumnSnapshot:
-    """One column's numbers as `_compute_observed` needs them, whichever source they came from.
-
-    `sample` and `sketch` are `None` from a carried table, so `containment` and a measured
-    `target_coverage` only ever fire between two columns this run re-extracted.
-    """
+    """One column's numbers as `_compute_observed` needs them, whichever source they came from."""
 
     row_count: int | None
     scoped: bool
-    sample: float | None
     cardinality: int | None
     cardinality_method: str | None
     top_count: int | None
@@ -3286,7 +3957,7 @@ def _column_snapshot(
     fqn: str,
     column: str,
     per_table_meta: dict[str, _PerTableContext],
-    baseline_states: dict[str, diff_module.TableState] | None,
+    committed: CommittedPrint,
 ) -> _ColumnSnapshot | None:
     """`fqn.column`'s numbers, preferring this run's fresh extraction over the committed print.
 
@@ -3311,31 +3982,29 @@ def _column_snapshot(
         return _ColumnSnapshot(
             row_count=payload.get("row_count"),
             scoped=scoped,
-            sample=scope.get("sample") if scoped else None,
             cardinality=col.get("cardinality"),
             cardinality_method=col.get("cardinality_method"),
             top_count=_top_count(col.get("values")),
             sketch=_decode_column_sketch(col.get("sketch")),
         )
 
-    state = (baseline_states or {}).get(fqn)
+    table = committed.tables.get(fqn)
 
-    if state is None or state.statistics is None:
+    if table is None or table.state is None or table.state.statistics is None:
         return None
 
-    col = state.statistics.get(column)
+    col = table.columns.get(column)
 
-    if col is None:
+    if col is None or column not in table.state.statistics:
         return None
 
     return _ColumnSnapshot(
-        row_count=state.row_count,
-        scoped=state.scoped,
-        sample=None,  # unknown from a carried table - see _ColumnSnapshot
-        cardinality=col.get("cardinality"),
-        cardinality_method=col.get("cardinality_method"),
-        top_count=_top_count(col.get("values")),
-        sketch=None,  # never hydrated for a carried table - see _ColumnSnapshot
+        row_count=table.state.row_count,
+        scoped=table.state.scoped,
+        cardinality=col.cardinality,
+        cardinality_method=col.cardinality_method,
+        top_count=_top_count(col.stats.get("values")),
+        sketch=_decode_column_sketch(col.sketch),
     )
 
 
@@ -3375,7 +4044,7 @@ def _compute_observed(
     parent_fqn: str,
     parent_column: tuple[str, ...],
     per_table_meta: dict[str, _PerTableContext],
-    baseline_states: dict[str, diff_module.TableState] | None,
+    committed: CommittedPrint,
 ) -> dict[str, Any] | None:
     """SPEC 2.3.10: what joining across one edge costs, from statistics already on hand.
 
@@ -3386,8 +4055,8 @@ def _compute_observed(
     if len(child_column) != 1 or len(parent_column) != 1:
         return None
 
-    child = _column_snapshot(child_fqn, child_column[0], per_table_meta, baseline_states)
-    parent = _column_snapshot(parent_fqn, parent_column[0], per_table_meta, baseline_states)
+    child = _column_snapshot(child_fqn, child_column[0], per_table_meta, committed)
+    parent = _column_snapshot(parent_fqn, parent_column[0], per_table_meta, committed)
 
     if child is None or parent is None:
         return None
@@ -3438,18 +4107,18 @@ def _compute_observed(
 
 def _build_manifest_entries(
     outcome: _ExtractionOutcome,
-    baseline_manifest: dict[str, Any] | None,
     conn: ConnectionConfig,
 ) -> list[ManifestTableEntry]:
-    """Freshly-extracted entries and inherited ones, in the target's listing order.
+    """Freshly-extracted entries and carried ones, in the target's listing order.
 
-    Ordering off the matched list rather than the extracted one holds a table in place whether
-    it was re-extracted or carried. `outcome.dropped_carried` is excluded from both branches.
+    Out-of-scope carried tables follow in manifest order.
     """
 
-    baseline_tables = (baseline_manifest or {}).get("tables") or {}
-    dropped = set(outcome.dropped_carried)
-    carried = set(outcome.carried_matched) - dropped
+    carried = {c.table.fqn: c for c in outcome.carry.carried}
+    blocks = {
+        "statistics_params": statistics_params_dict(conn.statistics),
+        "profiling_params": profiling_params_dict(conn),
+    }
     entries: list[ManifestTableEntry] = []
 
     for fqn in outcome.matched_fqns:
@@ -3459,16 +4128,14 @@ def _build_manifest_entries(
             entries.append(_entry_from_context(fqn, ctx, conn))
         elif fqn in carried:
             entries.append(
-                _carried_entry(
-                    fqn,
-                    baseline_tables[fqn],
-                    outcome.resolved_thresholds.get(fqn),
+                carried_entry(
+                    carried.pop(fqn),
+                    resolved_max_age_days=outcome.resolved_thresholds.get(fqn),
+                    **blocks,
                 ),
             )
 
-    for fqn in outcome.carried_out_of_scope:
-        if fqn not in dropped:
-            entries.append(entry_from_payload(fqn, baseline_tables[fqn]))
+    entries.extend(carried_entry(c, resolved_max_age_days=None, **blocks) for c in carried.values())
 
     return entries
 
@@ -3494,16 +4161,12 @@ def _entry_from_context(
         profiled_at=ctx.profiled_at,
         max_age_days=ctx.max_age_days,
         statistics_params=_statistics_override(conn, fqn, ctx.row_count_estimate),
+        max_rows_scanned=(
+            None
+            if ctx.type == "view"
+            else conn.settings_for(fqn, ctx.row_count_estimate).max_rows_scanned
+        ),
     )
-
-
-def _statistics_params_dict(cfg: StatisticsConfig) -> dict[str, Any]:
-    """A `StatisticsConfig` as a plain dict, with `percentiles` as a list for YAML."""
-
-    values = asdict(cfg)
-    values["percentiles"] = list(values["percentiles"])
-
-    return values
 
 
 def _statistics_override(
@@ -3517,30 +4180,14 @@ def _statistics_override(
     2.5) - the profiled count can sit the other side of a `min_rows` threshold.
     """
 
-    resolved = _statistics_params_dict(conn.settings_for(fqn, row_count_estimate).statistics)
-    default = _statistics_params_dict(conn.statistics)
+    resolved = statistics_params_dict(conn.settings_for(fqn, row_count_estimate).statistics)
+    default = statistics_params_dict(conn.statistics)
     diff = {key: value for key, value in resolved.items() if value != default[key]}
 
     return diff or None
 
 
-def _carried_entry(
-    fqn: str,
-    payload: dict[str, Any],
-    max_age_days: int | None,
-) -> ManifestTableEntry:
-    """Inherit an entry, restating the threshold when this run resolved one.
-
-    Everything else rides over verbatim, `profiled_at` included - the table was not re-read.
-    A run that skipped it as fresh still evaluated it under the value it just resolved.
-    """
-
-    entry = entry_from_payload(fqn, payload)
-
-    return entry if max_age_days is None else replace(entry, max_age_days=max_age_days)
-
-
-def _manifest_unchanged(manifest: dict[str, Any], baseline: dict[str, Any] | None) -> bool:
+def _manifest_unchanged(manifest: dict[str, Any], baseline: Mapping[str, Any] | None) -> bool:
     """True when the new manifest differs from the committed one only by its timestamp."""
 
     if not baseline:
@@ -3566,147 +4213,299 @@ def _run_scope(
     )
 
 
-def _carried_matched(
-    matched_fqns: tuple[str, ...],
-    per_table_meta: dict[str, _PerTableContext],
-    baseline_manifest: dict[str, Any] | None,
-) -> tuple[str, ...]:
-    """Tables the target listed that this run did not re-extract.
+def _fail_unredacted_carries(
+    results: list[TableResult],
+    carry: CarrySet,
+    conn: ConnectionConfig,
+) -> list[TableResult]:
+    """Fail every carried table this run never tested whose print contradicts `redact` now."""
 
-    Skipped-as-fresh and failed both land here: the table answered `list_tables`, so it
-    exists. Only a table the target no longer lists has been removed.
-    """
+    failures = {
+        c.table.fqn: _redaction_failure(c, mismatches, conn)
+        for c in carry.carried
+        if c.reason != "fresh" and (mismatches := redaction_mismatches(c.table, conn))
+    }
 
-    entries = (baseline_manifest or {}).get("tables") or {}
+    if not failures:
+        return results
 
-    return tuple(f for f in matched_fqns if f not in per_table_meta and f in entries)
-
-
-def _artifacts_present(prints_root: Path, entry: dict[str, Any]) -> bool:
-    """Whether every artifact a manifest entry declares still exists on disk.
-
-    Checked file by file, not by directory: `manifest.missing-artifact` fires on the files
-    themselves, and a directory that lost only `statistics.yaml` is the same defect.
-    """
-
-    tbl_dir = prints_root / entry.get("path", "")
-
-    return all((tbl_dir / filename).is_file() for filename in _declared_artifacts(entry).values())
-
-
-def _preserved_incoming(
-    prints_root: Path,
-    baseline_manifest: dict[str, Any] | None,
-    untouched_referencers: tuple[str, ...],
-) -> dict[str, list[relationship_graph.IncomingFk]]:
-    """Committed incoming edges whose referencer's own file this run left alone.
-
-    Pass 2 resolves the graph from re-extracted tables only, so an untouched referencer's edge
-    would vanish from the target print it rewrites in full. `untouched_referencers` is the
-    caller's already-filtered set, so a referencer genuinely gone never reaches it.
-    """
-
-    if not untouched_referencers:
-        return {}
-
-    untouched = set(untouched_referencers)
-    out: dict[str, list[relationship_graph.IncomingFk]] = {}
-
-    for fqn, edges in _load_incoming_edges(prints_root, baseline_manifest).items():
-        kept = [e for e in edges if e.referencer_table in untouched]
-
-        if kept:
-            out[fqn] = kept
+    out = [
+        replace(r, error=f"{r.error}; {failures.pop(r.fqn)}") if r.fqn in failures else r
+        for r in results
+    ]
+    out.extend(
+        TableResult(fqn=fqn, status="failed", error=message, elapsed_ms=0)
+        for fqn, message in failures.items()
+    )
 
     return out
 
 
+def _redaction_failure(
+    carried: CarriedTable,
+    mismatches: tuple[RedactionMismatch, ...],
+    conn: ConnectionConfig,
+) -> str:
+    columns = ", ".join(
+        f"{m.column} ({m.recorded or 'unredacted'} -> {m.expected or 'unredacted'})"
+        for m in mismatches
+    )
+    remedy = {
+        "out_of_scope": "outside this run's selectors - rerun without the narrowing selector",
+        "not_attempted": "never reached under --fail-fast - rerun without --fail-fast",
+        "failed": "not re-read - fix the failure and rerun",
+    }[carried.reason]
+
+    if not selectors.match(carried.table.fqn, list(conn.include), list(conn.exclude)):
+        return (
+            f"{carried.table.fqn} publishes columns the current redact rules would publish "
+            f"otherwise: {columns}; the connection's selectors exclude it - include it again, "
+            f"or delete its directory"
+        )
+
+    return (
+        f"{carried.table.fqn} publishes columns the current redact rules would publish "
+        f"otherwise: {columns}; {remedy}, or run `dbprint generate --force`"
+    )
+
+
+def _declared_single_keys(statistics: Mapping[str, Any]) -> set[str]:
+    grain = statistics.get("grain")
+    keys = grain.get("keys") if isinstance(grain, dict) else None
+
+    return {
+        key["columns"][0]
+        for key in keys or []
+        if isinstance(key, dict)
+        and key.get("detection") == "declared"
+        and isinstance(key.get("columns"), list)
+        and len(key["columns"]) == 1
+    }
+
+
+def _carried_refers_to(
+    table: CommittedTable,
+    proposals: list[ForeignKeyMeta],
+    reread: set[str],
+) -> list[dict[str, Any]]:
+    entries = [
+        dict(entry)
+        for entry in table.refers_to
+        if not (entry.get("detection") == "measured" and entry.get("target_table") in reread)
+    ]
+
+    for fk in proposals:
+        entries.append(
+            {
+                "column": list(fk.column),
+                "target_table": fk.target_table,
+                "target_column": list(fk.target_column),
+                "detection": fk.detection,
+            },
+        )
+
+    # A full run lists measured edges last, in `infer_value_derived_edges`'s order.
+    measured = sorted(
+        (e for e in entries if e.get("detection") == "measured"),
+        key=lambda e: (str(e["target_table"]), e["target_column"][0], e["column"][0]),
+    )
+
+    return [e for e in entries if e.get("detection") != "measured"] + measured
+
+
+def _incoming_from_carried(
+    carried_refers_to: dict[str, list[dict[str, Any]]],
+) -> dict[str, list[relationship_graph.IncomingFk]]:
+    out: dict[str, list[relationship_graph.IncomingFk]] = {}
+
+    for referencer, entries in carried_refers_to.items():
+        for entry in entries:
+            try:
+                edge = relationship_graph.IncomingFk(
+                    column=tuple(entry["target_column"]),
+                    referencer_table=referencer,
+                    referencer_column=tuple(entry["column"]),
+                    on_delete=entry.get("on_delete"),
+                    on_update=entry.get("on_update"),
+                    detection=entry.get("detection") or "inferred",
+                    constraint_name=entry.get("constraint_name"),
+                )
+            except (KeyError, TypeError):
+                continue
+
+            out.setdefault(str(entry["target_table"]), []).append(edge)
+
+    return out
+
+
+def _serialize_carried_relationships(
+    table: CommittedTable,
+    refers_to: list[dict[str, Any]],
+    reread_incoming: list[relationship_graph.IncomingFk],
+    reread: set[str],
+    per_table_meta: dict[str, _PerTableContext],
+    committed: CommittedPrint,
+) -> str:
+    """Rebuild every entry touching a re-read table; entries between two carried tables stay
+    as committed, since both files still recompute to them (SPEC 2.3.10)."""
+
+    header = table.relationships or {}
+
+    def rebuilt(
+        entry: dict[str, Any],
+        child: str,
+        child_col: Any,
+        parent: str,
+        parent_col: Any,
+    ) -> dict[str, Any]:
+        return _without_none(
+            {
+                **entry,
+                "observed": _compute_observed(
+                    child,
+                    tuple(child_col),
+                    parent,
+                    tuple(parent_col),
+                    per_table_meta,
+                    committed,
+                ),
+            },
+        )
+
+    outgoing = [
+        rebuilt(
+            _edge_fields(entry),
+            table.fqn,
+            entry["column"],
+            entry["target_table"],
+            entry["target_column"],
+        )
+        if entry.get("target_table") in reread
+        else entry
+        for entry in refers_to
+    ]
+    kept_incoming = [
+        entry
+        for entry in header.get("referenced_by") or []
+        if isinstance(entry, dict) and entry.get("referencer_table") not in reread
+    ]
+    fresh_incoming = [
+        rebuilt(
+            {
+                "column": list(e.column),
+                "referencer_table": e.referencer_table,
+                "referencer_column": list(e.referencer_column),
+                **_fk_action_fields(e.detection, e.on_delete, e.on_update),
+                "detection": e.detection,
+                "constraint_name": e.constraint_name,
+            },
+            e.referencer_table,
+            e.referencer_column,
+            table.fqn,
+            e.column,
+        )
+        for e in reread_incoming
+        if e.referencer_table in reread
+    ]
+    payload: dict[str, Any] = {
+        key: header[key]
+        for key in ("format_version", "table", "profiled_at", "eligible_target")
+        if key in header
+    }
+    payload["refers_to"] = outgoing
+    payload["referenced_by"] = sorted(
+        [*kept_incoming, *fresh_incoming],
+        key=lambda e: (str(e.get("referencer_table")), tuple(e.get("referencer_column") or ())),
+    )
+
+    return _dump_yaml(payload)
+
+
+def _edge_fields(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """A refers_to entry's own fields, `observed` dropped, in the order a producer writes them."""
+
+    detection = str(entry.get("detection") or "inferred")
+
+    return _without_none(
+        {
+            "column": entry.get("column"),
+            "target_table": entry.get("target_table"),
+            "target_column": entry.get("target_column"),
+            **_fk_action_fields(detection, entry.get("on_delete"), entry.get("on_update")),
+            "detection": detection,
+            "constraint_name": entry.get("constraint_name"),
+        },
+    )
+
+
 def _merge_incoming(
     resolved: list[relationship_graph.IncomingFk],
-    preserved: list[relationship_graph.IncomingFk],
+    carried: list[relationship_graph.IncomingFk],
 ) -> list[relationship_graph.IncomingFk]:
-    """Resolved edges plus preserved ones, held in `resolve`'s ordering."""
-
-    if not preserved:
+    if not carried:
         return resolved
 
-    return sorted([*resolved, *preserved], key=lambda e: (e.referencer_table, e.referencer_column))
+    return sorted([*resolved, *carried], key=lambda e: (e.referencer_table, e.referencer_column))
 
 
-def _carried_out_of_scope(
-    baseline_manifest: dict[str, Any] | None,
-    matched_fqns: tuple[str, ...],
-    scope: diff_module.DiffSelectors,
+def _failed_tables(
+    results: list[TableResult],
+    committed: CommittedPrint,
+    run_scope: diff_module.DiffSelectors,
+    conn: ConnectionConfig,
 ) -> tuple[str, ...]:
-    """Committed tables this run's selectors never covered.
-
-    A narrowed run learns nothing about them, so the diff withholds events (SPEC 2.6.8) and
-    the manifest must withhold the removal too, or narrowing the scope orphans their prints.
+    """What the manifest names as unprofiled (SPEC 2.5): this run's failures, plus a committed
+    mark for a table a CLI narrowing left unread that the connection's selectors still cover.
     """
 
-    entries = (baseline_manifest or {}).get("tables") or {}
-    matched = set(matched_fqns)
+    failed = {
+        result.fqn
+        for result in results
+        if result.status == "failed"
+        and selectors.match(result.fqn, list(conn.include), list(conn.exclude))
+    }
+    carried = {
+        fqn
+        for fqn in committed.failed_tables
+        if not run_scope.covers(fqn)
+        and selectors.match(fqn, list(conn.include), list(conn.exclude))
+    }
 
-    return tuple(f for f in entries if f not in matched and not scope.covers(f))
-
-
-def _baseline_only_tables(
-    baseline_manifest: dict[str, Any] | None,
-    matched_fqns: tuple[str, ...],
-) -> list[TableMeta]:
-    """Baseline-committed tables this run's selectors did not match.
-
-    Stand-ins for the catalog pre-pass alone, which reads only `fqn`/`type`. Inference's
-    universe is the committed print's table set, so a narrowed run resolves a stem against the
-    same tables a full run would. With no baseline it is this run's matched tables.
-    """
-
-    matched = set(matched_fqns)
-    entries = (baseline_manifest or {}).get("tables") or {}
-
-    return [
-        TableMeta(
-            fqn=fqn,
-            type=payload.get("type", "table"),
-            namespace_path=tuple(p for p in payload.get("path", "").split("/") if p),
-        )
-        for fqn, payload in entries.items()
-        if fqn not in matched
-    ]
+    return tuple(sorted(failed | carried))
 
 
 def _compute_diff_dict(
     project_root: Path,
     *,
-    baseline_manifest: dict[str, Any] | None,
+    committed: CommittedPrint,
     baseline_states: dict[str, diff_module.TableState] | None,
     per_table_meta: dict[str, _PerTableContext],
-    carried_matched: tuple[str, ...],
+    not_reread: tuple[str, ...],
     conn: ConnectionConfig,
     cli_include: tuple[str, ...],
     cli_exclude: tuple[str, ...],
     generated_at: str,
+    default_collation: str | None = None,
+    unread: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
-    """Compare this run's extraction against the states the caller captured.
+    """Compare this run's extraction against the states the caller captured."""
 
-    `baseline_states` arrive hydrated because the generate path has already overwritten the
-    artifacts they come from; the manifest is still read for the provenance fields.
-    """
-
-    current_states = {fqn: _table_state_from_context(ctx) for fqn, ctx in per_table_meta.items()}
+    current_states = {
+        fqn: _table_state_from_context(ctx, default_collation)
+        for fqn, ctx in per_table_meta.items()
+    }
 
     # A listed-but-not-re-extracted table stands on its baseline state, so it compares equal
-    # to itself: in scope, zero events, not a removal, and still counted by `tables_scanned`,
-    # which follows what the selectors matched (SPEC 2.6.3).
-    for fqn in carried_matched:
+    # to itself: in scope, zero events, not a removal. It and an `unread` table (failed, with no
+    # baseline) are still counted by `tables_scanned`, which follows what the selectors matched.
+    for fqn in not_reread:
         if baseline_states and fqn in baseline_states:
             current_states[fqn] = baseline_states[fqn]
 
     scope = _run_scope(conn, cli_include, cli_exclude)
-    baseline_generated_at = baseline_manifest.get("generated_at") if baseline_manifest else None
-    baseline_dbprint_version = (
-        baseline_manifest.get("dbprint_version") if baseline_manifest else None
-    )
+    manifest = committed.manifest
+    baseline_generated_at = manifest.get("generated_at") if manifest else None
+    baseline_dbprint_version = manifest.get("dbprint_version") if manifest else None
 
     return diff_module.compute(
         baseline_states,
@@ -3719,7 +4518,8 @@ def _compute_diff_dict(
         scanned_at=generated_at,
         selectors=scope,
         generated_at=generated_at,
-        carried=frozenset(carried_matched),
+        carried=frozenset(not_reread),
+        unread=unread,
     )
 
 
@@ -3786,6 +4586,9 @@ def _summarize_diff(diff_dict: dict[str, Any]) -> _DiffResult:
     )
 
 
+_ASSERTION_FILE_FIELDS = ("row_count", "catalog_only", "scope", "unmeasured")
+
+
 def _statistics_payload_for_assertions(ctx: _PerTableContext) -> dict[str, Any]:
     """The statistics artifact this run would write, as a statistic assertion reads one.
 
@@ -3794,23 +4597,29 @@ def _statistics_payload_for_assertions(ctx: _PerTableContext) -> dict[str, Any]:
     """
 
     payload = ctx.statistics_payload
+    carried = {k: payload[k] for k in _ASSERTION_FILE_FIELDS if k in payload}
 
-    return {
-        "table": ctx.fqn,
-        "type": ctx.type,
-        "row_count": payload.get("row_count", 0),
-        "columns": payload.get("columns") or {},
-    }
+    return {"table": ctx.fqn, "type": ctx.type, **carried, "columns": payload.get("columns") or {}}
 
 
-def _table_state_from_context(ctx: _PerTableContext) -> diff_module.TableState:
-    state = diff_module.TableState(fqn=ctx.fqn, type=ctx.type)
+def _table_state_from_context(
+    ctx: _PerTableContext,
+    default_collation: str | None,
+) -> diff_module.TableState:
+    state = diff_module.TableState(
+        fqn=ctx.fqn,
+        type=ctx.type,
+        default_collation=default_collation or None,
+    )
+    written = ctx.statistics_payload.get("columns") or {}
     state.columns = {
         c.name: diff_module.ColumnState(
             name=c.name,
             sql_type=c.sql_type,
             nullable=c.nullable,
             default=c.default,
+            physical_name=(written.get(c.name) or {}).get("physical_name"),
+            collation=(written.get(c.name) or {}).get("collation"),
         )
         for c in ctx.columns
     }
@@ -3874,6 +4683,40 @@ def _table_state_from_context(ctx: _PerTableContext) -> diff_module.TableState:
     return state
 
 
+def _rewrite_statistics(ctx: _PerTableContext, added: dict[str, dict[str, Any]]) -> None:
+    """Rewrite `statistics.yaml` with post-pass fields, from the written text rather than the
+    float-read comparison copy, which has already lost digits past binary64.
+    """
+
+    assert ctx.statistics_yaml is not None
+    exact = artifact_yaml.load(ctx.statistics_yaml, loader=_ExactLoader)
+
+    for column, fields in added.items():
+        exact["columns"][column].update(fields)
+
+    _apply_redaction_rule_to(exact)
+    ctx.statistics_yaml = _dump_yaml(exact)
+    ctx.statistics_payload = _reread_statistics(ctx.statistics_yaml)
+    assert ctx.stage is not None
+    ctx.stage.write(ctx.tbl_dir, {"statistics.yaml": ctx.statistics_yaml})
+
+
+class _ExactLoader(ArtifactLoader):
+    pass
+
+
+def _construct_exact_float(loader: ArtifactLoader, node: yaml.ScalarNode) -> Any:
+    text = loader.construct_scalar(node)
+
+    try:
+        return Decimal(text.replace("_", ""))
+    except ArithmeticError:
+        return loader.construct_yaml_float(node)
+
+
+_ExactLoader.add_constructor("tag:yaml.org,2002:float", _construct_exact_float)
+
+
 def _reread_statistics(statistics_yaml: str) -> dict[str, Any]:
     """Load back the artifact just serialized, as a consumer reads one.
 
@@ -3881,7 +4724,7 @@ def _reread_statistics(statistics_yaml: str) -> dict[str, Any]:
     hands back differently, so only a round-tripped value compares equal to a committed one.
     """
 
-    loaded = yaml.safe_load(statistics_yaml)
+    loaded = artifact_yaml.load(statistics_yaml)
 
     return loaded if isinstance(loaded, dict) else {}
 
@@ -3945,11 +4788,65 @@ def _derive_generate_exit_code(
         return EXIT_OK
 
 
+def _names_any(table: CommittedTable, fqns: set[str]) -> bool:
+    return any(entry.get("target_table") in fqns for entry in table.refers_to) or any(
+        edge.referencer_table in fqns for edge in table.referenced_by
+    )
+
+
+def _sweep_undeclared(
+    prints_root: Path,
+    entries: list[ManifestTableEntry],
+    stage: RunStage,
+) -> None:
+    root = prints_root.resolve()
+    declared = {(prints_root / entry.path).resolve() for entry in entries}
+    orphaned = sorted(
+        {
+            path.parent
+            for path in prints_root.rglob("*")
+            if path.name in PRODUCER_ARTIFACTS and path.is_file()
+        },
+    )
+
+    for directory in orphaned:
+        if directory.resolve() in declared or directory.resolve() == root:
+            continue
+
+        stage.remove(directory, PRODUCER_ARTIFACTS)
+        kept = sorted(p.name for p in directory.iterdir() if p.name not in PRODUCER_ARTIFACTS)
+        where = directory.relative_to(prints_root).as_posix()
+
+        if kept:
+            _LOG.warning(
+                "removed the producer files in %r, which the manifest no longer declares; "
+                "kept the user-authored %s",
+                where,
+                ", ".join(kept),
+            )
+        else:
+            _LOG.warning("removed %r, which the manifest no longer declares", where)
+
+
+def _refusal_text(exc: IdentifierRejected, committed: CommittedPrint) -> str:
+    table = committed.tables.get(exc.fqn) if exc.fqn else None
+
+    if table is None:
+        return str(exc)
+
+    return (
+        f"{exc}\n  Stale print: {table.directory}/ - after excluding the table, delete this "
+        f"directory; the next generate drops its entry"
+    )
+
+
 def _connection_error_generate(
     connection_name: str,
     generated_at: str,
     started: float,
     exc: Exception,
+    *,
+    exit_code: int = EXIT_CONNECTION,
 ) -> GenerateResult:
     elapsed_ms = int((time.monotonic() - started) * 1000)
 
@@ -3974,6 +4871,6 @@ def _connection_error_generate(
             unevaluated_tables=0,
         ),
         elapsed_ms=elapsed_ms,
-        exit_code=EXIT_CONNECTION,
+        exit_code=exit_code,
         error=str(exc),
     )

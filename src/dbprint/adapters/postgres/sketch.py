@@ -11,10 +11,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from dbprint.spec.sketch import SketchKind
-from . import stats
 from .connection import exec_query
-from .identity import Identity
-from .introspect import resolve_column
+from .rendering import render_canonical, render_operand
+from ..identifiers import SOURCE_ALIAS, Identity
+from ..sql_layout import indented
 
 
 if TYPE_CHECKING:
@@ -32,40 +32,32 @@ def compute_key_sketch(
     """The k smallest low-64-bit MD5 hashes of the column's distinct non-null values."""
 
     quoted_table = identity.quoted()
-    quoted_col = stats._quote_ident(resolve_column(conn, identity, column))
-    canonical = _canonical_expr(quoted_col, kind, sql_type)
-    low64 = _low64_expr("v")
+    quoted_col = identity.source_column(column)
+    canonical = render_canonical(render_operand(quoted_col, sql_type), sql_type, kind)
+    low64 = _low64_expr("dst.v")
 
     rows = exec_query(
         conn,
         f"""
-        SELECT {low64} AS h
-        FROM (
-            SELECT DISTINCT {canonical} AS v
-            FROM {quoted_table}
-            WHERE {quoted_col} IS NOT NULL
-        ) t
-        ORDER BY h
+        SELECT
+          {indented(low64, 10)} AS h
+        FROM
+          (
+            SELECT DISTINCT
+              {indented(canonical, 14)} AS v
+            FROM
+              {quoted_table} {SOURCE_ALIAS}
+            WHERE
+              {quoted_col} IS NOT NULL
+          ) dst
+        ORDER BY
+          h
         LIMIT %s
         """,
         (k,),
     ).fetchall()
 
     return tuple(int(r[0]) for r in rows)
-
-
-def _canonical_expr(quoted_col: str, kind: SketchKind, sql_type: str) -> str:
-    """SPEC 2.2.14's canonical byte form for one SQL value, as a SQL expression.
-
-    Postgres's default `::text` rendering already matches the canonical form for every
-    non-temporal kind. Temporal reuses `_render_calendar_bound`: Postgres
-    appends `Z` itself, so SPEC 2.2.4 and SPEC 2.2.14 coincide and need no override.
-    """
-
-    if kind == "temporal":
-        return stats._render_calendar_bound(quoted_col, sql_type)
-
-    return f"{quoted_col}::text"
 
 
 def _low64_expr(value_expr: str) -> str:
@@ -75,7 +67,7 @@ def _low64_expr(value_expr: str) -> str:
     bit as negative, corrupting "smallest k".
     """
 
-    hi = f"('x' || substring(md5({value_expr}), 17, 8))::bit(32)::bigint::numeric"
-    lo = f"('x' || substring(md5({value_expr}), 25, 8))::bit(32)::bigint::numeric"
+    hi = f"('x' || SUBSTRING(MD5({value_expr}), 17, 8))::BIT(32)::BIGINT::NUMERIC"
+    lo = f"('x' || SUBSTRING(MD5({value_expr}), 25, 8))::BIT(32)::BIGINT::NUMERIC"
 
-    return f"({hi} * 4294967296::numeric + {lo})"
+    return f"({hi} * 4294967296::NUMERIC + {lo})"

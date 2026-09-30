@@ -1,8 +1,7 @@
 """Implicit connection resolution: which connection runs when none is named.
 
-A supplied CONN wins, then the `auto: true` set in declaration order, then the sole
-connection when only one is defined. Anything else - no connections at all, an unknown CONN,
-or several defined with none marked `auto` - raises `ConnectionResolutionError`.
+A named CONNECTION wins, then the `auto: true` set in declaration order, then a sole connection;
+anything else raises `ConnectionResolutionError`.
 """
 
 from __future__ import annotations
@@ -43,6 +42,6 @@ def resolve(project_config: ProjectConfig, conn_arg: str | None) -> list[Connect
     known = sorted(connections)
 
     raise ConnectionResolutionError(
-        f"no CONN supplied and multiple connections defined: {known}. "
+        f"no CONNECTION supplied and multiple connections defined: {known}. "
         f"Pass one as the positional argument, or mark one or more with `auto: true`.",
     )

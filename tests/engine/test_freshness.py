@@ -6,14 +6,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from dbprint.engine.freshness import (
-    DurationError,
-    StaleEntry,
-    evaluate,
-    format_age,
-    format_threshold,
-    parse_duration,
-)
+from dbprint.config.duration import DurationError, format_threshold, parse_duration
+from dbprint.engine.freshness import evaluate, format_age
 
 
 class TestParseDuration:
@@ -74,11 +68,6 @@ class TestEvaluate:
         stale = evaluate(manifest, 7.0, _NOW)
         assert len(stale) == 1
         assert stale[0].age_days == float("inf")
-
-    def test_returns_StaleEntry_dataclass(self) -> None:
-        manifest = _manifest_with(("a", _ts(_NOW, 10.0)))
-        stale = evaluate(manifest, 7.0, _NOW)
-        assert isinstance(stale[0], StaleEntry)
 
 
 class TestPerTableThreshold:

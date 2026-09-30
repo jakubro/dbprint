@@ -25,7 +25,7 @@ from dbprint.adapters import (
     TableScope,
     ValueCount,
 )
-from dbprint.adapters.base import ColumnProgress
+from dbprint.adapters.base import ColumnProgress, PhaseB
 from dbprint.conformance import validate_print
 from dbprint.engine import Engine
 from tests.engine.test_orchestrator import _conn_config
@@ -93,61 +93,13 @@ class TestTheEngineAsksForTheSkip:
 
         assert adapter.suppressed == {"field_notes", "phone"}
 
-    def test_the_request_reaches_phase_b_before_it_runs(self, tmp_path: Path) -> None:
-        """Phase A must not receive it - by then there is nothing left to skip."""
-
-        adapter = _RecordingAdapter(_fixture())
-        Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
-
-        assert adapter.calls == ["base", "columns"]
-
-
-class TestTheConcreteCompositeStillAgrees:
-    """`compute_statistics` runs the two halves, so every existing caller is unmoved."""
-
-    def test_the_composite_matches_the_halves_run_in_order(self) -> None:
-        """Literals `_fixture()` states directly, not a replay of `compute_statistics`'s calls.
-
-        A replay would match by construction, whatever the two phases returned.
-        """
-
-        adapter = MockAdapter(_fixture())
-        adapter.connect()
-        columns = adapter.introspect_columns("public.curator_note")
-        config = StatisticsConfig()
-
-        counts, stats = adapter.compute_statistics(
-            "public.curator_note",
-            columns,
-            config,
-            frozenset(),
-        )
-
-        assert counts.row_count == 200
-        assert counts.rows_scanned == 200
-        assert stats["status"].cardinality == 3
-        assert stats["status"].null_count == 0
-        assert stats["field_notes"].cardinality == 100
-
 
 class _RecordingAdapter(MockAdapter):
-    """Records the suppression request and the order the phases were called in."""
+    """Records which columns the engine asked Phase B to skip the value scan for."""
 
     def __init__(self, fixture: dict[str, MockTable]) -> None:
         super().__init__(fixture)
         self.suppressed: set[str] = set()
-        self.calls: list[str] = []
-
-    def compute_base_statistics(
-        self,
-        fqn: str,
-        columns: list[ColumnMeta],
-        config: StatisticsConfig,
-        scope: TableScope | None = None,
-    ) -> tuple[TableCounts, dict[str, BaseStats]]:
-        self.calls.append("base")
-
-        return super().compute_base_statistics(fqn, columns, config, scope)
 
     def compute_column_statistics(
         self,
@@ -161,8 +113,7 @@ class _RecordingAdapter(MockAdapter):
         suppress_values: frozenset[str] = frozenset(),
         on_column: ColumnProgress | None = None,
         scope: TableScope | None = None,
-    ) -> dict[str, ColumnStats]:
-        self.calls.append("columns")
+    ) -> PhaseB:
         self.suppressed |= set(suppress_values)
 
         return super().compute_column_statistics(

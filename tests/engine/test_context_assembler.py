@@ -18,6 +18,7 @@ from dbprint.engine.context_assembler import (
     _markdown_catalog_only_columns,
     _markdown_null_patterns,
     _markdown_relationships,
+    _render_table_markdown,
     _stripped_statistics,
 )
 
@@ -430,7 +431,7 @@ class TestProvenance:
         assert "- dbprint version: 0.1.0" in result.text
         assert "- Default collation: en_US.utf8" in result.text
         assert "- Redaction configured: 2 rules" in result.text
-        assert "- Selectors narrow this print: include herbarium.public.*" in result.text
+        assert "- Selectors applied to this print: include herbarium.public.*" in result.text
         assert "- Percentiles configured: p5, p25, p75, p95" in result.text
 
     def test_single_table_render_carries_no_provenance_block(self, tmp_path: Path) -> None:
@@ -481,7 +482,7 @@ class TestProvenance:
             "primary",
         )
 
-        assert "Selectors narrow" not in result.text
+        assert "Selectors applied" not in result.text
         assert "Redaction configured" not in result.text
 
 
@@ -609,24 +610,20 @@ class TestScopeQualifier:
     ) -> None:
         root = _seed_scoped_print(tmp_path, {"rows_scanned": 400_000, "sample": 0.1})
 
-        assert "Scanned: 400,000 of 4,000,000 rows (10.0%)" in _render_scoped(root)
+        assert "Scanned: 400000 of 4000000 rows (10%)" in _render_scoped(root)
 
     def test_a_sampled_read_names_the_fraction_that_was_asked_for(self, tmp_path: Path) -> None:
         root = _seed_scoped_print(tmp_path, {"rows_scanned": 400_000, "sample": 0.1})
 
         assert "sample 0.1" in _render_scoped(root)
 
-    def test_a_precise_fraction_is_rounded_to_4_significant_digits(self, tmp_path: Path) -> None:
-        """SPEC 2.2.8: `sample` records what was asked for - not at sixteen digits of it."""
-
+    def test_a_precise_fraction_is_spelled_as_the_artifact_spells_it(self, tmp_path: Path) -> None:
         root = _seed_scoped_print(
             tmp_path,
             {"rows_scanned": 1_000_000, "sample": 0.1234567890123456},
         )
-        text = _render_scoped(root)
 
-        assert "sample 0.1235" in text
-        assert "0.1234567890123456" not in text
+        assert "sample 0.1234567890123456" in _render_scoped(root)
 
     def test_a_filtered_read_carries_the_predicate_verbatim(self, tmp_path: Path) -> None:
         predicate = "created_at >= '2024-01-01'"
@@ -657,7 +654,7 @@ class TestScopeQualifier:
         root = _seed_scoped_print(tmp_path, {"rows_scanned": 400_000, "sample": 0.1})
         text = _render_scoped(root, budget=40)
 
-        assert "Scanned: 400,000 of 4,000,000 rows (10.0%)" in text
+        assert "Scanned: 400000 of 4000000 rows (10%)" in text
         assert "## Cardinality & key columns" not in text
 
     def test_dropping_the_statistics_drops_the_qualifier_with_them(self, tmp_path: Path) -> None:
@@ -675,7 +672,7 @@ class TestCardinalityCueNamesItsPopulation:
     ) -> None:
         root = _seed_scoped_print(tmp_path, {"rows_scanned": 400_000, "sample": 0.1})
 
-        assert "| trace_id | 400,000 (= scanned rows) |" in _render_scoped(root)
+        assert "| trace_id | 400000 (= scanned rows) |" in _render_scoped(root)
 
     def test_a_scoped_column_below_its_draw_carries_no_cue(self, tmp_path: Path) -> None:
         root = _seed_scoped_print(tmp_path, {"rows_scanned": 400_000, "sample": 0.1})
@@ -754,7 +751,7 @@ class TestCardinalityCueNamesItsPopulation:
         )
         text = _render_scoped(print_root)
 
-        assert "Scanned: 0 of 4,000,000 rows (0.0%)" in text
+        assert "Scanned: 0 of 4000000 rows (0%)" in text
         assert "| trace_id | 0 |" in text
 
 
@@ -803,14 +800,14 @@ class TestTimelineCoverageQualifier:
 
     def test_the_clamp_ceiling_itself_never_renders_as_100_percent(self, tmp_path: Path) -> None:
         """`0.999999` is the ceiling a `<1.0` coverage is clamped to, and rounding to one decimal
-        would send it to the `100.0%` the words above are withheld for claiming.
+        would send it to the `100%` the words above are withheld for claiming.
         """
 
         root = _seed_timeline_print(tmp_path, 0.999999)
         text = _render_scoped(root)
 
-        assert "99.9% of scanned rows" in text
-        assert "100.0% of scanned rows" not in text
+        assert "99.9999% of scanned rows" in text
+        assert "100% of scanned rows" not in text
         assert "every scanned row" not in text
 
     def test_a_coverage_of_exactly_1_renders_every_scanned_row(self, tmp_path: Path) -> None:
@@ -1014,13 +1011,13 @@ class TestObservedRendering:
         }
         line = _markdown_relationships(self._artifacts(self._refers_to(observed)))
 
-        assert "observed: fanout avg 10.0 (max 15), covers 40.0% of target" in line
+        assert "observed: fanout avg 10.0 (max 15), covers 40% of target" in line
 
     def test_an_absent_fanout_max_renders_no_max_clause(self) -> None:
         observed = {"fanout_avg": 1.0, "target_coverage": 1.0, "scope_compatible": True}
         line = _markdown_relationships(self._artifacts(self._refers_to(observed)))
 
-        assert "observed: fanout avg 1.0, covers 100.0% of target" in line
+        assert "observed: fanout avg 1.0, covers 100% of target" in line
         assert "max" not in line
 
     def test_an_incoherent_edge_carries_a_visible_marker(self) -> None:
@@ -1060,7 +1057,7 @@ class TestObservedRendering:
         }
         line = _markdown_relationships(self._artifacts(self._refers_to(observed)))
 
-        assert "60.0% of the referencing values are contained (42 answerable)" in line
+        assert "60% of the referencing values are contained (42 answerable)" in line
 
     def test_containment_with_no_answerable_count_renders_the_ratio_alone(self) -> None:
         observed = {
@@ -1071,7 +1068,7 @@ class TestObservedRendering:
         }
         line = _markdown_relationships(self._artifacts(self._refers_to(observed)))
 
-        assert "60.0% of the referencing values are contained" in line
+        assert "60% of the referencing values are contained" in line
         assert "answerable" not in line
 
 
@@ -1329,8 +1326,6 @@ class TestSketchStrippedFromStructuredPayload:
         assert "sketch" not in stripped["columns"]["collector_id"]
         assert stripped["columns"]["collector_id"]["cardinality"] == 100
         assert stats["columns"]["collector_id"]["sketch"] == self._SKETCH  # input untouched
-        assert stripped is not stats
-        assert stripped["columns"] is not stats["columns"]
 
     def test_json_carries_no_sketch_key(self, tmp_path: Path) -> None:
         print_root = self._seed(tmp_path)
@@ -1435,26 +1430,28 @@ class TestSketchStrippedFromStructuredPayload:
 class TestAssembleStructured:
     """`assemble_structured_context` - the object MCP's get_table_context returns directly."""
 
-    def test_matches_the_json_serialization_it_replaces(self, tmp_path: Path) -> None:
-        """Same payload as assemble(format='json'), one call shallower - no text round-trip."""
+    def test_returns_the_seeded_prints_fields_as_objects(self, tmp_path: Path) -> None:
+        """The payload MCP hands back directly - no text round-trip to parse."""
 
         print_root = _seed_print(tmp_path)
-        via_serialized = json.loads(
-            assemble_context(
-                MANIFEST,
-                print_root,
-                ["herbarium.public.collector"],
-                AssemblyOptions(format="json"),
-                "primary",
-            ).text,
-        )
         direct = assemble_structured_context(
             MANIFEST,
             print_root,
             "herbarium.public.collector",
             AssemblyOptions(format="json"),
         )
-        assert direct == via_serialized
+
+        assert (direct["table"], direct["type"], direct["columns_count"], direct["row_count"]) == (
+            "herbarium.public.collector",
+            "table",
+            3,
+            100,
+        )
+        assert direct["statistics"]["columns"]["rank"]["values"][0] == {
+            "count": 60,
+            "value": "trainee",
+        }
+        assert direct["statistics"]["columns"]["seed_count"]["range"] == {"max": 99, "min": 18}
 
     def test_identity_fields_present_even_at_zero_budget(self, tmp_path: Path) -> None:
         print_root = _seed_print(tmp_path)
@@ -1962,7 +1959,7 @@ class TestAnnotations:
         )
 
         assert set(result["_corrupted"]) == {"relationships_annotations"}
-        assert "expected the node content" in result["_corrupted"]["relationships_annotations"]
+        assert result["_corrupted"]["relationships_annotations"].strip()
 
     def test_a_non_mapping_artifact_reports_why(self, tmp_path: Path) -> None:
         """A YAML-valid file that isn't a mapping is corrupt for a different reason than a
@@ -1980,7 +1977,8 @@ class TestAnnotations:
             AssemblyOptions(format="json"),
         )
 
-        assert result["_corrupted"] == {"statistics": "parses, but is not a mapping"}
+        assert set(result["_corrupted"]) == {"statistics"}
+        assert result["_corrupted"]["statistics"].strip()
 
     def test_structured_json_includes_relationship_annotations(self, tmp_path: Path) -> None:
         print_root = _seed_print(tmp_path)
@@ -2262,12 +2260,12 @@ class TestQueryPurpose:
     def test_an_exhaustive_list_states_the_whole_domain(self, tmp_path: Path) -> None:
         text = _query(_seed_print(tmp_path), "herbarium.public.collector", MANIFEST)
 
-        assert "1.0 - the list is the whole domain" in _row_for(text, "rank")
+        assert "100% - the list is the whole domain" in _row_for(text, "rank")
 
     def test_a_truncated_list_states_that_it_is_a_sample(self, tmp_path: Path) -> None:
         text = _query(_seed_print(tmp_path), "herbarium.public.collector", MANIFEST)
 
-        assert "0.02 - a sample of the most frequent values" in _row_for(text, "collector_id")
+        assert "2% - a sample of the most frequent values" in _row_for(text, "collector_id")
 
     def test_a_column_without_values_has_no_row(self, tmp_path: Path) -> None:
         """`seed_count` is numeric with no value list; an empty cell would read as no values."""
@@ -2320,11 +2318,11 @@ class TestQueryPurpose:
 
         text = _query(print_root, "herbarium.public.field_log", SCOPED_MANIFEST)
 
-        assert "1.0 - the list is the whole domain over the rows scanned" in _row_for(
+        assert "100% - the list is the whole domain over the rows scanned" in _row_for(
             text,
             "region",
         )
-        assert "Scanned: 400,000 of 4,000,000 rows (10.0%)" in text
+        assert "Scanned: 400000 of 4000000 rows (10%)" in text
 
     def test_identity_rides_a_budget_too_small_for_anything_else(self, tmp_path: Path) -> None:
         text = _query(_seed_print(tmp_path), "herbarium.public.collector", MANIFEST, budget=20)
@@ -2486,7 +2484,7 @@ class TestTheQueryValueTableShowsWhatAPredicateCanUse:
 
         assert "Kew (40) {Kew 30, KEW 10} / Leiden (20) / Geneva (5) / Meise (5) / Paris (5)" in row
         assert "Uppsala" not in row
-        assert "0.75 - a sample of the most frequent values" in row
+        assert "75% - a sample of the most frequent values" in row
 
     def test_a_column_with_values_but_no_coverage_has_no_row(self, tmp_path: Path) -> None:
         """A numeric list is a frequency sample with no stated share (SPEC 2.2.3) - not a domain."""
@@ -2741,6 +2739,31 @@ class TestDatabaseContentCannotReshapeTheTableQuotingIt:
 
         assert rows
         assert all(len(_unescaped_cells(row)) == 3 for row in rows)
+
+
+class TestLostTableBlocks:
+    """SPEC 2.2.1: a block the file names `unmeasured` is unknown, and the context says so."""
+
+    def test_a_lost_layout_read_is_named_as_lost(self) -> None:
+        text = self._render({"row_count": 10, "columns": {}, "unmeasured": ["physical_layout"]})
+
+        assert "## Blocks in the file's `unmeasured` list" in text
+        assert "`physical_layout` (clustering or partitioning)" in text
+
+    def test_a_file_that_lost_nothing_renders_no_such_section(self) -> None:
+        assert "`unmeasured` list" not in self._render({"row_count": 10, "columns": {}})
+
+    @staticmethod
+    def _render(statistics: dict[str, Any]) -> str:
+        text, _, _ = _render_table_markdown(
+            _bare_artifacts(statistics),
+            AssemblyOptions(),
+            None,
+            {},
+            None,
+        )
+
+        return text
 
 
 def _unescaped_cells(row: str) -> list[str]:

@@ -44,6 +44,7 @@ class ProgressEvent:
     elapsed_ms: int | None = None
     row_count: int | None = None
     error: str | None = None
+    reason: str | None = None
     pass_name: str | None = None
     pass_index: int | None = None
     pass_total: int | None = None
@@ -58,8 +59,7 @@ ProgressCallback = Callable[[ProgressEvent], None]
 class GenerateRequest:
     """Per-call options for `Engine.generate()`.
 
-    `on_progress` of None disables emission entirely - the strict no-op path `diff`/`check`
-    rely on. `fail_fast` stops at the first table failure instead of isolating it.
+    `on_progress=None` emits nothing; `confirm_all_removed` accepts a listing sharing no table.
     """
 
     force: bool = False
@@ -68,6 +68,7 @@ class GenerateRequest:
     cli_exclude: tuple[str, ...] = ()
     on_progress: ProgressCallback | None = None
     fail_fast: bool = False
+    confirm_all_removed: bool = False
 
 
 @dataclass(frozen=True)
@@ -83,9 +84,7 @@ class DiffRequest:
 class TableResult:
     """Per-table outcome of a generate run.
 
-    `error` is the one-line cause, formatted `<ExcType>: <message>`. `error_operation` names
-    the adapter call that raised, since one message can come from more than one call;
-    `error_detail` carries a query failure's statement and parameters.
+    `error` is `<ExcType>: <message>`; `error_operation` names the raising call; `reason` explains a skip.
     """
 
     fqn: str
@@ -95,6 +94,7 @@ class TableResult:
     error_operation: str | None = None
     error_detail: str | None = None
     error_traceback: str | None = None
+    reason: str | None = None
 
 
 @dataclass(frozen=True)

@@ -7,11 +7,14 @@ from __future__ import annotations
 from dbprint.spec.sketch import SketchKind
 from . import stats
 from .connection import Cursor, exec_query
+from .rendering import render_canonical
+from ..identifiers import SOURCE_ALIAS, Identity
+from ..sql_layout import indented
 
 
 def compute_key_sketch(
     cursor: Cursor,
-    fqn: str,
+    identity: Identity,
     column: str,
     sql_type: str,
     kind: SketchKind,
@@ -19,36 +22,32 @@ def compute_key_sketch(
 ) -> tuple[int, ...]:
     """The k smallest low-64-bit MD5 hashes of the column's distinct non-null values."""
 
-    database, schema, table = fqn.split(".")
-    quoted_table = stats._quote_qualified(database, schema, table)
-    quoted_col = stats._quote_ident(column)
-    canonical = _canonical_expr(quoted_col, kind, sql_type)
-    low64 = _low64_expr("v")
+    quoted_table = identity.quoted()
+    quoted_col = stats._qualified(column)
+    canonical = render_canonical(quoted_col, sql_type, kind)
+    low64 = _low64_expr("dst.v")
 
     rows = exec_query(
         cursor,
         f"""
-        SELECT {low64} AS h
-        FROM (
-            SELECT DISTINCT {canonical} AS v
-            FROM {quoted_table}
-            WHERE {quoted_col} IS NOT NULL
-        ) t
-        ORDER BY h
+        SELECT
+          {low64} AS h
+        FROM
+          (
+            SELECT DISTINCT
+              {indented(canonical, 14)} AS v
+            FROM
+              {quoted_table} {SOURCE_ALIAS}
+            WHERE
+              {quoted_col} IS NOT NULL
+          ) dst
+        ORDER BY
+          h
         LIMIT {int(k)}
         """,
     ).fetchall()
 
     return tuple(int(r[0]) for r in rows)
-
-
-def _canonical_expr(quoted_col: str, kind: SketchKind, sql_type: str) -> str:
-    """SPEC 2.2.14's canonical byte form for one SQL value, as a SQL expression."""
-
-    if kind == "temporal":
-        return stats._render_calendar_bound(quoted_col, sql_type)
-
-    return f"CAST({quoted_col} AS VARCHAR)"
 
 
 def _low64_expr(value_expr: str) -> str:

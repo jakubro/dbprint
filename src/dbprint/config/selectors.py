@@ -9,6 +9,7 @@ beyond the project config.
 
 from __future__ import annotations
 
+import re
 from fnmatch import fnmatchcase
 
 
@@ -54,6 +55,19 @@ def expand(
     """Filter fqns through effective selectors, preserving input order."""
 
     return [f for f in fqns if covers(f, config_include, config_exclude, cli_include, cli_exclude)]
+
+
+def may_hold(namespace: str, include: list[str]) -> bool:
+    """Whether any include pattern could match a table under `namespace` - False only when every
+    pattern's literal head names another namespace, so a lister can skip it unread.
+    """
+
+    head = f"{namespace.lower()}."
+
+    return any(
+        head.startswith(literal) or literal.startswith(head)
+        for literal in (re.split(r"[*?\[]", pattern.lower(), maxsplit=1)[0] for pattern in include)
+    )
 
 
 def _any_match(fqn: str, patterns: list[str]) -> bool:

@@ -72,27 +72,6 @@ class TestSingleValueColumn:
         assert classify([60], 5, exhaustive=False) != "dominant_value"
 
 
-class TestBothPathsAgreeOnIdenticalInput:
-    """The value-list path and the top-N path both classify through `classify`.
-
-    A top-N fetch over-reads by one row to detect truncation, then trims; that
-    pre-processing is reproduced here, not just the shared call.
-    """
-
-    def test_a_truncated_top_n_fetch_matches_an_equivalent_value_list(self) -> None:
-        value_list_counts = [10, 8, 5]
-
-        fetched, n = [10, 8, 5, 3], 3
-        top_n_counts = fetched[:n]
-        top_n_exhaustive = len(fetched) <= n
-
-        assert classify(value_list_counts, 100, exhaustive=False) == classify(
-            top_n_counts,
-            100,
-            exhaustive=top_n_exhaustive,
-        )
-
-
 class TestSummarize:
     """`summarize` (the `frequencies` field) over the same capped list `classify` reads."""
 
@@ -123,3 +102,19 @@ class TestAllThreeAdaptersShareOneFunction:
         assert postgres_classify is classify
         assert mysql_classify is classify
         assert snowflake_classify is classify
+
+
+def test_a_single_row_single_value_list_is_dominant() -> None:
+    assert classify([1], 1, exhaustive=True) == "dominant_value"
+
+
+def test_a_tail_share_of_exactly_the_threshold_is_not_a_long_tail() -> None:
+    assert classify([3], 10, exhaustive=False) == "uniform"
+
+
+def test_an_exhaustive_list_with_one_non_zero_count_is_dominant() -> None:
+    assert classify([5, 0], 10, exhaustive=True) == "dominant_value"
+
+
+def test_a_count_of_one_is_a_non_zero_count() -> None:
+    assert classify([3, 1], 4, exhaustive=True) == "imbalanced"

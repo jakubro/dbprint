@@ -7,6 +7,7 @@ disk, so a page reflects the latest `generate`.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 import markdown
@@ -15,6 +16,7 @@ from jinja2 import ChainableUndefined
 from markupsafe import Markup
 
 from dbprint.config import ConnectionConfig
+from dbprint.spec.value_text import spell_number, spell_percent
 from . import catalogue, view
 
 
@@ -98,7 +100,8 @@ def _sidebar_context(connections: list[catalogue.PrintConnection]) -> dict[str, 
 def _register_filters(app: Flask) -> None:
     app.add_template_filter(_render_markdown, "md")
     app.add_template_filter(_non_breaking, "nbsp")
-    app.add_template_filter(_human_number, "human")
+    app.add_template_filter(_number, "number")
+    app.add_template_filter(_percent, "percent")
     app.add_template_filter(_pretty_datetime, "dt")
     app.add_template_filter(_relative_time, "relative")
 
@@ -115,37 +118,26 @@ def _non_breaking(text: str | None) -> str | None:
     return text.replace("_", NBSP) if text else text
 
 
-def _human_number(n: Any) -> str:
-    """Format a count with K/M/B/T suffixes; blank for anything that is not one.
+def _number(value: Any) -> str:
+    """A statistic or count as the artifact spells it; blank for anything that is not a number.
 
-    A plain view's manifest entry carries no `row_count` (SPEC 1.4), so this also absorbs
-    Jinja's `Undefined`, whose `float()` raises `UndefinedError` rather than `TypeError`.
+    Jinja's `Undefined` included: a plain view's entry has no `row_count` (SPEC 1.4).
     """
 
-    try:
-        n = float(n)
-    except Exception:  # noqa: BLE001 - degrade any non-numeric input, incl. jinja2.Undefined
-        return ""
+    return spell_number(value) if _is_number(value) else ""
 
-    units = [("T", 1e12), ("B", 1e9), ("M", 1e6), ("K", 1e3)]
 
-    for i, (unit, div) in enumerate(units):
-        if abs(n) < div:
-            continue
+def _percent(ratio: Any) -> str:
+    """A share as a percentage that never rounds a partial one onto 0% or 100%; blank otherwise."""
 
-        value = round(n / div, 1)
-
-        if abs(value) >= 1000 and i > 0:  # e.g. 999999 rounds to 1000K, bump to 1M
-            unit, div = units[i - 1]
-            value = round(n / div, 1)
-
-        return f"{value:.1f}".rstrip("0").rstrip(".") + unit
-
-    return str(int(n))
+    return spell_percent(ratio) if _is_number(ratio) else ""
 
 
 def _pretty_datetime(value: Any) -> Any:
-    """Render an ISO date or timestamp string in a readable form."""
+    """Render an ISO date or timestamp string in a readable form, and a number as the artifact does."""
+
+    if _is_number(value):
+        return spell_number(value)
 
     if not isinstance(value, str):
         return value
@@ -197,3 +189,7 @@ def _relative_time(value: Any) -> Any:
     n = max(1, round(seconds / 60))
 
     return f"{n} minute{'s' if n != 1 else ''} ago"
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, int | float | Decimal) and not isinstance(value, bool)

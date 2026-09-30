@@ -1,9 +1,6 @@
 """A type the adapter cannot profile but the format does not name.
 
-`dbprint.spec` lists the types the format can describe and an adapter lists its vendor's, so
-the second is the larger set. Without `supported=False`, phase A classifies such a column
-`text` while phase B returns `cardinality: null` - a schema violation. Only MySQL and
-Snowflake can reach it; Postgres's unsupported list is a subset of the format's.
+Without `supported=False`, phase A would classify it `text` while phase B publishes no cardinality.
 """
 
 from __future__ import annotations
@@ -28,28 +25,68 @@ from tests.adapters.test_mysql import _build as build_mysql
 from tests.adapters.test_snowflake import _build_adapter as build_snowflake
 
 
+# Types each adapter declines to profile that the format's own unsupported list does not name.
 VENDOR_ONLY: dict[str, frozenset[str]] = {
-    "mysql": frozenset(MYSQL_UNSUPPORTED) - frozenset(SPEC_UNSUPPORTED),
-    "snowflake": frozenset(SNOWFLAKE_UNSUPPORTED) - frozenset(SPEC_UNSUPPORTED),
-    "postgres": frozenset(POSTGRES_UNSUPPORTED) - frozenset(SPEC_UNSUPPORTED),
+    "mysql": frozenset(
+        {
+            "geometry",
+            "geometrycollection",
+            "linestring",
+            "longblob",
+            "mediumblob",
+            "multilinestring",
+            "multipoint",
+            "multipolygon",
+            "point",
+            "polygon",
+            "tinyblob",
+            "vector",
+        },
+    ),
+    "snowflake": frozenset({"file", "geography", "geometry", "unknown", "vector"}),
+    "postgres": frozenset(
+        {
+            "aclitem",
+            "box",
+            "cid",
+            "circle",
+            "geography",
+            "geometry",
+            "gtsvector",
+            "jsonpath",
+            "line",
+            "lseg",
+            "path",
+            "pg_snapshot",
+            "point",
+            "polygon",
+            "refcursor",
+            "txid_snapshot",
+            "vector",
+            "xid",
+            "xml",
+        },
+    ),
+}
+
+_ADAPTER_UNSUPPORTED = {
+    "mysql": MYSQL_UNSUPPORTED,
+    "snowflake": SNOWFLAKE_UNSUPPORTED,
+    "postgres": POSTGRES_UNSUPPORTED,
 }
 
 
 class TestTheDivergenceIsReal:
     """Pure: the lists themselves, with no database in the way."""
 
-    @pytest.mark.parametrize("vendor", ["mysql", "snowflake"])
+    @pytest.mark.parametrize("vendor", ["mysql", "snowflake", "postgres"])
     def test_the_adapter_knows_types_the_format_does_not(self, vendor: str) -> None:
-        """The precondition: an empty result would make the divergence below untestable."""
+        """The precondition: every named type is the adapter's to decline and not the format's."""
 
-        assert VENDOR_ONLY[vendor], f"{vendor} no longer carries a type outside the spec list"
+        assert VENDOR_ONLY[vendor] <= frozenset(_ADAPTER_UNSUPPORTED[vendor])
+        assert not VENDOR_ONLY[vendor] & frozenset(SPEC_UNSUPPORTED)
 
-    def test_postgres_cannot_exhibit_the_case(self) -> None:
-        """Which is exactly why a Postgres-only run cannot see this class of defect."""
-
-        assert VENDOR_ONLY["postgres"] == frozenset()
-
-    @pytest.mark.parametrize("vendor", ["mysql", "snowflake"])
+    @pytest.mark.parametrize("vendor", ["mysql", "snowflake", "postgres"])
     def test_a_measured_cardinality_would_misclassify_every_one_of_them(
         self,
         vendor: str,
@@ -62,7 +99,7 @@ class TestTheDivergenceIsReal:
 
         assert all(v != "unsupported" for v in misclassified.values()), misclassified
 
-    @pytest.mark.parametrize("vendor", ["mysql", "snowflake"])
+    @pytest.mark.parametrize("vendor", ["mysql", "snowflake", "postgres"])
     def test_withholding_the_cardinality_classifies_them_unsupported(self, vendor: str) -> None:
         """And what it does once the adapter says it could not profile the column."""
 
@@ -81,7 +118,6 @@ _POSTGRES_NETWORK_AND_TEXT_FAMILY = (
     "inet",
     "cidr",
     "macaddr",
-    "xml",
     "interval",
     "bit varying",
     "tsvector",
@@ -128,11 +164,12 @@ class TestMysqlReportsItsOwnUnsupportedTypes:
 
         try:
             columns = adapter.introspect_columns(f"{mysql_test_db['database']}.blobs")
-            _, base = adapter.compute_base_statistics(
+            _, phase_a = adapter.compute_base_statistics(
                 f"{mysql_test_db['database']}.blobs",
                 columns,
                 StatisticsConfig(),
             )
+            base = phase_a.stats
         finally:
             adapter.close()
 
@@ -166,11 +203,12 @@ class TestSnowflakeReportsItsOwnUnsupportedTypes:
         try:
             adapter.list_tables(include=["*"], exclude=[])
             columns = adapter.introspect_columns("memory.seedbank.shapes")
-            _, base = adapter.compute_base_statistics(
+            _, phase_a = adapter.compute_base_statistics(
                 "memory.seedbank.shapes",
                 columns,
                 StatisticsConfig(),
             )
+            base = phase_a.stats
         finally:
             adapter.close()
 

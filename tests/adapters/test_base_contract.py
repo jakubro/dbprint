@@ -6,9 +6,13 @@ parameter, and each DB-backed adapter extends the list.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
+from typing import Any, LiteralString, cast
 
+import psycopg
 import pytest
 
 from dbprint.adapters import (
@@ -30,16 +34,22 @@ from dbprint.adapters import (
     TableScope,
     ValueCount,
 )
-from dbprint.adapters.base import row_count_or_none
+from dbprint.adapters.base import PhaseA, PhaseB, batched_by_cost, row_count_or_none, run_phase_a
+from dbprint.adapters.errors import QueryFailed
+from dbprint.adapters.identifiers import IdentifierRejected
+from dbprint.cli.adapter_registry import ADAPTERS
 from dbprint.spec.classification import classify
 from dbprint.spec.statistics_matrix import FORBIDDEN_FIELDS, REQUIRED_FIELDS
 from dbprint.spec.temporal_age import parse_instant
+from dbprint.spec.value_text import scalar_text
 from tests.adapters.conftest import (
     WIDE_DISTINCT,
     WIDE_FUTURE_MAX,
     WIDE_ROW_COUNT,
     WIDE_TEMPORAL_MAX,
     WIDE_TEMPORAL_SPAN_DAYS,
+    _adapter_factory_for,
+    _mysql_exec_many,
 )
 
 
@@ -48,6 +58,7 @@ from tests.adapters.conftest import (
 ABSTRACT_METHODS = {
     "connect",
     "close",
+    "new_session",
     "list_tables",
     "extract_ddl",
     "introspect_columns",
@@ -429,7 +440,8 @@ class TestProbeTimeline:
         vendor, factory = sql_adapter_factory
         adapter = factory()
         fqn, columns, counts = _viability_check_probe_context(adapter, empty_stats_config)
-        _, base = adapter.compute_base_statistics(fqn, columns, empty_stats_config)
+        _, phase_a = adapter.compute_base_statistics(fqn, columns, empty_stats_config)
+        base = phase_a.stats
         stats = adapter.compute_column_statistics(
             fqn,
             columns,
@@ -620,9 +632,10 @@ class TestBareUniqueIndexAgreement:
             pytest.skip("BigQuery has no CREATE INDEX at all; see class docstring.")
 
         fqn = _herbarium_fqn(adapter)
-        groups = {g.columns for g in adapter.introspect_unique_keys(fqn)}
+        groups = {g.columns: g.primary for g in adapter.introspect_unique_keys(fqn)}
 
         assert ("code",) in groups, f"{fqn} did not declare `code` unique"
+        assert not groups[("code",)], f"{fqn} declared `code` its primary key"
 
     def test_every_adapter_excludes_it_from_indexes(
         self,
@@ -693,24 +706,7 @@ class TestStatistics:
         for t in _tables_with_columns(adapter):
             cols = adapter.introspect_columns(t.fqn)
             _, stats = adapter.compute_statistics(t.fqn, cols, empty_stats_config, frozenset())
-            assert isinstance(stats, dict)
             assert all(isinstance(s, ColumnStats) for s in stats.values())
-
-    def test_stats_does_not_include_classification(
-        self,
-        adapter_factory: Callable[[], Adapter],
-        empty_stats_config: StatisticsConfig,
-    ) -> None:
-        """Engine assigns classification; the adapter MUST NOT stamp it."""
-
-        adapter = adapter_factory()
-
-        for t in _tables_with_columns(adapter):
-            cols = adapter.introspect_columns(t.fqn)
-            _, stats = adapter.compute_statistics(t.fqn, cols, empty_stats_config, frozenset())
-
-            for s in stats.values():
-                assert getattr(s, "classification", None) is None
 
     def test_no_column_emits_a_field_its_own_resulting_classification_forbids(
         self,
@@ -789,7 +785,8 @@ class TestStatistics:
 
         for t in _tables_with_columns(adapter):
             cols = adapter.introspect_columns(t.fqn)
-            counts, base = adapter.compute_base_statistics(t.fqn, cols, empty_stats_config)
+            counts, phase_a = adapter.compute_base_statistics(t.fqn, cols, empty_stats_config)
+            base = phase_a.stats
             stats = adapter.compute_column_statistics(
                 t.fqn,
                 cols,
@@ -970,7 +967,7 @@ class TestStatistics:
         adapter_factory: Callable[[], Adapter],
         empty_stats_config: StatisticsConfig,
     ) -> None:
-        """SPEC 2.2.4: ties at the cutoff broken by lexicographic order on value."""
+        """SPEC 2.2.4: tied entries are listed by code point on the published text of value."""
 
         adapter = adapter_factory()
 
@@ -989,19 +986,41 @@ class TestStatistics:
 
                     continue
 
-                # Within each run of equal counts, values must ascend lexicographically.
+                # Within each run of equal counts, values must ascend by published text.
                 run_start = 0
                 tvs = s.values
 
                 for i in range(1, len(tvs) + 1):
                     if i == len(tvs) or tvs[i].count != tvs[run_start].count:
                         run = tvs[run_start:i]
-                        run_values = [str(tv.value) for tv in run]
+                        run_values = [scalar_text(tv.value) for tv in run]
                         assert run_values == sorted(run_values), (
                             f"{t.fqn}: ties at count={tvs[run_start].count} must "
-                            f"break lexicographically by value (SPEC 2.2.4)."
+                            f"ascend by published text (SPEC 2.2.4)."
                         )
                         run_start = i
+
+    def test_a_tie_orders_by_published_text_not_by_the_drivers_value(
+        self,
+        sql_adapter_factory: tuple[str, Callable[[], Adapter]],
+        empty_stats_config: StatisticsConfig,
+    ) -> None:
+        """`tie_spellings` ties five against five: "B" sorts before "b" by code point, and
+        "0.0000001" before "0.5" - though a driver's `str()` spells the first `1e-07`.
+        """
+
+        vendor, factory = sql_adapter_factory
+        adapter = factory()
+        fqn = next(
+            t.fqn
+            for t in adapter.list_tables(include=["*"], exclude=[])
+            if t.fqn.rsplit(".", 1)[-1] == "tie_spellings"
+        )
+        columns = adapter.introspect_columns(fqn)
+        _, stats = adapter.compute_statistics(fqn, columns, empty_stats_config, frozenset())
+
+        assert [tv.value for tv in stats["letter"].values or ()] == ["B", "b"], vendor
+        assert [float(tv.value) for tv in stats["weight"].values or ()] == [1e-07, 0.5], vendor
 
 
 class TestEmptyDrawOverANonEmptyTable:
@@ -1030,7 +1049,7 @@ class TestEmptyDrawOverANonEmptyTable:
             scope=scope,
         )
 
-        assert stats == {}
+        assert dict(stats) == {}
 
     def test_an_ordinary_scoped_read_still_returns_column_stats(
         self,
@@ -1057,6 +1076,39 @@ class TestEmptyDrawOverANonEmptyTable:
         assert set(stats) == {c.name for c in columns}
 
 
+class TestQualifiedFilter:
+    """SPEC 2.2.8 records a filter verbatim, so one naming the table itself must still resolve."""
+
+    def test_a_filter_qualified_by_the_table_name_reads_what_the_bare_one_reads(
+        self,
+        sql_adapter_factory: tuple[str, Callable[[], Adapter]],
+        empty_stats_config: StatisticsConfig,
+    ) -> None:
+        vendor, factory = sql_adapter_factory
+        adapter = factory()
+        fqn = next(
+            t.fqn for t in adapter.list_tables(include=["*"], exclude=[]) if _is_curator(t.fqn)
+        )
+        columns = adapter.introspect_columns(fqn)
+
+        def profile(predicate: str) -> dict[str, Any]:
+            counts, stats = adapter.compute_statistics(
+                fqn,
+                columns,
+                empty_stats_config,
+                frozenset(),
+                scope=TableScope(filter=predicate),
+            )
+
+            return {"rows_scanned": counts.rows_scanned, **stats}
+
+        qualified = profile("curator.id IS NOT NULL")
+        bare = profile("id IS NOT NULL")
+
+        assert qualified == bare, vendor
+        assert qualified["rows_scanned"] > 0, vendor
+
+
 class TestSampling:
     def test_returns_list_bounded_by_n(self, adapter_factory: Callable[[], Adapter]) -> None:
         adapter = adapter_factory()
@@ -1066,6 +1118,156 @@ class TestSampling:
                 samples = adapter.sample_values(t.fqn, col.name, n=5)
                 assert isinstance(samples, list)
                 assert len(samples) <= 5
+
+
+class TestHashOrderedDraw:
+    """SPEC 4.1.2: the distinct draw follows a hash of the value, never storage order.
+
+    `viability_check.id` is inserted ascending, so a storage-order draw returns exactly the first 25.
+    """
+
+    def test_a_value_stored_past_the_draw_size_is_drawn(
+        self,
+        sql_adapter_factory: tuple[str, Callable[[], Adapter]],
+    ) -> None:
+        vendor, factory = sql_adapter_factory
+        drawn = _draw_viability_check_ids(factory())
+
+        assert len(drawn) == 25, vendor
+        assert max(drawn) >= 25, f"{vendor} drew the first rows stored: {sorted(drawn)}"
+
+    def test_two_draws_over_unchanged_data_agree(
+        self,
+        sql_adapter_factory: tuple[str, Callable[[], Adapter]],
+    ) -> None:
+        vendor, factory = sql_adapter_factory
+        adapter = factory()
+
+        assert _draw_viability_check_ids(adapter) == _draw_viability_check_ids(adapter), vendor
+
+
+# The copies' own vendors: each seeds through its substrate, in its own identifier spelling.
+_SEEDED_VENDORS = ["postgres", "mysql", "snowflake"]
+
+_QUOTE = {"postgres": '"', "mysql": "`", "snowflake": '"'}
+
+
+class TestIdentifierRejection:
+    """SPEC 1.5: a name outside the path-segment allowlist aborts the listing unless excluded."""
+
+    @pytest.mark.parametrize("vendor", _SEEDED_VENDORS)
+    def test_an_unsafe_character_is_rejected_with_a_resolution(
+        self,
+        vendor: str,
+        request: pytest.FixtureRequest,
+    ) -> None:
+        adapter = _adapter_factory_for(request, vendor)()
+        _sibling_of_herbarium(adapter, "weird name")
+        _seed(request, vendor, [f"CREATE TABLE {_table(vendor, 'weird name')} (id INT)"])
+
+        with pytest.raises(IdentifierRejected) as rejected:
+            adapter.list_tables(include=["*"], exclude=[])
+
+        message = str(rejected.value)
+        assert "contains-unsafe-character" in message
+        assert "Resolution:" in message
+        assert "exclude:" in message
+
+    @pytest.mark.parametrize("vendor", _SEEDED_VENDORS)
+    def test_an_excluded_unsafe_name_lets_the_listing_proceed(
+        self,
+        vendor: str,
+        request: pytest.FixtureRequest,
+    ) -> None:
+        adapter = _adapter_factory_for(request, vendor)()
+        weird = _sibling_of_herbarium(adapter, "weird name")
+        herbarium = _herbarium_fqn(adapter)
+        _seed(request, vendor, [f"CREATE TABLE {_table(vendor, 'weird name')} (id INT)"])
+
+        fqns = {t.fqn for t in adapter.list_tables(include=["*"], exclude=[weird])}
+
+        assert herbarium in fqns
+        assert weird not in fqns
+
+    @pytest.mark.parametrize("vendor", ["postgres", "mysql"])
+    def test_a_case_collision_is_rejected_naming_both(
+        self,
+        vendor: str,
+        request: pytest.FixtureRequest,
+    ) -> None:
+        """SPEC 1.5.2: `Curator` beside the contract's own `curator` lowercases to one path."""
+
+        adapter = _adapter_factory_for(request, vendor)()
+        curator = _sibling_of_herbarium(adapter, "curator")
+        _seed(request, vendor, [f"CREATE TABLE {_table(vendor, 'Curator')} (id INT)"])
+
+        with pytest.raises(IdentifierRejected) as rejected:
+            adapter.list_tables(include=["*"], exclude=[])
+
+        message = str(rejected.value)
+        # Either spelling can be the one listed first, so neither is pinned as the "previous".
+        assert "case-collides-with-" in message
+        assert curator in message
+        assert curator.rsplit(".", 1)[0] + ".Curator" in message
+        assert "Resolution:" in message
+
+    @pytest.mark.parametrize("vendor", ["postgres", "mysql"])
+    def test_excluding_the_shared_path_drops_both_spellings(
+        self,
+        vendor: str,
+        request: pytest.FixtureRequest,
+    ) -> None:
+        """SPEC 1.5.4: selectors match the lowercased path, so neither spelling survives."""
+
+        adapter = _adapter_factory_for(request, vendor)()
+        curator = _sibling_of_herbarium(adapter, "curator")
+        herbarium = _herbarium_fqn(adapter)
+        _seed(request, vendor, [f"CREATE TABLE {_table(vendor, 'Curator')} (id INT)"])
+
+        fqns = {t.fqn for t in adapter.list_tables(include=["*"], exclude=[curator])}
+
+        assert herbarium in fqns
+        assert curator not in fqns
+
+
+class TestEmptyTable:
+    @pytest.mark.parametrize("vendor", _SEEDED_VENDORS)
+    def test_every_column_measures_zero(
+        self,
+        vendor: str,
+        request: pytest.FixtureRequest,
+    ) -> None:
+        adapter = _adapter_factory_for(request, vendor)()
+        fqn = _sibling_of_herbarium(adapter, "empty_t")
+        _seed(request, vendor, [f"CREATE TABLE {_table(vendor, 'empty_t')} (id INT, name TEXT)"])
+        adapter.list_tables(include=["*"], exclude=[])
+        columns = adapter.introspect_columns(fqn)
+
+        counts, stats = adapter.compute_statistics(fqn, columns, StatisticsConfig(), frozenset())
+
+        assert counts.row_count == 0
+        assert {name: (s.null_count, s.null_rate, s.cardinality) for name, s in stats.items()} == {
+            "id": (0, 0.0, 0),
+            "name": (0, 0.0, 0),
+        }
+
+
+class TestLifecycle:
+    @pytest.mark.parametrize("kind", sorted(ADAPTERS))
+    def test_closing_an_adapter_never_connected_is_a_no_op(self, kind: str) -> None:
+        # The ABC cannot type the constructor, as in `cli/engine_setup.py`.
+        adapter_class = cast(Any, ADAPTERS[kind])
+        credentials = {key: "1" for key in adapter_class.REQUIRED_KEYS} | {"password": "p"}
+        adapter = adapter_class(credentials)
+
+        assert adapter.close() is None
+        assert adapter.close() is None
+
+    def test_closing_twice_is_a_no_op(self, adapter_factory: Callable[[], Adapter]) -> None:
+        adapter = adapter_factory()
+
+        assert adapter.close() is None
+        assert adapter.close() is None
 
 
 # Helpers
@@ -1156,7 +1358,7 @@ class TestDayCounts:
             assert stats[name].range is not None, f"{name} produced no range"
 
 
-def _viability_check_stats(adapter: Adapter, config: StatisticsConfig) -> dict[str, ColumnStats]:
+def _viability_check_stats(adapter: Adapter, config: StatisticsConfig) -> PhaseB:
     """Per-column statistics for the wide fixture table on any substrate."""
 
     fqn = next(
@@ -1182,7 +1384,7 @@ def _is_herbarium(fqn: str) -> bool:
     return fqn.rsplit(".", 1)[-1] == "herbarium"
 
 
-def _curator_stats(adapter: Adapter, config: StatisticsConfig) -> dict[str, ColumnStats]:
+def _curator_stats(adapter: Adapter, config: StatisticsConfig) -> PhaseB:
     """Per-column statistics for the null-bearing fixture table on any substrate."""
 
     fqn = next(t.fqn for t in adapter.list_tables(include=["*"], exclude=[]) if _is_curator(t.fqn))
@@ -1241,7 +1443,8 @@ def _curator_dependency_context(
 
     fqn = next(t.fqn for t in adapter.list_tables(include=["*"], exclude=[]) if _is_curator(t.fqn))
     columns = adapter.introspect_columns(fqn)
-    counts, base = adapter.compute_base_statistics(fqn, columns, config)
+    counts, phase_a = adapter.compute_base_statistics(fqn, columns, config)
+    base = phase_a.stats
 
     return fqn, columns, counts, base
 
@@ -1256,7 +1459,8 @@ def _viability_check_dependency_context(
         t.fqn for t in adapter.list_tables(include=["*"], exclude=[]) if _is_viability_check(t.fqn)
     )
     columns = adapter.introspect_columns(fqn)
-    counts, base = adapter.compute_base_statistics(fqn, columns, config)
+    counts, phase_a = adapter.compute_base_statistics(fqn, columns, config)
+    base = phase_a.stats
 
     return fqn, columns, counts, base
 
@@ -1295,7 +1499,7 @@ class TestCrossAdapterDayCountAgreement:
         assert len({tuple(sorted(v.items())) for v in maxima.values()}) == 1, maxima
 
 
-def _spans(stats: dict[str, ColumnStats]) -> dict[str, int | None]:
+def _spans(stats: PhaseB) -> dict[str, int | None]:
     out: dict[str, int | None] = {}
 
     for name in WIDE_TEMPORAL_SPAN_DAYS:
@@ -1306,7 +1510,7 @@ def _spans(stats: dict[str, ColumnStats]) -> dict[str, int | None]:
     return out
 
 
-def _range_maxima(stats: dict[str, ColumnStats]) -> dict[str, datetime | None]:
+def _range_maxima(stats: PhaseB) -> dict[str, datetime | None]:
     out: dict[str, datetime | None] = {}
 
     for name in WIDE_TEMPORAL_MAX:
@@ -1339,3 +1543,308 @@ class TestFutureDatedColumns:
             assert str(rng.max).startswith(maximum.strftime("%Y-%m-%d")), (
                 f"{name}: range.max={rng.max!r} does not carry the seeded maximum"
             )
+
+
+class TestPhaseABatching:
+    """SPEC 2.2.2 is measured per column, but an engine compiles the whole statement first."""
+
+    def test_a_group_never_exceeds_the_budget_unless_one_column_does(self) -> None:
+        columns = [_named(f"c{i}") for i in range(10)]
+        groups = list(batched_by_cost(columns, lambda _: 3, budget=10))
+
+        assert [len(g) for g in groups] == [3, 3, 3, 1]
+
+    def test_every_column_lands_in_exactly_one_group(self) -> None:
+        columns = [_named(f"c{i}") for i in range(37)]
+        groups = list(batched_by_cost(columns, lambda _: 7, budget=20))
+        landed = [c.name for g in groups for c in g]
+
+        assert landed == [c.name for c in columns]
+
+    def test_a_column_costing_more_than_the_budget_still_gets_a_group(self) -> None:
+        columns = [_named("wide"), _named("also_wide")]
+        groups = list(batched_by_cost(columns, lambda _: 99, budget=10))
+
+        assert [[c.name for c in g] for g in groups] == [["wide"], ["also_wide"]]
+
+    def test_no_group_is_empty(self) -> None:
+        columns = [_named(f"c{i}") for i in range(9)]
+        groups = list(batched_by_cost(columns, lambda _: 4, budget=4))
+
+        assert all(groups)
+
+    def test_no_columns_yields_no_groups(self) -> None:
+        assert list(batched_by_cost([], lambda _: 1, budget=10)) == []
+
+
+class TestRunPhaseA:
+    """The shared phase-A driver, against fake hooks: batching, degradation, the recount."""
+
+    def test_every_batch_answering_measures_every_column_from_the_first_count(self) -> None:
+        columns = [_named(f"c{i}") for i in range(5)]
+        calls: list[list[str]] = []
+
+        def statement(batch: list[ColumnMeta]) -> tuple[int, dict[str, BaseStats]]:
+            calls.append([c.name for c in batch])
+
+            return 10 + len(calls), {c.name: _base(1, 4) for c in batch}
+
+        rows, phase_a = run_phase_a(columns, lambda _: 2, statement, _no_null_read, budget=4)
+
+        assert calls == [["c0", "c1"], ["c2", "c3"], ["c4"]]
+        assert rows == 11
+        assert list(phase_a.stats) == [c.name for c in columns]
+        assert phase_a.unmeasured == {}
+
+    def test_a_failing_batch_is_retried_column_by_column(self) -> None:
+        columns = [_named(n) for n in ("a", "broken", "c", "d")]
+        calls: list[list[str]] = []
+
+        def statement(batch: list[ColumnMeta]) -> tuple[int, dict[str, BaseStats]]:
+            calls.append([c.name for c in batch])
+
+            if "broken" in (c.name for c in batch):
+                raise RuntimeError("bad expression")
+
+            return 7, {c.name: _base(1, 3) for c in batch}
+
+        rows, phase_a = run_phase_a(
+            columns,
+            lambda _: 2,
+            statement,
+            lambda cols: (7, dict.fromkeys((c.name for c in cols), 2)),
+            budget=4,
+        )
+
+        assert calls == [["a", "broken"], ["a"], ["broken"], ["c", "d"]]
+        assert rows == 7
+        assert list(phase_a.stats) == ["a", "c", "d"]
+        assert phase_a.unmeasured == {"broken": 2}
+        assert len(phase_a.failures) == 2
+
+    def test_a_failing_first_batch_takes_the_count_from_the_next_read(self) -> None:
+        columns = [_named(n) for n in ("x", "y")]
+
+        def statement(batch: list[ColumnMeta]) -> tuple[int, dict[str, BaseStats]]:
+            if batch[0].name == "x":
+                raise RuntimeError("bad expression")
+
+            return 40, {c.name: _base(0, 1) for c in batch}
+
+        rows, phase_a = run_phase_a(
+            columns,
+            lambda _: 9,
+            statement,
+            lambda cols: (41, dict.fromkeys((c.name for c in cols), 5)),
+            budget=4,
+        )
+
+        assert rows == 41
+        assert phase_a.unmeasured == {"x": 5}
+        assert list(phase_a.stats) == ["y"]
+
+    def test_every_statement_failing_leaves_null_counts(self) -> None:
+        columns = [_named(n) for n in ("x", "y")]
+
+        rows, phase_a = run_phase_a(
+            columns,
+            lambda _: 1,
+            _failing,
+            lambda cols: (9, {c.name: len(c.name) for c in cols}),
+        )
+
+        assert rows == 9
+        assert phase_a.stats == {}
+        assert phase_a.unmeasured == {"x": 1, "y": 1}
+
+    def test_the_table_fails_only_when_the_null_count_fails_too(self) -> None:
+        def null_read(_: list[ColumnMeta]) -> tuple[int, dict[str, int]]:
+            raise ValueError("null read failed")
+
+        with pytest.raises(ValueError, match="null read failed"):
+            run_phase_a([_named("x")], lambda _: 1, _failing, null_read)
+
+    def test_a_batch_cancelled_by_the_statement_limit_fails_the_table_unretried(self) -> None:
+        calls: list[list[str]] = []
+
+        def statement(batch: list[ColumnMeta]) -> tuple[int, dict[str, BaseStats]]:
+            calls.append([c.name for c in batch])
+
+            raise QueryFailed(RuntimeError("canceled"), "SELECT 1", timed_out=True)
+
+        with pytest.raises(QueryFailed):
+            run_phase_a([_named("a"), _named("b")], lambda _: 1, statement, _no_null_read)
+
+        assert calls == [["a", "b"]]
+
+    def test_a_retry_cancelled_by_the_statement_limit_fails_the_table(self) -> None:
+        calls: list[list[str]] = []
+
+        def statement(batch: list[ColumnMeta]) -> tuple[int, dict[str, BaseStats]]:
+            calls.append([c.name for c in batch])
+
+            if len(batch) > 1:
+                raise ValueError("unsupported expression")
+
+            raise QueryFailed(RuntimeError("canceled"), "SELECT 1", timed_out=True)
+
+        with pytest.raises(QueryFailed):
+            run_phase_a([_named("a"), _named("b")], lambda _: 1, statement, _no_null_read)
+
+        assert calls == [["a", "b"], ["a"]]
+
+    def test_the_recount_runs_once_after_every_batch_and_clamps_to_non_null(self) -> None:
+        columns = [_named(f"c{i}") for i in range(4)]
+        recounts: list[list[str]] = []
+
+        def statement(batch: list[ColumnMeta]) -> tuple[int, dict[str, BaseStats]]:
+            return 100, {c.name: _base(10, 95 if c.name != "c3" else 20) for c in batch}
+
+        def recount(near_unique: list[ColumnMeta]) -> tuple[int, ...]:
+            recounts.append([c.name for c in near_unique])
+
+            return (500, 88, 91)
+
+        _, phase_a = run_phase_a(columns, lambda _: 2, statement, _no_null_read, recount, budget=2)
+
+        assert recounts == [["c0", "c1", "c2"]]
+        assert phase_a.stats["c0"].cardinality == 90
+        assert phase_a.stats["c1"].cardinality == 88
+        assert phase_a.stats["c0"].cardinality_method == "exact"
+        assert phase_a.stats["c3"].cardinality_method == "approximate"
+
+    def test_an_unsupported_column_is_never_recounted(self) -> None:
+        recounts: list[list[str]] = []
+
+        def statement(batch: list[ColumnMeta]) -> tuple[int, dict[str, BaseStats]]:
+            return 10, {"a": _base(0, 10), "blob": replace(_base(0, 10), supported=False)}
+
+        def recount(near_unique: list[ColumnMeta]) -> tuple[int, ...]:
+            recounts.append([c.name for c in near_unique])
+
+            return (10,)
+
+        run_phase_a([_named("a"), _named("blob")], lambda _: 1, statement, _no_null_read, recount)
+
+        assert recounts == [["a"]]
+
+    def test_a_raising_recount_leaves_the_estimates_standing(self) -> None:
+        def statement(batch: list[ColumnMeta]) -> tuple[int, dict[str, BaseStats]]:
+            return 10, {"a": _base(0, 10)}
+
+        def recount(_: list[ColumnMeta]) -> tuple[int, ...]:
+            raise RuntimeError("recount failed")
+
+        _, phase_a = run_phase_a([_named("a")], lambda _: 1, statement, _no_null_read, recount)
+
+        assert phase_a.stats["a"].cardinality_method == "approximate"
+        assert isinstance(phase_a.recount_failure, RuntimeError)
+        assert phase_a.unmeasured == {}
+
+    def test_without_the_hook_nothing_is_recounted(self) -> None:
+        def statement(batch: list[ColumnMeta]) -> tuple[int, dict[str, BaseStats]]:
+            return 10, {"a": _base(0, 10)}
+
+        _, phase_a = run_phase_a([_named("a")], lambda _: 1, statement, _no_null_read)
+
+        assert phase_a == PhaseA(stats={"a": _base(0, 10)})
+
+
+class TestPhaseADegradesPerColumn:
+    """Every adapter wires the driver: one broken column is null-counted, its batch-mates are not."""
+
+    def test_only_the_column_whose_statement_fails_is_unmeasured(
+        self,
+        sql_adapter_factory: tuple[str, Callable[[], Adapter]],
+        empty_stats_config: StatisticsConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        vendor, factory = sql_adapter_factory
+        adapter = factory()
+        fqn, columns, _ = _viability_check_probe_context(adapter, empty_stats_config)
+        _, whole = adapter.compute_base_statistics(fqn, columns, empty_stats_config)
+        broken = columns[0].name
+        stats_module = sys.modules[type(adapter).__module__.rsplit(".", 1)[0] + ".stats"]
+        real = stats_module._phase_a_statement
+
+        def failing_on_broken(*args: Any, **kwargs: Any) -> Any:
+            if any(c.name == broken for c in args[-1]):
+                raise RuntimeError("forced")
+
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(stats_module, "_phase_a_statement", failing_on_broken)
+        _, degraded = adapter.compute_base_statistics(fqn, columns, empty_stats_config)
+
+        assert degraded.unmeasured == {broken: whole.stats[broken].null_count}, vendor
+        assert degraded.stats == {k: v for k, v in whole.stats.items() if k != broken}, vendor
+
+
+def _base(null_count: int, cardinality: int) -> BaseStats:
+    return BaseStats(
+        null_count=null_count,
+        cardinality=cardinality,
+        cardinality_method="approximate",
+    )
+
+
+def _failing(_: list[ColumnMeta]) -> tuple[int, dict[str, BaseStats]]:
+    raise RuntimeError("bad expression")
+
+
+def _no_null_read(_: list[ColumnMeta]) -> tuple[int, dict[str, int]]:
+    raise AssertionError("no column needed the null-count fallback")
+
+
+def _named(name: str) -> ColumnMeta:
+    return ColumnMeta(name=name, sql_type="TEXT", nullable=True, default=None, ordinal=0)
+
+
+def _draw_viability_check_ids(adapter: Adapter) -> list[int]:
+    """Draw 25 of the 200 `id`s and return each one's insertion index (the id's last segment)."""
+
+    fqn = next(
+        t.fqn for t in adapter.list_tables(include=["*"], exclude=[]) if _is_viability_check(t.fqn)
+    )
+    adapter.introspect_columns(fqn)
+    drawn = adapter.sample_values(fqn, "id", n=25)
+
+    return [int(str(value).rsplit("-", 1)[-1]) - 1000 for value in drawn]
+
+
+def _sibling_of_herbarium(adapter: Adapter, name: str) -> str:
+    """Return the FQN a table named `name` gets beside the contract's `herbarium`, lowercased."""
+
+    return _herbarium_fqn(adapter).rsplit(".", 1)[0] + "." + name.lower()
+
+
+def _table(vendor: str, name: str) -> str:
+    quote = _QUOTE[vendor]
+    table = f"{quote}{name}{quote}"
+
+    return table if vendor == "mysql" else f"seedbank.{table}"
+
+
+def _seed(request: pytest.FixtureRequest, vendor: str, statements: list[str]) -> None:
+    """Run `statements` against the substrate the test's `vendor` adapter reads."""
+
+    if vendor == "postgres":
+        creds = request.getfixturevalue("postgres_test_db")
+
+        with psycopg.connect(
+            host=creds["host"],
+            port=int(creds["port"]),
+            dbname=creds["database"],
+            user=creds["user"],
+            autocommit=True,
+        ) as conn:
+            for statement in statements:
+                conn.execute(cast(LiteralString, statement))
+    elif vendor == "mysql":
+        creds = request.getfixturevalue("mysql_test_db")
+        _mysql_exec_many(int(creds["port"]), creds["database"], statements)
+    else:
+        shim = request.getfixturevalue("snowflake_duckdb_connection")
+
+        for statement in statements:
+            shim.execute(statement)

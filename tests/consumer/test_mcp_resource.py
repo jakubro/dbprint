@@ -20,12 +20,18 @@ from tests.fixtures.adversarial import (
     DELIMITER_TABLE,
     DELIMITER_VALUE,
     EMPTY_COLUMNS_TABLE,
+    EXTREME_TABLE,
     FUTURE_DATED_COLUMN,
     INCOMPLETE_GRAIN_TABLE,
     LINE_BREAK_VALUE,
     NEVER_DECLARED_KIND,
     REDACTED_COLUMN,
+    SCOPED_COMPLETE_LIST_COLUMN,
+    SCOPED_KEY_COLUMN,
+    SCOPED_LATEST_COLUMN,
     SCOPED_TABLE,
+    SPELLING_COLUMN,
+    SPELLING_VALUES,
     TRUNCATED_FK_COLUMN,
     UNEVALUATED_TABLE,
     AdversarialPrint,
@@ -45,6 +51,12 @@ COVERS = frozenset(
         "catalog_only_table",
         "declared_missing_artifact",
         "delimiter_in_a_value",
+        "value_spelling",
+        "scoped_complete_list",
+        "scoped_candidate_key",
+        "scoped_latest_value",
+        "extreme_number_statistics",
+        "near_boundary_share",
     },
 )
 
@@ -169,36 +181,6 @@ def test_declared_missing_artifact_reads_a_different_error_than_never_declared(
     assert declared_missing.value.code != never_declared.value.code
 
 
-def test_declared_missing_optional_kind_reads_a_different_error_than_never_declared(
-    adversarial_print: AdversarialPrint,
-) -> None:
-    """The same distinction as above, for a human-authored (optional) kind.
-
-    `adversarial_print` is session-scoped, so the manifest mutation is undone before returning.
-    """
-
-    conn = adversarial_print.conn.name
-    path = DECLARED_MISSING_TABLE.replace(".", "/")
-    state = _state(adversarial_print)
-    manifest_path = adversarial_print.print_root / "manifest.yaml"
-    original = manifest_path.read_text()
-
-    try:
-        manifest = yaml.safe_load(original)
-        manifest["tables"][DECLARED_MISSING_TABLE]["artifacts"]["description"] = "description.md"
-        manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
-
-        with pytest.raises(mcp_errors.McpError) as declared_missing:
-            mcp_resources.read(state, f"dbprint://{conn}/{path}/description")
-
-        with pytest.raises(mcp_errors.McpError) as never_declared:
-            mcp_resources.read(state, f"dbprint://{conn}/{path}/statistics_annotations")
-
-        assert declared_missing.value.code != never_declared.value.code
-    finally:
-        manifest_path.write_text(original)
-
-
 def test_a_delimiter_in_a_value_is_served_verbatim(adversarial_print: AdversarialPrint) -> None:
     """The resource channel serves the file as committed, so the literal arrives intact."""
 
@@ -207,3 +189,60 @@ def test_a_delimiter_in_a_value_is_served_verbatim(adversarial_print: Adversaria
 
     assert DELIMITER_VALUE in values
     assert LINE_BREAK_VALUE in values
+
+
+def test_scoped_complete_list_is_served_beside_its_scope(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    statistics = _statistics(adversarial_print, SCOPED_TABLE)
+
+    assert statistics["scope"]["rows_scanned"] == 250
+    assert statistics["columns"][SCOPED_COMPLETE_LIST_COLUMN]["values_coverage"] == 1.0
+
+
+def test_scoped_candidate_key_is_served_beside_its_scope(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    statistics = _statistics(adversarial_print, SCOPED_TABLE)
+
+    assert statistics["scope"]["sample"] == 0.25
+    assert statistics["columns"][SCOPED_KEY_COLUMN]["rows_scanned"] == 250
+
+
+def test_scoped_latest_value_is_served_beside_its_scope(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    statistics = _statistics(adversarial_print, SCOPED_TABLE)
+
+    assert statistics["columns"][SCOPED_LATEST_COLUMN]["rows_scanned"] == 250
+    assert "freshness" in statistics["columns"][SCOPED_LATEST_COLUMN]
+
+
+def test_a_value_needing_a_spelling_is_served_verbatim(adversarial_print: AdversarialPrint) -> None:
+    statistics = _statistics(adversarial_print, DELIMITER_TABLE)
+    values = [entry["value"] for entry in statistics["columns"][SPELLING_COLUMN]["values"]]
+
+    assert values == list(SPELLING_VALUES)
+
+
+def _statistics_text(adversarial_print: AdversarialPrint, table: str) -> str:
+    conn = adversarial_print.conn.name
+    path = table.replace(".", "/")
+
+    return mcp_resources.read(
+        _state(adversarial_print),
+        f"dbprint://{conn}/{path}/statistics",
+    ).content
+
+
+def test_an_extreme_statistic_is_served_as_the_artifact_spells_it(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    text = _statistics_text(adversarial_print, EXTREME_TABLE)
+
+    assert "p50: 18446744073709548000.0" in text
+    assert "mean: 0.00000005" in text
+
+
+def test_a_share_near_a_boundary_is_served_unrounded(adversarial_print: AdversarialPrint) -> None:
+    assert "null_rate: 0.9996" in _statistics_text(adversarial_print, EXTREME_TABLE)

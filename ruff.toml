@@ -17,6 +17,7 @@ extend-select = [
   "RUF003",
   "COM812",
   "PLW1514",
+  "B905",
 ]
 
 [lint.per-file-ignores]

@@ -8,13 +8,14 @@ from pathlib import Path
 import pytest
 import yaml
 
-from dbprint.engine.baseline import (
-    baseline_states_from_manifest,
-    hydrate_baseline_states,
-    load_baseline_manifest,
-    load_incoming_edges,
+from dbprint.engine.baseline import load_baseline_manifest
+from dbprint.engine.carried import CommittedPrint
+from dbprint.engine.diff import (
+    GrainKeyState,
+    PhysicalLayoutKeyState,
+    PhysicalLayoutState,
+    TableState,
 )
-from dbprint.engine.diff import GrainKeyState, PhysicalLayoutKeyState, PhysicalLayoutState
 
 
 def _seed_print(tmp_path: Path) -> Path:
@@ -89,12 +90,14 @@ def _seed_print(tmp_path: Path) -> Path:
     return prints
 
 
+def _states(prints: Path) -> dict[str, TableState] | None:
+    return CommittedPrint.load(prints).baseline_states()
+
+
 class TestColumnHydration:
     def test_columns_populated_from_statistics(self, tmp_path: Path) -> None:
         prints = _seed_print(tmp_path)
-        manifest = load_baseline_manifest(prints)
-        states = baseline_states_from_manifest(manifest)
-        hydrate_baseline_states(states, prints, manifest)
+        states = _states(prints)
 
         assert states is not None
         state = states["public.curator"]
@@ -103,9 +106,7 @@ class TestColumnHydration:
 
     def test_sql_type_carried_through(self, tmp_path: Path) -> None:
         prints = _seed_print(tmp_path)
-        manifest = load_baseline_manifest(prints)
-        states = baseline_states_from_manifest(manifest)
-        hydrate_baseline_states(states, prints, manifest)
+        states = _states(prints)
 
         assert states is not None
         cols = states["public.curator"].columns
@@ -115,9 +116,7 @@ class TestColumnHydration:
 
     def test_nullable_carried_through(self, tmp_path: Path) -> None:
         prints = _seed_print(tmp_path)
-        manifest = load_baseline_manifest(prints)
-        states = baseline_states_from_manifest(manifest)
-        hydrate_baseline_states(states, prints, manifest)
+        states = _states(prints)
 
         assert states is not None
         cols = states["public.curator"].columns
@@ -129,9 +128,7 @@ class TestColumnHydration:
         """statistics.yaml carries no `default` field (see `diff.ColumnState.default_known`)."""
 
         prints = _seed_print(tmp_path)
-        manifest = load_baseline_manifest(prints)
-        states = baseline_states_from_manifest(manifest)
-        hydrate_baseline_states(states, prints, manifest)
+        states = _states(prints)
 
         assert states is not None
         cols = states["public.curator"].columns
@@ -156,9 +153,7 @@ class TestColumnHydration:
         }
         (prints / "manifest.yaml").write_text(yaml.safe_dump(manifest))
 
-        loaded = load_baseline_manifest(prints)
-        states = baseline_states_from_manifest(loaded)
-        hydrate_baseline_states(states, prints, loaded)
+        states = _states(prints)
 
         assert states is not None
         assert states["public.curator"].columns is None
@@ -167,9 +162,7 @@ class TestColumnHydration:
         prints = _seed_print(tmp_path)
         (prints / "public" / "curator" / "statistics.yaml").write_text("{ not: valid")
 
-        manifest = load_baseline_manifest(prints)
-        states = baseline_states_from_manifest(manifest)
-        hydrate_baseline_states(states, prints, manifest)
+        states = _states(prints)
 
         assert states is not None
         assert states["public.curator"].columns is None
@@ -178,9 +171,7 @@ class TestColumnHydration:
 class TestRowCountHydration:
     def test_row_count_and_method_carried_through(self, tmp_path: Path) -> None:
         prints = _seed_print(tmp_path)
-        manifest = load_baseline_manifest(prints)
-        states = baseline_states_from_manifest(manifest)
-        hydrate_baseline_states(states, prints, manifest)
+        states = _states(prints)
 
         assert states is not None
         state = states["public.curator"]
@@ -204,9 +195,7 @@ class TestRowCountHydration:
         }
         (prints / "manifest.yaml").write_text(yaml.safe_dump(manifest))
 
-        loaded = load_baseline_manifest(prints)
-        states = baseline_states_from_manifest(loaded)
-        hydrate_baseline_states(states, prints, loaded)
+        states = _states(prints)
 
         assert states is not None
         assert states["public.curator"].row_count is None
@@ -221,9 +210,7 @@ class TestRowCountHydration:
         data["columns"] = "not-a-mapping"
         stats_path.write_text(yaml.safe_dump(data))
 
-        manifest = load_baseline_manifest(prints)
-        states = baseline_states_from_manifest(manifest)
-        hydrate_baseline_states(states, prints, manifest)
+        states = _states(prints)
 
         assert states is not None
         assert states["public.curator"].row_count == 3
@@ -233,9 +220,7 @@ class TestRowCountHydration:
 class TestScopedHydration:
     def test_no_scope_block_hydrates_false(self, tmp_path: Path) -> None:
         prints = _seed_print(tmp_path)
-        manifest = load_baseline_manifest(prints)
-        states = baseline_states_from_manifest(manifest)
-        hydrate_baseline_states(states, prints, manifest)
+        states = _states(prints)
 
         assert states is not None
         assert states["public.curator"].scoped is False
@@ -247,9 +232,7 @@ class TestScopedHydration:
         data["scope"] = {"rows_scanned": 1, "sample": 0.5}
         stats_path.write_text(yaml.safe_dump(data))
 
-        manifest = load_baseline_manifest(prints)
-        states = baseline_states_from_manifest(manifest)
-        hydrate_baseline_states(states, prints, manifest)
+        states = _states(prints)
 
         assert states is not None
         assert states["public.curator"].scoped is True
@@ -273,9 +256,7 @@ class TestScopedHydration:
         }
         (prints / "manifest.yaml").write_text(yaml.safe_dump(manifest))
 
-        loaded = load_baseline_manifest(prints)
-        states = baseline_states_from_manifest(loaded)
-        hydrate_baseline_states(states, prints, loaded)
+        states = _states(prints)
 
         assert states is not None
         assert states["public.curator"].scoped is False
@@ -286,9 +267,7 @@ class TestGrainAndPhysicalLayoutHydration:
         """A baseline predating `grain` carries none - not an empty `keys` list."""
 
         prints = _seed_print(tmp_path)
-        manifest = load_baseline_manifest(prints)
-        states = baseline_states_from_manifest(manifest)
-        hydrate_baseline_states(states, prints, manifest)
+        states = _states(prints)
 
         assert states is not None
         assert states["public.curator"].grain is None
@@ -303,9 +282,7 @@ class TestGrainAndPhysicalLayoutHydration:
         }
         stats_path.write_text(yaml.safe_dump(data))
 
-        manifest = load_baseline_manifest(prints)
-        states = baseline_states_from_manifest(manifest)
-        hydrate_baseline_states(states, prints, manifest)
+        states = _states(prints)
 
         assert states is not None
         grain = states["public.curator"].grain
@@ -320,9 +297,7 @@ class TestGrainAndPhysicalLayoutHydration:
         """Absence means "not clustered" per SPEC 2.2.11, never a comparison-suppressing None."""
 
         prints = _seed_print(tmp_path)
-        manifest = load_baseline_manifest(prints)
-        states = baseline_states_from_manifest(manifest)
-        hydrate_baseline_states(states, prints, manifest)
+        states = _states(prints)
 
         assert states is not None
         assert states["public.curator"].physical_layout == PhysicalLayoutState(
@@ -340,9 +315,7 @@ class TestGrainAndPhysicalLayoutHydration:
         }
         stats_path.write_text(yaml.safe_dump(data))
 
-        manifest = load_baseline_manifest(prints)
-        states = baseline_states_from_manifest(manifest)
-        hydrate_baseline_states(states, prints, manifest)
+        states = _states(prints)
 
         assert states is not None
         layout = states["public.curator"].physical_layout
@@ -361,9 +334,7 @@ class TestWrongShapeArtifacts:
         prints = _seed_print(tmp_path)
         (prints / "public" / "curator" / "statistics.yaml").write_text("- a\n- b\n")
 
-        manifest = load_baseline_manifest(prints)
-        states = baseline_states_from_manifest(manifest)
-        hydrate_baseline_states(states, prints, manifest)
+        states = _states(prints)
 
         assert states is not None
         assert states["public.curator"].columns is None
@@ -376,9 +347,7 @@ class TestWrongShapeArtifacts:
         prints = _seed_print(tmp_path)
         (prints / "public" / "curator" / "relationships.yaml").write_text("just a string\n")
 
-        manifest = load_baseline_manifest(prints)
-        states = baseline_states_from_manifest(manifest)
-        hydrate_baseline_states(states, prints, manifest)
+        states = _states(prints)
 
         assert states is not None
         assert states["public.curator"].relationships is None
@@ -390,7 +359,7 @@ class TestWrongShapeArtifacts:
         prints = _seed_print(tmp_path)
         (prints / "public" / "curator" / "relationships.yaml").write_text("just a string\n")
 
-        assert load_incoming_edges(prints, load_baseline_manifest(prints)) == {}
+        assert CommittedPrint.load(prints).tables["public.curator"].referenced_by == ()
 
     def test_an_ignored_artifact_is_named(
         self,
@@ -402,8 +371,7 @@ class TestWrongShapeArtifacts:
         stats.write_text("- a\n- b\n")
 
         with caplog.at_level(logging.WARNING):
-            manifest = load_baseline_manifest(prints)
-            hydrate_baseline_states(baseline_states_from_manifest(manifest), prints, manifest)
+            CommittedPrint.load(prints)
 
         assert str(stats) in caplog.text
         assert "list" in caplog.text
@@ -446,9 +414,7 @@ class TestWrongShapeArtifacts:
         manifest["tables"]["public.specimen_loan"] = "not an entry"
         (prints / "manifest.yaml").write_text(yaml.safe_dump(manifest))
 
-        loaded = load_baseline_manifest(prints)
-        states = baseline_states_from_manifest(loaded)
-        hydrate_baseline_states(states, prints, loaded)
+        states = _states(prints)
 
         assert states is not None
         assert set(states) == {"public.curator"}
@@ -473,9 +439,7 @@ class TestWrongShapeArtifacts:
         (prints / "public" / "curator" / "statistics.yaml").write_text("")
 
         with caplog.at_level(logging.WARNING):
-            manifest = load_baseline_manifest(prints)
-            states = baseline_states_from_manifest(manifest)
-            hydrate_baseline_states(states, prints, manifest)
+            states = _states(prints)
 
         assert states is not None
         assert states["public.curator"].columns is None
@@ -522,10 +486,9 @@ class TestRelationshipEdgeDefaults:
             },
         )
 
-        manifest = load_baseline_manifest(prints)
-        states = baseline_states_from_manifest(manifest)
-        hydrate_baseline_states(states, prints, manifest)
-        edges = load_incoming_edges(prints, manifest)
+        committed = CommittedPrint.load(prints)
+        states = committed.baseline_states()
+        edges = committed.tables["public.curator"].referenced_by
 
         assert states is not None
         relationships = states["public.curator"].relationships
@@ -533,7 +496,7 @@ class TestRelationshipEdgeDefaults:
         fk = relationships[0]
         assert (fk.on_delete, fk.on_update, fk.detection) == (None, None, "inferred")
 
-        incoming = edges["public.curator"][0]
+        incoming = edges[0]
         assert (incoming.on_delete, incoming.on_update, incoming.detection) == (
             None,
             None,
@@ -561,9 +524,7 @@ class TestRelationshipEdgeDefaults:
             },
         )
 
-        manifest = load_baseline_manifest(prints)
-        states = baseline_states_from_manifest(manifest)
-        hydrate_baseline_states(states, prints, manifest)
+        states = _states(prints)
 
         assert states is not None
         relationships = states["public.curator"].relationships
@@ -583,8 +544,7 @@ class TestAnEntryTheReaderCannotFollow:
         manifest["tables"]["public.curator"]["path"] = 5
         (prints / "manifest.yaml").write_text(yaml.safe_dump(manifest))
 
-        loaded = load_baseline_manifest(prints)
-        states = baseline_states_from_manifest(loaded)
+        states = _states(prints)
 
         assert states == {}
 
@@ -597,9 +557,7 @@ class TestAnEntryTheReaderCannotFollow:
         manifest["tables"]["public.curator"]["artifacts"]["statistics"] = 7
         (prints / "manifest.yaml").write_text(yaml.safe_dump(manifest))
 
-        loaded = load_baseline_manifest(prints)
-        states = baseline_states_from_manifest(loaded)
-        hydrate_baseline_states(states, prints, loaded)
+        states = _states(prints)
 
         assert states is not None
         assert states["public.curator"].columns is None
@@ -614,9 +572,7 @@ class TestAnEntryTheReaderCannotFollow:
         }
         (prints / "manifest.yaml").write_text(yaml.safe_dump(manifest))
 
-        loaded = load_baseline_manifest(prints)
-        states = baseline_states_from_manifest(loaded)
-        hydrate_baseline_states(states, prints, loaded)
+        states = _states(prints)
 
         assert states is not None
         assert set(states) == {"public.curator"}

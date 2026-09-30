@@ -12,8 +12,12 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from .. import trace_context
+from ..dialect import Dialect
 from ..errors import QueryFailed
 
+
+# clickhouse-connect's DB-API defaults to pyformat (%s); the adapter does not override it.
+DIALECT = Dialect(vendor="clickhouse", paramstyle="pyformat", quote_char="`")
 
 _LOG = logging.getLogger(__name__)
 
@@ -28,19 +32,25 @@ class ConnectionParams:
 
     host: str
     port: int
-    database: str
     user: str
     password: str
+    database: str | None = None
+    statement_timeout: int | None = None
 
     @classmethod
-    def from_credentials(cls, creds: dict[str, str]) -> ConnectionParams:
+    def from_credentials(
+        cls,
+        creds: dict[str, str],
+        statement_timeout: int | None = None,
+    ) -> ConnectionParams:
         try:
             return cls(
                 host=creds["host"],
                 port=int(creds.get("port", 8123)),
-                database=creds["database"],
+                database=creds.get("database"),
                 user=creds.get("user", "default"),
                 password=creds.get("password", ""),
+                statement_timeout=statement_timeout,
             )
         except KeyError as exc:
             raise ClickhouseConnectionError(
@@ -77,15 +87,22 @@ class Connection:
         self._factory = cursor_factory or _default_cursor_factory
         self._cursor: Cursor | None = None
 
+    def sibling(self) -> Connection:
+        """An unopened connection with the same parameters and cursor factory."""
+
+        return Connection(self.params, self._factory)
+
     def open(self) -> None:
         try:
             self._cursor = self._factory(self.params)
         except ClickhouseConnectionError:
             raise
         except Exception as exc:
+            where = f"{self.params.host}:{self.params.port}"
+            where += f"/{self.params.database}" if self.params.database is not None else ""
+
             raise ClickhouseConnectionError(
-                f"could not connect to ClickHouse at {self.params.host}:{self.params.port}/"
-                f"{self.params.database} as {self.params.user!r}: {exc}",
+                f"could not connect to ClickHouse at {where} as {self.params.user!r}: {exc}",
             ) from exc
 
     def close(self) -> None:
@@ -119,7 +136,7 @@ def exec_query(cursor: Cursor, sql: str, params: Any = None) -> Cursor:
         else:
             cursor.execute(sql, params)
     except Exception as exc:
-        failure = QueryFailed(exc, sql, params)
+        failure = QueryFailed(exc, sql, params, timed_out=_is_timeout(exc))
         trace_context.log_failure(_LOG, started, failure)
 
         raise failure from exc
@@ -142,12 +159,28 @@ def _default_cursor_factory(params: ConnectionParams) -> Any:
             "extra: `pip install dbprint[clickhouse]`.",
         ) from exc
 
+    # Unrecognised keywords travel as server settings on every request; a zero speed-check delay
+    # makes the limit wall-clock rather than a projection that can fire before it is reached.
+    settings = (
+        {}
+        if params.statement_timeout is None
+        else {
+            "max_execution_time": params.statement_timeout,
+            "timeout_before_checking_execution_speed": 0,
+        }
+    )
     conn = dbapi.connect(
         host=params.host,
         port=params.port,
         database=params.database,
         username=params.user,
         password=params.password,
+        **settings,
     )
 
     return conn.cursor()
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    # TIMEOUT_EXCEEDED; older clients carry the server code only in the message.
+    return getattr(exc, "code", None) == 159 or "Code: 159" in str(exc)

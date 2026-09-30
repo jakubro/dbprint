@@ -12,6 +12,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from dbprint.config import selectors as selectors_module
+from dbprint.spec.absence import Absence, column_value, read_column_field
+from dbprint.spec.drift import DATA_CHANGE_KINDS, Data, column_field_rule
+from dbprint.spec.redaction import NOT_COMPARED_UNDER_REDACTION, is_redacted
 from dbprint.spec.v1 import FORMAT_VERSION
 
 
@@ -23,10 +26,9 @@ GRAIN_CHANGE_KIND = "grain_changed"
 PHYSICAL_LAYOUT_CHANGE_KIND = "physical_layout_changed"
 DEPENDS_ON_CHANGE_KIND = "depends_on_changed"
 
-# Kinds reporting data moving; every other kind means a committed print is no longer true.
-# grain_changed, physical_layout_changed and depends_on_changed sit with the shape-moving kinds:
-# each states what a constraint or a view's substrate declares, which churning data cannot move.
-DATA_CHANGE_KINDS = frozenset({DATA_CHANGE_KIND, ROW_COUNT_CHANGE_KIND})
+TYPE_CHANGE_KIND = "table_type_changed"
+PHYSICAL_NAME_CHANGE_KIND = "column_physical_name_changed"
+COLLATION_CHANGE_KIND = "column_collation_changed"
 
 
 # Diff payload subkeys.
@@ -66,7 +68,8 @@ class TableState:
     """
 
     fqn: str
-    type: str
+    # None where the committed entry records no `type`: unknown, never assumed to be a table.
+    type: str | None
     columns: dict[str, ColumnState] | None = None
     relationships: list[FkState] | None = None
     indexes: dict[str, IndexState] | None = None
@@ -87,6 +90,8 @@ class TableState:
     # The FQNs a view/matview reads (SPEC 2.2.17); None on a table or where the catalog could not
     # answer - absent on both sides reads as "nothing to compare", never as a removal.
     depends_on: tuple[str, ...] | None = None
+    # The connection default an implicit column collation resolves to (SPEC 2.2.2).
+    default_collation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -139,6 +144,8 @@ class ColumnState:
     # False when the default is unknown rather than absent, which None alone cannot say: a
     # baseline hydrated from statistics.yaml must not fire column_default_changed.
     default_known: bool = True
+    physical_name: str | None = None
+    collation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -185,11 +192,11 @@ def compute(
     selectors: DiffSelectors,
     generated_at: str,
     carried: frozenset[str] = frozenset(),
+    unread: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Return the diff dict ready for YAML serialization.
 
-    `carried` names tables this run did not re-read: their current state is the
-    baseline's own, so they compare equal and only the caller can name them (SPEC 2.6.4).
+    `carried`: not re-read, so equal to its baseline (SPEC 2.6.4); `unread`: unread, no baseline.
     """
 
     # Baseline scoped like current, so an out-of-scope table is not a removal (SPEC 2.6.8).
@@ -231,7 +238,7 @@ def compute(
     summary = _summarize(
         changes,
         unchanged_tables=len(shared_fqns) - len(modified_table_fqns) - len(unevaluated_table_fqns),
-        unevaluated_tables=len(unevaluated_table_fqns),
+        unevaluated_tables=len(unevaluated_table_fqns) + len(unread - set(current)),
     )
 
     return {
@@ -254,7 +261,7 @@ def compute(
                 "include": list(selectors.include),
                 "exclude": list(selectors.exclude),
             },
-            "tables_scanned": len(current),
+            "tables_scanned": len(current) + len(unread - set(current)),
         },
         "summary": summary,
         "changes": changes,
@@ -271,26 +278,6 @@ def has_schema_changes(diff_dict: dict[str, Any]) -> bool:
     return any(c.get("kind") not in DATA_CHANGE_KINDS for c in diff_dict.get("changes") or [])
 
 
-# `sampled`/`matched` and the `looks_like_candidate` pair move whenever the sample is redrawn -
-# drift about the measurement, not the column. `sketch` has no current side in a diff-only run.
-# Membership here is a BLANKET PROJECTION, not a per-comparison skip: `comparable_columns` strips
-# these off both sides, so a field the comparison must still READ belongs in `_MARKER_STATS`.
-_UNCOMPARED_STATS = frozenset(
-    {
-        "freshness",
-        "sql_type",
-        "nullable",
-        # The scanned-set marker itself (SPEC 2.2.8), echoed on every column of a scoped file -
-        # it describes the read, not the data, and differs between any two sampled runs.
-        "rows_scanned",
-        "inferred.sampled",
-        "inferred.matched",
-        "inferred.looks_like_candidate",
-        "inferred.looks_like_candidate_share",
-        "sketch",
-    },
-)
-
 # Present on one side only where the other never computed it - a `dbprint diff` run has no current
 # side, so it is skipped rather than compared; a `generate` run compares it normally.
 _PRESENCE_GATED_STATS = frozenset({"normalized_cardinality"})
@@ -303,16 +290,23 @@ _MARKER_STATS = frozenset({"unmeasured"})
 def comparable_columns(columns: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Project a `statistics.yaml` columns map onto the fields drift is read from.
 
-    Both sides pass through here, so what counts as a statistic is stated once: `freshness`
-    drifts with the clock, and `sql_type`/`nullable` have their own change kinds.
-    `cardinality`/`cardinality_ratio` drop per column in `_diff_one_column_stats`.
+    Both sides pass through here, so `spec.drift`'s DATA and MARKER rules decide what counts.
     """
 
     return {
-        name: {key: value for key, value in payload.items() if key not in _UNCOMPARED_STATS}
+        name: {key: value for key, value in payload.items() if _projected(key)}
         for name, payload in columns.items()
         if isinstance(payload, dict)
     }
+
+
+def _projected(key: str) -> bool:
+    try:
+        rule = column_field_rule(key)
+    except KeyError:
+        return True
+
+    return isinstance(rule, Data) or key in _MARKER_STATS
 
 
 def grain_from_block(data: Any) -> TableGrainState | None:
@@ -388,8 +382,15 @@ def _statistics_comparable(before: TableState, after: TableState) -> bool:
 def _diff_table(fqn: str, before: TableState, after: TableState) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
 
+    if before.type is not None and after.type is not None and before.type != after.type:
+        out.append(
+            {"kind": TYPE_CHANGE_KIND, "table": fqn, "before": before.type, "after": after.type},
+        )
+
+    # Catalog facts, not measurements (SPEC 2.2.15): compared whatever gates the statistics.
     if before.columns is not None and after.columns is not None:
         out.extend(_diff_columns(fqn, before.columns, after.columns))
+        out.extend(_diff_column_catalog_facts(fqn, before, after))
 
     if before.relationships is not None and after.relationships is not None:
         out.extend(_diff_relationships(fqn, before.relationships, after.relationships))
@@ -510,6 +511,52 @@ def _diff_columns(
                     "column": name,
                     "before": b.default,
                     "after": a.default,
+                },
+            )
+
+    return out
+
+
+def _diff_column_catalog_facts(
+    fqn: str,
+    before: TableState,
+    after: TableState,
+) -> list[dict[str, Any]]:
+    """Absent `physical_name` means the key (SPEC 7.2); absent `collation` means that side's
+    default, so only a column explicit on one side is compared."""
+
+    assert before.columns is not None and after.columns is not None
+    out: list[dict[str, Any]] = []
+
+    for name in sorted(set(before.columns) & set(after.columns)):
+        b, a = before.columns[name], after.columns[name]
+        spelled_before, spelled_after = b.physical_name or name, a.physical_name or name
+
+        if spelled_before != spelled_after:
+            out.append(
+                {
+                    "kind": PHYSICAL_NAME_CHANGE_KIND,
+                    "table": fqn,
+                    "column": name,
+                    "before": spelled_before,
+                    "after": spelled_after,
+                },
+            )
+
+        if b.collation is None and a.collation is None:
+            continue
+
+        collated_before = b.collation or before.default_collation
+        collated_after = a.collation or after.default_collation
+
+        if collated_before and collated_after and collated_before != collated_after:
+            out.append(
+                {
+                    "kind": COLLATION_CHANGE_KIND,
+                    "table": fqn,
+                    "column": name,
+                    "before": collated_before,
+                    "after": collated_after,
                 },
             )
 
@@ -826,24 +873,15 @@ _POPULATION_ABSOLUTE_STATS = frozenset(
 )
 
 
-# Cell values under SPEC 2.2.9: a marker either side withholds them, so comparing republishes
-# whichever side still holds one. `mean`/`sum`/`length` join - their exemption reads `rows_scanned`.
-_REDACTED_EXCLUDED_STATS = frozenset(
-    {
-        "values",
-        "range",
-        "percentiles",
-        "mean",
-        "sum",
-        "length",
-    },
-)
+# SPEC 2.2.9: a marker either side withholds these, so comparing republishes whichever side
+# still holds one.
+_REDACTED_EXCLUDED_STATS = NOT_COMPARED_UNDER_REDACTION
 
 
 def _unmeasured_of(col: dict[str, Any]) -> frozenset[str]:
     """The field names one side declares it could not measure (SPEC 2.2.4)."""
 
-    value = col.get("unmeasured")
+    value = column_value(col, "unmeasured")
 
     if not isinstance(value, list):
         return frozenset()
@@ -862,8 +900,8 @@ def _diff_one_column_stats(
     # A missing `cardinality_method` reads as exact, so a baseline predating the field keeps
     # comparing instead of silently stopping.
     approximate = "approximate" in (
-        before.get("cardinality_method", "exact"),
-        after.get("cardinality_method", "exact"),
+        column_value(before, "cardinality_method") or "exact",
+        column_value(after, "cardinality_method") or "exact",
     )
     out: list[dict[str, Any]] = []
     paths = _stat_paths(before) | _stat_paths(after)
@@ -872,15 +910,15 @@ def _diff_one_column_stats(
     unmeasured = _unmeasured_of(before) | _unmeasured_of(after)
     # Either side, not both: a hydrated baseline carries whatever primitive and salt wrote it, so
     # which of the two still holds a plain literal is not a fact the comparison can establish.
-    redacted = "redacted" in before or "redacted" in after
+    redacted = is_redacted(before) or is_redacted(after)
 
     for path in sorted(paths):
         head = path.split(".")[0]
 
-        if path in _UNCOMPARED_STATS or path in _MARKER_STATS:
+        if path in _MARKER_STATS or not _is_data(path):
             continue
 
-        if head in unmeasured:
+        if head in unmeasured or _unmeasured(before, path) or _unmeasured(after, path):
             continue
 
         if redacted and head in _REDACTED_EXCLUDED_STATS:
@@ -921,6 +959,13 @@ def _diff_one_column_stats(
     return out
 
 
+def _is_data(path: str) -> bool:
+    try:
+        return isinstance(column_field_rule(path), Data)
+    except KeyError:
+        return True
+
+
 def _same_reading(before: Any, after: Any) -> bool:
     """True when two readings of one stat say the same thing, NaN included.
 
@@ -948,20 +993,29 @@ def _stat_paths(stats: dict[str, Any]) -> set[str]:
     return flat
 
 
+def _unmeasured(stats: dict[str, Any], path: str) -> bool:
+    try:
+        return read_column_field(stats, path).state is Absence.UNMEASURED
+    except KeyError:
+        return False
+
+
 def _get_path(stats: dict[str, Any], path: str) -> Any:
-    if "." in path:
-        head, _, tail = path.partition(".")
-        sub = stats.get(head)
+    try:
+        return column_value(stats, path)
+    except KeyError:
+        pass
 
-        if isinstance(sub, dict):
-            return sub.get(tail)
+    head, _, tail = path.partition(".")
+    sub = stats.get(head)
 
-        return None
+    if not tail:
+        return sub
 
-    return stats.get(path)
+    return sub.get(tail) if isinstance(sub, dict) else None
 
 
-# `sql_type` and `freshness.*` are unreachable: `_UNCOMPARED_STATS` drops them before
+# `sql_type` and `freshness.*` are unreachable: `comparable_columns` drops them before
 # `_stat_paths` flattens a payload, so neither needs an entry.
 _NON_NUMERIC_STATS = {
     "classification",
@@ -1029,13 +1083,6 @@ def _summarize(
         elif kind == DATA_CHANGE_KIND:
             counts["statistics_drifted"] += 1
             modified_tables.add(c["table"])
-        elif kind == ROW_COUNT_CHANGE_KIND:
-            # No summary counter of its own (SPEC 2.6.4) - still counts the table as
-            # modified, or a row-count-only change would read as unchanged.
-            modified_tables.add(c["table"])
-        elif kind in {GRAIN_CHANGE_KIND, PHYSICAL_LAYOUT_CHANGE_KIND, DEPENDS_ON_CHANGE_KIND}:
-            # No summary counter of their own - still counts the table as modified.
-            modified_tables.add(c["table"])
         elif kind in {"relationship_added", "relationship_removed", "relationship_modified"}:
             counts["relationships_changed"] += 1
             modified_tables.add(c.get("source_table", c.get("table", "")))
@@ -1044,6 +1091,9 @@ def _summarize(
             modified_tables.add(c["table"])
         elif kind == "comment_changed":
             counts["comments_changed"] += 1
+            modified_tables.add(c["table"])
+        else:
+            # Every other kind has no counter of its own (SPEC 2.6.4) yet still modifies its table.
             modified_tables.add(c["table"])
 
     counts["tables_modified"] = len(modified_tables)

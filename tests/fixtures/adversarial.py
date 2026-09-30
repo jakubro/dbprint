@@ -9,6 +9,7 @@ tests/consumer/register.py for the claim each state carries and which surface sa
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
@@ -27,6 +28,8 @@ from dbprint.adapters import (
     Length,
     MockAdapter,
     MockTable,
+    NullPattern,
+    NullPatterns,
     Range,
     ValueCount,
 )
@@ -50,6 +53,9 @@ REDACTED_COLUMN = "email"
 REDACTED_PRIMITIVE = "mask"
 FUTURE_DATED_COLUMN = "matures_at"
 FUTURE_DATED_RANGE_MAX = "2099-01-01T00:00:00"
+SCOPED_KEY_COLUMN = "id"
+SCOPED_COMPLETE_LIST_COLUMN = "stage"
+SCOPED_LATEST_COLUMN = "sown_at"
 TRUNCATED_FK_COLUMN = "cultivar_id"
 TRUNCATED_FK_COVERAGE = 0.4
 FK_TARGET_TABLE = "public.cultivar"
@@ -67,6 +73,21 @@ DELIMITER_TABLE = "public.curation_event"
 DELIMITER_COLUMN = "condition"
 DELIMITER_VALUE = "fair|poor"
 LINE_BREAK_VALUE = "sound\nbut small"
+SPELLING_COLUMN = "remark"
+EXTREME_TABLE = "public.gauge"
+EXTREME_ROW_COUNT = 10_000
+# Every float statistic of `wide`/`tiny` sits where `str(float)` switches to exponent form.
+EXTREME_WIDE_P50 = 18446744073709548000.0
+EXTREME_TINY_MEAN = 0.00000005
+EXTREME_NULL_RATE = 0.9996
+EXPONENT_FORM = re.compile(r"(?<![\w.])\d+(?:\.\d+)?[eE][+-]?\d+(?![\w.])")
+PARTIAL_AS_WHOLE = re.compile(r"(?<![\d.])(?:0|100)(?:\.0)?%")
+# Each reads as something else when printed raw: nothing, a genuine null, a fold.
+SPELLING_VALUES = (
+    "",
+    "NULL",
+    "seed coat intact and no visible damage under magnification after the second germination trial",
+)
 
 _CREDENTIAL_ENV = {
     "DBPRINT_PRIMARY_HOST": "h",
@@ -99,7 +120,8 @@ def _fixture_tables() -> dict[str, MockTable]:
         namespace_path=("public", "sowing_trial"),
         ddl=(
             "CREATE TABLE public.sowing_trial (id uuid PRIMARY KEY, cultivar_id uuid, "
-            "email text, matures_at timestamp with time zone);\n"
+            "email text, matures_at timestamp with time zone, stage text, "
+            "sown_at timestamp with time zone);\n"
         ),
         columns=[
             ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1),
@@ -117,6 +139,14 @@ def _fixture_tables() -> dict[str, MockTable]:
                 nullable=False,
                 default=None,
                 ordinal=4,
+            ),
+            ColumnMeta(name="stage", sql_type="text", nullable=False, default=None, ordinal=5),
+            ColumnMeta(
+                name="sown_at",
+                sql_type="timestamp with time zone",
+                nullable=False,
+                default=None,
+                ordinal=6,
             ),
         ],
         relationships=[
@@ -198,6 +228,38 @@ def _fixture_tables() -> dict[str, MockTable]:
                 range=Range(min="2024-01-01", max=FUTURE_DATED_RANGE_MAX, span_days=27394),
                 percentiles={"p50": "2050-01-01"},
                 quantized_count=0,
+            ),
+            "stage": ColumnStats(
+                sql_type="text",
+                nullable=False,
+                null_count=0,
+                null_rate=0.0,
+                cardinality=2,
+                cardinality_ratio=0.008,
+                cardinality_method="exact",
+                values=(
+                    ValueCount(value="sown", count=150),
+                    ValueCount(value="harvested", count=100),
+                ),
+                values_coverage=1.0,
+                distribution="imbalanced",
+                empty_count=0,
+                length=Length(min=4, max=9, avg=6.0, p95=9.0),
+            ),
+            "sown_at": ColumnStats(
+                sql_type="timestamp with time zone",
+                nullable=False,
+                null_count=0,
+                null_rate=0.0,
+                cardinality=SCOPED_ROWS_SCANNED,
+                cardinality_ratio=1.0,
+                cardinality_method="exact",
+                values=tuple(ValueCount(value=f"201{i}-03-01", count=1) for i in range(5)),
+                distribution="uniform",
+                frequencies=Frequencies(top=1, bottom=1, listed=5, total=SCOPED_ROWS_SCANNED),
+                range=Range(min="2010-03-01", max="2014-03-01", span_days=1461),
+                percentiles={"p50": "2012-03-01"},
+                quantized_count=SCOPED_ROWS_SCANNED,
             ),
         },
         samples={"id": [f"00000000-0000-7000-8000-{i:012d}" for i in range(20)]},
@@ -365,10 +427,14 @@ def _fixture_tables() -> dict[str, MockTable]:
     curation_event = MockTable(
         type="table",
         namespace_path=("public", "curation_event"),
-        ddl="CREATE TABLE public.curation_event (id uuid PRIMARY KEY, condition text);\n",
+        ddl=(
+            "CREATE TABLE public.curation_event (id uuid PRIMARY KEY, condition text, "
+            "remark text);\n"
+        ),
         columns=[
             ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1),
             ColumnMeta(name="condition", sql_type="text", nullable=False, default=None, ordinal=2),
+            ColumnMeta(name="remark", sql_type="text", nullable=False, default=None, ordinal=3),
         ],
         relationships=[],
         indexes=[],
@@ -408,12 +474,136 @@ def _fixture_tables() -> dict[str, MockTable]:
                 empty_count=0,
                 length=Length(min=9, max=15, avg=12.0, p95=15.0),
             ),
+            "remark": ColumnStats(
+                sql_type="text",
+                nullable=False,
+                null_count=0,
+                null_rate=0.0,
+                cardinality=3,
+                cardinality_ratio=0.03,
+                cardinality_method="exact",
+                values=tuple(
+                    ValueCount(value=value, count=count)
+                    for value, count in zip(SPELLING_VALUES, (34, 33, 33), strict=True)
+                ),
+                values_coverage=1.0,
+                distribution="uniform",
+                empty_count=34,
+                length=Length(min=0, max=93, avg=32.01, p95=93.0),
+            ),
         },
-        samples={"condition": [DELIMITER_VALUE, LINE_BREAK_VALUE]},
+        samples={"condition": [DELIMITER_VALUE, LINE_BREAK_VALUE], "remark": list(SPELLING_VALUES)},
         row_count=100,
     )
 
+    gauge = MockTable(
+        type="table",
+        namespace_path=("public", "gauge"),
+        ddl=(
+            "CREATE TABLE public.gauge (wide double precision, tiny double precision, "
+            "sparse integer, status text);\n"
+        ),
+        columns=[
+            ColumnMeta(
+                name="wide",
+                sql_type="double precision",
+                nullable=False,
+                default=None,
+                ordinal=1,
+            ),
+            ColumnMeta(
+                name="tiny",
+                sql_type="double precision",
+                nullable=False,
+                default=None,
+                ordinal=2,
+            ),
+            ColumnMeta(name="sparse", sql_type="integer", nullable=True, default=None, ordinal=3),
+            ColumnMeta(name="status", sql_type="text", nullable=False, default=None, ordinal=4),
+        ],
+        relationships=[],
+        indexes=[],
+        comments=CommentsMeta(table=None, columns={}),
+        stats={
+            "wide": ColumnStats(
+                sql_type="double precision",
+                nullable=False,
+                null_count=0,
+                null_rate=0.0,
+                cardinality=EXTREME_ROW_COUNT,
+                cardinality_ratio=1.0,
+                cardinality_method="exact",
+                range=Range(min=18446744073709541000.0, max=18446744073709552000.0),
+                percentiles={"p50": EXTREME_WIDE_P50},
+                mean=EXTREME_WIDE_P50,
+                sum=184467440737095480000000.0,
+                zero_count=0,
+                negative_count=0,
+                quantized_count=EXTREME_ROW_COUNT,
+                values=(ValueCount(value=EXTREME_WIDE_P50, count=1),),
+                distribution="uniform",
+                frequencies=Frequencies(top=1, bottom=1, listed=1, total=EXTREME_ROW_COUNT),
+            ),
+            "tiny": ColumnStats(
+                sql_type="double precision",
+                nullable=False,
+                null_count=0,
+                null_rate=0.0,
+                cardinality=97,
+                cardinality_ratio=0.0097,
+                cardinality_method="exact",
+                range=Range(min=0.000000001, max=0.000000097),
+                percentiles={"p50": 0.000000049},
+                mean=EXTREME_TINY_MEAN,
+                sum=0.00049,
+                zero_count=0,
+                negative_count=0,
+                quantized_count=0,
+                values=(ValueCount(value=0.000000049, count=104),),
+                distribution="uniform",
+                frequencies=Frequencies(top=104, bottom=103, listed=1, total=EXTREME_ROW_COUNT),
+            ),
+            "sparse": ColumnStats(
+                sql_type="integer",
+                nullable=True,
+                null_count=9996,
+                null_rate=EXTREME_NULL_RATE,
+                cardinality=4,
+                cardinality_ratio=0.0004,
+                cardinality_method="exact",
+                values=tuple(ValueCount(value=i, count=1) for i in range(1, 5)),
+                values_coverage=1.0,
+                distribution="uniform",
+            ),
+            "status": ColumnStats(
+                sql_type="text",
+                nullable=False,
+                null_count=0,
+                null_rate=0.0,
+                cardinality=30,
+                cardinality_ratio=0.003,
+                cardinality_method="exact",
+                values=(
+                    ValueCount(value="ok", count=9994),
+                    ValueCount(value="bad", count=2),
+                    ValueCount(value="lost", count=2),
+                ),
+                values_coverage=0.9998,
+                distribution="dominant_value",
+                empty_count=0,
+                length=Length(min=2, max=4, avg=2.0006, p95=2.0),
+            ),
+        },
+        samples={},
+        null_patterns=NullPatterns(
+            patterns=(NullPattern(columns=("sparse",), count=9996),),
+            coverage=EXTREME_NULL_RATE,
+        ),
+        row_count=EXTREME_ROW_COUNT,
+    )
+
     return {
+        "public.gauge": gauge,
         "public.sowing_trial": sowing_trial,
         "public.cultivar": cultivar,
         "public.batch": batch,
@@ -430,7 +620,7 @@ class _MockPostgresAdapter(MockAdapter):
 
     REQUIRED_KEYS = ("host", "port", "database", "user", "password")
 
-    def __init__(self, _credentials: dict[str, str]) -> None:
+    def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
         super().__init__(_fixture_tables())
 
 

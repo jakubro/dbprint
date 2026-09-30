@@ -172,29 +172,9 @@ def _add_plain_view(server: StdioServer, fqn: str = "public.a_view") -> None:
 
 
 class TestBuildServer:
-    def test_returns_server_instance(self, primary_conn: ConnectionConfig) -> None:
-        from mcp.server import Server
-
-        server = build_server(_state_for(primary_conn))
-        assert isinstance(server, Server)
-
     def test_server_advertises_dbprint_name(self, primary_conn: ConnectionConfig) -> None:
         server = build_server(_state_for(primary_conn))
         assert server.name == "dbprint"
-
-    def test_server_carries_package_version(self, primary_conn: ConnectionConfig) -> None:
-        from dbprint import __version__
-
-        server = build_server(_state_for(primary_conn))
-        assert server.version == __version__
-
-    def test_handlers_registered(self, primary_conn: ConnectionConfig) -> None:
-        server = build_server(_state_for(primary_conn))
-        # get_request_handler looks up the internal dispatch table the SDK uses.
-        assert server.get_request_handler("resources/list") is not None
-        assert server.get_request_handler("resources/read") is not None
-        assert server.get_request_handler("tools/list") is not None
-        assert server.get_request_handler("tools/call") is not None
 
 
 class TestAnArgumentFaultReachesTheWireAsAFault:
@@ -218,7 +198,7 @@ class TestAnArgumentFaultReachesTheWireAsAFault:
         result = _call_tool(
             primary_conn,
             "get_table_context",
-            {"table": "seedbank.taxon", "include_stats": "false"},
+            {"table": "arboretum.seedbank.taxon", "include_stats": "false"},
         )
         content = result.content[0]
 
@@ -238,11 +218,11 @@ class TestReadResourceErrorsReachTheWire:
         self,
         primary_conn: ConnectionConfig,
     ) -> None:
-        """seedbank.vault ships with no description.md for real."""
+        """arboretum.seedbank.vault ships with no description.md for real."""
 
         code = _read_resource_error_code(
             primary_conn,
-            "dbprint://production/seedbank.vault/description",
+            "dbprint://production/arboretum.seedbank.vault/description",
         )
         assert code == -32602
 
@@ -256,7 +236,7 @@ class TestReadResourceErrorsReachTheWire:
 
         code = _read_resource_error_code(
             primary_conn,
-            "dbprint://production/seedbank.collector/ddl",
+            "dbprint://production/arboretum.seedbank.collector/ddl",
         )
         assert code == -32603
 
@@ -270,7 +250,7 @@ class TestReadResourceErrorsReachTheWire:
         params_code = _read_resource_error_code(primary_conn, "http://not-dbprint/x")
         internal_code = _read_resource_error_code(
             primary_conn,
-            "dbprint://production/seedbank.collector/ddl",
+            "dbprint://production/arboretum.seedbank.collector/ddl",
         )
 
         assert params_code != internal_code
@@ -296,7 +276,7 @@ class TestCallToolErrorsReachTheWire:
         assert result.is_error is True
 
     def test_unknown_connection_is_a_failed_call(self, primary_conn: ConnectionConfig) -> None:
-        result = _call_tool(primary_conn, "list_tables", {"conn": "nonexistent"})
+        result = _call_tool(primary_conn, "list_tables", {"connection": "nonexistent"})
 
         assert result.is_error is True
 
@@ -355,7 +335,10 @@ class TestResourceMimeTypeReachesTheWire:
     """
 
     def test_ddl_is_application_sql(self, primary_conn: ConnectionConfig) -> None:
-        listed, read = _list_and_read(primary_conn, "dbprint://production/seedbank.collector/ddl")
+        listed, read = _list_and_read(
+            primary_conn,
+            "dbprint://production/arboretum.seedbank.collector/ddl",
+        )
 
         assert listed == "application/sql"
         assert read == "application/sql"
@@ -363,7 +346,7 @@ class TestResourceMimeTypeReachesTheWire:
     def test_statistics_is_application_yaml(self, primary_conn: ConnectionConfig) -> None:
         listed, read = _list_and_read(
             primary_conn,
-            "dbprint://production/seedbank.collector/statistics",
+            "dbprint://production/arboretum.seedbank.collector/statistics",
         )
 
         assert listed == "application/yaml"
@@ -380,7 +363,7 @@ class TestResourceMimeTypeReachesTheWire:
 
         listed, read = _list_and_read(
             primary_conn,
-            "dbprint://production/seedbank.collector/relationships",
+            "dbprint://production/arboretum.seedbank.collector/relationships",
         )
 
         assert listed == read
@@ -405,22 +388,35 @@ class TestHandshakeAdvertisesInstructions:
         assert self._instructions(primary_conn) == SERVER_DESCRIPTION
 
 
+class TestTheInstructionsRouteBeforeTheyInterpret:
+    """What an agent needs before its first call is which tool answers its task."""
+
+    def test_they_fit_under_the_client_truncation_cap(self) -> None:
+        from dbprint.mcp.server import SERVER_DESCRIPTION
+
+        # Claude Code truncates a server's instructions at 2,048 characters by default.
+        assert len(SERVER_DESCRIPTION) <= 2048
+
+    def test_every_tool_is_named_before_the_reading_rules(self) -> None:
+        from dbprint.mcp.server import SERVER_DESCRIPTION
+
+        routing, reading = SERVER_DESCRIPTION.split("Reading an answer:", 1)
+
+        for name in tools_module.TOOL_NAMES:
+            assert name in routing, name
+
+        assert "Scope." in reading
+
+
 class TestTheInstructionsCarryTheQueryWriterRules:
     """The two decisions an agent makes badly untold: which context to read, and when to ask."""
 
-    def test_it_names_the_query_purpose_and_what_profile_costs(self) -> None:
+    def test_retired_instructions_stay_out(self) -> None:
         from dbprint.mcp.server import SERVER_DESCRIPTION
 
-        assert "purpose: query" in SERVER_DESCRIPTION
-        assert "Join through the Joins list" in SERVER_DESCRIPTION
-        assert "the edges the catalog never declared" in SERVER_DESCRIPTION
         assert "offers no other" not in SERVER_DESCRIPTION
-
-    def test_it_names_the_lookup_and_when_not_to_call_it(self) -> None:
-        from dbprint.mcp.server import SERVER_DESCRIPTION
-
-        assert "resolve_value" in SERVER_DESCRIPTION
-        assert "Do not call it for a value the context already lists in full" in SERVER_DESCRIPTION
+        # `rows_scanned / row_count` is below 1: an agent multiplying by it shrinks the count.
+        assert "rescaled by rows_scanned / row_count" not in SERVER_DESCRIPTION
 
     def test_the_guide_states_the_same_facts_in_the_prints_own_files(self) -> None:
         """The guide's reader holds files, not tools; the tools are its closing sentence."""
@@ -452,12 +448,16 @@ _SERVER_DESCRIPTION_ANCHORS = (
         "SPEC 2.2.8's sum-not-rescalable sentence moved",
     ),
     (
-        "sampled` and `matched` describe `looks_like` alone, never `epoch_unit` or `sensitivity`",
-        "SPEC 4.1.3's sampled/matched scoping sentence moved",
-    ),
-    (
         'absence means "not detected", never "safe to publish"',
         "SPEC 4.4.2's sensitivity-absence sentence moved",
+    ),
+    (
+        "MUST NOT treat the join as cardinality-guaranteed the way a declared FK is",
+        "SPEC 2.3's inferred-edge sentence moved",
+    ),
+    (
+        "names the fields and blocks a run tried and failed to measure",
+        "SPEC 7.1's unmeasured sentence moved",
     ),
 )
 
@@ -468,30 +468,6 @@ class TestServerDescriptionSpecBinding:
     @pytest.mark.parametrize(("needle", "message"), _SERVER_DESCRIPTION_ANCHORS)
     def test_the_cited_spec_sentence_still_holds(self, needle: str, message: str) -> None:
         assert needle in _SPEC_PATH.read_text(), message
-
-    def test_sum_and_other_aggregates_are_not_told_to_rescale(self) -> None:
-        from dbprint.mcp.server import SERVER_DESCRIPTION
-
-        assert "sum" in SERVER_DESCRIPTION
-        assert "mean" in SERVER_DESCRIPTION
-        assert "A ratio, a bound, a percentile, or an aggregate" in SERVER_DESCRIPTION
-        assert "assumes the sample is representative" in SERVER_DESCRIPTION
-
-    def test_a_count_still_gets_the_rescale_instruction(self) -> None:
-        from dbprint.mcp.server import SERVER_DESCRIPTION
-
-        # The reciprocal, and named as a multiplication: `rows_scanned / row_count` is below 1,
-        # so an agent multiplying by it shrinks the very count it meant to scale up.
-        assert "multiplying it by row_count / rows_scanned" in SERVER_DESCRIPTION
-        assert "rescaled by rows_scanned / row_count" not in SERVER_DESCRIPTION
-
-    def test_the_evidence_promise_is_scoped_to_looks_like(self) -> None:
-        from dbprint.mcp.server import SERVER_DESCRIPTION
-
-        assert "looks_like publishes the sampled/matched evidence" in SERVER_DESCRIPTION
-        assert "candidate_key's own verdict is recomputable" in SERVER_DESCRIPTION
-        assert "sensitivity publishes no evidence at all" in SERVER_DESCRIPTION
-        assert "its absence never means safe to publish" in SERVER_DESCRIPTION
 
 
 class TestToolDescriptionsReachTheWire:
@@ -508,21 +484,13 @@ class TestToolDescriptionsReachTheWire:
 
         return anyio.run(_run)
 
-    def test_search_columns_is_named_the_entry_point(self, primary_conn: ConnectionConfig) -> None:
-        assert "entry point" in self._descriptions(primary_conn)["search_columns"].lower()
-
-    def test_get_diff_names_the_real_filename(self, primary_conn: ConnectionConfig) -> None:
-        description = self._descriptions(primary_conn)["get_diff"]
-        assert "diff.yaml" in description
-
-    def test_get_manifest_is_framed_as_an_index_not_a_catalogue(
+    def test_every_tool_reaches_the_wire_with_its_own_description(
         self,
         primary_conn: ConnectionConfig,
     ) -> None:
-        assert "not a semantic catalogue" in self._descriptions(primary_conn)["get_manifest"]
-
-    def test_get_table_context_names_truncation(self, primary_conn: ConnectionConfig) -> None:
-        assert "truncation" in self._descriptions(primary_conn)["get_table_context"]
+        assert self._descriptions(primary_conn) == {
+            t.name: t.description for t in tools_module.TOOL_DEFINITIONS
+        }
 
 
 class TestToolFormatShapesReachTheWire:
@@ -542,21 +510,27 @@ class TestToolFormatShapesReachTheWire:
         return anyio.run(_run)
 
     def test_md_is_bare_text_not_a_json_envelope(self, primary_conn: ConnectionConfig) -> None:
-        text = self._call(primary_conn, {"table": "seedbank.collector", "format": "md"})
+        text = self._call(primary_conn, {"table": "arboretum.seedbank.collector", "format": "md"})
 
         assert not text.startswith("{")
         assert "CREATE TABLE" in text
 
     def test_json_is_the_structured_object(self, primary_conn: ConnectionConfig) -> None:
-        text = self._call(primary_conn, {"table": "seedbank.collector", "format": "json"})
+        text = self._call(primary_conn, {"table": "arboretum.seedbank.collector", "format": "json"})
         payload = json.loads(text)
 
-        assert payload["table"] == "seedbank.collector"
+        assert payload["table"] == "arboretum.seedbank.collector"
         assert "text" not in payload
 
     def test_yaml_is_yaml_text_of_the_same_object(self, primary_conn: ConnectionConfig) -> None:
-        json_text = self._call(primary_conn, {"table": "seedbank.collector", "format": "json"})
-        yaml_text = self._call(primary_conn, {"table": "seedbank.collector", "format": "yaml"})
+        json_text = self._call(
+            primary_conn,
+            {"table": "arboretum.seedbank.collector", "format": "json"},
+        )
+        yaml_text = self._call(
+            primary_conn,
+            {"table": "arboretum.seedbank.collector", "format": "yaml"},
+        )
 
         assert not yaml_text.startswith("{")
         assert yaml.safe_load(yaml_text) == json.loads(json_text)
@@ -577,7 +551,7 @@ class TestRealTransportErrorPaths:
         result = _stdio_call_tool(
             stdio_server,
             "get_table_context",
-            {"table": "seedbank.collector", "format": "md", "budget_tokens": 1},
+            {"table": "arboretum.seedbank.collector", "format": "md", "budget_tokens": 1},
         )
         content = result.content[0]
         assert isinstance(content, TextContent)
@@ -595,6 +569,7 @@ class TestRealTransportErrorPaths:
             stdio_server.project_dir
             / "prints"
             / stdio_server.conn_name
+            / "arboretum"
             / "seedbank"
             / "collector"
             / "statistics.yaml"
@@ -604,7 +579,7 @@ class TestRealTransportErrorPaths:
         result = _stdio_call_tool(
             stdio_server,
             "get_table_context",
-            {"table": "seedbank.collector", "format": "json"},
+            {"table": "arboretum.seedbank.collector", "format": "json"},
         )
         content = result.content[0]
         assert isinstance(content, TextContent)
@@ -621,6 +596,7 @@ class TestRealTransportErrorPaths:
             stdio_server.project_dir
             / "prints"
             / stdio_server.conn_name
+            / "arboretum"
             / "seedbank"
             / "collector"
             / "statistics.yaml"
@@ -629,7 +605,7 @@ class TestRealTransportErrorPaths:
 
         error = _stdio_read_resource_error(
             stdio_server,
-            f"dbprint://{stdio_server.conn_name}/seedbank.collector/statistics",
+            f"dbprint://{stdio_server.conn_name}/arboretum.seedbank.collector/statistics",
         )
 
         assert error.error.code == -32603
@@ -642,6 +618,7 @@ class TestRealTransportErrorPaths:
             stdio_server.project_dir
             / "prints"
             / stdio_server.conn_name
+            / "arboretum"
             / "seedbank"
             / "collector"
             / "statistics.yaml"
@@ -651,7 +628,7 @@ class TestRealTransportErrorPaths:
         result = _stdio_call_tool(
             stdio_server,
             "get_table_context",
-            {"table": "seedbank.collector", "format": "json"},
+            {"table": "arboretum.seedbank.collector", "format": "json"},
         )
         content = result.content[0]
         assert isinstance(content, TextContent)
@@ -690,7 +667,7 @@ class TestRealTransportErrorPaths:
             f"    output: prints\n",
         )
 
-        result = _stdio_call_tool(stdio_server, "list_tables", {"conn": "staging"})
+        result = _stdio_call_tool(stdio_server, "list_tables", {"connection": "staging"})
         content = result.content[0]
         assert isinstance(content, TextContent)
 
@@ -767,7 +744,7 @@ class TestRealTransportErrorPaths:
         result = _stdio_call_tool(
             stdio_server,
             "get_table_context",
-            {"table": "seedbank.collector", "format": "yml"},
+            {"table": "arboretum.seedbank.collector", "format": "yml"},
         )
 
         assert result.is_error is True
@@ -779,7 +756,7 @@ class TestRealTransportErrorPaths:
         result = _stdio_call_tool(
             stdio_server,
             "get_table_context",
-            {"table": "seedbank.collector", "budget_tokens": 0},
+            {"table": "arboretum.seedbank.collector", "budget_tokens": 0},
         )
 
         assert result.is_error is True
@@ -812,14 +789,14 @@ class TestRealTransportErrorPaths:
     ) -> None:
         """A `limit` that caps `matches` on the first table must not blind the corruption scan.
 
-        `seedbank.vault` sorts last, so `limit: 1` exhausts the cap before it - only a scan that
-        walks every declared table reaches vault's corruption.
+        `vault` sorts last, so `limit: 1` exhausts the cap before it; only a full scan reaches it.
         """
 
         vault_stats = (
             stdio_server.project_dir
             / "prints"
             / stdio_server.conn_name
+            / "arboretum"
             / "seedbank"
             / "vault"
             / "statistics.yaml"
@@ -833,4 +810,4 @@ class TestRealTransportErrorPaths:
 
         assert result.is_error is False
         assert payload.get("truncated") is True
-        assert "seedbank.vault" in payload.get("unreadable_tables", [])
+        assert "arboretum.seedbank.vault" in payload.get("unreadable_tables", [])

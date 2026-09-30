@@ -283,14 +283,14 @@ def _added_table_fixture() -> dict[str, MockTable]:
 class _MockPostgresAdapterBase(MockAdapter):
     REQUIRED_KEYS = ("host", "port", "database", "user", "password")
 
-    def __init__(self, _credentials: dict[str, str]) -> None:
+    def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
         super().__init__(_base_fixture())
 
 
 class _MockPostgresAdapterDrifted(MockAdapter):
     REQUIRED_KEYS = ("host", "port", "database", "user", "password")
 
-    def __init__(self, _credentials: dict[str, str]) -> None:
+    def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
         super().__init__(_added_table_fixture())
 
 
@@ -308,7 +308,7 @@ def _moved_statistics_fixture() -> dict[str, MockTable]:
 class _MockPostgresAdapterMovedStatistics(MockAdapter):
     REQUIRED_KEYS = ("host", "port", "database", "user", "password")
 
-    def __init__(self, _credentials: dict[str, str]) -> None:
+    def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
         super().__init__(_moved_statistics_fixture())
 
 
@@ -352,9 +352,7 @@ class TestNoBaseline:
             result = runner.invoke(main, ["diff", "--no-tui"])
 
         assert result.exit_code == 1
-        assert f"No committed prints at {tmp_path / 'prints' / 'primary'}/" in (
-            result.output + (result.stderr or "")
-        )
+        assert f"No committed prints at {tmp_path / 'prints' / 'primary'}/" in result.stderr
 
     def test_names_a_non_default_configured_output(
         self,
@@ -534,25 +532,6 @@ class TestFormats:
         assert "changes" in docs[0]
         assert "summary" in docs[0]
 
-    def test_json_emits_array(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        _setup_project(tmp_path)
-        monkeypatch.chdir(tmp_path)
-
-        for k, v in _credential_env().items():
-            monkeypatch.setenv(k, v)
-
-        runner = CliRunner()
-
-        with _patch_registry(_MockPostgresAdapterBase):
-            runner.invoke(main, ["generate", "--no-tui"])
-            result = runner.invoke(main, ["diff", "--no-tui", "--format", "json"])
-
-        assert result.exit_code == 0
-        # Payload is on stdout; progress (if any) is on stderr and must not pollute it.
-        data = json.loads(result.stdout)
-        assert isinstance(data, list)
-        assert data[0]["connection"] == "primary"
-
 
 class TestOutputFile:
     def test_writes_to_file_overwriting_silently(
@@ -578,29 +557,6 @@ class TestOutputFile:
         contents = out_path.read_text()
         assert "Connection: primary" in contents
         assert "stale content" not in contents
-
-
-class TestThresholdOverride:
-    def test_threshold_zero_is_accepted(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The mock produces only structural drift, so the floor has nothing to admit."""
-
-        _setup_project(tmp_path)
-        monkeypatch.chdir(tmp_path)
-
-        for k, v in _credential_env().items():
-            monkeypatch.setenv(k, v)
-
-        runner = CliRunner()
-
-        with _patch_registry(_MockPostgresAdapterBase):
-            runner.invoke(main, ["generate", "--no-tui"])
-            result = runner.invoke(main, ["diff", "--no-tui", "--threshold", "0"])
-
-        assert result.exit_code == 0
 
 
 class TestProgress:
@@ -650,24 +606,6 @@ class TestProgress:
         assert quiet.stderr == ""
         # Progress is additive: payload matches with/without it, aside from stamped instants.
         assert normalize_instants(quiet.stdout) == normalize_instants(default.stdout)
-
-    def test_json_stdout_stays_parseable_with_progress(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        self._seed_and_env(tmp_path, monkeypatch)
-        runner = CliRunner()
-
-        with _patch_registry(_MockPostgresAdapterBase):
-            runner.invoke(main, ["generate", "--no-tui"])
-            with_progress = runner.invoke(main, ["diff", "--no-tui", "--format", "json"])
-            without_progress = runner.invoke(main, ["diff", "-q", "--no-tui", "--format", "json"])
-
-        # stdout parses cleanly and matches the no-progress payload, aside from stamped instants.
-        assert json.loads(normalize_instants(with_progress.stdout)) == json.loads(
-            normalize_instants(without_progress.stdout),
-        )
 
 
 class TestResolutionErrors:

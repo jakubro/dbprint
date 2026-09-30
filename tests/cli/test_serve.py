@@ -146,7 +146,8 @@ class TestProject:
 
         result = CliRunner().invoke(main, ["serve", "warehouse"])
 
-        assert result.exit_code == EXIT_GENERIC
+        assert result.exit_code == 1
+        assert "error: no .dbprint.yaml found" in result.stderr
 
     def test_the_config_file_itself_is_accepted(
         self,
@@ -211,12 +212,3 @@ class TestProject:
 
         assert result.exit_code == EXIT_GENERIC
         assert str(absent) in result.output
-
-    def test_the_old_flag_is_gone(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        project, _ = self._project_and_elsewhere(tmp_path)
-        monkeypatch.chdir(project)
-
-        result = CliRunner().invoke(main, ["serve", "--project-dir", str(project)])
-
-        assert result.exit_code == 2
-        assert "no such option" in result.output.lower()

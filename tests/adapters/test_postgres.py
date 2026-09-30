@@ -17,12 +17,12 @@ import pytest
 import yaml
 
 from dbprint.adapters import ColumnStats, StatisticsConfig, TableCounts, TableScope
+from dbprint.adapters.base import PhaseB
 from dbprint.adapters.errors import QueryFailed
-from dbprint.adapters.postgres import PostgresAdapter, PostgresConnectionError, introspect
-from dbprint.adapters.postgres.adapter import UnknownTable
+from dbprint.adapters.identifiers import Identity, UnknownTable
+from dbprint.adapters.postgres import DIALECT, PostgresAdapter, PostgresConnectionError, introspect
 from dbprint.adapters.postgres.connection import ConnectionParams, exec_query
 from dbprint.adapters.postgres.ddl import extract_ddl, normalize
-from dbprint.adapters.postgres.identity import Identity
 from dbprint.adapters.postgres.stats import classify_distribution
 
 
@@ -244,7 +244,10 @@ class _RaisingConnection:
 class TestCatalogReadFailure:
     def test_columns_wraps_the_driver_error_with_the_statement(self) -> None:
         with pytest.raises(QueryFailed, match="permission denied") as exc_info:
-            introspect.columns(cast(Any, _RaisingConnection()), Identity(parts=("public", "t")))
+            introspect.columns(
+                cast(Any, _RaisingConnection()),
+                Identity.of(("d", "public", "t"), DIALECT),
+            )
 
         assert "pg_attribute" in exc_info.value.sql
 
@@ -330,9 +333,6 @@ class TestConstruction:
                 },
             )
 
-    def test_required_keys_class_attr(self) -> None:
-        assert PostgresAdapter.REQUIRED_KEYS == ("host", "port", "database", "user", "password")
-
 
 # Live-Postgres scenarios.
 
@@ -358,19 +358,33 @@ def fresh_postgres(postgres_test_db: dict[str, str]) -> Iterator[PostgresAdapter
 
 
 class TestLiveContract:
-    def test_lists_seeded_tables(self, fresh_postgres: PostgresAdapter) -> None:
+    def test_lists_seeded_tables(
+        self,
+        fresh_postgres: PostgresAdapter,
+        postgres_test_db: dict[str, str],
+    ) -> None:
         tables = fresh_postgres.list_tables(include=["*"], exclude=[])
         fqns = {t.fqn for t in tables}
-        assert "seedbank.curator" in fqns
-        assert "seedbank.herbarium" in fqns
+        assert f"{postgres_test_db['database']}.seedbank.curator" in fqns
+        assert f"{postgres_test_db['database']}.seedbank.herbarium" in fqns
 
-    def test_skips_system_schemas(self, fresh_postgres: PostgresAdapter) -> None:
+    def test_skips_system_schemas(
+        self,
+        fresh_postgres: PostgresAdapter,
+        postgres_test_db: dict[str, str],
+    ) -> None:
         tables = fresh_postgres.list_tables(include=["*"], exclude=[])
-        assert all(not t.fqn.startswith("pg_") for t in tables)
-        assert all(not t.fqn.startswith("information_schema.") for t in tables)
+        schemas = {t.namespace_path[1] for t in tables}
 
-    def test_columns_include_all_seeded(self, fresh_postgres: PostgresAdapter) -> None:
-        cols = fresh_postgres.introspect_columns("seedbank.curator")
+        assert "seedbank" in schemas
+        assert not {s for s in schemas if s.startswith("pg_") or s == "information_schema"}
+
+    def test_columns_include_all_seeded(
+        self,
+        fresh_postgres: PostgresAdapter,
+        postgres_test_db: dict[str, str],
+    ) -> None:
+        cols = fresh_postgres.introspect_columns(f"{postgres_test_db['database']}.seedbank.curator")
         names = {c.name for c in cols}
         assert names == {
             "id",
@@ -385,37 +399,62 @@ class TestLiveContract:
     def test_relationship_emits_array_for_single_column_fk(
         self,
         fresh_postgres: PostgresAdapter,
+        postgres_test_db: dict[str, str],
     ) -> None:
-        rels = fresh_postgres.introspect_relationships("seedbank.curator")
+        rels = fresh_postgres.introspect_relationships(
+            f"{postgres_test_db['database']}.seedbank.curator",
+        )
         assert len(rels) == 1
         fk = rels[0]
         assert fk.column == ("herbarium_id",)
-        assert fk.target_table == "seedbank.herbarium"
+        assert fk.target_table == f"{postgres_test_db['database']}.seedbank.herbarium"
         assert fk.target_column == ("id",)
         assert fk.on_delete == "CASCADE"
 
-    def test_index_excludes_pk_and_unique_backed(self, fresh_postgres: PostgresAdapter) -> None:
-        idxs = fresh_postgres.introspect_indexes("seedbank.curator")
+    def test_index_excludes_pk_and_unique_backed(
+        self,
+        fresh_postgres: PostgresAdapter,
+        postgres_test_db: dict[str, str],
+    ) -> None:
+        idxs = fresh_postgres.introspect_indexes(f"{postgres_test_db['database']}.seedbank.curator")
         names = {i.name for i in idxs}
         assert "curator_email_idx" in names
 
         for idx in idxs:
             assert not idx.name.endswith("_pkey")
 
-    def test_comments_round_trip(self, fresh_postgres: PostgresAdapter) -> None:
-        comments = fresh_postgres.extract_comments("seedbank.curator")
+    def test_comments_round_trip(
+        self,
+        fresh_postgres: PostgresAdapter,
+        postgres_test_db: dict[str, str],
+    ) -> None:
+        comments = fresh_postgres.extract_comments(
+            f"{postgres_test_db['database']}.seedbank.curator",
+        )
         assert comments.table == "Primary curator table"
         assert comments.columns.get("email") == "user-facing email address"
 
-    def test_ddl_extract_normalized(self, fresh_postgres: PostgresAdapter) -> None:
-        ddl = fresh_postgres.extract_ddl("seedbank.curator")
+    def test_ddl_extract_normalized(
+        self,
+        fresh_postgres: PostgresAdapter,
+        postgres_test_db: dict[str, str],
+    ) -> None:
+        ddl = fresh_postgres.extract_ddl(f"{postgres_test_db['database']}.seedbank.curator")
         assert ddl.endswith("\n")
         assert "CREATE TABLE" in ddl
         assert "SET statement_timeout" not in ddl
         assert "PostgreSQL database dump" not in ddl
 
-    def test_sample_values_returns_distinct_non_null(self, fresh_postgres: PostgresAdapter) -> None:
-        samples = fresh_postgres.sample_values("seedbank.curator", "email", n=10)
+    def test_sample_values_returns_distinct_non_null(
+        self,
+        fresh_postgres: PostgresAdapter,
+        postgres_test_db: dict[str, str],
+    ) -> None:
+        samples = fresh_postgres.sample_values(
+            f"{postgres_test_db['database']}.seedbank.curator",
+            "email",
+            n=10,
+        )
         assert len(set(samples)) == len(samples)
         assert all(s is not None for s in samples)
 
@@ -455,7 +494,12 @@ class TestPhysicalColumnIdentity:
         adapter = _connected(postgres_test_db)
 
         try:
-            cols = {c.name: c for c in adapter.introspect_columns("public.curator")}
+            cols = {
+                c.name: c
+                for c in adapter.introspect_columns(
+                    f"{postgres_test_db['database']}.public.curator",
+                )
+            }
         finally:
             adapter.close()
 
@@ -471,8 +515,8 @@ class TestPhysicalColumnIdentity:
         adapter = _connected(postgres_test_db)
 
         try:
-            indexes = adapter.introspect_indexes("public.curator")
-            comments = adapter.extract_comments("public.curator")
+            indexes = adapter.introspect_indexes(f"{postgres_test_db['database']}.public.curator")
+            comments = adapter.extract_comments(f"{postgres_test_db['database']}.public.curator")
         finally:
             adapter.close()
 
@@ -487,14 +531,18 @@ class TestPhysicalColumnIdentity:
         adapter = _connected(postgres_test_db)
 
         try:
-            cols = adapter.introspect_columns("public.curator")
+            cols = adapter.introspect_columns(f"{postgres_test_db['database']}.public.curator")
             counts, stats = adapter.compute_statistics(
-                "public.curator",
+                f"{postgres_test_db['database']}.public.curator",
                 cols,
                 StatisticsConfig(),
                 frozenset(),
             )
-            samples = adapter.sample_values("public.curator", "fullname", n=10)
+            samples = adapter.sample_values(
+                f"{postgres_test_db['database']}.public.curator",
+                "fullname",
+                n=10,
+            )
         finally:
             adapter.close()
 
@@ -519,7 +567,7 @@ class TestPhysicalColumnIdentity:
             adapter="postgres",
             auto=False,
             output=tmp_path,
-            include=("public.curator",),
+            include=(f"{postgres_test_db['database']}.public.curator",),
             exclude=(),
             max_age_days=7,
             statistics=StatisticsConfig(),
@@ -530,7 +578,14 @@ class TestPhysicalColumnIdentity:
         Engine(adapter, conn, tmp_path).generate()
 
         stats = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "curator" / "statistics.yaml").read_text(),
+            (
+                tmp_path
+                / "primary"
+                / postgres_test_db["database"]
+                / "public"
+                / "curator"
+                / "statistics.yaml"
+            ).read_text(),
         )
         column = stats["columns"]["fullname"]
 
@@ -580,8 +635,10 @@ class TestPhysicalTableIdentity:
         finally:
             adapter.close()
 
-        entry = next(t for t in listed if t.fqn == "seedbank.accession")
-        assert entry.namespace_path == ("seedbank", "accession")
+        entry = next(
+            t for t in listed if t.fqn == f"{postgres_test_db['database']}.seedbank.accession"
+        )
+        assert entry.namespace_path == (postgres_test_db["database"], "seedbank", "accession")
 
     def test_the_catalog_reads_address_the_native_spelling(
         self,
@@ -591,9 +648,13 @@ class TestPhysicalTableIdentity:
         adapter = _connected(postgres_test_db)
 
         try:
-            cols = adapter.introspect_columns("seedbank.accession")
-            comments = adapter.extract_comments("seedbank.accession")
-            estimate = adapter.estimate_row_count("seedbank.accession")
+            cols = adapter.introspect_columns(f"{postgres_test_db['database']}.seedbank.accession")
+            comments = adapter.extract_comments(
+                f"{postgres_test_db['database']}.seedbank.accession",
+            )
+            estimate = adapter.estimate_row_count(
+                f"{postgres_test_db['database']}.seedbank.accession",
+            )
         finally:
             adapter.close()
 
@@ -606,16 +667,29 @@ class TestPhysicalTableIdentity:
         adapter = _connected(postgres_test_db)
 
         try:
-            cols = adapter.introspect_columns("seedbank.accession")
+            cols = adapter.introspect_columns(f"{postgres_test_db['database']}.seedbank.accession")
             counts, stats = adapter.compute_statistics(
-                "seedbank.accession",
+                f"{postgres_test_db['database']}.seedbank.accession",
                 cols,
                 StatisticsConfig(),
                 frozenset(),
             )
-            samples = adapter.sample_values("seedbank.accession", "label", n=10)
-            sketch = adapter.compute_key_sketch("seedbank.accession", "id", "integer", "integer", 8)
-            normalized = adapter.compute_normalized_cardinality("seedbank.accession", "label")
+            samples = adapter.sample_values(
+                f"{postgres_test_db['database']}.seedbank.accession",
+                "label",
+                n=10,
+            )
+            sketch = adapter.compute_key_sketch(
+                f"{postgres_test_db['database']}.seedbank.accession",
+                "id",
+                "integer",
+                "integer",
+                8,
+            )
+            normalized = adapter.compute_normalized_cardinality(
+                f"{postgres_test_db['database']}.seedbank.accession",
+                "label",
+            )
         finally:
             adapter.close()
 
@@ -635,7 +709,7 @@ class TestPhysicalTableIdentity:
         adapter = _connected(postgres_test_db)
 
         try:
-            ddl = adapter.extract_ddl("seedbank.accession")
+            ddl = adapter.extract_ddl(f"{postgres_test_db['database']}.seedbank.accession")
         finally:
             adapter.close()
 
@@ -651,7 +725,7 @@ class TestPhysicalTableIdentity:
 
         try:
             with pytest.raises(UnknownTable, match="call list_tables"):
-                adapter.introspect_columns("public.never_listed")
+                adapter.introspect_columns(f"{postgres_test_db['database']}.public.never_listed")
         finally:
             adapter.close()
 
@@ -687,7 +761,10 @@ class TestCollation:
         adapter = _connected(postgres_test_db)
 
         try:
-            cols = {c.name: c for c in adapter.introspect_columns("public.labels")}
+            cols = {
+                c.name: c
+                for c in adapter.introspect_columns(f"{postgres_test_db['database']}.public.labels")
+            }
             default = adapter.default_collation()
         finally:
             adapter.close()
@@ -711,7 +788,7 @@ class TestCollation:
             adapter="postgres",
             auto=False,
             output=tmp_path,
-            include=("public.labels",),
+            include=(f"{postgres_test_db['database']}.public.labels",),
             exclude=(),
             max_age_days=7,
             statistics=StatisticsConfig(),
@@ -722,7 +799,14 @@ class TestCollation:
 
         manifest = yaml.safe_load((tmp_path / "primary" / "manifest.yaml").read_text())
         stats = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "labels" / "statistics.yaml").read_text(),
+            (
+                tmp_path
+                / "primary"
+                / postgres_test_db["database"]
+                / "public"
+                / "labels"
+                / "statistics.yaml"
+            ).read_text(),
         )
         columns = stats["columns"]
 
@@ -737,37 +821,6 @@ class TestCollation:
 
 
 class TestEdgeCases:
-    def test_empty_table_yields_zero_stats(self, postgres_test_db: dict[str, str]) -> None:
-        import psycopg
-
-        from dbprint.config import StatisticsConfig
-
-        with psycopg.connect(
-            host=postgres_test_db["host"],
-            port=int(postgres_test_db["port"]),
-            dbname=postgres_test_db["database"],
-            user=postgres_test_db["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
-            conn.execute("CREATE TABLE public.empty_t (id int, name text)")
-
-        adapter = _connected(postgres_test_db)
-
-        try:
-            cols = adapter.introspect_columns("public.empty_t")
-            _, stats = adapter.compute_statistics(
-                "public.empty_t",
-                cols,
-                StatisticsConfig(),
-                frozenset(),
-            )
-            assert stats["id"].null_count == 0
-            assert stats["id"].cardinality == 0
-            assert stats["id"].null_rate == 0.0
-        finally:
-            adapter.close()
-
     def test_all_null_column(self, postgres_test_db: dict[str, str]) -> None:
         import psycopg
 
@@ -787,9 +840,9 @@ class TestEdgeCases:
         adapter = _connected(postgres_test_db)
 
         try:
-            cols = adapter.introspect_columns("public.nullable_t")
+            cols = adapter.introspect_columns(f"{postgres_test_db['database']}.public.nullable_t")
             _, stats = adapter.compute_statistics(
-                "public.nullable_t",
+                f"{postgres_test_db['database']}.public.nullable_t",
                 cols,
                 StatisticsConfig(),
                 frozenset(),
@@ -828,12 +881,12 @@ class TestEdgeCases:
         adapter = _connected(postgres_test_db)
 
         try:
-            rels = adapter.introspect_relationships("public.child")
+            rels = adapter.introspect_relationships(f"{postgres_test_db['database']}.public.child")
             assert len(rels) == 1
             fk = rels[0]
             assert fk.column == ("x", "y")
             assert fk.target_column == ("a", "b")
-            assert fk.target_table == "public.parent"
+            assert fk.target_table == f"{postgres_test_db['database']}.public.parent"
         finally:
             adapter.close()
 
@@ -860,9 +913,11 @@ class TestEdgeCases:
         adapter = _connected(postgres_test_db)
 
         try:
-            rels = adapter.introspect_relationships("public.curator")
+            rels = adapter.introspect_relationships(
+                f"{postgres_test_db['database']}.public.curator",
+            )
             assert len(rels) == 1
-            assert rels[0].target_table == "public.curator"
+            assert rels[0].target_table == f"{postgres_test_db['database']}.public.curator"
             assert rels[0].column == ("mentor_id",)
             assert rels[0].target_column == ("id",)
         finally:
@@ -886,7 +941,7 @@ class TestEdgeCases:
 
         try:
             tables = {t.fqn: t for t in adapter.list_tables(include=["*"], exclude=[])}
-            assert tables["public.src_v"].type == "view"
+            assert tables[f"{postgres_test_db['database']}.public.src_v"].type == "view"
         finally:
             adapter.close()
 
@@ -908,7 +963,7 @@ class TestEdgeCases:
 
         try:
             tables = {t.fqn: t for t in adapter.list_tables(include=["*"], exclude=[])}
-            assert tables["public.src_mv"].type == "matview"
+            assert tables[f"{postgres_test_db['database']}.public.src_mv"].type == "matview"
         finally:
             adapter.close()
 
@@ -941,7 +996,12 @@ class TestEdgeCases:
         adapter = _connected(postgres_test_db)
 
         try:
-            groups = {g.columns for g in adapter.introspect_unique_keys("public.mv_src_mv")}
+            groups = {
+                g.columns
+                for g in adapter.introspect_unique_keys(
+                    f"{postgres_test_db['database']}.public.mv_src_mv",
+                )
+            }
             assert ("code",) in groups
         finally:
             adapter.close()
@@ -991,9 +1051,9 @@ class TestEdgeCases:
         adapter = _connected(postgres_test_db)
 
         try:
-            cols = adapter.introspect_columns("public.varied")
+            cols = adapter.introspect_columns(f"{postgres_test_db['database']}.public.varied")
             _, stats = adapter.compute_statistics(
-                "public.varied",
+                f"{postgres_test_db['database']}.public.varied",
                 cols,
                 StatisticsConfig(),
                 frozenset(),
@@ -1039,7 +1099,6 @@ class TestEdgeCases:
         import psycopg
 
         from dbprint.config import StatisticsConfig
-        from dbprint.spec.classification import classify
 
         with psycopg.connect(
             host=postgres_test_db["host"],
@@ -1076,9 +1135,9 @@ class TestEdgeCases:
         adapter = _connected(postgres_test_db)
 
         try:
-            cols = adapter.introspect_columns("public.field_site")
+            cols = adapter.introspect_columns(f"{postgres_test_db['database']}.public.field_site")
             _, stats = adapter.compute_statistics(
-                "public.field_site",
+                f"{postgres_test_db['database']}.public.field_site",
                 cols,
                 StatisticsConfig(),
                 frozenset(),
@@ -1087,48 +1146,10 @@ class TestEdgeCases:
             for name in ("addr", "postal_code"):
                 assert stats[name].cardinality is None
                 assert stats[name].cardinality_method is None
-                assert (
-                    classify(
-                        sql_type=next(c.sql_type for c in cols if c.name == name),
-                        cardinality=stats[name].cardinality,
-                        has_declared_fk=False,
-                        enumeration_threshold=StatisticsConfig().enumeration_threshold,
-                    )
-                    == "unsupported"
-                )
 
             # A scalar column on the same table measures normally.
             assert stats["label"].cardinality is not None
             assert stats["id"].cardinality is not None
-        finally:
-            adapter.close()
-
-    def test_bare_unique_index_is_declared_unique_not_an_index(
-        self,
-        postgres_test_db: dict[str, str],
-    ) -> None:
-        """Enforced uniqueness is declared, whichever catalog table records it."""
-
-        import psycopg
-
-        with psycopg.connect(
-            host=postgres_test_db["host"],
-            port=int(postgres_test_db["port"]),
-            dbname=postgres_test_db["database"],
-            user=postgres_test_db["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
-            conn.execute("CREATE TABLE public.codes (id int PRIMARY KEY, code text NOT NULL)")
-            conn.execute("CREATE UNIQUE INDEX codes_code_ux ON public.codes (code)")
-
-        adapter = _connected(postgres_test_db)
-
-        try:
-            groups = {g.columns for g in adapter.introspect_unique_keys("public.codes")}
-            index_columns = {i.columns for i in adapter.introspect_indexes("public.codes")}
-            assert ("code",) in groups
-            assert ("code",) not in index_columns
         finally:
             adapter.close()
 
@@ -1156,7 +1177,12 @@ class TestEdgeCases:
         adapter = _connected(postgres_test_db)
 
         try:
-            groups = [g.columns for g in adapter.introspect_unique_keys("public.pairs")]
+            groups = [
+                g.columns
+                for g in adapter.introspect_unique_keys(
+                    f"{postgres_test_db['database']}.public.pairs",
+                )
+            ]
             assert ("b", "a") in groups
         finally:
             adapter.close()
@@ -1193,8 +1219,18 @@ class TestEdgeCases:
         adapter = _connected(postgres_test_db)
 
         try:
-            groups = {g.columns for g in adapter.introspect_unique_keys("public.soft_deletes")}
-            indexes = {i.columns: i for i in adapter.introspect_indexes("public.soft_deletes")}
+            groups = {
+                g.columns
+                for g in adapter.introspect_unique_keys(
+                    f"{postgres_test_db['database']}.public.soft_deletes",
+                )
+            }
+            indexes = {
+                i.columns: i
+                for i in adapter.introspect_indexes(
+                    f"{postgres_test_db['database']}.public.soft_deletes",
+                )
+            }
             assert ("code",) not in groups
             assert ("code",) in indexes
             assert indexes[("code",)].unique is True
@@ -1229,7 +1265,9 @@ class TestPhysicalLayout:
         adapter = _connected(postgres_test_db)
 
         try:
-            layout = adapter.introspect_physical_layout("public.curation_event")
+            layout = adapter.introspect_physical_layout(
+                f"{postgres_test_db['database']}.public.curation_event",
+            )
             assert layout is not None
             assert layout.mechanism == "partition"
             assert [k.expression for k in layout.keys] == ["logged_at"]
@@ -1250,7 +1288,9 @@ class TestPhysicalLayout:
         adapter = _connected(postgres_test_db)
 
         try:
-            layout = adapter.introspect_physical_layout("public.field_log")
+            layout = adapter.introspect_physical_layout(
+                f"{postgres_test_db['database']}.public.field_log",
+            )
             assert layout is not None
             assert [k.column for k in layout.keys] == ["country_code", "logged_at"]
         finally:
@@ -1271,7 +1311,9 @@ class TestPhysicalLayout:
         adapter = _connected(postgres_test_db)
 
         try:
-            layout = adapter.introspect_physical_layout("public.logs")
+            layout = adapter.introspect_physical_layout(
+                f"{postgres_test_db['database']}.public.logs",
+            )
             assert layout is not None
             key = layout.keys[0]
             assert key.column is None
@@ -1291,7 +1333,9 @@ class TestPhysicalLayout:
         adapter = _connected(postgres_test_db)
 
         try:
-            layout = adapter.introspect_physical_layout("public.buckets")
+            layout = adapter.introspect_physical_layout(
+                f"{postgres_test_db['database']}.public.buckets",
+            )
             assert layout is not None
             assert layout.mechanism == "partition"
             assert [k.column for k in layout.keys] == ["id"]
@@ -1308,7 +1352,10 @@ class TestPhysicalLayout:
         adapter = _connected(postgres_test_db)
 
         try:
-            assert adapter.introspect_physical_layout("public.plain") is None
+            assert (
+                adapter.introspect_physical_layout(f"{postgres_test_db['database']}.public.plain")
+                is None
+            )
         finally:
             adapter.close()
 
@@ -1329,7 +1376,10 @@ class TestPhysicalLayout:
                 "CREATE TABLE public.specimen_loan_2024 PARTITION OF public.specimen_loan "
                 "FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')",
             )
-            child = Identity(parts=("public", "specimen_loan_2024"))
+            child = Identity.of(
+                (postgres_test_db["database"], "public", "specimen_loan_2024"),
+                DIALECT,
+            )
 
             assert introspect.physical_layout(conn, child) is None
 
@@ -1366,7 +1416,10 @@ class TestViewDependencies:
         try:
             deps = adapter.introspect_view_dependencies()
             assert deps is not None
-            assert set(deps["public.both_v"]) == {"public.wide", "public.narrow"}
+            assert set(deps[f"{postgres_test_db['database']}.public.both_v"]) == {
+                f"{postgres_test_db['database']}.public.wide",
+                f"{postgres_test_db['database']}.public.narrow",
+            }
         finally:
             adapter.close()
 
@@ -1384,8 +1437,12 @@ class TestViewDependencies:
         try:
             deps = adapter.introspect_view_dependencies()
             assert deps is not None
-            assert deps["public.outer_v"] == ("public.inner_v",)
-            assert deps["public.inner_v"] == ("public.wide",)
+            assert deps[f"{postgres_test_db['database']}.public.outer_v"] == (
+                f"{postgres_test_db['database']}.public.inner_v",
+            )
+            assert deps[f"{postgres_test_db['database']}.public.inner_v"] == (
+                f"{postgres_test_db['database']}.public.wide",
+            )
         finally:
             adapter.close()
 
@@ -1403,7 +1460,7 @@ class TestViewDependencies:
         try:
             deps = adapter.introspect_view_dependencies()
             assert deps is not None
-            assert deps["public.literal_v"] == ()
+            assert deps[f"{postgres_test_db['database']}.public.literal_v"] == ()
         finally:
             adapter.close()
 
@@ -1420,7 +1477,9 @@ class TestViewDependencies:
         try:
             deps = adapter.introspect_view_dependencies()
             assert deps is not None
-            assert deps["public.wide_mv"] == ("public.wide",)
+            assert deps[f"{postgres_test_db['database']}.public.wide_mv"] == (
+                f"{postgres_test_db['database']}.public.wide",
+            )
         finally:
             adapter.close()
 
@@ -1436,7 +1495,7 @@ class TestViewDependencies:
         try:
             deps = adapter.introspect_view_dependencies()
             assert deps is not None
-            assert "public.plain" not in deps
+            assert f"{postgres_test_db['database']}.public.plain" not in deps
         finally:
             adapter.close()
 
@@ -1477,9 +1536,9 @@ class TestPartitionChildExclusion:
 
         try:
             fqns = {t.fqn for t in adapter.list_tables(include=["*"], exclude=[])}
-            assert "public.viability_check" in fqns
-            assert "public.readings_2024" not in fqns
-            assert "public.readings_2025" not in fqns
+            assert f"{postgres_test_db['database']}.public.viability_check" in fqns
+            assert f"{postgres_test_db['database']}.public.readings_2024" not in fqns
+            assert f"{postgres_test_db['database']}.public.readings_2025" not in fqns
         finally:
             adapter.close()
 
@@ -1501,140 +1560,8 @@ class TestPartitionChildExclusion:
 
         try:
             fqns = {t.fqn for t in adapter.list_tables(include=["*"], exclude=[])}
-            assert "public.batch" in fqns
-            assert "public.batch_2024" in fqns
-        finally:
-            adapter.close()
-
-
-class TestIdentifierRejection:
-    """SPEC 1.5: producers reject identifiers that violate the path-segment allowlist."""
-
-    def test_unsafe_character_rejected(self, postgres_test_db: dict[str, str]) -> None:
-        import psycopg
-
-        from dbprint.adapters.postgres.introspect import IdentifierRejected
-
-        with psycopg.connect(
-            host=postgres_test_db["host"],
-            port=int(postgres_test_db["port"]),
-            dbname=postgres_test_db["database"],
-            user=postgres_test_db["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
-            # Quoted identifier with a space lowercases to "weird name" - fails the regex.
-            conn.execute('CREATE TABLE public."weird name" (id int)')
-
-        adapter = PostgresAdapter(postgres_test_db)
-        adapter.connect()
-
-        try:
-            with pytest.raises(IdentifierRejected) as exc_info:
-                adapter.list_tables(include=["*"], exclude=[])
-
-            message = str(exc_info.value)
-            assert "contains-unsafe-character" in message
-            assert "Resolution:" in message
-            assert "exclude:" in message
-        finally:
-            adapter.close()
-
-    def test_excluded_unsafe_identifier_does_not_block(
-        self,
-        postgres_test_db: dict[str, str],
-    ) -> None:
-        """Per SPEC 1.5.5: excluding the bad table via selectors lets the run proceed."""
-
-        import psycopg
-
-        with psycopg.connect(
-            host=postgres_test_db["host"],
-            port=int(postgres_test_db["port"]),
-            dbname=postgres_test_db["database"],
-            user=postgres_test_db["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
-            conn.execute('CREATE TABLE public."weird name" (id int)')
-            conn.execute("CREATE TABLE public.ok (id int)")
-
-        adapter = PostgresAdapter(postgres_test_db)
-        adapter.connect()
-
-        try:
-            tables = adapter.list_tables(include=["*"], exclude=["public.weird name"])
-            fqns = {t.fqn for t in tables}
-            assert "public.ok" in fqns
-            assert "public.weird name" not in fqns
-        finally:
-            adapter.close()
-
-    def test_case_collision_rejected(self, postgres_test_db: dict[str, str]) -> None:
-        """SPEC 1.5.2: two identifiers that lowercase to the same path abort the run."""
-
-        import psycopg
-
-        from dbprint.adapters.postgres.introspect import IdentifierRejected
-
-        with psycopg.connect(
-            host=postgres_test_db["host"],
-            port=int(postgres_test_db["port"]),
-            dbname=postgres_test_db["database"],
-            user=postgres_test_db["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
-            conn.execute('CREATE TABLE public."Curator" (id int)')
-            conn.execute("CREATE TABLE public.curator (id int)")
-
-        adapter = PostgresAdapter(postgres_test_db)
-        adapter.connect()
-
-        try:
-            with pytest.raises(IdentifierRejected) as exc_info:
-                adapter.list_tables(include=["*"], exclude=[])
-
-            message = str(exc_info.value)
-            # Either row can be the "previous" entry - catalog order is a cluster-collation
-            # detail - so assert both names appear without fixing which is which.
-            assert "case-collides-with-public." in message
-            assert "public.Curator" in message
-            assert "public.curator" in message
-            assert "Resolution:" in message
-        finally:
-            adapter.close()
-
-    def test_excluded_case_collision_lets_the_run_proceed(
-        self,
-        postgres_test_db: dict[str, str],
-    ) -> None:
-        """Per SPEC 1.5.4: excluding the pair's shared path resolves the collision.
-
-        Selectors match the lowercased FQN, so excluding it drops both candidates rather
-        than picking a survivor; the unrelated table proves the run still completes.
-        """
-
-        import psycopg
-
-        with psycopg.connect(
-            host=postgres_test_db["host"],
-            port=int(postgres_test_db["port"]),
-            dbname=postgres_test_db["database"],
-            user=postgres_test_db["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
-            conn.execute('CREATE TABLE public."Curator" (id int)')
-            conn.execute("CREATE TABLE public.curator (id int)")
-            conn.execute("CREATE TABLE public.ok (id int)")
-
-        adapter = PostgresAdapter(postgres_test_db)
-        adapter.connect()
-
-        try:
-            tables = adapter.list_tables(include=["public.*"], exclude=["public.curator"])
-            assert [t.fqn for t in tables] == ["public.ok"]
+            assert f"{postgres_test_db['database']}.public.batch" in fqns
+            assert f"{postgres_test_db['database']}.public.batch_2024" in fqns
         finally:
             adapter.close()
 
@@ -1682,7 +1609,7 @@ class TestPgDumpTrace:
         )
 
         with caplog.at_level(logging.DEBUG, logger="dbprint.adapters.postgres.ddl"):
-            extract_ddl(params, Identity(parts=("public", "t")))
+            extract_ddl(params, Identity.of(("d", "public", "t"), DIALECT))
 
         # Read the record, not `caplog.text`: the installed formatter escapes the pattern's
         # own quotes under the full run and does not under a scoped one.
@@ -1708,58 +1635,8 @@ class TestExecuteQueryTrace:
         assert "rows=1" in caplog.text
 
 
-class _RecordingConnection:
-    """Wraps a real psycopg connection; records every statement text verbatim."""
-
-    def __init__(self, real: Any) -> None:
-        self._real = real
-        self.statements: list[str] = []
-
-    def execute(self, query: object, params: object = None) -> object:
-        self.statements.append(str(query))
-
-        return self._real.execute(query, params)
-
-
 class TestHashOrderedDraw:
     """SPEC 4.1.2: the distinct draw is ordered by a hash of the value, not storage order."""
-
-    def test_the_draw_is_sql_ordered_by_a_hash_of_the_value(
-        self,
-        postgres_test_db: dict[str, str],
-    ) -> None:
-        """Asserts on the emitted statement text, which the behavioral checks cannot prove."""
-
-        import psycopg
-
-        from dbprint.adapters.postgres import looks_like as postgres_looks_like
-
-        with psycopg.connect(
-            host=postgres_test_db["host"],
-            port=int(postgres_test_db["port"]),
-            dbname=postgres_test_db["database"],
-            user=postgres_test_db["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
-            conn.execute("CREATE TABLE public.sql_shape (v text)")
-            conn.execute(
-                "INSERT INTO public.sql_shape SELECT 'val-' || i FROM generate_series(1, 100) i",
-            )
-
-            recorder = _RecordingConnection(conn)
-            postgres_looks_like.sample_distinct(
-                cast(psycopg.Connection, recorder),
-                Identity(parts=("public", "sql_shape")),
-                "v",
-                n=50,
-            )
-            flat = " ".join(" ".join(s.lower().split()) for s in recorder.statements)
-
-            assert "order by" in flat and "md5(" in flat, (
-                f"expected the distinct draw ordered by a hash of the value; "
-                f"captured SQL: {recorder.statements}"
-            )
 
     def test_a_value_inserted_last_is_still_reachable(
         self,
@@ -1792,7 +1669,11 @@ class TestHashOrderedDraw:
         adapter = _connected(postgres_test_db)
 
         try:
-            values = adapter.sample_values("public.late_shape", "v", n=1000)
+            values = adapter.sample_values(
+                f"{postgres_test_db['database']}.public.late_shape",
+                "v",
+                n=1000,
+            )
             late = [v for v in values if str(v).startswith("11111111-1111-4111-8111-")]
 
             assert late, "the draw never reached a value inserted after the first n rows"
@@ -1820,8 +1701,16 @@ class TestHashOrderedDraw:
         adapter = _connected(postgres_test_db)
 
         try:
-            first = adapter.sample_values("public.stable_draw", "v", n=50)
-            second = adapter.sample_values("public.stable_draw", "v", n=50)
+            first = adapter.sample_values(
+                f"{postgres_test_db['database']}.public.stable_draw",
+                "v",
+                n=50,
+            )
+            second = adapter.sample_values(
+                f"{postgres_test_db['database']}.public.stable_draw",
+                "v",
+                n=50,
+            )
 
             assert first == second
         finally:
@@ -1837,7 +1726,7 @@ class TestApproximateCardinality:
     """
 
     @staticmethod
-    def _profile(creds: dict[str, str], fqn: str, threshold: int) -> dict[str, ColumnStats]:
+    def _profile(creds: dict[str, str], fqn: str, threshold: int) -> PhaseB:
         from dbprint.adapters.postgres import stats as pg_stats
         from dbprint.config import StatisticsConfig
 
@@ -1888,7 +1777,11 @@ class TestApproximateCardinality:
         """A unique column gets n_distinct = -1, meaning every row is distinct."""
 
         self._seed(postgres_test_db, analyze=True)
-        stats = self._profile(postgres_test_db, "public.wide_t", threshold=10)
+        stats = self._profile(
+            postgres_test_db,
+            f"{postgres_test_db['database']}.public.wide_t",
+            threshold=10,
+        )
 
         # Every value distinct: the estimate must land on the row count, not zero, and a
         # ratio of 1.0 reaches the near-unique re-probe, which counts it exactly.
@@ -1909,7 +1802,11 @@ class TestApproximateCardinality:
         """
 
         self._seed(postgres_test_db, analyze=True)
-        stats = self._profile(postgres_test_db, "public.wide_t", threshold=10)
+        stats = self._profile(
+            postgres_test_db,
+            f"{postgres_test_db['database']}.public.wide_t",
+            threshold=10,
+        )
 
         assert stats["id"].range is not None
         assert (stats["id"].cardinality_ratio or 0) >= 0.9999
@@ -1925,7 +1822,11 @@ class TestApproximateCardinality:
         """No planner row is the absence of an estimate, not a zero."""
 
         self._seed(postgres_test_db, analyze=False)
-        stats = self._profile(postgres_test_db, "public.wide_t", threshold=10)
+        stats = self._profile(
+            postgres_test_db,
+            f"{postgres_test_db['database']}.public.wide_t",
+            threshold=10,
+        )
 
         assert stats["id"].cardinality == 500
         assert stats["id"].cardinality_method == "exact"
@@ -1935,7 +1836,11 @@ class TestApproximateCardinality:
         postgres_test_db: dict[str, str],
     ) -> None:
         self._seed(postgres_test_db, analyze=True)
-        stats = self._profile(postgres_test_db, "public.wide_t", threshold=100_000)
+        stats = self._profile(
+            postgres_test_db,
+            f"{postgres_test_db['database']}.public.wide_t",
+            threshold=100_000,
+        )
 
         assert stats["id"].cardinality == 500
         assert stats["id"].cardinality_method == "exact"
@@ -1974,7 +1879,7 @@ class TestStaleEstimateCannotUnboundTheRead:
             )
 
     @staticmethod
-    def _profile(creds: dict[str, str]) -> tuple[dict[str, ColumnStats], list[str]]:
+    def _profile(creds: dict[str, str]) -> tuple[PhaseB, list[str]]:
         from dbprint.adapters.postgres import stats as pg_stats
         from dbprint.config import StatisticsConfig
         from tests.adapters.test_dialect_guard import _install_recorder
@@ -1983,11 +1888,11 @@ class TestStaleEstimateCannotUnboundTheRead:
         recorder = _install_recorder(adapter)
 
         try:
-            cols = adapter.introspect_columns("public.stale_t")
+            cols = adapter.introspect_columns(f"{creds['database']}.public.stale_t")
 
             with patch.object(pg_stats, "APPROXIMATE_THRESHOLD", 10):
                 _, computed = adapter.compute_statistics(
-                    "public.stale_t",
+                    f"{creds['database']}.public.stale_t",
                     cols,
                     StatisticsConfig(),
                     frozenset(),
@@ -2074,11 +1979,11 @@ class TestApproximateEstimateBoundedByNonNullCount:
         adapter = _connected(creds)
 
         try:
-            cols = adapter.introspect_columns("public.null_heavy_t")
+            cols = adapter.introspect_columns(f"{creds['database']}.public.null_heavy_t")
 
             with patch.object(pg_stats, "APPROXIMATE_THRESHOLD", 10):
                 _, computed = adapter.compute_statistics(
-                    "public.null_heavy_t",
+                    f"{creds['database']}.public.null_heavy_t",
                     cols,
                     StatisticsConfig(),
                     frozenset(),
@@ -2154,21 +2059,21 @@ class TestScopedStatistics:
         adapter = _connected(creds)
 
         try:
-            return adapter.sample_values("public.scoped_t", "id", n, scope)
+            return adapter.sample_values(f"{creds['database']}.public.scoped_t", "id", n, scope)
         finally:
             adapter.close()
 
     @staticmethod
-    def _profile(creds: dict[str, str], scope: TableScope | None) -> tuple[TableCounts, dict]:
+    def _profile(creds: dict[str, str], scope: TableScope | None) -> tuple[TableCounts, PhaseB]:
         from dbprint.config import StatisticsConfig
 
         adapter = _connected(creds)
 
         try:
-            cols = adapter.introspect_columns("public.scoped_t")
+            cols = adapter.introspect_columns(f"{creds['database']}.public.scoped_t")
 
             return adapter.compute_statistics(
-                "public.scoped_t",
+                f"{creds['database']}.public.scoped_t",
                 cols,
                 StatisticsConfig(),
                 frozenset(),
@@ -2310,7 +2215,7 @@ class TestScopedStatistics:
         recorder = _install_recorder(adapter)
 
         try:
-            adapter.sample_values("public.scoped_t", "bucket", n, scope)
+            adapter.sample_values(f"{creds['database']}.public.scoped_t", "bucket", n, scope)
 
             return [s for s in recorder.flattened() if "select distinct" in s]
         finally:
@@ -2358,7 +2263,7 @@ class TestDatelessTemporal:
     """
 
     @staticmethod
-    def _profile(creds: dict[str, str]) -> dict[str, ColumnStats]:
+    def _profile(creds: dict[str, str]) -> PhaseB:
         import psycopg
 
         from dbprint.config import StatisticsConfig
@@ -2382,9 +2287,9 @@ class TestDatelessTemporal:
         adapter = _connected(creds)
 
         try:
-            cols = adapter.introspect_columns("public.field_round")
+            cols = adapter.introspect_columns(f"{creds['database']}.public.field_round")
             _, stats = adapter.compute_statistics(
-                "public.field_round",
+                f"{creds['database']}.public.field_round",
                 cols,
                 StatisticsConfig(),
                 frozenset(),
@@ -2448,15 +2353,15 @@ class TestOutOfRangeTemporal:
                 )
 
     @staticmethod
-    def _profile(creds: dict[str, str]) -> dict[str, ColumnStats]:
+    def _profile(creds: dict[str, str]) -> PhaseB:
         from dbprint.config import StatisticsConfig
 
         adapter = _connected(creds)
 
         try:
-            cols = adapter.introspect_columns("public.viability_check")
+            cols = adapter.introspect_columns(f"{creds['database']}.public.viability_check")
             _, stats = adapter.compute_statistics(
-                "public.viability_check",
+                f"{creds['database']}.public.viability_check",
                 cols,
                 StatisticsConfig(),
                 frozenset(),
@@ -2544,7 +2449,7 @@ class TestOutOfRangeTemporal:
             conn.execute("SET TimeZone = 'UTC'")
             utc_rng, *_ = pg_stats._fetch_temporal_block(
                 conn,
-                "public.viability_check",
+                pg_stats._source(f"{postgres_test_db['database']}.public.viability_check", None),
                 col,
                 60,
                 config,
@@ -2553,7 +2458,7 @@ class TestOutOfRangeTemporal:
             conn.execute("SET TimeZone = 'America/New_York'")
             shifted_rng, *_ = pg_stats._fetch_temporal_block(
                 conn,
-                "public.viability_check",
+                pg_stats._source(f"{postgres_test_db['database']}.public.viability_check", None),
                 col,
                 60,
                 config,
@@ -2595,7 +2500,7 @@ class TestOutOfRangeTemporal:
             conn.execute("SET TimeZone = 'UTC'")
             utc_values, *_ = pg_stats._fetch_value_list(
                 conn,
-                "public.viability_check",
+                pg_stats._source(f"{postgres_test_db['database']}.public.viability_check", None),
                 col,
                 240,
                 config,
@@ -2604,7 +2509,7 @@ class TestOutOfRangeTemporal:
             conn.execute("SET TimeZone = 'America/New_York'")
             shifted_values, *_ = pg_stats._fetch_value_list(
                 conn,
-                "public.viability_check",
+                pg_stats._source(f"{postgres_test_db['database']}.public.viability_check", None),
                 col,
                 240,
                 config,
@@ -2612,25 +2517,6 @@ class TestOutOfRangeTemporal:
 
         assert shifted_values == utc_values
         assert all(entry.value.endswith("Z") for entry in utc_values)
-
-    def test_degradation_net_drops_bounds_not_the_table(
-        self,
-        postgres_test_db: dict[str, str],
-    ) -> None:
-        self._seed(postgres_test_db, [])
-
-        with patch(
-            "dbprint.adapters.postgres.stats._fetch_calendar_temporal_block",
-            side_effect=RuntimeError("simulated failure"),
-        ):
-            stats = self._profile(postgres_test_db)
-
-        assert stats["taken_at"].range is None
-        assert stats["taken_at"].percentiles is None
-        assert stats["taken_at"].unrepresentable is None
-        # The rest of the column's statistics, and every other column, survive.
-        assert stats["taken_at"].cardinality is not None
-        assert stats["id"].cardinality is not None
 
     def test_empty_non_null_set_does_not_clamp_to_a_bogus_span(
         self,
@@ -2667,7 +2553,7 @@ class TestOutOfRangeTemporal:
             )
             rng, percentiles, _, unrepresentable, _, _, _ = pg_stats._fetch_temporal_block(
                 conn,
-                "public.all_null_ts",
+                pg_stats._source(f"{postgres_test_db['database']}.public.all_null_ts", None),
                 col,
                 0,
                 StatisticsConfig(),

@@ -205,7 +205,7 @@ body.chart-fs-open { overflow: hidden; }
 
 .bars { display: flex; flex-direction: column; gap: 2px; min-width: 20rem; }
 .bar-row { display: grid; grid-template-columns: 9rem 1fr 2.5rem; gap: .35rem; align-items: center; font-size: .9em; }
-.bar-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, monospace; }
+.bar-label { overflow: hidden; text-overflow: ellipsis; white-space: pre; font-family: ui-monospace, monospace; }
 .bar-track { background: #8882; height: 8px; border-radius: 2px; overflow: hidden; }
 .bar-fill { display: block; height: 100%; background: #4a90d9; }
 .bar-fill.bar-fill-muted { background: #8888; }

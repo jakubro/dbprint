@@ -10,7 +10,6 @@ from typing import get_args
 import pytest
 
 from dbprint.spec.epoch import EpochUnit, bounds_epoch_unit, sample_epoch_unit
-from dbprint.spec.looks_like import MATCH_THRESHOLD
 
 
 # isdigit()-true, isdecimal()-false: a superscript, a subscript, and a circled digit.
@@ -114,8 +113,6 @@ class TestPerValueRule:
     def test_noise_within_tolerance_still_detects(self) -> None:
         values = [str(1704067200 + i) for i in range(29)] + ["unknown"]
 
-        assert len(values) == 30
-        assert 29 / 30 >= MATCH_THRESHOLD
         assert sample_epoch_unit(values) == "seconds"
 
     def test_an_empty_sample_is_not_detected(self) -> None:
@@ -161,3 +158,17 @@ class TestTheTwoRulesAreDisjointByConstruction:
         values = [str(lo), str(hi)] * 15
 
         assert bounds_epoch_unit(lo, hi) == sample_epoch_unit(values) == "seconds"
+
+
+def test_nineteen_of_twenty_is_enough() -> None:
+    assert sample_epoch_unit([1_500_000_000] * 19 + ["x"]) == "seconds"
+    assert sample_epoch_unit([1_500_000_000_000] * 19 + ["x"]) == "milliseconds"
+    assert sample_epoch_unit([1_500_000_000] * 18 + ["x", "y"]) is None
+
+
+def test_the_window_endpoints_are_inside() -> None:
+    assert sample_epoch_unit([1_000_000_000, 2_000_000_000]) == "seconds"
+
+
+def test_a_trailing_minus_is_not_a_signed_integer() -> None:
+    assert sample_epoch_unit(["1500000000-"]) is None

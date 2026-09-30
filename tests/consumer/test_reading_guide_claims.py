@@ -49,12 +49,21 @@ COVERS = frozenset(
         "catalog_only_table",
         "declared_missing_artifact",
         "delimiter_in_a_value",
+        "value_spelling",
+        "scoped_complete_list",
+        "scoped_candidate_key",
+        "scoped_latest_value",
+        "extreme_number_statistics",
+        "near_boundary_share",
     },
 )
 
 # register key -> (SPEC section that defines the state, a field name SPEC uses there).
 # The field is the anchor: neither SPEC nor the guide can drop it without failing here.
 ANCHORS: dict[str, tuple[str, str]] = {
+    # Both rest on SPEC 2.2.6's rendering rule; the guide names the notation and the ratio.
+    "extreme_number_statistics": ("2.2.6", "positional"),
+    "near_boundary_share": ("2.2.6", "null_rate"),
     "scoped_table": ("2.2.8", "rows_scanned"),
     "redacted_column": ("2.2.9", "redacted"),
     "future_dated_temporal": ("2.2.4", "freshness"),
@@ -68,6 +77,11 @@ ANCHORS: dict[str, tuple[str, str]] = {
     "catalog_only_table": ("2.2.15", "catalog_only"),
     "declared_missing_artifact": ("7.3", "artifacts"),
     "delimiter_in_a_value": ("2.2.3", "values"),
+    "value_spelling": ("2.2.4", "values"),
+    # The three scanned-set claims rest on SPEC 2.2.8's one rule; the guide names its block.
+    "scoped_complete_list": ("2.2.8", "scope"),
+    "scoped_candidate_key": ("2.2.8", "scope"),
+    "scoped_latest_value": ("2.2.8", "scope"),
 }
 
 
@@ -127,3 +141,10 @@ def test_every_register_entry_has_an_anchor() -> None:
     from tests.consumer import register
 
     assert {state.key for state in register.REGISTER} == set(ANCHORS)
+
+
+def test_the_whole_column_sentence_carries_the_scope_clause() -> None:
+    guide = _guide()
+    at = guide.index("is the whole column")
+
+    assert "over the rows scanned where the file carries `scope`" in guide[at : at + 90]

@@ -12,8 +12,6 @@ from pathlib import Path
 
 import pytest
 
-from dbprint.engine.reading_guide import READING_GUIDE_TEXT
-
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GUIDE_PATH = REPO_ROOT / "src/dbprint/engine/reading_guide.md"
@@ -49,12 +47,6 @@ def test_the_shipped_package_copy_matches_the_generator() -> None:
     assert GUIDE_PATH.read_text() == gen.build_document()
 
 
-def test_the_runtime_loader_matches_the_shipped_copy() -> None:
-    """`READING_GUIDE_TEXT` ships via importlib.resources - confirm it reads the same bytes."""
-
-    assert READING_GUIDE_TEXT == GUIDE_PATH.read_text()
-
-
 def test_every_spec_classification_gets_a_vocabulary_sentence() -> None:
     text = gen.build_document()
 
@@ -64,7 +56,7 @@ def test_every_spec_classification_gets_a_vocabulary_sentence() -> None:
 
 def test_the_sketch_signal_names_the_decoder_and_carries_no_percentage() -> None:
     text = gen.build_document()
-    signals = text.split("## Signals nobody points at")[1]
+    signals = text.split("## The diff, reference lists and sketches")[1]
 
     assert "`sketch`" in text
     assert "`dbprint.spec.sketch`" in text
@@ -84,12 +76,6 @@ def test_the_generator_raises_if_an_anchor_no_longer_holds() -> None:
 
     with pytest.raises(AssertionError, match="boolean no longer requires values"):
         gen._check_vocabulary_anchors(broken_matrix)
-
-
-def test_the_consumer_must_guard_passes_on_the_committed_spec() -> None:
-    """A returning `build_document()` already proves this; asserted directly for its own sake."""
-
-    gen._check_consumer_must_coverage(_SPEC_PATH.read_text())
 
 
 def test_the_consumer_must_guard_fires_on_an_uncited_new_rule() -> None:
@@ -115,6 +101,12 @@ def test_the_scope_and_redaction_rules_are_present() -> None:
     assert "90 days" in text
 
 
+def test_a_complete_list_is_the_whole_column_only_over_the_rows_scanned() -> None:
+    text = gen.build_document()
+
+    assert "the whole column — over the rows scanned where the file carries `scope`" in text
+
+
 def test_the_foreign_key_candidate_bullet_names_the_referencing_side() -> None:
     text = gen.build_document()
 
@@ -135,7 +127,7 @@ def test_the_entry_point_names_both_starting_conditions() -> None:
     text = gen.build_document()
 
     assert "`manifest.yaml`" in text
-    assert "`search_columns`" in text
+    assert "An MCP client calls the server's tools instead" in text
 
 
 def test_absence_is_pointed_at_spec_7() -> None:

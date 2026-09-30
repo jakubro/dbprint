@@ -5,7 +5,7 @@ per-object statement and no external binary.
 from __future__ import annotations
 
 from .connection import Cursor, exec_query
-from .identity import Identity
+from ..identifiers import Identity
 
 
 def extract_ddl(cursor: Cursor, identity: Identity) -> str:
@@ -13,12 +13,20 @@ def extract_ddl(cursor: Cursor, identity: Identity) -> str:
 
     row = exec_query(
         cursor,
-        "SELECT create_table_query FROM system.tables WHERE database = %s AND name = %s",
+        """
+        SELECT
+          tbl.create_table_query
+        FROM
+          system.tables tbl
+        WHERE
+          tbl.database = %s
+          AND tbl.name = %s
+        """,
         identity.parts,
     ).fetchone()
 
     if not row or not row[0]:
-        raise ValueError(f"no DDL available for {identity.dotted()!r}; not found in catalog")
+        raise ValueError(f"no DDL available for {identity.fqn!r}; not found in catalog")
 
     return normalize(str(row[0]))
 

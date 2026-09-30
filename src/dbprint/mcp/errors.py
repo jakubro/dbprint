@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from dbprint.engine.baseline import unprofiled_message
+
 
 JsonRpcCode = Literal[
     -32601,  # MethodNotFound
@@ -33,8 +35,14 @@ def unknown_table(table: str, connection: str) -> McpError:
     return McpError(
         -32602,
         f"table {table!r} not found in connection {connection!r}. "
-        f"Run dbprint list {connection} for valid names.",
+        f"Call list_tables with connection {connection!r} for valid names.",
     )
+
+
+def unprofiled_table(table: str) -> McpError:
+    """The requested table exists and the last `generate` run could not profile it (SPEC 2.5)."""
+
+    return McpError(-32602, unprofiled_message(table))
 
 
 def unknown_column(column: str, table: str, columns: list[str]) -> McpError:
@@ -84,7 +92,7 @@ def no_default_connection(configured: list[str]) -> McpError:
 
     return McpError(
         -32602,
-        f"no default connection; pass conn explicitly. Configured: {sorted(configured)}",
+        f"no default connection; pass connection explicitly. Configured: {sorted(configured)}",
     )
 
 

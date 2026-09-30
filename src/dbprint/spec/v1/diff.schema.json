@@ -90,8 +90,9 @@
     },
     "Kind": {
       "enum": [
-        "table_added", "table_removed",
+        "table_added", "table_removed", "table_type_changed",
         "column_added", "column_removed", "column_type_changed", "column_nullable_changed", "column_default_changed",
+        "column_physical_name_changed", "column_collation_changed",
         "statistic_changed", "table_row_count_changed", "grain_changed", "physical_layout_changed", "depends_on_changed",
         "relationship_added", "relationship_removed", "relationship_modified",
         "index_added", "index_removed", "index_modified",
@@ -107,11 +108,14 @@
       "oneOf": [
         {"$ref": "#/$defs/TableAdded"},
         {"$ref": "#/$defs/TableRemoved"},
+        {"$ref": "#/$defs/TableTypeChanged"},
         {"$ref": "#/$defs/ColumnAdded"},
         {"$ref": "#/$defs/ColumnRemoved"},
         {"$ref": "#/$defs/ColumnTypeChanged"},
         {"$ref": "#/$defs/ColumnNullableChanged"},
         {"$ref": "#/$defs/ColumnDefaultChanged"},
+        {"$ref": "#/$defs/ColumnPhysicalNameChanged"},
+        {"$ref": "#/$defs/ColumnCollationChanged"},
         {"$ref": "#/$defs/StatisticChanged"},
         {"$ref": "#/$defs/TableRowCountChanged"},
         {"$ref": "#/$defs/GrainChanged"},
@@ -173,6 +177,38 @@
         "kind": {"const": "column_default_changed"},
         "before": {},
         "after": {}
+      },
+      "required": ["kind", "table", "column", "before", "after"],
+      "type": "object"
+    },
+    "TableTypeChanged": {
+      "properties": {
+        "kind": {"const": "table_type_changed"},
+        "table": {"type": "string"},
+        "before": {"enum": ["table", "view", "matview"]},
+        "after": {"enum": ["table", "view", "matview"]}
+      },
+      "required": ["kind", "table", "before", "after"],
+      "type": "object"
+    },
+    "ColumnPhysicalNameChanged": {
+      "properties": {
+        "kind": {"const": "column_physical_name_changed"},
+        "table": {"type": "string"},
+        "column": {"type": "string"},
+        "before": {"type": "string", "minLength": 1},
+        "after": {"type": "string", "minLength": 1}
+      },
+      "required": ["kind", "table", "column", "before", "after"],
+      "type": "object"
+    },
+    "ColumnCollationChanged": {
+      "properties": {
+        "kind": {"const": "column_collation_changed"},
+        "table": {"type": "string"},
+        "column": {"type": "string"},
+        "before": {"type": "string", "minLength": 1},
+        "after": {"type": "string", "minLength": 1}
       },
       "required": ["kind", "table", "column", "before", "after"],
       "type": "object"

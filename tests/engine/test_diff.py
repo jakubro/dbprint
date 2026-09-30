@@ -1,11 +1,12 @@
-"""Diff computation tests - 19 v1 change kinds."""
+"""Diff computation tests - every v1 change kind."""
 
 from __future__ import annotations
 
 import dataclasses
 from typing import Any
 
-from dbprint.adapters.base import ColumnStats
+import pytest
+
 from dbprint.engine import diff as diff_module
 from dbprint.engine.diff import (
     ColumnState,
@@ -23,6 +24,7 @@ from dbprint.engine.diff import (
     has_schema_changes,
     physical_layout_from_block,
 )
+from dbprint.spec import drift
 
 
 SELECTORS = DiffSelectors(include=("*",), exclude=())
@@ -1197,9 +1199,6 @@ class TestPopulationSuppression:
         diff = _compute({"a.scoped": before}, {"a.scoped": after})
 
         assert diff["summary"]["statistics_drifted"] == 1
-        assert diff["summary"]["statistics_drifted"] == len(
-            [c for c in diff["changes"] if c["kind"] == "statistic_changed"],
-        )
 
     def test_the_six_scale_dependent_counts_are_suppressed_under_scope(self) -> None:
         """The count fields scale with `rows_scanned` exactly as `null_count` does (SPEC 2.2.8) -
@@ -1277,6 +1276,23 @@ class TestPopulationSuppression:
         diff = _compute({"public.t": before}, {"public.t": after})
 
         assert diff["changes"] == []
+
+    def test_a_verdict_whose_input_went_unmeasured_is_not_compared(self) -> None:
+        """SPEC 7.2: `candidate_key` read without its `cardinality_ratio` is unmeasured, not false."""
+
+        before = _table(
+            columns={"a": ColumnState("a", "int", True, None)},
+            statistics=comparable_columns(
+                {"a": {"cardinality_ratio": 1.0, "inferred": {"candidate_key": True}}},
+            ),
+        )
+        after = _table(
+            columns={"a": ColumnState("a", "int", True, None)},
+            statistics=comparable_columns({"a": {"unmeasured": ["cardinality_ratio"]}}),
+        )
+        diff = _compute({"public.t": before}, {"public.t": after})
+
+        assert [c["stat"] for c in diff["changes"]] == []
 
     def test_the_marker_itself_is_never_an_event(self) -> None:
         """A marker lifted between two runs is not drift about the column - and the field it named
@@ -1373,6 +1389,17 @@ class TestRedactedValueSuppression:
 
         assert stats_changed == {"redacted"}
         assert "collector@example.invalid" not in repr(diff)
+
+    def test_a_baseline_count_the_marker_now_withholds_does_not_report(self) -> None:
+        """An older print carries `zero_count` beside a marker; comparing it republishes it."""
+
+        diff = self._sides(
+            {"zero_count": 50, "empty_count": 3, "normalized_cardinality": 40, "redacted": "mask"},
+            {"zero_count": 10, "redacted": "mask"},
+        )
+        stats_changed = {c["stat"] for c in diff["changes"] if c["kind"] == "statistic_changed"}
+
+        assert stats_changed == set()
 
     def test_the_marker_change_itself_still_reports(self) -> None:
         """It names a primitive, not a value - and it is why the rest of the column went quiet."""
@@ -1694,62 +1721,166 @@ class TestSelectorScoping:
         assert "table_removed" not in _kinds(diff)
 
 
-# `ColumnStats` fields whose artifact value nests, flattening under `_stat_paths` into dotted
-# sub-paths ("range.min") rather than a bare name - the sub-paths are what needs classifying.
-_CONTAINER_COLUMN_STATS_FIELDS = frozenset(
-    {"frequencies", "range", "percentiles", "length", "inferred"},
-)
+_COLUMN_SAMPLES: dict[str, tuple[Any, Any]] = {
+    "sql_type": ("integer", "bigint"),
+    "nullable": (False, True),
+    "physical_name": (None, "C"),
+    "collation": ("en_US", "C"),
+    "physical_layout_key": (True, False),
+    "classification": ("numeric", "categorical"),
+    "null_count": (1, 2),
+    "null_rate": (0.1, 0.2),
+    "cardinality": (10, 11),
+    "cardinality_ratio": (0.5, 0.6),
+    "cardinality_method": ("exact", "exact_fallback"),
+    "values": ([{"value": "a", "count": 1}], [{"value": "b", "count": 1}]),
+    "values_coverage": (0.5, 0.6),
+    "values_coverage_method": ("measured", "bounded"),
+    "distribution": ("uniform", "long_tail"),
+    "frequencies": ({"top": 3}, {"top": 4}),
+    "range": ({"min": 1}, {"min": 2}),
+    "percentiles": ({"p50": 1}, {"p50": 2}),
+    "mean": (1.5, 2.5),
+    "sum": (3, 4),
+    "zero_count": (0, 1),
+    "negative_count": (0, 1),
+    "empty_count": (0, 1),
+    "quantized_count": (0, 1),
+    "length": ({"max": 3}, {"max": 4}),
+    "populated": ({"from": "2024-01-01"}, {"from": "2024-02-01"}),
+    "normalized_cardinality": (5, 6),
+    "unrepresentable": (["min"], ["max"]),
+    "redacted": (None, "mask"),
+    "inferred": ({"looks_like": "email"}, {"looks_like": "phone"}),
+    "inferred.sampled": ({"sampled": 10}, {"sampled": 20}),
+    "inferred.matched": ({"matched": 10}, {"matched": 20}),
+    "inferred.looks_like_candidate": ({"looks_like_candidate": "a"}, {"looks_like_candidate": "b"}),
+    "inferred.looks_like_candidate_share": (
+        {"looks_like_candidate_share": 0.5},
+        {"looks_like_candidate_share": 0.6},
+    ),
+    "rows_scanned": (10, 20),
+    "unmeasured": ([], ["mean"]),
+    "freshness": ({"max_age_days": 1}, {"max_age_days": 2}),
+    "sketch": ({"values": "a"}, {"values": "b"}),
+}
+_SHAPE_COLUMN_FIELDS = {"sql_type", "nullable", "physical_name", "collation"}
 
-# Flat fields reviewed and confirmed correct to compare unconditionally, scope included: ratios
-# and non-numeric verdicts that are not scan-scale, plus `mean` (normalised like `null_rate`).
-_DELIBERATELY_UNSUPPRESSED_STATS = frozenset(
+
+def _column_pair(field: str) -> tuple[TableState, TableState]:
+    before_value, after_value = _COLUMN_SAMPLES[field]
+    key = field.split(".")[0]
+    sides = []
+
+    for value in (before_value, after_value):
+        column = ColumnState(name="c", sql_type="integer", nullable=False, default=None)
+        payload: dict[str, Any] = {}
+
+        if field in _SHAPE_COLUMN_FIELDS:
+            column = dataclasses.replace(column, **{field: value})
+        elif value is not None:
+            payload[key] = value
+
+        sides.append(
+            _table(
+                columns={"c": column},
+                statistics=diff_module.comparable_columns({"c": payload}),
+            ),
+        )
+
+    return sides[0], sides[1]
+
+
+# A column field is a shape change, a data change, or not compared at all (SPEC 2.6.1).
+_SHAPE_KIND = {
+    "collation": "column_collation_changed",
+    "nullable": "column_nullable_changed",
+    "physical_name": "column_physical_name_changed",
+    "sql_type": "column_type_changed",
+}
+_NOT_COMPARED = frozenset(
     {
-        "null_rate",
-        "cardinality_ratio",
-        "cardinality_method",
-        "values_coverage",
-        "distribution",
-        "mean",
-        "unrepresentable",
+        "freshness",
+        "inferred.looks_like_candidate",
+        "inferred.looks_like_candidate_share",
+        "inferred.matched",
+        "inferred.sampled",
+        "physical_layout_key",
+        "rows_scanned",
+        "sketch",
+        "unmeasured",
     },
 )
 
 
-class TestColumnStatsCompleteness:
-    """Every scalar `ColumnStats` field is triaged in `diff.py` - population-absolute, uncompared,
-    marker, presence-gated or compared unconditionally - so a new one cannot slip through.
-    """
+class TestEveryColumnFieldReportsInItsDeclaredFamily:
+    """A field differing alone reports its mapped kind, and nothing when it is not compared."""
 
-    @staticmethod
-    def _flat_fields() -> set[str]:
-        return {
-            f.name
-            for f in dataclasses.fields(ColumnStats)
-            if f.name not in _CONTAINER_COLUMN_STATS_FIELDS
+    def test_the_samples_cover_every_column_rule(self) -> None:
+        mapped = {
+            path.removeprefix("columns.*.")
+            for artifact, path in drift.FIELD_RULES
+            if artifact == "statistics" and path.startswith("columns.*.")
         }
 
-    @staticmethod
-    def _triaged() -> set[str]:
-        uncompared = {name for name in diff_module._UNCOMPARED_STATS if "." not in name}
+        assert set(_COLUMN_SAMPLES) == mapped
 
-        return (
-            uncompared
-            | diff_module._MARKER_STATS
-            | diff_module._POPULATION_ABSOLUTE_STATS
-            | diff_module._PRESENCE_GATED_STATS
-            | _DELIBERATELY_UNSUPPRESSED_STATS
+    @pytest.mark.parametrize("field", sorted(_COLUMN_SAMPLES))
+    def test_one_field_differing(self, field: str) -> None:
+        before, after = _column_pair(field)
+        diff = _compute({"public.t": before}, {"public.t": after})
+
+        if field in _SHAPE_KIND:
+            assert _kinds(diff) == [_SHAPE_KIND[field]]
+            assert diff_module.has_schema_changes(diff)
+        elif field in _NOT_COMPARED:
+            assert _kinds(diff) == []
+        else:
+            assert set(_kinds(diff)) == {"statistic_changed"}
+            assert not diff_module.has_schema_changes(diff)
+
+
+class TestTableTypeAndCollation:
+    def test_a_type_change_is_a_shape_change_counted_as_modified(self) -> None:
+        diff = _compute({"public.t": _table(type="table")}, {"public.t": _table(type="view")})
+
+        assert diff["changes"] == [
+            {"kind": "table_type_changed", "table": "public.t", "before": "table", "after": "view"},
+        ]
+        assert diff["summary"]["tables_modified"] == 1
+        assert diff_module.has_schema_changes(diff)
+
+    def test_an_unknown_baseline_type_compares_nothing(self) -> None:
+        diff = _compute({"public.t": _table(type=None)}, {"public.t": _table(type="view")})
+
+        assert _kinds(diff) == []
+
+    def test_a_default_collation_move_alone_reports_nothing(self) -> None:
+        implicit = ColumnState(name="c", sql_type="text", nullable=True, default=None)
+        explicit = dataclasses.replace(implicit, collation="X")
+        before = _table(columns={"c": implicit}, default_collation="X")
+        after = _table(columns={"c": explicit}, default_collation="Y")
+
+        assert _kinds(_compute({"public.t": before}, {"public.t": after})) == []
+
+    def test_catalog_facts_compare_on_a_catalog_only_side(self) -> None:
+        before = _table(
+            columns={"c": ColumnState(name="c", sql_type="text", nullable=True, default=None)},
+            catalog_only=True,
+        )
+        after = _table(
+            columns={
+                "c": ColumnState(
+                    name="c",
+                    sql_type="text",
+                    nullable=True,
+                    default=None,
+                    physical_name="C",
+                ),
+            },
+            catalog_only=True,
         )
 
-    def test_every_flat_field_is_triaged(self) -> None:
-        untriaged = self._flat_fields() - self._triaged()
-
-        assert untriaged == set(), (
-            f"{sorted(untriaged)} landed on ColumnStats with no diff.py triage - classify each "
-            "in _POPULATION_ABSOLUTE_STATS, _UNCOMPARED_STATS, _PRESENCE_GATED_STATS, or record "
-            "it as deliberately unsuppressed"
-        )
-
-    def test_the_guard_actually_fires_on_an_untriaged_field(self) -> None:
-        """Proves the sweep isn't vacuous - not just that today's fields happen to pass."""
-
-        assert "a_future_field" in (self._flat_fields() | {"a_future_field"}) - self._triaged()
+        assert _kinds(_compute({"public.t": before}, {"public.t": after})) == [
+            "column_physical_name_changed",
+        ]

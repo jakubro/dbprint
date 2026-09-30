@@ -1,0 +1,8 @@
+{
+  "path": ["src", "tests", "scripts"],
+  "format": ["python"],
+  "minTokens": 100,
+  "mode": "weak",
+  "reporters": ["console"],
+  "output": "/tmp/dbprint--jscpd"
+}

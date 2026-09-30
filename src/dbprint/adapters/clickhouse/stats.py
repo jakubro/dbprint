@@ -6,18 +6,32 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import replace
-from decimal import Decimal
+from functools import partial
 from typing import Any, Literal
 
 from dbprint.config import StatisticsConfig
-from dbprint.spec.classification import base_type, compute_cardinality_ratio, compute_null_rate
+from dbprint.spec.classification import (
+    base_type,
+    classify,
+    compute_cardinality_ratio,
+    compute_null_rate,
+    is_numeric_type,
+    is_string_like_type,
+)
 from dbprint.spec.coverage import coverage_share, enumeration_limit
 from dbprint.spec.distribution import classify as classify_distribution
 from dbprint.spec.distribution import summarize as summarize_frequencies
+from dbprint.spec.percentiles import coherent_percentiles
+from dbprint.spec.rounding import (
+    UnrepresentableValue,
+    measured_text,
+    measured_value,
+    round_statistic,
+)
 from dbprint.spec.temporal_range import is_representable
-from .connection import Cursor, exec_query
-from .identity import Identity
+from .connection import DIALECT, Cursor, exec_query
 from .introspect import estimate_row_count
+from .rendering import render_domain, render_text, stores_below_microsecond, temporal_shape
 from ..base import (
     BaseStats,
     CardinalityMethod,
@@ -28,6 +42,8 @@ from ..base import (
     Frequencies,
     Length,
     NullPatterns,
+    PhaseA,
+    PhaseB,
     Range,
     RowCountMethod,
     TableCounts,
@@ -37,44 +53,17 @@ from ..base import (
     materialized_name,
     null_flags,
     null_patterns_from_rows,
+    order_values,
+    run_phase_a,
+    run_phase_b,
     temporal_block_unmeasured,
 )
+from ..identifiers import SOURCE_ALIAS, Identity, quote, source_column
+from ..sql_layout import derived, indented, select_from
 
 
 APPROXIMATE_THRESHOLD = 1_000_000
 
-# Ratio at/above which a column is re-counted exactly - the same constant Postgres/Snowflake
-# use, since SPEC 4.2's candidate-key threshold (0.9999) needs a precise count near the top.
-_EXACT_PROBE_RATIO = 0.85
-
-_NUMERIC_TYPES = (
-    "int8",
-    "int16",
-    "int32",
-    "int64",
-    "int128",
-    "int256",
-    "uint8",
-    "uint16",
-    "uint32",
-    "uint64",
-    "uint128",
-    "uint256",
-    "float32",
-    "float64",
-    "decimal",
-    "decimal32",
-    "decimal64",
-    "decimal128",
-    "decimal256",
-)
-
-_TEMPORAL_TYPES = ("date", "date32", "datetime", "datetime64")
-_DATE_ONLY_TYPES = ("date", "date32")
-
-_JSON_TYPES = ("json",)
-
-_BOOLEAN_TYPES = ("bool",)
 
 _UNSUPPORTED_TYPES = (
     "array",
@@ -83,7 +72,39 @@ _UNSUPPORTED_TYPES = (
     "nested",
     "aggregatefunction",
     "simpleaggregatefunction",
+    "dynamic",
+    "point",
+    "ring",
+    "linestring",
+    "multilinestring",
+    "polygon",
+    "multipolygon",
+    "geometry",
+    "qbit",
+    "nothing",
 )
+
+# Vendor spellings profiled as text by representability (SPEC 3.1), declared so none is guessed.
+_TEXT_TYPES: tuple[str, ...] = (
+    "ipv4",
+    "ipv6",
+    "enum",
+    "enum8",
+    "enum16",
+    "intervalnanosecond",
+    "intervalmicrosecond",
+    "intervalmillisecond",
+    "intervalsecond",
+    "intervalminute",
+    "intervalhour",
+    "intervalday",
+    "intervalweek",
+    "intervalmonth",
+    "intervalquarter",
+    "intervalyear",
+)
+
+KNOWN_TYPES = (*_UNSUPPORTED_TYPES, *_TEXT_TYPES)
 
 
 def compute_base(
@@ -91,21 +112,28 @@ def compute_base(
     identity: Identity,
     columns: list[ColumnMeta],
     scope: TableScope | None = None,
-) -> tuple[TableCounts, dict[str, BaseStats]]:
+) -> tuple[TableCounts, PhaseA]:
     """Phase A: the table's counts plus per-column null_count and cardinality."""
 
     if not columns:
-        return TableCounts(row_count=0, rows_scanned=0), {}
+        return TableCounts(row_count=0, rows_scanned=0), PhaseA({})
 
     source = _source(identity, scope)
     narrows = scope is not None and scope.narrows
     # The catalog estimate describes the whole table, so a narrowed read counts instead.
     estimate = estimate_row_count(cursor, identity)
     approximate = estimate > APPROXIMATE_THRESHOLD and not narrows
-    rows_scanned, base_stats = _phase_a(cursor, source, columns, approximate)
+    rows_scanned, phase_a = run_phase_a(
+        columns,
+        _phase_a_cost,
+        partial(_phase_a_statement, cursor, source, approximate=approximate),
+        partial(_null_counts, cursor, source),
+        partial(_recount, cursor, source) if approximate else None,
+        declines=lambda col: _is_unsupported(col.classified_type),
+    )
     row_count, row_count_method = _table_row_count(cursor, identity, rows_scanned, scope)
 
-    return TableCounts(row_count, rows_scanned, row_count_method), base_stats
+    return TableCounts(row_count, rows_scanned, row_count_method), phase_a
 
 
 def compute_columns(
@@ -119,30 +147,30 @@ def compute_columns(
     suppress_values: frozenset[str] = frozenset(),
     on_column: ColumnProgress | None = None,
     scope: TableScope | None = None,
-) -> dict[str, ColumnStats]:
+) -> PhaseB:
     """Phase B: the classification-specific statistics, keyed by column name."""
 
     if not columns:
-        return {}
+        return PhaseB({})
 
     if counts.rows_scanned == 0:
         if scope is not None and scope.narrows:
             # A narrowed read drew nothing; an exact, exhaustive shape for columns
             # nobody read would overclaim (SPEC 2.2.7).
-            return {}
+            return PhaseB({})
 
-        return {c.name: _empty_stats(c) for c in columns}
+        return PhaseB({c.name: _empty_stats(c) for c in columns})
 
     source = _source(identity, scope)
-    enriched: dict[str, ColumnStats] = {}
     total = len(columns)
+    position = {col.name: index for index, col in enumerate(columns, start=1)}
 
-    for index, col in enumerate(columns, start=1):
+    def measure(col: ColumnMeta) -> ColumnStats:
         if on_column is not None:
-            on_column(index, total, col.name)
+            on_column(position[col.name], total, col.name)
 
         pre = _pre_classify(col, base[col.name].cardinality, config, col.name in fk_source_columns)
-        enriched[col.name] = _phase_b(
+        return _phase_b(
             cursor,
             source,
             col,
@@ -153,7 +181,7 @@ def compute_columns(
             suppressed=col.name in suppress_values,
         )
 
-    return enriched
+    return run_phase_b(columns, measure)
 
 
 def compute_null_patterns(
@@ -171,15 +199,20 @@ def compute_null_patterns(
         return None
 
     source = _source(identity, scope)
-    quoted = [_quote_ident(col.physical_name or col.name) for col in columns]
+    quoted = [source_column(col, DIALECT) for col in columns]
     cap = config.top_n_null_patterns
     rows = exec_query(
         cursor,
         f"""
-        SELECT {null_flags(quoted, concat=True)} AS dbprint_nulls, count() AS cnt
-        FROM {source}
-        GROUP BY dbprint_nulls
-        ORDER BY cnt DESC, dbprint_nulls ASC
+        SELECT
+          {indented(null_flags(quoted, concat=True), 10)} AS dbprint_nulls,
+          count() AS cnt
+        FROM
+          {indented(source, 10)}
+        GROUP BY
+          dbprint_nulls
+        ORDER BY
+          cnt DESC, dbprint_nulls ASC
         LIMIT {cap + 1}
         """,
     ).fetchall()
@@ -203,13 +236,12 @@ def probe_grain(
         return ()
 
     source = _source(identity, scope)
-    physical = {col.name: col.physical_name or col.name for col in columns}
+    physical = {col.name: source_column(col, DIALECT) for col in columns}
     exprs = [
-        f"uniqExact(tuple({_quote_ident(physical[a])}, {_quote_ident(physical[b])}))"
-        f" AS dbprint_grain_{i}"
+        f"uniqExact(tuple({physical[a]}, {physical[b]})) AS dbprint_grain_{i}"
         for i, (a, b) in enumerate(candidates)
     ]
-    row = exec_query(cursor, f"SELECT {', '.join(exprs)} FROM {source}").fetchone()
+    row = exec_query(cursor, select_from(exprs, source)).fetchone()
 
     if row is None:
         return ()
@@ -233,34 +265,35 @@ def probe_timeline(
     source = _source(identity, scope)
     by_name = {col.name: col for col in columns}
     col = by_name[column]
-    cn = _quote_ident(col.physical_name or col.name)
-    date_only = _matches(col.sql_type, _DATE_ONLY_TYPES)
+    cn = source_column(col, DIALECT)
+    date_only = temporal_shape(col.classified_type) == "date"
     bucket_expr = _timeline_bucket_expr(cn, unit, date_only=date_only)
-    rendered = "toString(bucket_start)" if date_only else _render_temporal("bucket_start")
+    rendered = render_domain("bkt.bucket_start", col.classified_type)
 
     rows = exec_query(
         cursor,
         f"""
-        SELECT {rendered} AS bucket_text, cnt
-        FROM (
-            SELECT {bucket_expr} AS bucket_start, count() AS cnt
-            FROM {source}
-            WHERE {cn} IS NOT NULL
-            GROUP BY bucket_start
-        ) buckets
-        ORDER BY bucket_start
+        SELECT
+          {indented(rendered, 10)} AS bucket_text,
+          bkt.cnt
+        FROM
+          (
+            SELECT
+              {bucket_expr} AS bucket_start,
+              count() AS cnt
+            FROM
+              {indented(source, 14)}
+            WHERE
+              {cn} IS NOT NULL
+            GROUP BY
+              bucket_start
+          ) bkt
+        ORDER BY
+          bkt.bucket_start
         """,
     ).fetchall()
 
-    return tuple((row[0], int(row[1])) for row in rows)
-
-
-def _render_temporal(expr: str) -> str:
-    """Render a DateTime expression per SPEC 2.2.4: `T` separator, no trailing `.000000`."""
-
-    rendered = f"formatDateTime(toDateTime64({expr}, 6), '%Y-%m-%dT%H:%i:%S.%f')"
-
-    return f"replaceRegexpOne({rendered}, '\\\\.000000$', '')"
+    return tuple((measured_text(row[0], "timeline"), int(row[1])) for row in rows)
 
 
 def _timeline_bucket_expr(cn: str, unit: str, *, date_only: bool) -> str:
@@ -297,20 +330,19 @@ def compute_populated_windows(
     source = _source(identity, scope)
     by_name = {col.name: col for col in columns}
     anchor = by_name[anchor_column]
-    anchor_cn = _quote_ident(anchor.physical_name or anchor.name)
-    day_aligned = not _matches(anchor.sql_type, ("date", "date32"))
+    anchor_cn = source_column(anchor, DIALECT)
     exprs = []
 
     for subject in subject_columns:
-        subject_cn = _quote_ident(by_name[subject].physical_name or by_name[subject].name)
+        subject_cn = source_column(by_name[subject], DIALECT)
         from_expr = f"minIf({anchor_cn}, {subject_cn} IS NOT NULL)"
         to_expr = f"maxIf({anchor_cn}, {subject_cn} IS NOT NULL)"
-        rendered_from = _render_temporal(from_expr) if day_aligned else f"toString({from_expr})"
-        rendered_to = _render_temporal(to_expr) if day_aligned else f"toString({to_expr})"
+        rendered_from = render_domain(from_expr, anchor.classified_type)
+        rendered_to = render_domain(to_expr, anchor.classified_type)
         exprs.append(f"{rendered_from} AS from_{_alias(subject)}")
         exprs.append(f"{rendered_to} AS to_{_alias(subject)}")
 
-    row = exec_query(cursor, f"SELECT {', '.join(exprs)} FROM {source}").fetchone()
+    row = exec_query(cursor, select_from(exprs, source)).fetchone()
 
     if row is None:
         return {}
@@ -321,7 +353,10 @@ def compute_populated_windows(
         from_text, to_text = row[2 * i], row[2 * i + 1]
 
         if from_text is not None and to_text is not None:
-            windows[subject] = (from_text, to_text)
+            windows[subject] = (
+                measured_text(from_text, "populated.from"),
+                measured_text(to_text, "populated.to"),
+            )
 
     return windows
 
@@ -345,13 +380,12 @@ def probe_dependencies(
         return {}
 
     source = _source(identity, scope)
-    physical = {col.name: col.physical_name or col.name for col in columns}
+    physical = {col.name: source_column(col, DIALECT) for col in columns}
     exprs = [
-        f"uniqExact(tuple({_quote_ident(physical[a])}, {_quote_ident(physical[b])}))"
-        f" AS dbprint_dep_{i}"
+        f"uniqExact(tuple({physical[a]}, {physical[b]})) AS dbprint_dep_{i}"
         for i, (a, b) in enumerate(candidates)
     ]
-    row = exec_query(cursor, f"SELECT {', '.join(exprs)} FROM {source}").fetchone()
+    row = exec_query(cursor, select_from(exprs, source)).fetchone()
 
     if row is None:
         return {}
@@ -372,11 +406,11 @@ def materialize(cursor: Cursor, identity: Identity, scope: TableScope) -> TableS
     `ENGINE = MergeTree` keeps a large draw off RAM, and the name is never database-qualified.
     """
 
-    name = materialized_name(identity.dotted().lower())
+    name = materialized_name(identity.fqn)
     drawn = _sample_expr(identity, scope)
     exec_query(
         cursor,
-        f"CREATE TEMPORARY TABLE {_quote_ident(name)} ENGINE = MergeTree ORDER BY tuple() "
+        f"CREATE TEMPORARY TABLE {quote(name, DIALECT)} ENGINE = MergeTree ORDER BY tuple() "
         f"AS SELECT * FROM {drawn}",
     )
 
@@ -389,7 +423,7 @@ def release(cursor: Cursor, scope: TableScope) -> None:
     if scope.materialized is None:
         return
 
-    exec_query(cursor, f"DROP TEMPORARY TABLE IF EXISTS {_quote_ident(scope.materialized)}")
+    exec_query(cursor, f"DROP TEMPORARY TABLE IF EXISTS {quote(scope.materialized, DIALECT)}")
 
 
 def _source(identity: Identity, scope: TableScope | None) -> str:
@@ -400,11 +434,11 @@ def _source(identity: Identity, scope: TableScope | None) -> str:
     quoted = identity.quoted()
 
     if scope is None or not scope.narrows:
-        return quoted
+        return f"{quoted} {SOURCE_ALIAS}"
     elif scope.materialized is not None:
-        return _quote_ident(scope.materialized)
+        return f"{quote(scope.materialized, DIALECT)} {SOURCE_ALIAS}"
     else:
-        return f"(SELECT * FROM {quoted} WHERE ({scope.filter})) AS dbprint_scoped"
+        return derived(f"SELECT * FROM {quoted} WHERE ({scope.filter})", SOURCE_ALIAS)
 
 
 def _sample_expr(identity: Identity, scope: TableScope) -> str:
@@ -413,9 +447,17 @@ def _sample_expr(identity: Identity, scope: TableScope) -> str:
     quoted = identity.quoted()
 
     if scope.filter is not None:
-        return f"(SELECT * FROM {quoted} WHERE ({scope.filter}))"
+        return derived(f"SELECT * FROM {quoted} WHERE ({scope.filter})", SOURCE_ALIAS)
 
-    return f"(SELECT * FROM {quoted} SAMPLE {scope.sample})"
+    return derived(
+        f"""
+        SELECT
+          *
+        FROM
+          {quoted} SAMPLE {scope.sample}
+        """,
+        SOURCE_ALIAS,
+    )
 
 
 def _table_row_count(
@@ -436,12 +478,47 @@ def _table_row_count(
     if estimate >= 0:
         return int(estimate), "approximate"
 
-    row = exec_query(cursor, f"SELECT count() FROM {identity.quoted()}").fetchone()
+    row = exec_query(cursor, f"SELECT count() FROM {identity.quoted()} {SOURCE_ALIAS}").fetchone()
 
     return (int(row[0]) if row and row[0] is not None else rows_scanned), "exact"
 
 
-def _phase_a(
+def _phase_a_cost(column: ColumnMeta) -> int:
+    if is_numeric_type(column.classified_type):
+        return 5
+
+    if _is_string_like(column.classified_type):
+        return 7
+
+    return 2
+
+
+def _null_counts(
+    cursor: Cursor,
+    source: str,
+    columns: list[ColumnMeta],
+) -> tuple[int, dict[str, int]]:
+    counts = [f"count({source_column(col, DIALECT)})" for col in columns]
+    row = exec_query(cursor, select_from(["count()", *counts], source)).fetchone()
+    rows, *non_null = (int(value) for value in row) if row else (0, *(0 for _ in columns))
+
+    return rows, {col.name: rows - n for col, n in zip(columns, non_null, strict=True)}
+
+
+def _recount(
+    cursor: Cursor,
+    source: str,
+    columns: list[ColumnMeta],
+) -> Sequence[Any] | None:
+    select_parts = [
+        f"uniqExact({source_column(col, DIALECT)}) AS {_alias(f'card_{col.name}')}"
+        for col in columns
+    ]
+
+    return exec_query(cursor, select_from(select_parts, source)).fetchone()
+
+
+def _phase_a_statement(
     cursor: Cursor,
     source: str,
     columns: list[ColumnMeta],
@@ -455,15 +532,15 @@ def _phase_a(
     card_fn = "uniqCombined64" if approximate else "uniqExact"
 
     for col in columns:
-        cn = _quote_ident(col.physical_name or col.name)
+        cn = source_column(col, DIALECT)
         a = _alias(col.name)
         select_parts.append(f"countIf({cn} IS NULL) AS null_{a}")
 
-        if _matches(col.sql_type, _NUMERIC_TYPES):
+        if is_numeric_type(col.classified_type):
             select_parts.append(f"countIf({cn} = 0) AS zero_{a}")
             select_parts.append(f"countIf({cn} < 0) AS neg_{a}")
             select_parts.append(f"countIf({cn} = trunc({cn})) AS quant_{a}")
-        elif _is_string_like(col.sql_type):
+        elif _is_string_like(col.classified_type):
             # A non-String type (UUID, Enum) has no native `= ''`/`length()`; casting first
             # is what every "string-like" type here actually shares (Postgres does the same).
             rendered = f"toString({cn})"
@@ -475,7 +552,7 @@ def _phase_a(
 
         select_parts.append(f"{card_fn}({cn}) AS card_{a}")
 
-    row = exec_query(cursor, f"SELECT {', '.join(select_parts)} FROM {source}").fetchone()
+    row = exec_query(cursor, select_from(select_parts, source)).fetchone()
 
     if row is None:
         return 0, {c.name: _empty_base(c) for c in columns}
@@ -491,14 +568,14 @@ def _phase_a(
         zero_count = negative_count = empty_count = quantized_count = None
         length_min = length_max = length_avg = None
 
-        if _matches(col.sql_type, _NUMERIC_TYPES):
+        if is_numeric_type(col.classified_type):
             zero_count, negative_count, quantized_count = (
                 int(row[idx]),
                 int(row[idx + 1]),
                 int(row[idx + 2]),
             )
             idx += 3
-        elif _is_string_like(col.sql_type):
+        elif _is_string_like(col.classified_type):
             empty_count = int(row[idx])
             length_min, length_max, length_avg = row[idx + 1], row[idx + 2], row[idx + 3]
             idx += 4
@@ -510,7 +587,7 @@ def _phase_a(
             null_count=null_count,
             cardinality=cardinality,
             cardinality_method=method,
-            supported=not _is_unsupported(col.sql_type),
+            supported=not _is_unsupported(col.classified_type),
             zero_count=zero_count,
             negative_count=negative_count,
             empty_count=empty_count,
@@ -520,54 +597,13 @@ def _phase_a(
             length_avg=length_avg,
         )
 
-    if approximate:
-        _settle_near_unique(cursor, source, columns, out, row_count)
-
     return row_count, out
-
-
-def _settle_near_unique(
-    cursor: Cursor,
-    source: str,
-    columns: list[ColumnMeta],
-    base: dict[str, BaseStats],
-    row_count: int,
-) -> None:
-    """Re-count, exactly, the columns an HLL estimate could misclassify - an estimate a fraction
-    low costs a key its `candidate_key`, so near-unique columns take one batched follow-up.
-    """
-
-    near_unique = [
-        col
-        for col in columns
-        if row_count and base[col.name].cardinality / row_count >= _EXACT_PROBE_RATIO
-    ]
-
-    if not near_unique:
-        return
-
-    select_parts = [
-        f"uniqExact({_quote_ident(col.physical_name or col.name)}) AS {_alias(f'card_{col.name}')}"
-        for col in near_unique
-    ]
-    row = exec_query(cursor, f"SELECT {', '.join(select_parts)} FROM {source}").fetchone()
-
-    if row is None:
-        return
-
-    for col, value in zip(near_unique, row):
-        # A separate statement may read a different snapshot than phase A; clamp to non_null.
-        base[col.name] = replace(
-            base[col.name],
-            cardinality=min(row_count - base[col.name].null_count, int(value)),
-            cardinality_method="exact",
-        )
 
 
 def _empty_stats(col: ColumnMeta) -> ColumnStats:
     """SPEC 2.2.7 edge case: a table read in full and found empty -> minimal column stats."""
 
-    if _is_unsupported(col.sql_type):
+    if _is_unsupported(col.classified_type):
         return ColumnStats(
             sql_type=col.sql_type,
             nullable=col.nullable,
@@ -628,7 +664,7 @@ def _phase_b(
             Length(
                 min=int(base.length_min),
                 max=int(base.length_max),
-                avg=_round_numeric(base.length_avg),
+                avg=round_statistic(base.length_avg),
                 p95=length_p95,
             )
             if length_p95 is not None
@@ -695,10 +731,16 @@ def _phase_b(
             rng, percentiles, distribution, unrepresentable, frequencies, values, quantized = (
                 _fetch_temporal_block(cursor, source, col, non_null, config)
             )
-        except Exception:  # noqa: BLE001 - the temporal block degrades as a whole, and its
+        except UnrepresentableValue:
+            raise
+        except Exception as exc:  # noqa: BLE001 - the temporal block degrades as a whole, and its
             # fields are REQUIRED here (SPEC 2.2.3); the column names what the read cost it
             # rather than leaving an absence a reader would read as a structural cause.
-            return replace(stats, unmeasured=temporal_block_unmeasured(col.sql_type))
+            return replace(
+                stats,
+                unmeasured=temporal_block_unmeasured(col.classified_type),
+                unmeasured_cause=exc,
+            )
 
         return replace(
             stats,
@@ -726,26 +768,15 @@ def _pre_classify(
     config: StatisticsConfig,
     has_declared_fk: bool,
 ) -> str:
-    """Adapter-internal classification mirroring the engine's SPEC 3.2 logic - uniqueness plays
-    no part, the cardinality ratio sitting on the `inferred` axis (SPEC 4.2).
-    """
-
-    if _is_unsupported(col.sql_type):
+    if _is_unsupported(col.classified_type):
         return "unsupported"
-    elif _matches(col.sql_type, _BOOLEAN_TYPES):
-        return "boolean"
-    elif _matches(col.sql_type, _JSON_TYPES):
-        return "json"
-    elif has_declared_fk:
-        return "foreign_key_candidate"
-    elif cardinality <= config.enumeration_threshold:
-        return "categorical"
-    elif _matches(col.sql_type, _TEMPORAL_TYPES):
-        return "temporal"
-    elif _matches(col.sql_type, _NUMERIC_TYPES):
-        return "numeric"
-    else:
-        return "text"
+
+    return classify(
+        col.classified_type,
+        cardinality,
+        has_declared_fk,
+        config.enumeration_threshold,
+    )
 
 
 def _fetch_value_list(
@@ -759,24 +790,38 @@ def _fetch_value_list(
     the bound is fetched, so truncation is observed rather than predicted (SPEC 2.2.4).
     """
 
-    cn = _quote_ident(col.physical_name or col.name)
+    cn = source_column(col, DIALECT)
     limit = enumeration_limit(config.enumeration_threshold, config.top_n_values)
+    # `toString` stays the ordering key, since it decides the cutoff; a number publishes natively.
+    native = is_numeric_type(col.classified_type)
     rows = exec_query(
         cursor,
         f"""
-        SELECT toString({cn}) AS rendered, count() AS cnt
-        FROM {source}
-        WHERE {cn} IS NOT NULL
-        GROUP BY {cn}
-        ORDER BY cnt DESC, rendered ASC
+        SELECT
+          {render_text(cn, col.classified_type)} AS rendered,
+          count() AS cnt,
+          any({cn}) AS native
+        FROM
+          {indented(source, 10)}
+        WHERE
+          {cn} IS NOT NULL
+        GROUP BY
+          {cn}
+        ORDER BY
+          cnt DESC, rendered ASC
         LIMIT {limit + 1}
         """,
     ).fetchall()
     exhaustive = len(rows) <= limit
     kept = rows if exhaustive else rows[: config.top_n_values]
-    entries = sorted(
-        (ValueCount(value=value, count=int(cnt)) for value, cnt in kept),
-        key=lambda v: (-v.count, str(v.value)),
+    entries = order_values(
+        (
+            ValueCount(
+                value=measured_value(value if native else text, f"values[{i}]"),
+                count=int(cnt),
+            )
+            for i, (text, cnt, value) in enumerate(kept)
+        ),
     )
     values = tuple(entries)
     total = sum(v.count for v in values)
@@ -799,32 +844,39 @@ def _fetch_numeric_block(
     float | None,
     float | None,
 ]:
-    cn = _quote_ident(col.physical_name or col.name)
+    cn = source_column(col, DIALECT)
     keys = config.percentiles
-    sql = (
-        f"SELECT min({cn}), max({cn}), avg({cn}), sum({cn}), {_percentile_exprs(cn, keys)} "
-        f"FROM {source}"
-    )
-    row = exec_query(cursor, sql).fetchone()
+    select_parts = [
+        f"min({cn})",
+        f"max({cn})",
+        f"avg({cn})",
+        f"sum({cn})",
+        *_percentile_exprs(cn, keys),
+    ]
+    row = exec_query(cursor, select_from(select_parts, source)).fetchone()
 
     if row is None:
         return Range(min=None, max=None), {}, "uniform", summarize_frequencies([]), (), None, None
 
     rng = Range(
-        min=_round_numeric(row[0], exact_int=True),
-        max=_round_numeric(row[1], exact_int=True),
+        min=round_statistic(row[0], exact_int=True),
+        max=round_statistic(row[1], exact_int=True),
     )
-    mean = _round_numeric(row[2])
-    total = _round_numeric(row[3], exact_int=True)
+    mean = round_statistic(row[2])
+    total = round_statistic(row[3], exact_int=True)
     percentile_values = row[4 : 4 + len(keys)]
-    percentiles = {f"p{p:02d}": _round_numeric(v) for p, v in zip(keys, percentile_values)}
+    percentiles = coherent_percentiles(
+        {f"p{p:02d}": round_statistic(v) for p, v in zip(keys, percentile_values, strict=True)},
+        rng.min,
+        rng.max,
+    )
     distribution, frequencies, values = _approximate_distribution_via_top_n(
         cursor,
         source,
         cn,
         non_null,
         config,
-        _measured_value,
+        measured_value,
     )
 
     return rng, percentiles, distribution, frequencies, values, mean, total
@@ -845,35 +897,34 @@ def _fetch_temporal_block(
     tuple[ValueCount, ...],
     int | None,
 ]:
-    """DATE/DATE32/DATETIME/DATETIME64: bounds and percentiles render to text in SQL, and
-    `quantized_count` is omitted for `Date`, where every value already is its own day.
+    """Bounds and percentiles render to text in SQL; `quantized_count` is omitted for a `Date`,
+    already its own day, and a `Time`, which has none.
     """
 
-    cn = _quote_ident(col.physical_name or col.name)
+    cn = source_column(col, DIALECT)
     keys = config.percentiles
-    day_aligned = not _matches(col.sql_type, ("date", "date32"))
-    # quantileExactInclusive rejects Date/DateTime directly (measured), so every temporal value
-    # is reduced to a float first and rendered back through the column's own domain.
-    if day_aligned:
-        percentile_exprs = ", ".join(
-            _render_temporal(
-                f"toDateTime64(quantileExactInclusive({p / 100.0})(toFloat64({cn})), 6)",
-            )
-            for p in keys
+    clock = temporal_shape(col.classified_type) in ("time", "time_tz")
+    day_aligned = temporal_shape(col.classified_type) not in ("date", "time", "time_tz")
+    # Nearest rank over the column's own sorted values, so a percentile keeps the type and zone
+    # the bounds render from; `quantileExactLow` ranks floor(p * n) + 1, and a float rank overshoots.
+    ranked = [
+        f"""
+        if(
+          empty(arraySort(groupArray({cn})) AS dbprint_sorted),
+          NULL,
+          dbprint_sorted[greatest(intDiv({p} * length(dbprint_sorted) + 99, 100), 1)]
         )
-    else:
-        percentile_exprs = ", ".join(
-            f"toString(toDate32(toInt32(round("
-            f"quantileExactInclusive({p / 100.0})(toFloat64({cn}))))))"
-            for p in keys
-        )
+        """
+        for p in keys
+    ]
+    percentile_exprs = [render_domain(expr, col.classified_type) for expr in ranked]
     select_parts = [
-        _render_temporal(f"min({cn})") if day_aligned else f"toString(min({cn}))",
-        _render_temporal(f"max({cn})") if day_aligned else f"toString(max({cn}))",
-        # Elapsed whole days, not calendar-day boundaries crossed - `dateDiff('day', ...)`
-        # would count a span crossing midnight as 1 even when under 24 hours elapsed.
-        f"intDiv(dateDiff('second', min({cn}), max({cn})), 86400)",
-        percentile_exprs,
+        render_domain(f"min({cn})", col.classified_type),
+        render_domain(f"max({cn})", col.classified_type),
+        # Elapsed whole days at microsecond resolution: `dateDiff` counts unit boundaries, so a
+        # coarser unit would count a crossed boundary as a whole one (SPEC 2.2.4).
+        "0" if clock else f"intDiv(dateDiff('microsecond', min({cn}), max({cn})), 86400000000)",
+        *percentile_exprs,
     ]
 
     if day_aligned:
@@ -881,7 +932,7 @@ def _fetch_temporal_block(
             f"countIf(toStartOfDay(toDateTime({cn})) = toDateTime({cn})) AS quant",
         )
 
-    row = exec_query(cursor, f"SELECT {', '.join(select_parts)} FROM {source}").fetchone()
+    row = exec_query(cursor, select_from(select_parts, source)).fetchone()
 
     if row is None:
         empty_range = Range(min=None, max=None, span_days=0)
@@ -889,19 +940,26 @@ def _fetch_temporal_block(
         return empty_range, {}, "uniform", (), summarize_frequencies([]), (), None
 
     span_days = int(row[2]) if row[2] is not None else 0
-    rng = Range(min=row[0], max=row[1], span_days=span_days)
+    rng = Range(
+        min=measured_value(row[0], "range.min"),
+        max=measured_value(row[1], "range.max"),
+        span_days=span_days,
+    )
     percentile_values = row[3 : 3 + len(keys)]
-    percentiles = {f"p{p:02d}": v for p, v in zip(keys, percentile_values)}
+    percentiles = {
+        f"p{p:02d}": measured_value(v, f"percentiles.p{p:02d}")
+        for p, v in zip(keys, percentile_values, strict=True)
+    }
     quantized_count = int(row[3 + len(keys)]) if day_aligned else None
 
     distribution, frequencies, values = _approximate_distribution_via_top_n(
         cursor,
         source,
-        _render_temporal(cn) if day_aligned else f"toString({cn})",
+        render_domain(cn, col.classified_type),
         non_null,
         config,
         lambda v: v,
-        group_expr=cn,
+        group_expr=None if stores_below_microsecond(col.classified_type) else cn,
     )
     unrepresentable = _unrepresentable_fields(rng, percentiles)
 
@@ -928,25 +986,31 @@ def _unrepresentable_fields(rng: Range, percentiles: dict[str, Any]) -> tuple[st
     return tuple(names)
 
 
-def _percentile_exprs(cn: str, keys: Sequence[int]) -> str:
-    """Comma-joined scalar `quantileExactInclusive(p)(col)` calls, one per requested percentile -
+def _percentile_exprs(cn: str, keys: Sequence[int]) -> list[str]:
+    """Scalar `quantileExactInclusive(p)(col)` calls, one per requested percentile -
     the array form round-trips as a repr, and plain `quantileExact` is nearest-rank instead.
     """
 
-    return ", ".join(f"quantileExactInclusive({p / 100.0})(toFloat64({cn}))" for p in keys)
+    return [f"quantileExactInclusive({p / 100.0})(toFloat64({cn}))" for p in keys]
 
 
 def _fetch_length_p95(cursor: Cursor, source: str, col: ColumnMeta) -> float | None:
     """P95 character length (SPEC 2.2.4), via `quantileExactInclusive` over `lengthUTF8`."""
 
-    cn = _quote_ident(col.physical_name or col.name)
+    cn = source_column(col, DIALECT)
     row = exec_query(
         cursor,
-        f"SELECT quantileExactInclusive(0.95)(lengthUTF8(toString({cn}))) "
-        f"FROM {source} WHERE {cn} IS NOT NULL",
+        f"""
+        SELECT
+          quantileExactInclusive(0.95)(lengthUTF8(toString({cn})))
+        FROM
+          {indented(source, 10)}
+        WHERE
+          {cn} IS NOT NULL
+        """,
     ).fetchone()
 
-    return _round_numeric(row[0]) if row is not None else None
+    return round_statistic(row[0]) if row is not None else None
 
 
 def _approximate_distribution_via_top_n(
@@ -965,19 +1029,24 @@ def _approximate_distribution_via_top_n(
     rows = exec_query(
         cursor,
         f"""
-        SELECT {select_expr} AS rendered, count() AS cnt
-        FROM {source}
-        WHERE {grouping} IS NOT NULL
-        GROUP BY {grouping}
-        ORDER BY cnt DESC, rendered ASC
+        SELECT
+          {indented(select_expr, 10)} AS rendered,
+          count() AS cnt
+        FROM
+          {indented(source, 10)}
+        WHERE
+          {indented(grouping, 10)} IS NOT NULL
+        GROUP BY
+          {indented(grouping, 10)}
+        ORDER BY
+          cnt DESC, rendered ASC
         LIMIT {limit + 1}
         """,
     ).fetchall()
     exhaustive = len(rows) <= limit
     kept = rows if exhaustive else rows[: config.top_n_values]
-    entries = sorted(
+    entries = order_values(
         (ValueCount(value=value_transform(value), count=int(cnt)) for value, cnt in kept),
-        key=lambda v: (-v.count, str(v.value)),
     )
     values = tuple(entries)
     kept_counts = [v.count for v in values]
@@ -996,7 +1065,7 @@ def _empty_base(col: ColumnMeta) -> BaseStats:
         null_count=0,
         cardinality=0,
         cardinality_method="exact",
-        supported=not _is_unsupported(col.sql_type),
+        supported=not _is_unsupported(col.classified_type),
     )
 
 
@@ -1009,64 +1078,7 @@ def _matches(sql_type: str, types: tuple[str, ...]) -> bool:
 
 
 def _is_string_like(sql_type: str) -> bool:
-    """Neither json, boolean, temporal, numeric nor unsupported."""
-
-    base = base_type(sql_type)
-
-    return base not in (
-        *_UNSUPPORTED_TYPES,
-        *_JSON_TYPES,
-        *_BOOLEAN_TYPES,
-        *_TEMPORAL_TYPES,
-        *_NUMERIC_TYPES,
-    )
-
-
-def _round_numeric(v: Any, *, exact_int: bool = False) -> Any:
-    """`exact_int` is set only for count-like fields (`sum`, `range.min`/`max`) - an average or a
-    percentile stays rate-valued, so it stays fractional even when one instance is whole (SPEC 2.2.6).
-    """
-
-    if v is None:
-        return None
-
-    if isinstance(v, int):
-        return v
-
-    # A Decimal integral to the last digit publishes exact - float64 loses precision above
-    # 2**53, which a total over a bigint column reaches (SPEC 2.2.6 rounds only what is not).
-    if exact_int and isinstance(v, Decimal) and v.is_finite() and v == int(v):
-        return int(v)
-
-    try:
-        f = float(v)
-    except (TypeError, ValueError):
-        return v
-
-    rounded = round(f, 6)
-
-    # Six decimals annihilate a measurement below half of one, and 2.2.6 promises to leave a
-    # value's magnitude intact - so such a value goes to six significant figures instead.
-    if rounded == 0.0 and f != 0.0:
-        return float(f"{f:.6g}")
-
-    return rounded
-
-
-def _measured_value(v: Any) -> Any:
-    """One listed value, normalized but never rounded - a cell is not a statistic (SPEC 2.2.7)."""
-
-    if v is None or isinstance(v, int):
-        return v
-
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return v
-
-
-def _quote_ident(name: str) -> str:
-    return "`" + name.replace("`", "``") + "`"
+    return not _is_unsupported(sql_type) and is_string_like_type(sql_type)
 
 
 def _alias(name: str) -> str:

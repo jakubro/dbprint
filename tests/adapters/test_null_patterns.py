@@ -39,7 +39,8 @@ def _census(adapter: Adapter, table_glob: str):
 
     table = next(t for t in adapter.list_tables(include=[table_glob], exclude=[]))
     columns = adapter.introspect_columns(table.fqn)
-    counts, base = adapter.compute_base_statistics(table.fqn, columns, CONFIG)
+    counts, phase_a = adapter.compute_base_statistics(table.fqn, columns, CONFIG)
+    base = phase_a.stats
     census = adapter.compute_null_patterns(table.fqn, columns, CONFIG, counts, base)
 
     return counts, base, census
@@ -111,7 +112,8 @@ class TestTheCensusIsSkippedWhenItWouldSayNothing:
         try:
             table = next(t for t in adapter.list_tables(include=["*.herbarium"], exclude=[]))
             columns = adapter.introspect_columns(table.fqn)
-            counts, base = adapter.compute_base_statistics(table.fqn, columns, CONFIG)
+            counts, phase_a = adapter.compute_base_statistics(table.fqn, columns, CONFIG)
+            base = phase_a.stats
 
             assert not any(s.null_count for s in base.values()), (
                 f"{vendor}: the fixture's herbarium table grew a null; pick another table"
@@ -149,13 +151,19 @@ class TestAWidthBeyondTheFunctionArgumentLimit:
         try:
             seed = next(t for t in adapter.list_tables(include=["*.curator"], exclude=[]))
             namespace = seed.fqn.rsplit(".", 1)[0]
+
+            if vendor == "redshift":
+                # The shim's backing database is not named after the FQN's, so qualify by schema.
+                namespace = namespace.split(".", 1)[1]
+
             _execute(adapter, _wide_ddl(vendor, namespace, names))
             _execute(adapter, _wide_row(vendor, namespace, populated=True, width=self.WIDTH))
             _execute(adapter, _wide_row(vendor, namespace, populated=False, width=self.WIDTH))
 
             table = next(t for t in adapter.list_tables(include=["*.wide"], exclude=[]))
             columns = adapter.introspect_columns(table.fqn)
-            counts, base = adapter.compute_base_statistics(table.fqn, columns, CONFIG)
+            counts, phase_a = adapter.compute_base_statistics(table.fqn, columns, CONFIG)
+            base = phase_a.stats
             recorder = _install_recorder(adapter)
             census = adapter.compute_null_patterns(table.fqn, columns, CONFIG, counts, base)
             issued = list(recorder.flattened())
@@ -183,7 +191,8 @@ class TestOneStatementPerTable:
         try:
             table = next(t for t in adapter.list_tables(include=["*.curator"], exclude=[]))
             columns = adapter.introspect_columns(table.fqn)
-            counts, base = adapter.compute_base_statistics(table.fqn, columns, CONFIG)
+            counts, phase_a = adapter.compute_base_statistics(table.fqn, columns, CONFIG)
+            base = phase_a.stats
             recorder = _install_recorder(adapter)
             adapter.compute_null_patterns(table.fqn, columns, CONFIG, counts, base)
             issued = list(recorder.flattened())
@@ -217,7 +226,8 @@ class TestOneStatementPerTable:
 
             assert scope.materialized is not None, f"{vendor}: the adapter declined to copy"
 
-            counts, base = adapter.compute_base_statistics(table.fqn, columns, CONFIG, scope)
+            counts, phase_a = adapter.compute_base_statistics(table.fqn, columns, CONFIG, scope)
+            base = phase_a.stats
             recorder = _install_recorder(adapter)
             census = adapter.compute_null_patterns(table.fqn, columns, CONFIG, counts, base, scope)
             issued = list(recorder.flattened())

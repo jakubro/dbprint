@@ -14,6 +14,11 @@ UV_RUN := UV_ENV + " uv run --extra dev --extra mcp --extra docs"
 PYTHON := UV_RUN + " python -m"
 # Test runner wrapper: bounds wall-clock time and virtual memory
 RUN_BOUNDED := justfile_directory() / "scripts/run-bounded.sh"
+# Clone detector, pinned exactly: its fingerprints are the baseline's format
+JSCPD := "npx --yes jscpd@5.3.2 --config .jscpd.json --baseline .jscpd-baseline.json"
+# Mutation testing works on a copy: mutmut writes `mutants/` into its working directory
+MUTATE_DIR := "/tmp/dbprint--mutate"
+MUTMUT := UV_ENV + " uv run --project " + justfile_directory() + " --extra dev --extra mcp --extra docs mutmut"
 # xdist distribution mode; `load` suits a machine with fewer cores than there are vendor groups
 DIST := env_var_or_default("DBPRINT_TEST_DIST", "loadgroup")
 
@@ -30,13 +35,18 @@ install:
     {{ UV_RUN }} python -m tests._provisioning 2>&1 | tee -a /tmp/dbprint--install.log
 
 # Run tests; ARGS narrows (pytest falls back to testpaths when given no path)
+# `-rfEs`, not `-rs`: `-r` replaces pytest's default `fE`, so failures and errors must be restated.
 test *ARGS:
-    {{ UV_ENV }} {{ RUN_BOUNDED }} 20m 32768 -- uv run --extra dev --extra mcp --extra docs python -m pytest {{ ARGS }} 2>&1 | tee /tmp/dbprint--test.log
+    {{ UV_ENV }} {{ RUN_BOUNDED }} 30m 32768 -- uv run --extra dev --extra mcp --extra docs python -m pytest -rfEs {{ ARGS }} 2>&1 | tee /tmp/dbprint--test.log
 
 # Run all tests with coverage, parallelized (kept out of `test` - not worth it on a narrowed run)
-# `loadgroup` honours conftest's per-vendor groups: one live substrate per run, not per worker.
+# `loadgroup` honours conftest's Spark and BigQuery groups: one instance per group, not per worker.
 test-cov *ARGS:
-    just test -n auto --dist {{ DIST }} --cov=src --cov-report=term-missing {{ ARGS }}
+    just test -n auto --dist {{ DIST }} --durations=40 --cov=src --cov-report=term-missing {{ ARGS }}
+
+# Run every test that needs no database server, container or JVM, in parallel and without coverage
+test-fast *ARGS:
+    just test -n auto -m "'not live_server'" {{ ARGS }}
 
 # Lint all code
 lint:
@@ -44,6 +54,27 @@ lint:
     {{ UV_RUN }} ruff format --check 2>&1 | tee -a /tmp/dbprint--lint.log
     {{ UV_RUN }} ruff check 2>&1 | tee -a /tmp/dbprint--lint.log
     PYTHONPATH= {{ UV_RUN }} ty check 2>&1 | tee -a /tmp/dbprint--lint.log
+    {{ UV_RUN }} deptry src 2>&1 | tee -a /tmp/dbprint--lint.log
+    PYTHONPATH=src {{ UV_RUN }} lint-imports --no-logo --cache-dir /tmp/.import-linter-dbprint 2>&1 | tee -a /tmp/dbprint--lint.log
+    {{ JSCPD }} --fail-on-new-clones --reporters json,silent 2>&1 | tee -a /tmp/dbprint--lint.log \
+        || { {{ UV_RUN }} python scripts/new_clones.py /tmp/dbprint--jscpd/jscpd-report.json \
+        | tee -a /tmp/dbprint--lint.log; exit 1; }
+
+# Mutation-test one package (spec, assertions, conformance), or one module of it, against its tests in a /tmp copy
+mutate PACKAGE MODULE="*":
+    rm -rf {{ MUTATE_DIR }} && mkdir -p {{ MUTATE_DIR }}
+    cp -r src tests docs scripts pyproject.toml {{ MUTATE_DIR }}/
+    printf 'only_mutate = ["src/dbprint/{{ PACKAGE }}/{{ MODULE }}"]\npytest_add_cli_args_test_selection = ["tests/{{ PACKAGE }}"]\n' \
+        >> {{ MUTATE_DIR }}/pyproject.toml
+    cd {{ MUTATE_DIR }} && DBPRINT_HYPOTHESIS_PROFILE=mutate {{ MUTMUT }} run 2>&1 | tr '\r' '\n' \
+        | grep -v '^[^0-9]*Generating mutants' | tee /tmp/dbprint--mutate.log
+    cd {{ MUTATE_DIR }} && {{ MUTMUT }} results | tee -a /tmp/dbprint--mutate.log \
+        | sed -n 's/^ *\([^:]*\): survived$/\1/p' | while read -r name; do {{ MUTMUT }} show "$name"; done \
+        | tee -a /tmp/dbprint--mutate.log
+
+# Refresh the clone baseline and print every clone; commit it only once each new one is accepted
+dupes:
+    {{ JSCPD }} --update-baseline --reporters console 2>&1 | tee /tmp/dbprint--dupes.log
 
 # Auto-fix all code
 fix:

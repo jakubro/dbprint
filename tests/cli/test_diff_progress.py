@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import logging
+from io import StringIO
 from pathlib import Path
-from typing import Any, Self
+from typing import Any
 from unittest.mock import patch
 
 import pytest
 import yaml
 from click.testing import CliRunner
+from rich.console import Console
 
 from dbprint.adapters import ColumnMeta, ColumnStats, CommentsMeta, Inferred, MockAdapter, MockTable
 from dbprint.cli.main import main
-from dbprint.engine import ProgressEvent
+from dbprint.cli.rendering.progress import LiveProgressRenderer
 
 
 PROJECT_TWO_CONNECTIONS_YAML = """\
@@ -147,7 +150,7 @@ def _fixture() -> dict[str, MockTable]:
 class _CleanAdapter(MockAdapter):
     REQUIRED_KEYS = ("host", "port", "database", "user", "password")
 
-    def __init__(self, _credentials: dict[str, str]) -> None:
+    def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
         super().__init__(_fixture())
 
 
@@ -156,7 +159,7 @@ class _ConnectFailsAdapter(MockAdapter):
 
     REQUIRED_KEYS = ("host", "port", "database", "user", "password")
 
-    def __init__(self, _credentials: dict[str, str]) -> None:
+    def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
         super().__init__(_fixture())
 
     def connect(self) -> None:
@@ -265,38 +268,10 @@ def _credential_env(name: str) -> dict[str, str]:
     return {
         f"{prefix}_HOST": "h",
         f"{prefix}_PORT": "5432",
-        f"{prefix}_DATABASE": "d",
+        f"{prefix}_DATABASE": f"db_{name}",
         f"{prefix}_USER": "u",
         f"{prefix}_PASSWORD": "p",
     }
-
-
-class _RecordingRenderer:
-    """Fake `ProgressRenderer` recording the call sequence `diff_command` makes, no TTY needed."""
-
-    def __init__(self) -> None:
-        self.calls: list[str] = []
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        return None
-
-    def on_event(self, event: ProgressEvent) -> None:
-        self.calls.append(f"on_event:{event.connection}")
-
-    def connection_summary(self, result: Any) -> None:
-        self.calls.append(f"connection_summary:{result.connection_name}")
-
-    def flush_warnings(self) -> None:
-        self.calls.append("flush_warnings")
-
-    def finish(self) -> None:
-        self.calls.append("finish")
-
-    def log_record(self, text: str) -> None:
-        self.calls.append(f"log_record:{text}")
 
 
 def _seed_project(tmp_path: Path) -> None:
@@ -308,18 +283,20 @@ def _set_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(k, v)
 
 
-def _run_with_recorder(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    adapter_class: type,
-) -> _RecordingRenderer:
+# The start of connection b's summary line, which follows everything b itself printed.
+_B_SUMMARY = "b  -  "
+
+
+def _run_live(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, adapter_class: type) -> str:
+    """Run `diff` over both connections with the real live renderer; return what it printed."""
+
     monkeypatch.chdir(tmp_path)
     _set_credentials(monkeypatch)
-
-    recorder = _RecordingRenderer()
+    buf = StringIO()
+    console = Console(file=buf, force_terminal=True, width=120, color_system=None)
     monkeypatch.setattr(
         "dbprint.cli.commands.diff.build_progress_renderer",
-        lambda **kwargs: recorder,
+        lambda **kwargs: LiveProgressRenderer(console),
     )
 
     with patch.dict(
@@ -329,13 +306,31 @@ def _run_with_recorder(
     ):
         CliRunner().invoke(main, ["diff", "--no-tui"])
 
-    return recorder
+    return buf.getvalue()
+
+
+class _WarnsOnConnect(_CleanAdapter):
+    """Logs one warning naming its own database before any table is in flight."""
+
+    def __init__(self, credentials: dict[str, str], **options: object) -> None:
+        super().__init__(credentials, **options)
+        self._database = credentials["database"]
+
+    def connect(self) -> None:
+        logging.getLogger("dbprint.adapters.mock").warning("held for %s", self._database)
+        super().connect()
+
+
+class _WarnsThenFailsToConnect(_WarnsOnConnect):
+    def connect(self) -> None:
+        logging.getLogger("dbprint.adapters.mock").warning("held for %s", self._database)
+
+        raise RuntimeError("could not connect to host")
 
 
 class TestFlushWarningsCalledPerConnection:
-    """`flush_warnings()` fires once per connection's iteration, on every exit path: "a" takes
-    one of `diff.py`'s three early-exit branches per test, and whatever it held must flush
-    before clean "b"'s events begin.
+    """A warning held while one connection ran prints before the next connection's first line,
+    on every exit path: a missing baseline, a failed connect, and a clean comparison.
     """
 
     def test_missing_baseline_still_flushes_before_the_next_connection(
@@ -345,52 +340,48 @@ class TestFlushWarningsCalledPerConnection:
     ) -> None:
         """ "a" has no committed print - the early `continue` never even calls `_run_one`."""
 
+        from dbprint.cli.commands import diff as diff_module
+
         _seed_project(tmp_path)
         _seed_baseline(tmp_path, "b")
-        recorder = _run_with_recorder(tmp_path, monkeypatch, _CleanAdapter)
+        real = diff_module._baseline_present
 
-        assert "flush_warnings" in recorder.calls
-        first_b_event = next(i for i, c in enumerate(recorder.calls) if c.startswith("on_event:b"))
-        first_flush = recorder.calls.index("flush_warnings")
+        def warn_then_check(conn_config: Any) -> bool:
+            logging.getLogger("dbprint.cli").warning("held for %s", conn_config.name)
 
-        assert first_flush < first_b_event
+            return real(conn_config)
 
-    def test_connection_error_still_reports_a_summary_and_flushes(
+        monkeypatch.setattr(diff_module, "_baseline_present", warn_then_check)
+        out = _run_live(tmp_path, monkeypatch, _CleanAdapter)
+
+        assert out.index("held for a") < out.index(_B_SUMMARY)
+        assert out.count("held for a") == 1
+
+    def test_connection_error_still_flushes_before_the_next_connection(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Both connections fail to connect (EXIT_CONNECTION) - each still gets its own
-        error-carrying summary, so the run cannot report success by skipping it.
-        """
-
         _seed_project(tmp_path)
         _seed_baseline(tmp_path, "a")
         _seed_baseline(tmp_path, "b")
-        recorder = _run_with_recorder(tmp_path, monkeypatch, _ConnectFailsAdapter)
 
-        assert "flush_warnings" in recorder.calls
-        assert recorder.calls.count("connection_summary:a") == 1
-        assert recorder.calls.count("connection_summary:b") == 1
+        out = _run_live(tmp_path, monkeypatch, _WarnsThenFailsToConnect)
 
-    def test_every_connection_gets_exactly_one_flush_on_a_clean_run(
+        assert out.index("held for db_a") < out.index(_B_SUMMARY)
+        assert out.count("held for db_a") == 1
+
+    def test_a_clean_connection_flushes_its_own_warning_before_the_next(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Control: two clean connections still each get their own flush, not a shared one."""
-
         _seed_project(tmp_path)
         _seed_baseline(tmp_path, "a")
         _seed_baseline(tmp_path, "b")
-        recorder = _run_with_recorder(tmp_path, monkeypatch, _CleanAdapter)
 
-        assert recorder.calls.count("flush_warnings") == 2
-        assert recorder.calls.count("connection_summary:a") == 1
-        assert recorder.calls.count("connection_summary:b") == 1
-        # Each connection's own flush follows its own summary, never the other's.
-        a_summary = recorder.calls.index("connection_summary:a")
-        b_summary = recorder.calls.index("connection_summary:b")
-        flush_indices = [i for i, c in enumerate(recorder.calls) if c == "flush_warnings"]
+        out = _run_live(tmp_path, monkeypatch, _WarnsOnConnect)
 
-        assert any(a_summary < i < b_summary for i in flush_indices)
+        assert out.index("held for db_a") < out.index(_B_SUMMARY)
+        assert out.count("held for db_a") == 1
+        assert out.count("held for db_b") == 1

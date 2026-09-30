@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from typing import Literal, Protocol, Self, TextIO
@@ -18,6 +19,7 @@ from rich.console import Console, Group
 from rich.live import Live
 from rich.text import Text
 
+from dbprint.adapters import trace_context
 from dbprint.conformance.progress import VALIDATION_PASSES
 from dbprint.engine import (
     GenerateResult,
@@ -26,6 +28,8 @@ from dbprint.engine import (
     SummaryCounts,
     TableResult,
 )
+from dbprint.spec.fqn import join as join_fqn
+from dbprint.spec.fqn import split as split_fqn
 from . import tree
 
 
@@ -158,6 +162,8 @@ class StreamingProgressRenderer:
     def __init__(self, out: TextIO) -> None:
         self._out = out
         self._prepass_tracker = _PrepassSchemaTracker()
+        # Events and log records arrive from every session's worker thread.
+        self._lock = threading.RLock()
 
     def __enter__(self) -> Self:
         return self
@@ -166,6 +172,30 @@ class StreamingProgressRenderer:
         return None
 
     def on_event(self, event: ProgressEvent) -> None:
+        with self._lock:
+            self._on_event(event)
+
+    def connection_summary(self, result: GenerateResult | ConnectionSummary) -> None:
+        with self._lock:
+            self._connection_summary(result)
+
+    def flush_warnings(self) -> None:
+        """Nothing to flush - `log_record` writes straight to stderr, unqueued."""
+
+        return
+
+    def finish(self) -> None:
+        """No frame to finalize - the streaming renderer has none to begin with."""
+
+        return
+
+    def log_record(self, text: str) -> None:
+        """One plain line to stderr; `self._out` under `generate` is the stdout data stream."""
+
+        with self._lock:
+            print(text, file=sys.stderr, flush=True)
+
+    def _on_event(self, event: ProgressEvent) -> None:
         if event.phase in ("connecting", "listing", "inventory"):
             self._write_prepass(event)
 
@@ -194,9 +224,10 @@ class StreamingProgressRenderer:
         elif event.status == "failed":
             self._write(f"{event.connection}\t{event.fqn}\tfailed\t{event.error or ''}")
         elif event.status == "skipped":
-            self._write(f"{event.connection}\t{event.fqn}\tskipped")
+            reason = f"\t{event.reason}" if event.reason else ""
+            self._write(f"{event.connection}\t{event.fqn}\tskipped{reason}")
 
-    def connection_summary(self, result: GenerateResult | ConnectionSummary) -> None:
+    def _connection_summary(self, result: GenerateResult | ConnectionSummary) -> None:
         s = result.summary
         self._write(
             f"{result.connection_name}\tsummary\t"
@@ -209,21 +240,6 @@ class StreamingProgressRenderer:
                 f"{result.connection_name}\t{sketch_failure.table}.{sketch_failure.column}\t"
                 f"sketch_failed\t{sketch_failure.error}",
             )
-
-    def flush_warnings(self) -> None:
-        """Nothing to flush - `log_record` writes straight to stderr, unqueued."""
-
-        return
-
-    def finish(self) -> None:
-        """No frame to finalize - the streaming renderer has none to begin with."""
-
-        return
-
-    def log_record(self, text: str) -> None:
-        """One plain line to stderr; `self._out` under `generate` is the stdout data stream."""
-
-        print(text, file=sys.stderr, flush=True)
 
     def _write_prepass(self, event: ProgressEvent) -> None:
         """Bracket lines for `connecting`/`listing`/`inventory`; `inventory` also closes a
@@ -348,6 +364,13 @@ class LiveProgressRenderer:
         # one raised with no table in flight waits for the connection summary.
         self._pending_table_warnings: list[str] = []
         self._held_warnings: list[str] = []
+        self._inflight: dict[str, str] = {}
+        self._completed = 0
+        # Most tables seen in flight at once this section: the remaining work runs that wide.
+        self._width = 0
+        self._pending_by_fqn: dict[str, list[str]] = {}
+        # Events and log records arrive from every session's worker thread.
+        self._lock = threading.RLock()
 
     def __enter__(self) -> Self:
         self._started = time.monotonic()
@@ -361,6 +384,10 @@ class LiveProgressRenderer:
             self._live.stop()
 
     def on_event(self, event: ProgressEvent) -> None:
+        with self._lock:
+            self._on_event(event)
+
+    def _on_event(self, event: ProgressEvent) -> None:
         if event.connection != self._connection:
             # One shared renderer serves every connection in sequence - a repeated label
             # re-heads, and the counters reset since the prior span already reached `_run_index`.
@@ -369,6 +396,7 @@ class LiveProgressRenderer:
             self._headed_sections = set()
             self._index = 0
             self._total = 0
+            self._inflight = {}
             self._reset_connection_eta()
 
         self._connection = event.connection
@@ -390,7 +418,6 @@ class LiveProgressRenderer:
         # `finalizing` carries the table count under whichever phase preceded it - a bracket,
         # not a position - so the bar keeps the last real phase's counters through it.
         if event.phase != "finalizing":
-            self._index = event.index
             self._total = event.total
 
         if event.phase == "sketch":
@@ -402,36 +429,27 @@ class LiveProgressRenderer:
             self._bar_label = "Profiling"
             self._enter_segment("Profiling")
 
+        self._fqn = ""
+        self._phase_label = ""
+
         if event.status in ("done", "failed", "skipped"):
             if event.fqn is not None:
+                self._inflight.pop(event.fqn, None)
+                self._completed += 1
                 self._print_table_line(event)
 
             # `finalizing("done", ...)` reaches this branch too, with `fqn`/`elapsed_ms` None.
             if event.fqn is not None and event.elapsed_ms is not None:
                 self._accumulate_duration(event.elapsed_ms)
-
-            self._fqn = ""
-            self._phase_label = ""
         elif event.phase == "finalizing":
-            self._fqn = ""
+            self._inflight = {}
             self._phase_label = "finalizing"
-        elif event.phase == "statistics" and event.column is not None:
-            self._fqn = event.fqn or ""
-            self._phase_label = (
-                f"statistics  column {event.column_index}/{event.column_total} ({event.column})"
-            )
-        elif event.phase == "sketch" and event.column is not None:
-            self._fqn = event.fqn or ""
-            self._phase_label = f"column {event.column_index}/{event.column_total} ({event.column})"
-        elif event.phase == "write":
-            self._fqn = event.fqn or ""
-            self._phase_label = "writing"
-        elif event.phase == "sketch":
-            self._fqn = event.fqn or ""
-            self._phase_label = ""
-        else:
-            self._fqn = event.fqn or ""
-            self._phase_label = "extract ddl"
+        elif event.fqn is not None:
+            self._inflight[event.fqn] = _inflight_label(event)
+            self._width = max(self._width, len(self._inflight))
+
+        if event.phase != "finalizing":
+            self._index = self._completed + len(self._inflight)
 
         self._live.update(self._footer())
 
@@ -466,6 +484,8 @@ class LiveProgressRenderer:
 
         self._headed_sections.add(section)
         self._printed_path = ()
+        self._completed = 0
+        self._width = 0
         cap = tree.resolve_cap(self._console.width)
         self._console.print(Text(tree.banner_box(section, cap=cap), style="bold"))
 
@@ -596,6 +616,10 @@ class LiveProgressRenderer:
         self._console.print(Text(line, style=_TERMINAL_STYLE["done"]))
 
     def connection_summary(self, result: GenerateResult | ConnectionSummary) -> None:
+        with self._lock:
+            self._connection_summary(result)
+
+    def _connection_summary(self, result: GenerateResult | ConnectionSummary) -> None:
         s = result.summary
         self._any_failed = (
             self._any_failed
@@ -631,20 +655,25 @@ class LiveProgressRenderer:
     def flush_warnings(self) -> None:
         """No-op unless a caller's control flow skipped `connection_summary()`."""
 
-        self._flush_held_warnings()
+        with self._lock:
+            self._flush_held_warnings()
 
     def log_record(self, text: str) -> None:
-        """Attach to the in-flight table if there is one, else hold for the summary."""
+        """Attach to the in-flight table that raised it, if one did, else hold for the summary."""
 
-        if self._fqn:
-            fragment = f" for {self._fqn!r}"
+        # Emitted synchronously on the raising thread, so its trace tag names the table.
+        owner = trace_context.fqn.get()
 
-            if fragment in text:
-                text = text.replace(fragment, "", 1)
+        with self._lock:
+            if owner not in self._inflight and len(self._inflight) == 1:
+                owner = next(iter(self._inflight))
 
-            self._pending_table_warnings.append(text)
-        else:
-            self._held_warnings.append(text)
+            if owner in self._inflight:
+                self._pending_by_fqn.setdefault(owner, []).append(_without_fqn(text, owner))
+            elif self._fqn:
+                self._pending_table_warnings.append(_without_fqn(text, self._fqn))
+            else:
+                self._held_warnings.append(text)
 
     def finish(self) -> None:
         """Stop the live and print a persistent final frame carrying the verdict.
@@ -653,6 +682,10 @@ class LiveProgressRenderer:
         ordinary output so it stays in scrollback after the live region stops.
         """
 
+        with self._lock:
+            self._finish()
+
+    def _finish(self) -> None:
         if self._finished:
             return
 
@@ -671,16 +704,28 @@ class LiveProgressRenderer:
     def _flush_held_warnings(self) -> None:
         cap = tree.resolve_cap(self._console.width)
 
-        for text in (*self._held_warnings, *self._pending_table_warnings):
+        pending = [text for texts in self._pending_by_fqn.values() for text in texts]
+
+        for text in (*self._held_warnings, *self._pending_table_warnings, *pending):
             self._console.print(
                 Text(tree.warning_line(0, text, cap=cap), style=_TERMINAL_STYLE["note"]),
             )
 
         self._held_warnings = []
         self._pending_table_warnings = []
+        self._pending_by_fqn = {}
 
     def _footer(self) -> Group:
-        return Group(self._bar_line(), self._inflight_line())
+        if not self._inflight:
+            return Group(self._bar_line(), self._inflight_line())
+
+        shown = list(self._inflight.items())[: max(self._console.size.height - 1, 1)]
+        lines = [
+            Text(f"  {fqn}   {label}".rstrip(), style="cyan", no_wrap=True, overflow="ellipsis")
+            for fqn, label in shown
+        ]
+
+        return Group(self._bar_line(), *lines)
 
     def _bar_line(
         self,
@@ -699,6 +744,9 @@ class LiveProgressRenderer:
         if show_eta:
             in_segment, beyond = self._remaining_split()
             eta = _eta_seconds(self._costs, self._segment, in_segment, beyond)
+
+            if eta is not None:
+                eta /= max(self._width, 1)
             text += f"  ETA {self._display_eta(eta)}"
 
         return Text(text, style=style, no_wrap=True, overflow="ellipsis")
@@ -799,10 +847,10 @@ class LiveProgressRenderer:
         self._console.print(
             Text(line, style=_TERMINAL_STYLE[event.status], no_wrap=True, overflow="ellipsis"),
         )
-        self._flush_table_warnings(leaf_depth, cap=cap)
+        self._flush_table_warnings(leaf_depth, cap=cap, fqn=fqn)
 
-    def _flush_table_warnings(self, leaf_depth: int, *, cap: int) -> None:
-        for text in self._pending_table_warnings:
+    def _flush_table_warnings(self, leaf_depth: int, *, cap: int, fqn: str = "") -> None:
+        for text in (*self._pending_table_warnings, *self._pending_by_fqn.pop(fqn, [])):
             self._console.print(
                 Text(tree.warning_line(leaf_depth, text, cap=cap), style=_TERMINAL_STYLE["note"]),
             )
@@ -820,6 +868,26 @@ def supports_live(console: Console) -> bool:
         and not console.is_dumb_terminal
         and console.size.height >= _MIN_FOOTER_HEIGHT
     )
+
+
+def _inflight_label(event: ProgressEvent) -> str:
+    if event.phase == "statistics" and event.column is not None:
+        return f"statistics  column {event.column_index}/{event.column_total} ({event.column})"
+
+    if event.phase == "sketch" and event.column is not None:
+        return f"column {event.column_index}/{event.column_total} ({event.column})"
+
+    if event.phase == "write":
+        return "writing"
+
+    if event.phase == "sketch":
+        return ""
+
+    return "extract ddl"
+
+
+def _without_fqn(text: str, fqn: str) -> str:
+    return text.replace(f" for {fqn!r}", "", 1)
 
 
 def _clock(seconds: float) -> str:
@@ -914,7 +982,8 @@ class _PrepassSchemaTracker:
     def tick(self, fqn: str) -> _ClosedSchema | None:
         """Returns the previous schema's tally when `fqn` starts a new one."""
 
-        schema_key = fqn.rsplit(".", 1)[0] if "." in fqn else fqn
+        parts = split_fqn(fqn)
+        schema_key = join_fqn(parts[:-1]) if len(parts) > 1 else fqn
         closed = None
 
         if schema_key != self.current:

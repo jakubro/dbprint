@@ -12,8 +12,11 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from .. import trace_context
+from ..dialect import Dialect
 from ..errors import QueryFailed
 
+
+DIALECT = Dialect(vendor="bigquery", paramstyle="pyformat", quote_char="`")
 
 _LOG = logging.getLogger(__name__)
 
@@ -27,16 +30,22 @@ class ConnectionParams:
     """Resolved BigQuery credentials passed to the adapter."""
 
     project: str
-    dataset: str
+    dataset: str | None = None
     credentials_file: str | None = None
+    statement_timeout: int | None = None
 
     @classmethod
-    def from_credentials(cls, creds: dict[str, str]) -> ConnectionParams:
+    def from_credentials(
+        cls,
+        creds: dict[str, str],
+        statement_timeout: int | None = None,
+    ) -> ConnectionParams:
         try:
             return cls(
                 project=creds["project"],
-                dataset=creds["dataset"],
+                dataset=creds.get("dataset"),
                 credentials_file=creds.get("credentials_file"),
+                statement_timeout=statement_timeout,
             )
         except KeyError as exc:
             raise BigqueryConnectionError(
@@ -58,6 +67,9 @@ class Cursor(Protocol):
 
 CursorFactory = Callable[[ConnectionParams], Any]
 
+# `datasets.list` is a client call, not SQL, so it has a seam of its own beside the cursor's.
+DatasetLister = Callable[[ConnectionParams], list[str]]
+
 
 class Connection:
     """Wraps a cursor-factory output with open/close lifecycle hooks."""
@@ -71,15 +83,22 @@ class Connection:
         self._factory = cursor_factory or _default_cursor_factory
         self._cursor: Cursor | None = None
 
+    def sibling(self) -> Connection:
+        """An unopened connection with the same parameters and cursor factory."""
+
+        return Connection(self.params, self._factory)
+
     def open(self) -> None:
         try:
             self._cursor = self._factory(self.params)
         except BigqueryConnectionError:
             raise
         except Exception as exc:
+            dataset = "" if self.params.dataset is None else f", dataset {self.params.dataset!r}"
+
             raise BigqueryConnectionError(
-                f"could not open a BigQuery session for project {self.params.project!r}, "
-                f"dataset {self.params.dataset!r}: {exc}",
+                f"could not open a BigQuery session for project {self.params.project!r}"
+                f"{dataset}: {exc}",
             ) from exc
 
     def close(self) -> None:
@@ -113,7 +132,7 @@ def exec_query(cursor: Cursor, sql: str, params: Any = None) -> Cursor:
         else:
             cursor.execute(sql, params)
     except Exception as exc:
-        failure = QueryFailed(exc, sql, params)
+        failure = QueryFailed(exc, sql, params, timed_out=_is_timeout(exc))
         trace_context.log_failure(_LOG, started, failure)
 
         raise failure from exc
@@ -137,13 +156,47 @@ def _default_cursor_factory(params: ConnectionParams) -> Any:
             "extra: `pip install dbprint[bigquery]`.",
         ) from exc
 
+    return dbapi.connect(_client(bigquery, params)).cursor()
+
+
+def default_dataset_lister(params: ConnectionParams) -> list[str]:
+    """Every dataset in the project the caller can see - billed as no query, filtered to those
+    it holds `bigquery.datasets.get` on, and leaving hidden datasets out.
+    """
+
+    try:
+        bigquery = importlib.import_module("google.cloud.bigquery")
+    except ImportError as exc:
+        raise BigqueryConnectionError(
+            "google-cloud-bigquery is not installed. Install dbprint with the [bigquery] "
+            "extra: `pip install dbprint[bigquery]`.",
+        ) from exc
+
+    client = _client(bigquery, params)
+
+    return [item.dataset_id for item in client.list_datasets(params.project)]
+
+
+def _client(bigquery: Any, params: ConnectionParams) -> Any:
+    options: dict[str, Any] = {}
+
+    if params.statement_timeout is not None:
+        options["default_query_job_config"] = bigquery.QueryJobConfig(
+            job_timeout_ms=params.statement_timeout * 1000,
+        )
+
     if params.credentials_file:
         service_account = importlib.import_module("google.oauth2.service_account")
-        credentials = service_account.Credentials.from_service_account_file(
+        options["credentials"] = service_account.Credentials.from_service_account_file(
             params.credentials_file,
         )
-        client = bigquery.Client(project=params.project, credentials=credentials)
-    else:
-        client = bigquery.Client(project=params.project)
 
-    return dbapi.connect(client).cursor()
+    return bigquery.Client(project=params.project, **options)
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    # The DB-API error wraps the job's GoogleCloudError, whose `errors` carry the reason.
+    cause = exc.args[0] if exc.args else exc
+    errors = getattr(cause, "errors", None) or []
+
+    return any(isinstance(error, dict) and error.get("reason") == "timeout" for error in errors)

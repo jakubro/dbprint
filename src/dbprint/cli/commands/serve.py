@@ -17,7 +17,7 @@ _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
 @click.command(name="serve")
-@click.argument("conn", required=False)
+@click.argument("connection", required=False)
 @project_option
 @click.option(
     "--transport",
@@ -48,7 +48,7 @@ _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 @click.pass_context
 def serve_command(
     ctx: click.Context,
-    conn: str | None,
+    connection: str | None,
     project: str | None,
     transport: str,
     host: str,
@@ -67,7 +67,7 @@ def serve_command(
 
     **Arguments:**
 
-    - `CONN`: connection(s) to serve; resolved from `.dbprint.yaml` when
+    - `CONNECTION`: connection(s) to serve; resolved from `.dbprint.yaml` when
       omitted (the `auto: true` set, or the sole connection).
 
     **Exit codes:**
@@ -113,7 +113,7 @@ def serve_command(
     keep_fresh(project)
 
     try:
-        connections = resolve_connections(project_config, conn)
+        connections = resolve_connections(project_config, connection)
     except ConnectionResolutionError as exc:
         click.echo(str(exc), err=True)
         ctx.exit(EXIT_GENERIC)
@@ -128,7 +128,7 @@ def serve_command(
     )
     state = mcp_pkg.build_state(
         served_config,
-        conn,
+        connection,
         configured=frozenset(project_config.connections),
     )
 

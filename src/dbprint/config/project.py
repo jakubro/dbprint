@@ -15,6 +15,7 @@ import yaml
 
 from dbprint.spec.looks_like import LooksLike
 from dbprint.spec.sensitivity import Sensitivity
+from .duration import DurationError, parse_duration_seconds
 from .selectors import match
 
 
@@ -39,6 +40,7 @@ INFER_RELATIONSHIPS_DEFAULT = True
 MATERIALIZE_SAMPLE_DEFAULT = True
 SKETCH_ALL_COLUMNS_DEFAULT = False
 COMPUTE_TIMELINE_DEFAULT = True
+PARALLELISM_DEFAULT = 1
 
 # Credential key for the redaction salt - it lives with the passwords, not in `.dbprint.yaml`.
 REDACTION_SALT_KEY = "redaction_salt"
@@ -132,8 +134,8 @@ class RuleConfig:
 class RedactRule:
     """One redaction rule: which columns it covers, and what it does to their values.
 
-    `columns` globs over the qualified `<fqn>.<column>`; matching any of `columns`,
-    `sensitivity` or `looks_like` covers the column. Declaration order, last match wins.
+    Any of `columns` (globs over `<table>.<column>`), `sensitivity` or `looks_like` covers a
+    column; rules apply in declaration order, and the last match wins.
     """
 
     columns: tuple[str, ...] = ()
@@ -157,15 +159,14 @@ class RedactRule:
 class TableSettings:
     """Effective settings for one table once the rule cascade has been applied.
 
-    At most one of `sample` and `filter` is set (SPEC 2.2.8). A `max_rows_scanned` ceiling folds
-    into `sample` as a fraction, and `ceiling_yielded` is True when a ceiling matched but
-    `filter` won instead. `matched_rules` is every rule that matched, in declaration order.
+    At most one of `sample` and `filter` is set (SPEC 2.2.8); a ceiling folds into `sample` as a fraction.
     """
 
     statistics: StatisticsConfig
     max_age_days: int
     sample: float | None = None
     filter: str | None = None
+    max_rows_scanned: int | None = None
     ceiling_yielded: bool = False
     matched_rules: tuple[str, ...] = ()
 
@@ -200,6 +201,8 @@ class ConnectionConfig:
     exclude: tuple[str, ...] = ()
     max_age_days: int = MAX_AGE_DAYS_DEFAULT
     max_rows_scanned: int | None = None
+    statement_timeout: int | None = None
+    parallelism: int = PARALLELISM_DEFAULT
     statistics: StatisticsConfig = field(default_factory=StatisticsConfig)
     rules: tuple[RuleConfig, ...] = ()
     diff: DiffConfig = field(default_factory=DiffConfig)
@@ -327,17 +330,20 @@ class ConnectionConfig:
             )
 
         ceiling_yielded = False
+        governing_cap: int | None = None
 
         if predicate is not None:
             ceiling_yielded = cap is not None
         elif cap is not None and cap_position > sample_position:
             sample = _resolve_ceiling(cap, row_count)
+            governing_cap = cap
 
         return TableSettings(
             statistics=statistics,
             max_age_days=max_age_days,
             sample=sample,
             filter=predicate,
+            max_rows_scanned=governing_cap,
             ceiling_yielded=ceiling_yielded,
             matched_rules=tuple(matched_rules),
         )
@@ -473,6 +479,8 @@ def _parse_defaults(raw: dict[str, Any]) -> dict[str, Any]:
         "diff": raw.get("diff"),
         "max_age_days": raw.get("max_age_days"),
         "max_rows_scanned": raw.get("max_rows_scanned"),
+        "statement_timeout": raw.get("statement_timeout"),
+        "parallelism": raw.get("parallelism"),
         "output": raw.get("output"),
         "include": raw.get("include"),
         "exclude": raw.get("exclude"),
@@ -499,7 +507,7 @@ def _parse_connection(
         )
 
     output_raw = body.get("output") or defaults.get("output") or OUTPUT_DEFAULT
-    output = _resolve_path(output_raw, project_root)
+    output = resolve_project_path(output_raw, project_root)
 
     include = _coerce_pattern_list(
         body.get("include"),
@@ -527,6 +535,20 @@ def _parse_connection(
     max_rows_scanned = _resolve_max_rows_scanned(
         body.get("max_rows_scanned"),
         defaults.get("max_rows_scanned"),
+        config_path,
+        name,
+    )
+
+    statement_timeout = _resolve_statement_timeout(
+        body.get("statement_timeout"),
+        defaults.get("statement_timeout"),
+        config_path,
+        name,
+    )
+    parallelism = _resolve_parallelism(
+        body.get("parallelism"),
+        defaults.get("parallelism"),
+        adapter,
         config_path,
         name,
     )
@@ -576,6 +598,8 @@ def _parse_connection(
         exclude=exclude,
         max_age_days=max_age_days,
         max_rows_scanned=max_rows_scanned,
+        statement_timeout=statement_timeout,
+        parallelism=parallelism,
         statistics=statistics,
         rules=rules,
         diff=diff,
@@ -1053,8 +1077,8 @@ def _parse_diff(
     Each block is validated where it is written, so an error names the block the author typed.
     """
 
-    defaults_diff = _diff_block(defaults_block, config_path, conn_name, "defaults")
-    conn_diff = _diff_block(conn_block, config_path, conn_name, f"connection {conn_name!r}")
+    defaults_diff = _diff_block(defaults_block, config_path, conn_name, "defaults.")
+    conn_diff = _diff_block(conn_block, config_path, conn_name, "")
 
     thresholds = dict(STAT_CHANGE_THRESHOLD_DEFAULT)
     thresholds.update(
@@ -1062,7 +1086,7 @@ def _parse_diff(
             defaults_diff.get("stat_change_threshold"),
             config_path,
             conn_name,
-            "defaults",
+            "defaults.",
         ),
     )
     thresholds.update(
@@ -1070,14 +1094,14 @@ def _parse_diff(
             conn_diff.get("stat_change_threshold"),
             config_path,
             conn_name,
-            f"connection {conn_name!r}",
+            "",
         ),
     )
 
     return DiffConfig(stat_change_threshold=thresholds)
 
 
-def _diff_block(raw: Any, config_path: Path, conn_name: str, label: str) -> dict[str, Any]:
+def _diff_block(raw: Any, config_path: Path, conn_name: str, prefix: str) -> dict[str, Any]:
     """One `diff` block as a mapping; absent or empty means the spec defaults govern.
 
     Any other value under the key is refused rather than read as absent.
@@ -1088,7 +1112,7 @@ def _diff_block(raw: Any, config_path: Path, conn_name: str, label: str) -> dict
 
     if not isinstance(raw, dict):
         raise ConfigError(
-            f"{config_path}: connection {conn_name!r}: {label}.diff must be a mapping, "
+            f"{config_path}: connection {conn_name!r}: {prefix}diff must be a mapping, "
             f"got {type(raw).__name__}.",
         )
 
@@ -1099,7 +1123,7 @@ def _coerce_stat_change_threshold(
     raw: Any,
     config_path: Path,
     conn_name: str,
-    label: str,
+    prefix: str,
 ) -> dict[str, float]:
     """Validate one `stat_change_threshold` block into per-stat fractions.
 
@@ -1107,7 +1131,7 @@ def _coerce_stat_change_threshold(
     keys are SPEC 2.6.9's. Absent or empty means no overrides.
     """
 
-    where = f"{config_path}: connection {conn_name!r}: {label}.diff.stat_change_threshold"
+    where = f"{config_path}: connection {conn_name!r}: {prefix}diff.stat_change_threshold"
 
     if raw is None:
         return {}
@@ -1248,6 +1272,60 @@ def _resolve_max_age_days(
     return inherited if inherited is not None else MAX_AGE_DAYS_DEFAULT
 
 
+def _resolve_statement_timeout(
+    conn_value: Any,
+    default_value: Any,
+    config_path: Path,
+    conn_name: str,
+) -> int | None:
+    """Settle the per-statement limit in seconds; absence means no limit and no session setting."""
+
+    value = conn_value if conn_value is not None else default_value
+
+    if value is None:
+        return None
+
+    # Zero means "no limit" on some vendors and "the maximum" on Snowflake, so it is refused.
+    try:
+        if isinstance(value, str) and (seconds := parse_duration_seconds(value)) > 0:
+            return seconds
+    except DurationError:
+        pass
+
+    raise ConfigError(
+        f"{config_path}: connection {conn_name!r}: statement_timeout must be a duration like "
+        f"30s, 10m or 2h (Nd/Nh/Nm/Ns, one unit), got {value!r}.",
+    )
+
+
+def _resolve_parallelism(
+    conn_value: Any,
+    default_value: Any,
+    adapter: str,
+    config_path: Path,
+    conn_name: str,
+) -> int:
+    value = conn_value if conn_value is not None else default_value
+
+    if value is None:
+        return PARALLELISM_DEFAULT
+
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ConfigError(
+            f"{config_path}: connection {conn_name!r}: parallelism must be an integer of at "
+            f"least 1, got {value!r}.",
+        )
+
+    # An unnamed `:memory:` database is private to each session, and temp tables always are.
+    if adapter == "duckdb" and value > 1:
+        raise ConfigError(
+            f"{config_path}: connection {conn_name!r}: parallelism {value} is not supported on "
+            f"the duckdb adapter, whose sessions cannot share one database; set it to 1.",
+        )
+
+    return value
+
+
 def _resolve_max_rows_scanned(
     conn_value: Any,
     default_value: Any,
@@ -1332,7 +1410,9 @@ def _coerce_bool(
     return source
 
 
-def _resolve_path(value: str | os.PathLike[str], project_root: Path) -> Path:
+def resolve_project_path(value: str | os.PathLike[str], project_root: Path) -> Path:
+    """Expand `~` and anchor a relative path at the project root, never the working directory."""
+
     p = Path(value).expanduser()
 
     if not p.is_absolute():

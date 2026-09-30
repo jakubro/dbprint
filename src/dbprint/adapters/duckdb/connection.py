@@ -6,14 +6,19 @@ from __future__ import annotations
 
 import importlib
 import logging
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from .. import trace_context
+from ..dialect import Dialect
 from ..errors import QueryFailed
 
+
+# The Python duckdb driver binds parameters positionally with `?`, like sqlite3.
+DIALECT = Dialect(vendor="duckdb", paramstyle="qmark", quote_char='"')
 
 _LOG = logging.getLogger(__name__)
 
@@ -28,9 +33,14 @@ class ConnectionParams:
 
     database: str
     read_only: bool = False
+    statement_timeout: int | None = None
 
     @classmethod
-    def from_credentials(cls, creds: dict[str, str]) -> ConnectionParams:
+    def from_credentials(
+        cls,
+        creds: dict[str, str],
+        statement_timeout: int | None = None,
+    ) -> ConnectionParams:
         try:
             database = creds["database"]
         except KeyError as exc:
@@ -40,7 +50,7 @@ class ConnectionParams:
 
         read_only = str(creds.get("read_only", "")).strip().lower() in ("1", "true", "yes")
 
-        return cls(database=database, read_only=read_only)
+        return cls(database=database, read_only=read_only, statement_timeout=statement_timeout)
 
 
 class Cursor(Protocol):
@@ -70,15 +80,23 @@ class Connection:
         self._factory = cursor_factory or _default_cursor_factory
         self._cursor: Cursor | None = None
 
+    def sibling(self) -> Connection:
+        """An unopened connection with the same parameters and cursor factory."""
+
+        return Connection(self.params, self._factory)
+
     def open(self) -> None:
         try:
-            self._cursor = self._factory(self.params)
+            cursor = self._factory(self.params)
         except DuckdbConnectionError:
             raise
         except Exception as exc:
             raise DuckdbConnectionError(
                 f"could not open duckdb database {self.params.database!r}: {exc}",
             ) from exc
+
+        limit = self.params.statement_timeout
+        self._cursor = cursor if limit is None else _TimedCursor(cursor, limit)
 
     def close(self) -> None:
         if self._cursor is not None:
@@ -111,7 +129,7 @@ def exec_query(cursor: Cursor, sql: str, params: Any = None) -> Cursor:
         else:
             cursor.execute(sql, params)
     except Exception as exc:
-        failure = QueryFailed(exc, sql, params)
+        failure = QueryFailed(exc, sql, params, timed_out=_is_timeout(exc))
         trace_context.log_failure(_LOG, started, failure)
 
         raise failure from exc
@@ -135,3 +153,61 @@ def _default_cursor_factory(params: ConnectionParams) -> Any:
         ) from exc
 
     return duckdb.connect(database=params.database, read_only=params.read_only)
+
+
+class _TimedCursor:
+    """A connection a client-side timer interrupts, and only while its own statement is in flight."""
+
+    def __init__(self, cursor: Any, seconds: int) -> None:
+        self._cursor = cursor
+        self._seconds = seconds
+        self._lock = threading.Lock()
+        self._in_flight: object | None = None
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._cursor, name)
+
+    def execute(self, sql: str, params: Any = None) -> Any:
+        token = object()
+        fired = threading.Event()
+
+        def interrupt() -> None:
+            with self._lock:
+                if self._in_flight is token:
+                    fired.set()
+                    self._cursor.interrupt()
+
+        timer = threading.Timer(self._seconds, interrupt)
+
+        with self._lock:
+            self._in_flight = token
+
+        timer.start()
+
+        try:
+            return (
+                self._cursor.execute(sql) if params is None else self._cursor.execute(sql, params)
+            )
+        except Exception as exc:
+            if fired.is_set():
+                raise TimeoutError(f"statement interrupted after {self._seconds}s") from exc
+
+            raise
+        finally:
+            timer.cancel()
+
+            with self._lock:
+                self._in_flight = None
+
+    def fetchall(self) -> list[Any]:
+        return self._cursor.fetchall()
+
+    def fetchone(self) -> Any:
+        return self._cursor.fetchone()
+
+    def close(self) -> None:
+        self._cursor.close()
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    return isinstance(exc, TimeoutError)

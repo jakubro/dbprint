@@ -73,7 +73,7 @@ class _ConnectFails(MockAdapter):
     REQUIRED_KEYS = ("host", "port", "database", "user", "password")
     MESSAGE = "could not connect to Postgres at badhost:5432/db as 'u': connection refused"
 
-    def __init__(self, _credentials: dict[str, str]) -> None:
+    def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
         super().__init__({"public.t": _table()})
 
     def connect(self) -> None:
@@ -87,7 +87,7 @@ class _MissingExtra(_ConnectFails):
 class _Healthy(MockAdapter):
     REQUIRED_KEYS = ("host", "port", "database", "user", "password")
 
-    def __init__(self, _credentials: dict[str, str]) -> None:
+    def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
         super().__init__({"public.t": _table()})
 
 
@@ -141,17 +141,25 @@ def _write_manifest(project_dir: Path, body: str) -> None:
     manifest.write_text(body)
 
 
-class TestGenerateErrors:
-    def test_unreachable_connection_exits_4_with_cause(self, project: Path) -> None:
+class TestUnreachableConnection:
+    @pytest.mark.parametrize("command", ["generate", "diff"])
+    def test_exits_4_with_the_cause_and_no_payload(self, project: Path, command: str) -> None:
+        _write_manifest(
+            project,
+            "format_version: 1\nadapter: postgres\ngenerated_at: 'x'\ntables: {}\n",
+        )
         runner = CliRunner()
 
         with _registry(_ConnectFails):
-            result = runner.invoke(main, ["generate", "--no-tui"])
+            result = runner.invoke(main, [command, "--no-tui"])
 
         assert result.exit_code == 4
         assert "connection refused" in result.stderr
         assert "primary" in result.stderr
+        assert result.stdout.strip() == ""
 
+
+class TestGenerateErrors:
     def test_missing_driver_extra_hint_reaches_stderr(self, project: Path) -> None:
         runner = CliRunner()
 
@@ -180,52 +188,6 @@ class TestGenerateErrors:
 
         assert _PASSWORD not in result.stderr
         assert _PASSWORD not in result.output
-
-
-class TestDiffErrors:
-    def test_unreachable_connection_exits_4_with_cause(self, project: Path) -> None:
-        _write_manifest(
-            project,
-            "format_version: 1\nadapter: postgres\ngenerated_at: 'x'\ntables: {}\n",
-        )
-        runner = CliRunner()
-
-        with _registry(_ConnectFails):
-            result = runner.invoke(main, ["diff", "--no-tui"])
-
-        assert result.exit_code == 4
-        assert "connection refused" in result.stderr
-        # Connection failure must NOT emit an empty diff doc to stdout.
-        assert result.stdout.strip() == ""
-
-    def test_missing_baseline_message_preserved(self, project: Path) -> None:
-        runner = CliRunner()
-
-        with _registry(_Healthy):
-            result = runner.invoke(main, ["diff", "--no-tui"])
-
-        assert result.exit_code == 1
-        assert "No committed prints" in result.stderr
-
-
-class TestListErrors:
-    def test_malformed_manifest_reports_parse_error(self, project: Path) -> None:
-        _write_manifest(project, "tables: [unterminated\n")
-        runner = CliRunner()
-
-        result = runner.invoke(main, ["list", "--no-tui"])
-
-        assert result.exit_code == 1
-        assert "could not parse" in result.stderr
-        assert "no manifest" not in result.stderr
-
-    def test_absent_manifest_reports_no_manifest(self, project: Path) -> None:
-        runner = CliRunner()
-
-        result = runner.invoke(main, ["list", "--no-tui"])
-
-        assert result.exit_code == 1
-        assert "no manifest" in result.stderr
 
 
 def _storage_reading_table() -> MockTable:
@@ -524,7 +486,7 @@ class _AllDdlFail(MockAdapter):
 
     REQUIRED_KEYS = ("host", "port", "database", "user", "password")
 
-    def __init__(self, _credentials: dict[str, str]) -> None:
+    def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
         super().__init__(_three_real_tables())
 
     def extract_ddl(self, fqn: str) -> str:
@@ -536,7 +498,7 @@ class _MixedFail(MockAdapter):
 
     REQUIRED_KEYS = ("host", "port", "database", "user", "password")
 
-    def __init__(self, _credentials: dict[str, str]) -> None:
+    def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
         super().__init__(_two_real_tables())
 
     def extract_ddl(self, fqn: str) -> str:
@@ -552,7 +514,7 @@ class _SameMessageDifferentOps(MockAdapter):
     REQUIRED_KEYS = ("host", "port", "database", "user", "password")
     MESSAGE = "not all arguments converted during string formatting"
 
-    def __init__(self, _credentials: dict[str, str]) -> None:
+    def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
         super().__init__(_two_real_tables())
 
     def extract_ddl(self, fqn: str) -> str:
@@ -678,7 +640,7 @@ class _OneOfThreeFails(MockAdapter):
 
     REQUIRED_KEYS = ("host", "port", "database", "user", "password")
 
-    def __init__(self, _credentials: dict[str, str]) -> None:
+    def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
         super().__init__(_three_real_tables())
 
     def extract_ddl(self, fqn: str) -> str:

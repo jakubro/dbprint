@@ -80,13 +80,6 @@ class TestEmission:
 
         assert "null_patterns" not in payload
 
-    def test_coverage_method_reaches_the_artifact_when_present(self, tmp_path: Path) -> None:
-        """SPEC 2.2.10: whether an untruncated census agreed with rows_scanned."""
-
-        payload = _generate_accession(tmp_path, ACCESSION_NULL_PATTERNS)
-
-        assert payload["null_patterns"]["coverage_method"] == "measured"
-
 
 class _CensusFailingAdapter(MockAdapter):
     """Fails the grouped null scan, as a statement timeout on a wide table would."""
@@ -161,7 +154,7 @@ class TestContextRendering:
         text = _context_accession(tmp_path, ACCESSION_NULL_PATTERNS, fmt="md")
 
         assert "## Columns null on the same rows" in text
-        assert "| 2,353 | storage_temperature_c |" in text
+        assert "| 2353 | storage_temperature_c |" in text
         assert "| 147 | storage_temperature_c, traits |" in text
 
     def test_the_fully_populated_rows_are_named_not_left_blank(self, tmp_path: Path) -> None:

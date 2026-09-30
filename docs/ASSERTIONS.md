@@ -81,7 +81,7 @@ assertions:
 
 Both `tables` and `queries` are OPTIONAL. An `assertions:` block with neither key is equivalent to no block at all.
 
-A shape violating this section - `assertions:` itself not a mapping, `tables:` not a mapping, `queries:` not a list, a table or column body not a mapping, a query entry not a mapping, or a query missing `name`/`sql`/a valid `expect` - is a block-shape fault. Evaluators MUST emit `assertion.malformed-block` (error) for it. Only a fault in `assertions:` itself, the one shape nothing else can be extracted from, MAY abort evaluation of the whole connection; every other block-shape fault MUST NOT prevent evaluation of the assertions unaffected by it - the malformed table, column or query is skipped, and every sibling assertion is still evaluated, per §5.4's run-everything-then-report principle.
+A shape violating this section — `assertions:` itself not a mapping, `tables:` not a mapping, `queries:` not a list, a table or column body not a mapping, a query entry not a mapping, or a query missing `name`/`sql`/a valid `expect` — is a block-shape fault. Evaluators MUST emit `assertion.malformed-block` (error) for it. Only a fault in `assertions:` itself, the one shape nothing else can be extracted from, MAY abort evaluation of the whole connection; every other block-shape fault MUST NOT prevent evaluation of the assertions unaffected by it — the malformed table, column or query is skipped, and every sibling assertion is still evaluated, per §5.4's run-everything-then-report principle.
 
 ### 1.3 FQN matching
 
@@ -122,18 +122,20 @@ Every predicate is `<stat>: <expected>` where `<expected>` follows one of the fo
 | Form | YAML shape | Meaning |
 |---|---|---|
 | Scalar | `null_rate: 0.0` | Exact equality |
-| Range | `null_rate: {max: 0.01}` | Bounds - `min`, `max`, or both |
+| Range | `null_rate: {max: 0.01}` | Bounds — `min`, `max`, or both |
 | Enum | `classification: categorical` | Field MUST equal the value |
-| Set | `accepted_values: [a, b, c]` | The column's `values` list MUST be a subset of the given set. Applies only when that list is exhaustive (`values_coverage` of `1.0`) |
+| Set | `accepted_values: [a, b, c]` | The column's `values` list MUST be a subset of the given set. Applies only when that list is the column's whole domain: exhaustive (`values_coverage` of `1.0`) and read over the whole table, never from a file carrying `scope` |
 | Pattern | `looks_like: email` | The `inferred.looks_like` field MUST equal the value |
 
 Range form details:
 
-- `{min: X}` - actual value MUST be >= X
-- `{max: Y}` - actual value MUST be <= Y
-- `{min: X, max: Y}` - actual value MUST be in `[X, Y]`
+- `{min: X}` — actual value MUST be >= X
+- `{max: Y}` — actual value MUST be <= Y
+- `{min: X, max: Y}` — actual value MUST be in `[X, Y]`
+- A temporal value and its bounds compare as instants, never as text: `'2024-03-01 05:00:00'`, `'2024-03-01T04:00:00-01:00'` and an unquoted YAML `2024-03-01 05:00:00` name one instant. A reading without an offset is UTC, on either side; a date is its midnight UTC. A time of day compares only against a time of day, ordered by its UTC equivalent. A bound of the other kind, or with no ISO 8601 reading, is `assertion.malformed-predicate`
+- The same rule decides a scalar predicate on a temporal value: instant equality, not string equality
 
-Evaluators MUST emit `assertion.malformed-predicate` (error) when a predicate uses an unknown form or an incompatible value type (e.g., string scalar against a numeric stat).
+Evaluators MUST emit `assertion.malformed-predicate` (error) when a predicate uses an unknown form or an incompatible value type (e.g., string scalar against a numeric stat). The type check runs before equality: `nullable: 1` or `null_count: false` is malformed, never a pass because a boolean equals its integer.
 
 ### 2.2 Per-table predicates
 
@@ -143,7 +145,7 @@ tables:
     row_count: <predicate>
 ```
 
-The only per-table predicate is `row_count`, applied to the top-level `row_count` field from `statistics.yaml`.
+The only per-table predicate is `row_count`, applied to the top-level `row_count` field from `statistics.yaml`. A file carrying `catalog_only` (SPEC §2.2.15) issued no query and has no `row_count`, so the predicate is inapplicable there (`assertion.inapplicable-stat`, warning), in both modes.
 
 ### 2.3 Per-column predicates
 
@@ -172,22 +174,22 @@ The following stats from SPEC §2.2 are assertable:
 | `cardinality_ratio` | scalar, range | float in [0, 1] |
 | `classification` | enum | one of the SPEC §3.1 values |
 | `distribution` | enum | one of `uniform`, `imbalanced`, `dominant_value`, `long_tail` |
-| `accepted_values` | set | the column's `values` MUST be a subset of the asserted set; requires an exhaustive list |
-| `looks_like` | pattern | matches `inferred.looks_like` |
-| `candidate_key` | scalar | boolean; matches `inferred.candidate_key` |
-| `range.min` | scalar, range | type-matched (numeric or ISO 8601) |
-| `range.max` | scalar, range | type-matched (numeric or ISO 8601) |
-| `percentiles.<key>` | scalar, range | dotted access; e.g., `percentiles.p99` |
+| `accepted_values` | set | the column's `values` MUST be a subset of the asserted set; requires an exhaustive list over the whole table — never one from a file carrying `scope` (SPEC §2.2.8) |
+| `looks_like` | pattern | matches `inferred.looks_like`; absent on a `categorical`/`text`/`foreign_key_candidate` column with non-null values, it reads as no pattern (SPEC §4.1.2) and fails the predicate |
+| `candidate_key` | scalar | boolean; matches `inferred.candidate_key`; absent on a column carrying `cardinality_ratio`, it reads as `false` (SPEC §4.2, §7.2) |
+| `range.min` | scalar, range | type-matched: numeric, or an ISO 8601 date, instant or time of day, quoted or YAML-native, compared by value |
+| `range.max` | scalar, range | type-matched: numeric, or an ISO 8601 date, instant or time of day, quoted or YAML-native, compared by value |
+| `percentiles.<key>` | scalar, range | dotted access; e.g., `percentiles.p99`; a temporal percentile compares by value as `range.*` does |
 | `freshness.classification` | enum | one of `live`, `stale`, `dormant` |
 | `freshness.max_age_days` | scalar, range | integer >= 0 |
 
-Stats marked R or O in the SPEC §2.2.3 field matrix for the column's classification MAY be asserted. Stats marked "must not emit" for the column's classification (e.g., asserting `percentiles.p99` on a `boolean` column) MUST emit `assertion.inapplicable-stat` as a warning and skip the predicate.
+Stats marked R or O in the SPEC §2.2.3 field matrix for the column's classification MAY be asserted. Stats marked "must not emit" for the column's classification (e.g., asserting `percentiles.p99` on a `boolean` column) MUST emit `assertion.inapplicable-stat` as a warning and skip the predicate. An **O** field whose absence is itself the verdict (SPEC §7.2 — `candidate_key`, `looks_like`) is evaluated against the value its absence states, not skipped. A field the column's own `unmeasured` list names was not measured this run: the predicate is skipped as `assertion.inapplicable-stat`, its detail naming the stat unmeasured.
 
 ### 2.5 Evaluation source
 
 | Mode | Source for statistic assertion evaluation |
 |---|---|
-| Offline (`dbprint check`) | The committed `prints/<conn>/<namespace>/<table>/statistics.yaml` |
+| Offline (`dbprint check`) | The committed `prints/<connection>/<namespace>/<table>/statistics.yaml` |
 | Online (`dbprint check --online`) | Live re-extraction via the adapter; the just-computed `ColumnStats` payloads |
 
 The predicate form is identical in both modes. Only the source of evidence differs.
@@ -199,20 +201,33 @@ The predicate form is identical in both modes. Only the source of evidence diffe
 | Predicate references a stat the column doesn't expose for its classification | `assertion.inapplicable-stat` warning; skip the predicate |
 | Predicate references an unknown stat name | `assertion.unknown-stat` error |
 | Empty table (`row_count == 0`) asserted with `cardinality_ratio: {min: 0.999}` | Evaluator computes `cardinality_ratio == 0`; emits `assertion.cardinality-ratio-mismatch` per the predicate |
-| A nonzero `null_count`/`cardinality` asserted with `null_rate: 0` / `cardinality_ratio: 0` | FAIL - SPEC 2.2.6's floor means a nonzero numerator never publishes exactly `0.0`; use `{max: 0.000001}` for an effectively-zero tolerance |
-| A nonzero non-null count asserted with `null_rate: 1` | FAIL - `null_rate: 1.0` is a defined sentinel (SPEC 2.2.7) and a nonzero non-null count never publishes it; use `{min: 0.999999}` for an effectively-all-null tolerance. `cardinality_ratio` carries no such ceiling |
-| `accepted_values` asserts a superset of what the table contains | PASS - the set predicate requires the table's values to be a subset, not equal |
-| `accepted_values` on a column whose `values` list is truncated | `assertion.inapplicable-stat` warning - a capped list is the frequent slice of a domain, not the domain, so a subset check over it would both miss real violations and invent others |
-| `accepted_values` and the table has values outside the asserted set | FAIL - `assertion.accepted-values-violated`; the offending values listed in the Issue detail |
-| Numeric range bound is a string, or a string range bound is numeric | `assertion.malformed-predicate` error |
-| All-null column asserted with `looks_like: <pattern>` | `assertion.inapplicable-stat` warning - `looks_like` requires sampled non-null values |
-| Predicate over cell values on a redacted column | `assertion.redacted-stat` warning; skip the predicate. The subjects are `accepted_values`, `range` with its bounds, `percentiles` with its keys, and a temporal column's `freshness.max_age_days` - a redacted column emits a placeholder or a digest for the first three under `mask` and `hash` and omits them under `drop` (SPEC §2.2.9), and floors `max_age_days` to the nearest 90 days under every primitive including `drop`, so evaluating any of them would compare the assertion against a stand-in rather than the real measurement. Every other measurement on that column stays assertable, including `freshness.classification`, which is derived from the true, uncoarsened age |
+| A nonzero `null_count`/`cardinality` asserted with `null_rate: 0` / `cardinality_ratio: 0` | FAIL — SPEC 2.2.6's floor means a nonzero numerator never publishes exactly `0.0`; use `{max: 0.000001}` for an effectively-zero tolerance |
+| A nonzero non-null count asserted with `null_rate: 1` | FAIL — `null_rate: 1.0` is a defined sentinel (SPEC 2.2.7) and a nonzero non-null count never publishes it; use `{min: 0.999999}` for an effectively-all-null tolerance. `cardinality_ratio` carries no such ceiling |
+| `accepted_values` asserts a superset of what the table contains | PASS — the set predicate requires the table's values to be a subset, not equal |
+| `accepted_values` on a column whose `values` list is truncated | `assertion.inapplicable-stat` warning — a capped list is the frequent slice of a domain, not the domain, so a subset check over it would both miss real violations and invent others |
+| `accepted_values` on a table whose print carries `scope` | `assertion.inapplicable-stat` warning; the detail names the scope — a list complete over the rows scanned is not the table's domain, for the same reason as a truncated one |
+| `accepted_values` over a `DECIMAL`/`NUMERIC` column | The list holds numbers on every classification (SPEC §2.2.4), so the set is written as numbers: `[-20, -19.5]`, not `['-20.0', '-19.5']` |
+| `accepted_values` and the table has values outside the asserted set | FAIL — `assertion.accepted-values-violated`; the offending values listed in the Issue detail |
+| Numeric range bound is a string, or a string range bound is numeric | `assertion.malformed-predicate` error; a temporal bound with no ISO 8601 reading (`'next tuesday'`), or of the other kind (a date against a time of day), is malformed too |
+| An offset-less value against an offset-bearing bound, or the reverse | The offset-less side is read as UTC (SPEC §2.2.4) |
+| A date against a datetime bound | The date is its midnight UTC: `'2024-03-02'` fails `{min: '2024-03-02T12:00:00'}` |
+| An unrepresentable temporal value (`infinity`, a BC or negative year, a year above 9999) | Ordered, not skipped: `-infinity`, BC and negative years sort before every representable instant, the rest after, so `infinity` fails `{max: '2030-01-01'}` |
+| A bound written with more than six fractional digits | Compared at microsecond resolution; SPEC renders no finer |
+| `nullable: 1`, `candidate_key: 1`, `null_count: false` | `assertion.malformed-predicate` error — a boolean and a number are different types |
+| All-null column asserted with `looks_like: <pattern>` | `assertion.inapplicable-stat` warning — `looks_like` requires sampled non-null values |
+| `candidate_key: true` on a column whose `cardinality_ratio` fell below the key threshold | FAIL — `assertion.candidate-key-mismatch`; the absent verdict reads as `false` |
+| `candidate_key` on a column with no `cardinality_ratio` (a `catalog_only` view, an `unsupported` column) | `assertion.inapplicable-stat` warning |
+| `looks_like: <pattern>` on a `categorical`/`text`/`foreign_key_candidate` column with non-null values and no verdict | FAIL — `assertion.looks-like-mismatch`; no pattern reached the threshold |
+| `looks_like: numeric_string` on a numeric SQL type | `assertion.inapplicable-stat` warning — SPEC §4.1.5 never publishes that verdict there |
+| `row_count` on a `catalog_only` object | `assertion.inapplicable-stat` warning — no query was issued to count it |
+| Predicate over a stat the column's `unmeasured` names | `assertion.inapplicable-stat` warning; the detail says the read failed this run |
+| Predicate over cell values on a redacted column | `assertion.redacted-stat` warning; skip the predicate. The subjects are `accepted_values`, `range` with its bounds, `percentiles` with its keys, and a temporal column's `freshness.max_age_days` — a redacted column emits a placeholder or a digest for the first three under `mask` and `hash` and omits them under `drop` (SPEC §2.2.9), and floors `max_age_days` to the nearest 90 days under every primitive including `drop`, so evaluating any of them would compare the assertion against a stand-in rather than the real measurement. Every other measurement on that column stays assertable, including `freshness.classification`, which is derived from the true, uncoarsened age |
 
 ---
 
 ## 3. SQL assertions
 
-SQL assertions are SQL strings executed against the live database. They cover assertions that cannot be expressed declaratively as statistic assertions - cross-table predicates, filtered counts, complex business rules.
+SQL assertions are SQL strings executed against the live database. They cover assertions that cannot be expressed declaratively as statistic assertions — cross-table predicates, filtered counts, complex business rules.
 
 SQL assertions run ONLY in online mode (`dbprint check --online`).
 
@@ -240,11 +255,11 @@ The query MUST return at least one row; the assertion subject is the value in ro
 
 Type coercion rules:
 
-- A finite number equal to `0` PASSES, whatever numeric type the driver returned it as - `0`, `0.0` and `DECIMAL('0.00')` alike. `DECIMAL` and `NUMERIC` columns, and the `SUM` and `AVG` of them, reach a Python evaluator as `decimal.Decimal`.
+- A finite number equal to `0` PASSES, whatever numeric type the driver returned it as — `0`, `0.0` and `DECIMAL('0.00')` alike. `DECIMAL` and `NUMERIC` columns, and the `SUM` and `AVG` of them, reach a Python evaluator as `decimal.Decimal`.
 - A `NULL` FAILS (treated as non-zero).
-- A value no integer can be read off emits `assertion.sql-type-mismatch`, at the query's own severity: a string, a date, a boolean (`True == 1` in Python, so a query returning the wrong shape would otherwise pass), or a non-finite number - `NaN` and either infinity, in any numeric type.
+- A value no integer can be read off emits `assertion.sql-type-mismatch`, at the query's own severity: a string, a date, a boolean (`True == 1` in Python, so a query returning the wrong shape would otherwise pass), or a non-finite number — `NaN` and either infinity, in any numeric type.
 
-If the query returns zero rows, evaluators MUST emit `assertion.sql-empty-result`, at the query's own severity - `expect: 0` requires a scalar result.
+If the query returns zero rows, evaluators MUST emit `assertion.sql-empty-result`, at the query's own severity — `expect: 0` requires a scalar result.
 
 ### 3.3 `expect: empty`
 
@@ -272,12 +287,12 @@ Queries MUST be read-only. Evaluators MUST run them in a read-only session where
 | Case | Resolution |
 |---|---|
 | Query raises a DB error at execution time | `assertion.sql-execution-error`, at the query's own severity (default `error`); Issue detail carries the DB error message |
-| `expect: 0` query returns a value no integer can be read off - a string, a date, a boolean, or a non-finite number | `assertion.sql-type-mismatch`, at the query's own severity (default `error`) |
+| `expect: 0` query returns a value no integer can be read off — a string, a date, a boolean, or a non-finite number | `assertion.sql-type-mismatch`, at the query's own severity (default `error`) |
 | `expect: 0` query returns a non-zero `DECIMAL` | FAIL with `assertion.sql-non-zero`; the detail carries the count without the driver's scale (`5`, not `5.00`), and a fractional value as the driver spelled it |
 | `expect: 0` query returns NULL in row 0, column 0 | FAIL with `assertion.sql-non-zero`; Issue detail records `actual: null` |
 | `expect: empty` query returns rows | FAIL with `assertion.sql-non-empty`; up to producer-defined N rows listed in Issue detail |
-| Multi-statement SQL where intermediate statements have side-effects | Disallowed - read-only session SHOULD reject; producer behavior in non-read-only sessions is implementation-defined and out of scope |
-| `name` collides with another query in the same connection | `assertion.duplicate-query-name` error at configuration parse time; the first query with that name is kept and runs, every later duplicate is skipped and faulted - every other query and every table predicate in the connection still evaluates, per §5.4 |
+| Multi-statement SQL where intermediate statements have side-effects | Disallowed — read-only session SHOULD reject; producer behavior in non-read-only sessions is implementation-defined and out of scope |
+| `name` collides with another query in the same connection | `assertion.duplicate-query-name` error at configuration parse time; the first query with that name is kept and runs, every later duplicate is skipped and faulted — every other query and every table predicate in the connection still evaluates, per §5.4 |
 
 ---
 
@@ -289,7 +304,7 @@ Every assertion defaults to severity `error`. Failed `error` assertions drive a 
 
 ### 4.2 Per-assertion override
 
-SQL assertions accept an explicit `severity:` field. `severity:` is a property of the assertion as a whole, not of one outcome kind: setting `severity: warning` downgrades every Issue that assertion can emit to warning, driving no non-zero exit code - the PASS/FAIL verdict (`assertion.sql-non-zero`, `assertion.sql-non-empty`) and every diagnostic the same query can raise instead of a verdict (`assertion.sql-execution-error`, `assertion.sql-empty-result`, `assertion.sql-type-mismatch`) alike. A query that cannot execute or cannot be coerced into a verdict has not proven the condition it was written to check, which is exactly what `severity: warning` already says the author is willing to tolerate.
+SQL assertions accept an explicit `severity:` field. `severity:` is a property of the assertion as a whole, not of one outcome kind: setting `severity: warning` downgrades every Issue that assertion can emit to warning, driving no non-zero exit code — the PASS/FAIL verdict (`assertion.sql-non-zero`, `assertion.sql-non-empty`) and every diagnostic the same query can raise instead of a verdict (`assertion.sql-execution-error`, `assertion.sql-empty-result`, `assertion.sql-type-mismatch`) alike. A query that cannot execute or cannot be coerced into a verdict has not proven the condition it was written to check, which is exactly what `severity: warning` already says the author is willing to tolerate.
 
 Statistic assertion predicates do NOT carry per-predicate severity. Every statistic assertion failure is `error` severity. (There is no per-predicate severity; the `accepted_values` warning case in §2.4 is a structural skip, not a downgrade.)
 
@@ -320,7 +335,7 @@ class Issue:
 
 | Field | Content for assertions |
 |---|---|
-| `path` | Dotted path identifying the assertion - e.g., `assertions.<conn>.tables.<fqn>.columns.<col>.<stat>` (statistic assertion) or `assertions.<conn>.queries.<name>` (SQL assertion) |
+| `path` | Dotted path identifying the assertion — e.g., `assertions.<connection>.tables.<fqn>.columns.<col>.<stat>` (statistic assertion) or `assertions.<connection>.queries.<name>` (SQL assertion) |
 | `code` | One of the `assertion.*` or `drift.*` values in §5.2 |
 | `severity` | `error` or `warning` per §4 |
 | `detail` | Human-readable explanation; MUST include expected and actual values where applicable |
@@ -333,7 +348,7 @@ class Issue:
 | `assertion.unknown-table` | warning | FQN not in the manifest |
 | `assertion.unknown-column` | warning | Column not in the table's statistics |
 | `assertion.unknown-stat` | error | Stat name not in the §2.4 vocabulary |
-| `assertion.inapplicable-stat` | warning | Stat is "MUST NOT emit" for the column's classification |
+| `assertion.inapplicable-stat` | warning | The artifact carries no measurement the predicate can be read against — forbidden for the classification, never queried, or not measured this run (§2.4, §2.6) |
 | `assertion.redacted-stat` | warning | Predicate over cell values on a column whose values were redacted |
 | `assertion.malformed-predicate` | error | Predicate form invalid or incompatible value type |
 | `assertion.malformed-block` | error | The `assertions:` block, or one table/column/query entry within it, does not match §1.2's shape |
@@ -347,7 +362,7 @@ class Issue:
 | `assertion.accepted-values-violated` | error | `accepted_values` set predicate failed |
 | `assertion.looks-like-mismatch` | error | `looks_like` predicate failed |
 | `assertion.candidate-key-mismatch` | error | `candidate_key` predicate failed |
-| `assertion.sql-type-mismatch` | error | a `sql_type` predicate failed, **or** an `expect: 0` query returned a first value no integer can be read off - non-numeric, boolean, or non-finite |
+| `assertion.sql-type-mismatch` | error | a `sql_type` predicate failed, **or** an `expect: 0` query returned a first value no integer can be read off — non-numeric, boolean, or non-finite |
 | `assertion.nullable-mismatch` | error | `nullable` predicate failed |
 | `assertion.range-out-of-bounds` | error | `range.min` / `range.max` predicate failed |
 | `assertion.percentile-mismatch` | error | `percentiles.<key>` predicate failed |
@@ -358,10 +373,11 @@ class Issue:
 | `assertion.sql-non-empty` | error | `expect: empty` query returned rows |
 | `assertion.sql-empty-result` | error | `expect: 0` query returned zero rows |
 | `assertion.sql-execution-error` | error | DB raised an error executing the query |
-| `drift.schema-changed` | error | `dbprint check --online` re-extraction found a change of shape - any diff event kind except `statistic_changed` and `table_row_count_changed` |
-| `drift.statistic-changed` | error | `dbprint check --online` re-extraction found a `statistic_changed` or `table_row_count_changed` event - the committed print's data moved |
+| `drift.schema-changed` | error | `dbprint check --online` re-extraction found a change of shape — any diff event kind except `statistic_changed` and `table_row_count_changed` |
+| `drift.statistic-changed` | error | `dbprint check --online` re-extraction found a `statistic_changed` or `table_row_count_changed` event — the committed print's data moved |
+| `privacy.redaction-not-applied` | error | Offline `dbprint check` found a committed column whose `redacted` marker the current `redact` rules would set otherwise — rules added, removed or changed since the table was profiled |
 
-Severity column shows the DEFAULT. SQL assertions may downgrade per §4.2. The two `drift.*` codes are emitted by `check --online`'s drift phase (§6.2), not by an assertion evaluator, and are not `assertion.*` values - `spec_ref` points here regardless.
+Severity column shows the DEFAULT. SQL assertions may downgrade per §4.2. The two `drift.*` codes are emitted by `check --online`'s drift phase (§6.2), and `privacy.redaction-not-applied` by offline `check` reading `.dbprint.yaml` beside the committed files; neither comes from an assertion evaluator, and neither is an `assertion.*` value — `spec_ref` points here regardless.
 
 ### 5.3 Ordering
 
@@ -379,34 +395,34 @@ Evaluators MUST evaluate every assertion before returning. A failure on one asse
 
 `dbprint check` (no flag) evaluates:
 
-1. Structural checks - manifest presence, artifact presence, orphans, conformance, freshness.
+1. Structural checks — manifest presence, artifact presence, orphans, conformance, freshness.
 2. Statistic assertion predicates against the committed `statistics.yaml`.
 
-SQL assertions are NOT executed in offline mode (no live DB connection) - but the `queries:` block is still parsed and validated per §1.2, since that is a property of the configuration, not of the database. A SQL assertion whose shape is malformed (a missing `name`/`sql`, an invalid `expect`, a duplicate `name`) emits `assertion.malformed-block` or `assertion.duplicate-query-name` offline, the same as it would online; only the query's *execution* - and therefore `assertion.sql-non-zero`, `assertion.sql-non-empty`, and the diagnostic codes in §3.5 - is offline-skipped.
+SQL assertions are NOT executed in offline mode (no live DB connection) — but the `queries:` block is still parsed and validated per §1.2, since that is a property of the configuration, not of the database. A SQL assertion whose shape is malformed (a missing `name`/`sql`, an invalid `expect`, a duplicate `name`) emits `assertion.malformed-block` or `assertion.duplicate-query-name` offline, the same as it would online; only the query's *execution* — and therefore `assertion.sql-non-zero`, `assertion.sql-non-empty`, and the diagnostic codes in §3.5 — is offline-skipped.
 
 ### 6.2 Online mode
 
 `dbprint check --online` evaluates the offline set, then:
 
-1. Drift detection against the live database - both a change of shape and a moved statistic; see §5.2's two `drift.*` codes.
+1. Drift detection against the live database — both a change of shape and a moved statistic; see §5.2's two `drift.*` codes.
 2. Statistic assertion predicates against live re-extracted statistics.
 3. SQL assertions against the live database.
 
-A structural failure found offline - a conformance error or a stale print - means there is nothing worth comparing, and suppresses this phase; an *assertion* failure found offline does not, since the print itself is still well-formed and fresh. The two are independent questions, and §6.3's MAX rule is what lets both exit codes surface at once when both are true.
+A structural failure found offline — a conformance error or a stale print — means there is nothing worth comparing, and suppresses this phase; an *assertion* failure found offline does not, since the print itself is still well-formed and fresh. The two are independent questions, and §6.3's MAX rule is what lets both exit codes surface at once when both are true.
 
 ### 6.3 Exit code mapping
 
 | Code | Trigger | Mode |
 |---|---|---|
 | 0 | All structural checks pass; all evaluated assertions pass (warnings allowed) | offline + online |
-| 1 | Structural failure (manifest malformed, artifact missing, orphan, conformance error) | offline + online |
-| 2 | Staleness - print older than max-age threshold | offline + online |
-| 3 | Drift detected - `drift.schema-changed`, `drift.statistic-changed`, or both | online only |
+| 1 | Structural failure (manifest malformed, artifact missing, orphan, conformance error), or `privacy.redaction-not-applied` | offline + online |
+| 2 | Staleness — print older than max-age threshold | offline + online |
+| 3 | Drift detected — `drift.schema-changed`, `drift.statistic-changed`, or both | online only |
 | 4 | Connection error (DB unreachable, auth failed) | online only |
-| 5 | Partial extraction - the connection was reached but some tables could not be re-extracted; the ones that did are still compared and reported normally | online only |
-| 6 | At least one `error`-severity assertion failed - a statistic assertion predicate, or a block-shape/duplicate-name fault in the `queries:` config itself | offline + online |
+| 5 | Partial extraction — the connection was reached but some tables could not be re-extracted; the ones that did are still compared and reported normally — or the committed manifest names a table the last `generate` run could not profile (its `failed_tables`) | offline + online |
+| 6 | At least one `error`-severity assertion failed — a statistic assertion predicate, or a block-shape/duplicate-name fault in the `queries:` config itself | offline + online |
 
-When multiple failure conditions co-occur, top-level exit is the MAX of the per-condition codes. SQL assertion execution errors emit `assertion.sql-execution-error` Issues, not exit code 4 - the DB connection succeeded; the QUERY failed.
+When multiple failure conditions co-occur, top-level exit is the MAX of the per-condition codes. SQL assertion execution errors emit `assertion.sql-execution-error` Issues, not exit code 4 — the DB connection succeeded; the QUERY failed.
 
 ---
 
@@ -425,4 +441,4 @@ The statistic assertion vocabulary and the SQL assertion `expect:` value set MAY
 
 ## Cross-references
 
-- [`format/v1/SPEC.md`](format/v1/SPEC.md) - format specification for `statistics.yaml`, `relationships.yaml`, `manifest.yaml`, `diff.yaml`
+- [`format/v1/SPEC.md`](format/v1/SPEC.md) — format specification for `statistics.yaml`, `relationships.yaml`, `manifest.yaml`, `diff.yaml`

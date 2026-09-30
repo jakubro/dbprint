@@ -4,8 +4,8 @@ this costs one row of a statement the catalog pre-pass already issues.
 
 from __future__ import annotations
 
-from .connection import Cursor, exec_query
-from .identity import Identity
+from .connection import DIALECT, Cursor, exec_query
+from ..identifiers import Identity, quote
 
 
 def extract_ddl(cursor: Cursor, project: str, identity: Identity) -> str:
@@ -14,15 +14,18 @@ def extract_ddl(cursor: Cursor, project: str, identity: Identity) -> str:
     row = exec_query(
         cursor,
         f"""
-        SELECT ddl
-        FROM `{project}`.`{identity.dataset}`.INFORMATION_SCHEMA.TABLES
-        WHERE table_name = %s
+        SELECT
+          tbl.ddl
+        FROM
+          {quote(project, DIALECT)}.{quote(identity.parts[0], DIALECT)}.INFORMATION_SCHEMA.TABLES tbl
+        WHERE
+          tbl.table_name = %s
         """,
         (identity.table,),
     ).fetchone()
 
     if not row or not row[0]:
-        raise ValueError(f"no DDL available for {identity.dotted()!r}; not found in catalog")
+        raise ValueError(f"no DDL available for {identity.fqn!r}; not found in catalog")
 
     return normalize(str(row[0]))
 

@@ -6,8 +6,9 @@ import itertools
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeGuard
 
+from dbprint.spec.absence import SAMPLED_CLASSIFICATIONS, SAMPLE_VERDICTS, emits
 from dbprint.spec.classification import (
     compute_candidate_key_exception,
     compute_cardinality_ratio,
@@ -19,23 +20,29 @@ from dbprint.spec.classification import (
 from dbprint.spec.coverage import coverage_share, is_incoherent
 from dbprint.spec.looks_like import MATCH_THRESHOLD
 from dbprint.spec.normalization import fold
-from dbprint.spec.redaction import REDACTED_DAY_COUNT_GRANULARITY
+from dbprint.spec.percentiles import beyond_float64_precision
+from dbprint.spec.percentiles import tolerance as percentile_tolerance
+from dbprint.spec.redaction import (
+    REDACTED_DAY_COUNT_GRANULARITY,
+    WITHHELD_UNDER_REDACTION,
+    is_redacted,
+)
+from dbprint.spec.rounding import DECIMAL_PLACES, round_statistic
 from dbprint.spec.sketch import METHOD as SKETCH_METHOD
 from dbprint.spec.sketch import K as SKETCH_K
 from dbprint.spec.sketch import decode_sketch
 from dbprint.spec.statistics_matrix import FORBIDDEN_FIELDS as _FORBIDDEN_BY_CLASSIFICATION
 from dbprint.spec.statistics_matrix import REQUIRED_FIELDS as _REQUIRED_BY_CLASSIFICATION
 from dbprint.spec.temporal_age import day_count, parse_instant
+from dbprint.spec.temporal_range import LeadingYear, leading_year
+from dbprint.spec.value_text import scalar_text, value_order_key
 from .issue import Issue
 
 
-_PRECISION_DECIMALS = 6
+# One float64 step at 1.7e18 is 256, so an absolute tolerance cannot compare two readings of one
+# measurement there. Temporal compares need none: both sides parse the same ISO text.
+_ABSOLUTE_TOLERANCE = 1e-06
 
-# Tolerance for the numeric percentile-containment compare: Snowflake orders percentiles by a
-# CAST(... AS DOUBLE) while `range` reads the raw column, and both sides round to six decimals
-# independently, so an exact compare can invert containment in the last digit on a correct
-# read. Temporal containment needs no tolerance; both sides parse the same ISO text.
-_PERCENTILE_CONTAINMENT_TOLERANCE = 1e-06
 
 # The `inferred.*` rows of the SPEC 2.2.3 matrix, separate from the flat fields because the
 # container's verdict overrides each sub-field independently. `candidate_key` carries no row.
@@ -101,27 +108,6 @@ def _inferred_of(col: dict) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def _redacted_single_row_aggregate(col: dict, rows_scanned: int) -> bool:
-    """Whether `mean`/`sum`/`length` would republish the one cell a redacted marker withholds -
-    an aggregate over one non-null row, or over one distinct value, is that value (SPEC 2.2.9).
-    """
-
-    if col.get("redacted") is None:
-        return False
-
-    cardinality = col.get("cardinality")
-
-    if isinstance(cardinality, int) and not isinstance(cardinality, bool) and cardinality == 1:
-        return True
-
-    null_count = col.get("null_count")
-
-    if not isinstance(null_count, int):
-        return False
-
-    return rows_scanned - null_count <= 1
-
-
 def _string_valued_sql_type(col: dict) -> bool:
     """Whether `col`'s declared type is one `length` could apply to, cross-dialect - the same
     elimination test every adapter's Phase A uses, so the matrix cannot outrun a producer.
@@ -174,15 +160,18 @@ _CONDITIONAL_CELLS: tuple[_ConditionalCell, ...] = (
         spec_ref="§2.2.3",
         holds=lambda col, rows_scanned: _inferred_of(col).get("looks_like") == "prose",
     ),
+    # `sketch` keeps its own code, `stats.sketch-on-redacted-column`.
     _ConditionalCell(
-        classifications=frozenset({"numeric"}),
-        fields=frozenset({"mean", "sum"}),
+        classifications=frozenset(
+            {"boolean", "categorical", "foreign_key_candidate", "text", "numeric", "temporal"},
+        ),
+        fields=WITHHELD_UNDER_REDACTION - {"sketch"},
         reason=(
-            "the column carries a redacted marker over at most one non-null scanned row, or "
-            "over one distinct value, so the aggregate would republish the cell it withholds"
+            "the column carries a redacted marker, which publishes only what a renaming of its "
+            "values cannot change"
         ),
         spec_ref="§2.2.9",
-        holds=_redacted_single_row_aggregate,
+        holds=lambda col, rows_scanned: is_redacted(col),
     ),
     # `length` follows the value's type, not the classification - `categorical` and
     # `foreign_key_candidate` match before any type-based branch runs (SPEC 3.2).
@@ -197,16 +186,6 @@ _CONDITIONAL_CELLS: tuple[_ConditionalCell, ...] = (
         holds=lambda col, rows_scanned: (
             not _string_valued_sql_type(col) or _no_non_null_rows(col, rows_scanned)
         ),
-    ),
-    _ConditionalCell(
-        classifications=frozenset({"text", "categorical", "foreign_key_candidate"}),
-        fields=frozenset({"length"}),
-        reason=(
-            "the column carries a redacted marker over at most one non-null scanned row, or "
-            "over one distinct value, so the aggregate would republish the cell it withholds"
-        ),
-        spec_ref="§2.2.9",
-        holds=_redacted_single_row_aggregate,
     ),
     # `quantized_count` follows the value's day resolution, not the classification alone:
     # DATE is always its own day-truncation and TIME/YEAR carry no date at all (SPEC 2.2.3).
@@ -502,7 +481,7 @@ def _check_grain(
                 path,
                 "stats.grain-duplicate-key",
                 "error",
-                f"grain.keys lists {sorted(list(c) for c in duplicated)} more than once.",
+                f"grain.keys lists {sorted(sorted(c) for c in duplicated)} more than once.",
                 "§2.2.12",
             ),
         )
@@ -671,7 +650,8 @@ def _check_timeline(
     rows_scanned: int,
 ) -> list[Issue]:
     """SPEC 2.2.16: the anchor names a real, non-redacted temporal column, buckets are
-    ascending by `start`, and `coverage` agrees with the listed counts over `rows_scanned`.
+    ascending by `start`, and `coverage` is the bounded share of the listed counts over
+    `rows_scanned` - an overrun of which is reported from the operands, not the share.
     """
 
     block = data.get("timeline")
@@ -756,10 +736,25 @@ def _check_timeline(
         )
 
     covered = sum(b.get("count") for b in buckets if isinstance(b.get("count"), int))
+
+    if covered > rows_scanned:
+        issues.append(
+            Issue(
+                path,
+                "stats.timeline-buckets-exceed-rows-scanned",
+                "warning",
+                f"timeline bucket counts sum to {covered} over {rows_scanned} rows scanned; "
+                f"the buckets and the row count were read in separate statements",
+                "§2.2.16",
+            ),
+        )
+
     coverage = block.get("coverage")
 
     if isinstance(coverage, (int, float)):
-        expected = covered / rows_scanned if rows_scanned else 0.0
+        # A raw division here would reject every clamp `coverage_share` applies to an overrun.
+        # `exhaustive` comes from the operands: read off the field, a false `1.0` would pass.
+        expected = coverage_share(covered, rows_scanned, exhaustive=covered == rows_scanned)
 
         if abs(coverage - expected) > 1e-6:
             issues.append(
@@ -779,14 +774,20 @@ def _check_timeline(
 def _check_populated(data: dict, path: str, columns: dict) -> list[Issue]:
     """SPEC 2.2.4: `populated` requires `timeline` in the same file, and each instant lies
     within the anchor column's own measured `range`.
+
+    Containment is a warning, not an error: the window and the anchor's bounds are read by
+    separate statements, so an anchor advancing between them carries `to` past its own max.
     """
 
     timeline = data.get("timeline")
     anchor_name = timeline.get("column") if isinstance(timeline, dict) else None
     anchor_col = columns.get(anchor_name) if isinstance(anchor_name, str) else None
     anchor_range = anchor_col.get("range") if isinstance(anchor_col, dict) else None
-    lo = parse_instant(anchor_range.get("min")) if isinstance(anchor_range, dict) else None
-    hi = parse_instant(anchor_range.get("max")) if isinstance(anchor_range, dict) else None
+    bounds = anchor_range if isinstance(anchor_range, dict) else {}
+    lo_raw = bounds.get("min")
+    hi_raw = bounds.get("max")
+    lo = parse_instant(lo_raw)
+    hi = parse_instant(hi_raw)
 
     issues: list[Issue] = []
 
@@ -814,8 +815,9 @@ def _check_populated(data: dict, path: str, columns: dict) -> list[Issue]:
             )
             continue
 
+        # The anchor's bounds hold for the whole loop, so skipping this column and stopping agree.
         if lo is None or hi is None:
-            continue
+            continue  # pragma: no mutate
 
         for key in ("from", "to"):
             instant = parse_instant(populated.get(key))
@@ -825,8 +827,10 @@ def _check_populated(data: dict, path: str, columns: dict) -> list[Issue]:
                     Issue(
                         col_path,
                         "stats.populated-out-of-anchor-range",
-                        "error",
-                        f"populated.{key} falls outside the anchor {anchor_name!r}'s own range.",
+                        "warning",
+                        f"populated.{key} is {populated.get(key)!r}, outside the anchor "
+                        f"{anchor_name!r}'s own range [{lo_raw!r}, {hi_raw!r}]; the two were "
+                        f"read in separate statements.",
                         "§2.2.4",
                     ),
                 )
@@ -1427,8 +1431,8 @@ def _check_count_invariants(col: dict, col_path: str, rows_scanned: int) -> list
             ),
         )
 
-    # Redaction does not touch these - a count discloses no literal (SPEC 2.2.9) - so the
-    # bound applies unconditionally, the same population the cardinality check above uses.
+    # Wherever one is published the bound applies, over the same population the cardinality
+    # check above uses; a redacted column publishes none (SPEC 2.2.9).
     if isinstance(null_count, int):
         non_null = max(rows_scanned - null_count, 0)
 
@@ -1574,17 +1578,19 @@ def _check_count_invariants(col: dict, col_path: str, rows_scanned: int) -> list
 
 
 def _check_value_order(col: dict, col_path: str) -> list[Issue]:
-    """Verify the SPEC 2.2.4 ordering: count DESC, lexicographic tie-break."""
+    """Verify the SPEC 2.2.4 ordering: count DESC, ties by published text."""
 
     values = col.get("values")
 
     if not isinstance(values, list) or len(values) < 2:
         return []
 
-    # Redaction leaves no literal for the SPEC 2.2.4 tie-break; only count ordering is checked.
-    redacted = col.get("redacted") is not None
+    # `mask` and `drop` leave no literal for the SPEC 2.2.4 tie-break; a `hash` digest is one.
+    by_count_only = is_redacted(col) and col.get("redacted") != "hash"
     keys = [
-        (-int(e["count"]),) if redacted else (-int(e["count"]), str(e.get("value")))
+        (-int(e["count"]),)
+        if by_count_only
+        else value_order_key(int(e["count"]), _published_text(e.get("value")))
         for e in values
         if isinstance(e, dict) and isinstance(e.get("count"), int)
     ]
@@ -1597,10 +1603,24 @@ def _check_value_order(col: dict, col_path: str) -> list[Issue]:
             col_path,
             "stats.values-not-ordered",
             "error",
-            "values is not ordered by count descending with a lexicographic tie-break.",
+            "values is not ordered by count descending with ties by the published text of value.",
             "§2.2.4",
         ),
     ]
+
+
+def _published_text(value: Any) -> str:
+    """The text a value is written as: a number's own source, else its artifact spelling."""
+
+    source = getattr(value, "source", None)
+
+    if isinstance(source, str):
+        return source
+
+    try:
+        return scalar_text(value)
+    except TypeError:
+        return str(value)
 
 
 def _check_spelling_groups(col: dict, col_path: str) -> list[Issue]:
@@ -1686,8 +1706,11 @@ def _check_unmeasured(
         if classification in cell.classifications and cell.holds(col, rows_scanned):
             required -= cell.fields
 
+    if classification in SAMPLED_CLASSIFICATIONS:
+        required |= SAMPLE_VERDICTS
+
     for field in sorted(named):
-        if field in col:
+        if emits(col, field):
             issues.append(
                 Issue(
                     col_path,
@@ -1899,15 +1922,18 @@ def _check_unredacted_sensitive(col: dict, col_path: str) -> list[Issue]:
 
 
 def _check_precision(col: dict, col_path: str) -> list[Issue]:
-    """Verify the SPEC 2.2.6 rounding rule: at most six decimal places.
+    """Verify SPEC 2.2.6's rule, both halves: six decimals, floored at six significant figures.
 
-    Temporal bounds are ISO strings with no precision to measure, so only numeric forms are
-    read; notation is unreadable from a parsed value, so 2.2.6's rendering half is untested.
+    Only numeric forms are read - a temporal bound is an ISO string, and notation is unreadable
+    from a parsed value, so 2.2.6's rendering half is untested.
     """
 
     issues: list[Issue] = []
 
-    for field in ("null_rate", "cardinality_ratio", "values_coverage", "mean", "sum"):
+    for field in ("null_rate", "cardinality_ratio", "values_coverage"):
+        issues.extend(_precision_issue(col.get(field), col_path, field, ratio=True))
+
+    for field in ("mean", "sum"):
         issues.extend(_precision_issue(col.get(field), col_path, field))
 
     bounds = col.get("range")
@@ -1925,7 +1951,13 @@ def _check_precision(col: dict, col_path: str) -> list[Issue]:
     return issues
 
 
-def _precision_issue(value: object, col_path: str, field: str) -> list[Issue]:
+def _precision_issue(
+    value: object,
+    col_path: str,
+    field: str,
+    *,
+    ratio: bool = False,
+) -> list[Issue]:
     if not isinstance(value, float):
         return []
 
@@ -1933,7 +1965,11 @@ def _precision_issue(value: object, col_path: str, field: str) -> list[Issue]:
     if not math.isfinite(value):
         return []
 
-    if round(value, _PRECISION_DECIMALS) == value:
+    # A ratio floors at six decimals, never at six significant figures (SPEC 2.2.6), so a value
+    # below half of one is a producer that skipped its floor rather than a small measurement.
+    emitted = round(value, DECIMAL_PLACES) if ratio else round_statistic(value)
+
+    if emitted == value:
         return []
 
     return [
@@ -1941,7 +1977,7 @@ def _precision_issue(value: object, col_path: str, field: str) -> list[Issue]:
             col_path,
             "stats.excess-precision",
             "error",
-            f"{field}={value!r} carries more than {_PRECISION_DECIMALS} decimal places.",
+            f"{field}={value!r} is not what SPEC 2.2.6 emits for it: {emitted!r}.",
             "§2.2.6",
         ),
     ]
@@ -2067,16 +2103,22 @@ def _check_span_days(col: dict, col_path: str) -> list[Issue]:
     return []
 
 
-def _percentile_value(raw: object, classification: str | None) -> Any:
-    """`raw` as a comparable value: a parsed instant for `temporal`, a float otherwise.
+def _numeric_tolerance(a: float, b: float, *, beyond: bool) -> float:
+    # Sized by the pair being compared: a wide range's far end never licenses its near end.
+    if not beyond:
+        return _ABSOLUTE_TOLERANCE
 
-    None when it cannot be read back that way - wrong type for the classification,
-    non-finite, or unparseable - which covers every `unrepresentable` value, none of which
-    round-trip through `datetime.fromisoformat` at Python's proleptic year bounds.
+    return max(_ABSOLUTE_TOLERANCE, percentile_tolerance(a, b))
+
+
+def _percentile_value(raw: object, classification: str | None) -> Any:
+    """`raw` as a comparable value: an instant for `temporal`, a float otherwise, else None.
+
+    A temporal value `fromisoformat` rejects - every `unrepresentable` one - becomes its `LeadingYear`.
     """
 
     if classification == "temporal":
-        return parse_instant(raw)
+        return parse_instant(raw) or leading_year(raw)
 
     if isinstance(raw, bool) or not isinstance(raw, (int, float)):
         return None
@@ -2137,16 +2179,26 @@ def _check_percentiles_order(col: dict, col_path: str) -> list[Issue]:
             "§2.2.4",
         )
         for (percent_a, raw_a, value_a), (percent_b, raw_b, value_b) in itertools.pairwise(entries)
-        if value_a > value_b
+        if _descends(value_a, value_b)
     ]
 
 
-def _check_percentiles_containment(col: dict, col_path: str) -> list[Issue]:
-    """SPEC 2.2.4: every percentile lies within `[range.min, range.max]`.
+def _descends(earlier: Any, later: Any) -> bool:
+    if isinstance(earlier, LeadingYear) or isinstance(later, LeadingYear):
+        return earlier.year > later.year
 
-    One statement reads `range` and `percentiles` on every adapter, so a correct producer
-    cannot publish a percentile outside its own bounds. Skipped under any `redacted` marker:
-    the placeholder carries no literal to compare.
+    if isinstance(earlier, (int, float)) and isinstance(later, (int, float)):
+        beyond = beyond_float64_precision(earlier) and beyond_float64_precision(later)
+
+        return earlier > later + _numeric_tolerance(earlier, later, beyond=beyond)
+
+    return bool(earlier > later)
+
+
+def _check_percentiles_containment(col: dict, col_path: str) -> list[Issue]:
+    """SPEC 2.2.4: every percentile lies within `[range.min, range.max]`; skipped under `redacted`.
+
+    A bound past 2**53 licenses one float64 step of tolerance, against itself alone.
     """
 
     if col.get("redacted") is not None:
@@ -2169,10 +2221,10 @@ def _check_percentiles_containment(col: dict, col_path: str) -> list[Issue]:
 
     for percent, raw, value in _percentile_entries(col):
         outside = (
-            value < lo - _PERCENTILE_CONTAINMENT_TOLERANCE
-            or value > hi + _PERCENTILE_CONTAINMENT_TOLERANCE
+            value < lo - _numeric_tolerance(value, lo, beyond=beyond_float64_precision(lo))
+            or value > hi + _numeric_tolerance(value, hi, beyond=beyond_float64_precision(hi))
             if numeric
-            else value < lo or value > hi
+            else _descends(lo, value) or _descends(value, hi)
         )
 
         if outside:
@@ -2197,7 +2249,7 @@ def _check_mean_containment(col: dict, col_path: str) -> list[Issue]:
     any `redacted` marker, whose bounds carry no literal to compare.
     """
 
-    if col.get("redacted") is not None:
+    if is_redacted(col):
         return []
 
     rng = col.get("range")
@@ -2211,7 +2263,11 @@ def _check_mean_containment(col: dict, col_path: str) -> list[Issue]:
     if not (_is_real_number(lo) and _is_real_number(hi)):
         return []
 
-    if lo - _PERCENTILE_CONTAINMENT_TOLERANCE <= mean <= hi + _PERCENTILE_CONTAINMENT_TOLERANCE:
+    # Ungated: an average of exact values can land one step outside them at any magnitude.
+    below = lo - _numeric_tolerance(mean, lo, beyond=True)
+    above = hi + _numeric_tolerance(mean, hi, beyond=True)
+
+    if below <= mean <= above:
         return []
 
     return [
@@ -2225,7 +2281,7 @@ def _check_mean_containment(col: dict, col_path: str) -> list[Issue]:
     ]
 
 
-def _is_real_number(value: Any) -> bool:
+def _is_real_number(value: Any) -> TypeGuard[float]:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
@@ -2261,6 +2317,9 @@ def _check_length_order(col: dict, col_path: str) -> list[Issue]:
 def _check_normalized_cardinality_order(col: dict, col_path: str) -> list[Issue]:
     """SPEC 2.2.4: `normalized_cardinality` <= `cardinality` - unchecked where `cardinality` is
     approximate, an undershooting estimate being legitimately exceeded by the exact count.
+
+    A warning, not an error: the two counts are read by separate statements, so a table taking
+    writes between them can carry a folded count above the one it is compared against.
     """
 
     normalized = col.get("normalized_cardinality")
@@ -2282,9 +2341,10 @@ def _check_normalized_cardinality_order(col: dict, col_path: str) -> list[Issue]
         Issue(
             col_path,
             "stats.normalized-cardinality-exceeds-cardinality",
-            "error",
+            "warning",
             f"normalized_cardinality={normalized!r} exceeds cardinality={cardinality!r}; "
-            "folding case and trimming whitespace cannot increase distinctness.",
+            "folding case and trimming whitespace cannot increase distinctness, so the two "
+            "counts were read in separate statements.",
             "§2.2.4",
         ),
     ]
@@ -2336,7 +2396,7 @@ def _check_max_age_days_mismatch(col: dict, col_path: str, profiled_at: Any) -> 
     - skipped wherever the bound cannot be read back the same way, redaction included.
     """
 
-    if col.get("redacted") is not None:
+    if is_redacted(col):
         return []
 
     freshness = col.get("freshness")
@@ -2440,7 +2500,7 @@ def _check_sketch(col: dict, col_path: str) -> list[Issue]:
 
     issues: list[Issue] = []
 
-    if col.get("redacted") is not None:
+    if is_redacted(col):
         issues.append(
             Issue(
                 col_path,

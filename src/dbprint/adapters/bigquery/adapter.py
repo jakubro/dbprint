@@ -4,7 +4,8 @@ credentials dict; `cursor_factory` lets tests substitute a substrate-appropriate
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Literal
+import copy
+from typing import Any, ClassVar, Literal, Self
 
 from . import ddl as ddl_module
 from . import introspect as introspect_module
@@ -13,35 +14,36 @@ from . import normalization as normalization_module
 from . import sketch as sketch_module
 from . import stats as stats_module
 from .connection import (
+    DIALECT,
     BigqueryConnectionError,
     Connection,
     ConnectionParams,
     CursorFactory,
+    DatasetLister,
+    default_dataset_lister,
     exec_query,
 )
-from .identity import Identity
 from ..base import (
     Adapter,
     BaseStats,
     ColumnMeta,
     ColumnProgress,
-    ColumnStats,
     CommentsMeta,
     ForeignKeyMeta,
     IndexMeta,
     NullPatterns,
+    PhaseA,
+    PhaseB,
     PhysicalLayout,
     SketchKind,
+    SkippedNamespace,
     StatisticsConfig,
     TableCounts,
     TableMeta,
     TableScope,
     UniqueKeyMeta,
 )
-
-
-class UnknownTable(LookupError):
-    """Raised when a table's physical identifiers were never captured."""
+from ..identifiers import Identity, IdentityRegistry
 
 
 class BigqueryAdapter(Adapter):
@@ -51,8 +53,10 @@ class BigqueryAdapter(Adapter):
     records the physical form as `list_tables`/`introspect_columns` observe it - the first must run.
     """
 
-    REQUIRED_KEYS: ClassVar[tuple[str, ...]] = ("project", "dataset")
-    OPTIONAL_KEYS: ClassVar[tuple[str, ...]] = ("credentials_file",)
+    KNOWN_TYPES: ClassVar[tuple[str, ...]] = stats_module.KNOWN_TYPES
+    REQUIRED_KEYS: ClassVar[tuple[str, ...]] = ("project",)
+    OPTIONAL_KEYS: ClassVar[tuple[str, ...]] = ("dataset", "credentials_file")
+    PATH_KEYS: ClassVar[tuple[str, ...]] = ("credentials_file",)
     # TABLESAMPLE has no seed on BigQuery, so an unmaterialized `sample` scope redraws with
     # no guarantee of agreement across statements.
     SAMPLE_FALLBACK_COHERENT: ClassVar[bool] = False
@@ -64,14 +68,21 @@ class BigqueryAdapter(Adapter):
         self,
         credentials: dict[str, str],
         cursor_factory: CursorFactory | None = None,
+        *,
+        statement_timeout: int | None = None,
+        dataset_lister: DatasetLister | None = None,
     ) -> None:
-        self._params = ConnectionParams.from_credentials(credentials)
+        self._params = ConnectionParams.from_credentials(
+            credentials,
+            statement_timeout=statement_timeout,
+        )
         self._connection = Connection(self._params, cursor_factory)
         # Populated by list_tables()'s own read of TABLES.ddl - extract_ddl reads from here
         # first rather than paying a second round trip for data this connection already has.
         self._ddl_cache: dict[str, str] = {}
-        self._physical_tables: dict[str, str] = {}
-        self._physical_columns: dict[str, dict[str, str]] = {}
+        self._dataset_lister = dataset_lister or default_dataset_lister
+        self._identities = IdentityRegistry(DIALECT)
+        self._skipped: tuple[SkippedNamespace, ...] = ()
 
     def connect(self) -> None:
         self._connection.open()
@@ -79,19 +90,32 @@ class BigqueryAdapter(Adapter):
     def close(self) -> None:
         self._connection.close()
 
+    def new_session(self) -> Self:
+        session = copy.copy(self)
+        session._connection = self._connection.sibling()
+
+        return session
+
     def list_tables(self, include: list[str], exclude: list[str]) -> list[TableMeta]:
-        selected, ddl_by_fqn, physical_by_fqn = introspect_module.list_tables(
+        datasets = (
+            [self._params.dataset]
+            if self._params.dataset is not None
+            else self._dataset_lister(self._params)
+        )
+        selected, ddl_by_fqn, self._skipped = introspect_module.list_tables(
             self._cursor,
             self._params.project,
-            self._params.dataset,
+            datasets,
             include,
             exclude,
         )
         self._ddl_cache.update({fqn: ddl_module.normalize(ddl) for fqn, ddl in ddl_by_fqn.items()})
-        self._physical_tables = physical_by_fqn
-        self._physical_columns = {}
+        self._identities.register(selected)
 
-        return selected
+        return [meta for meta, _ in selected]
+
+    def skipped_namespaces(self) -> tuple[SkippedNamespace, ...]:
+        return self._skipped
 
     def extract_ddl(self, fqn: str) -> str:
         cached = self._ddl_cache.get(fqn)
@@ -102,12 +126,8 @@ class BigqueryAdapter(Adapter):
         return ddl_module.extract_ddl(self._cursor, self._params.project, self._identity(fqn))
 
     def introspect_columns(self, fqn: str) -> list[ColumnMeta]:
-        metas, physical = introspect_module.columns(
-            self._cursor,
-            self._params.project,
-            self._identity(fqn),
-        )
-        self._physical_columns[fqn] = physical
+        metas = introspect_module.columns(self._cursor, self._params.project, self._identity(fqn))
+        self._identities.attach(fqn, metas)
 
         return metas
 
@@ -157,7 +177,7 @@ class BigqueryAdapter(Adapter):
         columns: list[ColumnMeta],
         config: StatisticsConfig,
         scope: TableScope | None = None,
-    ) -> tuple[TableCounts, dict[str, BaseStats]]:
+    ) -> tuple[TableCounts, PhaseA]:
         del config
 
         return stats_module.compute_base(
@@ -180,7 +200,7 @@ class BigqueryAdapter(Adapter):
         suppress_values: frozenset[str] = frozenset(),
         on_column: ColumnProgress | None = None,
         scope: TableScope | None = None,
-    ) -> dict[str, ColumnStats]:
+    ) -> PhaseB:
         return stats_module.compute_columns(
             self._cursor,
             self._identity(fqn),
@@ -301,6 +321,7 @@ class BigqueryAdapter(Adapter):
         column: str,
         n: int,
         scope: TableScope | None = None,
+        sql_type: str | None = None,
     ) -> list[Any]:
         return looks_like_module.sample_distinct(
             self._cursor,
@@ -309,6 +330,7 @@ class BigqueryAdapter(Adapter):
             column,
             n,
             scope,
+            sql_type,
         )
 
     def compute_key_sketch(
@@ -352,22 +374,7 @@ class BigqueryAdapter(Adapter):
         return [tuple(row) for row in rows]
 
     def _identity(self, fqn: str) -> Identity:
-        """Physical identity for a listed table - raises `UnknownTable` rather than falling back
-        to the lowercased path, which would filter the catalog for a name that does not exist.
-        """
-
-        try:
-            physical_table = self._physical_tables[fqn]
-        except KeyError:
-            raise UnknownTable(
-                f"physical identifiers for {fqn!r} are unknown; "
-                "call list_tables() before per-table extraction",
-            ) from None
-
-        return Identity(
-            parts=(self._params.dataset, physical_table),
-            columns=self._physical_columns.get(fqn, {}),
-        )
+        return self._identities[fqn]
 
     @property
     def _cursor(self) -> Any:

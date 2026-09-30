@@ -1,8 +1,6 @@
 # dbprint CLI reference
 
-Complete `--help` for every command, captured verbatim. This file is generated
-from the CLI itself - do not edit it by hand. Run `just docs` to regenerate it
-after changing a command's docstring, options, or help sections.
+Complete `--help` for every command, captured verbatim. This file is generated from the CLI itself — do not edit it by hand. Run `just docs` to regenerate it after changing a command's docstring, options, or help sections.
 
 ## `dbprint`
 
@@ -71,14 +69,16 @@ after changing a command's docstring, options, or help sections.
 ## `dbprint generate`
 
 ```text
- Usage: dbprint generate [OPTIONS] [CONN]
+ Usage: dbprint generate [OPTIONS] [CONNECTION]
 
  Profile the live database; write prints and a structured diff.
  Connects to each resolved connection, scans the tables matched by the include/exclude selectors,
  extracts DDL + column statistics + relationships, and writes one print per table plus a
- prints/<conn>/diff.yaml describing what changed. Per-table writes are atomic and a user-authored
- description.md or statistics.annotations.yaml is never touched. Auto connections run sequentially,
- each isolated so one failure does not block the rest. Writes one run log to
+ prints/<connection>/diff.yaml describing what changed. A run's writes land together when it
+ finishes, and a run that ends early leaves the committed print as it was. A user-authored
+ description.md or statistics.annotations.yaml is never touched. A table the database no longer has
+ loses its producer-written files; its user-authored files are kept. Auto connections run
+ sequentially, each isolated so one failure does not block the rest. Writes one run log to
  ~/.dbprint/logs/<project-slug>/, keeping the 3 most recent.
 
  Selector patterns are fnmatch globs over lowercased FQNs (* spans dots, ? matches one character);
@@ -86,8 +86,8 @@ after changing a command's docstring, options, or help sections.
 
  Arguments:
 
-  • CONN: connection to profile; resolved from .dbprint.yaml when omitted (the auto: true set, or
-    the sole connection).
+  • CONNECTION: connection to profile; resolved from .dbprint.yaml when omitted (the auto: true
+    set, or the sole connection).
 
  Exit codes:
 
@@ -96,7 +96,8 @@ after changing a command's docstring, options, or help sections.
   • 3: schema drift (the database's shape moved relative to the baseline - a table, column,
     relationship, index or comment). Statistics that moved are recorded in diff.yaml but do not set
     this code; dbprint check --online reports both
-  • 4: connection
+  • 4: connection (also when the target lists none of the committed tables in scope, a wrong path
+    or missing grants; --confirm-all-removed records a real total removal)
   • 5: partial (some tables failed, others succeeded or were skipped; or every table succeeded but
     the sketch pass that runs after them did not)
   • 7: total failure (no table was profiled)
@@ -105,36 +106,39 @@ after changing a command's docstring, options, or help sections.
 
   • dbprint generate: all auto connections
   • dbprint generate warehouse: one connection
-  • dbprint generate --include 'public.*': narrow scope for this run
+  • dbprint generate --include '*.public.*': narrow scope for this run
   • dbprint generate --dry-run: preview plan + diff, write nothing
   • dbprint generate --fail-fast: stop at the first table failure
 
 ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
-│ --project           TEXT  Exact project locator: a directory whose direct child is               │
-│                           .dbprint.yaml, that .dbprint.yaml file itself, or a git address (a     │
-│                           forge URL, an SSH remote, or <git-url>#<ref>:<subpath>). No upward     │
-│                           walk, no downward scan. Omit it to walk up from the working directory  │
-│                           instead.                                                               │
-│ --force                   Re-profile every matched table, bypassing the freshness skip.          │
-│ --dry-run                 Compute everything; write nothing to disk.                             │
-│ --include           TEXT  Narrow scope to tables also matching PATTERN (intersects config        │
-│                           include); repeatable. e.g. --include 'public.*'                        │
-│ --exclude           TEXT  Also drop tables matching PATTERN (unions config exclude); repeatable. │
-│                           e.g. --exclude '*.audit_*'                                             │
-│ --fail-fast               Stop at the first table failure instead of profiling the rest. Use     │
-│                           when a target is failing systemically, to avoid repeating one doomed   │
-│                           query per table.                                                       │
-│ --tui/--no-tui            Force TTY (Rich) or piped (plain-text) rendering.                      │
-│ --quiet         -q        Silence stderr progress (footer / tree / streaming / summary) -        │
-│                           generate writes nothing to stdout.                                     │
-│ --help          -h        Show this message and exit.                                            │
+│ --project                  TEXT  Exact project locator: a directory whose direct child is        │
+│                                  .dbprint.yaml, that .dbprint.yaml file itself, or a git address │
+│                                  (a forge URL, an SSH remote, or <git-url>#<ref>:<subpath>). No  │
+│                                  upward walk, no downward scan. Omit it to walk up from the      │
+│                                  working directory instead.                                      │
+│ --force                          Re-profile every matched table, bypassing the freshness skip.   │
+│ --dry-run                        Compute everything; write nothing to disk.                      │
+│ --include                  TEXT  Narrow scope to tables also matching PATTERN (intersects config │
+│                                  include); repeatable. e.g. --include '*.public.*'               │
+│ --exclude                  TEXT  Also drop tables matching PATTERN (unions config exclude);      │
+│                                  repeatable. e.g. --exclude '*.audit_*'                          │
+│ --confirm-all-removed            Record every committed table as removed when the target lists   │
+│                                  none of them. Without it, such a run exits 4 and writes         │
+│                                  nothing.                                                        │
+│ --fail-fast                      Stop at the first table failure instead of profiling the rest.  │
+│                                  Use when a target is failing systemically, to avoid repeating   │
+│                                  one doomed query per table.                                     │
+│ --tui/--no-tui                   Force TTY (Rich) or piped (plain-text) rendering.               │
+│ --quiet                -q        Silence stderr progress (footer / tree / streaming / summary) - │
+│                                  generate writes nothing to stdout.                              │
+│ --help                 -h        Show this message and exit.                                     │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## `dbprint diff`
 
 ```text
- Usage: dbprint diff [OPTIONS] [CONN]
+ Usage: dbprint diff [OPTIONS] [CONNECTION]
 
  Compare committed prints against the live database (read-only).
  Re-extracts the live schema + statistics and diffs them against the committed prints, emitting the
@@ -149,14 +153,15 @@ after changing a command's docstring, options, or help sections.
 
  Arguments:
 
-  • CONN: connection to compare; resolved from .dbprint.yaml when omitted (the auto: true set, or
-    the sole connection).
+  • CONNECTION: connection to compare; resolved from .dbprint.yaml when omitted (the auto: true
+    set, or the sole connection).
 
  Exit codes:
 
   • 0: ran (differences are not failures)
   • 1: no baseline or invalid connection
-  • 4: connection
+  • 4: connection (also when the target lists none of the committed tables in scope - generate
+    --confirm-all-removed records a real total removal)
   • 5: partial extraction
 
  Examples:
@@ -173,7 +178,7 @@ after changing a command's docstring, options, or help sections.
 │                                        scan. Omit it to walk up from the working directory       │
 │                                        instead.                                                  │
 │ --include           TEXT               Narrow scope to tables also matching PATTERN (intersects  │
-│                                        config include); repeatable. e.g. --include 'public.*'    │
+│                                        config include); repeatable. e.g. --include '*.public.*'  │
 │ --exclude           TEXT               Also drop tables matching PATTERN (unions config          │
 │                                        exclude); repeatable.                                     │
 │ --format            [human|json|yaml]  Output format.                                            │
@@ -193,17 +198,17 @@ after changing a command's docstring, options, or help sections.
 ## `dbprint list`
 
 ```text
- Usage: dbprint list [OPTIONS] [CONN]
+ Usage: dbprint list [OPTIONS] [CONNECTION]
 
  Summarise committed prints offline (no database connection).
- Reads prints/<conn>/manifest.yaml and reports connection metadata, the table count, freshness
- buckets (live / stale / dormant) relative to each table's own max_age_days, and how many tables
- carry a user-authored description.md. Never connects to the database.
+ Reads prints/<connection>/manifest.yaml and reports connection metadata, the table count,
+ freshness buckets (live / stale / dormant) relative to each table's own max_age_days, and how many
+ tables carry a user-authored description.md. Never connects to the database.
 
  Arguments:
 
-  • CONN: connection to summarize; resolved from .dbprint.yaml when omitted (the auto: true set, or
-    the sole connection).
+  • CONNECTION: connection to summarize; resolved from .dbprint.yaml when omitted (the auto: true
+    set, or the sole connection).
 
  Exit codes:
 
@@ -236,7 +241,7 @@ after changing a command's docstring, options, or help sections.
 ## `dbprint check`
 
 ```text
- Usage: dbprint check [OPTIONS] [CONN]
+ Usage: dbprint check [OPTIONS] [CONNECTION]
 
  Verify committed prints are well-formed, fresh, and meet assertions.
  CI gate over the committed prints.
@@ -251,20 +256,23 @@ after changing a command's docstring, options, or help sections.
 
  Arguments:
 
-  • CONN: connection to check; resolved from .dbprint.yaml when omitted (the auto: true set, or the
-    sole connection).
+  • CONNECTION: connection to check; resolved from .dbprint.yaml when omitted (the auto: true set,
+    or the sole connection).
 
  Exit codes:
 
   • 0: ok
-  • 1: generic - a malformed print, or a table whose rules narrow it both by a predicate and by a
-    fraction, which this command refuses to judge
+  • 1: generic - a malformed print, a column the current redact rules would publish otherwise than
+    the print does (privacy.redaction-not-applied), or a table whose rules narrow it both by a
+    predicate and by a fraction, which this command refuses to judge
   • 2: staleness
   • 3: drift (--online) - the committed print no longer matches the database, including a statistic
     that moved (generate sets this code for a change of shape only)
-  • 4: connection (--online, the database could not be reached)
-  • 5: partial extraction (--online) - the connection was reached but some tables could not be
-    re-extracted; the ones that did are still compared and reported normally
+  • 4: connection (--online, the database could not be reached, or it lists none of the committed
+    tables in scope - generate --confirm-all-removed records a real total removal)
+  • 5: partial extraction - the committed manifest names a table the last generate run could not
+    profile, or (--online) the connection was reached but some tables could not be re-extracted;
+    the ones that did are still compared and reported normally
   • 6: assertion failure
 
  Examples:
@@ -301,7 +309,7 @@ after changing a command's docstring, options, or help sections.
 ## `dbprint context`
 
 ```text
- Usage: dbprint context [OPTIONS] [TARGET] [CONN]
+ Usage: dbprint context [OPTIONS] [TARGET] [CONNECTION]
 
  Emit an agent-ready context fragment for committed tables.
  Assembles per-table artifacts (DDL, statistics, relationships, description, annotations) into a
@@ -312,10 +320,10 @@ after changing a command's docstring, options, or help sections.
 
  Arguments:
 
-  • TARGET: table FQN (e.g. arboretum.seedbank.accession), an fnmatch pattern (e.g. public.*), or
+  • TARGET: table FQN (e.g. arboretum.seedbank.accession), an fnmatch pattern (e.g. *.public.*), or
     omit and pass --all for every table.
-  • CONN: connection scope; resolved from .dbprint.yaml when omitted (the auto: true set, or the
-    sole connection).
+  • CONNECTION: connection scope; resolved from .dbprint.yaml when omitted (the auto: true set, or
+    the sole connection).
 
  Exit codes:
 
@@ -325,7 +333,7 @@ after changing a command's docstring, options, or help sections.
  Examples:
 
   • dbprint context arboretum.seedbank.accession: one table, full Markdown
-  • dbprint context 'public.*': every public table (pattern)
+  • dbprint context '*.public.*': every public table (pattern)
   • dbprint context --all --no-ddl: every table, skip DDL
   • dbprint context accession --budget 4000: cap output near 4000 tokens
   • dbprint context accession --purpose query: DDL, join paths, definitions and value lists, for
@@ -370,7 +378,7 @@ after changing a command's docstring, options, or help sections.
 ## `dbprint serve`
 
 ```text
- Usage: dbprint serve [OPTIONS] [CONN]
+ Usage: dbprint serve [OPTIONS] [CONNECTION]
 
  Run a read-only MCP server over the committed prints.
  Exposes the committed prints as Model Context Protocol resources and tools for editor and agent
@@ -381,8 +389,8 @@ after changing a command's docstring, options, or help sections.
 
  Arguments:
 
-  • CONN: connection(s) to serve; resolved from .dbprint.yaml when omitted (the auto: true set, or
-    the sole connection).
+  • CONNECTION: connection(s) to serve; resolved from .dbprint.yaml when omitted (the auto: true
+    set, or the sole connection).
 
  Exit codes:
 
@@ -439,7 +447,7 @@ after changing a command's docstring, options, or help sections.
 ## `dbprint docs serve`
 
 ```text
- Usage: dbprint docs serve [OPTIONS] [CONN]
+ Usage: dbprint docs serve [OPTIONS] [CONNECTION]
 
  Serve the docs site live over HTTP, re-reading the print on every request.
  Binds loopback only. Re-reads every artifact from disk on each request, so a page reflects the
@@ -447,8 +455,8 @@ after changing a command's docstring, options, or help sections.
 
  Arguments:
 
-  • CONN: connection(s) to serve; resolved from .dbprint.yaml when omitted (the auto: true set, or
-    the sole connection). Pass --all for completeness instead.
+  • CONNECTION: connection(s) to serve; resolved from .dbprint.yaml when omitted (the auto: true
+    set, or the sole connection). Pass --all for completeness instead.
 
  Exit codes:
 
@@ -477,7 +485,7 @@ after changing a command's docstring, options, or help sections.
 ## `dbprint docs build`
 
 ```text
- Usage: dbprint docs build [OPTIONS] [CONN]
+ Usage: dbprint docs build [OPTIONS] [CONNECTION]
 
  Write the docs site as static files - servable by any host that resolves path/index.html.
  Recreates --output from scratch on every run, so a page for a table the print no longer has never
@@ -485,8 +493,8 @@ after changing a command's docstring, options, or help sections.
 
  Arguments:
 
-  • CONN: connection(s) to build; resolved from .dbprint.yaml when omitted (the auto: true set, or
-    the sole connection). Pass --all for completeness instead.
+  • CONNECTION: connection(s) to build; resolved from .dbprint.yaml when omitted (the auto: true
+    set, or the sole connection). Pass --all for completeness instead.
 
  Exit codes:
 

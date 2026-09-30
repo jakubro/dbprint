@@ -4,19 +4,19 @@ A print is a measurement with a timestamp. The database keeps moving; the file d
 
 ## What changed: `diff.yaml`
 
-Every `dbprint generate` writes `prints/<conn>/diff.yaml` alongside the artifacts, describing what moved since the previous run. It is a machine artifact — a consumer reads it, a reviewer skims it in the pull request that regenerated the print.
+Every `dbprint generate` writes `prints/<connection>/diff.yaml` alongside the artifacts, describing what moved since the previous run. It is a machine artifact — a consumer reads it, a reviewer skims it in the pull request that regenerated the print.
 
-Its `changes` array carries one entry per event, each with a `kind`. Nineteen kinds exist, and the module puts them on two sides of one line: `statistic_changed` and `table_row_count_changed` are the only two the engine treats as **data** movement — a value that changed because the rows underneath it did. Every other kind means the committed print no longer describes the database it names at all:
+Its `changes` array carries one entry per event, each with a `kind`. Twenty-two kinds exist, and the module puts them on two sides of one line: `statistic_changed` and `table_row_count_changed` are the only two the engine treats as **data** movement — a value that changed because the rows underneath it did. Every other kind means the committed print no longer describes the database it names at all:
 
 | Grain | Kinds |
 |---|---|
-| Table | `table_added`, `table_removed`, `grain_changed`, `physical_layout_changed`, `depends_on_changed`, `comment_changed` |
-| Column | `column_added`, `column_removed`, `column_type_changed`, `column_nullable_changed`, `column_default_changed`, `comment_changed` |
+| Table | `table_added`, `table_removed`, `table_type_changed`, `grain_changed`, `physical_layout_changed`, `depends_on_changed`, `comment_changed` |
+| Column | `column_added`, `column_removed`, `column_type_changed`, `column_nullable_changed`, `column_default_changed`, `column_physical_name_changed`, `column_collation_changed`, `comment_changed` |
 | Relationship | `relationship_added`, `relationship_removed`, `relationship_modified` |
 | Index | `index_added`, `index_removed`, `index_modified` |
 | Data | `statistic_changed`, `table_row_count_changed` |
 
-`grain_changed`, `physical_layout_changed` and `depends_on_changed` sit with the schema-moving kinds even though they can look like data at a glance: each states what a constraint or a view's own substrate declares, which rows churning cannot move on their own. `depends_on_changed` fires only when both sides carry a `depends_on` list at all — a side that never asked (a plain table, or a `catalog_only` read) reports nothing, never a removal; the format distinguishes `[]` (the catalog answered, reads nothing) from an omitted key (the producer could not ask), and the diff preserves that distinction rather than collapsing it.
+The diff, `generate`'s exit code, `check --online` and the validator draw that line the same way for every field the format records. `grain_changed`, `physical_layout_changed` and `depends_on_changed` sit with the schema-moving kinds even though they can look like data at a glance: each states what a constraint or a view's own substrate declares, which rows churning cannot move on their own. `depends_on_changed` fires only when both sides carry a `depends_on` list at all — a side that never asked (a plain table, or a `catalog_only` read) reports nothing, never a removal; the format distinguishes `[]` (the catalog answered, reads nothing) from an omitted key (the producer could not ask), and the diff preserves that distinction rather than collapsing it.
 
 [SPEC 2.6.6](../format/v1/SPEC.md#266-per-kind-field-schemas) gives every kind its own field schema.
 
@@ -57,7 +57,7 @@ connections:
   primary:
     max_age_days: 1
     rules:
-      - include: ["seedbank.germination_by_taxon_mv"]
+      - include: ["arboretum.seedbank.germination_by_taxon_mv"]
         max_age_days: 30
 ```
 

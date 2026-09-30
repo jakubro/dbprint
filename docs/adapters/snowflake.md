@@ -10,7 +10,7 @@ Fully-qualified names are `database.schema.table`.
 
 ## Credentials
 
-`account`, `user`, `warehouse`, `database` and `role` are required; `schema`, `password`, `private_key_file` and `private_key_file_pwd` are optional, and exactly one of `password` or `private_key_file` is supplied — both, or neither, is an error. `private_key_file_pwd` decrypts an encrypted key. See [Configuration](../CONFIG.md).
+`account`, `user`, `warehouse` and `role` are required; `database`, `schema` (which requires `database`), `password`, `private_key_file` and `private_key_file_pwd` are optional, and exactly one of `password` or `private_key_file` is supplied — both, or neither, is an error. `private_key_file_pwd` decrypts an encrypted key. A relative `private_key_file` resolves against the project root, and `~` expands. See [Configuration](../CONFIG.md).
 
 ## Privileges
 
@@ -44,9 +44,9 @@ The warehouse grant is not optional even though most of the introspection could 
 
 Snowflake fails differently from most of the other engines, and the difference is the thing most likely to waste an afternoon.
 
-Both surfaces the adapter enumerates from are filtered to what the role can see. `INFORMATION_SCHEMA` returns only objects the current role has been granted access to, and `SHOW` returns only objects the role holds at least one privilege on. A role missing `SELECT` therefore does not get an error — it gets **an empty result**, and dbprint writes a print with no tables in it.
+Both surfaces the adapter enumerates from are filtered to what the role can see. `INFORMATION_SCHEMA` returns only objects the current role has been granted access to, and `SHOW` returns only objects the role holds at least one privilege on. A role missing `SELECT` therefore does not get an error — it gets **an empty result**. On a first run dbprint writes a print with no tables in it; against an existing print, a listing that shares none of its tables exits `4` and names the grants.
 
-So a run that reports `0 objects` and exits cleanly is the symptom of a missing grant, not of an empty database. PostgreSQL and MySQL would have reported a permission failure or refused the connection outright; Snowflake reports success over nothing.
+So a first run that reports `0 objects` and exits cleanly is the symptom of a missing grant, not of an empty database. PostgreSQL and MySQL would have reported a permission failure or refused the connection outright; Snowflake reports success over nothing.
 
 Check the role's grants before concluding the selectors are wrong.
 
@@ -92,6 +92,18 @@ seeded into agreement across statements. Narrow with a filter instead of a sampl
 ```
 
 Setting `materialize_sample: false` on a `sample`-scoped table is refused the same way, before any statement runs.
+
+## Namespaces
+
+`database` is optional. Omitted, the session has no current database; the connection reads every database `SHOW DATABASES` lists for the role — which needs no extra grant and no warehouse — less `SNOWFLAKE`, and reads each through its own `"<database>".INFORMATION_SCHEMA`. A configured name is matched to the spelling Snowflake stores. With no database, an unqualified name in `dbprint check --online` SQL assertions has nothing to resolve against. The grants below are per database, and a database the role cannot read is skipped with a warning. View dependencies are read per database holding a selected object; one whose dependency read fails is named in a warning and its views omit `depends_on` for that run.
+
+## Statement timeout
+
+`statement_timeout` becomes the session's `STATEMENT_TIMEOUT_IN_SECONDS`, which covers queueing, compilation and execution of every statement, and a statement that exceeds it is cancelled by Snowflake. A lower non-zero limit set on the warehouse still wins. The vendor's ceiling is 7 days; a larger value is refused when the connection opens.
+
+## Parallelism
+
+`parallelism: N` opens N sessions and profiles up to N tables at once, all on the connection's warehouse. A warehouse runs a limited number of statements concurrently and queues the rest; a multi-cluster warehouse may instead scale out and bill for the extra clusters.
 
 ## Reference
 

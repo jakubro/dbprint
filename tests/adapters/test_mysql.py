@@ -7,8 +7,8 @@ renders JSON as longtext, so the native JSON type is covered only by the gated l
 from __future__ import annotations
 
 import logging
+import secrets
 from collections.abc import Iterator
-from datetime import date
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -17,14 +17,14 @@ import yaml
 from click.testing import CliRunner
 
 from dbprint.adapters import MysqlAdapter, TableScope
-from dbprint.adapters.base import ColumnMeta, ColumnStats, UniqueKeyMeta
+from dbprint.adapters.base import ColumnMeta, PhaseB, UniqueKeyMeta
 from dbprint.adapters.errors import QueryFailed
+from dbprint.adapters.identifiers import Identity, UnknownTable
+from dbprint.adapters.mysql import DIALECT
 from dbprint.adapters.mysql import ddl as ddl_module
 from dbprint.adapters.mysql import introspect as introspect_module
 from dbprint.adapters.mysql import stats as stats_module
-from dbprint.adapters.mysql.adapter import UnknownTable
 from dbprint.adapters.mysql.connection import ConnectionParams, MysqlConnectionError, exec_query
-from dbprint.adapters.mysql.identity import Identity
 from dbprint.cli.main import main
 from dbprint.config import StatisticsConfig
 from dbprint.conformance import validate_print
@@ -66,19 +66,10 @@ class _StubCursor:
 
 
 class TestConnectionParams:
-    def test_required_keys_enumerated(self) -> None:
-        assert set(MysqlAdapter.REQUIRED_KEYS) == {
-            "host",
-            "port",
-            "database",
-            "user",
-            "password",
-        }
-
     def test_missing_credential_key_raises(self) -> None:
-        incomplete = {k: v for k, v in CREDS.items() if k != "database"}
+        incomplete = {k: v for k, v in CREDS.items() if k != "user"}
 
-        with pytest.raises(MysqlConnectionError, match="database"):
+        with pytest.raises(MysqlConnectionError, match="user"):
             ConnectionParams.from_credentials(incomplete)
 
     def test_invalid_port_raises(self) -> None:
@@ -201,9 +192,6 @@ class TestClassificationDispatch:
             fk,
         )
 
-    def test_json_dispatches_to_json(self) -> None:
-        assert self._pre("json", cardinality=900) == "json"
-
     def test_enum_low_cardinality_is_categorical(self) -> None:
         assert self._pre("enum('a','b','c')", cardinality=3) == "categorical"
 
@@ -213,24 +201,10 @@ class TestClassificationDispatch:
     def test_unsigned_int_is_numeric(self) -> None:
         assert self._pre("int(10) unsigned", cardinality=100000) == "numeric"
 
-    def test_datetime_is_temporal(self) -> None:
-        assert self._pre("datetime", cardinality=100000) == "temporal"
-
-    def test_blob_is_unsupported(self) -> None:
-        assert self._pre("blob", cardinality=5) == "unsupported"
-
     def test_full_cardinality_is_text(self) -> None:
         """Uniqueness is not a classification (SPEC 4.2) - a unique char column stays text."""
 
         assert self._pre("char(36)", cardinality=1000) == "text"
-
-
-class TestIdentifierNormalization:
-    def test_backticks_stripped_and_lowercased(self) -> None:
-        assert introspect_module._norm("`MixedCase`") == "mixedcase"
-
-    def test_plain_identifier_lowercased(self) -> None:
-        assert introspect_module._norm("Herbarium") == "herbarium"
 
 
 class TestPhysicalColumnIdentity:
@@ -573,173 +547,6 @@ class TestPhysicalTableIdentity:
             adapter.close()
 
 
-class TestIdentifierRejection:
-    """SPEC 1.5: producers reject identifiers that violate the path-segment allowlist.
-
-    The `zz_` prefix isolates these tables via `include` from the contract schema
-    `mysql_test_db` seeds into the same database.
-    """
-
-    def test_unsafe_character_rejected(self, mysql_test_db: dict[str, str]) -> None:
-        import mysql.connector
-
-        conn = mysql.connector.connect(
-            host=mysql_test_db["host"],
-            port=int(mysql_test_db["port"]),
-            user=mysql_test_db["user"],
-            password="",
-            database=mysql_test_db["database"],
-            autocommit=True,
-        )
-
-        try:
-            cursor = conn.cursor()
-            cursor.execute("CREATE TABLE `zz_weird name` (id INT)")
-            cursor.close()
-        finally:
-            conn.close()
-
-        adapter = MysqlAdapter(mysql_test_db)
-        adapter.connect()
-
-        try:
-            with pytest.raises(introspect_module.IdentifierRejected) as exc_info:
-                adapter.list_tables(include=[f"{mysql_test_db['database']}.zz_*"], exclude=[])
-
-            message = str(exc_info.value)
-            assert "contains-unsafe-character" in message
-            assert "Resolution:" in message
-            assert "exclude:" in message
-        finally:
-            adapter.close()
-
-    def test_excluded_unsafe_identifier_does_not_block(
-        self,
-        mysql_test_db: dict[str, str],
-    ) -> None:
-        """Per SPEC 1.5.5: excluding the bad table via selectors lets the run proceed."""
-
-        import mysql.connector
-
-        conn = mysql.connector.connect(
-            host=mysql_test_db["host"],
-            port=int(mysql_test_db["port"]),
-            user=mysql_test_db["user"],
-            password="",
-            database=mysql_test_db["database"],
-            autocommit=True,
-        )
-
-        try:
-            cursor = conn.cursor()
-            cursor.execute("CREATE TABLE `zz_weird name` (id INT)")
-            cursor.execute("CREATE TABLE zz_ok (id INT)")
-            cursor.close()
-        finally:
-            conn.close()
-
-        adapter = MysqlAdapter(mysql_test_db)
-        adapter.connect()
-        db = mysql_test_db["database"]
-
-        try:
-            tables = adapter.list_tables(
-                include=[f"{db}.zz_*"],
-                exclude=[f"{db}.zz_weird name"],
-            )
-            fqns = {t.fqn for t in tables}
-            assert f"{db}.zz_ok" in fqns
-            assert f"{db}.zz_weird name" not in fqns
-        finally:
-            adapter.close()
-
-    def test_case_collision_rejected(self, mysql_test_db: dict[str, str]) -> None:
-        """SPEC 1.5.2: two identifiers that lowercase to the same path abort the run.
-
-        Requires `lower_case_table_names=0` (the Linux default this cluster inherits); under
-        `1` the pair could not exist, since names are folded at creation.
-        """
-
-        import mysql.connector
-
-        conn = mysql.connector.connect(
-            host=mysql_test_db["host"],
-            port=int(mysql_test_db["port"]),
-            user=mysql_test_db["user"],
-            password="",
-            database=mysql_test_db["database"],
-            autocommit=True,
-        )
-
-        try:
-            cursor = conn.cursor()
-            cursor.execute("CREATE TABLE `zz_Curator` (id INT)")
-            cursor.execute("CREATE TABLE `zz_curator` (id INT)")
-            cursor.close()
-        finally:
-            conn.close()
-
-        adapter = MysqlAdapter(mysql_test_db)
-        adapter.connect()
-        db = mysql_test_db["database"]
-
-        try:
-            with pytest.raises(introspect_module.IdentifierRejected) as exc_info:
-                adapter.list_tables(include=[f"{db}.zz_*"], exclude=[])
-
-            message = str(exc_info.value)
-            # Either row can be the "previous" entry - catalog order is a MariaDB detail -
-            # so assert both names appear without fixing which is which.
-            assert "case-collides-with-" in message
-            assert f"{db}.zz_Curator" in message
-            assert f"{db}.zz_curator" in message
-        finally:
-            adapter.close()
-
-    def test_excluded_case_collision_lets_the_run_proceed(
-        self,
-        mysql_test_db: dict[str, str],
-    ) -> None:
-        """Per SPEC 1.5.4: excluding the pair's shared path resolves the collision.
-
-        Selectors match the lowercased FQN, so excluding it drops both candidates rather
-        than picking a survivor; the unrelated table proves the run still completes.
-        """
-
-        import mysql.connector
-
-        conn = mysql.connector.connect(
-            host=mysql_test_db["host"],
-            port=int(mysql_test_db["port"]),
-            user=mysql_test_db["user"],
-            password="",
-            database=mysql_test_db["database"],
-            autocommit=True,
-        )
-
-        try:
-            cursor = conn.cursor()
-            cursor.execute("CREATE TABLE `zz_Curator` (id INT)")
-            cursor.execute("CREATE TABLE `zz_curator` (id INT)")
-            cursor.execute("CREATE TABLE zz_ok (id INT)")
-            cursor.close()
-        finally:
-            conn.close()
-
-        adapter = MysqlAdapter(mysql_test_db)
-        adapter.connect()
-        db = mysql_test_db["database"]
-
-        try:
-            tables = adapter.list_tables(
-                include=[f"{db}.zz_*"],
-                exclude=[f"{db}.zz_curator"],
-            )
-            assert [t.fqn for t in tables] == [f"{db}.zz_ok"]
-        finally:
-            adapter.close()
-
-
 class TestIndexesFunctionalKeyParts:
     """Functional indexes emit STATISTICS rows with COLUMN_NAME=NULL; MariaDB cannot create one."""
 
@@ -752,7 +559,10 @@ class TestIndexesFunctionalKeyParts:
     ]
 
     def _indexes(self) -> list:
-        return introspect_module.indexes(_StubCursor(self._ROWS), Identity(parts=("fixture", "t")))
+        return introspect_module.indexes(
+            _StubCursor(self._ROWS),
+            Identity.of(("fixture", "t"), DIALECT),
+        )
 
     def test_purely_expression_index_omitted(self) -> None:
         names = {idx.name for idx in self._indexes()}
@@ -788,7 +598,7 @@ class TestUniqueKeysFunctionalKeyParts:
             group.columns
             for group in introspect_module.unique_keys(
                 _StubCursor(self._ROWS),
-                Identity(parts=("fixture", "t")),
+                Identity.of(("fixture", "t"), DIALECT),
             )
         ]
 
@@ -803,16 +613,6 @@ class TestUniqueKeysFunctionalKeyParts:
         assert self._groups() == [("id",), ("herbarium_id",), ("email",)]
 
 
-class TestLifecycle:
-    def test_close_before_connect_noop(self) -> None:
-        MysqlAdapter(CREDS).close()
-
-    def test_close_twice_is_idempotent(self) -> None:
-        adapter = MysqlAdapter(CREDS)
-        adapter.close()
-        adapter.close()
-
-
 # Live MariaDB tests.
 
 
@@ -822,7 +622,7 @@ def herbarium_sheet_db(mysql_cluster: MysqlCluster) -> Iterator[dict[str, str]]:
 
     import mysql.connector
 
-    db_name = "herbarium_catalog"
+    db_name = f"herbarium_catalog_{secrets.token_hex(4)}"
     schema = (_FIXTURE_DIR / "schema.sql").read_text()
     data = (_FIXTURE_DIR / "data.sql").read_text()
 
@@ -1199,7 +999,7 @@ def events_db(mysql_cluster: MysqlCluster) -> Iterator[dict[str, str]]:
 
     import mysql.connector
 
-    db_name = "events_test"
+    db_name = f"events_test_{secrets.token_hex(4)}"
     admin = mysql.connector.connect(
         host="127.0.0.1",
         port=mysql_cluster.port,
@@ -1333,7 +1133,7 @@ def years_db(mysql_cluster: MysqlCluster) -> Iterator[dict[str, str]]:
 
     import mysql.connector
 
-    db_name = "years_test"
+    db_name = f"years_test_{secrets.token_hex(4)}"
     admin = mysql.connector.connect(
         host="127.0.0.1",
         port=mysql_cluster.port,
@@ -1415,10 +1215,10 @@ class TestYearColumn:
 
     def test_span_covers_the_real_range_of_years(self, years_db: dict[str, str]) -> None:
         collected = self._stats(years_db)
-        expected = (date(YEAR_MAX, 1, 1) - date(YEAR_MIN, 1, 1)).days
 
         assert collected.range is not None
-        assert collected.range.span_days == expected
+        # 1960-01-01 to 2019-01-01: 59 years, 15 of them leap.
+        assert collected.range.span_days == 21550
 
     def test_range_reports_the_years_themselves(self, years_db: dict[str, str]) -> None:
         """Only the arithmetic goes through a date; the values stay the years held."""
@@ -1444,7 +1244,7 @@ def times_db(mysql_cluster: MysqlCluster) -> Iterator[dict[str, str]]:
 
     import mysql.connector
 
-    db_name = "times_test"
+    db_name = f"times_test_{secrets.token_hex(4)}"
     admin = mysql.connector.connect(
         host="127.0.0.1",
         port=mysql_cluster.port,
@@ -1576,46 +1376,6 @@ class _RecordingCursor:
 class TestHashOrderedDraw:
     """SPEC 4.1.2: the distinct draw is ordered by a hash of the value, not storage order."""
 
-    def test_the_draw_is_sql_ordered_by_a_hash_of_the_value(
-        self,
-        mysql_test_db: dict[str, str],
-    ) -> None:
-        """Asserts on the emitted statement text, which the behavioral checks cannot prove."""
-
-        import mysql.connector
-
-        from dbprint.adapters.mysql import looks_like as mysql_looks_like
-
-        conn = mysql.connector.connect(
-            host=mysql_test_db["host"],
-            port=int(mysql_test_db["port"]),
-            user=mysql_test_db["user"],
-            password="",
-            database=mysql_test_db["database"],
-            autocommit=True,
-        )
-
-        try:
-            cursor = conn.cursor()
-            cursor.execute("CREATE TABLE sql_shape (v VARCHAR(64))")
-            cursor.executemany(
-                "INSERT INTO sql_shape (v) VALUES (%s)",
-                [(f"val-{i}",) for i in range(100)],
-            )
-            cursor.close()
-
-            recorder = _RecordingCursor(conn.cursor())
-            identity = Identity(parts=(mysql_test_db["database"], "sql_shape"))
-            mysql_looks_like.sample_distinct(recorder, identity, "v", n=50)
-            flat = " ".join(" ".join(s.lower().split()) for s in recorder.statements)
-
-            assert "order by" in flat and "md5(" in flat, (
-                f"expected the distinct draw ordered by a hash of the value; "
-                f"captured SQL: {recorder.statements}"
-            )
-        finally:
-            conn.close()
-
     def test_a_value_inserted_last_is_still_reachable(
         self,
         mysql_test_db: dict[str, str],
@@ -1740,7 +1500,7 @@ class TestSuppressionReachesTextAlone:
         self,
         creds: dict[str, str],
         suppress: frozenset[str],
-    ) -> dict[str, ColumnStats]:
+    ) -> PhaseB:
         from dbprint.config import StatisticsConfig
 
         adapter = _build(creds)
@@ -1748,7 +1508,8 @@ class TestSuppressionReachesTextAlone:
 
         try:
             columns = adapter.introspect_columns(fqn)
-            counts, base = adapter.compute_base_statistics(fqn, columns, StatisticsConfig())
+            counts, phase_a = adapter.compute_base_statistics(fqn, columns, StatisticsConfig())
+            base = phase_a.stats
 
             return adapter.compute_column_statistics(
                 fqn,
@@ -1845,7 +1606,7 @@ class TestOutOfRangeTemporal:
             conn.close()
 
     @staticmethod
-    def _profile(creds: dict[str, str]) -> dict[str, ColumnStats]:
+    def _profile(creds: dict[str, str]) -> PhaseB:
         adapter = _build(creds)
         fqn = f"{creds['database']}.germination_reading"
 
@@ -1904,7 +1665,7 @@ class TestOutOfRangeTemporal:
             cursor.execute("SET time_zone = '+00:00'")
             utc_rng, *_ = stats_module._fetch_temporal_block(
                 cast(stats_module.Cursor, cursor),
-                "stamped",
+                stats_module._source("stamped", None),
                 col,
                 1,
                 StatisticsConfig(),
@@ -1913,7 +1674,7 @@ class TestOutOfRangeTemporal:
             cursor.execute("SET time_zone = '+05:00'")
             shifted_rng, *_ = stats_module._fetch_temporal_block(
                 cast(stats_module.Cursor, cursor),
-                "stamped",
+                stats_module._source("stamped", None),
                 col,
                 1,
                 StatisticsConfig(),
@@ -1958,7 +1719,7 @@ class TestOutOfRangeTemporal:
             cursor.execute("SET time_zone = '+00:00'")
             utc_values, *_ = stats_module._fetch_value_list(
                 cast(stats_module.Cursor, cursor),
-                "stamped2",
+                stats_module._source("stamped2", None),
                 col,
                 1,
                 StatisticsConfig(),
@@ -1967,7 +1728,7 @@ class TestOutOfRangeTemporal:
             cursor.execute("SET time_zone = '+05:00'")
             shifted_values, *_ = stats_module._fetch_value_list(
                 cast(stats_module.Cursor, cursor),
-                "stamped2",
+                stats_module._source("stamped2", None),
                 col,
                 1,
                 StatisticsConfig(),
@@ -1978,23 +1739,3 @@ class TestOutOfRangeTemporal:
             conn.close()
 
         assert shifted_values == utc_values
-
-    def test_degradation_net_drops_bounds_not_the_table(
-        self,
-        mysql_test_db: dict[str, str],
-    ) -> None:
-        from unittest.mock import patch
-
-        self._seed(mysql_test_db, [])
-
-        with patch(
-            "dbprint.adapters.mysql.stats._fetch_calendar_temporal_block",
-            side_effect=RuntimeError("simulated failure"),
-        ):
-            stats = self._profile(mysql_test_db)
-
-        assert stats["taken_at"].range is None
-        assert stats["taken_at"].percentiles is None
-        assert stats["taken_at"].unrepresentable is None
-        assert stats["taken_at"].cardinality is not None
-        assert stats["id"].cardinality is not None

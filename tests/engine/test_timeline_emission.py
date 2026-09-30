@@ -21,6 +21,7 @@ from dbprint.adapters import (
 )
 from dbprint.config import ConnectionConfig, RuleConfig
 from dbprint.config.project import RedactRule
+from dbprint.conformance import validate_print
 from dbprint.engine import Engine
 from dbprint.engine.context_assembler import AssemblyOptions, assemble
 
@@ -219,6 +220,22 @@ class TestBucketsAndCoverage:
 
         assert payload["timeline"]["coverage"] == 0.999999
 
+    def test_a_clamped_coverage_is_conformant_and_reports_the_overrun(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        payload = _generate(
+            tmp_path,
+            {"created_at": ("timestamp", 0, 200)},
+            row_count=100,
+            timeline_buckets={"created_at": (("2024-01-01T00:00:00", 103),)},
+        )
+        codes = {issue.code for issue in validate_print(tmp_path / "w")}
+
+        assert payload["timeline"]["coverage"] == 0.999999
+        assert "stats.timeline-coverage-mismatch" not in codes
+        assert "stats.timeline-buckets-exceed-rows-scanned" in codes
+
 
 class TestSkipConditions:
     def test_scope_suppresses_the_block(self, tmp_path: Path) -> None:
@@ -268,7 +285,7 @@ class TestContextRendering:
 
         assert (
             "Timeline: created_at (month), 2 bucket(s), "
-            "2024-01-01T00:00:00 to 2024-02-01T00:00:00, 15.0% of scanned rows" in text
+            "2024-01-01T00:00:00 to 2024-02-01T00:00:00, 15% of scanned rows" in text
         )
 
     def test_no_anchor_says_nothing(self, tmp_path: Path) -> None:

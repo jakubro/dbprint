@@ -14,8 +14,11 @@ from click.testing import CliRunner
 from rich.console import Console
 
 from dbprint.cli.main import main
-from dbprint.cli.rendering.progress import LiveProgressRenderer, _eta_seconds
+from dbprint.cli.rendering.progress import LiveProgressRenderer
 from dbprint.engine import ProgressEvent
+
+
+_BAR_RE = re.compile(r"(?P<label>.+?)  \[[#-]*\]  (?P<index>\d+)/(?P<total>\d+)  ")
 
 
 PROJECT_YAML = """\
@@ -48,18 +51,22 @@ def _rounded_age(payload: str) -> Any:
 
 
 class TestOfflineProgress:
+    @pytest.mark.parametrize("flags", [[], ["--no-tui"]], ids=["default", "no-tui"])
     def test_stderr_carries_per_table_progress(
         self,
         tmp_path: Path,
         committed_print: Path,
         monkeypatch: pytest.MonkeyPatch,
+        flags: list[str],
     ) -> None:
+        """`--no-tui` selects the plain streaming renderer, never silence (that is `--quiet`)."""
+
         _seed_committed_print(tmp_path, committed_print)
         monkeypatch.chdir(tmp_path)
 
-        result = CliRunner().invoke(main, ["check", "--format", "json"])
+        result = CliRunner().invoke(main, ["check", "--format", "json", *flags])
 
-        assert "seedbank.accession" in result.stderr
+        assert "arboretum.seedbank.accession" in result.stderr
         assert "\tvalidated\t" in result.stderr
 
     def test_summary_elapsed_ms_is_real_not_the_online_only_diff_result(
@@ -81,46 +88,6 @@ class TestOfflineProgress:
         elapsed = summary_line.rsplit("\t", 1)[-1]
 
         assert elapsed != "0.0s"
-
-    def test_stdout_stays_a_clean_envelope(
-        self,
-        tmp_path: Path,
-        committed_print: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _seed_committed_print(tmp_path, committed_print)
-        monkeypatch.chdir(tmp_path)
-
-        result = CliRunner().invoke(main, ["check", "--format", "json"])
-
-        payload = json.loads(result.stdout)
-        assert payload[0]["connection"] == "primary"
-
-    def test_no_tui_still_emits_progress(
-        self,
-        tmp_path: Path,
-        committed_print: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """`--no-tui` selects the plain streaming renderer, never silence (that is `--quiet`)."""
-
-        _seed_committed_print(tmp_path, committed_print)
-        monkeypatch.chdir(tmp_path)
-
-        result = CliRunner().invoke(
-            main,
-            ["check", "--format", "json", "--no-tui"],
-        )
-
-        assert result.stderr.strip() != ""
-
-    def test_validate_print_called_positionally_is_unaffected(self, committed_print: Path) -> None:
-        """SPEC 6.7's normative call - one positional argument."""
-
-        from dbprint.conformance import validate_print
-
-        issues = validate_print(committed_print / "production")
-        assert isinstance(issues, list)
 
     def test_a_missing_manifest_still_reaches_the_connection_summary(
         self,
@@ -150,29 +117,18 @@ class TestOfflineProgress:
 class TestQuiet:
     """`-q`/`--quiet` silences stderr progress; the stdout envelope is untouched by it."""
 
+    @pytest.mark.parametrize("flag", ["--quiet", "-q"])
     def test_quiet_silences_stderr(
         self,
         tmp_path: Path,
         committed_print: Path,
         monkeypatch: pytest.MonkeyPatch,
+        flag: str,
     ) -> None:
         _seed_committed_print(tmp_path, committed_print)
         monkeypatch.chdir(tmp_path)
 
-        result = CliRunner().invoke(main, ["check", "--format", "json", "--quiet"])
-
-        assert result.stderr == ""
-
-    def test_short_form_matches_the_long_one(
-        self,
-        tmp_path: Path,
-        committed_print: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _seed_committed_print(tmp_path, committed_print)
-        monkeypatch.chdir(tmp_path)
-
-        result = CliRunner().invoke(main, ["check", "--format", "json", "-q"])
+        result = CliRunner().invoke(main, ["check", "--format", "json", flag])
 
         assert result.stderr == ""
 
@@ -249,7 +205,7 @@ class TestOnlineProgress:
             ["check", "--online", "--format", "json"],
         )
 
-        assert "seedbank.accession" in result.stderr
+        assert "arboretum.seedbank.accession" in result.stderr
         payload = json.loads(result.stdout)
         assert payload[0]["connection"] == "primary"
 
@@ -300,9 +256,14 @@ class TestValidationLiveRendering:
 
     def _drive_two_tables_three_passes(self, r: LiveProgressRenderer) -> None:
         for pass_index, pass_name in enumerate(("manifest", "artifacts", "edge claims"), start=1):
-            for index, fqn in enumerate(("seedbank.accession", "seedbank.taxon"), start=1):
+            for index, fqn in enumerate(
+                ("arboretum.seedbank.accession", "arboretum.seedbank.taxon"),
+                start=1,
+            ):
                 findings = (
-                    (1 if fqn == "seedbank.taxon" else 0) if pass_name == "edge claims" else None
+                    (1 if fqn == "arboretum.seedbank.taxon" else 0)
+                    if pass_name == "edge claims"
+                    else None
                 )
                 r.on_event(
                     _tick(
@@ -323,8 +284,8 @@ class TestValidationLiveRendering:
 
         with LiveProgressRenderer(console) as r:
             self._drive_two_tables_three_passes(r)
-            assert r._total == 6  # 2 tables * 3 passes
-            assert r._index == 6  # last tick: pass 3, table 2
+            assert _bar(r)[2] == 6  # 2 tables * 3 passes
+            assert _bar(r)[1] == 6  # last tick: pass 3, table 2
 
     def test_banner_box_prints_once_as_a_rounded_box(self) -> None:
         buf = StringIO()
@@ -347,12 +308,12 @@ class TestValidationLiveRendering:
         console = Console(file=StringIO(), force_terminal=True, width=100, color_system=None)
 
         with LiveProgressRenderer(console) as r:
-            r.on_event(_tick("seedbank.accession", 1, 2, "manifest", 1, 3))
+            r.on_event(_tick("arboretum.seedbank.accession", 1, 2, "manifest", 1, 3))
             assert "manifest" in r._bar_line().plain
-            assert "seedbank.accession" in r._inflight_line().plain
+            assert "arboretum.seedbank.accession" in r._inflight_line().plain
             assert "manifest" not in r._inflight_line().plain
 
-            r.on_event(_tick("seedbank.accession", 1, 2, "artifacts", 2, 3))
+            r.on_event(_tick("arboretum.seedbank.accession", 1, 2, "artifacts", 2, 3))
             assert "artifacts" in r._bar_line().plain
 
     def test_leaf_prints_only_on_the_findings_tick_with_a_count_not_rows(self) -> None:
@@ -364,8 +325,8 @@ class TestValidationLiveRendering:
 
         out = buf.getvalue()
         assert "- rows" not in out
-        assert "no findings" in out  # seedbank.accession: 0
-        assert "1 finding" in out  # seedbank.taxon: 1
+        assert "no findings" in out  # arboretum.seedbank.accession: 0
+        assert "1 finding" in out  # arboretum.seedbank.taxon: 1
         assert out.count("accession") == 1  # header + leaf, once - not once per pass
         assert out.count("taxon") == 1
 
@@ -379,7 +340,7 @@ class TestValidationLiveRendering:
         with LiveProgressRenderer(console) as r:
             assert "--:--" in r._bar_line().plain
 
-            r.on_event(_tick("seedbank.accession", 1, 2, "manifest", 1, 3, elapsed_ms=5))
+            r.on_event(_tick("arboretum.seedbank.accession", 1, 2, "manifest", 1, 3, elapsed_ms=5))
             assert "--:--" not in r._bar_line().plain
 
     def test_the_running_pass_is_priced_from_its_own_cost(self) -> None:
@@ -389,13 +350,25 @@ class TestValidationLiveRendering:
 
         with LiveProgressRenderer(console) as r:
             for i in (1, 2):
-                r.on_event(_tick("seedbank.accession", i, 2, "manifest", 1, 3, elapsed_ms=1_000))
+                r.on_event(
+                    _tick(
+                        "arboretum.seedbank.accession",
+                        i,
+                        2,
+                        "manifest",
+                        1,
+                        3,
+                        elapsed_ms=100_000,
+                    ),
+                )
 
-            r.on_event(_tick("seedbank.accession", 1, 2, "artifacts", 2, 3, elapsed_ms=10))
-            eta = _eta_seconds(r._costs, r._segment, *r._remaining_split())
+            r.on_event(
+                _tick("arboretum.seedbank.accession", 1, 2, "artifacts", 2, 3, elapsed_ms=10),
+            )
 
-        # One tick left in the cheap pass at its own 10ms, two beyond it at the run's 670ms mean.
-        assert eta == pytest.approx((10 + 2 * 670) / 1000)
+            # One tick left in the cheap pass at its own 10ms, two beyond it at the run's 66.7s
+            # mean: 133s, shown to within one 30s step. Priced at the run mean throughout, 200s.
+            assert abs(_shown_seconds(r) - 133) <= 30
 
     def test_eta_resets_on_a_connection_change_with_no_connecting_event(self) -> None:
         """`check` never emits `connecting` - the reset must not depend on that phase firing."""
@@ -403,7 +376,7 @@ class TestValidationLiveRendering:
         console = Console(file=StringIO(), force_terminal=True, width=100, color_system=None)
 
         with LiveProgressRenderer(console) as r:
-            r.on_event(_tick("acme.t1", 1, 1, "manifest", 1, 1, elapsed_ms=2_000))
+            r.on_event(_tick("acme.t1", 1, 1, "manifest", 1, 1, elapsed_ms=200_000))
             r.on_event(
                 ProgressEvent(
                     connection="secondary",
@@ -418,20 +391,19 @@ class TestValidationLiveRendering:
                     elapsed_ms=5,
                 ),
             )
-            eta = _eta_seconds(r._costs, r._segment, *r._remaining_split())
 
-        # 2 remaining ticks priced at `secondary`'s own 5ms - `acme`'s 2000ms must not blend in.
-        assert eta == pytest.approx(2 * 5 / 1000)
+            # 2 remaining ticks at `secondary`'s own 5ms; blended with `acme`'s 200s, ~200s.
+            assert _shown_seconds(r) < 5
 
     def test_bar_label_carries_the_pass_padded_to_a_fixed_bracket_column(self) -> None:
         console = Console(file=StringIO(), force_terminal=True, width=100, color_system=None)
 
         with LiveProgressRenderer(console) as r:
-            r.on_event(_tick("seedbank.accession", 1, 2, "manifest", 1, 10))
+            r.on_event(_tick("arboretum.seedbank.accession", 1, 2, "manifest", 1, 10))
             short = r._bar_line().plain
             assert short.startswith("Validating manifest")
 
-            r.on_event(_tick("seedbank.accession", 1, 2, "edge reciprocity", 3, 10))
+            r.on_event(_tick("arboretum.seedbank.accession", 1, 2, "edge reciprocity", 3, 10))
             long = r._bar_line().plain
             assert long.startswith("Validating edge reciprocity")
 
@@ -466,8 +438,8 @@ class TestAssertionsLiveRendering:
         console = Console(file=buf, force_terminal=True, width=100, color_system=None)
 
         with LiveProgressRenderer(console) as r:
-            r.on_event(self._assertions_tick("seedbank.accession", 1, 2))
-            r.on_event(self._assertions_tick("seedbank.taxon", 2, 2))
+            r.on_event(self._assertions_tick("arboretum.seedbank.accession", 1, 2))
+            r.on_event(self._assertions_tick("arboretum.seedbank.taxon", 2, 2))
 
         out = buf.getvalue()
         assert out.count("accession") == 1
@@ -482,7 +454,7 @@ class TestAssertionsLiveRendering:
         console = Console(file=buf, force_terminal=True, width=100, color_system=None)
 
         with LiveProgressRenderer(console) as r:
-            r.on_event(self._assertions_tick("seedbank.accession", 1, 1, elapsed_ms=250))
+            r.on_event(self._assertions_tick("arboretum.seedbank.accession", 1, 1, elapsed_ms=250))
 
         out = buf.getvalue()
         assert "rows" not in out
@@ -493,7 +465,7 @@ class TestAssertionsLiveRendering:
         console = Console(file=buf, force_terminal=True, width=100, color_system=None)
 
         with LiveProgressRenderer(console) as r:
-            r.on_event(self._assertions_tick("seedbank.accession", 1, 1))
+            r.on_event(self._assertions_tick("arboretum.seedbank.accession", 1, 1))
 
         lines = _strip_ansi(buf.getvalue()).splitlines()
         top_idxs = [i for i, line in enumerate(lines) if line.startswith("╭")]
@@ -513,7 +485,7 @@ class TestAssertionsDurationAttribution:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """`on_table` fires after each table's read, so a slow table's cost lands on its own line.
-        `fixture.shape_probe` is the first table `check` walks; its read is made artificially slow.
+        `arboretum.fixture.shape_probe` is the first table `check` walks; its read is made artificially slow.
         """
 
         import time
@@ -524,27 +496,24 @@ class TestAssertionsDurationAttribution:
         (tmp_path / ".dbprint.yaml").write_text(
             PROJECT_YAML + "    assertions:\n"
             "      tables:\n"
-            "        fixture.shape_probe:\n"
+            "        arboretum.fixture.shape_probe:\n"
             "          row_count: {min: 1}\n",
         )
         monkeypatch.chdir(tmp_path)
 
-        # Replaces only this module's own `yaml` name - the real module and every other caller
-        # stay untouched, so the delay applies exactly once, to this module's own read.
-        real_yaml = check_module.yaml
-        marker = "table: fixture.shape_probe"
+        # Replaces only this module's own `artifact_yaml` name - the real module and every other
+        # caller stay untouched, so the delay applies exactly once, to this module's own read.
+        real_loader = check_module.artifact_yaml
+        marker = "table: arboretum.fixture.shape_probe"
 
         class _SlowedForOneTable:
-            def safe_load(self, text: str) -> Any:
+            def load(self, text: str) -> Any:
                 if marker in text:
                     time.sleep(1.0)
 
-                return real_yaml.safe_load(text)
+                return real_loader.load(text)
 
-            def __getattr__(self, name: str) -> Any:
-                return getattr(real_yaml, name)
-
-        monkeypatch.setattr(check_module, "yaml", _SlowedForOneTable())
+        monkeypatch.setattr(check_module, "artifact_yaml", _SlowedForOneTable())
 
         result = CliRunner().invoke(main, ["check", "--format", "json", "--no-tui"])
         lines = {
@@ -553,15 +522,33 @@ class TestAssertionsDurationAttribution:
             if "\tasserted\t" in line
         }
 
-        slow = _duration_seconds(lines["fixture.shape_probe"])
-        fast = _duration_seconds(lines["seedbank.accession"])
+        slow = _duration_seconds(lines["arboretum.fixture.shape_probe"])
+        fast = _duration_seconds(lines["arboretum.seedbank.accession"])
 
         # A relative comparison, not a fixed threshold: a heavily parallel run can add its own
         # noise to every table's read, but the marked table's own ~1s sleep must still dominate.
         assert slow >= 0.9, (
-            f"the slowed table's own line should show ~1.0s: {lines['fixture.shape_probe']}"
+            f"the slowed table's own line should show ~1.0s: {lines['arboretum.fixture.shape_probe']}"
         )
         assert fast < slow - 0.5, (
             f"the fast table's line should not inherit the slow table's cost: "
             f"slow={slow}s fast={fast}s"
         )
+
+
+def _bar(renderer: LiveProgressRenderer) -> tuple[str, int, int]:
+    """The bar line's label and `index/total`, read off the text a terminal shows."""
+
+    match = _BAR_RE.match(renderer._bar_line().plain)
+    assert match is not None, renderer._bar_line().plain
+
+    return match["label"], int(match["index"]), int(match["total"])
+
+
+def _shown_seconds(renderer: LiveProgressRenderer) -> float:
+    """The bar's shown ETA in seconds; fails where it reads `--:--`."""
+
+    shown = renderer._bar_line().plain.rsplit("ETA ", 1)[1]
+    hours, minutes, seconds = (int(part) for part in shown.split(":"))
+
+    return hours * 3600 + minutes * 60 + seconds

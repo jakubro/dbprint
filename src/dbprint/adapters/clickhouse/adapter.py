@@ -4,7 +4,8 @@ credentials dict; every method asserts the session is open before delegating.
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Literal
+import copy
+from typing import Any, ClassVar, Literal, Self
 
 from . import ddl as ddl_module
 from . import introspect as introspect_module
@@ -12,20 +13,27 @@ from . import looks_like as looks_like_module
 from . import normalization as normalization_module
 from . import sketch as sketch_module
 from . import stats as stats_module
-from .connection import ClickhouseConnectionError, Connection, ConnectionParams, CursorFactory
-from .identity import Identity
+from .connection import (
+    DIALECT,
+    ClickhouseConnectionError,
+    Connection,
+    ConnectionParams,
+    CursorFactory,
+)
 from ..base import (
     Adapter,
     BaseStats,
     ColumnMeta,
     ColumnProgress,
-    ColumnStats,
     CommentsMeta,
     ForeignKeyMeta,
     IndexMeta,
     NullPatterns,
+    PhaseA,
+    PhaseB,
     PhysicalLayout,
     SketchKind,
+    SkippedNamespace,
     StatisticsConfig,
     TableCounts,
     TableMeta,
@@ -33,10 +41,7 @@ from ..base import (
     UniqueKeyMeta,
     row_count_or_none,
 )
-
-
-class UnknownTable(LookupError):
-    """Raised when a table's physical identifiers were never captured."""
+from ..identifiers import Identity, IdentityRegistry
 
 
 class SamplingKeyMissing(RuntimeError):
@@ -53,8 +58,9 @@ class ClickhouseAdapter(Adapter):
     Preconditions: `list_tables` before extraction, `introspect_columns` before a column-keyed call.
     """
 
-    REQUIRED_KEYS: ClassVar[tuple[str, ...]] = ("host", "database")
-    OPTIONAL_KEYS: ClassVar[tuple[str, ...]] = ("port", "user", "password")
+    KNOWN_TYPES: ClassVar[tuple[str, ...]] = stats_module.KNOWN_TYPES
+    REQUIRED_KEYS: ClassVar[tuple[str, ...]] = ("host",)
+    OPTIONAL_KEYS: ClassVar[tuple[str, ...]] = ("database", "port", "user", "password")
     # SAMPLE's determinism depends on a declared SAMPLE BY key; an unmaterialized scope on a
     # table without one is not a seeded per-row guarantee.
     SAMPLE_FALLBACK_COHERENT: ClassVar[bool] = False
@@ -63,14 +69,19 @@ class ClickhouseAdapter(Adapter):
         self,
         credentials: dict[str, str],
         cursor_factory: CursorFactory | None = None,
+        *,
+        statement_timeout: int | None = None,
     ) -> None:
-        self._params = ConnectionParams.from_credentials(credentials)
+        self._params = ConnectionParams.from_credentials(
+            credentials,
+            statement_timeout=statement_timeout,
+        )
         self._connection = Connection(self._params, cursor_factory)
         # Populated by list_tables()'s own read of system.tables.sampling_key - materialize_scope
         # reads from here rather than discovering the same fact by a failed CREATE.
         self._samplable: dict[str, bool] = {}
-        self._physical_tables: dict[str, tuple[str, str]] = {}
-        self._physical_columns: dict[str, dict[str, str]] = {}
+        self._identities = IdentityRegistry(DIALECT)
+        self._skipped: tuple[SkippedNamespace, ...] = ()
 
     def connect(self) -> None:
         self._connection.open()
@@ -78,25 +89,39 @@ class ClickhouseAdapter(Adapter):
     def close(self) -> None:
         self._connection.close()
 
+    def new_session(self) -> Self:
+        session = copy.copy(self)
+        session._connection = self._connection.sibling()
+
+        return session
+
     def list_tables(self, include: list[str], exclude: list[str]) -> list[TableMeta]:
-        selected, samplable, physical = introspect_module.list_tables(
+        databases = (
+            (self._params.database,)
+            if self._params.database is not None
+            else introspect_module.list_databases(self._cursor)
+        )
+        selected, samplable, skipped = introspect_module.list_tables(
             self._cursor,
-            self._params.database,
+            databases,
             include,
             exclude,
         )
         self._samplable = samplable
-        self._physical_tables = physical
-        self._physical_columns = {}
+        self._identities.register(selected)
+        self._skipped = skipped
 
-        return selected
+        return [meta for meta, _ in selected]
+
+    def skipped_namespaces(self) -> tuple[SkippedNamespace, ...]:
+        return self._skipped
 
     def extract_ddl(self, fqn: str) -> str:
         return ddl_module.extract_ddl(self._cursor, self._identity(fqn))
 
     def introspect_columns(self, fqn: str) -> list[ColumnMeta]:
-        metas, physical = introspect_module.columns(self._cursor, self._identity(fqn))
-        self._physical_columns[fqn] = physical
+        metas = introspect_module.columns(self._cursor, self._identity(fqn))
+        self._identities.attach(fqn, metas)
 
         return metas
 
@@ -132,7 +157,7 @@ class ClickhouseAdapter(Adapter):
         columns: list[ColumnMeta],
         config: StatisticsConfig,
         scope: TableScope | None = None,
-    ) -> tuple[TableCounts, dict[str, BaseStats]]:
+    ) -> tuple[TableCounts, PhaseA]:
         del config
 
         return stats_module.compute_base(self._cursor, self._identity(fqn), columns, scope)
@@ -149,7 +174,7 @@ class ClickhouseAdapter(Adapter):
         suppress_values: frozenset[str] = frozenset(),
         on_column: ColumnProgress | None = None,
         scope: TableScope | None = None,
-    ) -> dict[str, ColumnStats]:
+    ) -> PhaseB:
         return stats_module.compute_columns(
             self._cursor,
             self._identity(fqn),
@@ -279,6 +304,7 @@ class ClickhouseAdapter(Adapter):
         column: str,
         n: int,
         scope: TableScope | None = None,
+        sql_type: str | None = None,
     ) -> list[Any]:
         return looks_like_module.sample_distinct(
             self._cursor,
@@ -286,6 +312,7 @@ class ClickhouseAdapter(Adapter):
             column,
             n,
             scope,
+            sql_type,
         )
 
     def compute_key_sketch(
@@ -330,20 +357,7 @@ class ClickhouseAdapter(Adapter):
         return [tuple(row) for row in rows]
 
     def _identity(self, fqn: str) -> Identity:
-        """Physical identity for a listed table.
-
-        Raises `UnknownTable` rather than folding, which would filter `system.*` for a missing name.
-        """
-
-        try:
-            parts = self._physical_tables[fqn]
-        except KeyError:
-            raise UnknownTable(
-                f"physical identifiers for {fqn!r} are unknown; "
-                "call list_tables() before per-table extraction",
-            ) from None
-
-        return Identity(parts=parts, columns=self._physical_columns.get(fqn, {}))
+        return self._identities[fqn]
 
     @property
     def _cursor(self) -> Any:

@@ -4,23 +4,30 @@ against a forced terminal on its observable contract rather than pixels.
 
 from __future__ import annotations
 
+import logging
+import re
 from io import StringIO
-from itertools import pairwise
 from pathlib import Path
-from typing import Self
 from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
 from rich.console import Console
 
-from dbprint.adapters import ColumnMeta, ColumnStats, CommentsMeta, Inferred, MockAdapter, MockTable
+from dbprint.adapters import (
+    ColumnMeta,
+    ColumnStats,
+    CommentsMeta,
+    Inferred,
+    MockAdapter,
+    MockTable,
+    trace_context,
+)
 from dbprint.cli.main import main
 from dbprint.cli.rendering.progress import (
     ConnectionSummary,
     LiveProgressRenderer,
     StreamingProgressRenderer,
-    _eta_seconds,
     build_progress_renderer,
     install_log_handler,
     remove_log_handler,
@@ -28,6 +35,9 @@ from dbprint.cli.rendering.progress import (
 from dbprint.engine import DiffSummary, GenerateResult, ProgressEvent, SummaryCounts, TableResult
 from dbprint.engine.orchestrator import _ProgressEmitter
 from dbprint.engine.result import ProgressPhase, ProgressStatus
+
+
+_BAR_RE = re.compile(r"(?P<label>.+?)  \[[#-]*\]  (?P<index>\d+)/(?P<total>\d+)  ")
 
 
 _ZERO_DIFF = DiffSummary(
@@ -90,6 +100,7 @@ def _event(
     elapsed_ms: int | None = None,
     row_count: int | None = None,
     error: str | None = None,
+    reason: str | None = None,
 ) -> ProgressEvent:
     return ProgressEvent(
         connection="acme",
@@ -104,6 +115,7 @@ def _event(
         elapsed_ms=elapsed_ms,
         row_count=row_count,
         error=error,
+        reason=reason,
     )
 
 
@@ -150,6 +162,18 @@ class TestStreamingRenderer:
         assert any(line.startswith("acme\ts.t\tok\t") for line in lines)
         assert "acme\ts.u\tfailed\tboom" in lines
         assert not any("statistics" in line for line in lines)
+
+    def test_a_skip_line_carries_its_reason_as_a_fourth_field(self) -> None:
+        buf = StringIO()
+
+        with StreamingProgressRenderer(buf) as r:
+            r.on_event(_event("extract", "skipped", fqn="s.t", reason="fresh (2 of 7 days)"))
+            r.on_event(_event("extract", "skipped", fqn="s.u"))
+
+        assert buf.getvalue().splitlines() == [
+            "acme\ts.t\tskipped\tfresh (2 of 7 days)",
+            "acme\ts.u\tskipped",
+        ]
 
     def test_finalizing_events_emit_nothing(self) -> None:
         buf = StringIO()
@@ -385,9 +409,9 @@ class TestLiveRenderer:
             r.on_event(
                 ProgressEvent(connection="acme", phase="inventory", status="start", total=40),
             )
-            assert r._bar_label == "Cataloguing"
-            assert r._index == 0
-            assert r._total == 40
+            assert _bar(r)[0] == "Cataloguing"
+            assert _bar(r)[1] == 0
+            assert _bar(r)[2] == 40
 
             r.on_event(
                 ProgressEvent(
@@ -399,8 +423,8 @@ class TestLiveRenderer:
                     fqn="seedbank.accession",
                 ),
             )
-            assert r._index == 7
-            assert r._total == 40
+            assert _bar(r)[1] == 7
+            assert _bar(r)[2] == 40
             assert "seedbank" in r._inflight_line().plain
 
             r.on_event(
@@ -410,9 +434,9 @@ class TestLiveRenderer:
             # The label change is what marks the new pass - an index restart alone reads
             # exactly like a crash and retry.
             r.on_event(_event("extract", "start", fqn="s.t"))
-            assert r._bar_label == "Profiling"
-            assert r._index == 1
-            assert r._fqn == "s.t"
+            assert _bar(r)[0] == "Profiling"
+            assert _bar(r)[1] == 1
+            assert list(r._inflight) == ["s.t"]
 
     def test_prepass_closes_a_schema_row_when_the_schema_changes(self) -> None:
         buf = StringIO()
@@ -473,14 +497,14 @@ class TestLiveRenderer:
             r.on_event(
                 _event("write", "done", fqn="seedbank.accession", elapsed_ms=10, row_count=1),
             )
-            assert r._bar_label == "Profiling"
+            assert _bar(r)[0] == "Profiling"
 
             r.on_event(
                 ProgressEvent(connection="acme", phase="sketch", status="start", total=1),
             )
-            assert r._bar_label == "Sketching"
-            assert r._index == 0
-            assert r._total == 1
+            assert _bar(r)[0] == "Sketching"
+            assert _bar(r)[1] == 0
+            assert _bar(r)[2] == 1
 
             r.on_event(
                 ProgressEvent(
@@ -506,9 +530,10 @@ class TestLiveRenderer:
                 ),
             )
             # No "sketch" prefix - it would restate the bar label, which already says Sketching.
-            assert "sketch" not in r._inflight_line().plain
-            assert "1/2" in r._inflight_line().plain
-            assert "id" in r._inflight_line().plain
+            line = r._inflight["seedbank.accession"]
+            assert "sketch" not in line
+            assert "1/2" in line
+            assert "id" in line
 
             r.on_event(
                 ProgressEvent(
@@ -571,11 +596,11 @@ class TestLiveRenderer:
             r.on_event(
                 _event("write", "done", fqn="seedbank.accession", elapsed_ms=10, row_count=1),
             )
-            assert r._bar_label == "Profiling"
+            assert _bar(r)[0] == "Profiling"
 
             r.on_event(ProgressEvent(connection="acme", phase="finalizing", status="start"))
             r.on_event(ProgressEvent(connection="acme", phase="finalizing", status="done"))
-            assert r._bar_label == "Profiling"
+            assert _bar(r)[0] == "Profiling"
             r.finish()
 
         assert "Sketching" not in buf.getvalue()
@@ -588,22 +613,22 @@ class TestLiveRenderer:
 
         with LiveProgressRenderer(console) as r:
             r.on_event(ProgressEvent(connection="acme", phase="connecting", status="start"))
-            assert r._bar_label == "Connecting"
+            assert _bar(r)[0] == "Connecting"
 
             r.on_event(ProgressEvent(connection="acme", phase="connecting", status="done"))
             r.on_event(ProgressEvent(connection="acme", phase="listing", status="start"))
-            assert r._bar_label == "Listing objects"
+            assert _bar(r)[0] == "Listing objects"
 
             r.on_event(ProgressEvent(connection="acme", phase="listing", status="done"))
             r.on_event(
                 ProgressEvent(connection="acme", phase="inventory", status="start", total=1),
             )
-            assert r._bar_label == "Cataloguing"
+            assert _bar(r)[0] == "Cataloguing"
 
             r.on_event(
                 _event("write", "done", fqn="seedbank.accession", elapsed_ms=10, row_count=1),
             )
-            assert r._bar_label == "Profiling"
+            assert _bar(r)[0] == "Profiling"
             r.finish()
 
     def test_every_streamed_tree_gets_its_own_box(self) -> None:
@@ -752,7 +777,7 @@ class TestETA:
         console = Console(file=StringIO(), force_terminal=True, width=80, color_system=None)
 
         with LiveProgressRenderer(console) as r:
-            assert "ETA --:--" in r._bar_line().plain
+            assert _eta(r) is None
 
     def test_finalizing_does_not_corrupt_the_accumulator(self) -> None:
         """`finalizing("done", ...)` reaches the terminal branch with no table attached."""
@@ -764,8 +789,7 @@ class TestETA:
                 ProgressEvent(connection="acme", phase="finalizing", status="done", total=0),
             )
 
-            assert r._costs == {}
-            assert "ETA --:--" in r._bar_line().plain
+            assert _eta(r) is None
 
     def test_eta_is_remaining_times_the_observed_mean(self) -> None:
         console = Console(file=StringIO(), force_terminal=True, width=80, color_system=None)
@@ -774,10 +798,8 @@ class TestETA:
             for i in range(1, 21):
                 r.on_event(_terminal_event("write", "done", i, 100, 5000))
 
-            # 80 tables remain at an observed mean of 5s each.
-            eta = _eta_seconds(r._costs, r._segment, *r._remaining_split())
-
-        assert eta == pytest.approx(400.0)
+            # 80 tables remain at an observed mean of 5s each; shown to within one 30s step.
+            assert abs(_shown_seconds(r) - 400) <= 30
 
     def test_a_run_of_skips_does_not_collapse_the_estimate(self) -> None:
         """The ETA estimate is not dominated by the most recent (all-skip) run."""
@@ -791,10 +813,7 @@ class TestETA:
             for i in range(21, 71):
                 r.on_event(_terminal_event("extract", "skipped", i, 100, 10))
 
-            eta = _eta_seconds(r._costs, r._segment, 100 - 70, 0)
-
-            assert eta is not None
-            assert eta > 20
+            assert _shown_seconds(r) > 20
 
     def test_a_failed_tables_duration_is_counted(self) -> None:
         console = Console(file=StringIO(), force_terminal=True, width=80, color_system=None)
@@ -803,15 +822,13 @@ class TestETA:
             for i in range(1, 21):
                 r.on_event(_terminal_event("write", "done", i, 100, 5000))
 
-            eta_before = _eta_seconds(r._costs, r._segment, 100 - 20, 0)
+            before = _shown_seconds(r)
             r.on_event(_terminal_event("extract", "failed", 21, 100, 60_000))
-            eta_after = _eta_seconds(r._costs, r._segment, 100 - 21, 0)
+            after = _shown_seconds(r)
 
-            assert eta_before is not None
-            assert eta_after is not None
-            assert eta_after > eta_before
-            # It counts, and it counts as one sample among twenty-one - not as the whole estimate.
-            assert eta_after < eta_before * 2
+        assert after > before
+        # It counts, and it counts as one sample among twenty-one - not as the whole estimate.
+        assert after < before * 2
 
     def test_no_eta_on_the_final_frame(self) -> None:
         console = Console(file=StringIO(), force_terminal=True, width=80, color_system=None)
@@ -847,39 +864,37 @@ class TestETA:
         with LiveProgressRenderer(console) as r:
             # A sketch-sized duration, as the prior connection's Sketching pass would leave.
             r.on_event(_terminal_event("sketch", "done", 1, 1, 50_000))
-            assert r._costs
+            assert _eta(r) is not None
 
             r.on_event(ProgressEvent(connection="second", phase="connecting", status="start"))
+            assert _eta(r) is None
 
-            assert r._costs == {}
+            # 59 tables left at the new connection's own 1s each; the 50s sample would read ~25x.
+            r.on_event(_terminal_event("write", "done", 1, 60, 1_000))
 
-            # The next connection's own (much smaller) table duration drives the ETA alone.
-            r.on_event(_terminal_event("write", "done", 1, 2, 1_000))
-            eta = _eta_seconds(r._costs, r._segment, 1, 0)
-
-            assert eta == pytest.approx(1.0)
+            assert abs(_shown_seconds(r) - 59) <= 5
 
     def test_one_slow_table_never_ages_back_out_of_the_estimate(self) -> None:
-        """An estimate that rises on a slow table stays risen while every table after it is fast -
-        asserted on the per-unit cost, so only the slow table's tick may exceed 2x.
+        """An estimate that rises on a slow table stays risen while every table after it is fast:
+        the 900s table keeps every later unit priced far above the 80ms the others take.
         """
 
         console = Console(file=StringIO(), force_terminal=True, width=80, color_system=None)
         durations = [80] * 25 + [900_000] + [80] * 40
-        unit_costs = []
+        shown_per_unit = []
 
         with LiveProgressRenderer(console) as r:
             for i, ms in enumerate(durations, start=1):
                 r.on_event(_terminal_event("write", "done", i, len(durations), ms))
-                unit_costs.append(_eta_seconds(r._costs, r._segment, 1, 0))
 
-        steps = [max(a, b) / min(a, b) for a, b in pairwise(unit_costs) if a and b]
+                if i > 25 and i < len(durations):
+                    shown_per_unit.append(_shown_seconds(r) / (len(durations) - i))
 
-        assert len([s for s in steps if s > 2]) == 1
+        assert min(shown_per_unit) > 5
 
     def test_an_unentered_segment_is_priced_from_the_whole_run(self) -> None:
         """A segment with nothing observed borrows the run's mean rather than refusing to
-        resolve, so a bar spanning several segments still carries a number.
+        resolve - the section change keeps what Profiling learned.
         """
 
         console = Console(file=StringIO(), force_terminal=True, width=80, color_system=None)
@@ -888,14 +903,13 @@ class TestETA:
             for i in range(1, 5):
                 r.on_event(_terminal_event("write", "done", i, 4, 4_000))
 
-            eta = _eta_seconds(r._costs, "Sketching", 3, 0)
+            r.on_event(_terminal_event("sketch", "start", 0, 3, None))
 
-        assert eta == pytest.approx(12.0)
+            # Three sketches at the run's 4s mean.
+            assert abs(_shown_seconds(r) - 12) <= 5
 
-    def test_a_section_change_keeps_what_the_run_has_already_learned(self) -> None:
-        """Each section keeps its own observed cost across a section change, so a section that
-        has already been measured is never re-estimated from a single sample.
-        """
+    def test_a_measured_segment_is_priced_from_its_own_mean(self) -> None:
+        """Once a segment has a sample of its own, the run's slower mean no longer prices it."""
 
         console = Console(file=StringIO(), force_terminal=True, width=80, color_system=None)
 
@@ -903,14 +917,14 @@ class TestETA:
             for i in range(1, 5):
                 r.on_event(_terminal_event("write", "done", i, 4, 4_000))
 
-            r.on_event(_terminal_event("sketch", "done", 1, 3, 20))
+            r.on_event(_terminal_event("sketch", "done", 1, 100, 20))
 
-            assert _eta_seconds(r._costs, "Profiling", 1, 0) == pytest.approx(4.0)
-            assert _eta_seconds(r._costs, "Sketching", 1, 0) == pytest.approx(0.02)
+            # 99 sketches at 20ms each; priced at the run's 3.2s mean they would read ~320s.
+            assert _shown_seconds(r) < 5
 
 
 class TestBarPosition:
-    """`_index`/`_total` describe where the run is - a bracket event must not overwrite them
+    """The bar's `index/total` is where the run is - a bracket event must not overwrite it
     with a position the run never occupied.
     """
 
@@ -928,11 +942,11 @@ class TestBarPosition:
             for i in range(1, 6):
                 emitter.sketch_table("done", i, 5, f"s.t{i}", elapsed_ms=10)
 
-            assert r._index == 5
+            assert _bar(r)[1] == 5
 
             emitter.sketch_phase("done", 5)
 
-            assert r._index == 5
+            assert _bar(r)[1] == 5
             assert "0/5" not in r._bar_line().plain
 
     def test_finalizing_does_not_overwrite_the_last_real_phases_counters(self) -> None:
@@ -942,18 +956,18 @@ class TestBarPosition:
             for i in range(1, 6):
                 r.on_event(_terminal_event("sketch", "done", i, 5, 10))
 
-            assert r._index == 5
-            assert r._total == 5
+            assert _bar(r)[1] == 5
+            assert _bar(r)[2] == 5
 
             r.on_event(
                 ProgressEvent(connection="acme", phase="finalizing", status="start", total=8),
             )
-            assert r._index == 5
-            assert r._total == 5
+            assert _bar(r)[1] == 5
+            assert _bar(r)[2] == 5
 
             r.on_event(ProgressEvent(connection="acme", phase="finalizing", status="done", total=8))
-            assert r._index == 5
-            assert r._total == 5
+            assert _bar(r)[1] == 5
+            assert _bar(r)[2] == 5
 
     def test_a_second_connection_does_not_inherit_the_firsts_index(self) -> None:
         console = Console(file=StringIO(), force_terminal=True, width=80, color_system=None)
@@ -962,17 +976,17 @@ class TestBarPosition:
             for i in range(1, 11):
                 r.on_event(_terminal_event("write", "done", i, 10, 10))
 
-            assert r._index == 10
+            assert _bar(r)[1] == 10
 
             r.on_event(ProgressEvent(connection="secondary", phase="connecting", status="start"))
-            assert r._index == 0
-            assert r._total == 0
+            assert _bar(r)[1] == 0
+            assert _bar(r)[2] == 0
 
             r.on_event(
                 ProgressEvent(connection="secondary", phase="listing", status="done", total=3),
             )
-            assert r._index == 0
-            assert r._total == 3
+            assert _bar(r)[1] == 0
+            assert _bar(r)[2] == 3
             assert "100%" not in r._bar_line().plain
 
 
@@ -1035,9 +1049,11 @@ class TestEtaDisplay:
 
         r._display_eta(300.0)
         cleared = r._display_eta(None)
+        # Held at 300s, a 320s raw value would stay inside the deadband; cleared, it re-quantises.
+        after = r._display_eta(320.0)
 
         assert cleared == "--:--"
-        assert r._shown_eta is None
+        assert after == "0:05:30"
 
     def test_a_real_slowdown_moves_the_rendered_bar_within_one_tick(self) -> None:
         console = Console(file=StringIO(), force_terminal=True, width=80, color_system=None)
@@ -1060,11 +1076,11 @@ class TestEtaDisplay:
             for i in range(1, 6):
                 r.on_event(_terminal_event("write", "done", i, 10, 5000))
 
-            assert r._shown_eta is not None
+            assert _eta(r) is not None
 
             r.on_event(ProgressEvent(connection="secondary", phase="connecting", status="start"))
 
-            assert r._shown_eta is None
+            assert _eta(r) is None
 
 
 class TestFinalFrameSpansTheRun:
@@ -1104,7 +1120,7 @@ class TestFinalFrameSpansTheRun:
         assert "5/5" in final
 
     def test_the_sketch_pass_narrowing_index_total_does_not_shrink_the_final_frame(self) -> None:
-        """`sketch` legitimately narrows `_index`/`_total` to its own sketchable subset - the
+        """`sketch` legitimately narrows the bar's `index/total` to its own sketchable subset - the
         final frame must span the connection's real table count, not whatever phase ran last.
         """
 
@@ -1279,7 +1295,7 @@ class TestRendererSelection:
 class _MockPostgresAdapter(MockAdapter):
     REQUIRED_KEYS = ("host", "port", "database", "user", "password")
 
-    def __init__(self, _credentials: dict[str, str]) -> None:
+    def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
         super().__init__(_two_table_fixture())
 
 
@@ -1449,7 +1465,7 @@ class TestPipedStreamingThroughCli:
         class _BrokenAdapter(MockAdapter):
             REQUIRED_KEYS = ("host", "port", "database", "user", "password")
 
-            def __init__(self, _credentials: dict[str, str]) -> None:
+            def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
                 super().__init__({"public.a": _table("public", "a")})
 
             def compute_column_statistics(self, fqn: str, *args: object, **kwargs: object):
@@ -1489,23 +1505,17 @@ class TestQuiet:
         ):
             return CliRunner().invoke(main, ["generate", *args])
 
-    def test_quiet_leaves_stdout_empty(
+    @pytest.mark.parametrize("flag", ["--quiet", "-q"])
+    def test_quiet_leaves_both_streams_empty(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        flag: str,
     ) -> None:
-        result = self._invoke(tmp_path, monkeypatch, "a", "--no-tui", "--quiet")
+        result = self._invoke(tmp_path, monkeypatch, "a", "--no-tui", flag)
 
         assert result.stdout == ""
-
-    def test_short_form_matches_the_long_one(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        result = self._invoke(tmp_path, monkeypatch, "a", "--no-tui", "-q")
-
-        assert result.stdout == ""
+        assert result.stderr == ""
 
     def test_exit_code_is_unaffected(
         self,
@@ -1540,7 +1550,7 @@ class TestQuiet:
         class _BrokenAdapter(MockAdapter):
             REQUIRED_KEYS = ("host", "port", "database", "user", "password")
 
-            def __init__(self, _credentials: dict[str, str]) -> None:
+            def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
                 super().__init__({"public.a": _table("public", "a")})
 
             def compute_column_statistics(self, fqn: str, *args: object, **kwargs: object):
@@ -1557,62 +1567,144 @@ class TestQuiet:
         assert "1 table failed: RuntimeError: boom" in result.stderr
 
 
-class _RecordingRenderer:
-    """Fake `ProgressRenderer` recording the call sequence, pinning `connection_summary` first."""
+class _WarnsOnConnect(_MockPostgresAdapter):
+    """Logs one warning before any table is in flight, so the renderer has to hold it."""
 
-    def __init__(self) -> None:
-        self.calls: list[str] = []
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        return None
-
-    def on_event(self, event: ProgressEvent) -> None:
-        self.calls.append(f"on_event:{event.connection}")
-
-    def connection_summary(self, result: GenerateResult | ConnectionSummary) -> None:
-        self.calls.append(f"connection_summary:{result.connection_name}")
-
-    def flush_warnings(self) -> None:
-        self.calls.append("flush_warnings")
-
-    def finish(self) -> None:
-        self.calls.append("finish")
-
-    def log_record(self, text: str) -> None:
-        self.calls.append(f"log_record:{text}")
+    def connect(self) -> None:
+        logging.getLogger("dbprint.adapters.mock").warning("held before any table")
+        super().connect()
 
 
 class TestFlushWarningsCalledPerConnection:
-    def test_the_one_connection_gets_exactly_one_flush(
+    def test_a_held_warning_prints_before_the_next_connections_summary(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        (tmp_path / ".dbprint.yaml").write_text(PROJECT_YAML)
+        second = "  secondary:\n    adapter: postgres\n    auto: true\n    output: prints\n"
+        (tmp_path / ".dbprint.yaml").write_text(PROJECT_YAML + second)
         monkeypatch.chdir(tmp_path)
 
         for k, v in _credential_env().items():
             monkeypatch.setenv(k, v)
+            monkeypatch.setenv(k.replace("PRIMARY", "SECONDARY"), v)
 
-        recorder = _RecordingRenderer()
+        buf = StringIO()
+        console = Console(file=buf, force_terminal=True, width=120, color_system=None)
         monkeypatch.setattr(
             "dbprint.cli.commands.generate.build_progress_renderer",
-            lambda **kwargs: recorder,
+            lambda **kwargs: LiveProgressRenderer(console),
         )
 
         with patch.dict(
             "dbprint.cli.adapter_registry.ADAPTERS",
-            {"postgres": _MockPostgresAdapter},
+            {"postgres": _WarnsOnConnect},
             clear=True,
         ):
             CliRunner().invoke(main, ["generate"])
 
-        assert recorder.calls.count("flush_warnings") == 1
-        # The flush follows the summary it is a backstop for.
-        summary_index = recorder.calls.index("connection_summary:primary")
-        flush_index = recorder.calls.index("flush_warnings")
+        out = buf.getvalue()
+        first = out.index("held before any table")
 
-        assert summary_index < flush_index
+        assert out.count("held before any table") == 2
+        assert out.index("primary  -  ") < first < out.index("secondary  -  ")
+
+
+class TestSeveralTablesInFlight:
+    """A parallel connection: one footer line per table, a bar that never runs backwards."""
+
+    def _started(self, r: LiveProgressRenderer, *fqns: str) -> None:
+        for fqn in fqns:
+            r.on_event(_event("extract", "start", fqn=fqn))
+
+    def test_each_table_in_flight_has_its_own_footer_line(self) -> None:
+        console = Console(file=StringIO(), force_terminal=True, width=80, height=20)
+
+        with LiveProgressRenderer(console) as r:
+            self._started(r, "s.a", "s.b", "s.c")
+            r.on_event(
+                _event(
+                    "statistics",
+                    "start",
+                    fqn="s.b",
+                    column="x",
+                    column_index=1,
+                    column_total=4,
+                ),
+            )
+            footer = [str(line) for line in r._footer().renderables[1:]]
+
+        assert footer == [
+            "  s.a   extract ddl",
+            "  s.b   statistics  column 1/4 (x)",
+            "  s.c   extract ddl",
+        ]
+
+    def test_the_bar_counts_finished_and_running_tables_whatever_order_they_end_in(self) -> None:
+        console = Console(file=StringIO(), force_terminal=True, width=80, height=20)
+        positions = []
+
+        with LiveProgressRenderer(console) as r:
+            self._started(r, "s.a", "s.b", "s.c")
+            positions.append(_bar(r)[1])
+
+            for fqn in ("s.c", "s.a"):
+                r.on_event(_event("write", "done", fqn=fqn, elapsed_ms=1))
+                positions.append(_bar(r)[1])
+
+            self._started(r, "s.d")
+            positions.append(_bar(r)[1])
+
+        assert positions == [3, 3, 3, 4]
+
+    def test_a_warning_attaches_to_the_table_whose_thread_raised_it(self) -> None:
+        buf = StringIO()
+        console = Console(file=buf, force_terminal=True, width=80, color_system=None)
+
+        with LiveProgressRenderer(console) as r:
+            self._started(r, "s.a", "s.b")
+            token = trace_context.fqn.set("s.b")
+
+            try:
+                r.log_record("compute_null_patterns failed for 's.b': boom")
+            finally:
+                trace_context.fqn.reset(token)
+
+            r.on_event(_event("write", "done", fqn="s.a", elapsed_ms=1))
+            r.on_event(_event("write", "done", fqn="s.b", elapsed_ms=1))
+
+        lines = [line for line in buf.getvalue().splitlines() if line.strip()]
+        note = next(i for i, line in enumerate(lines) if "boom" in line)
+
+        assert lines[note - 1].split()[1] == "b"
+        assert lines[note - 2].split()[1] == "a"
+        assert "for 's.b'" not in lines[note]
+
+
+def _bar(renderer: LiveProgressRenderer) -> tuple[str, int, int]:
+    """The bar line's label and `index/total`, read off the text a terminal shows."""
+
+    match = _BAR_RE.match(renderer._bar_line().plain)
+    assert match is not None, renderer._bar_line().plain
+
+    return match["label"], int(match["index"]), int(match["total"])
+
+
+def _shown_seconds(renderer: LiveProgressRenderer) -> float:
+    shown = _eta(renderer)
+    assert shown is not None
+
+    return shown
+
+
+def _eta(renderer: LiveProgressRenderer) -> float | None:
+    """The bar's shown ETA in seconds, or None where it reads `--:--`."""
+
+    shown = renderer._bar_line().plain.rsplit("ETA ", 1)[1]
+
+    if shown == "--:--":
+        return None
+
+    hours, minutes, seconds = (int(part) for part in shown.split(":"))
+
+    return hours * 3600 + minutes * 60 + seconds

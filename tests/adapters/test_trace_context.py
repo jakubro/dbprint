@@ -39,8 +39,22 @@ class TestLogSuccess:
         with caplog.at_level(logging.DEBUG, logger=_LOG.name):
             trace_context.log_success(_LOG, 0.0, "SELECT %s", ("secret",), None)
 
-        sql_field = next(part for part in caplog.text.split() if part.startswith("sql="))
-        assert "secret" not in sql_field
+        statement = caplog.records[0].getMessage().split("\n", 1)[1]
+        assert "%s" in statement
+        assert "secret" not in statement
+
+    def test_the_statement_keeps_its_own_layout(self, caplog: pytest.LogCaptureFixture) -> None:
+        sql = "\n        SELECT\n          src.a,\n          src.b\n        FROM t src\n        "
+
+        with caplog.at_level(logging.DEBUG, logger=_LOG.name):
+            trace_context.log_success(_LOG, 0.0, sql, None, None)
+
+        assert caplog.records[0].getMessage().split("\n")[1:] == [
+            "    SELECT",
+            "      src.a,",
+            "      src.b",
+            "    FROM t src",
+        ]
 
     @pytest.mark.parametrize("rowcount", [None, -1, [("a", "b")]])
     def test_a_meaningless_rowcount_is_omitted(

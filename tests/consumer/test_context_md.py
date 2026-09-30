@@ -10,6 +10,7 @@ import os
 import re
 from pathlib import Path
 
+import yaml
 from click.testing import CliRunner
 
 from dbprint.cli.main import main
@@ -20,13 +21,21 @@ from tests.fixtures.adversarial import (
     DELIMITER_TABLE,
     DELIMITER_VALUE,
     EMPTY_COLUMNS_TABLE,
+    EXPONENT_FORM,
+    EXTREME_TABLE,
     FUTURE_DATED_COLUMN,
     INCOMPLETE_GRAIN_TABLE,
     LINE_BREAK_VALUE,
     NEVER_DECLARED_KIND,
+    PARTIAL_AS_WHOLE,
     REDACTED_COLUMN,
     REDACTED_PRIMITIVE,
+    SCOPED_COMPLETE_LIST_COLUMN,
+    SCOPED_KEY_COLUMN,
+    SCOPED_LATEST_COLUMN,
     SCOPED_TABLE,
+    SPELLING_COLUMN,
+    SPELLING_VALUES,
     TRUNCATED_FK_COLUMN,
     UNEVALUATED_TABLE,
     AdversarialPrint,
@@ -46,6 +55,12 @@ COVERS = frozenset(
         "catalog_only_table",
         "declared_missing_artifact",
         "delimiter_in_a_value",
+        "value_spelling",
+        "scoped_complete_list",
+        "scoped_candidate_key",
+        "scoped_latest_value",
+        "extreme_number_statistics",
+        "near_boundary_share",
     },
 )
 
@@ -102,7 +117,7 @@ def _cardinality_row(text: str, column: str) -> str:
 def test_scoped_table_states_the_population(adversarial_print: AdversarialPrint) -> None:
     text = _render(adversarial_print, SCOPED_TABLE)
 
-    assert "Scanned: 250 of 1,000 rows (25.0%)" in text
+    assert "Scanned: 250 of 1000 rows (25%)" in text
 
 
 def test_redacted_column_never_leaks_the_literal(adversarial_print: AdversarialPrint) -> None:
@@ -146,7 +161,7 @@ def test_unevaluated_diff_table_is_never_called_unchanged(
 def test_empty_columns_map_states_nothing_was_read(adversarial_print: AdversarialPrint) -> None:
     text = _render(adversarial_print, EMPTY_COLUMNS_TABLE)
 
-    assert "Scanned: 0 of 500 rows (0.0%)" in text
+    assert "Scanned: 0 of 500 rows (0%)" in text
     assert "no columns" not in text.lower()
 
 
@@ -198,7 +213,7 @@ class TestTheQueryPurposeHonoursTheSameRegister:
     ) -> None:
         text = _render_query(adversarial_print, SCOPED_TABLE)
 
-        assert "Scanned: 250 of 1,000 rows (25.0%)" in text
+        assert "Scanned: 250 of 1000 rows (25%)" in text
         assert "the whole domain over the rows scanned" in text
         assert "1.0 - the list is the whole domain |" not in text
 
@@ -219,7 +234,7 @@ class TestTheQueryPurposeHonoursTheSameRegister:
 
         assert "rank-00 (1)" in row
         assert "rank-05" not in row
-        assert "0.0667 - a sample of the most frequent values" in row
+        assert "6.7% - a sample of the most frequent values" in row
 
 
 def test_a_delimiter_in_a_value_does_not_split_a_row(adversarial_print: AdversarialPrint) -> None:
@@ -238,3 +253,78 @@ def _cells(row: str) -> list[str]:
     """The row's cells, splitting on delimiters a reader would act on, not escaped ones."""
 
     return [c for c in re.split(r"(?<!\\)\|", row.strip()) if c.strip()]
+
+
+def test_scoped_complete_list_carries_the_clause(adversarial_print: AdversarialPrint) -> None:
+    row = _cardinality_row(_render(adversarial_print, SCOPED_TABLE), SCOPED_COMPLETE_LIST_COLUMN)
+
+    assert "2 distinct over the rows scanned:" in row
+
+
+def test_scoped_candidate_key_carries_the_clause(adversarial_print: AdversarialPrint) -> None:
+    row = _cardinality_row(_render(adversarial_print, SCOPED_TABLE), SCOPED_KEY_COLUMN)
+
+    assert "candidate key over the rows scanned" in row
+
+
+def test_scoped_latest_value_carries_the_clause(adversarial_print: AdversarialPrint) -> None:
+    row = _cardinality_row(_render(adversarial_print, SCOPED_TABLE), SCOPED_LATEST_COLUMN)
+
+    assert "freshness dormant over the rows scanned" in row
+
+
+def test_an_unscoped_table_carries_no_clause(adversarial_print: AdversarialPrint) -> None:
+    assert "over the rows scanned" not in _render(adversarial_print, "public.cultivar")
+
+
+def test_a_value_is_spelled_so_it_reads_back_as_itself(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    """A stored 'NULL' or '' printed raw reads as a null or as nothing; a long one folds."""
+
+    row = _cardinality_row(_render(adversarial_print, DELIMITER_TABLE), SPELLING_COLUMN)
+    listed = row.split("3 distinct: ", 1)[1].split(", uniform", 1)[0]
+
+    assert [yaml.safe_load(v) for v in listed.split(" / ")] == list(SPELLING_VALUES)
+
+
+def test_a_value_is_spelled_the_same_way_under_purpose_query(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    row = _cardinality_row(_render_query(adversarial_print, DELIMITER_TABLE), SPELLING_COLUMN)
+    listed = _cells(row)[1].strip().split(" / ")
+
+    assert [yaml.safe_load(re.sub(r" \(\d+\)$", "", v)) for v in listed] == list(SPELLING_VALUES)
+
+
+def test_an_extreme_statistic_is_spelled_as_the_artifact_spells_it(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    text = _render(adversarial_print, EXTREME_TABLE) + _render_query(
+        adversarial_print,
+        EXTREME_TABLE,
+    )
+
+    assert EXPONENT_FORM.findall(text) == []
+    assert "p50=18446744073709548000.0" in text
+    assert "range 0.000000001..0.000000097, p50=0.000000049, mean=0.00000005" in text
+
+
+def test_a_share_near_a_boundary_is_not_rounded_onto_it(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    text = _render(adversarial_print, EXTREME_TABLE) + _render_query(
+        adversarial_print,
+        EXTREME_TABLE,
+    )
+
+    partial = [line for line in text.splitlines() if line.startswith(("| status |", "| sparse |"))]
+
+    assert [PARTIAL_AS_WHOLE.findall(line) for line in partial if "whole domain" not in line] == [
+        [],
+        [],
+        [],
+    ]
+    assert "99.96% null" in text
+    assert "99.96% of scanned rows" in text
+    assert "bad (0.02%)" in text

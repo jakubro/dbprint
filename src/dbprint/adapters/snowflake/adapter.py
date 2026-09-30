@@ -7,7 +7,8 @@ connection satisfying the same DB-API surface.
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Literal
+import copy
+from typing import Any, ClassVar, Literal, Self
 
 from . import ddl as ddl_module
 from . import introspect as introspect_module
@@ -15,20 +16,21 @@ from . import looks_like as looks_like_module
 from . import normalization as normalization_module
 from . import sketch as sketch_module
 from . import stats as stats_module
-from .connection import Connection, ConnectionParams, CursorFactory, exec_query
-from .identity import Identity
+from .connection import DIALECT, Connection, ConnectionParams, CursorFactory, exec_query
 from ..base import (
     Adapter,
     BaseStats,
     ColumnMeta,
     ColumnProgress,
-    ColumnStats,
     CommentsMeta,
     ForeignKeyMeta,
     IndexMeta,
     NullPatterns,
+    PhaseA,
+    PhaseB,
     PhysicalLayout,
     SketchKind,
+    SkippedNamespace,
     StatisticsConfig,
     TableCounts,
     TableMeta,
@@ -36,10 +38,8 @@ from ..base import (
     UniqueKeyMeta,
     row_count_or_none,
 )
-
-
-class UnknownTable(LookupError):
-    """Raised when a table's physical identifiers were never captured."""
+from ..errors import QueryFailed
+from ..identifiers import Identity, IdentityRegistry
 
 
 class SnowflakeAdapter(Adapter):
@@ -50,19 +50,16 @@ class SnowflakeAdapter(Adapter):
     as `list_tables`/`introspect_columns` observe it: `list_tables` must run first.
     """
 
-    REQUIRED_KEYS: ClassVar[tuple[str, ...]] = (
-        "account",
-        "user",
-        "warehouse",
-        "database",
-        "role",
-    )
+    KNOWN_TYPES: ClassVar[tuple[str, ...]] = stats_module.KNOWN_TYPES
+    REQUIRED_KEYS: ClassVar[tuple[str, ...]] = ("account", "user", "warehouse", "role")
     OPTIONAL_KEYS: ClassVar[tuple[str, ...]] = (
+        "database",
         "password",
         "private_key_file",
         "private_key_file_pwd",
         "schema",
     )
+    PATH_KEYS: ClassVar[tuple[str, ...]] = ("private_key_file",)
     # Block sampling's seed guarantee does not cover an unmaterialized re-evaluation, so a
     # `sample` scope with no copy must be refused rather than measured over drifting rows.
     SAMPLE_FALLBACK_COHERENT: ClassVar[bool] = False
@@ -71,11 +68,19 @@ class SnowflakeAdapter(Adapter):
         self,
         credentials: dict[str, str],
         cursor_factory: CursorFactory | None = None,
+        *,
+        statement_timeout: int | None = None,
     ) -> None:
-        self._params = ConnectionParams.from_credentials(credentials)
+        self._params = ConnectionParams.from_credentials(
+            credentials,
+            statement_timeout=statement_timeout,
+        )
         self._connection = Connection(self._params, cursor_factory)
-        self._physical_tables: dict[str, tuple[str, str, str]] = {}
-        self._physical_columns: dict[str, dict[str, str]] = {}
+        self._identities = IdentityRegistry(DIALECT)
+        self._skipped: tuple[SkippedNamespace, ...] = ()
+        self._selected_databases: tuple[str, ...] = ()
+        self._unread_dependencies: tuple[SkippedNamespace, ...] = ()
+        self._database_names: tuple[str, ...] | None = None
 
     def connect(self) -> None:
         self._connection.open()
@@ -83,19 +88,34 @@ class SnowflakeAdapter(Adapter):
     def close(self) -> None:
         self._connection.close()
 
-    def list_tables(self, include: list[str], exclude: list[str]) -> list[TableMeta]:
-        tables, physical = introspect_module.list_tables(self._cursor, include, exclude)
-        self._physical_tables = physical
-        self._physical_columns = {}
+    def new_session(self) -> Self:
+        session = copy.copy(self)
+        session._connection = self._connection.sibling()
 
-        return tables
+        return session
+
+    def list_tables(self, include: list[str], exclude: list[str]) -> list[TableMeta]:
+        selected, skipped = introspect_module.list_tables(
+            self._cursor,
+            self._databases(),
+            include,
+            exclude,
+        )
+        self._identities.register(selected)
+        self._skipped = skipped
+        self._selected_databases = tuple(sorted({physical[0] for _, physical in selected}))
+
+        return [meta for meta, _ in selected]
+
+    def skipped_namespaces(self) -> tuple[SkippedNamespace, ...]:
+        return self._skipped
 
     def extract_ddl(self, fqn: str) -> str:
         return ddl_module.extract_ddl(self._cursor, self._identity(fqn))
 
     def introspect_columns(self, fqn: str) -> list[ColumnMeta]:
-        metas, physical = introspect_module.columns(self._cursor, self._identity(fqn))
-        self._physical_columns[fqn] = physical
+        metas = introspect_module.columns(self._cursor, self._identity(fqn))
+        self._identities.attach(fqn, metas)
 
         return metas
 
@@ -115,7 +135,21 @@ class SnowflakeAdapter(Adapter):
         return introspect_module.physical_layout(self._cursor, self._identity(fqn))
 
     def introspect_view_dependencies(self) -> dict[str, tuple[str, ...]] | None:
-        return introspect_module.view_dependencies(self._cursor, self._params.database)
+        out: dict[str, tuple[str, ...]] = {}
+        unread: list[SkippedNamespace] = []
+
+        for database in self._selected_databases:
+            try:
+                out.update(introspect_module.view_dependencies(self._cursor, (database,)))
+            except QueryFailed as exc:
+                unread.append(SkippedNamespace(name=database, cause=str(exc)))
+
+        self._unread_dependencies = tuple(unread)
+
+        return out
+
+    def unread_dependency_namespaces(self) -> tuple[SkippedNamespace, ...]:
+        return self._unread_dependencies
 
     def extract_comments(self, fqn: str) -> CommentsMeta:
         return introspect_module.comments(self._cursor, self._identity(fqn))
@@ -131,7 +165,7 @@ class SnowflakeAdapter(Adapter):
         columns: list[ColumnMeta],
         config: StatisticsConfig,
         scope: TableScope | None = None,
-    ) -> tuple[TableCounts, dict[str, BaseStats]]:
+    ) -> tuple[TableCounts, PhaseA]:
         del config
 
         return stats_module.compute_base(self._cursor, self._identity(fqn), columns, scope)
@@ -148,7 +182,7 @@ class SnowflakeAdapter(Adapter):
         suppress_values: frozenset[str] = frozenset(),
         on_column: ColumnProgress | None = None,
         scope: TableScope | None = None,
-    ) -> dict[str, ColumnStats]:
+    ) -> PhaseB:
         return stats_module.compute_columns(
             self._cursor,
             self._identity(fqn),
@@ -267,6 +301,7 @@ class SnowflakeAdapter(Adapter):
         column: str,
         n: int,
         scope: TableScope | None = None,
+        sql_type: str | None = None,
     ) -> list[Any]:
         return looks_like_module.sample_distinct(
             self._cursor,
@@ -274,6 +309,7 @@ class SnowflakeAdapter(Adapter):
             column,
             n,
             scope,
+            sql_type,
         )
 
     def compute_key_sketch(
@@ -317,22 +353,31 @@ class SnowflakeAdapter(Adapter):
 
         return [tuple(row) for row in rows]
 
-    def _identity(self, fqn: str) -> Identity:
-        """Physical identity for a listed table.
-
-        Raises `UnknownTable` rather than falling back to the lowercased path, which would
-        filter the catalog for a name that does not exist and report the table empty.
+    def _databases(self) -> tuple[str, ...]:
+        """The databases read, resolved once; a configured name takes the catalog's own spelling,
+        since it is bound and quoted from here on where the connector used to fold it.
         """
 
-        try:
-            parts = self._physical_tables[fqn]
-        except KeyError:
-            raise UnknownTable(
-                f"physical identifiers for {fqn!r} are unknown; "
-                "call list_tables() before per-table extraction",
-            ) from None
+        if self._database_names is None:
+            configured = self._params.database
 
-        return Identity(parts=parts, columns=self._physical_columns.get(fqn, {}))
+            if configured is None:
+                self._database_names = introspect_module.list_databases(self._cursor)
+            else:
+                matches = [
+                    name
+                    for name in introspect_module.list_databases(self._cursor, like=configured)
+                    if name.upper() == configured.upper()
+                ]
+                exact = [name for name in matches if name == configured]
+                self._database_names = (
+                    (exact or matches)[0] if len(exact or matches) == 1 else configured,
+                )
+
+        return self._database_names
+
+    def _identity(self, fqn: str) -> Identity:
+        return self._identities[fqn]
 
     @property
     def _cursor(self) -> Any:

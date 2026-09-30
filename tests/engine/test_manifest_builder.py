@@ -1,15 +1,15 @@
 """Manifest assembly and the round-trip that carries entries between runs (SPEC 2.5).
 
-An optional key has to survive `build` -> `entry_from_payload` in both directions - present
-stays present, absent stays absent - or a run that skips a table rewrites its entry.
+An optional key survives `build` -> `carried_entry` both ways, or a skipped table rewrites its entry.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from dbprint.engine.carried import CarriedTable, CommittedTable, carried_entry
 from dbprint.engine.diff import DiffSelectors
-from dbprint.engine.manifest_builder import ManifestTableEntry, build, entry_from_payload
+from dbprint.engine.manifest_builder import ManifestTableEntry, build
 
 
 DEFAULT_STATISTICS_PARAMS: dict[str, Any] = {
@@ -19,7 +19,19 @@ DEFAULT_STATISTICS_PARAMS: dict[str, Any] = {
     "looks_like_sample_size": 1000,
     "percentiles": [1, 25, 50, 75, 99],
 }
+DEFAULT_PROFILING_PARAMS: dict[str, Any] = {
+    "infer_relationships": True,
+    "sketch_all_columns": False,
+    "compute_timeline": True,
+    "materialize_sample": True,
+}
 NO_SELECTORS = DiffSelectors(include=("*",), exclude=())
+
+
+def _carried(fqn: str, payload: dict[str, Any]) -> ManifestTableEntry:
+    carried = CarriedTable(table=CommittedTable(fqn=fqn, entry=payload), reason="out_of_scope")
+
+    return carried_entry(carried, resolved_max_age_days=None)
 
 
 def _entry(**overrides: Any) -> ManifestTableEntry:
@@ -65,6 +77,7 @@ def _manifest(entries: list[ManifestTableEntry], **overrides: Any) -> dict[str, 
         "entries": entries,
         "generated_at": "2026-08-01T00:00:00Z",
         "statistics_params": DEFAULT_STATISTICS_PARAMS,
+        "profiling_params": DEFAULT_PROFILING_PARAMS,
         "selectors": NO_SELECTORS,
         "redaction_rules_configured": 0,
         "default_collation": "en_US.UTF-8",
@@ -88,7 +101,7 @@ class TestFreshnessThreshold:
         assert "max_age_days" not in _payload(_matview_entry())
 
     def test_the_threshold_survives_a_carry_forward(self) -> None:
-        carried = entry_from_payload(
+        carried = _carried(
             "seedbank.germination_by_taxon_mv",
             _payload(_matview_entry(max_age_days=30)),
         )
@@ -100,7 +113,7 @@ class TestFreshnessThreshold:
         """The older-manifest path: absent must not become a key on the next run."""
 
         payload = _payload(_matview_entry())
-        carried = entry_from_payload("seedbank.germination_by_taxon_mv", payload)
+        carried = _carried("seedbank.germination_by_taxon_mv", payload)
 
         assert carried.max_age_days is None
         assert "max_age_days" not in _payload(carried)
@@ -116,7 +129,7 @@ class TestAnnotationsPresence:
         assert "statistics_annotations" not in _payload(_entry())["artifacts"]
 
     def test_presence_survives_a_carry_forward(self) -> None:
-        carried = entry_from_payload(
+        carried = _carried(
             "seedbank.accession",
             _payload(_entry(has_statistics_annotations=True)),
         )
@@ -135,7 +148,7 @@ class TestRelationshipAnnotationsPresence:
         assert "relationships_annotations" not in _payload(_entry())["artifacts"]
 
     def test_presence_survives_a_carry_forward(self) -> None:
-        carried = entry_from_payload(
+        carried = _carried(
             "seedbank.accession",
             _payload(_entry(has_relationships_annotations=True)),
         )
@@ -192,7 +205,7 @@ class TestProvenance:
 
     def test_a_tables_override_survives_a_carry_forward(self) -> None:
         override = {"top_n_values": 50}
-        carried = entry_from_payload(
+        carried = _carried(
             "seedbank.accession",
             _payload(_entry(statistics_params=override)),
         )
@@ -201,7 +214,7 @@ class TestProvenance:
         assert _payload(carried)["statistics_params"] == override
 
     def test_an_entry_from_a_producer_that_recorded_none_stays_that_way(self) -> None:
-        carried = entry_from_payload("seedbank.accession", _payload(_entry()))
+        carried = _carried("seedbank.accession", _payload(_entry()))
 
         assert carried.statistics_params is None
         assert "statistics_params" not in _payload(carried)

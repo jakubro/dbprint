@@ -99,7 +99,7 @@ _VOCABULARY = (
     (
         "boolean",
         (
-            "Carries a full `values` list - the true/false split is exact over what was "
+            "Carries a full `values` list — the true/false split is exact over what was "
             "scanned (see scope, below), never a frequency sample."
         ),
     ),
@@ -107,16 +107,16 @@ _VOCABULARY = (
         "json",
         (
             "Carries a distinct-value count (`cardinality`) but no `values` list and no "
-            "`distribution` - the shape is unmeasured, only the count is."
+            "`distribution` — the shape is unmeasured, only the count is."
         ),
     ),
     (
         "foreign_key_candidate",
         (
-            "Carries a foreign key on this column, the referencing side - not the target. "
-            "`relationships.yaml`'s own entry says `declared` (from the catalog), `inferred` "
+            "Carries a foreign key on this column, the referencing side — not the target. "
+            "The edge's `detection` in `relationships.yaml` is `declared` (from the catalog), `inferred` "
             "(a naming guess a database will not enforce), or `measured` (proposed from value "
-            "containment between two columns' sketches) - a measured edge is a stronger claim "
+            "containment between two columns' sketches) — a measured edge is a stronger claim "
             "about the data at the instant of the read, never a stronger claim about the "
             "schema than an inferred one (SPEC 2.3); its value list follows the same "
             "truncation rule as `categorical`/`text` below."
@@ -125,44 +125,45 @@ _VOCABULARY = (
     (
         "categorical",
         (
-            "A closed or sampled domain. `values_coverage == 1.0` licenses an exact-match "
-            "predicate over what was scanned (see scope, below) - anything less is a "
+            "A closed or sampled domain. `values_coverage == 1.0` means an exact-match "
+            "predicate is complete over what was scanned (see scope, below) — anything less is a "
             "frequent-value sample, not the whole set (SPEC 2.2.3)."
         ),
     ),
     (
         "temporal",
         (
-            "Percentiles here are always an actual observed value, never interpolated - "
-            "every engine takes them by rank. `freshness.max_age_days` clamps at `0` for a "
+            "Percentiles here are always a value the column holds, never interpolated — every "
+            "engine takes them at the nearest rank, or near it where its construct is "
+            "approximate (SPEC 2.2.4). `freshness.max_age_days` clamps at `0` for a "
             "future-dated maximum (reads `live`, not negative) and is always `0` for a "
-            "date-less `TIME` type - `range.max` carries the true value regardless "
+            "date-less `TIME` type — `range.max` carries the true value regardless "
             "(SPEC 2.2.4)."
         ),
     ),
     (
         "numeric",
         (
-            "Percentiles may be interpolated (Postgres, Snowflake) - a `p50` is not guaranteed "
-            "to be a value the column actually holds. MySQL always returns an observed value "
-            "by rank."
+            "Percentiles interpolate on every engine but MySQL, which takes them by rank, and "
+            "BigQuery, which approximates them — a `p50` is not guaranteed to be a value the "
+            "column actually holds."
         ),
     ),
     (
         "text",
         (
             "The value list may be exhaustive or a frequent-value sample, the same rule as "
-            "`categorical` - check `values_coverage` before treating an absent value as absent "
+            "`categorical` — check `values_coverage` before treating an absent value as absent "
             "from the column. A column flagged `looks_like: prose` carries none of the three "
-            "at all - the scan they need is one a producer skips on purpose."
+            "at all — the producer does not read the values of a prose column."
         ),
     ),
     (
         "unsupported",
         (
             "Only `sql_type`, `nullable`, `null_count`, `null_rate` and `classification` are "
-            "measured (SPEC 3.3) - plus `rows_scanned` when the file's `scope` block is "
-            "present. No cardinality, no values - the producer declined to profile this type "
+            "measured (SPEC 3.3) — plus `rows_scanned` when the file's `scope` block is "
+            "present. No cardinality, no values — the producer declined to profile this type "
             "at all."
         ),
     ),
@@ -250,118 +251,141 @@ def _check_vocabulary_anchors(matrix: dict[str, dict[str, str]]) -> None:
         "percentile_disc semantics",
         "MySQL's rank-based percentile claim moved",
     )
+    _require_contains(
+        SPEC_PATH,
+        "**A temporal percentile is a value the column holds.**",
+        "SPEC 2.2.4's temporal-percentile-is-held sentence moved",
+    )
+
+    for adapter, construct in (
+        ("duckdb", "PERCENTILE_CONT("),
+        ("redshift", "PERCENTILE_CONT("),
+        ("clickhouse", "quantileExactInclusive("),
+        ("databricks", "PERCENTILE({cn}"),
+        ("bigquery", "APPROX_QUANTILES({cn}"),
+    ):
+        _require_contains(
+            REPO_ROOT / f"src/dbprint/adapters/{adapter}/stats.py",
+            construct,
+            f"{adapter}'s numeric percentile construct moved",
+        )
 
 
 _TRAPS = (
     (
+        "**A table missing from `tables` may still exist.** The manifest's `failed_tables` "
+        "names every table the last run attempted and could not profile; one named there and "
+        "absent from `tables` exists and is unprofiled, and one named there and present is "
+        "an earlier run's print, dated by its own `profiled_at` (SPEC 2.5)."
+    ),
+    (
         "**A `p50` is not always a value the column holds.** Numeric percentiles interpolate on "
-        "Postgres and Snowflake (`PERCENTILE_CONT`); temporal percentiles never interpolate, on "
-        "any engine, because Snowflake cannot evaluate a continuous percentile against a "
-        "timestamp ordering. MySQL takes every percentile by rank."
+        "every engine but MySQL and BigQuery; temporal percentiles never interpolate, on any "
+        "engine (SPEC 2.2.4). MySQL takes every percentile by rank."
     ),
     (
         "**An inferred edge can resolve on a name coincidence, and a measured edge is not a "
         "stronger schema claim than either.** `refers_to`/`referenced_by` entries with "
         "`detection: inferred` are a naming match, not a verified relationship; a `measured` "
         "entry is stronger evidence about the data at `profiled_at`, never a stronger claim "
-        "about the schema - a consumer MAY use either as a join candidate, never as "
+        "about the schema — a consumer MAY use either as a join candidate, never as "
         "cardinality-guaranteed, and SHOULD prefer a `declared` edge over both where one "
-        "exists (SPEC 2.3) - `relationships.annotations.yaml` records where a human has "
+        "exists (SPEC 2.3) — `relationships.annotations.yaml` records where a human has "
         "since rejected an inferred one."
     ),
     (
         "**`cardinality` is collation-relative.** Two prints of one logical schema, taken "
         "through different engines or different column-level collations, can legitimately "
-        "disagree on a text column's distinct count for this reason alone - it is not drift."
+        "disagree on a text column's distinct count for this reason alone — it is not drift."
     ),
     (
         "**`approximate` can mean two different measurements.** "
         "`cardinality_method`/`row_count_method: approximate` covers both a live sketch this "
-        "run computed and a catalog estimate of unknown staleness - the field alone does not "
-        "say which (SPEC 2.2.2)."
+        "run computed and a catalog estimate of unknown staleness — the field does not "
+        "distinguish the two (SPEC 2.2.2)."
     ),
     (
         "**A measured `grain`, `dependencies` entry, or `null_patterns` combination is an "
         "observation, never a constraint.** Each states what held over the rows read at "
-        "`profiled_at`, on the same footing as an inferred relationship - not a rule the "
+        "`profiled_at`, on the same footing as an inferred relationship — not a rule the "
         "database enforces (SPEC 2.2.10, 2.2.12, 2.2.13)."
     ),
     (
-        "**`inferred.sensitivity`'s absence never means safe to publish.** Nothing was "
-        "detected - that is not a completeness claim, and this specification does not make "
-        "one for the field either (SPEC 4.4.2)."
+        "**`inferred.sensitivity`'s absence never means safe to publish.** It means nothing was "
+        "detected; the detector does not find every sensitive column, and this specification "
+        "does not require it to (SPEC 4.4.2)."
     ),
     (
-        "**`description.md` loses to the measured layer.** On any question `statistics.yaml` "
-        "answers, prefer the statistic - the prose may describe a schema a later run already "
-        "changed underneath it (SPEC 2.4)."
+        "**Where `description.md` and `statistics.yaml` disagree, use `statistics.yaml`.** "
+        "The description is written by hand and may describe the table as it was before a "
+        "later run recorded a schema change (SPEC 2.4)."
     ),
     (
         "**A `catalog_only` object was never queried, not measured as empty.** Its file "
         "carries the schema facts a catalog already knew and no `row_count` and no per-column "
-        "measurement at all (SPEC 2.2.15). Read a statistic missing there as unasked - never "
-        "as zero, and never as a value withheld."
+        "measurement at all (SPEC 2.2.15). A statistic missing there was never requested — "
+        "read it as neither zero nor a value withheld."
     ),
     (
-        "**A grain search that gave up ruled nothing out.** `grain.search.exhausted: false` "
-        "means a per-table cap cut the search short before it could test every candidate "
-        "(SPEC 2.2.12) - the absence of a measured key is a gap in the search, not evidence "
+        "**`grain.search.exhausted: false` does not rule out a key.** It means a per-table "
+        "cap cut the search short before it could test every candidate "
+        "(SPEC 2.2.12) — the absence of a measured key is a gap in the search, not evidence "
         "that the table has none beyond those listed."
     ),
     (
         "**A declared artifact with no file on disk is not the same as one never declared.** "
-        "A manifest entry's `artifacts` map names every kind this table promised; a kind "
-        "listed there whose file is absent is a broken promise the print SHOULD be treated "
-        "as inconsistent for, not an absence licensed by the classification or object type "
+        "A manifest entry's `artifacts` map names every artifact kind this table declares; a "
+        "kind listed there whose file is absent makes the print inconsistent, and it SHOULD "
+        "be treated as such — the classification or object type does not allow that absence "
         "(SPEC 2.5, 7.3)."
     ),
     (
         "**`values_coverage_method: bounded` means the coverage figure is a clamp, not a "
         "measurement.** The value list and the population it is measured against were not "
-        "read at the same instant, so an exhaustive-looking `values_coverage: 1.0` under "
-        "`bounded` is not the same claim as one with no hedge at all - `measured` states the "
-        "two agreed, `bounded` states a producer caught them disagreeing (SPEC 2.2.4)."
+        "read at the same instant, so a `values_coverage: 1.0` under `bounded` does not state "
+        "that the list is exhaustive — `measured` means the two agreed, `bounded` means the "
+        "producer found them disagreeing and clamped the figure (SPEC 2.2.4)."
     ),
     (
         "**`numeric`/`temporal` carry `values` but never `values_coverage`; `frequencies` "
         "is not an omission.** The list is the same top-N fetch `distribution` is computed "
         "from, but it is never exhaustive on these two classifications, so a validator has "
-        "no exhaustive list to recompute `distribution` from - `frequencies`'s four counts "
-        "- `top`, `bottom`, `listed`, `total` - are what it checks instead (SPEC 2.2.4). "
+        "no exhaustive list to recompute `distribution` from — `frequencies`'s four counts "
+        "— `top`, `bottom`, `listed`, `total` — are what it checks instead (SPEC 2.2.4). "
         "None of the four is a share; recompute any ratio against `non_null`/`cardinality` "
         "before trusting a rounded one."
     ),
     (
         "**`unrepresentable` changes how a bound must be read, not just which fields are "
         "absent.** A temporal `min`/`max`/percentile outside the years 0001-9999 (proleptic "
-        "Gregorian) is still emitted as text - the database's own rendering - but named here "
+        "Gregorian) is still emitted as text — the database's own rendering — but named here "
         "so a consumer feeding it to a typed parser degrades deliberately instead of "
-        "crashing (SPEC 2.2.4). The marker says nothing about whether the value is correct."
+        "crashing (SPEC 2.2.4). The marker does not state whether the value is correct."
     ),
     (
         "**`depends_on: []` and the key omitted mean different things.** A view or "
-        "matview's `[]` states the catalog answered and it reads no other object in the "
-        "print; the key omitted entirely states the producer could not ask - no grant, no "
-        "such catalog table on this engine version, or the read failed for any other "
-        "reason (SPEC 2.2.17). Collapsing the two into one `[]` would spend that meaning "
-        "on every engine to cover one engine's own gap."
+        "matview's `[]` means the catalog was read and the object reads no other object in "
+        "the print; the key omitted entirely means the dependency read did not happen — no "
+        "grant, no such catalog table on this engine version, or the read failed for any other "
+        "reason (SPEC 2.2.17). A producer never writes `[]` for the second case, so `[]` keeps "
+        "one meaning on every engine."
     ),
     (
-        "**A field named in `unmeasured` was attempted and lost, not forbidden.** Every other "
-        "absence a print carries is structural - the classification forbids the field, a "
-        "redaction withheld it, the type has no day to truncate to - and SPEC 7 reads it that "
-        "way. A name in a column's `unmeasured` list (SPEC 2.2.4), or a block in the file's "
-        "own (SPEC 2.2.1), states that this run issued the read and did not get an answer: "
+        "**A field named in `unmeasured` was not measured this run; nothing forbids it.** "
+        "Every other absence a print carries is structural — the classification forbids the "
+        "field, a redaction withheld it, the type has no day to truncate to — and SPEC 7 lists "
+        "each. A name in a column's `unmeasured` list (SPEC 2.2.4), or a block in the file's "
+        "own (SPEC 2.2.1), states that this run issued the read and the read failed: "
         "treat that field as unknown, never as zero, none, or a property of the data. An "
-        "artifact with no marker anywhere is not thereby complete - a producer that dropped a "
+        "artifact with no marker anywhere is not thereby complete — a producer that dropped a "
         "measurement silently looks identical."
     ),
     (
         "**A timeline gap is not a zero.** `timeline.buckets` lists only a day/week/month "
-        "span containing at least one non-null anchor value - a span with none is absent "
+        "span containing at least one non-null anchor value — a span with none is absent "
         "from the list, never published as a zero-count entry, so two consecutive buckets "
-        "whose `start` values are not adjacent at `unit`'s own width mark a gap where no "
-        "row fell, not a measured absence of activity (SPEC 2.2.16)."
+        "whose `start` values are not adjacent at `unit`'s own width mark a span with no "
+        "rows, not a measured zero (SPEC 2.2.16)."
     ),
 )
 
@@ -399,7 +423,7 @@ def _check_trap_anchors() -> None:
     )
     _require_contains(
         SPEC_PATH,
-        "the measured layer wins",
+        "use the measured statistic",
         "SPEC's description.md precedence sentence moved",
     )
     _require_contains(
@@ -436,8 +460,8 @@ def _check_trap_anchors() -> None:
     )
     _require_contains(
         SPEC_PATH,
-        "A producer MUST NOT collapse the two: emitting `[]` for an object the catalog "
-        "never answered for",
+        "A producer MUST NOT collapse the two: emitting `[]` for an object whose catalog "
+        "was never read",
         "SPEC's depends_on two-encoding sentence moved",
     )
     _require_contains(
@@ -448,7 +472,7 @@ def _check_trap_anchors() -> None:
     )
     _require_contains(
         SPEC_PATH,
-        "this marker is what makes the true one expressible",
+        "this marker lets a producer state the true one",
         "SPEC's unmeasured-marker sentence moved",
     )
     _require_contains(
@@ -468,110 +492,138 @@ def _check_trap_anchors() -> None:
     )
 
 
-_READING_STRATEGY = """\
-## Reading strategy
+_READING_STRATEGY_PARAGRAPHS = (
+    "## Reading strategy",
+    (
+        "Start at `manifest.yaml` when reading a print straight off disk — it lists every table "
+        "and where its artifacts live, before opening any of them. An MCP client calls the "
+        "server's tools instead; the server's instructions name the tool for each question. For a broad "
+        'question ("what does this warehouse track"), read manifests and DDL first; statistics '
+        "are large and most of a broad question is answered by table and column names alone. For a "
+        "narrow question about one table, `ddl.sql` and `statistics.yaml` together usually answer "
+        "it without a live query."
+    ),
+    (
+        "Stop reading and query the database when a question needs a value the print does not "
+        "publish — an exact row, a join across a predicate no column here encodes, anything newer "
+        "than `profiled_at`. The print is a snapshot; it does not replace the database. Before "
+        "reading a missing field as zero, none, or unmeasured, check what its absence means: "
+        "SPEC 7 names what each absence can mean."
+    ),
+    (
+        "A file carrying a top-level `scope` block did not read the whole table — a row predicate "
+        "narrowed it, or a sample bounded the cost. Every count in it except `row_count` is over "
+        "`rows_scanned`, not the table (SPEC 2.2.8) — a `boolean`'s exact split and a "
+        "`values_coverage: 1.0` are both exhaustive over that narrower set only, never wider than "
+        "what was actually read, and `sum` is not rescalable to table grain by assuming the sample "
+        "is representative: read it as a partial total, never the column's true sum."
+    ),
+    (
+        "A `physical_layout` block declares a clustering, partitioning or sort key: `mechanism` "
+        "(`cluster`, `partition` or `sort`) names the mechanism, not a judgment; `keys` is "
+        "ordered, its first component pruning far more than its last; each key's `column` is what "
+        "a predicate matches against, `expression` what was actually declared. Absence means the "
+        "table declares none of the three, never that the block was not read — unless the file's own "
+        "`unmeasured` list names the block (SPEC 2.2.11, 2.2.1)."
+    ),
+    (
+        "A column carrying a `redacted` marker (`mask`, `drop`, `hash`) publishes only its "
+        "counts — `cardinality`, `null_rate`, `values_coverage`, `distribution` and each "
+        "value's count stay true, and every statistic computed from what the values are (`mean`, "
+        "`sum`, `length`, the degenerate-value counts) is withheld (SPEC 2.2.9). Do not order, "
+        "compare, or do arithmetic on a bound from one: a masked maximum still looks like a "
+        "maximum, and a hashed bound sorts by digest, not value. A redacted `temporal` column's "
+        "`max_age_days` and `range.span_days` are floored to the nearest 90 days, under every "
+        "primitive including `drop`."
+    ),
+    (
+        "A table with no `description.md` has no human-authored context — grain, units and "
+        "exclusions are then whatever the DDL and statistics alone can support. Do not infer a "
+        "business rule the artifact does not state."
+    ),
+)
+_READING_STRATEGY = "\n\n".join(_READING_STRATEGY_PARAGRAPHS) + "\n"
 
-Start at `manifest.yaml` when reading a print straight off disk - it lists every table
-and where its artifacts live, before opening any of them. An MCP client starts from
-`search_columns` instead; the server names it as the entry point on connect. For a
-broad question ("what does this warehouse track"), read manifests and DDL first;
-statistics are large and most of a broad question is answered by table and column
-names alone. For a narrow question about one table, `ddl.sql` and `statistics.yaml`
-together usually answer it without a live query.
+_QUERY_WRITING_PARAGRAPHS = (
+    "## Writing a query against a printed table",
+    (
+        "For each table the query touches, read `ddl.sql`; the `refers_to` and `referenced_by` "
+        "edges in `relationships.yaml`, which are the join paths — each marked `declared`, "
+        "`inferred` or `measured` (SPEC 2.3): an inferred edge is a guess from a column name, a "
+        "measured one a value containment seen at the read, neither a constraint, so prefer a "
+        "declared edge where one exists; each column's `values` with its counts and `values_coverage`; "
+        "and the column notes in `statistics.annotations.yaml`. Leave the rest of "
+        "`statistics.yaml` — counts, ratios, percentiles, distributions — unread: they describe "
+        "the data, not what a predicate needs."
+    ),
+    (
+        "Write a literal in a listed value's exact spelling. A list at `values_coverage` `1.0` is "
+        "the whole column — over the rows scanned where the file carries `scope`; below it, or on "
+        "a `numeric`/`temporal` column whose `frequencies.listed` is short of `cardinality`, a "
+        "phrase absent from the list is not evidence it is absent from the column. An entry "
+        "carrying `spelling_of` is another spelling of the value it names (SPEC 2.2.4) — one "
+        "category stored several ways, so a predicate needs every spelling in the group."
+    ),
+    (
+        "Every number in a print is written positionally, never in exponent form (SPEC 2.2.6), so "
+        "paste it into SQL as it stands. A `null_rate` or coverage below `1.0` means some rows "
+        "are not covered, however close it is: a column that is 99.96% null still holds values."
+    ),
+    (
+        "With dbprint installed, `dbprint context <table> --purpose query` renders exactly this "
+        "selection off the print, join paths included, with no server running. Served over MCP, "
+        "`get_table_context` with `purpose: query` is the same selection, and `resolve_value` "
+        "returns how a phrase is spelled in one column; the server's instructions say when to "
+        "call it."
+    ),
+)
+_QUERY_WRITING = "\n\n".join(_QUERY_WRITING_PARAGRAPHS) + "\n"
 
-Stop reading and query the database when a question needs a value the print does not
-publish - an exact row, a join across a predicate no column here encodes, anything
-newer than `profiled_at`. The print is a snapshot; it does not replace the database. A
-missing field is a different question first - SPEC 7 names what each absence can mean
-before you read it as zero, none, or unmeasured.
-
-A file carrying a top-level `scope` block did not read the whole table - a row
-predicate narrowed it, or a sample bounded the cost. Every count in it except
-`row_count` is over `rows_scanned`, not the table (SPEC 2.2.8) - a `boolean`'s exact
-split and a `values_coverage: 1.0` are both exhaustive over that narrower set only,
-never wider than what was actually read, and `sum` is not rescalable to table grain
-by assuming the sample is representative: read it as a partial total, never the
-column's true sum.
-
-A `physical_layout` block declares a clustering, partitioning or sort key: `mechanism`
-(`cluster`, `partition` or `sort`) names the mechanism, not a judgment; `keys` is ordered,
-its first component pruning far more than its last; each key's `column` is what a
-predicate matches against, `expression` what was actually declared. Absence means
-the table declares none of the three, never that nobody checked - unless the
-file's own `unmeasured` list names the block (SPEC 2.2.11, 2.2.1).
-
-A column carrying a `redacted` marker (`mask`, `drop`, `hash`) withholds literals, not
-measurements - `cardinality`, `null_rate`, `values_coverage` and `distribution` stay
-true (SPEC 2.2.9). Do not order, compare, or do arithmetic on a bound from one: a
-masked maximum still looks like a maximum, and a hashed bound sorts by digest, not
-value. A redacted `temporal` column's `max_age_days` and `range.span_days` are floored
-to the nearest 90 days, under every primitive including `drop`.
-
-A table with no `description.md` has no human-authored context - grain, units and
-exclusions are then whatever the DDL and statistics alone can support. Do not infer a
-business rule the artifact does not state.
-"""
-
-_QUERY_WRITING = """\
-## Writing a query against a printed table
-
-For each table the query touches, read `ddl.sql`; the `refers_to` and `referenced_by`
-edges in `relationships.yaml`, which are the join paths - each marked `declared`,
-`inferred` or `measured` (SPEC 2.3): an inferred edge is a guess from a column name, a
-measured one a value containment seen at the read, neither a constraint, and a declared
-edge wins where one exists; each column's `values` with its counts and `values_coverage`;
-and the column notes in `statistics.annotations.yaml`. Leave the rest of
-`statistics.yaml` - counts, ratios, percentiles, distributions - unread: they describe
-the data, not what a predicate needs.
-
-Write a literal in a listed value's exact spelling. A list at `values_coverage` `1.0` is
-the whole column; below it, or on a `numeric`/`temporal` column whose `frequencies.listed`
-is short of `cardinality`, a phrase absent from the list is not evidence it is absent from
-the column. An entry carrying `spelling_of` is another spelling of the value it names
-(SPEC 2.2.4) - one category stored several ways, so a predicate needs every spelling in
-the group.
-
-With dbprint installed, `dbprint context <table> --purpose query` renders exactly this
-selection off the print, join paths included, with no server running. Served over MCP,
-`get_table_context` with `purpose: query` is the same selection and `resolve_value`
-answers the spelling question; the server's instructions say when to call it.
-"""
-
-_SIGNALS = """\
-## Signals nobody points at
-
-`diff.yaml` is the latest structured diff only, overwritten every run (SPEC 1.2) - a
-column carrying many change-kind entries this run is one whose statistics moved a lot,
-not a history to read across prints. A column with no entries this run is not
-necessarily stable: `unevaluated_tables` (SPEC 2.6.4) counts objects the diff had no
-basis to compare at all - a plain view, or one this run did not re-read - and those
-produce no events either.
-
-`referenced_by` counts are a usage census. A table with a long `referenced_by` list is
-load-bearing across the schema; one with none may be a leaf table, or may simply lie
-outside every other table's selectors (SPEC 2.3.6) - `eligible_target` on the target and
-the manifest's own `selectors` tell the two apart.
-"""
+_SIGNALS_PARAGRAPHS = (
+    "## The diff, reference lists and sketches",
+    (
+        "`diff.yaml` is the latest structured diff only, overwritten every run (SPEC 1.2) — a "
+        "column carrying many change-kind entries this run is one whose statistics moved a lot, "
+        "not a history to read across prints. A column with no entries this run is not necessarily "
+        "stable: `unevaluated_tables` (SPEC 2.6.4) counts objects the diff had no basis to compare "
+        "at all — a plain view, or one this run did not re-read — and those produce no events "
+        "either."
+    ),
+    (
+        "`referenced_by` lists the tables whose columns reference this one. A table with a long "
+        "list is referenced from many places in the schema; one with none may be a leaf table, or may lie "
+        "outside every other table's selectors (SPEC 2.3.6) — `eligible_target` on the target and "
+        "the manifest's own `selectors` tell the two apart."
+    ),
+    (
+        "A `target_table`, `referencer_table` or `depends_on` entry absent from `manifest.tables` "
+        "names an object outside the print. Read it as an opaque name: its periods are not a "
+        "schema/table boundary you can split on, and no directory in the print stands for it (SPEC "
+        "1.3)."
+    ),
+)
+_SIGNALS = "\n\n".join(_SIGNALS_PARAGRAPHS) + "\n"
 
 # Guide-only: the skill copy omits this paragraph.
-_SIGNALS_SKETCH = """\
-
-A column's `sketch` exists for a computation the producer deliberately does not run:
-whether its distinct values overlap another column's, across tables or across prints,
-with no second query against either database. `dbprint.spec.sketch` decodes it and
-estimates that overlap; `observed.containment`/`target_coverage` are that same estimate
-already computed wherever both endpoints of an edge sit in one print (SPEC 2.3.10),
-alongside `fanout_avg`/`fanout_max` (average and worst-case rows per distinct
-referencing key) and `coherent` (`false` when the child's cardinality exceeds the
-parent's - arithmetically impossible for a real containment). `answerable_count` is
-the denominator a containment ratio must be read against, not a headline number of
-its own - the margin narrows as it grows, and a small one widens it sharply.
-`scope_compatible: false` means the two endpoints could not be compared on equal
-terms at all; every other field in the block is then absent, never zero, and no
-ratio is published across a mismatched pair. A sketch below its own retained size is
-exhaustive and answers single-value membership exactly; at or above it, membership
-is not answerable at all.
-"""
+_SIGNALS_SKETCH_PARAGRAPHS = (
+    (
+        "A column's `sketch` exists for a computation the producer deliberately does not run: "
+        "whether its distinct values overlap another column's, across tables or across prints, "
+        "with no second query against either database. `dbprint.spec.sketch` decodes it and "
+        "estimates that overlap; `observed.containment`/`target_coverage` are that same estimate "
+        "already computed wherever both endpoints of an edge sit in one print (SPEC 2.3.10), "
+        "alongside `fanout_avg`/`fanout_max` (average and worst-case rows per distinct referencing "
+        "key) and `coherent` (`false` when the child's cardinality exceeds the parent's — "
+        "arithmetically impossible for a real containment). `answerable_count` is the denominator "
+        "a containment ratio must be read against, not a result on its own: the ratio's error "
+        "shrinks as it grows and is large when it is small. `scope_compatible: false` means "
+        "the two endpoints could not be compared on equal terms at all; every other field in the "
+        "block is then absent, never zero, and no ratio is published across a mismatched pair. A "
+        "sketch below its own retained size is exhaustive and tests single-value membership "
+        "exactly; at or above it, membership cannot be tested."
+    ),
+)
+_SIGNALS_SKETCH = "\n" + "\n\n".join(_SIGNALS_SKETCH_PARAGRAPHS) + "\n"
 
 
 _HEADING = re.compile(r"^#{2,4} (\d+(?:\.\d+)*)\.?", re.MULTILINE)
@@ -662,13 +714,13 @@ def build_document() -> str:
     ]
 
     for name, sentence in _VOCABULARY:
-        vocab_lines.append(f"- **`{name}`** - {sentence}")
+        vocab_lines.append(f"- **`{name}`** — {sentence}")
 
-    traps_lines = ["## Residual traps", ""]
+    traps_lines = ["## Fields that are easy to misread", ""]
     traps_lines.extend(f"- {trap}" for trap in _TRAPS)
 
     sections = [
-        "# Reading a dbprint print\n\nGenerated by dbprint - do not edit by hand.",
+        "# Reading a dbprint print\n\nGenerated by dbprint — do not edit by hand.",
         "\n".join(vocab_lines),
         "\n".join(traps_lines),
         _READING_STRATEGY.rstrip(),

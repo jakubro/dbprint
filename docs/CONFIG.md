@@ -1,9 +1,6 @@
 # dbprint Configuration
 
-> **Purpose**: every key dbprint reads from `.dbprint.yaml` and
-> `~/.dbprint/connections.yaml`. For the on-disk output these settings produce, see
-> [format/v1/SPEC.md](format/v1/SPEC.md) (normative). For the command surface, see
-> [CLI.md](CLI.md). For the `assertions:` grammar, see [ASSERTIONS.md](ASSERTIONS.md).
+> **Purpose**: every key dbprint reads from `.dbprint.yaml` and `~/.dbprint/connections.yaml`. For the on-disk output these settings produce, see [format/v1/SPEC.md](format/v1/SPEC.md) (normative). For the command surface, see [CLI.md](CLI.md). For the `assertions:` grammar, see [ASSERTIONS.md](ASSERTIONS.md).
 
 Two files, with different lifetimes:
 
@@ -12,14 +9,9 @@ Two files, with different lifetimes:
 | `.dbprint.yaml` | **Yes** — it describes the project | Connections, rules, tuning |
 | `~/.dbprint/connections.yaml` | **No** — credentials | Host, user, password, keys |
 
-`dbprint init` writes a starting pair. A worked `.dbprint.yaml` ships at
-[`format/v1/examples/production/.dbprint.yaml`](format/v1/examples/production/.dbprint.yaml)
-alongside the print it produces.
+`dbprint init` writes a starting pair. A worked `.dbprint.yaml` ships at [`format/v1/examples/production/.dbprint.yaml`](format/v1/examples/production/.dbprint.yaml) alongside the print it produces.
 
-**Unknown keys are ignored, not rejected.** dbprint reads exactly the keys below; anything
-else is dropped silently, so a misspelled or mis-nested key leaves the default in place
-without a warning. When something appears to have no effect, check the spelling and the
-nesting depth first.
+**Unknown keys are ignored, not rejected.** dbprint reads exactly the keys below; anything else is dropped silently, so a misspelled or mis-nested key leaves the default in place without a warning. When something appears to have no effect, check the spelling and the nesting depth first.
 
 ---
 
@@ -31,6 +23,7 @@ defaults:                       # OPTIONAL; each key cascades into every connect
   include: ["<PATTERN>"]
   exclude: ["<PATTERN>"]
   max_age_days: 7
+  parallelism: 1
   infer_relationships: true
   sketch_all_columns: false
   compute_timeline: true
@@ -48,6 +41,8 @@ connections:                    # REQUIRED; at least one
     exclude: ["<PATTERN>"]
     max_age_days: 7
     max_rows_scanned: <INT>       # absent by default
+    statement_timeout: <DURATION> # absent by default
+    parallelism: 1
     infer_relationships: true
     materialize_sample: true
     sketch_all_columns: false
@@ -59,21 +54,21 @@ connections:                    # REQUIRED; at least one
     assertions: { ... }
 ```
 
-`defaults` accepts every connection key except `adapter`, `auto` and `assertions`, which are
-per-connection only. `rules` and `redact` are the two keys that do not override: a connection's
-entries are appended to the ones from `defaults`, which is what makes a connection entry win.
+`defaults` accepts every connection key except `adapter`, `auto` and `assertions`, which are per-connection only. `rules` and `redact` are the two keys that do not override: a connection's entries are appended to the ones from `defaults`, which is what makes a connection entry win.
 
 ### Connection keys
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `adapter` | enum | — (required) | `postgres` \| `snowflake` \| `mysql` \| `duckdb` \| `clickhouse` \| `redshift` \| `databricks` \| `bigquery` |
-| `auto` | bool | `false` | Run this connection on a bare `dbprint <command>` with no `CONN` argument. Any number of connections may set it |
-| `output` | path | `prints` | Root directory, relative to `.dbprint.yaml`. Prints land in `<output>/<name>/` — the connection name is appended, so do not include it |
+| `auto` | bool | `false` | Run this connection on a bare `dbprint <command>` with no `CONNECTION` argument. Any number of connections may set it |
+| `output` | path | `prints` | Root directory, relative to `.dbprint.yaml`. Prints land in `<output>/<name>/` — the connection name is appended, so do not include it. While a run is in flight `generate` keeps a hidden, git-ignored `.dbprint-run/` beside the prints; it must share the prints' filesystem, and an advisory lock guards it (on a network filesystem that lock may be emulated or absent) |
 | `include` | list of glob | `["*"]` | Tables to profile. **Omitting this profiles everything the connection can see** |
 | `exclude` | list of glob | `[]` | Removed from the include set |
-| `max_age_days` | int ≥ 0 | `7` | A print younger than this is left alone by `generate`, and passes `check`'s freshness gate. A `rules` entry can override it per table, and can condition that override on the table's size. `0` re-profiles on every run — see below. A negative value is refused at load |
+| `max_age_days` | int ≥ 0 | `7` | A print younger than this passes `check`'s freshness gate, and is left alone by `generate` — which additionally requires that the running version of dbprint wrote it, under the settings the configuration still resolves to (see below). A `rules` entry can override it per table, and can condition that override on the table's size. `0` re-profiles on every run — see below. A negative value is refused at load |
 | `max_rows_scanned` | int ≥ 1 | absent | A row-count ceiling covering every table this connection profiles; `defaults` and `rules` may also carry it. See below |
+| `statement_timeout` | duration | absent | The longest any one statement on this connection may run, as `Nd`, `Nh`, `Nm` or `Ns` (one unit). Absent means no limit and no session setting. See below |
+| `parallelism` | int ≥ 1 | `1` | How many tables the connection profiles at once, each on a session of its own. `1` is one session and tables in listing order. duckdb refuses anything above `1`. See below |
 | `infer_relationships` | bool | `true` | Derive the foreign keys the catalog does not declare, from column naming — see below |
 | `materialize_sample` | bool | `true` | Draw a sampled table's rows once into a temporary table, so every statistic for that table describes the same rows. Takes a temporary-table privilege on PostgreSQL and MySQL, none on Snowflake. On ClickHouse, Redshift and BigQuery the copy is not optional: a `sample` scope with the key set `false`, or a table the copy cannot be taken on, fails that table outright rather than reading it — see below |
 | `sketch_all_columns` | bool | `false` | Sketch every sketchable-type column, not only the smaller required set — see below |
@@ -86,83 +81,29 @@ entries are appended to the ones from `defaults`, which is what makes a connecti
 
 The five block-valued keys each have their own section below.
 
-**`infer_relationships` derives the foreign keys a schema never declared.** Plenty of
-warehouses declare none — Snowflake does not enforce them, and analytics schemas in
-PostgreSQL routinely skip them — so a print of one carries an empty relationship graph and
-a reader cannot tell that `accession.collector_id` points at `collector.collector_id`. With the key on, a column
-named `<stem>_id` whose stem resolves to an in-scope **table** declaring a single-column
-key of a compatible type becomes an edge marked `detection: inferred`; the rule and its
-refusals are specified in [SPEC 2.3.8](format/v1/SPEC.md). Turning it off removes every one
-of those edges — the graph then carries only what the catalog declares — and skips the
-catalog pre-pass that reads the columns and declared keys inference resolves against.
+**`infer_relationships` derives the foreign keys a schema never declared.** Plenty of warehouses declare none — Snowflake does not enforce them, and analytics schemas in PostgreSQL routinely skip them — so a print of one carries an empty relationship graph and a reader cannot tell that `accession.collector_id` points at `collector.collector_id`. With the key on, a column named `<stem>_id` whose stem resolves to an in-scope **table** declaring a single-column key of a compatible type becomes an edge marked `detection: inferred`; the rule and its refusals are specified in [SPEC 2.3.8](format/v1/SPEC.md). Turning it off removes every one of those edges — the graph then carries only what the catalog declares — and skips the catalog pre-pass that reads the columns and declared keys inference resolves against.
 
-**`materialize_sample` is the one setting that makes dbprint write to your database.** A sampled
-table is read by many statements, and a sampling construct re-evaluated per statement draws a
-fresh set of rows each time — so a column's listed value counts and the non-null figure they are a
-share of come from different reads, and the two disagree on a table nobody wrote to. With the key
-on, the producer copies the draw into a temporary table once and every statement for that table
-reads that instead. What the write costs you: a temporary-table privilege where the copy is made,
-spelled differently per engine — `TEMPORARY` on the database for PostgreSQL, `CREATE TEMPORARY
-TABLES` on the database for MySQL, and nothing at all on Snowflake, which exempts temporary tables
-from the schema's `CREATE TABLE` privilege. The copy lands in the session's own temporary space on
-PostgreSQL and MySQL and in the profiled table's own schema on Snowflake. The object holds the
-sampled fraction only rather than the whole table, and on every adapter but BigQuery its lifetime
-is the session, so it is gone when the run ends whether the run succeeded or not — BigQuery has no
-session-scoped table at all, so its own copy is a real dataset object with an expiration set
-instead; see the per-adapter note below.
-Where the privilege is absent, what happens next depends on the adapter. PostgreSQL's own
-`TABLESAMPLE BERNOULLI` decides row membership per row from its seed, so it falls back to
-sampling per statement with a warning on stderr, and the incoherence above is back. MySQL and
-Snowflake document no such guarantee for their own constructs, so turning the key off (or a
-refused write) fails that one table instead, naming `materialize_sample` in the message, rather
-than publish a file whose fields describe different reads — see the per-adapter notes below for
-the full split across all eight. A table that is not sampled never materializes — a full scan has
-nothing to copy, and a `filter` is a predicate, so re-evaluating it selects the same rows every
-time.
+**`statement_timeout` bounds every statement the connection issues.** It is applied once per session through the vendor's own setting, so a limit that fires cancels the statement in the database rather than abandoning it. A statement that exceeds it fails like any other: a table-wide statistic fails its table, a column's own statistics or an optional block are named `unmeasured`, and the run log and summary say `timed out after <limit>`. A zero or compound value is refused at load; a value above the vendor's own ceiling (Snowflake 7d, Databricks 2d) is refused at connect. What each adapter can and cannot bound is stated on its adapter page.
 
-**`sketch_all_columns` widens the second setting that changes what leaves the database.**
-[SPEC 2.2.14](format/v1/SPEC.md) always sketches a column named by an edge, plus every
-declared-unique column, every column at or below the sketch's own retained size, and every
-column carrying a measured candidate key — a fixed-size summary of a column's distinct
-values, from which a consumer computes set overlap against another column offline, no query
-against either source. With the key on, every column whose type the sketch format covers is
-sketched, whether or not it fits one of those four categories, at the cost of one extra query
-per newly-sketched column. A KMV sketch is an unsalted hash of real cell values, so turning
-this on widens that surface to every column redaction did not withhold, on top of whatever
-the required set already carries.
+**`parallelism` profiles several whole tables at once.** The connection opens that many sessions, and each table runs start to finish on one of them; a sampled table's copy is read and dropped on the session that made it, so the unit of parallel work is a table, never a statement. The artifacts match a run at `1`: tables are written in whatever order they finish, but the manifest, diff and run summary list them in listing order, and a table that fails does not stop the others. Connections still run one after another. Every session carries the connection's `statement_timeout`. A session that will not open leaves the run on the ones that did, with a warning naming how many that was; if the first one fails, the run fails with a connection error. dbprint does not cap the count to what the warehouse serves: sessions beyond what it serves concurrently queue there, and on PostgreSQL and Redshift the cap applies per database, one session each opened on first use. duckdb refuses a value above `1` — an unnamed `:memory:` database is private to each session. The adapter pages state what each vendor makes of concurrent sessions.
 
-The key has no effect on a table that carries a `scope` block, or on a plain view: neither is
-sketched at all, whatever this is set to. A sketch answers set-overlap questions between two
-columns, which needs a reproducible read of the whole column — a narrowed read cannot give
-one, and a view is never queried. Since a large warehouse is also where sampling gets turned
-on, expect the two settings to meet: a table narrowed by `sample`, `filter` or
-`max_rows_scanned` publishes no sketches regardless.
+**`materialize_sample` is the one setting that makes dbprint write to your database.** A sampled table is read by many statements, and a sampling construct re-evaluated per statement draws a fresh set of rows each time — so a column's listed value counts and the non-null figure they are a share of come from different reads, and the two disagree on a table nobody wrote to. With the key on, the producer copies the draw into a temporary table once and every statement for that table reads that instead. What the write costs you: a temporary-table privilege where the copy is made, spelled differently per engine — `TEMPORARY` on the database for PostgreSQL, `CREATE TEMPORARY TABLES` on the database for MySQL, and nothing at all on Snowflake, which exempts temporary tables from the schema's `CREATE TABLE` privilege. The copy lands in the session's own temporary space on PostgreSQL and MySQL and in the profiled table's own schema on Snowflake. The object holds the sampled fraction only rather than the whole table, and on every adapter but BigQuery its lifetime is the session, so it is gone when the run ends whether the run succeeded or not — BigQuery has no session-scoped table at all, so its own copy is a real dataset object with an expiration set instead; see the per-adapter note below. Where the privilege is absent, what happens next depends on the adapter. PostgreSQL's own `TABLESAMPLE BERNOULLI` decides row membership per row from its seed, so it falls back to sampling per statement with a warning on stderr, and the incoherence above is back. MySQL and Snowflake document no such guarantee for their own constructs, so turning the key off (or a refused write) fails that one table instead, naming `materialize_sample` in the message, rather than publish a file whose fields describe different reads — see the per-adapter notes below for the full split across all eight. A table that is not sampled never materializes — a full scan has nothing to copy, and a `filter` is a predicate, so re-evaluating it selects the same rows every time.
 
-**`compute_timeline` picks one temporal column per table and buckets its non-null values by
-day, week, or month.** [SPEC 2.2.16](format/v1/SPEC.md) names the anchor deterministically
-— a temporal, non-redacted, calendar-typed column named in the table's own clustering or
-partitioning key first, otherwise the eligible column with the lowest null rate — at the
-cost of one extra grouped query per table that has one. Turning the key off skips that
-query and the column entirely, the same way `infer_relationships: false` skips its own
-pre-pass. Like `sketch_all_columns`, a table carrying a `scope` block or an empty table
-publishes no `timeline` regardless of this setting.
+**`sketch_all_columns` widens the second setting that changes what leaves the database.** [SPEC 2.2.14](format/v1/SPEC.md) always sketches a column named by an edge, plus every declared-unique column, every column at or below the sketch's own retained size, and every column carrying a measured candidate key — a fixed-size summary of a column's distinct values, from which a consumer computes set overlap against another column offline, no query against either source. With the key on, every column whose type the sketch format covers is sketched, whether or not it fits one of those four categories, at the cost of one extra query per newly-sketched column. A KMV sketch is an unsalted hash of real cell values, so turning this on widens that surface to every column redaction did not withhold, on top of whatever the required set already carries.
 
-**`max_age_days: 0` means the print is stale the moment it is written.** `generate`
-re-extracts it every run, and `check`'s freshness gate cannot pass at `0` whatever order the
-commands run in. Use it where `check` does not gate the pipeline, or pass `check --max-age`
-explicitly — an explicit flag overrides every table's recorded threshold. A negative value
-asks for the same thing and is refused at load, because it holds every table stale with no
-way for the artifact to say so.
+The key has no effect on a table that carries a `scope` block, or on a plain view: neither is sketched at all, whatever this is set to. A sketch answers set-overlap questions between two columns, which needs a reproducible read of the whole column — a narrowed read cannot give one, and a view is never queried. Since a large warehouse is also where sampling gets turned on, expect the two settings to meet: a table narrowed by `sample`, `filter` or `max_rows_scanned` publishes no sketches regardless.
 
-`include` and `exclude` decide **which** tables are profiled; `rules` decides **how** each one
-is profiled. The two axes never mix: a rule cannot bring a table into scope. A rule selects
-within the second axis — `include` / `exclude` / `min_rows` narrow which of the profiled
-tables that rule governs, and none of them can widen the connection's scope.
+**`compute_timeline` picks one temporal column per table and buckets its non-null values by day, week, or month.** [SPEC 2.2.16](format/v1/SPEC.md) names the anchor deterministically — a temporal, non-redacted, calendar-typed column named in the table's own clustering or partitioning key first, otherwise the eligible column with the lowest null rate — at the cost of one extra grouped query per table that has one. Turning the key off skips that query and the column entirely, the same way `infer_relationships: false` skips its own pre-pass. Like `sketch_all_columns`, a table carrying a `scope` block or an empty table publishes no `timeline` regardless of this setting.
 
-Patterns are `fnmatch` globs over the lowercased fully-qualified name, so matching is
-case-insensitive. `*` spans dot separators. The FQN shape is the adapter's:
-`database.schema.table` (Snowflake, duckdb), `schema.table` (PostgreSQL, Redshift,
-Databricks), `database.table` (MySQL, ClickHouse), `dataset.table` (BigQuery).
+**`max_age_days: 0` means the print is stale the moment it is written.** `generate` re-extracts it every run, and `check`'s freshness gate cannot pass at `0` whatever order the commands run in. Use it where `check` does not gate the pipeline, or pass `check --max-age` explicitly — an explicit flag overrides every table's recorded threshold. A negative value asks for the same thing and is refused at load, because it holds every table stale with no way for the artifact to say so.
+
+**A release bump makes every print stale, whatever `max_age_days` says.** `generate` carries a committed table forward only when the manifest records the version now running, so the first run after an upgrade re-profiles every table.
+
+**A changed setting makes the tables it governs stale, whatever `max_age_days` says.** `generate` carries a table forward only while its print was written under the settings the configuration resolves to now: the effective `statistics` parameters, a rule's `filter` or explicit `sample`, the `max_rows_scanned` ceiling (compared as the ceiling, so a table that grows under an unchanged ceiling stays fresh), each column's `redact` primitive, and the four profiling switches the manifest records — `infer_relationships` for every table, `sketch_all_columns` and `compute_timeline` for tables read without a `scope`, `materialize_sample` for tables that resolve to a sample. Anything else re-reads only the tables whose files it could change. A table this run does not re-read — outside the CLI selectors, failed, or never reached under `--fail-fast` — but whose print the current `redact` rules contradict fails the run (exit 5), naming the columns; its files stay as they are until a run re-reads it. Rotating `redaction_salt` is the exception: the salt is never recorded, so the print cannot tell it changed, and a rotation needs `generate --force`.
+
+`include` and `exclude` decide **which** tables are profiled; `rules` decides **how** each one is profiled. The two axes never mix: a rule cannot bring a table into scope. A rule selects within the second axis — `include` / `exclude` / `min_rows` narrow which of the profiled tables that rule governs, and none of them can widen the connection's scope.
+
+Patterns are `fnmatch` globs over the lowercased fully-qualified name, so matching is case-insensitive. `*` spans dot separators. The FQN shape is the adapter's: `database.schema.table` (Snowflake, duckdb), `schema.table` (PostgreSQL, Redshift, Databricks), `database.table` (MySQL, ClickHouse), `dataset.table` (BigQuery).
 
 ### `statistics`
 
@@ -176,27 +117,23 @@ Tuning for [SPEC 2.2](format/v1/SPEC.md). Every key is optional.
 | `looks_like_sample_size` | int | `1000` | Distinct non-null values sampled for `inferred.looks_like` detection |
 | `percentiles` | list of int | `[1, 25, 50, 75, 99]` | **Integer percents in 1..99.** Fractions such as `0.25` are rejected at load |
 
-Lowering `enumeration_threshold` is the cheapest way to cut cost on a wide table: fewer columns
-are enumerated in full, and the ones that still are carry fewer values. `values_coverage` states
-how much of the column the listed entries cover.
+Lowering `enumeration_threshold` is the cheapest way to cut cost on a wide table: fewer columns are enumerated in full, and the ones that still are carry fewer values. `values_coverage` states how much of the column the listed entries cover.
 
 ### `rules`
 
-An ordered list. Each entry carries a matcher and the settings it overrides for the tables it
-matches, so one connection can sample a billion-row fact table without sampling anything else,
-and refresh dimensions daily while refreshing that fact table weekly.
+An ordered list. Each entry carries a matcher and the settings it overrides for the tables it matches, so one connection can sample a billion-row fact table without sampling anything else, and refresh dimensions daily while refreshing that fact table weekly.
 
 ```yaml
 rules:
-  - include: ["seedbank.storage_reading*"]   # OPTIONAL; defaults to ["*"]
-    exclude: ["seedbank.storage_reading_v2"] # OPTIONAL; defaults to []
+  - include: ["arboretum.seedbank.storage_reading*"]   # OPTIONAL; defaults to ["*"]
+    exclude: ["arboretum.seedbank.storage_reading_v2"] # OPTIONAL; defaults to []
     min_rows: 500000000                   # OPTIONAL; only tables at least this large
     sample: 0.01                          # OPTIONAL; fraction in (0, 1]. Excludes `filter`
     statistics: {top_n_values: 5}         # OPTIONAL; merged key by key
     max_age_days: 30                      # OPTIONAL
-  - include: ["seedbank.germination_reading"]
+  - include: ["arboretum.seedbank.germination_reading"]
     filter: "created_at >= current_date - interval '30 days'"   # OPTIONAL. Excludes `sample`
-  - include: ["seedbank.field_*"]
+  - include: ["arboretum.seedbank.field_*"]
     max_rows_scanned: 1000000000          # OPTIONAL; also valid on a connection or in `defaults`
 ```
 
@@ -211,192 +148,50 @@ rules:
 | `statistics` | map | `{}` | Any subset of the `statistics` keys, merged onto the connection's |
 | `max_age_days` | int ≥ 0 | absent | Freshness threshold for these tables. Same bound and same meaning of `0` as the connection key |
 
-- **Every matching rule applies, in declaration order, and later ones win.** Rules from
-  `defaults` are walked before the connection's own. Each of `sample`, `filter` and
-  `max_age_days` is last-wins against another rule setting the same key; `statistics` merges key
-  by key, so two rules can set different keys and both hold. `sample` and `filter` are the one
-  pair that does not resolve this way — see below.
-- A rule that matches a table but sets nothing is rejected at load rather than ignored — that
-  shape is almost always a mis-nested key, which the ignore-unknown-keys policy would swallow.
-- The mirror shape is rejected for the same reason: a rule whose `include` is an empty list
-  matches no table and would never fire. Omitting `include` is the way to match everything;
-  `include: []` matches nothing, so it is refused rather than silently ignored. An empty
-  `exclude` is fine — it removes nothing.
-- **`sample`, `filter` and `min_rows` are read only inside a rule.** Placing any of them directly
-  on a connection or in `defaults` is rejected by name rather than dropped, because it is the
-  predictable way to mis-migrate a config and the ignore-unknown-keys policy would otherwise
-  swallow it. That deny list is exactly `scope`, `sample`, `filter` and `min_rows`; every other
-  unrecognized key is still ignored silently, and `statistics` and `max_age_days` are read at
-  connection level as normal.
-- Two matching filters never combine: the later predicate replaces the earlier one, so no query
-  runs a condition neither rule authored.
-- **A table is narrowed by a predicate or by a fraction, never both.** A rule carrying `sample` and
-  `filter` together is rejected at load; rules that each carry one and match the same table are
-  rejected when that table resolves, naming both of them. Neither key silently clears the other,
-  because a config that reads as narrowing two ways must not quietly do one. To sample a slice,
-  widen the predicate until it describes the rows you want.
-- `inferred.looks_like` honors both `filter` and `sample`: it must not describe rows outside
-  the artifact, and its own draw composes with the sample fraction rather than replacing it -
-  so honouring `sample` costs no extra rows. Composition is population-level only on MySQL and
-  Snowflake, which take no seed on this sub-draw; Postgres and duckdb both cohere row for row.
-- **A sampled table reads one row set within a run, and on PostgreSQL and duckdb the same one
-  next run.** One table's profile issues many statements against the same narrowed source, so
-  an unseeded fraction would describe different rows per field on a table nobody wrote to.
-  What prevents that is the materialized copy, not the seed. MySQL, Snowflake and Databricks
-  also seed the fraction from the table's own name, but only PostgreSQL's and duckdb's
-  `TABLESAMPLE ... REPEATABLE` document a stable draw across runs (duckdb's measured directly,
-  reproducing regardless of thread count): MySQL's seeded predicate holds only while scan order
-  does, and Snowflake does not document two evaluations of one seeded expression reading the
-  same rows — which is precisely why the copy exists, and why the engine refuses a `sample`
-  scope with no materialized copy on both rather than publish a file whose fields disagree with
-  each other (`Adapter.SAMPLE_FALLBACK_COHERENT = False`; see the per-adapter notes below).
-  ClickHouse, Redshift and BigQuery take no seed on the fraction at all, so each refuses a
-  `sample` scope with no materialized copy outright, for the same reason. The
-  exception is the extra draw `inferred.looks_like` takes on top of that row set, which takes no
-  seed on MySQL or Snowflake — so on those two the shape claim agrees with the rest of the
-  profile at the population level rather than row for row. duckdb seeds this draw too, the one
-  axis where it reproduces more than Snowflake's own substrate can.
-- **ClickHouse never reads a sampled table without the copy.** A declared `SAMPLE BY` key does
-  not mean `SAMPLE` narrows anything — measured directly: a monotonic key reads the whole table
-  at every requested fraction, and a table with no key at all raises rather than falling back to
-  a full scan. Every other adapter here degrades to an unmaterialized, best-effort read when the
-  copy is unavailable; ClickHouse fails that one table instead, naming `materialize_sample` in
-  the message, because there is no unmaterialized reading of it that is honest. This is the one
-  adapter where `materialize_sample: false` is not a performance trade — it decides whether a
-  `sample`-scoped table is profiled at all.
-- **Redshift never reads a sampled table without the copy either.** There is no seeded sampling
-  clause at all: `WHERE RANDOM() < p` is the only narrowing, and its result is not
-  deterministic across a distributed cluster's compute slices, even within one run. A `sample`
-  scope with no materialized copy fails that table rather than mixing rows drawn by independent
-  evaluations of the same predicate — the same refusal ClickHouse makes, for a different reason.
-- **Databricks degrades instead of refusing.** `TABLESAMPLE ... REPEATABLE` is a genuinely
-  reproducible draw on this engine, so a table the copy cannot be taken on still reads a stable
-  fraction directly, with a warning, rather than failing outright.
-- **BigQuery never reads a sampled table without the copy either.** `TABLESAMPLE SYSTEM` has no
-  seed clause in the grammar at all, and each execution processes an independently computed
-  sample, so results are not guaranteed to match from one execution to the next. A `sample`
-  scope with no materialized copy fails that table rather than publish a
-  `statistics.yaml` whose fields describe different rows - the same refusal ClickHouse and
-  Redshift make, for a third reason. The copy itself also differs from every other adapter's:
-  BigQuery has no session-scoped temporary table, so the draw is copied into an ordinary table
-  in the profiled dataset, created with its own `expiration_timestamp` (a few hours out) rather
-  than the run's own cleanup being the only thing standing between it and an orphaned copy - a
-  killed process or a revoked delete privilege leaves it to expire on its own instead of
-  billing as storage indefinitely. `CREATE OR REPLACE` also means an orphan from an earlier run
-  never wedges a later one with `Already Exists`. The scratch table's own name is excluded from
-  `list_tables`, so it is never profiled as a table of its own.
-- **`min_rows` selects by size, and both conditions must hold.** A rule carrying it governs a
-  table only when the name matchers admit it *and* it is at least that large, so
-  `min_rows: 500000000` with `sample: 0.01` samples the tables that are too big to scan
-  without naming them one by one. It gates whatever the rule sets — `sample`, `filter`,
-  `statistics` and `max_age_days` alike — because it sits on the matcher rather than on one
-  key. It is a matcher, not a setting: a rule carrying `min_rows` and nothing else selects a
-  set of tables and does nothing to them, and is rejected at load like any other rule that
-  overrides nothing.
-- **A size condition needs a database, so the offline commands cannot apply one.** `check` and
-  `list` never connect, so there is no row count for `min_rows` to be tested against and a rule
-  carrying it is left unapplied — the same answer the engine gives a table whose catalog holds
-  no estimate. Where that matters is `max_age_days`: a size-gated threshold governs what
-  `generate` does, and a print that records no threshold of its own is judged offline against
-  the rules that match by name alone. Both commands say so on stderr, naming the tables, rather
-  than leaving the number unexplained.
-- **The size is a catalog estimate, so the bar is fuzzy near the boundary.** Postgres reports
-  a planner statistic that lags writes and is unset until the table is `ANALYZE`d; MySQL's
-  InnoDB `table_rows` is approximate by design. A table sitting close to the threshold may
-  fall either side of it between runs. When the catalog has no number at all the rule does
-  **not** apply — sampling degrades the artifact, so an unknown size takes the un-narrowed
-  path, and the run says so on stderr rather than deciding silently.
-- **A config with neither `min_rows` nor `max_rows_scanned` anywhere costs nothing.** No estimate
-  is fetched, and the run issues no statement on a table's account beyond the ones it profiles it
-  with. Either key, at any level, turns the pre-flight on for a table — a ceiling needs the estimate to derive
-  its fraction. It has no effect on a plain view, whatever this is set to: a view is never
-  queried, so no estimate is fetched for one and no size rule can govern it.
-- A narrowed run takes the table's `row_count` from the catalog rather than counting it, so
-  `row_count_method` reports `approximate`, and the emitted `statistics.yaml` carries the
-  `scope` block naming `rows_scanned` with every ratio computed against it. A table crossing
-  the bar therefore changes the shape of its artifact with no schema change, and `diff` shows
-  that — there is no hysteresis.
-- `dbprint check` judges each print against the threshold its own manifest entry records — the
-  one the run that wrote it skipped it against. An entry recording none falls back to the rules,
-  and offline that is the rules matching by name (see the size-condition note above). An
-  explicit `--max-age` overrides every table's threshold directly and reads no rule to find
-  one — but the rules are still read to catch the structural error below, since that is a
-  property of the configuration independent of freshness.
-- **A cascade that resolves one table to both a `filter` and a `sample` is refused.** Offline
-  the refusal is contained to that one table: `check` reports it as a check that did not run
-  and still judges every other table in the connection; `list` reports the cause and skips
-  that connection, since its output is aggregate counts and a table with no threshold has no
-  bucket. Neither command aborts, and neither loses a connection it had already summarised.
-  Under `check`'s default (no `--max-age`), the refusal costs the connection its exit code —
-  `1`. Under an explicit `--max-age` the refusal is still reported, on stderr and in the
-  machine envelope, but does not move the exit: the override already governs every table's
-  freshness, so a scope error the override does not depend on cannot fail a run it decided.
+- **Every matching rule applies, in declaration order, and later ones win.** Rules from `defaults` are walked before the connection's own. Each of `sample`, `filter` and `max_age_days` is last-wins against another rule setting the same key; `statistics` merges key by key, so two rules can set different keys and both hold. `sample` and `filter` are the one pair that does not resolve this way — see below.
+- A rule that matches a table but sets nothing is rejected at load rather than ignored — that shape is almost always a mis-nested key, which the ignore-unknown-keys policy would swallow.
+- The mirror shape is rejected for the same reason: a rule whose `include` is an empty list matches no table and would never fire. Omitting `include` is the way to match everything; `include: []` matches nothing, so it is refused rather than silently ignored. An empty `exclude` is fine — it removes nothing.
+- **`sample`, `filter` and `min_rows` are read only inside a rule.** Placing any of them directly on a connection or in `defaults` is rejected by name rather than dropped, because it is the predictable way to mis-migrate a config and the ignore-unknown-keys policy would otherwise swallow it. That deny list is exactly `scope`, `sample`, `filter` and `min_rows`; every other unrecognized key is still ignored silently, and `statistics` and `max_age_days` are read at connection level as normal.
+- Two matching filters never combine: the later predicate replaces the earlier one, so no query runs a condition neither rule authored.
+- **A table is narrowed by a predicate or by a fraction, never both.** A rule carrying `sample` and `filter` together is rejected at load; rules that each carry one and match the same table are rejected when that table resolves, naming both of them. Neither key silently clears the other, because a config that reads as narrowing two ways must not quietly do one. To sample a slice, widen the predicate until it describes the rows you want.
+- `inferred.looks_like` honors both `filter` and `sample`: it must not describe rows outside the artifact, and its own draw composes with the sample fraction rather than replacing it — so honouring `sample` costs no extra rows. Composition is population-level only on MySQL and Snowflake, which take no seed on this sub-draw; Postgres and duckdb both cohere row for row.
+- **A sampled table reads one row set within a run, and on PostgreSQL and duckdb the same one next run.** One table's profile issues many statements against the same narrowed source, so an unseeded fraction would describe different rows per field on a table nobody wrote to. What prevents that is the materialized copy, not the seed. MySQL, Snowflake and Databricks also seed the fraction from the table's own name, but only PostgreSQL's and duckdb's `TABLESAMPLE ... REPEATABLE` document a stable draw across runs (duckdb's measured directly, reproducing regardless of thread count): MySQL's seeded predicate holds only while scan order does, and Snowflake does not document two evaluations of one seeded expression reading the same rows — which is precisely why the copy exists, and why the engine refuses a `sample` scope with no materialized copy on both rather than publish a file whose fields disagree with each other (`Adapter.SAMPLE_FALLBACK_COHERENT = False`; see the per-adapter notes below). ClickHouse, Redshift and BigQuery take no seed on the fraction at all, so each refuses a `sample` scope with no materialized copy outright, for the same reason. The exception is the extra draw `inferred.looks_like` takes on top of that row set, which takes no seed on MySQL or Snowflake — so on those two the shape claim agrees with the rest of the profile at the population level rather than row for row. duckdb seeds this draw too, the one axis where it reproduces more than Snowflake's own substrate can.
+- **ClickHouse never reads a sampled table without the copy.** A declared `SAMPLE BY` key does not mean `SAMPLE` narrows anything — measured directly: a monotonic key reads the whole table at every requested fraction, and a table with no key at all raises rather than falling back to a full scan. Every other adapter here degrades to an unmaterialized, best-effort read when the copy is unavailable; ClickHouse fails that one table instead, naming `materialize_sample` in the message, because there is no unmaterialized reading of it that is honest. This is the one adapter where `materialize_sample: false` is not a performance trade — it decides whether a `sample`-scoped table is profiled at all.
+- **Redshift never reads a sampled table without the copy either.** There is no seeded sampling clause at all: `WHERE RANDOM() < p` is the only narrowing, and its result is not deterministic across a distributed cluster's compute slices, even within one run. A `sample` scope with no materialized copy fails that table rather than mixing rows drawn by independent evaluations of the same predicate — the same refusal ClickHouse makes, for a different reason.
+- **Databricks degrades instead of refusing.** `TABLESAMPLE ... REPEATABLE` is a genuinely reproducible draw on this engine, so a table the copy cannot be taken on still reads a stable fraction directly, with a warning, rather than failing outright.
+- **BigQuery never reads a sampled table without the copy either.** `TABLESAMPLE SYSTEM` has no seed clause in the grammar at all, and each execution processes an independently computed sample, so results are not guaranteed to match from one execution to the next. A `sample` scope with no materialized copy fails that table rather than publish a `statistics.yaml` whose fields describe different rows — the same refusal ClickHouse and Redshift make, for a third reason. The copy itself also differs from every other adapter's: BigQuery has no session-scoped temporary table, so the draw is copied into an ordinary table in the profiled dataset, created with its own `expiration_timestamp` (a few hours out) rather than the run's own cleanup being the only thing standing between it and an orphaned copy — a killed process or a revoked delete privilege leaves it to expire on its own instead of billing as storage indefinitely. `CREATE OR REPLACE` also means an orphan from an earlier run never wedges a later one with `Already Exists`. The scratch table's own name is excluded from `list_tables`, so it is never profiled as a table of its own.
+- **`min_rows` selects by size, and both conditions must hold.** A rule carrying it governs a table only when the name matchers admit it *and* it is at least that large, so `min_rows: 500000000` with `sample: 0.01` samples the tables that are too big to scan without naming them one by one. It gates whatever the rule sets — `sample`, `filter`, `statistics` and `max_age_days` alike — because it sits on the matcher rather than on one key. It is a matcher, not a setting: a rule carrying `min_rows` and nothing else selects a set of tables and does nothing to them, and is rejected at load like any other rule that overrides nothing.
+- **A size condition needs a database, so the offline commands cannot apply one.** `check` and `list` never connect, so there is no row count for `min_rows` to be tested against and a rule carrying it is left unapplied — the same answer the engine gives a table whose catalog holds no estimate. Where that matters is `max_age_days`: a size-gated threshold governs what `generate` does, and a print that records no threshold of its own is judged offline against the rules that match by name alone. Both commands say so on stderr, naming the tables, rather than leaving the number unexplained.
+- **The size is a catalog estimate, so the bar is fuzzy near the boundary.** Postgres reports a planner statistic that lags writes and is unset until the table is `ANALYZE`d; MySQL's InnoDB `table_rows` is approximate by design. A table sitting close to the threshold may fall either side of it between runs. When the catalog has no number at all the rule does **not** apply — sampling degrades the artifact, so an unknown size takes the un-narrowed path, and the run says so on stderr rather than deciding silently.
+- **A config with neither `min_rows` nor `max_rows_scanned` anywhere costs nothing.** No estimate is fetched, and the run issues no statement on a table's account beyond the ones it profiles it with. Either key, at any level, turns the pre-flight on for a table — a ceiling needs the estimate to derive its fraction. It has no effect on a plain view, whatever this is set to: a view is never queried, so no estimate is fetched for one and no size rule can govern it.
+- A narrowed run takes the table's `row_count` from the catalog rather than counting it, so `row_count_method` reports `approximate`, and the emitted `statistics.yaml` carries the `scope` block naming `rows_scanned` with every ratio computed against it. A table crossing the bar therefore changes the shape of its artifact with no schema change, and `diff` shows that — there is no hysteresis.
+- `dbprint check` judges each print against the threshold its own manifest entry records — the one the run that wrote it skipped it against. An entry recording none falls back to the rules, and offline that is the rules matching by name (see the size-condition note above). An explicit `--max-age` overrides every table's threshold directly and reads no rule to find one — but the rules are still read to catch the structural error below, since that is a property of the configuration independent of freshness.
+- **A cascade that resolves one table to both a `filter` and a `sample` is refused.** Offline the refusal is contained to that one table: `check` reports it as a check that did not run and still judges every other table in the connection; `list` reports the cause and skips that connection, since its output is aggregate counts and a table with no threshold has no bucket. Neither command aborts, and neither loses a connection it had already summarised. Under `check`'s default (no `--max-age`), the refusal costs the connection its exit code — `1`. Under an explicit `--max-age` the refusal is still reported, on stderr and in the machine envelope, but does not move the exit: the override already governs every table's freshness, so a scope error the override does not depend on cannot fail a run it decided.
 
-> **The predicate is interpolated, not bound.** It is your SQL, passed verbatim into every
-> statistics query for that table; dbprint never parses, rewrites or validates it, because
-> [SPEC 2.2.8](format/v1/SPEC.md) requires it recorded as written. Treat `.dbprint.yaml` as
-> carrying the same trust as the credentials file — it already names the connection whose
-> credentials a run uses.
+> **The predicate is interpolated, not bound.** It is your SQL, passed verbatim into every statistics query for that table; dbprint never parses, rewrites or validates it, because [SPEC 2.2.8](format/v1/SPEC.md) requires it recorded as written. Treat `.dbprint.yaml` as carrying the same trust as the credentials file — it already names the connection whose credentials a run uses.
 
 #### `max_rows_scanned`
 
-A row-count ceiling states the cost an operator can afford directly, in rows, rather than as a
-fraction — the engine derives the fraction from a catalog estimate, fetched for this key as it is
-for `min_rows`.
+A row-count ceiling states the cost an operator can afford directly, in rows, rather than as a fraction — the engine derives the fraction from a catalog estimate, fetched for this key as it is for `min_rows`.
 
-- **A ceiling is a different policy from a fraction, not another way to spell one.** `sample`
-  reads a fixed share regardless of table size; a ceiling caps the rows the draw *returns*, so a
-  table under it is read whole and every table over it yields the same number of rows regardless
-  of how far over. What a ceiling bounds is the downstream work — the rows aggregated, `rows_scanned`,
-  and on Snowflake the warehouse time, since `SAMPLE SYSTEM` prunes at block level. It does not
-  bound what leaves the disk on PostgreSQL or MySQL: `TABLESAMPLE BERNOULLI` tests rows
-  individually and a `RAND() < p` predicate is unindexable, so both scan the whole table however
-  small the fraction. Migrating a `min_rows`/`sample` ladder built to
-  approximate a cost curve to one `max_rows_scanned` value changes what gets read at the low
-  end — a table just over the ceiling is now read whole rather than sampled — and that is the
-  intended difference, not a bug.
-- **Unlike `sample`, `filter` and `min_rows`, a ceiling is legal at connection and `defaults`
-  level as well as inside a rule.** It cascades exactly like `max_age_days`: the connection's
-  own value wins over `defaults`, and a rule's value — at whatever level it is declared —
-  overrides both for the tables it names. It is deliberately absent from the deny list that
-  rejects the other three outside a rule, because a project-wide budget is the point of the
-  feature.
-- **A resolved fraction of exactly `1.0` is not a sample.** When the ceiling is at or above a
-  table's catalog estimate, the table is read whole: no `scope` block, no `row_count_method:
-  approximate`, and `row_count` is counted rather than estimated. `sample: 1.0` never reaches
-  the artifact through this path.
-- **The resolved fraction snaps down to a geometric grid, 10% per step.** A pure function of
-  the ceiling and the estimate alone — no run-to-run state — so a catalog estimate that drifted
-  by a few percent (`ANALYZE` noise, InnoDB's approximate `table_rows`) resolves to the same
-  fraction it did last run, and `diff` reports nothing. A table that genuinely changed size by
-  10% or more crosses at least one grid step, and `diff` shows the statistics move. Snapping
-  down, never up, keeps the ceiling a true ceiling: `rows_scanned` never exceeds
-  `max_rows_scanned` because of the grid.
-- **A ceiling and an explicit `sample` cascade on the same timeline.** Whichever was set later —
-  by declaration order, connection value first, then `defaults` rules, then the connection's
-  own — wins outright; the earlier one is discarded rather than blended, and a ceiling a later
-  `sample` overrides is never converted to a fraction. One rule setting both prefers its own
-  `sample`.
-- **A ceiling meeting a `filter` yields to it, with a warning, rather than being refused.**
-  `sample` and `filter` are mutually exclusive and a cascade resolving to both is a load error
-  (above) — a ceiling is not a third narrowing directive competing for that slot, since a
-  connection-wide ceiling would otherwise collide with every filtered table on every run. A
-  predicate already bounds cost, so the ceiling stands down and `generate` says so on stderr,
-  naming the table.
-- **A ceiling gates nothing offline.** `check` and `list` never connect, so a ceiling never
-  resolves there — unlike `min_rows`, it does not affect what an offline command reads, because
-  it governs only what `generate` scans.
+- **A ceiling is a different policy from a fraction, not another way to spell one.** `sample` reads a fixed share regardless of table size; a ceiling caps the rows the draw *returns*, so a table under it is read whole and every table over it yields the same number of rows regardless of how far over. What a ceiling bounds is the downstream work — the rows aggregated, `rows_scanned`, and on Snowflake the warehouse time, since `SAMPLE SYSTEM` prunes at block level. It does not bound what leaves the disk on PostgreSQL or MySQL: `TABLESAMPLE BERNOULLI` tests rows individually and a `RAND() < p` predicate is unindexable, so both scan the whole table however small the fraction. Migrating a `min_rows`/`sample` ladder built to approximate a cost curve to one `max_rows_scanned` value changes what gets read at the low end — a table just over the ceiling is now read whole rather than sampled — and that is the intended difference, not a bug.
+- **Unlike `sample`, `filter` and `min_rows`, a ceiling is legal at connection and `defaults` level as well as inside a rule.** It cascades exactly like `max_age_days`: the connection's own value wins over `defaults`, and a rule's value — at whatever level it is declared — overrides both for the tables it names. It is deliberately absent from the deny list that rejects the other three outside a rule, because a project-wide budget is the point of the feature.
+- **The ceiling is recorded on the table's manifest entry.** Freshness compares ceilings, never the fraction one resolved to, which moves with the estimate; a table the ceiling governed but did not sample records it too.
+- **A resolved fraction of exactly `1.0` is not a sample.** When the ceiling is at or above a table's catalog estimate, the table is read whole: no `scope` block, no `row_count_method: approximate`, and `row_count` is counted rather than estimated. `sample: 1.0` never reaches the artifact through this path.
+- **The resolved fraction snaps down to a geometric grid, 10% per step.** A pure function of the ceiling and the estimate alone — no run-to-run state — so a catalog estimate that drifted by a few percent (`ANALYZE` noise, InnoDB's approximate `table_rows`) resolves to the same fraction it did last run, and `diff` reports nothing. A table that genuinely changed size by 10% or more crosses at least one grid step, and `diff` shows the statistics move. Snapping down, never up, keeps the ceiling a true ceiling: `rows_scanned` never exceeds `max_rows_scanned` because of the grid.
+- **A ceiling and an explicit `sample` cascade on the same timeline.** Whichever was set later — by declaration order, connection value first, then `defaults` rules, then the connection's own — wins outright; the earlier one is discarded rather than blended, and a ceiling a later `sample` overrides is never converted to a fraction. One rule setting both prefers its own `sample`.
+- **A ceiling meeting a `filter` yields to it, with a warning, rather than being refused.** `sample` and `filter` are mutually exclusive and a cascade resolving to both is a load error (above) — a ceiling is not a third narrowing directive competing for that slot, since a connection-wide ceiling would otherwise collide with every filtered table on every run. A predicate already bounds cost, so the ceiling stands down and `generate` says so on stderr, naming the table.
+- **A ceiling gates nothing offline.** `check` and `list` never connect, so a ceiling never resolves there — unlike `min_rows`, it does not affect what an offline command reads, because it governs only what `generate` scans.
 
 ### `redact`
 
-An ordered list. Each entry names the columns it covers and what to do with their **cell
-values**; everything measured about those columns is left alone.
+An ordered list. Each entry names the columns it covers and what to do with their **cell values**; everything measured about those columns is left alone.
 
 ```yaml
 connections:
   production:
     redact:
-      - columns: ["*.collector.email", "*.curator.*_name"] # selector globs over <fqn>.<column>
+      - columns: ["*.collector.email", "*.curator.*_name"] # selector globs over <table>.<column>
         with: mask                                         # OPTIONAL; mask | drop | hash
       - sensitivity: [personal_name, postal_address]       # matches inferred.sensitivity
         with: drop
@@ -406,60 +201,23 @@ connections:
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `columns` | list of glob | `[]` | Globs over the qualified `<fqn>.<column>` |
+| `columns` | list of glob | `[]` | Globs over the qualified `<table>.<column>` |
 | `sensitivity` | list of enum | `[]` | Covers columns whose `inferred.sensitivity` is listed. One of `personal_name`, `postal_address`, `geolocation`, `date_of_birth`, `national_id`, `financial_account`, `credential`, `health`, `demographic`, `employment`, `contact`, `online_identifier` |
 | `looks_like` | list of enum | `[]` | Covers columns whose `inferred.looks_like` is listed. One of the [SPEC 4.1](format/v1/SPEC.md) patterns |
 | `with` | enum | `mask` | `mask` \| `drop` \| `hash` |
 
-- **A rule covers a column matching ANY of its three criteria.** Rules apply in declaration
-  order and the last matching one decides the primitive, the same resolution `rules` uses. A
-  rule naming none of the three is rejected at load — it would cover everything, which is never
-  what writing one means.
-- **`sensitivity` and `looks_like` are closed vocabularies, checked at load.** A value outside
-  the set is rejected by name rather than stored, because a rule targeting a category that does
-  not exist covers nothing and produces a print that reads as redacted. `columns` is an open
-  glob and is not checked: a pattern matching no table today may match one tomorrow.
-- **`redact` cascades from `defaults` and concatenates**, the same way `rules` does: the
-  `defaults` entries are walked first, then the connection's own, and the last matching entry
-  decides the primitive. So a connection can change what a project-wide rule applies to a
-  column — `mask` to `hash` — but cannot lift the coverage, because no primitive means "not
-  redacted". A connection that must stay unredacted is one whose rule does not belong in
-  `defaults`.
-- **Counts do not change; cell values and two derived day counts do.** `null_count`, `null_rate`,
-  `cardinality`, `cardinality_ratio`, the value counts, `values_coverage` and `distribution` are
-  identical to an unredacted run. `range` bounds and `percentiles` are cell values and receive the
-  same primitive; under `drop` they are omitted entirely, along with `unrepresentable`. The two
-  exceptions are derived rather than measured: `range.span_days` and `freshness.max_age_days` are
-  floored to the nearest 90 days under **every** primitive, `drop` included, since an exact age
-  narrows the values it was computed from.
-- **The column declares it** with a `redacted` marker naming the primitive, so a consumer can
-  tell a measurement from a substitution. A `check` predicate over `accepted_values`, `range`,
-  `percentiles` or `freshness.max_age_days` on a redacted column is refused rather than evaluated
-  against placeholders or against a coarsened figure.
-  A column a rule covers but that publishes no cell value at all carries no marker, because
-  nothing was withheld from it — whether that is because its classification never carries one
-  (`json`, `unsupported`) or because a `text` column detected as prose published
-  no value list for an unrelated reason (SPEC 2.2.3's enumeration exemption). The absence of a
-  marker means the emitted values are the real ones, which stays true either way.
-- **A detected category with no rule covering it is reported, not silenced.** `dbprint check`
-  carries `privacy.unredacted-sensitive` (a warning; SPEC §4.4.2) for a column that names its
-  own `inferred.sensitivity` and still publishes a cell value nothing withheld. Writing the
-  rule above is what clears it — the check reads the committed print, not this file.
-- **`hash` requires a salt and is rejected without one.** An unsalted digest of an email is
-  reversible by dictionary attack in minutes. The salt lives with the credentials —
-  `redaction_salt` in `~/.dbprint/connections.yaml`, or
-  `DBPRINT_<CONN>_REDACTION_SALT` — never in `.dbprint.yaml`, which is committed. Keep it
-  stable per project or every redacted column churns on every diff. A value that is empty or
-  only whitespace is not a salt: `DBPRINT_<CONN>_REDACTION_SALT=` is what a shell produces
-  when a secret did not resolve, and it is refused exactly as an absent one is.
-- **Detection is unaffected.** `looks_like` and `sensitivity` run over sampled values that are
-  never written, so a hashed email column still reports `looks_like: email`. The shape claim
-  describes the column, not the emitted literals.
+- **A rule covers a column matching ANY of its three criteria.** Rules apply in declaration order and the last matching one decides the primitive, the same resolution `rules` uses. A rule naming none of the three is rejected at load — it would cover everything, which is never what writing one means.
+- **`sensitivity` and `looks_like` are closed vocabularies, checked at load.** A value outside the set is rejected by name rather than stored, because a rule targeting a category that does not exist covers nothing and produces a print that reads as redacted. `columns` is an open glob and is not checked: a pattern matching no table today may match one tomorrow.
+- **`redact` cascades from `defaults` and concatenates**, the same way `rules` does: the `defaults` entries are walked first, then the connection's own, and the last matching entry decides the primitive. So a connection can change what a project-wide rule applies to a column — `mask` to `hash` — but cannot lift the coverage, because no primitive means "not redacted". A connection that must stay unredacted is one whose rule does not belong in `defaults`.
+- **The count profile does not change; everything else computed from the values does.** `null_count`, `null_rate`, `cardinality`, `cardinality_ratio`, the value counts, `values_coverage`, `distribution` and `frequencies` are identical to an unredacted run. `range` bounds and `percentiles` are cell values and receive the same primitive; under `drop` they are omitted entirely. `mean`, `sum`, `length`, `zero_count`, `negative_count`, `empty_count`, `quantized_count`, `normalized_cardinality` and `unrepresentable` are withheld under every primitive, since beside the value counts each solves for the literals. `range.span_days` and `freshness.max_age_days` are floored to the nearest 90 days under **every** primitive, `drop` included, since an exact age narrows the values it was computed from.
+- **The column declares it** with a `redacted` marker naming the primitive, so a consumer can tell a measurement from a substitution. A `check` predicate over `accepted_values`, `range`, `percentiles` or `freshness.max_age_days` on a redacted column is refused rather than evaluated against placeholders or against a coarsened figure. A column a rule covers but that publishes no cell value at all carries no marker, because nothing was withheld from it — whether that is because its classification never carries one (`json`, `unsupported`) or because a `text` column detected as prose published no value list for an unrelated reason (SPEC 2.2.3's enumeration exemption). The absence of a marker means the emitted values are the real ones, which stays true either way.
+- **A detected category with no rule covering it is reported, not silenced.** `dbprint check` carries `privacy.unredacted-sensitive` (a warning; SPEC §4.4.2) for a column that names its own `inferred.sensitivity` and still publishes a cell value nothing withheld. Writing the rule above is what clears it — the check reads the committed print, not this file.
+- **`hash` requires a salt and is rejected without one.** An unsalted digest of an email is reversible by dictionary attack in minutes. The salt lives with the credentials — `redaction_salt` in `~/.dbprint/connections.yaml`, or `DBPRINT_<CONNECTION>_REDACTION_SALT` — never in `.dbprint.yaml`, which is committed. Keep it stable per project or every redacted column churns on every diff. A value that is empty or only whitespace is not a salt: `DBPRINT_<CONNECTION>_REDACTION_SALT=` is what a shell produces when a secret did not resolve, and it is refused exactly as an absent one is. A digest is taken of the value as the artifact spells it, so the same number digests identically in a `DECIMAL` and an integer column.
+- **Detection is unaffected.** `looks_like` and `sensitivity` run over sampled values that are never written, so a hashed email column still reports `looks_like: email`. The shape claim describes the column, not the emitted literals.
 
 ### `diff`
 
-Presentation thresholds for `dbprint diff`'s human output. Machine output (`--format json`
-/ `yaml`) is always unfiltered.
+Presentation thresholds for `dbprint diff`'s human output. Machine output (`--format json` / `yaml`) is always unfiltered.
 
 ```yaml
 diff:
@@ -470,32 +228,21 @@ diff:
     default: 0.01               # every statistic without its own entry
 ```
 
-Each threshold is a fraction in `[0, 1]` and is checked when the config loads: a value that is
-not a number, or one outside that range, is refused with the file, the connection and the key.
-The four keys above are the whole accepted set, and a key outside it is refused rather than
-ignored — an unread key would leave `default` governing the statistic its author meant to
-configure, which is indistinguishable from a working config.
+Each threshold is a fraction in `[0, 1]` and is checked when the config loads: a value that is not a number, or one outside that range, is refused with the file, the connection and the key. The four keys above are the whole accepted set, and a key outside it is refused rather than ignored — an unread key would leave `default` governing the statistic its author meant to configure, which is indistinguishable from a working config.
 
-`--threshold` overrides every per-stat value for one run and is parsed by the CLI, so it is not
-subject to this check.
+`--threshold` overrides every per-stat value for one run and is parsed by the CLI, so it is not subject to this check.
 
 ### `assertions`
 
-Data-quality checks evaluated by `dbprint check`. The block is stored unparsed by the config
-loader and interpreted by the assertion layer; its grammar, severities and exit codes are
-specified in [ASSERTIONS.md](ASSERTIONS.md).
+Data-quality checks evaluated by `dbprint check`. The block is stored unparsed by the config loader and interpreted by the assertion layer; its grammar, severities and exit codes are specified in [ASSERTIONS.md](ASSERTIONS.md).
 
 ---
 
 ## `--project` locators
 
-Every command except `init` accepts `--project`, pointing it at a project without a `cd`; `init`
-scaffolds in the current directory only. Local by default: a
-directory whose direct child is `.dbprint.yaml`, or that file itself - never an upward walk,
-never a downward scan.
+Every command except `init` accepts `--project`, pointing it at a project without a `cd`; `init` scaffolds in the current directory only. Local by default: a directory whose direct child is `.dbprint.yaml`, or that file itself — never an upward walk, never a downward scan.
 
-`--project` also accepts a git address, so a project committed to a repository can be read
-without cloning it by hand first:
+`--project` also accepts a git address, so a project committed to a repository can be read without cloning it by hand first:
 
 | Form | Resolves to |
 |---|---|
@@ -503,16 +250,11 @@ without cloning it by hand first:
 | `git@github.com:<owner>/<repo>.git` | Same, over SSH |
 | `https://github.com/<owner>/<repo>/blob/<ref>/<path>/` | `<path>/.dbprint.yaml` at `<ref>` |
 | `https://github.com/<owner>/<repo>/blob/<ref>/<path>/.dbprint.yaml` | The same file, named directly |
-| `<git-url>#<ref>:<subpath>` | Explicit form - any git URL, any ref, any subpath |
+| `<git-url>#<ref>:<subpath>` | Explicit form — any git URL, any ref, any subpath |
 
-GitLab (`/-/blob/<ref>/<path>`) and Bitbucket (`/src/<ref>/<path>`) web URLs parse the same way.
-A bare remote always means the repository root at its default branch - a `.dbprint.yaml` nested
-under one is never discovered from the bare form.
+GitLab (`/-/blob/<ref>/<path>`) and Bitbucket (`/src/<ref>/<path>`) web URLs parse the same way. A bare remote always means the repository root at its default branch — a `.dbprint.yaml` nested under one is never discovered from the bare form.
 
-`<ref>` is anything git can check out: a branch, a tag, a full commit SHA or a short one - so a
-permalink copied from a forge, which pins a commit, resolves like any other address. A branch
-and a tag are re-read at most once every 15 minutes; a commit cannot move, so an address pinned
-to one is fetched when it is first cached and never again.
+`<ref>` is anything git can check out: a branch, a tag, a full commit SHA or a short one — so a permalink copied from a forge, which pins a commit, resolves like any other address. A branch and a tag are re-read at most once every 15 minutes; a commit cannot move, so an address pinned to one is fetched when it is first cached and never again.
 
 ---
 
@@ -533,44 +275,35 @@ production:
 
 | Adapter | Required | Optional |
 |---|---|---|
-| PostgreSQL | `host`, `port`, `database`, `user`, `password` | `redaction_salt` |
-| MySQL | `host`, `port`, `database`, `user`, `password` | `redaction_salt` |
-| Snowflake | `account`, `user`, `warehouse`, `database`, `role` | `password`, `private_key_file`, `private_key_file_pwd`, `schema`, `redaction_salt` |
-| duckdb | `database` (a file path, or `:memory:`) | `read_only`, `redaction_salt` |
-| ClickHouse | `host`, `database` | `port` (default `8123`), `user` (default `default`), `password`, `redaction_salt` |
-| Redshift | `host`, `database`, `user`, `password` | `port` (default `5439`), `redaction_salt` |
-| Databricks | `server_hostname`, `http_path`, `access_token`, `catalog` | `redaction_salt` |
-| BigQuery | `project`, `dataset` | `credentials_file`, `redaction_salt` |
+| PostgreSQL | `host`, `port`, `user`, `password` | `database`, `redaction_salt` |
+| MySQL | `host`, `port`, `user`, `password` | `database`, `redaction_salt` |
+| Snowflake | `account`, `user`, `warehouse`, `role` | `database`, `password`, `private_key_file`, `private_key_file_pwd`, `schema` (requires `database`), `redaction_salt` |
+| duckdb | `database` (a file path relative to the project root, or `:memory:`) | `read_only`, `redaction_salt` |
+| ClickHouse | `host` | `database`, `port` (default `8123`), `user` (default `default`), `password`, `redaction_salt` |
+| Redshift | `host`, `user`, `password` | `database`, `port` (default `5439`), `redaction_salt` |
+| Databricks | `server_hostname`, `http_path`, `access_token` | `catalog`, `redaction_salt` |
+| BigQuery | `project` | `dataset`, `credentials_file`, `redaction_salt` |
 
-Snowflake takes **exactly one** of `password` or `private_key_file`; supplying both, or
-neither, is an error. `private_key_file_pwd` decrypts an encrypted key.
+Snowflake takes **exactly one** of `password` or `private_key_file`; supplying both, or neither, is an error. `private_key_file_pwd` decrypts an encrypted key.
 
-BigQuery has no `password` key at all: credentials resolve through Application Default
-Credentials, the `google-cloud-bigquery` client's own mechanism, unless `credentials_file`
-names a service account key explicitly.
+BigQuery has no `password` key at all: credentials resolve through Application Default Credentials, the `google-cloud-bigquery` client's own mechanism, unless `credentials_file` names a service account key explicitly.
 
-Every unresolved required key is collected and reported in one error rather than one at a
-time.
+`database` (duckdb), `credentials_file` (BigQuery) and `private_key_file` (Snowflake) are file paths. A relative one resolves against the project root, whichever source supplies it; a leading `~` expands to the home directory; and a path that does not exist is refused with exit `4` rather than created or handed to the driver. A value naming no local file — duckdb's `:memory:`, or a URI such as `md:` — passes through unchanged.
+
+The namespace key — `database`, `catalog` on Databricks, `dataset` on BigQuery — is optional everywhere but duckdb. Set, the connection reads that one namespace; omitted, it reads every namespace the credentials can see, less the vendor's own system namespaces, and `include`/`exclude` are the only scoping (`include: ["arboretum.*", "garden.*"]`). PostgreSQL, Redshift and Databricks name a table `database.schema.table` (`catalog.schema.table`) whether or not the key is set, so adding a second namespace renames nothing; a namespace that cannot be listed is skipped with a warning. Each adapter page states what it enumerates and the grant that needs.
+
+Every unresolved required key is collected and reported in one error rather than one at a time.
 
 ### Resolution order
 
 Per key, first hit wins:
 
-1. `DBPRINT_<CONN>_<KEY>` environment variable — connection name and key upper-cased
+1. `DBPRINT_<CONNECTION>_<KEY>` environment variable — connection name and key upper-cased
 2. `~/.dbprint/connections.yaml`
-3. `DBPRINT_<CONN>_<KEY>` in the project's `.env`
+3. `DBPRINT_<CONNECTION>_<KEY>` in the project's `.env`
 
-So `DBPRINT_PRODUCTION_PASSWORD` overrides the file entry for `production`, and a `.env`
-entry serves as the fallback a checkout can carry without a user-level file.
+So `DBPRINT_PRODUCTION_PASSWORD` overrides the file entry for `production`, and a `.env` entry serves as the fallback a checkout can carry without a user-level file.
 
-**A variable carrying no value is skipped, not used.** `DBPRINT_PRODUCTION_HOST=` — set to
-empty, or to whitespace — is what a shell produces when a secret did not resolve, so
-resolution continues to the next source rather than handing an empty credential to the
-adapter. A `.env` entry with nothing after the `=` is skipped the same way, as is a bare key
-with no `=` at all. An empty value in `~/.dbprint/connections.yaml` (`host: ""`) is
-deliberate and is used as written.
+**A variable carrying no value is skipped, not used.** `DBPRINT_PRODUCTION_HOST=` — set to empty, or to whitespace — is what a shell produces when a secret did not resolve, so resolution continues to the next source rather than handing an empty credential to the adapter. A `.env` entry with nothing after the `=` is skipped the same way, as is a bare key with no `=` at all. An empty value in `~/.dbprint/connections.yaml` (`host: ""`) is deliberate and is used as written.
 
-**`password` is the exception, because its empty value is a credential.** A cluster
-configured for `trust` authentication is reached with no password at all, and
-`DBPRINT_<CONN>_PASSWORD=` is how a runner says so. An empty password is therefore taken as
-given, from any source.
+**`password` is the exception, because its empty value is a credential.** A cluster configured for `trust` authentication is reached with no password at all, and `DBPRINT_<CONNECTION>_PASSWORD=` is how a runner says so. An empty password is therefore taken as given, from any source.

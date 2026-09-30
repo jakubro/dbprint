@@ -25,7 +25,7 @@ from dbprint.adapters import (
     TableScope,
     ValueCount,
 )
-from dbprint.adapters.base import BaseStats, ColumnProgress, TableCounts
+from dbprint.adapters.base import BaseStats, ColumnProgress, PhaseA, PhaseB, TableCounts
 from dbprint.config import ConnectionConfig, RuleConfig
 from dbprint.engine import Engine
 
@@ -64,7 +64,7 @@ class _RecordingAdapter(MockAdapter):
         columns: list[ColumnMeta],
         config: StatisticsConfig,
         scope: TableScope | None = None,
-    ) -> tuple[TableCounts, dict[str, BaseStats]]:
+    ) -> tuple[TableCounts, PhaseA]:
         self.calls.append(("base", scope))
 
         return super().compute_base_statistics(fqn, columns, config, scope)
@@ -81,7 +81,7 @@ class _RecordingAdapter(MockAdapter):
         suppress_values: frozenset[str] = frozenset(),
         on_column: ColumnProgress | None = None,
         scope: TableScope | None = None,
-    ) -> dict[str, ColumnStats]:
+    ) -> PhaseB:
         self.calls.append(("columns", scope))
 
         return super().compute_column_statistics(
@@ -102,10 +102,11 @@ class _RecordingAdapter(MockAdapter):
         column: str,
         n: int,
         scope: TableScope | None = None,
+        sql_type: str | None = None,
     ) -> list[Any]:
         self.calls.append(("sample_values", scope))
 
-        return super().sample_values(fqn, column, n, scope)
+        return super().sample_values(fqn, column, n, scope, sql_type)
 
     def scopes_seen_by_statistics(self) -> list[TableScope | None]:
         """Every scope the three statistics entry points were handed, in call order."""

@@ -39,7 +39,9 @@ class TestFirstRun:
         runner = CliRunner()
 
         with runner.isolated_filesystem(temp_dir=tmp_path), _patched_connections_dir(tmp_path):
-            runner.invoke(init_command, [])
+            result = runner.invoke(init_command, [])
+
+            assert result.exit_code == 0
             assert (tmp_path / "fake-home" / "connections.yaml").is_file()
 
 
@@ -81,12 +83,3 @@ class TestCredentialsAreMachineWide:
             assert result.exit_code == 0
             assert creds.read_text() == real_credentials
             assert "kept\tconnections_file" in result.output
-
-    def test_absent_credentials_are_still_scaffolded(self, tmp_path: Path) -> None:
-        runner = CliRunner()
-
-        with runner.isolated_filesystem(temp_dir=tmp_path), _patched_connections_dir(tmp_path):
-            result = runner.invoke(init_command, [])
-
-            assert result.exit_code == 0
-            assert (tmp_path / "fake-home" / "connections.yaml").is_file()

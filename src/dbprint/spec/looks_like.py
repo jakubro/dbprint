@@ -126,7 +126,7 @@ _CURRENCY_CODES = frozenset(
     THB TJS TMT TND TOP TRY TTD TWD TZS UAH UGX USD USN UYI UYU UYW UZS VED VES
     VND VUV WST XAD XAF XAG XAU XBA XBB XBC XBD XCD XCG XDR XOF XPD XPF XPT XSU
     XTS XUA XXX YER ZAR ZMW ZWG
-    """.split(),  # noqa: SIM905 - 155 quoted triples are far less reviewable than this block
+    """.split(),  # noqa: SIM905 - 178 quoted triples are far less reviewable than this block
 )
 
 # IANA zone names, bound once - `available_timezones()` walks TZPATH on every call.

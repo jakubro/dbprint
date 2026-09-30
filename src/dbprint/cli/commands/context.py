@@ -21,7 +21,12 @@ from dbprint.engine import (
     assemble_context,
     assemble_context_payloads,
 )
-from dbprint.engine.baseline import manifest_shape_error
+from dbprint.engine.baseline import (
+    failed_tables,
+    manifest_shape_error,
+    unprofiled_message,
+)
+from dbprint.spec import artifact_yaml
 from ..options import project_option, resolve_project
 from ..rendering import resolve_render_mode
 from ..rendering.context_tty import render_human
@@ -30,7 +35,7 @@ from ..resolution import ConnectionResolutionError, resolve
 
 @click.command(name="context")
 @click.argument("target", required=False)
-@click.argument("conn", required=False)
+@click.argument("connection", required=False)
 @project_option
 @click.option(
     "--all",
@@ -103,7 +108,7 @@ from ..resolution import ConnectionResolutionError, resolve
 def context_command(
     ctx: click.Context,
     target: str | None,
-    conn: str | None,
+    connection: str | None,
     project: str | None,
     select_all: bool,
     fmt: str,
@@ -130,8 +135,8 @@ def context_command(
     **Arguments:**
 
     - `TARGET`: table FQN (e.g. `arboretum.seedbank.accession`), an fnmatch pattern
-      (e.g. `public.*`), or omit and pass `--all` for every table.
-    - `CONN`: connection scope; resolved from `.dbprint.yaml` when omitted (the
+      (e.g. `*.public.*`), or omit and pass `--all` for every table.
+    - `CONNECTION`: connection scope; resolved from `.dbprint.yaml` when omitted (the
       `auto: true` set, or the sole connection).
 
     **Exit codes:**
@@ -142,7 +147,7 @@ def context_command(
     **Examples:**
 
     - `dbprint context arboretum.seedbank.accession`: one table, full Markdown
-    - `dbprint context 'public.*'`: every public table (pattern)
+    - `dbprint context '*.public.*'`: every public table (pattern)
     - `dbprint context --all --no-ddl`: every table, skip DDL
     - `dbprint context accession --budget 4000`: cap output near 4000 tokens
     - `dbprint context accession --purpose query`: DDL, join paths, definitions
@@ -163,7 +168,7 @@ def context_command(
     project_config = resolve_project(project)
 
     try:
-        connections = resolve(project_config, conn)
+        connections = resolve(project_config, connection)
     except ConnectionResolutionError as exc:
         click.echo(str(exc), err=True)
         ctx.exit(EXIT_GENERIC)
@@ -270,6 +275,13 @@ def _resolve_connections(
             exit_code = max(exit_code, EXIT_GENERIC)
             continue
 
+        if unprofiled := _unprofiled_matches(manifest, target, select_all):
+            click.echo(
+                f"{conn_config.name}: not profiled by the last run, so not included: "
+                f"{', '.join(unprofiled)} - run dbprint generate to see the cause",
+                err=True,
+            )
+
         try:
             resolved_tables = _resolve_tables(manifest, target, select_all)
         except _NoMatch as exc:
@@ -318,10 +330,27 @@ def _resolve_tables(manifest: dict[str, Any], target: str | None, select_all: bo
     if target in tables:
         return [target]
 
+    if target in failed_tables(manifest):
+        raise _NoMatch(unprofiled_message(target))
+
     suggestions = get_close_matches(target, tables, n=1, cutoff=0.6)
     hint = f" Did you mean: {suggestions[0]}?" if suggestions else ""
 
     raise _NoMatch(f"no table {target!r} found in manifest.{hint}")
+
+
+def _unprofiled_matches(
+    manifest: dict[str, Any],
+    target: str | None,
+    select_all: bool,
+) -> list[str]:
+    if select_all:
+        return list(failed_tables(manifest))
+
+    if target is None or not any(ch in target for ch in "*?["):
+        return []
+
+    return [fqn for fqn in failed_tables(manifest) if fnmatch.fnmatchcase(fqn, target)]
 
 
 def _load_manifest(conn: ConnectionConfig) -> dict[str, Any] | None:
@@ -331,7 +360,7 @@ def _load_manifest(conn: ConnectionConfig) -> dict[str, Any] | None:
         return None
 
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        data = artifact_yaml.load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError:
         return None
 
@@ -354,7 +383,7 @@ def _unusable_manifest_cause(conn: ConnectionConfig) -> str:
         return f"no manifest at {path}. Run `dbprint generate {conn.name}` first."
 
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        data = artifact_yaml.load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
         return f"could not parse {path}: {exc}"
 

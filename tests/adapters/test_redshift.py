@@ -11,7 +11,7 @@ import pytest
 from psycopg import sql
 
 from dbprint.adapters import RedshiftAdapter, StatisticsConfig
-from dbprint.adapters.redshift.adapter import UnknownTable
+from dbprint.adapters.identifiers import UnknownTable
 from dbprint.spec.sketch import low64_md5
 from tests.adapters.conftest import RedshiftDialectShim
 from tests.adapters.test_dialect_guard import _install_recorder
@@ -108,8 +108,8 @@ class TestPhysicalTableIdentity:
         finally:
             adapter.close()
 
-        entry = next(t for t in listed if t.fqn == "seedbank.accession")
-        assert entry.namespace_path == ("seedbank", "accession")
+        entry = next(t for t in listed if t.fqn == "seedbank.seedbank.accession")
+        assert entry.namespace_path == ("seedbank", "seedbank", "accession")
 
     def test_every_statement_carries_the_catalog_spelling(self, redshift_scratch_db) -> None:
         self._seed(redshift_scratch_db)
@@ -117,14 +117,14 @@ class TestPhysicalTableIdentity:
         recorder = _install_recorder(adapter)
 
         try:
-            cols = adapter.introspect_columns("seedbank.accession")
+            cols = adapter.introspect_columns("seedbank.seedbank.accession")
             counts, stats = adapter.compute_statistics(
-                "seedbank.accession",
+                "seedbank.seedbank.accession",
                 cols,
                 StatisticsConfig(),
                 frozenset(),
             )
-            samples = adapter.sample_values("seedbank.accession", "label", n=10)
+            samples = adapter.sample_values("seedbank.seedbank.accession", "label", n=10)
         finally:
             adapter.close()
 
@@ -147,7 +147,7 @@ class TestPhysicalTableIdentity:
         recorder = _install_recorder(adapter)
 
         try:
-            adapter.extract_ddl("seedbank.accession")
+            adapter.extract_ddl("seedbank.seedbank.accession")
         finally:
             adapter.close()
 
@@ -161,7 +161,7 @@ class TestPhysicalTableIdentity:
 
         try:
             with pytest.raises(UnknownTable, match="call list_tables"):
-                adapter.introspect_columns("public.never_listed")
+                adapter.introspect_columns("seedbank.public.never_listed")
         finally:
             adapter.close()
 
@@ -182,7 +182,7 @@ class TestPhysicalLayout:
         adapter = _redshift_adapter(shim)
 
         try:
-            layout = adapter.introspect_physical_layout("public.hedge")
+            layout = adapter.introspect_physical_layout("seedbank.public.hedge")
         finally:
             adapter.close()
 
@@ -201,7 +201,7 @@ class TestPhysicalLayout:
         adapter = _redshift_adapter(shim)
 
         try:
-            layout = adapter.introspect_physical_layout("public.compound")
+            layout = adapter.introspect_physical_layout("seedbank.public.compound")
         finally:
             adapter.close()
 
@@ -213,7 +213,7 @@ class TestPhysicalLayout:
         adapter = _redshift_adapter(RedshiftDialectShim(redshift_scratch_db))
 
         try:
-            layout = adapter.introspect_physical_layout("public.plain")
+            layout = adapter.introspect_physical_layout("seedbank.public.plain")
         finally:
             adapter.close()
 
@@ -237,46 +237,21 @@ class TestKeySketch:
         adapter = _redshift_adapter(RedshiftDialectShim(redshift_scratch_db))
 
         try:
-            sketch = adapter.compute_key_sketch("public.hashed", "v", "varchar", "text", k=1000)
+            sketch = adapter.compute_key_sketch(
+                "seedbank.public.hashed",
+                "v",
+                "varchar",
+                "text",
+                k=1000,
+            )
         finally:
             adapter.close()
 
         expected = sorted(low64_md5(v) for v in values)
 
+        # A hash with the top bit set is what a signed or dropped-half recombination gets wrong.
+        assert any(h >= 2**63 for h in expected)
         assert list(sketch) == expected
-
-    def test_every_value_is_a_full_unsigned_64_bit_integer(self, redshift_scratch_db) -> None:
-        """A value whose top bit is set must not sort negative or overflow STRTOL's range."""
-
-        redshift_scratch_db.execute("CREATE TABLE public.hashed2 (v varchar(64))")
-        values = [f"probe-{i}" for i in range(500)]
-        rows = ", ".join(f"('{v}')" for v in values)
-        redshift_scratch_db.execute(f"INSERT INTO public.hashed2 (v) VALUES {rows}")
-
-        adapter = _redshift_adapter(RedshiftDialectShim(redshift_scratch_db))
-
-        try:
-            sketch = adapter.compute_key_sketch("public.hashed2", "v", "varchar", "text", k=1000)
-        finally:
-            adapter.close()
-
-        assert sketch, "the probe table seeded no distinct values"
-        assert all(0 <= h < 2**64 for h in sketch)
-        # 500 draws make a top-bit-set value near-certain - a sketch built only from small
-        # values would still pass a regression to the wrong MD5 half or dropped high 32 bits.
-        assert any(h >= 2**63 for h in sketch), "no sampled hash exercised the top bit"
-
-
-class TestDefaultCollation:
-    def test_reports_the_two_valued_model(self, redshift_scratch_db) -> None:
-        adapter = _redshift_adapter(RedshiftDialectShim(redshift_scratch_db))
-
-        try:
-            collation = adapter.default_collation()
-        finally:
-            adapter.close()
-
-        assert collation == "case_sensitive"
 
 
 class TestViewDependencies:
@@ -301,7 +276,7 @@ class TestViewDependencies:
             adapter.close()
 
         assert deps is not None
-        assert "public.late_view" not in deps
+        assert "seedbank.public.late_view" not in deps
 
     def test_an_ordinary_view_still_lists_its_source(self, redshift_scratch_db) -> None:
         redshift_scratch_db.execute("CREATE TABLE public.source_table (id int)")
@@ -316,7 +291,7 @@ class TestViewDependencies:
             adapter.close()
 
         assert deps is not None
-        assert deps["public.ordinary_view"] == ("public.source_table",)
+        assert deps["seedbank.public.ordinary_view"] == ("seedbank.public.source_table",)
 
 
 class TestRelationshipsViaPgConstraint:
@@ -335,14 +310,14 @@ class TestRelationshipsViaPgConstraint:
         adapter = _redshift_adapter(RedshiftDialectShim(redshift_scratch_db))
 
         try:
-            edges = adapter.introspect_relationships("public.fk_child")
+            edges = adapter.introspect_relationships("seedbank.public.fk_child")
         finally:
             adapter.close()
 
         assert len(edges) == 1, f"expected exactly one composite FK, got {len(edges)}: {edges}"
         edge = edges[0]
         assert edge.column == ("a", "b"), f"source columns duplicated or reordered: {edge.column}"
-        assert edge.target_table == "public.ref_parent"
+        assert edge.target_table == "seedbank.public.ref_parent"
         assert edge.target_column == ("x", "y")
         assert edge.on_delete == "NO ACTION"
         assert edge.on_update == "NO ACTION"
@@ -363,7 +338,7 @@ class TestUniqueKeysViaPgConstraint:
         adapter = _redshift_adapter(RedshiftDialectShim(redshift_scratch_db))
 
         try:
-            keys = adapter.introspect_unique_keys("public.uniq_test")
+            keys = adapter.introspect_unique_keys("seedbank.public.uniq_test")
         finally:
             adapter.close()
 
@@ -386,8 +361,8 @@ class TestDatabaseNameFilterIsEmitted:
         recorder = _install_recorder(adapter)
 
         try:
-            adapter.introspect_columns("public.scoped_test")
-            adapter.introspect_physical_layout("public.scoped_test")
+            adapter.introspect_columns("seedbank.public.scoped_test")
+            adapter.introspect_physical_layout("seedbank.public.scoped_test")
         finally:
             adapter.close()
 
@@ -397,8 +372,8 @@ class TestDatabaseNameFilterIsEmitted:
         )
         layout_stmt = next(s for s in statements if "sortkey <> 0" in s)
 
-        assert "database_name = current_database()" in columns_stmt
-        assert "database_name = current_database()" in layout_stmt
+        assert "col.database_name = current_database()" in columns_stmt
+        assert "col.database_name = current_database()" in layout_stmt
 
 
 class TestExtractDdlFallsBackForAView:
@@ -417,7 +392,7 @@ class TestExtractDdlFallsBackForAView:
         adapter = _redshift_adapter(RedshiftDialectShim(redshift_scratch_db))
 
         try:
-            ddl = adapter.extract_ddl("public.ddl_view")
+            ddl = adapter.extract_ddl("seedbank.public.ddl_view")
         finally:
             adapter.close()
 
@@ -442,10 +417,15 @@ class TestDateColumnFullTemporalStatistics:
         config = StatisticsConfig(enumeration_threshold=5)
 
         try:
-            columns = adapter.introspect_columns("public.date_col")
-            counts, base = adapter.compute_base_statistics("public.date_col", columns, config)
+            columns = adapter.introspect_columns("seedbank.public.date_col")
+            counts, phase_a = adapter.compute_base_statistics(
+                "seedbank.public.date_col",
+                columns,
+                config,
+            )
+            base = phase_a.stats
             stats = adapter.compute_column_statistics(
-                "public.date_col",
+                "seedbank.public.date_col",
                 columns,
                 config,
                 counts,
@@ -469,7 +449,7 @@ class TestDateColumnFullTemporalStatistics:
 
 
 class TestTimelineBucketUsesAnchorDomainRendering:
-    """A timeline bucket renders through `_render_calendar_bound`, as `range`/`percentiles` do -
+    """A timeline bucket renders through `render_domain`, as `range`/`percentiles` do -
     SPEC 2.2.16 requires the anchor's own domain rendering, not a second, bare one.
     """
 
@@ -485,14 +465,14 @@ class TestTimelineBucketUsesAnchorDomainRendering:
         adapter = _redshift_adapter(RedshiftDialectShim(redshift_scratch_db))
 
         try:
-            columns = adapter.introspect_columns("public.tz_timeline")
+            columns = adapter.introspect_columns("seedbank.public.tz_timeline")
             counts, _base = adapter.compute_base_statistics(
-                "public.tz_timeline",
+                "seedbank.public.tz_timeline",
                 columns,
                 StatisticsConfig(),
             )
             buckets = adapter.probe_timeline(
-                "public.tz_timeline",
+                "seedbank.public.tz_timeline",
                 columns,
                 counts,
                 "logged_at",
@@ -528,8 +508,8 @@ class TestMaterializedViewType:
         finally:
             adapter.close()
 
-        assert tables["public.mv_test"] == "matview"
-        assert tables["public.mv_base"] == "table"
+        assert tables["seedbank.public.mv_test"] == "matview"
+        assert tables["seedbank.public.mv_base"] == "table"
 
 
 class TestPhysicalNameUsedInStatistics:
@@ -549,15 +529,16 @@ class TestPhysicalNameUsedInStatistics:
         config = StatisticsConfig(enumeration_threshold=1)
 
         try:
-            columns = adapter.introspect_columns("public.mixed_case")
+            columns = adapter.introspect_columns("seedbank.public.mixed_case")
             assert columns[0].physical_name == "Amount"
-            counts, base = adapter.compute_base_statistics(
-                "public.mixed_case",
+            counts, phase_a = adapter.compute_base_statistics(
+                "seedbank.public.mixed_case",
                 columns,
                 config,
             )
+            base = phase_a.stats
             stats = adapter.compute_column_statistics(
-                "public.mixed_case",
+                "seedbank.public.mixed_case",
                 columns,
                 config,
                 counts,

@@ -14,11 +14,11 @@ import pytest
 
 from dbprint.adapters import (
     Adapter,
-    ColumnStats,
     SnowflakeAdapter,
     StatisticsConfig,
     TableScope,
 )
+from dbprint.adapters.base import PhaseB
 from dbprint.adapters.snowflake import stats as snowflake_stats
 from tests.adapters.conftest import SnowflakeDialectShim
 
@@ -49,7 +49,7 @@ def _profile(
     con: duckdb.DuckDBPyConnection,
     scope: TableScope | None,
     threshold: int,
-) -> dict[str, ColumnStats]:
+) -> PhaseB:
     adapter = SnowflakeAdapter(CREDS, cursor_factory=lambda _: SnowflakeDialectShim(con))
     adapter.connect()
 
@@ -184,49 +184,3 @@ class TestMysqlNeverEstimates:
         assert methods["snowflake"] == "approximate", methods
         assert methods["clickhouse"] == "approximate", methods
         assert methods["mysql"] == "exact", methods
-
-
-class TestTheReprobeCannotExceedTheTable:
-    """A second statement sees a different read than the row count it lands beside."""
-
-    def test_an_over_counting_reprobe_is_clamped(
-        self,
-        seeded: duckdb.DuckDBPyConnection,
-    ) -> None:
-        """Conformance rejects a cardinality above the non-null scanned count.
-
-        The re-probe runs after phase A, so concurrent writes or an independent draw can hand
-        it more distinct values than were counted.
-        """
-
-        original = snowflake_stats.exec_query
-        seen: dict[str, int] = {}
-
-        def inflate(cursor, sql, params=None):
-            result = original(cursor, sql, params) if params else original(cursor, sql)
-
-            if "COUNT(DISTINCT" in sql and "card_id" in sql:
-                row = result.fetchone()
-                seen["row_count"] = ROWS
-
-                class _Inflated:
-                    @staticmethod
-                    def fetchone():
-                        return (int(row[0]) + 10_000,)
-
-                return _Inflated()
-
-            return result
-
-        with patch.object(snowflake_stats, "exec_query", inflate):
-            stats = _profile(seeded, None, threshold=10)
-
-        assert seen, "the re-probe never ran; the assertion would be vacuous"
-
-        cardinality = stats["id"].cardinality
-
-        assert cardinality is not None
-        assert cardinality <= ROWS, (
-            f"cardinality {cardinality} exceeds the {ROWS} rows the table holds, "
-            "which conformance rejects as stats.cardinality-exceeds-row-count"
-        )

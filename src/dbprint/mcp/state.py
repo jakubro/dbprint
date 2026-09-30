@@ -6,20 +6,20 @@ from dataclasses import dataclass, field
 
 from dbprint.config import ConnectionConfig, ProjectConfig
 from . import errors
+from .parse_cache import ParseCache
 
 
 @dataclass(frozen=True)
 class ServedConnections:
-    """The connections this server exposes plus the optional default.
+    """The connections this server exposes, the optional default, and the parsed print files.
 
-    `configured` names every connection `.dbprint.yaml` declares, not only the served subset -
-    `resolve()` needs both to tell "not configured" from "configured but not served" (MCP.md
-    5.2). Defaults to `served`'s own keys.
+    `configured` lists every declared connection, served or not (MCP.md 5.2); default: `served`.
     """
 
     served: dict[str, ConnectionConfig]
     default: str | None
     configured: frozenset[str] = field(default_factory=frozenset)
+    files: ParseCache = field(default_factory=ParseCache, compare=False)
 
     def resolve(self, conn: str | None) -> ConnectionConfig:
         """Return the ConnectionConfig for `conn`, falling back to the default.

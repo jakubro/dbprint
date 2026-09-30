@@ -27,7 +27,8 @@ from dbprint.assertions import (
     evaluate_statistic_assertions,
     parse_block,
 )
-from dbprint.config import ConfigError, ConnectionConfig
+from dbprint.config import ConfigError, ConnectionConfig, selectors
+from dbprint.config.duration import DurationError, parse_duration
 from dbprint.conformance import Issue, ValidationProgress, ValidationTick, validate_print
 from dbprint.engine import (
     EXIT_ASSERTION,
@@ -41,12 +42,20 @@ from dbprint.engine import (
     ProgressEvent,
     SummaryCounts,
     TableResult,
+    thresholds,
 )
-from dbprint.engine.baseline import declared_artifacts, manifest_shape_error, walkable_tables
-from dbprint.engine.diff import DATA_CHANGE_KINDS
-from dbprint.engine.freshness import DurationError, evaluate, parse_duration
+from dbprint.engine.baseline import (
+    declared_artifacts,
+    failed_tables,
+    manifest_shape_error,
+    walkable_tables,
+)
+from dbprint.engine.carried import CommittedPrint, redaction_mismatches
+from dbprint.engine.freshness import evaluate
 from dbprint.engine.result import DiffResult
-from .. import thresholds
+from dbprint.spec import artifact_yaml
+from dbprint.spec.drift import DATA_CHANGE_KINDS
+from dbprint.spec.fqn import split as split_fqn
 from ..engine_setup import ConnectionSetupError, build_engine
 from ..options import project_option, refuse_if_remote, resolve_project
 from ..rendering import (
@@ -64,8 +73,13 @@ from ..resolution import ConnectionResolutionError, resolve
 from ..run_log import close_run_log, log_run_header, log_run_summary, open_run_log
 
 
+_UNPROFILED_CAUSE = (
+    "the last generate run could not profile this table; run dbprint generate to see the cause"
+)
+
+
 @click.command(name="check")
-@click.argument("conn", required=False)
+@click.argument("connection", required=False)
 @project_option
 @click.option(
     "--max-age",
@@ -107,7 +121,7 @@ from ..run_log import close_run_log, log_run_header, log_run_summary, open_run_l
 @click.pass_context
 def check_command(
     ctx: click.Context,
-    conn: str | None,
+    connection: str | None,
     project: str | None,
     max_age: str | None,
     online: bool,
@@ -131,22 +145,26 @@ def check_command(
 
     **Arguments:**
 
-    - `CONN`: connection to check; resolved from `.dbprint.yaml` when omitted
+    - `CONNECTION`: connection to check; resolved from `.dbprint.yaml` when omitted
       (the `auto: true` set, or the sole connection).
 
     **Exit codes:**
 
     - `0`: ok
-    - `1`: generic - a malformed print, or a table whose `rules` narrow it both
-      by a predicate and by a fraction, which this command refuses to judge
+    - `1`: generic - a malformed print, a column the current `redact` rules
+      would publish otherwise than the print does (`privacy.redaction-not-applied`),
+      or a table whose `rules` narrow it both by a predicate and by a fraction,
+      which this command refuses to judge
     - `2`: staleness
     - `3`: drift (`--online`) - the committed print no longer matches the
       database, including a statistic that moved (`generate` sets this code for
       a change of shape only)
-    - `4`: connection (`--online`, the database could not be reached)
-    - `5`: partial extraction (`--online`) - the connection was reached but some
-      tables could not be re-extracted; the ones that did are still compared
-      and reported normally
+    - `4`: connection (`--online`, the database could not be reached, or it lists none of the
+      committed tables in scope - `generate --confirm-all-removed` records a real total removal)
+    - `5`: partial extraction - the committed manifest names a table the last
+      `generate` run could not profile, or (`--online`) the connection was
+      reached but some tables could not be re-extracted; the ones that did are
+      still compared and reported normally
     - `6`: assertion failure
 
     **Examples:**
@@ -162,7 +180,7 @@ def check_command(
     project_config = resolve_project(project)
 
     try:
-        connections = resolve(project_config, conn)
+        connections = resolve(project_config, connection)
     except ConnectionResolutionError as exc:
         click.echo(str(exc), err=True)
         ctx.exit(EXIT_GENERIC)
@@ -295,13 +313,23 @@ def _check_one(
         ),
     )
     has_errors = any(i.severity == "error" for i in issues)
+    # Judged against `.dbprint.yaml`, not the format, so it moves the exit without blocking
+    # the online comparison a conformance error would.
+    redaction_issues = _redaction_issues(conn_config, print_root)
+    issues = tuple(sorted(issues + redaction_issues))
 
     manifest = _load_manifest(print_root)
 
     # Resolved regardless of --max-age: a table narrowed two ways is a scope error
     # independent of freshness; the override only changes what the refusal costs.
     resolved = thresholds.resolve(conn_config, manifest)
-    not_run = _not_run_from(resolved, exit_moving=override is None)
+    refused = _not_run_from(resolved, exit_moving=override is None)
+    unprofiled = tuple(
+        NotRun(subject=fqn, cause=_UNPROFILED_CAUSE, severity="error")
+        for fqn in failed_tables(manifest)
+        if fqn not in {entry.subject for entry in refused}
+    )
+    not_run = refused + unprofiled
 
     # Under an override no rule supplies the threshold, so the size-gate warning would be false.
     if override is None and resolved.size_gated:
@@ -319,10 +347,14 @@ def _check_one(
     )
 
     offline_exit = EXIT_OK
-    exit_moving_not_run = any(entry.severity == "error" for entry in not_run)
+    exit_moving_not_run = any(entry.severity == "error" for entry in refused)
 
-    if has_errors or exit_moving_not_run:
+    if has_errors or exit_moving_not_run or redaction_issues:
         offline_exit = max(offline_exit, EXIT_GENERIC)
+
+    # The same code `generate` returned when it could not profile these tables (SPEC 2.5).
+    if unprofiled:
+        offline_exit = max(offline_exit, EXIT_PARTIAL)
 
     if stale:
         offline_exit = max(offline_exit, EXIT_STALENESS)
@@ -425,6 +457,38 @@ def _check_one(
         renderer.connection_summary(_summary_view(result, manifest, elapsed_ms))
 
     return result
+
+
+def _redaction_issues(conn_config: ConnectionConfig, print_root: Path) -> tuple[Issue, ...]:
+    """One error per committed column whose `redacted` marker the current rules contradict."""
+
+    issues: list[Issue] = []
+
+    for table in CommittedPrint.load(print_root).tables.values():
+        artifact = declared_artifacts(dict(table.entry)).get("statistics")
+
+        remedy = (
+            f"run `dbprint generate` to re-read {table.fqn}"
+            if selectors.match(table.fqn, list(conn_config.include), list(conn_config.exclude))
+            else f"the connection's selectors exclude {table.fqn} - include it again and run "
+            f"`dbprint generate`, or delete its directory"
+        )
+
+        for mismatch in redaction_mismatches(table, conn_config):
+            issues.append(
+                Issue(
+                    path=f"{table.entry.get('path', '')}/{artifact}::columns.{mismatch.column}",
+                    code="privacy.redaction-not-applied",
+                    severity="error",
+                    detail=(
+                        f"published {mismatch.recorded or 'unredacted'}, but the current redact "
+                        f"rules resolve {mismatch.expected or 'no primitive'} - {remedy}"
+                    ),
+                    spec_ref="ASSERTIONS.md §5.2",
+                ),
+            )
+
+    return tuple(issues)
 
 
 def _not_run_from(
@@ -541,7 +605,7 @@ def _load_committed_statistics(
 
     for i, (fqn, entry) in enumerate(tables.items(), start=1):
         try:
-            entry_path = entry.get("path") or fqn.replace(".", "/")
+            entry_path = entry.get("path") or "/".join(split_fqn(fqn))
             artifacts = declared_artifacts(entry)
 
             if "statistics" not in artifacts:
@@ -553,7 +617,7 @@ def _load_committed_statistics(
                 continue
 
             try:
-                data = yaml.safe_load(stats_path.read_text(encoding="utf-8")) or {}
+                data = artifact_yaml.load(stats_path.read_text(encoding="utf-8")) or {}
             except yaml.YAMLError:
                 continue
 
@@ -614,6 +678,13 @@ def _run_online(
         return _OnlineOutcome(
             not_run=_not_run(conn_config.name, cause),
             connection_failed=True,
+        )
+
+    # A refused run (SPEC 1.5.5) compared nothing; a missing baseline was reported offline.
+    if diff_result.exit_code == EXIT_GENERIC and diff_result.failed_tables:
+        return _OnlineOutcome(
+            not_run=_not_run(conn_config.name, diff_result.failed_tables[0]),
+            config_refused=True,
         )
 
     # A partial result still has tables worth comparing, so no early return. `failed_tables`
@@ -740,7 +811,7 @@ def _load_manifest(print_root: Path) -> dict[str, Any] | None:
         return None
 
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        data = artifact_yaml.load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError:
         return None
 

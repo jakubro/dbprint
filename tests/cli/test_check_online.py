@@ -202,7 +202,7 @@ def _project_with_assertions(extra: str) -> str:
 class _MockPgAdapter(MockAdapter):
     REQUIRED_KEYS = ("host", "port", "database", "user", "password")
 
-    def __init__(self, _credentials: dict[str, str]) -> None:
+    def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
         super().__init__(_fixture(), _query_results())
 
 
@@ -670,7 +670,7 @@ class _ExtraColumnAdapter(MockAdapter):
 
     REQUIRED_KEYS = ("host", "port", "database", "user", "password")
 
-    def __init__(self, _credentials: dict[str, str]) -> None:
+    def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
         fixture = _fixture()
         table = fixture["fixture.shape_probe"]
         fixture["fixture.shape_probe"] = MockTable(
@@ -711,7 +711,7 @@ class _RowCountChangedAdapter(MockAdapter):
 
     REQUIRED_KEYS = ("host", "port", "database", "user", "password")
 
-    def __init__(self, _credentials: dict[str, str]) -> None:
+    def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
         fixture = _fixture()
         table = fixture["fixture.shape_probe"]
         fixture["fixture.shape_probe"] = MockTable(
@@ -837,7 +837,8 @@ class TestDriftVocabulary:
         data = json.loads(json_result.stdout)
         codes = {i["code"] for i in data[0]["drift_issues"]}
         assert codes == {"drift.schema-changed", "drift.statistic-changed"}
-        assert data[0]["summary"]["drift_count"] == len(data[0]["drift_issues"])
+        # One added column, and the three `probe_id` fields the seed rewrote.
+        assert data[0]["summary"]["drift_count"] == 4
 
         assert "schema" in human_result.stdout
         assert "statistics" in human_result.stdout
@@ -995,7 +996,7 @@ class _UnreachableAdapter(MockAdapter):
 
     REQUIRED_KEYS = ("host", "port", "database", "user", "password")
 
-    def __init__(self, _credentials: dict[str, str]) -> None:
+    def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
         super().__init__(_fixture(), _query_results())
 
     def connect(self) -> None:
@@ -1026,16 +1027,6 @@ class TestConnectionFailureIsReportedAsItself:
         ):
             return CliRunner().invoke(main, ["check", "--online", *args])
 
-    def test_unreachable_database_exits_connection_not_ok(
-        self,
-        tmp_path: Path,
-        committed_print: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        result = self._run(tmp_path, committed_print, monkeypatch)
-
-        assert result.exit_code == 4
-
     def test_connection_failure_reaches_the_structured_output(
         self,
         tmp_path: Path,
@@ -1045,6 +1036,7 @@ class TestConnectionFailureIsReportedAsItself:
         result = self._run(tmp_path, committed_print, monkeypatch, "--format", "json")
         data = json.loads(result.stdout)
 
+        assert result.exit_code == 4
         assert [n["subject"] for n in data[0]["not_run"]] == ["primary"]
         assert "could not connect" in data[0]["not_run"][0]["cause"]
 
@@ -1081,7 +1073,7 @@ class _ReconnectFailsAdapter(_MockPgAdapter):
     a connection lost after drift was already computed, not one that never reached the table.
     """
 
-    def __init__(self, _credentials: dict[str, str]) -> None:
+    def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
         super().__init__(_credentials)
         self._connect_calls = 0
 
@@ -1540,7 +1532,7 @@ class _TwoTableAdapter(MockAdapter):
 
     REQUIRED_KEYS = ("host", "port", "database", "user", "password")
 
-    def __init__(self, _credentials: dict[str, str]) -> None:
+    def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
         super().__init__(_two_table_fixture(), _query_results())
 
 
@@ -1895,7 +1887,40 @@ class TestRunLog:
         for k, v in _credential_env().items():
             monkeypatch.setenv(k, v)
 
-        with _patch_registry():
+        with _patch_registry(), patch.object(run_log, "LOGS_ROOT", tmp_path / "logs"):
             CliRunner().invoke(main, ["check"])
 
-        assert not (run_log.LOGS_ROOT / run_log._slug(tmp_path)).exists()
+        assert not any((tmp_path / "logs").rglob("*"))
+
+
+class _EmptyTargetAdapter(MockAdapter):
+    REQUIRED_KEYS = ("host", "port", "database", "user", "password")
+
+    def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
+        super().__init__({}, _query_results())
+
+
+class TestATargetListingNoCommittedTable:
+    def test_is_a_connection_failure_naming_the_generate_flag(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        (tmp_path / ".dbprint.yaml").write_text(_project_with_assertions(""))
+        _seed_clean_print(tmp_path, committed_print)
+        monkeypatch.chdir(tmp_path)
+
+        for k, v in _credential_env().items():
+            monkeypatch.setenv(k, v)
+
+        with patch.dict(
+            "dbprint.cli.adapter_registry.ADAPTERS",
+            {"postgres": _EmptyTargetAdapter},
+            clear=True,
+        ):
+            result = CliRunner().invoke(main, ["check", "--online"])
+
+        assert result.exit_code == 4
+        assert "lists none of the 1 committed tables in scope" in result.output
+        assert "--confirm-all-removed" in result.output

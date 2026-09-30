@@ -26,12 +26,11 @@ def test_reserved_classifications_are_not_shipped() -> None:
     assert _RESERVED_CLASSIFICATIONS & set(get_args(Classification)) == set()
 
 
-def test_the_five_shipped_names_are_not_reserved() -> None:
-    """All five are shipped patterns and absent from the reserve list."""
+def test_no_shipped_looks_like_pattern_is_reserved() -> None:
+    shipped = set(get_args(LooksLike))
 
-    shipped = {"mac_address", "iso8601_duration", "urn", "hex", "latlon"}
-
-    assert shipped <= set(get_args(LooksLike))
+    assert {"mac_address", "iso8601_duration", "urn", "hex", "latlon"} <= shipped
+    assert shipped & _RESERVED_LOOKS_LIKE == set()
 
 
 def test_no_sensitivity_category_is_a_reserved_classification() -> None:

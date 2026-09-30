@@ -19,7 +19,7 @@ That binds `127.0.0.1:8765` and serves the connections the project resolves — 
 | Schema | the tables in it, with row counts and column counts |
 | Table | the full per-column surface, its relationships, and a diagram of the edges into and out of it |
 
-The table page is the one worth knowing. It carries what `statistics.yaml` carries — classification, null rate, cardinality, value lists, ranges, percentiles — beside the prose from that table's `description.md` and `statistics.annotations.yaml`, so a measurement and the note correcting it appear together rather than in two files.
+The table page is the one worth knowing. It carries what `statistics.yaml` carries — classification, null rate, cardinality, value lists, ranges, percentiles — beside the prose from that table's `description.md` and `statistics.annotations.yaml`, so a measurement and the note correcting it appear together rather than in two files. Value bars spell each value as `dbprint context` does — `''` for an empty string, `'NULL'` for the stored word, `NULL` only for a genuine null — and a `drop`-redacted column's bars read `(value withheld)`.
 
 Three banners can appear above everything else, and they are deliberately distinct because absence and corruption read differently: `Missing: <kinds>` names a declared artifact that isn't on disk; `Unreadable: <kinds>` names one that is on disk but failed to parse; a catalog-only notice explains that no query was issued at all, so cardinality is not measured on this page.
 
@@ -27,14 +27,14 @@ Three banners can appear above everything else, and they are deliberately distin
 
 Two sections in the overview panel read the newer per-table fields directly:
 
-- **Timeline** — heading `Timeline - <column> by <unit>`, the anchor column linked to its own row. The hedge states the bucketed share as a floored percentage (never rounded, so a coverage under 1.0 can never read `100.0%`) and reads `A missing bucket is a gap - no rows fell in that <unit>`, so an absent row between two present ones is a real gap, not a rendering skip. The block only appears when the file carries `timeline` at all — a scoped table or an empty one never shows it, since neither computed one.
+- **Timeline** — heading `Timeline - <column> by <unit>`, the anchor column linked to its own row. The hedge states the bucketed share as a percentage that keeps one more decimal wherever rounding would land a partial share on `0%` or `100%`, so a coverage under 1.0 never reads `100%`. It also reads `A missing bucket is a gap - no rows fell in that <unit>`, so an absent row between two present ones is a real gap, not a rendering skip. The block only appears when the file carries `timeline` at all — a scoped table or an empty one never shows it, since neither computed one.
 - **Depends on** — hedged `Catalog-derived, direct dependencies only - a different relation than a foreign key`. Three states, and the page tells them apart: a non-empty list renders links to each object; an empty list renders `Reads nothing else printed`; the field omitted entirely (the producer could not ask) renders no section at all. The same names double as diagram edges, drawn with an open-circle head and a muted dashed style so a dependency edge can never be mistaken for a foreign key even without color.
 
 ### The column table's degenerate census
 
 Beside the null-rate bar, a column carrying `zero_count`, `negative_count` or `empty_count` shows a dot-separated line — `<n> zero`, `<n> negative`, `<n> empty` — under the null figure. Each sub-count is gated on being truthy, so an explicit `0` renders nothing there, reading the same as a field the classification forbids or the run never measured. If you need to tell those apart, read `statistics.yaml` directly for that column.
 
-Further down the same cell: `mean`/`sum` render as `mean X · sum Y` whenever either is present, independent of whether the column also carries a redacted range — a redacted `numeric` column can show `bounds withheld` and its mean and sum together, because redaction is cell-level and aggregates are governed by their own rule (mean, sum and length are withheld in two states only — a scanned set holding at most one non-null value, and one holding a single distinct value however many rows carry it; outside those two they are never touched). A `length` block renders as `length <min>-<max> · avg <avg> · p95 <p95>`.
+Further down the same cell: `mean`/`sum` render as `mean X · sum Y` whenever either is present, each spelled as `statistics.yaml` spells it (positional, never an exponent). Every count on the page is its exact integer, never compacted to `10K`. A redacted column carries neither, nor `length` or the degenerate counts above — a marked column publishes its count profile only — so its cell shows `bounds withheld` and the counts it keeps. A `length` block renders as `length <min>-<max> · avg <avg> · p95 <p95>`.
 
 ### The relationships panel
 
@@ -51,6 +51,14 @@ No query was issued, so the columns carry only catalog facts:
 - The rows card still shows the catalog's own row count, with no scanned-share line.
 - The Overview still shows Description, Grain, Timeline, Depends on, Physical layout and Dependencies wherever the statistics file happens to carry them — a plain view is exactly where `depends_on` is expected to be present.
 - The columns table still renders from the catalog-declared column list, with an empty null-rate figure and `n/a` cardinality on every row.
+
+## What a scoped table shows
+
+A table read over part of its rows — a `sample` or a `filter` — describes the rows scanned, not the table:
+
+- The rows card shows the scanned count and its share of the table's row count, with the sample or filter that narrowed it.
+- Every claim one unread row could falsify carries `over the rows scanned`: the data-through card's secondary line, a complete value list's `covered` line, a candidate key, and a freshness verdict.
+- Counts, ratios, percentiles and bounds carry no clause of their own; the rows card already names their population.
 
 ## When a route fails to build
 

@@ -22,19 +22,24 @@ SEVERITIES = {"E": "error", "W": "warning"}
 # symbols, then map each remaining space to a hyphen. `\w` keeps digits, letters and underscore.
 _DROPPED = re.compile(r"[^\w\- ]", re.UNICODE)
 
-_HEADER = """\
-# Conformance codes
-
-Every code conformance validation can raise - the full set `validate_print()` returns, and the set
-`dbprint check` reports under conformance - sorted by code so one pasted from a failure can be
-found. Data-quality assertions carry their own `assertion.*` codes, which are specified in
-[ASSERTIONS.md](../ASSERTIONS.md) rather than here. This file is generated from the specification's
-own catalog - do not edit it by hand. Run `just docs` to regenerate it.
-
-A print conforms when no `error` is raised against it. A `warning` records an anomaly that does not
-gate conformance; [SPEC 6.1](../format/v1/SPEC.md#61-severity-model) defines both, and
-[SPEC 6.2](../format/v1/SPEC.md#62-issue-document-shape) defines the issue each one is reported in.
-"""
+_HEADER_PARAGRAPHS = (
+    "# Conformance codes",
+    (
+        "Every code conformance validation can raise — the full set `validate_print()` returns, "
+        "and the set `dbprint check` reports under conformance — sorted by code so one pasted from "
+        "a failure can be found. Data-quality assertions carry their own `assertion.*` codes, "
+        "which are specified in [ASSERTIONS.md](../ASSERTIONS.md) rather than here. This file is "
+        "generated from the specification's own catalog — do not edit it by hand. Run `just docs` "
+        "to regenerate it."
+    ),
+    (
+        "A print conforms when no `error` is raised against it. A `warning` records an anomaly "
+        "that does not gate conformance; [SPEC 6.1](../format/v1/SPEC.md#61-severity-model) "
+        "defines both, and [SPEC 6.2](../format/v1/SPEC.md#62-issue-document-shape) defines the "
+        "issue each one is reported in."
+    ),
+)
+_HEADER = "\n\n".join(_HEADER_PARAGRAPHS) + "\n"
 
 
 def build_document() -> str:

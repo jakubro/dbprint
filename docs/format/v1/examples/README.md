@@ -12,30 +12,27 @@ It demonstrates the key constructs of the format spec at [`../SPEC.md`](../SPEC.
 
 Two schemas:
 
-- **`seedbank`** — a seed bank and herbarium accession registry: taxa, field collectors,
-  cold-storage vaults, accessions, germination trials, specimen images.
-- **`fixture`** — one table, `shape_probe`, that carries the few format shapes the seed-bank
-  domain has no honest column for (a raw device IPv4, JSON held as plain text). Its name says
-  what it is.
+- **`seedbank`** — a seed bank and herbarium accession registry: taxa, field collectors, cold-storage vaults, accessions, germination trials, specimen images.
+- **`fixture`** — one table, `shape_probe`, that carries the few format shapes the seed-bank domain has no honest column for (a raw device IPv4, JSON held as plain text). Its name says what it is.
 
 ## What's demonstrated
 
-**Adapter**: PostgreSQL. Fully-qualified names are two-part — `seedbank.accession`, not `arboretum.seedbank.accession` — and lowercase, the path-case convention the format addresses objects by. The print spans **two schemas**, so the `<schema>/<table>/` namespace path is exercised at two distinct depths in one connection.
+**Adapter**: PostgreSQL. Fully-qualified names are three-part — `arboretum.seedbank.accession`, the database leading — and lowercase, the path-case convention the format addresses objects by. The print spans **two schemas** of one database, so the `<database>/<schema>/<table>/` namespace path is exercised at two distinct schemas in one connection.
 
 **Ten objects:**
 
 | Object | Type | What it carries |
 |---|---|---|
-| `seedbank.taxon` | table | The self-referential FK (`parent_taxon_id`), a `dominant_value` and an `imbalanced` distribution, two `text`+`prose` columns |
-| `seedbank.collector` | table | All three redaction primitives, three of the five `sensitivity` categories, `uuid`/`email`/`phone`/`country_code`/`postal_code` shapes |
-| `seedbank.vault` | table | The composite primary key (`vault_id`, `shelf_code`) that `accession` references compositely; two `time`-typed columns |
-| `seedbank.accession` | table | The busiest table: `jsonb`, a composite FK, `foreign_key_candidate` on four columns, `statistics.annotations.yaml` on six columns, a path-valued relationship endpoint authored over `traits` |
-| `seedbank.germination_trial` | table | The deliberately inferred FK — `collector_id` names a `collector` row with no declared constraint; a value-grain note on `medium`'s `control` entry |
-| `seedbank.specimen_image` | table | `path`, `filename`, `content_type`, `base64` — every file-shaped `looks_like` pattern |
-| `seedbank.storage_reading` | table | The only empty table (`row_count: 0`), the only declared `physical_layout` — a `partition` mechanism on `reading_date` — and the only object whose `grain` is declared rather than searched |
-| `seedbank.accession_summary` | plain view | The only `catalog_only` object: column names and types with no measurement behind them (SPEC §2.2.15), and an empty `grain.keys`. It originates two inferred edges; one is annotated `verdict: rejected` |
-| `seedbank.germination_by_taxon_mv` | materialized view | Profiled like a table, and the object the per-table freshness override applies to; also originates an inferred edge, independent of the view's |
-| `fixture.shape_probe` | table | `ip`, `json`-as-text, `bytea`, and an array — the one table with **both** `refers_to` and `referenced_by` empty (SPEC §2.3.7's "no FKs at all") |
+| `arboretum.seedbank.taxon` | table | The self-referential FK (`parent_taxon_id`), a `dominant_value` and an `imbalanced` distribution, two `text`+`prose` columns |
+| `arboretum.seedbank.collector` | table | All three redaction primitives, three of the five `sensitivity` categories, `uuid`/`email`/`phone`/`country_code`/`postal_code` shapes |
+| `arboretum.seedbank.vault` | table | The composite primary key (`vault_id`, `shelf_code`) that `accession` references compositely; two `time`-typed columns |
+| `arboretum.seedbank.accession` | table | The busiest table: `jsonb`, a composite FK, `foreign_key_candidate` on four columns, `statistics.annotations.yaml` on six columns, a path-valued relationship endpoint authored over `traits` |
+| `arboretum.seedbank.germination_trial` | table | The deliberately inferred FK — `collector_id` names a `collector` row with no declared constraint; a value-grain note on `medium`'s `control` entry |
+| `arboretum.seedbank.specimen_image` | table | `path`, `filename`, `content_type`, `base64` — every file-shaped `looks_like` pattern |
+| `arboretum.seedbank.storage_reading` | table | The only empty table (`row_count: 0`), the only declared `physical_layout` — a `partition` mechanism on `reading_date` — and the only object whose `grain` is declared rather than searched |
+| `arboretum.seedbank.accession_summary` | plain view | The only `catalog_only` object: column names and types with no measurement behind them (SPEC §2.2.15), and an empty `grain.keys`. It originates two inferred edges; one is annotated `verdict: rejected` |
+| `arboretum.seedbank.germination_by_taxon_mv` | materialized view | Profiled like a table, and the object the per-table freshness override applies to; also originates an inferred edge, independent of the view's |
+| `arboretum.fixture.shape_probe` | table | `ip`, `json`-as-text, `bytea`, and an array — the one table with **both** `refers_to` and `referenced_by` empty (SPEC §2.3.7's "no FKs at all") |
 
 **Per-table freshness** (SPEC §2.5): a `rules` entry gives `germination_by_taxon_mv` a threshold of 30 days where the connection sets 1; its manifest entry records the 30 it resolved to, every other object records the connection's 1.
 
@@ -102,11 +99,11 @@ Value lists appear in all three shapes:
 | `numeric_string` | `accession.sheet_number` and every surrogate-key column whose values happen to render as digits (`accession_id`, `image_id`, `probe_id`, ...) |
 | `filename` | `specimen_image.file_name` |
 | `prose` | `taxon.description`, `accession.field_notes` |
-| `iso8601_date` | `germination_by_taxon_mv.trial_year` — the one native `date` column at categorical cardinality; SPEC §3.2's `categorical`-before-`temporal` priority is what reaches it, and the reason no other native `date` column in this print does (§4.1.5 excludes `temporal` from `looks_like` detection) - `collector.hired_on`, `accession.collected_on` and `germination_trial.started_on` all classify `temporal` and carry none |
+| `iso8601_date` | `germination_by_taxon_mv.trial_year` — the one native `date` column at categorical cardinality; SPEC §3.2's `categorical`-before-`temporal` priority is what reaches it, and the reason no other native `date` column in this print does (§4.1.5 excludes `temporal` from `looks_like` detection) — `collector.hired_on`, `accession.collected_on` and `germination_trial.started_on` all classify `temporal` and carry none |
 
 `collector.postal_code` is UK-formatted by construction: SPEC's `postal_code` detector recognises the UK, Canadian and Netherlands shapes only (`spec/looks_like.py`), so a US five-digit ZIP or any other locale would not fire it — the fixture's addresses stay UK-shaped for exactly this reason, not because the domain is set in the UK.
 
-Four of the twelve `sensitivity` categories appear: `personal_name` (`collector.full_name`), `postal_address` (`collector.street_address`), `contact` (`collector.email`, `.phone`, `.institution_email`), and `online_identifier` (`fixture.shape_probe.logger_ipv4`, from its own `looks_like: ip` shape - the column name carries no online-identifier token) — `geolocation`, `date_of_birth`, `national_id`, `financial_account`, `credential`, `health`, `demographic` and `employment` have no honest column in this domain and are demonstrated in `vocabulary/` instead. The three contact-adjacent columns reach `sensitivity: contact` by two different routes: `email` and `phone` are both in the name list §4.4 recognises, so their shape adds no further evidence than their name already gave; `institution_email` is not, so the category comes from the detected `looks_like: email` shape alone.
+Four of the twelve `sensitivity` categories appear: `personal_name` (`collector.full_name`), `postal_address` (`collector.street_address`), `contact` (`collector.email`, `.phone`, `.institution_email`), and `online_identifier` (`fixture.shape_probe.logger_ipv4`, from its own `looks_like: ip` shape — the column name carries no online-identifier token) — `geolocation`, `date_of_birth`, `national_id`, `financial_account`, `credential`, `health`, `demographic` and `employment` have no honest column in this domain and are demonstrated in `vocabulary/` instead. The three contact-adjacent columns reach `sensitivity: contact` by two different routes: `email` and `phone` are both in the name list §4.4 recognises, so their shape adds no further evidence than their name already gave; `institution_email` is not, so the category comes from the detected `looks_like: email` shape alone.
 
 `accession.traits` and `fixture.shape_probe.json_text` both carry JSON, and neither carries a `looks_like` alongside its classification: SPEC §2.2.3's field matrix forbids `inferred.looks_like` on `json`-classified columns outright (the JSON claim is what the `classification` field itself already says), which is exactly why `json_text` is stored as `text` rather than `jsonb` — a `jsonb` column can never demonstrate the `looks_like: json` pattern, only a text column holding JSON-shaped strings can.
 
@@ -134,7 +131,7 @@ Five columns on `collector`, by three primitives — every one of them low-cardi
 - **`institution` carries `redacted: hash`.** Every entry holds a salted digest instead — sixteen hex characters, distinct per distinct input, so a consumer can tell two institutions apart without learning either name. The salt is fixed in the generator (`FIXTURE_REDACTION_SALT`) rather than drawn from the environment: a committed digest has to be reproducible across regenerations, and publishing this particular salt is safe only because every value it ever digests is generated from a row ordinal — reversing a digest recovers a synthetic institution name, never a real one.
 - **`street_address` carries `redacted: drop`.** Its `values` entries carry `count` only — no `value` key at all, the one primitive where "redact the literal" and "omit the literal" are the same operation. `range` and `percentiles` would be affected by the same rule, but this column is `categorical` and never had them to begin with.
 
-Two mechanisms produced these five markers. `email`, `phone` and `institution_email` are all caught by the project-wide `sensitivity: [contact]` default — the first two through their strong name tokens, the third through its detected `looks_like: email` shape alone. `institution` and `street_address` are caught by connection-level rules keyed on a column glob (`columns: ["seedbank.collector.institution"]`) rather than a detected category — the escape hatch for a column detection misses, per CONFIG.md. `institution` in particular carries no `inferred.sensitivity` at all (its plain organisation name matches no §4.4 token and no shape), so it could only ever be reached by a glob.
+Two mechanisms produced these five markers. `email`, `phone` and `institution_email` are all caught by the project-wide `sensitivity: [contact]` default — the first two through their strong name tokens, the third through its detected `looks_like: email` shape alone. `institution` and `street_address` are caught by connection-level rules keyed on a column glob (`columns: ["arboretum.seedbank.collector.institution"]`) rather than a detected category — the escape hatch for a column detection misses, per CONFIG.md. `institution` in particular carries no `inferred.sensitivity` at all (its plain organisation name matches no §4.4 token and no shape), so it could only ever be reached by a glob.
 
 ## Conformance
 

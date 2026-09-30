@@ -194,82 +194,89 @@ class TestEnumerate:
         state = ServedConnections(served={"production": primary_conn}, default="production")
         entries = enumerate_for(state)
         uris = {e.uri for e in entries}
-        assert "dbprint://production/seedbank.collector/ddl" in uris
-        assert "dbprint://production/seedbank.collector/statistics" in uris
-        assert "dbprint://production/seedbank.collector/relationships" in uris
+        assert "dbprint://production/arboretum.seedbank.collector/ddl" in uris
+        assert "dbprint://production/arboretum.seedbank.collector/statistics" in uris
+        assert "dbprint://production/arboretum.seedbank.collector/relationships" in uris
 
     def test_description_only_when_authored(self, primary_conn: ConnectionConfig) -> None:
-        """seedbank.vault ships with no description.md - a real table not yet authored."""
+        """arboretum.seedbank.vault ships with no description.md - a real table not yet authored."""
 
         state = ServedConnections(served={"production": primary_conn}, default="production")
         entries = enumerate_for(state)
         uris = {e.uri for e in entries}
-        assert "dbprint://production/seedbank.vault/description" not in uris
+        assert "dbprint://production/arboretum.seedbank.vault/description" not in uris
 
         print_root = primary_conn.output / primary_conn.name
-        desc = print_root / "seedbank" / "vault" / "description.md"
+        desc = print_root / "arboretum" / "seedbank" / "vault" / "description.md"
         desc.write_text("Cold-storage vaults where accessions are shelved.\n")
         import yaml as _yaml
 
         manifest_path = print_root / "manifest.yaml"
         manifest = _yaml.safe_load(manifest_path.read_text())
-        manifest["tables"]["seedbank.vault"]["artifacts"]["description"] = "description.md"
+        manifest["tables"]["arboretum.seedbank.vault"]["artifacts"]["description"] = (
+            "description.md"
+        )
         manifest_path.write_text(_yaml.safe_dump(manifest))
 
         entries = enumerate_for(state)
         uris = {e.uri for e in entries}
-        assert "dbprint://production/seedbank.vault/description" in uris
+        assert "dbprint://production/arboretum.seedbank.vault/description" in uris
 
     def test_annotations_only_when_authored(self, primary_conn: ConnectionConfig) -> None:
-        """seedbank.collector ships with no statistics.annotations.yaml for real."""
+        """arboretum.seedbank.collector ships with no statistics.annotations.yaml for real."""
 
         state = ServedConnections(served={"production": primary_conn}, default="production")
         entries = enumerate_for(state)
         uris = {e.uri for e in entries}
-        assert "dbprint://production/seedbank.collector/statistics_annotations" not in uris
+        assert (
+            "dbprint://production/arboretum.seedbank.collector/statistics_annotations" not in uris
+        )
 
         print_root = primary_conn.output / primary_conn.name
-        ann = print_root / "seedbank" / "collector" / "statistics.annotations.yaml"
+        ann = print_root / "arboretum" / "seedbank" / "collector" / "statistics.annotations.yaml"
         ann.write_text("format_version: 1\ncolumns: {email: note}\n")
         import yaml as _yaml
 
         manifest_path = print_root / "manifest.yaml"
         manifest = _yaml.safe_load(manifest_path.read_text())
-        manifest["tables"]["seedbank.collector"]["artifacts"]["statistics_annotations"] = (
-            "statistics.annotations.yaml"
-        )
+        manifest["tables"]["arboretum.seedbank.collector"]["artifacts"][
+            "statistics_annotations"
+        ] = "statistics.annotations.yaml"
         manifest_path.write_text(_yaml.safe_dump(manifest))
 
         entries = enumerate_for(state)
         uris = {e.uri for e in entries}
-        assert "dbprint://production/seedbank.collector/statistics_annotations" in uris
+        assert "dbprint://production/arboretum.seedbank.collector/statistics_annotations" in uris
 
     def test_relationship_annotations_only_when_authored(
         self,
         primary_conn: ConnectionConfig,
     ) -> None:
-        """seedbank.collector ships with no relationships.annotations.yaml for real."""
+        """arboretum.seedbank.collector ships with no relationships.annotations.yaml for real."""
 
         state = ServedConnections(served={"production": primary_conn}, default="production")
         entries = enumerate_for(state)
         uris = {e.uri for e in entries}
-        assert "dbprint://production/seedbank.collector/relationships_annotations" not in uris
+        assert (
+            "dbprint://production/arboretum.seedbank.collector/relationships_annotations"
+            not in uris
+        )
 
         print_root = primary_conn.output / primary_conn.name
-        ann = print_root / "seedbank" / "collector" / "relationships.annotations.yaml"
+        ann = print_root / "arboretum" / "seedbank" / "collector" / "relationships.annotations.yaml"
         ann.write_text("format_version: 1\nrefers_to: []\n")
         import yaml as _yaml
 
         manifest_path = print_root / "manifest.yaml"
         manifest = _yaml.safe_load(manifest_path.read_text())
-        manifest["tables"]["seedbank.collector"]["artifacts"]["relationships_annotations"] = (
-            "relationships.annotations.yaml"
-        )
+        manifest["tables"]["arboretum.seedbank.collector"]["artifacts"][
+            "relationships_annotations"
+        ] = "relationships.annotations.yaml"
         manifest_path.write_text(_yaml.safe_dump(manifest))
 
         entries = enumerate_for(state)
         uris = {e.uri for e in entries}
-        assert "dbprint://production/seedbank.collector/relationships_annotations" in uris
+        assert "dbprint://production/arboretum.seedbank.collector/relationships_annotations" in uris
 
     def test_manifest_annotations_only_when_authored(
         self,
@@ -328,7 +335,7 @@ class TestRead:
 
     def test_read_ddl_returns_sql_mime(self, primary_conn: ConnectionConfig) -> None:
         state = ServedConnections(served={"production": primary_conn}, default="production")
-        result = read(state, "dbprint://production/seedbank.collector/ddl")
+        result = read(state, "dbprint://production/arboretum.seedbank.collector/ddl")
         assert result.mime_type == "application/sql"
         assert "CREATE TABLE" in result.content
 
@@ -357,20 +364,20 @@ class TestRead:
         """A broken promise and a kind the manifest never made are different failures."""
 
         print_root = primary_conn.output / primary_conn.name
-        (print_root / "seedbank" / "collector" / "statistics.yaml").unlink()
+        (print_root / "arboretum" / "seedbank" / "collector" / "statistics.yaml").unlink()
 
         manifest_path = print_root / "manifest.yaml"
         manifest = yaml.safe_load(manifest_path.read_text())
-        del manifest["tables"]["fixture.shape_probe"]["artifacts"]["relationships"]
+        del manifest["tables"]["arboretum.fixture.shape_probe"]["artifacts"]["relationships"]
         manifest_path.write_text(yaml.safe_dump(manifest))
 
         state = ServedConnections(served={"production": primary_conn}, default="production")
 
         with pytest.raises(McpError) as missing:
-            read(state, "dbprint://production/seedbank.collector/statistics")
+            read(state, "dbprint://production/arboretum.seedbank.collector/statistics")
 
         with pytest.raises(McpError) as undeclared:
-            read(state, "dbprint://production/fixture.shape_probe/relationships")
+            read(state, "dbprint://production/arboretum.fixture.shape_probe/relationships")
 
         assert missing.value.code == -32603
         assert "file is absent" in missing.value.detail
@@ -378,20 +385,20 @@ class TestRead:
         assert "is not declared" in undeclared.value.detail
 
     def test_read_missing_description_raises(self, primary_conn: ConnectionConfig) -> None:
-        """seedbank.vault ships with no description.md for real."""
+        """arboretum.seedbank.vault ships with no description.md for real."""
 
         state = ServedConnections(served={"production": primary_conn}, default="production")
 
         with pytest.raises(McpError):
-            read(state, "dbprint://production/seedbank.vault/description")
+            read(state, "dbprint://production/arboretum.seedbank.vault/description")
 
     def test_read_missing_annotations_raises(self, primary_conn: ConnectionConfig) -> None:
-        """seedbank.collector ships with no statistics.annotations.yaml for real."""
+        """arboretum.seedbank.collector ships with no statistics.annotations.yaml for real."""
 
         state = ServedConnections(served={"production": primary_conn}, default="production")
 
         with pytest.raises(McpError):
-            read(state, "dbprint://production/seedbank.collector/statistics_annotations")
+            read(state, "dbprint://production/arboretum.seedbank.collector/statistics_annotations")
 
     def test_declared_but_missing_optional_kind_is_distinguishable_from_never_declared(
         self,
@@ -402,16 +409,18 @@ class TestRead:
         print_root = primary_conn.output / primary_conn.name
         manifest_path = print_root / "manifest.yaml"
         manifest = yaml.safe_load(manifest_path.read_text())
-        manifest["tables"]["seedbank.vault"]["artifacts"]["description"] = "description.md"
+        manifest["tables"]["arboretum.seedbank.vault"]["artifacts"]["description"] = (
+            "description.md"
+        )
         manifest_path.write_text(yaml.safe_dump(manifest))
 
         state = ServedConnections(served={"production": primary_conn}, default="production")
 
         with pytest.raises(McpError) as missing:
-            read(state, "dbprint://production/seedbank.vault/description")
+            read(state, "dbprint://production/arboretum.seedbank.vault/description")
 
         with pytest.raises(McpError) as undeclared:
-            read(state, "dbprint://production/seedbank.collector/statistics_annotations")
+            read(state, "dbprint://production/arboretum.seedbank.collector/statistics_annotations")
 
         assert missing.value.code == -32603
         assert "file is absent" in missing.value.detail
@@ -476,12 +485,15 @@ class TestRead:
         self,
         primary_conn: ConnectionConfig,
     ) -> None:
-        """seedbank.collector ships with no relationships.annotations.yaml for real."""
+        """arboretum.seedbank.collector ships with no relationships.annotations.yaml for real."""
 
         state = ServedConnections(served={"production": primary_conn}, default="production")
 
         with pytest.raises(McpError):
-            read(state, "dbprint://production/seedbank.collector/relationships_annotations")
+            read(
+                state,
+                "dbprint://production/arboretum.seedbank.collector/relationships_annotations",
+            )
 
     def test_read_authored_relationship_annotations(
         self,
@@ -490,17 +502,20 @@ class TestRead:
         import yaml as _yaml
 
         print_root = primary_conn.output / primary_conn.name
-        ann = print_root / "seedbank" / "collector" / "relationships.annotations.yaml"
+        ann = print_root / "arboretum" / "seedbank" / "collector" / "relationships.annotations.yaml"
         ann.write_text("format_version: 1\nrefers_to: []\n")
         manifest_path = print_root / "manifest.yaml"
         manifest = _yaml.safe_load(manifest_path.read_text())
-        manifest["tables"]["seedbank.collector"]["artifacts"]["relationships_annotations"] = (
-            "relationships.annotations.yaml"
-        )
+        manifest["tables"]["arboretum.seedbank.collector"]["artifacts"][
+            "relationships_annotations"
+        ] = "relationships.annotations.yaml"
         manifest_path.write_text(_yaml.safe_dump(manifest))
         state = ServedConnections(served={"production": primary_conn}, default="production")
 
-        result = read(state, "dbprint://production/seedbank.collector/relationships_annotations")
+        result = read(
+            state,
+            "dbprint://production/arboretum.seedbank.collector/relationships_annotations",
+        )
 
         assert result.mime_type == "application/yaml"
         assert "refers_to: []" in result.content
@@ -509,27 +524,37 @@ class TestRead:
         import yaml as _yaml
 
         print_root = primary_conn.output / primary_conn.name
-        ann = print_root / "seedbank" / "collector" / "statistics.annotations.yaml"
+        ann = print_root / "arboretum" / "seedbank" / "collector" / "statistics.annotations.yaml"
         ann.write_text("format_version: 1\ncolumns: {email: note}\n")
         manifest_path = print_root / "manifest.yaml"
         manifest = _yaml.safe_load(manifest_path.read_text())
-        manifest["tables"]["seedbank.collector"]["artifacts"]["statistics_annotations"] = (
-            "statistics.annotations.yaml"
-        )
+        manifest["tables"]["arboretum.seedbank.collector"]["artifacts"][
+            "statistics_annotations"
+        ] = "statistics.annotations.yaml"
         manifest_path.write_text(_yaml.safe_dump(manifest))
         state = ServedConnections(served={"production": primary_conn}, default="production")
 
-        result = read(state, "dbprint://production/seedbank.collector/statistics_annotations")
+        result = read(
+            state,
+            "dbprint://production/arboretum.seedbank.collector/statistics_annotations",
+        )
 
         assert result.mime_type == "application/yaml"
         assert "email: note" in result.content
 
     def test_read_is_fresh_on_every_call(self, primary_conn: ConnectionConfig) -> None:
         state = ServedConnections(served={"production": primary_conn}, default="production")
-        ddl_path = primary_conn.output / primary_conn.name / "seedbank" / "collector" / "ddl.sql"
-        first = read(state, "dbprint://production/seedbank.collector/ddl")
+        ddl_path = (
+            primary_conn.output
+            / primary_conn.name
+            / "arboretum"
+            / "seedbank"
+            / "collector"
+            / "ddl.sql"
+        )
+        first = read(state, "dbprint://production/arboretum.seedbank.collector/ddl")
         ddl_path.write_text("CREATE TABLE different (x int);\n")
-        second = read(state, "dbprint://production/seedbank.collector/ddl")
+        second = read(state, "dbprint://production/arboretum.seedbank.collector/ddl")
         assert first.content != second.content
         assert "different" in second.content
 
@@ -572,7 +597,7 @@ class TestAWronglyShapedManifestIsAnErrorNotACrash:
         state = ServedConnections({"production": primary_conn}, default="production")
 
         with pytest.raises(McpError):
-            read(state, "dbprint://production/seedbank.collector/ddl")
+            read(state, "dbprint://production/arboretum.seedbank.collector/ddl")
 
     def test_enumeration_raises_a_protocol_error(
         self,
@@ -597,5 +622,22 @@ class TestAWronglyShapedManifestIsAnErrorNotACrash:
         state = ServedConnections({"production": primary_conn}, default="production")
         uris = [r.uri for r in enumerate_for(state)]
 
-        assert any("seedbank.collector" in uri for uri in uris)
+        assert any("arboretum.seedbank.collector" in uri for uri in uris)
         assert not any("seedbank.herbarium" in uri for uri in uris)
+
+
+def test_every_per_table_resource_names_the_tool_that_reads_it_interpreted(
+    primary_conn: ConnectionConfig,
+) -> None:
+    """A raw file is listed beside the tool an agent should call instead."""
+
+    state = ServedConnections(served={primary_conn.name: primary_conn}, default=primary_conn.name)
+    prefix = f"dbprint://{primary_conn.name}/"
+    per_table = [
+        e for e in enumerate_for(state) if e.uri.startswith(prefix) and e.uri.count("/") == 4
+    ]
+
+    assert per_table
+    assert all("get_table_context" in e.description for e in per_table), [
+        e.uri for e in per_table if "get_table_context" not in e.description
+    ]

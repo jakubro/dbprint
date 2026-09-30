@@ -12,6 +12,7 @@ import pytest
 
 from dbprint.adapters import DatabricksAdapter, StatisticsConfig
 from dbprint.adapters.databricks.introspect import UnmappedTableType
+from dbprint.adapters.identifiers import table_meta
 from dbprint.spec.sketch import low64_md5
 from tests.adapters.conftest import RecordedResponseCursor
 
@@ -42,6 +43,8 @@ def _uc_adapter(responses: dict[str, list[tuple]]) -> DatabricksAdapter:
     cursor = RecordedResponseCursor(responses)
     adapter = DatabricksAdapter(_UC_CREDS, cursor_factory=lambda _params: cursor)
     adapter.connect()
+    physical = ("garden", "seedbank", "accession")
+    adapter._identities.register([(table_meta(physical, "table"), physical)])
 
     return adapter
 
@@ -205,33 +208,9 @@ class TestKeySketch:
 
         expected = sorted(low64_md5(v) for v in values)
 
+        # A hash with the top bit set is what a signed or dropped-half recombination gets wrong.
+        assert any(h >= 2**63 for h in expected)
         assert list(sketch) == expected
-
-    def test_every_value_is_a_full_unsigned_64_bit_integer(self, databricks_test_schema) -> None:
-        """A value whose top bit is set must not sort negative or overflow `CONV`'s range."""
-
-        databricks_test_schema.execute("CREATE TABLE hashed2 (v STRING) USING DELTA")
-        values = [f"probe-{i}" for i in range(500)]
-        rows = ", ".join(f"('{v}')" for v in values)
-        databricks_test_schema.execute(f"INSERT INTO hashed2 (v) VALUES {rows}")
-
-        adapter = _databricks_adapter(databricks_test_schema)
-
-        try:
-            table = next(
-                t
-                for t in adapter.list_tables(include=["*"], exclude=[])
-                if t.fqn.split(".")[-1] == "hashed2"
-            )
-            sketch = adapter.compute_key_sketch(table.fqn, "v", "string", "text", k=1000)
-        finally:
-            adapter.close()
-
-        assert sketch, "the probe table seeded no distinct values"
-        assert all(0 <= h < 2**64 for h in sketch)
-        # 500 draws make a top-bit-set value near-certain - a sketch built only from small
-        # values would still pass a regression to the wrong MD5 half or a dropped high bit.
-        assert any(h >= 2**63 for h in sketch), "no sampled hash exercised the top bit"
 
 
 class TestDefaultCollation:
@@ -391,7 +370,7 @@ class TestUnityCatalogColumns:
         adapter = _uc_adapter(responses)
 
         try:
-            columns = {c.name: c for c in adapter.introspect_columns("garden.accession")}
+            columns = {c.name: c for c in adapter.introspect_columns("garden.seedbank.accession")}
         finally:
             adapter.close()
 
@@ -428,7 +407,7 @@ class TestCompositeForeignKeyPairing:
         adapter = _uc_adapter(responses)
 
         try:
-            edges = adapter.introspect_relationships("seedbank.accession")
+            edges = adapter.introspect_relationships("garden.seedbank.accession")
         finally:
             adapter.close()
 
@@ -438,27 +417,25 @@ class TestCompositeForeignKeyPairing:
         assert edge.target_column == ("pk2", "pk1"), (
             f"positional zipping would have paired (pk1, pk2) instead: got {edge.target_column}"
         )
-        assert edge.target_table == "seedbank.curator"
+        assert edge.target_table == "garden.seedbank.curator"
 
     def test_a_cross_catalog_foreign_key_is_not_dropped(self) -> None:
         responses = {
             "key_column_usage_fk": [
                 ("fk_collector", "collector_id", 1, "arboretum", "seedbank", "pk_collector"),
             ],
-            "key_column_usage": [
+            # Keyed to the target's own catalog: the session catalog's information_schema has
+            # no row for it, as on real Unity Catalog.
+            "key_column_usage:arboretum": [
                 ("collector", 1, "id"),
             ],
         }
         adapter = _uc_adapter(responses)
 
         try:
-            edges = adapter.introspect_relationships("seedbank.accession")
+            edges = adapter.introspect_relationships("garden.seedbank.accession")
         finally:
             adapter.close()
 
-        assert len(edges) == 1, (
-            "a cross-catalog FK resolved against current_catalog() unconditionally vanishes"
-        )
-        # `arboretum` is not the connected catalog, so the target is outside this print entirely -
-        # a bare `seedbank.collector` would name a different object that may well exist.
+        assert len(edges) == 1, "a target key read from the session catalog vanishes"
         assert edges[0].target_table == "arboretum.seedbank.collector"

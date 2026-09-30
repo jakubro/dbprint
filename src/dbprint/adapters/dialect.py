@@ -28,10 +28,15 @@ PLACEHOLDERS: dict[Paramstyle, str] = {"pyformat": "%s", "qmark": "?"}
 
 @dataclass(frozen=True)
 class Dialect:
-    """The SQL dialect one adapter's emitted statements must conform to."""
+    """The SQL dialect one adapter's emitted statements must conform to.
+
+    `addressed_parts` is how many trailing identifier parts a statement names - None for all.
+    """
 
     vendor: Vendor
     paramstyle: Paramstyle
+    quote_char: Literal['"', "`"]
+    addressed_parts: int | None = None
 
     @property
     def placeholder(self) -> str:
@@ -90,7 +95,7 @@ VENDOR_SUPPORT: dict[str, frozenset[Vendor]] = {
     "now()": frozenset({"postgres", "mysql", "duckdb"}),
     # `COUNT(DISTINCT (a, b))`'s row constructor, which Redshift does not support. The space
     # before the paren is deliberate: postgres/duckdb's composite-key expression renders it so.
-    "distinct (": frozenset({"postgres", "duckdb"}),
+    "count(distinct (": frozenset({"postgres", "duckdb"}),
     # Open paren rather than `rand()`, so a seeded `RAND(<n>)` is covered too; BigQuery's own
     # `RAND()` takes no argument at all, and still matches this substring.
     "rand(": frozenset({"mysql", "databricks", "bigquery"}),
@@ -111,8 +116,8 @@ VENDOR_SUPPORT: dict[str, frozenset[Vendor]] = {
     ),
     # Databricks' array-valued percentile, one call per column rather than one per key.
     "percentile(": frozenset({"databricks"}),
-    # Databricks' hex-to-decimal conversion for the sketch's low-64-bit recombination.
-    "conv(": frozenset({"databricks"}),
+    # The hex-to-decimal conversion Databricks and MySQL recombine the sketch's low 64 bits with.
+    "conv(": frozenset({"databricks", "mysql"}),
     # BigQuery's approximate cardinality and percentile-array functions.
     "approx_count_distinct(": frozenset({"bigquery"}),
     "approx_quantiles(": frozenset({"bigquery"}),
@@ -126,8 +131,9 @@ VENDOR_SUPPORT: dict[str, frozenset[Vendor]] = {
     "date_diff(": frozenset({"bigquery"}),
     # `COUNT(DISTINCT)` takes exactly one expression on BigQuery, so a composite key hashes
     # through `STRUCT(...)` cast to JSON text - the vendor-admitted encoding (measured).
+    # Databricks counts a `struct(...)` composite directly.
     "to_json_string(": frozenset({"bigquery"}),
-    "struct(": frozenset({"bigquery"}),
+    "struct(": frozenset({"bigquery", "databricks"}),
     # BigQuery's hex-digest rendering for the key sketch, paired with `md5(` above.
     "to_hex(": frozenset({"bigquery"}),
     # MySQL lacks WITHIN GROUP and these functions (mysql/stats.py).

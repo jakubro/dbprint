@@ -106,21 +106,21 @@ def _seed_clean(
     profiled_at: datetime | None = None,
     max_age_days: Any = None,
 ) -> Path:
-    """Seed a conformance-clean `seedbank.accession` print; `max_age_days` only when supplied."""
+    """Seed a conformance-clean `arboretum.seedbank.accession` print; `max_age_days` only when supplied."""
 
     (tmp_path / ".dbprint.yaml").write_text(PROJECT_YAML)
     prints = _seed_real(
         tmp_path,
         committed_print,
         "primary",
-        ("seedbank.accession",),
+        ("arboretum.seedbank.accession",),
         profiled_at or datetime.now(UTC),
     )
 
     if max_age_days is not None:
         manifest_path = prints / "manifest.yaml"
         manifest = yaml.safe_load(manifest_path.read_text())
-        manifest["tables"]["seedbank.accession"]["max_age_days"] = max_age_days
+        manifest["tables"]["arboretum.seedbank.accession"]["max_age_days"] = max_age_days
         manifest_path.write_text(yaml.safe_dump(manifest))
 
     return prints
@@ -133,7 +133,7 @@ connections:
     output: prints
     max_age_days: 30
     rules:
-      - include: ["seedbank.accession"]
+      - include: ["arboretum.seedbank.accession"]
         max_age_days: 1
 """
 
@@ -152,7 +152,7 @@ def _seed_two_tables(
         tmp_path,
         committed_print,
         "primary",
-        ("seedbank.accession", "seedbank.taxon"),
+        ("arboretum.seedbank.accession", "arboretum.seedbank.taxon"),
         profiled_at,
     )
 
@@ -180,8 +180,8 @@ class TestPerTableThresholdReachesCheck:
         payload = json.loads(result.stdout)[0]
 
         assert result.exit_code == 2
-        assert [(s["fqn"], s["max_age_days"]) for s in payload["stale_entries"]] == [
-            ("seedbank.accession", 1.0),
+        assert [(s["table"], s["max_age_days"]) for s in payload["stale_entries"]] == [
+            ("arboretum.seedbank.accession", 1.0),
         ]
 
     def test_an_override_governs_every_table_including_a_shortened_one(
@@ -200,9 +200,9 @@ class TestPerTableThresholdReachesCheck:
         result = CliRunner().invoke(main, ["check", "--max-age", "0d", "--format", "json"])
         payload = json.loads(result.stdout)[0]
 
-        assert {s["fqn"] for s in payload["stale_entries"]} == {
-            "seedbank.accession",
-            "seedbank.taxon",
+        assert {s["table"] for s in payload["stale_entries"]} == {
+            "arboretum.seedbank.accession",
+            "arboretum.seedbank.taxon",
         }
         assert {s["max_age_days"] for s in payload["stale_entries"]} == {0.0}
 
@@ -242,7 +242,7 @@ connections:
     rules:
       - include: ["*"]
         sample: 0.1
-      - include: ["seedbank.taxon"]
+      - include: ["arboretum.seedbank.taxon"]
         filter: "taxon_id > 0"
 """
 
@@ -253,7 +253,7 @@ connections:
     output: prints
     max_age_days: 7
     rules:
-      - include: ["seedbank.accession"]
+      - include: ["arboretum.seedbank.accession"]
         min_rows: 1000000
         max_age_days: 30
 """
@@ -266,12 +266,12 @@ connections:
     output: prints
     max_age_days: 7
     rules:
-      - include: ["seedbank.accession"]
+      - include: ["arboretum.seedbank.accession"]
         min_rows: 1000000
         max_age_days: 30
       - include: ["*"]
         sample: 0.1
-      - include: ["seedbank.taxon"]
+      - include: ["arboretum.seedbank.taxon"]
         filter: "taxon_id > 0"
 """
 
@@ -282,7 +282,7 @@ connections:
     output: prints
     max_age_days: 7
     rules:
-      - include: ["seedbank.accession"]
+      - include: ["arboretum.seedbank.accession"]
         max_age_days: 30
 """
 
@@ -302,7 +302,7 @@ connections:
     output: prints
     max_age_days: 7
     rules:
-      - include: ["seedbank.accession"]
+      - include: ["arboretum.seedbank.accession"]
         max_rows_scanned: 1000000000
         max_age_days: 30
 """
@@ -315,7 +315,7 @@ connections:
     max_age_days: 7
     max_rows_scanned: 1000000000
     rules:
-      - include: ["seedbank.accession"]
+      - include: ["arboretum.seedbank.accession"]
         min_rows: 1000000
         max_age_days: 30
 """
@@ -332,12 +332,12 @@ class TestContradictoryCascadeOffline:
     def _seed(tmp_path: Path, committed_print: Path) -> None:
         (tmp_path / ".dbprint.yaml").write_text(CASCADE_YAML)
         when = datetime.now(UTC)
-        _seed_real(tmp_path, committed_print, "good", ("seedbank.accession",), when)
+        _seed_real(tmp_path, committed_print, "good", ("arboretum.seedbank.accession",), when)
         _seed_real(
             tmp_path,
             committed_print,
             "bad",
-            ("seedbank.accession", "seedbank.taxon"),
+            ("arboretum.seedbank.accession", "arboretum.seedbank.taxon"),
             when,
         )
 
@@ -354,7 +354,7 @@ class TestContradictoryCascadeOffline:
 
         not_run = payload["bad"]["not_run"]
 
-        assert [entry["subject"] for entry in not_run] == ["seedbank.taxon"]
+        assert [entry["subject"] for entry in not_run] == ["arboretum.seedbank.taxon"]
         assert "rules[0]" in not_run[0]["cause"]
         assert "rules[1]" in not_run[0]["cause"]
         assert payload["bad"]["exit_code"] == 1
@@ -404,7 +404,7 @@ class TestContradictoryCascadeOffline:
         result = CliRunner().invoke(main, ["check"])
 
         assert "1 check did not run" in result.output
-        assert "seedbank.taxon" in result.output
+        assert "arboretum.seedbank.taxon" in result.output
         assert "Connection: good" in result.output
 
     def test_an_explicit_override_still_reports_the_cascade_without_failing(
@@ -422,11 +422,11 @@ class TestContradictoryCascadeOffline:
         not_run = payload["bad"]["not_run"]
 
         assert result.exit_code == 0
-        assert [entry["subject"] for entry in not_run] == ["seedbank.taxon"]
+        assert [entry["subject"] for entry in not_run] == ["arboretum.seedbank.taxon"]
         assert not_run[0]["severity"] == "warning"
         assert "rules[0]" in not_run[0]["cause"]
         assert "rules[1]" in not_run[0]["cause"]
-        assert "seedbank.taxon" in result.stderr
+        assert "arboretum.seedbank.taxon" in result.stderr
 
     def test_the_human_report_does_not_print_a_warning_under_the_fail_heading(
         self,
@@ -440,7 +440,7 @@ class TestContradictoryCascadeOffline:
 
         assert "NOTE: 1 check reported, exit unaffected" in result.output
         assert "FAIL: 1 check did not run" not in result.output
-        assert "seedbank.taxon" in result.output
+        assert "arboretum.seedbank.taxon" in result.output
 
     def test_the_size_gate_warning_stays_suppressed_under_override_with_a_cascade(
         self,
@@ -456,7 +456,7 @@ class TestContradictoryCascadeOffline:
             tmp_path,
             committed_print,
             "bad",
-            ("seedbank.accession", "seedbank.taxon"),
+            ("arboretum.seedbank.accession", "arboretum.seedbank.taxon"),
             when,
         )
         monkeypatch.chdir(tmp_path)
@@ -476,7 +476,7 @@ class TestContradictoryCascadeOffline:
         self._seed(tmp_path, committed_print)
         manifest_path = tmp_path / "prints" / "bad" / "manifest.yaml"
         manifest = yaml.safe_load(manifest_path.read_text())
-        manifest["tables"]["seedbank.taxon"]["max_age_days"] = 30
+        manifest["tables"]["arboretum.seedbank.taxon"]["max_age_days"] = 30
         manifest_path.write_text(yaml.safe_dump(manifest))
         monkeypatch.chdir(tmp_path)
         result = CliRunner().invoke(main, ["check", "--format", "json"])
@@ -507,7 +507,7 @@ class TestSizeGatedRuleOffline:
         payload = json.loads(result.stdout)[0]
 
         assert "min_rows" in result.stderr
-        assert "seedbank.accession" in result.stderr
+        assert "arboretum.seedbank.accession" in result.stderr
         # The rule's 30 did not apply, so the connection's 7 is what judged it.
         assert [entry["max_age_days"] for entry in payload["stale_entries"]] == [7.0]
 
@@ -543,21 +543,21 @@ class TestSizeGatedRuleOffline:
             tmp_path,
             committed_print,
             "primary",
-            ("seedbank.accession", "seedbank.accession_summary"),
+            ("arboretum.seedbank.accession", "arboretum.seedbank.accession_summary"),
             old,
         )
         (tmp_path / ".dbprint.yaml").write_text(
             SIZE_GATED_YAML.replace(
-                'include: ["seedbank.accession"]',
-                'include: ["seedbank.*"]',
+                'include: ["arboretum.seedbank.accession"]',
+                'include: ["arboretum.seedbank.*"]',
             ),
         )
         monkeypatch.chdir(tmp_path)
         result = CliRunner().invoke(main, ["check", "--format", "json"])
         warning = next(line for line in result.stderr.splitlines() if "min_rows" in line)
 
-        assert "seedbank.accession." in warning
-        assert "seedbank.accession_summary" not in warning
+        assert "arboretum.seedbank.accession." in warning
+        assert "arboretum.seedbank.accession_summary" not in warning
 
     def test_a_connection_level_ceiling_alone_says_nothing(
         self,
@@ -609,7 +609,7 @@ class TestSizeGatedRuleOffline:
             tmp_path,
             committed_print,
             "primary",
-            ("seedbank.accession", "seedbank.taxon"),
+            ("arboretum.seedbank.accession", "arboretum.seedbank.taxon"),
             old,
         )
         (tmp_path / ".dbprint.yaml").write_text(MIXED_YAML)
@@ -617,8 +617,8 @@ class TestSizeGatedRuleOffline:
         result = CliRunner().invoke(main, ["check", "--format", "json"])
         warning = next(line for line in result.stderr.splitlines() if "min_rows" in line)
 
-        assert "seedbank.accession." in warning
-        assert "seedbank.taxon" not in warning
+        assert "arboretum.seedbank.accession." in warning
+        assert "arboretum.seedbank.taxon" not in warning
 
 
 class TestCleanState:
@@ -632,6 +632,36 @@ class TestCleanState:
         monkeypatch.chdir(tmp_path)
         result = CliRunner().invoke(main, ["check"])
         assert result.exit_code == 0
+
+
+class TestRedactionNotApplied:
+    """A column the current `redact` rules would publish otherwise fails `check`, offline."""
+
+    def test_a_rule_the_print_predates_is_an_error(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _seed_clean(tmp_path, committed_print)
+        (tmp_path / ".dbprint.yaml").write_text(
+            PROJECT_YAML
+            + "    redact:\n"
+            + "      - columns: ['arboretum.seedbank.accession.accession_id']\n"
+            + "        with: mask\n",
+        )
+        monkeypatch.chdir(tmp_path)
+
+        result = CliRunner().invoke(main, ["check", "--format", "json"])
+        issues = json.loads(result.stdout)[0]["issues"]
+
+        assert result.exit_code == 1
+        assert [(i["code"], i["path"]) for i in issues] == [
+            (
+                "privacy.redaction-not-applied",
+                "arboretum/seedbank/accession/statistics.yaml::columns.accession_id",
+            ),
+        ]
 
 
 class TestMissingManifest:
@@ -792,7 +822,7 @@ class TestConformanceError:
     ) -> None:
         prints = _seed_clean(tmp_path, committed_print)
         # Break the statistics: cardinality exceeds row_count -> spec invariant.
-        stats_path = prints / "seedbank" / "accession" / "statistics.yaml"
+        stats_path = prints / "arboretum" / "seedbank" / "accession" / "statistics.yaml"
         stats: dict[str, Any] = yaml.safe_load(stats_path.read_text())
         stats["columns"]["accession_id"]["cardinality"] = 9999
         stats_path.write_text(yaml.safe_dump(stats))
@@ -878,7 +908,7 @@ class TestWrongShapeManifest:
         payload = json.loads(result.stdout)[0]
         assert result.exit_code == 2
         assert payload["summary"]["errors"] > 0
-        assert [e["fqn"] for e in payload["stale_entries"]] == ["public.broken"]
+        assert [e["table"] for e in payload["stale_entries"]] == ["public.broken"]
 
 
 class TestTheCauseReachesStderr:
@@ -895,13 +925,13 @@ class TestTheCauseReachesStderr:
             tmp_path,
             committed_print,
             "bad",
-            ("seedbank.accession", "seedbank.taxon"),
+            ("arboretum.seedbank.accession", "arboretum.seedbank.taxon"),
             datetime.now(UTC),
         )
         monkeypatch.chdir(tmp_path)
         result = CliRunner().invoke(main, ["check"])
 
-        assert "seedbank.taxon" in result.stderr
+        assert "arboretum.seedbank.taxon" in result.stderr
         assert result.exit_code == 1
 
     def test_the_machine_stream_stays_parseable_beside_it(
@@ -915,7 +945,7 @@ class TestTheCauseReachesStderr:
             tmp_path,
             committed_print,
             "bad",
-            ("seedbank.accession", "seedbank.taxon"),
+            ("arboretum.seedbank.accession", "arboretum.seedbank.taxon"),
             datetime.now(UTC),
         )
         monkeypatch.chdir(tmp_path)
@@ -924,7 +954,7 @@ class TestTheCauseReachesStderr:
         payload = {entry["connection"]: entry for entry in json.loads(result.stdout)}
 
         assert payload["bad"]["not_run"]
-        assert "seedbank.taxon" in result.stderr
+        assert "arboretum.seedbank.taxon" in result.stderr
 
 
 class TestValuesSumMismatchIsAWarning:
@@ -939,7 +969,7 @@ class TestValuesSumMismatchIsAWarning:
         """`provenance_country`'s exhaustive list undercounts row_count by one."""
 
         prints = _seed_clean(tmp_path, committed_print)
-        target = prints / "seedbank" / "accession" / "statistics.yaml"
+        target = prints / "arboretum" / "seedbank" / "accession" / "statistics.yaml"
         data = yaml.safe_load(target.read_text())
         # Decrement the last (already lowest-ranked) entry, so the list stays ordered by
         # count descending despite the drop.
@@ -971,7 +1001,7 @@ class TestValuesSumMismatchIsAWarning:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         prints = self._seed_with_sum_mismatch(tmp_path, committed_print)
-        target = prints / "seedbank" / "accession" / "statistics.yaml"
+        target = prints / "arboretum" / "seedbank" / "accession" / "statistics.yaml"
         data = yaml.safe_load(target.read_text())
         data["columns"]["provenance_country"]["cardinality"] = 99999
         target.write_text(yaml.safe_dump(data))

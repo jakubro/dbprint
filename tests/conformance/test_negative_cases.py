@@ -6,6 +6,7 @@ Each mutates a copy of the reference example and asserts its code appears; other
 from __future__ import annotations
 
 import base64
+import math
 import shutil
 from pathlib import Path
 from typing import Any
@@ -79,8 +80,33 @@ def test_layout_invalid_path_segment(print_dir: Path) -> None:
     assert "layout.invalid-path-segment" in _codes(validate_print(print_dir))
 
 
+def test_layout_a_dotted_table_directory_is_an_invalid_segment(print_dir: Path) -> None:
+    """SPEC 1.5.1: `.` is the FQN separator, so no directory segment may hold one."""
+
+    table_dir = print_dir / "arboretum" / "seedbank" / "beds.v2"
+    table_dir.mkdir()
+    (table_dir / "ddl.sql").write_text("-- dotted\n")
+
+    flagged = {i.path for i in validate_print(print_dir) if i.code == "layout.invalid-path-segment"}
+
+    assert flagged == {"arboretum/seedbank/beds.v2"}
+
+
+def test_manifest_a_key_naming_another_table_than_its_path_is_a_mismatch(print_dir: Path) -> None:
+    target = print_dir / "manifest.yaml"
+    data = _load_yaml_file(target)
+    data["tables"]["arboretum.seedbank.accession"]["path"] = "arboretum/seedbank/taxon"
+    _write_yaml_file(target, data)
+
+    issues = validate_print(print_dir)
+
+    assert [i.path for i in issues if i.code == "manifest.path-fqn-mismatch"] == [
+        "manifest.yaml::tables.arboretum.seedbank.accession.path",
+    ]
+
+
 def test_layout_unknown_file(print_dir: Path) -> None:
-    (print_dir / "seedbank/accession/notes.txt").write_text("foo\n")
+    (print_dir / "arboretum/seedbank/accession/notes.txt").write_text("foo\n")
     assert "layout.unknown-file" in _codes(validate_print(print_dir))
 
 
@@ -89,6 +115,22 @@ def test_layout_unexpected_directory_level(print_dir: Path) -> None:
     bad_dir.mkdir(parents=True)
     (bad_dir / "ddl.sql").write_text("-- bad\n")
     assert "layout.unexpected-directory-level" in _codes(validate_print(print_dir))
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["description.md", "statistics.annotations.yaml", "relationships.annotations.yaml"],
+)
+def test_a_user_file_in_an_undeclared_directory_is_a_warning_only(
+    print_dir: Path,
+    name: str,
+) -> None:
+    left_behind = print_dir / "fixture" / "dropped_table"
+    left_behind.mkdir(parents=True)
+    (left_behind / name).write_text("kept by the user\n")
+    found = {(i.code, i.severity) for i in validate_print(print_dir) if name in i.path}
+
+    assert found == {("manifest.orphaned-artifact", "warning")}
 
 
 def test_layout_missing_reading_guide(print_dir: Path) -> None:
@@ -135,7 +177,7 @@ def test_schema_type_mismatch(print_dir: Path) -> None:
 
 
 def test_schema_invalid_percentile_key(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["received_at"]["percentiles"]["p100"] = "2026-05-15T22:42:08Z"
     _write_yaml_file(target, data)
@@ -143,7 +185,7 @@ def test_schema_invalid_percentile_key(print_dir: Path) -> None:
 
 
 def test_schema_unknown_classification(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["accession_id"]["classification"] = "weird_new_value"
     _write_yaml_file(target, data)
@@ -191,7 +233,7 @@ def test_schema_unknown_change_kind(print_dir: Path) -> None:
 
 
 def test_schema_unknown_looks_like(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["accession_id"]["inferred"]["looks_like"] = "weird_pattern"
     _write_yaml_file(target, data)
@@ -201,7 +243,7 @@ def test_schema_unknown_looks_like(print_dir: Path) -> None:
 def test_a_print_carrying_ipv4_warns_not_errors(print_dir: Path) -> None:
     """A pattern outside the current vocabulary makes a print stale, not invalid (SPEC 5.3)."""
 
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["accession_id"]["inferred"]["looks_like"] = "ipv4"
     _write_yaml_file(target, data)
@@ -213,7 +255,7 @@ def test_a_print_carrying_ipv4_warns_not_errors(print_dir: Path) -> None:
 
 
 def test_schema_unknown_sensitivity(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["accession_id"]["inferred"]["sensitivity"] = "weird_category"
     _write_yaml_file(target, data)
@@ -251,7 +293,7 @@ def test_version_unknown_format_version(print_dir: Path) -> None:
 
 
 def test_manifest_missing_artifact(print_dir: Path) -> None:
-    (print_dir / "seedbank/accession/ddl.sql").unlink()
+    (print_dir / "arboretum/seedbank/accession/ddl.sql").unlink()
     assert "manifest.missing-artifact" in _codes(validate_print(print_dir))
 
 
@@ -279,7 +321,7 @@ def test_manifest_orphaned_artifact_in_a_declared_directory(print_dir: Path) -> 
 
     target = print_dir / "manifest.yaml"
     data = _load_yaml_file(target)
-    del data["tables"]["seedbank.collector"]["artifacts"]["description"]
+    del data["tables"]["arboretum.seedbank.collector"]["artifacts"]["description"]
     _write_yaml_file(target, data)
 
     assert "manifest.orphaned-artifact" in _codes(validate_print(print_dir))
@@ -288,12 +330,12 @@ def test_manifest_orphaned_artifact_in_a_declared_directory(print_dir: Path) -> 
 def test_manifest_missing_artifact_still_fires_beside_the_orphan_check(print_dir: Path) -> None:
     """The mirror direction - a declared entry whose file is absent - is unaffected."""
 
-    (print_dir / "seedbank/collector/description.md").unlink()
+    (print_dir / "arboretum/seedbank/collector/description.md").unlink()
     assert "manifest.missing-artifact" in _codes(validate_print(print_dir))
 
 
 def test_manifest_table_fqn_mismatch(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["table"] = "wrong.table.name"
     _write_yaml_file(target, data)
@@ -303,7 +345,7 @@ def test_manifest_table_fqn_mismatch(print_dir: Path) -> None:
 def test_manifest_columns_count_mismatch(print_dir: Path) -> None:
     target = print_dir / "manifest.yaml"
     data = _load_yaml_file(target)
-    data["tables"]["seedbank.accession"]["columns"] += 1
+    data["tables"]["arboretum.seedbank.accession"]["columns"] += 1
     _write_yaml_file(target, data)
     assert "manifest.columns-count-mismatch" in _codes(validate_print(print_dir))
 
@@ -313,7 +355,7 @@ def test_manifest_max_age_days_wrong_type(print_dir: Path) -> None:
 
     target = print_dir / "manifest.yaml"
     data = _load_yaml_file(target)
-    data["tables"]["seedbank.accession"]["max_age_days"] = "thirty"
+    data["tables"]["arboretum.seedbank.accession"]["max_age_days"] = "thirty"
     _write_yaml_file(target, data)
 
     assert "schema.type-mismatch" in _codes(validate_print(print_dir))
@@ -324,7 +366,7 @@ def test_manifest_max_age_days_negative(print_dir: Path) -> None:
 
     target = print_dir / "manifest.yaml"
     data = _load_yaml_file(target)
-    data["tables"]["seedbank.accession"]["max_age_days"] = -7
+    data["tables"]["arboretum.seedbank.accession"]["max_age_days"] = -7
     _write_yaml_file(target, data)
 
     issues = validate_print(print_dir)
@@ -332,7 +374,7 @@ def test_manifest_max_age_days_negative(print_dir: Path) -> None:
         i
         for i in issues
         if i.code == "schema.type-mismatch"
-        and i.path == "manifest.yaml::tables.seedbank.accession.max_age_days"
+        and i.path == "manifest.yaml::tables.arboretum.seedbank.accession.max_age_days"
     ]
 
     assert match, _codes(issues)
@@ -344,7 +386,7 @@ def test_manifest_max_age_days_zero_is_conformant(print_dir: Path) -> None:
 
     target = print_dir / "manifest.yaml"
     data = _load_yaml_file(target)
-    data["tables"]["seedbank.accession"]["max_age_days"] = 0
+    data["tables"]["arboretum.seedbank.accession"]["max_age_days"] = 0
     _write_yaml_file(target, data)
 
     assert [i for i in validate_print(print_dir) if i.severity == "error"] == []
@@ -410,7 +452,7 @@ def test_manifest_selectors_mismatch_diff_errors(print_dir: Path) -> None:
 
 
 def test_stats_missing_required_field_for_classification(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     # provenance_country is categorical; values is required
     del data["columns"]["provenance_country"]["values"]
@@ -419,7 +461,7 @@ def test_stats_missing_required_field_for_classification(print_dir: Path) -> Non
 
 
 def test_stats_forbidden_field_for_classification(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     # accession_id is numeric (unique, SPEC 4.2); values_coverage is MUST NOT emit there,
     # unlike values itself, which is now legitimate on numeric (SPEC 2.2.3)
@@ -428,8 +470,16 @@ def test_stats_forbidden_field_for_classification(print_dir: Path) -> None:
     assert "stats.forbidden-field-for-classification" in _codes(validate_print(print_dir))
 
 
+def test_stats_max_age_days_mismatch(print_dir: Path) -> None:
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
+    data = _load_yaml_file(target)
+    data["columns"]["collected_on"]["freshness"]["max_age_days"] += 1
+    _write_yaml_file(target, data)
+    assert "stats.max-age-days-mismatch" in _codes(validate_print(print_dir))
+
+
 def test_stats_physical_name_matches_key(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["accession_id"]["physical_name"] = "accession_id"
     _write_yaml_file(target, data)
@@ -437,7 +487,7 @@ def test_stats_physical_name_matches_key(print_dir: Path) -> None:
 
 
 def test_stats_cardinality_exceeds_row_count(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["accession_id"]["cardinality"] = 999999999
     _write_yaml_file(target, data)
@@ -445,7 +495,7 @@ def test_stats_cardinality_exceeds_row_count(print_dir: Path) -> None:
 
 
 def test_stats_null_count_exceeds_row_count(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["taxon_id"]["null_count"] = 999999999
     _write_yaml_file(target, data)
@@ -453,7 +503,7 @@ def test_stats_null_count_exceeds_row_count(print_dir: Path) -> None:
 
 
 def test_stats_nullable_contradicts_null_count(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     # traits already carries a nonzero null_count; only nullable is falsified here.
     data["columns"]["traits"]["nullable"] = False
@@ -462,7 +512,7 @@ def test_stats_nullable_contradicts_null_count(print_dir: Path) -> None:
 
 
 def test_stats_zero_count_exceeds_row_count(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["accession_id"]["zero_count"] = 999999999
     _write_yaml_file(target, data)
@@ -470,7 +520,7 @@ def test_stats_zero_count_exceeds_row_count(print_dir: Path) -> None:
 
 
 def test_stats_empty_count_exceeds_row_count(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["accession_code"]["empty_count"] = 999999999
     _write_yaml_file(target, data)
@@ -478,7 +528,7 @@ def test_stats_empty_count_exceeds_row_count(print_dir: Path) -> None:
 
 
 def test_stats_length_order_violated(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["accession_code"]["length"]["avg"] = 999999999.0
     _write_yaml_file(target, data)
@@ -488,7 +538,7 @@ def test_stats_length_order_violated(print_dir: Path) -> None:
 def test_stats_values_sum_mismatch(print_dir: Path) -> None:
     """Warning, not error - phase A and phase B are measured seconds apart on a live table."""
 
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["provenance_country"]["values"][0]["count"] = 1
     _write_yaml_file(target, data)
@@ -500,7 +550,7 @@ def test_stats_values_sum_mismatch(print_dir: Path) -> None:
 def test_stats_values_coverage_mismatch(print_dir: Path) -> None:
     """Warning, not error - same cross-phase drift `stats.values-sum-mismatch` reports."""
 
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["taxon_id"]["values_coverage"] = 0.5
     _write_yaml_file(target, data)
@@ -512,7 +562,7 @@ def test_stats_values_coverage_mismatch(print_dir: Path) -> None:
 
 
 def test_stats_values_list_short_of_cardinality(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     del data["columns"]["provenance_country"]["values"][0]
     _write_yaml_file(target, data)
@@ -523,7 +573,7 @@ def test_stats_values_list_short_of_cardinality(print_dir: Path) -> None:
 
 
 def test_stats_values_list_exceeds_cardinality(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     extra = dict(data["columns"]["provenance_country"]["values"][0])
     extra["value"] = "ZZ"
@@ -540,7 +590,7 @@ def test_stats_values_list_length_mismatch_ignored_when_cardinality_is_approxima
 ) -> None:
     """An HLL estimate may legitimately disagree with an entry count it never measured."""
 
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     del data["columns"]["provenance_country"]["values"][0]
     data["columns"]["provenance_country"]["cardinality_method"] = "approximate"
@@ -553,7 +603,7 @@ def test_stats_values_list_length_mismatch_ignored_when_cardinality_is_approxima
 def test_stats_values_list_short_of_cardinality_under_bounded_coverage(print_dir: Path) -> None:
     """The producer already disclosed the disagreement (SPEC 2.2.4) - warning, distinct code."""
 
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     del data["columns"]["provenance_country"]["values"][0]
     data["columns"]["provenance_country"]["values_coverage_method"] = "bounded"
@@ -571,7 +621,7 @@ def test_stats_values_list_short_of_cardinality_under_measured_coverage_is_uncha
 ) -> None:
     """An explicit `measured` marker is the undisclosed case - error, same as today."""
 
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     del data["columns"]["provenance_country"]["values"][0]
     data["columns"]["provenance_country"]["values_coverage_method"] = "measured"
@@ -589,7 +639,7 @@ def test_stats_values_list_short_of_cardinality_with_no_method_field_is_unchange
 ) -> None:
     """An artifact carrying no method field at all is not `bounded` (SPEC 7.2's absence rule)."""
 
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     del data["columns"]["provenance_country"]["values"][0]
     data["columns"]["provenance_country"].pop("values_coverage_method", None)  # predates it
@@ -607,7 +657,7 @@ def test_stats_values_list_exceeds_cardinality_under_bounded_is_not_double_downg
 ) -> None:
     """`stats.values-list-exceeds-cardinality` is already a warning; `bounded` changes nothing."""
 
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     extra = dict(data["columns"]["provenance_country"]["values"][0])
     extra["value"] = "ZZ"
@@ -621,7 +671,7 @@ def test_stats_values_list_exceeds_cardinality_under_bounded_is_not_double_downg
 
 
 def test_stats_null_rate_mismatch(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["provenance_country"]["null_rate"] = 0.5
     _write_yaml_file(target, data)
@@ -631,7 +681,7 @@ def test_stats_null_rate_mismatch(print_dir: Path) -> None:
 
 
 def test_stats_cardinality_ratio_mismatch(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["provenance_country"]["cardinality_ratio"] = 1.0
     _write_yaml_file(target, data)
@@ -648,7 +698,7 @@ def test_stats_a_floored_null_rate_agrees_with_the_validator(print_dir: Path) ->
     trip stats.null-rate-mismatch; the scope breaks other columns, so only this one is read.
     """
 
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["scope"] = {"rows_scanned": 10_000_000}
     col = data["columns"]["provenance_country"]
@@ -656,7 +706,7 @@ def test_stats_a_floored_null_rate_agrees_with_the_validator(print_dir: Path) ->
     col["null_rate"] = 0.000001  # floored; round(1 / 10_000_000, 6) alone is 0.0
     _write_yaml_file(target, data)
 
-    col_path = "seedbank/accession/statistics.yaml::columns.provenance_country"
+    col_path = "arboretum/seedbank/accession/statistics.yaml::columns.provenance_country"
     codes = {i.code for i in validate_print(print_dir) if i.path == col_path}
     assert "stats.null-rate-mismatch" not in codes
 
@@ -670,33 +720,86 @@ def test_stats_null_rate_and_cardinality_ratio_recompute_against_rows_scanned(
     and legitimately trips other invariants once `rows_scanned` shrinks.
     """
 
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
-    col = data["columns"]["traits"]  # null_count=147, cardinality=80
-    scanned = 1250  # half of row_count=2500, above both of traits' counts
-    data["scope"] = {"rows_scanned": scanned}
-    col["cardinality_ratio"] = round(col["cardinality"] / scanned, 6)
-    col["null_rate"] = round(col["null_count"] / scanned, 6)
+    col = data["columns"]["traits"]  # null_count=147, cardinality=161
+    data["scope"] = {"rows_scanned": 1250}  # half of row_count=2500, above both of traits' counts
+    col["cardinality_ratio"] = 0.1288
+    col["null_rate"] = 0.1176
     _write_yaml_file(target, data)
 
-    traits_path = "seedbank/accession/statistics.yaml::columns.traits"
+    traits_path = "arboretum/seedbank/accession/statistics.yaml::columns.traits"
     codes = {i.code for i in validate_print(print_dir) if i.path == traits_path}
     assert "stats.null-rate-mismatch" not in codes
     assert "stats.cardinality-ratio-mismatch" not in codes
 
 
 def test_stats_values_not_ordered(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["provenance_country"]["values"].reverse()
     _write_yaml_file(target, data)
     assert "stats.values-not-ordered" in _codes(validate_print(print_dir))
 
 
+@pytest.mark.parametrize(
+    ("first", "second", "ordered"),
+    [
+        ("0.5", "0.0000001", False),
+        ("9.5", "9.99999999999999999", True),
+        ("09:00:00", "'10:00:00'", True),
+    ],
+)
+def test_stats_values_tie_order_reads_the_published_text(
+    print_dir: Path,
+    first: str,
+    second: str,
+    ordered: bool,
+) -> None:
+    """A tie sorts on the scalar as written: `9.99999999999999999` loads as 10.0, sorts after 9.5."""
+
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
+    text = target.read_text(encoding="utf-8")
+    start = text.index("  provenance_country:")
+    block = text[start:].replace("- value: AU", f"- value: {first}", 1)
+    block = block.replace("- value: CA", f"- value: {second}", 1)
+    target.write_text(text[:start] + block, encoding="utf-8")
+
+    col_path = "arboretum/seedbank/accession/statistics.yaml::columns.provenance_country"
+    codes = {i.code for i in validate_print(print_dir) if i.path == col_path}
+    assert ("stats.values-not-ordered" not in codes) is ordered
+
+
+@pytest.mark.parametrize(
+    "node",
+    ["!!set {red: null}", "!!binary YWI=", "{a: 1}", "[1, 2]"],
+    ids=["set", "binary", "mapping", "list"],
+)
+def test_stats_a_listed_value_that_is_not_a_scalar_is_a_type_mismatch(
+    print_dir: Path,
+    node: str,
+) -> None:
+    """SPEC 2.2.4: values are strings, numbers or booleans - a YAML tag or collection is none."""
+
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
+    text = target.read_text(encoding="utf-8")
+    start = text.index("  provenance_country:")
+    target.write_text(
+        text[:start] + text[start:].replace("- value: AU", f"- value: {node}", 1),
+        encoding="utf-8",
+    )
+
+    col_path = "arboretum/seedbank/accession/statistics.yaml::columns.provenance_country"
+    assert any(
+        i.code == "schema.type-mismatch" and i.path.startswith(col_path)
+        for i in validate_print(print_dir)
+    )
+
+
 def _rewrite_spelling_member(print_dir: Path, value: str, spelling_of: str) -> None:
     """The example's `Sand Tray` entry (a spelling of `sand tray`) rewritten as given."""
 
-    target = print_dir / "seedbank/germination_trial/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/germination_trial/statistics.yaml"
     data = _load_yaml_file(target)
     entry = next(
         e for e in data["columns"]["medium"]["values"] if e.get("spelling_of") == "sand tray"
@@ -738,7 +841,7 @@ def test_stats_spelling_of_is_clean_on_the_example(print_dir: Path) -> None:
 
 
 def test_stats_percentiles_not_ordered_reversed(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     percentiles = data["columns"]["viability_pct"]["percentiles"]
     percentiles["p01"], percentiles["p99"] = percentiles["p99"], percentiles["p01"]
@@ -749,10 +852,170 @@ def test_stats_percentiles_not_ordered_reversed(print_dir: Path) -> None:
     assert match.severity == "error"
 
 
+def _as_nanosecond_epochs(column: dict) -> None:
+    """Rewrite a numeric column onto the magnitude where one float64 step is 256."""
+
+    base = 1_700_000_000_000_000_000
+    column["range"] = {"min": base, "max": base + 60_000_000_000_000_000}
+    column["percentiles"] = {
+        "p01": float(base),
+        "p25": float(base + 1_000),
+        "p50": float(base + 2_000),
+        "p75": float(base + 3_000),
+        "p99": float(base + 4_000),
+    }
+    column["mean"] = float(base + 2_000)
+
+
+def _widen_from_zero(column: dict) -> None:
+    """A range from zero to the magnitude where one float64 step is 256."""
+
+    _set_bounds(column, 0, 1_700_000_000_000_000_000)
+
+
+def _set_bounds(column: dict, low: float, high: float) -> None:
+    """Every percentile and the mean at the maximum, so only the value a test rewrites moves."""
+
+    column["range"] = {"min": low, "max": high}
+    column["percentiles"] = dict.fromkeys(("p01", "p25", "p50", "p75", "p99"), float(high))
+    column["mean"] = float(high)
+
+
+class TestComparingTwoReadingsOfOneMeasurementAbovePrecision:
+    """SPEC 2.2.4: above 2**53 a bound publishes exact and a percentile as a float64."""
+
+    def test_a_percentile_one_step_below_the_minimum_is_accepted(self, print_dir: Path) -> None:
+        target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
+        data = _load_yaml_file(target)
+        column = data["columns"]["viability_pct"]
+        _as_nanosecond_epochs(column)
+        column["percentiles"]["p01"] = float(column["range"]["min"]) - 256.0
+        _write_yaml_file(target, data)
+
+        assert "stats.percentile-outside-range" not in _codes(validate_print(print_dir))
+
+    def test_a_percentile_an_hour_below_the_minimum_still_fails(self, print_dir: Path) -> None:
+        target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
+        data = _load_yaml_file(target)
+        column = data["columns"]["viability_pct"]
+        _as_nanosecond_epochs(column)
+        column["percentiles"]["p01"] = float(column["range"]["min"] - 3_600_000_000_000)
+        _write_yaml_file(target, data)
+
+        assert "stats.percentile-outside-range" in _codes(validate_print(print_dir))
+
+    def test_two_percentiles_one_step_apart_are_accepted_in_either_order(
+        self,
+        print_dir: Path,
+    ) -> None:
+        target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
+        data = _load_yaml_file(target)
+        column = data["columns"]["viability_pct"]
+        _as_nanosecond_epochs(column)
+        column["percentiles"]["p25"] = column["percentiles"]["p50"] + 256.0
+        _write_yaml_file(target, data)
+
+        assert "stats.percentiles-not-ordered" not in _codes(validate_print(print_dir))
+
+    def test_a_mean_one_step_below_the_minimum_is_accepted(self, print_dir: Path) -> None:
+        target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
+        data = _load_yaml_file(target)
+        column = data["columns"]["viability_pct"]
+        _as_nanosecond_epochs(column)
+        column["mean"] = float(column["range"]["min"]) - 256.0
+        _write_yaml_file(target, data)
+
+        assert "stats.mean-outside-range" not in _codes(validate_print(print_dir))
+
+    def test_ordinary_magnitudes_keep_the_absolute_tolerance(self, print_dir: Path) -> None:
+        """At 2**52 one float64 step is 1.0: a magnitude-scaled tolerance would accept this."""
+
+        target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
+        data = _load_yaml_file(target)
+        column = data["columns"]["viability_pct"]
+        _set_bounds(column, 0, 2**53)
+        column["percentiles"]["p01"] = column["percentiles"]["p50"] = float(2**52)
+        column["percentiles"]["p25"] = float(2**52) + 1.0
+        _write_yaml_file(target, data)
+
+        assert "stats.percentiles-not-ordered" in _codes(validate_print(print_dir))
+
+    def test_a_wide_range_does_not_license_its_low_end(self, print_dir: Path) -> None:
+        target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
+        data = _load_yaml_file(target)
+        column = data["columns"]["viability_pct"]
+        _widen_from_zero(column)
+        column["percentiles"]["p01"] = -500.0
+        _write_yaml_file(target, data)
+
+        assert "stats.percentile-outside-range" in _codes(validate_print(print_dir))
+
+    def test_the_wide_ranges_high_end_still_takes_its_step(self, print_dir: Path) -> None:
+        target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
+        data = _load_yaml_file(target)
+        column = data["columns"]["viability_pct"]
+        _widen_from_zero(column)
+        column["percentiles"]["p99"] = float(column["range"]["max"]) + 256.0
+        _write_yaml_file(target, data)
+
+        assert "stats.percentile-outside-range" not in _codes(validate_print(print_dir))
+
+    def test_a_mean_far_below_a_wide_ranges_low_end_fails(self, print_dir: Path) -> None:
+        target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
+        data = _load_yaml_file(target)
+        column = data["columns"]["viability_pct"]
+        _widen_from_zero(column)
+        column["mean"] = -500.0
+        _write_yaml_file(target, data)
+
+        assert "stats.mean-outside-range" in _codes(validate_print(print_dir))
+
+    def test_a_minimum_of_exactly_2_53_keeps_the_gate_closed(self, print_dir: Path) -> None:
+        target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
+        data = _load_yaml_file(target)
+        column = data["columns"]["viability_pct"]
+        _set_bounds(column, 2**53, 2**53 + 1_000_000)
+        column["percentiles"]["p01"] = float(2**53) - 1.0
+        _write_yaml_file(target, data)
+
+        assert "stats.percentile-outside-range" in _codes(validate_print(print_dir))
+
+    def test_a_minimum_past_2_53_opens_it(self, print_dir: Path) -> None:
+        target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
+        data = _load_yaml_file(target)
+        column = data["columns"]["viability_pct"]
+        _set_bounds(column, 2**53 + 2, 2**53 + 1_000_000)
+        column["percentiles"]["p01"] = float(2**53)
+        _write_yaml_file(target, data)
+
+        assert "stats.percentile-outside-range" not in _codes(validate_print(print_dir))
+
+    def test_a_constant_columns_mean_reads_the_exact_bound(self, print_dir: Path) -> None:
+        target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
+        data = _load_yaml_file(target)
+        column = data["columns"]["viability_pct"]
+        _set_bounds(column, 2**53 + 1, 2**53 + 1)
+        column["mean"] = float(2**53 + 1)
+        _write_yaml_file(target, data)
+
+        assert "stats.mean-outside-range" not in _codes(validate_print(print_dir))
+
+    def test_a_mean_one_step_outside_is_accepted_below_the_limit_too(self, print_dir: Path) -> None:
+        target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
+        data = _load_yaml_file(target)
+        column = data["columns"]["viability_pct"]
+        bound = 2**40 + 0.5
+        _set_bounds(column, bound, bound)
+        column["mean"] = math.nextafter(bound, 0)
+        _write_yaml_file(target, data)
+
+        assert "stats.mean-outside-range" not in _codes(validate_print(print_dir))
+
+
 def test_stats_percentiles_not_ordered_single_inversion_temporal(print_dir: Path) -> None:
     """Ordering compares parsed instants, not string form - the rest stay ascending."""
 
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     percentiles = data["columns"]["received_at"]["percentiles"]
     percentiles["p50"], percentiles["p75"] = percentiles["p75"], percentiles["p50"]
@@ -763,7 +1026,7 @@ def test_stats_percentiles_not_ordered_single_inversion_temporal(print_dir: Path
 def test_stats_percentiles_equal_on_a_constant_column_is_conformant(print_dir: Path) -> None:
     """Non-decreasing, not strictly ascending - a single-valued column is legal."""
 
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["viability_pct"]["percentiles"] = {
         "p01": 59.33,
@@ -779,7 +1042,7 @@ def test_stats_percentiles_equal_on_a_constant_column_is_conformant(print_dir: P
 def test_stats_percentiles_a_non_default_configured_list_orders_correctly(
     print_dir: Path,
 ) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["viability_pct"]["percentiles"] = {"p10": 30.0, "p50": 59.33, "p90": 95.0}
     _write_yaml_file(target, data)
@@ -787,7 +1050,7 @@ def test_stats_percentiles_a_non_default_configured_list_orders_correctly(
 
 
 def test_stats_percentile_outside_range_numeric(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["viability_pct"]["percentiles"]["p99"] = 999.0
     _write_yaml_file(target, data)
@@ -798,17 +1061,47 @@ def test_stats_percentile_outside_range_numeric(print_dir: Path) -> None:
 
 
 def test_stats_percentile_outside_range_temporal(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["received_at"]["percentiles"]["p99"] = "2030-01-01T00:00:00Z"
     _write_yaml_file(target, data)
     assert "stats.percentile-outside-range" in _codes(validate_print(print_dir))
 
 
+class TestATemporalPercentilePastYear9999:
+    """SPEC 2.2.4: an instant `fromisoformat` cannot read still compares, by its leading year."""
+
+    @pytest.mark.parametrize("rendered", ["10000-01-01T00:00:00Z", "+10000-01-01T00:00:00Z"])
+    def test_one_above_a_year_9999_maximum_lies_outside_the_range(
+        self,
+        print_dir: Path,
+        rendered: str,
+    ) -> None:
+        target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
+        data = _load_yaml_file(target)
+        column = data["columns"]["received_at"]
+        column["range"]["max"] = "9999-12-31T23:59:59.999999Z"
+        column["percentiles"]["p99"] = rendered
+        column["unrepresentable"] = ["p99"]
+        _write_yaml_file(target, data)
+
+        assert "stats.percentile-outside-range" in _codes(validate_print(print_dir))
+
+    def test_one_below_a_neighbour_it_outranks_is_out_of_order(self, print_dir: Path) -> None:
+        target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
+        data = _load_yaml_file(target)
+        column = data["columns"]["received_at"]
+        column["percentiles"]["p75"] = "10000-01-01T00:00:00Z"
+        column["unrepresentable"] = ["p75"]
+        _write_yaml_file(target, data)
+
+        assert "stats.percentiles-not-ordered" in _codes(validate_print(print_dir))
+
+
 def test_stats_percentile_containment_skipped_when_range_absent(print_dir: Path) -> None:
     """A `drop` marker leaves `range` absent while `percentiles` may remain."""
 
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     del data["columns"]["viability_pct"]["range"]
     data["columns"]["viability_pct"]["percentiles"]["p99"] = 999.0
@@ -821,7 +1114,7 @@ def test_stats_percentile_containment_skipped_under_any_redacted_marker(
 ) -> None:
     """A redaction placeholder carries no literal to compare against `range`."""
 
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["viability_pct"]["percentiles"]["p99"] = 999.0
     data["columns"]["viability_pct"]["redacted"] = "hash"
@@ -830,7 +1123,7 @@ def test_stats_percentile_containment_skipped_under_any_redacted_marker(
 
 
 def test_stats_null_patterns_absent_with_nulls(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     del data["null_patterns"]
     _write_yaml_file(target, data)
@@ -841,7 +1134,7 @@ def test_stats_null_patterns_absent_with_nulls(print_dir: Path) -> None:
 def test_stats_null_patterns_present_without_nulls(print_dir: Path) -> None:
     """The same code both ways: the block's presence is a claim about the data."""
 
-    target = print_dir / "seedbank/collector/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/collector/statistics.yaml"
     data = _load_yaml_file(target)
     data["null_patterns"] = {"coverage": 1.0, "patterns": []}
     _write_yaml_file(target, data)
@@ -850,7 +1143,7 @@ def test_stats_null_patterns_present_without_nulls(print_dir: Path) -> None:
 
 
 def test_stats_null_patterns_unknown_column(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["null_patterns"]["patterns"][0]["columns"] = ["not_a_column"]
     _write_yaml_file(target, data)
@@ -859,7 +1152,7 @@ def test_stats_null_patterns_unknown_column(print_dir: Path) -> None:
 
 
 def test_stats_null_patterns_sum_exceeds_rows_scanned(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["null_patterns"]["patterns"][0]["count"] = data["row_count"] + 1
     _write_yaml_file(target, data)
@@ -872,7 +1165,7 @@ def test_stats_null_patterns_sum_exceeds_rows_scanned_under_bounded_coverage(
 ) -> None:
     """The producer already disclosed the disagreement (SPEC 2.2.10) - warning, distinct code."""
 
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["null_patterns"]["patterns"][0]["count"] = data["row_count"] + 1
     data["null_patterns"]["coverage_method"] = "bounded"
@@ -886,7 +1179,7 @@ def test_stats_null_patterns_sum_exceeds_rows_scanned_under_bounded_coverage(
 def test_stats_null_patterns_sum_exceeds_rows_scanned_under_measured_is_unchanged(
     print_dir: Path,
 ) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["null_patterns"]["patterns"][0]["count"] = data["row_count"] + 1
     data["null_patterns"]["coverage_method"] = "measured"
@@ -898,7 +1191,7 @@ def test_stats_null_patterns_sum_exceeds_rows_scanned_under_measured_is_unchange
 
 
 def test_stats_null_patterns_coverage_mismatch(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["null_patterns"]["coverage"] = 0.5
     _write_yaml_file(target, data)
@@ -907,7 +1200,7 @@ def test_stats_null_patterns_coverage_mismatch(print_dir: Path) -> None:
 
 
 def test_stats_null_patterns_not_ordered(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["null_patterns"]["patterns"].reverse()
     _write_yaml_file(target, data)
@@ -916,7 +1209,7 @@ def test_stats_null_patterns_not_ordered(print_dir: Path) -> None:
 
 
 def test_stats_null_patterns_duplicate_combination(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     first = data["null_patterns"]["patterns"][0]
     data["null_patterns"]["patterns"].append({"columns": list(first["columns"]), "count": 0})
@@ -928,7 +1221,7 @@ def test_stats_null_patterns_duplicate_combination(print_dir: Path) -> None:
 def test_stats_null_patterns_reconciliation_mismatch(print_dir: Path) -> None:
     """The cross-field identity: a column's own null_count moves, the census does not."""
 
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     column = data["null_patterns"]["patterns"][0]["columns"][0]
     data["columns"][column]["null_count"] += 1
@@ -940,7 +1233,7 @@ def test_stats_null_patterns_reconciliation_mismatch(print_dir: Path) -> None:
 def test_stats_null_patterns_reconciliation_mismatch_under_bounded_coverage(
     print_dir: Path,
 ) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     column = data["null_patterns"]["patterns"][0]["columns"][0]
     data["columns"][column]["null_count"] += 1
@@ -957,7 +1250,7 @@ def test_stats_null_patterns_reconciliation_mismatch_with_no_method_field_is_unc
 ) -> None:
     """An artifact carrying no method field at all is not `bounded` (SPEC 7.3's absence rule)."""
 
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     column = data["null_patterns"]["patterns"][0]["columns"][0]
     data["columns"][column]["null_count"] += 1
@@ -970,7 +1263,7 @@ def test_stats_null_patterns_reconciliation_mismatch_with_no_method_field_is_unc
 
 
 def test_stats_physical_layout_unknown_column(print_dir: Path) -> None:
-    target = print_dir / "seedbank/storage_reading/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/storage_reading/statistics.yaml"
     data = _load_yaml_file(target)
     data["physical_layout"]["keys"][0]["column"] = "not_a_column"
     _write_yaml_file(target, data)
@@ -981,7 +1274,7 @@ def test_stats_physical_layout_unknown_column(print_dir: Path) -> None:
 def test_stats_physical_layout_key_not_declared(print_dir: Path) -> None:
     """A column claims membership the table-level list does not name."""
 
-    target = print_dir / "seedbank/storage_reading/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/storage_reading/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["temperature_c"]["physical_layout_key"] = True
     _write_yaml_file(target, data)
@@ -992,7 +1285,7 @@ def test_stats_physical_layout_key_not_declared(print_dir: Path) -> None:
 def test_stats_physical_layout_key_missing_marker(print_dir: Path) -> None:
     """The table-level list names a column that never carries the per-column marker."""
 
-    target = print_dir / "seedbank/storage_reading/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/storage_reading/statistics.yaml"
     data = _load_yaml_file(target)
     del data["columns"]["reading_date"]["physical_layout_key"]
     _write_yaml_file(target, data)
@@ -1001,7 +1294,7 @@ def test_stats_physical_layout_key_missing_marker(print_dir: Path) -> None:
 
 
 def test_stats_grain_unknown_column(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["grain"]["keys"][0]["columns"] = ["not_a_column"]
     _write_yaml_file(target, data)
@@ -1010,7 +1303,7 @@ def test_stats_grain_unknown_column(print_dir: Path) -> None:
 
 
 def test_stats_grain_duplicate_key(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["grain"]["keys"].append(data["grain"]["keys"][0])
     _write_yaml_file(target, data)
@@ -1021,7 +1314,7 @@ def test_stats_grain_duplicate_key(print_dir: Path) -> None:
 def test_stats_grain_duplicate_key_is_order_independent(print_dir: Path) -> None:
     """Key order is meaningful for encoding (SPEC 2.2.12), not for spotting a repeat."""
 
-    target = print_dir / "seedbank/vault/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/vault/statistics.yaml"
     data = _load_yaml_file(target)
     declared = next(k for k in data["grain"]["keys"] if k["detection"] == "declared")
     reordered = {"columns": list(reversed(declared["columns"])), "detection": "declared"}
@@ -1034,7 +1327,7 @@ def test_stats_grain_duplicate_key_is_order_independent(print_dir: Path) -> None
 def test_stats_grain_absent_errors(print_dir: Path) -> None:
     """SPEC 2.2.12 requires the block: without it the file states nothing about its own grain."""
 
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     del data["grain"]
     _write_yaml_file(target, data)
@@ -1045,7 +1338,7 @@ def test_stats_grain_absent_errors(print_dir: Path) -> None:
 def test_stats_grain_measured_under_scope(print_dir: Path) -> None:
     """`vault` carries a genuine measured entry; a `scope` block beside it overclaims."""
 
-    target = print_dir / "seedbank/vault/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/vault/statistics.yaml"
     data = _load_yaml_file(target)
     assert any(k["detection"] == "measured" for k in data["grain"]["keys"])
     data["scope"] = {"rows_scanned": 20, "sample": 0.5}
@@ -1055,7 +1348,7 @@ def test_stats_grain_measured_under_scope(print_dir: Path) -> None:
 
 
 def test_stats_grain_measured_on_empty_table(print_dir: Path) -> None:
-    target = print_dir / "seedbank/vault/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/vault/statistics.yaml"
     data = _load_yaml_file(target)
     assert any(k["detection"] == "measured" for k in data["grain"]["keys"])
     data["row_count"] = 0
@@ -1065,7 +1358,7 @@ def test_stats_grain_measured_on_empty_table(print_dir: Path) -> None:
 
 
 def test_stats_dependencies_unknown_column(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["dependencies"] = [
         {"determinant": "not_a_column", "dependent": "accession_code", "strength": 1.0},
@@ -1076,7 +1369,7 @@ def test_stats_dependencies_unknown_column(print_dir: Path) -> None:
 
 
 def test_stats_dependencies_self_referential(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["dependencies"] = [
         {"determinant": "accession_id", "dependent": "accession_id", "strength": 1.0},
@@ -1087,7 +1380,7 @@ def test_stats_dependencies_self_referential(print_dir: Path) -> None:
 
 
 def test_stats_dependencies_strength_out_of_range(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["dependencies"] = [
         {"determinant": "accession_id", "dependent": "accession_code", "strength": 1.5},
@@ -1100,7 +1393,7 @@ def test_stats_dependencies_strength_out_of_range(print_dir: Path) -> None:
 def test_stats_dependencies_absent_is_conformant(print_dir: Path) -> None:
     """A MINOR-version addition (SPEC 5): its absence must not fail schema validation."""
 
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data.pop("dependencies", None)
     _write_yaml_file(target, data)
@@ -1111,7 +1404,7 @@ def test_stats_dependencies_absent_is_conformant(print_dir: Path) -> None:
 def test_stats_dependencies_direction_impossible(print_dir: Path) -> None:
     """A function's image cannot exceed its domain, independent of the strength claimed."""
 
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["accession_id"]["cardinality"] = 5
     data["columns"]["accession_code"]["cardinality"] = 50
@@ -1124,7 +1417,7 @@ def test_stats_dependencies_direction_impossible(print_dir: Path) -> None:
 
 
 def test_stats_dependencies_measured_under_scope(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["dependencies"] = [
         {"determinant": "accession_id", "dependent": "accession_code", "strength": 1.0},
@@ -1136,7 +1429,7 @@ def test_stats_dependencies_measured_under_scope(print_dir: Path) -> None:
 
 
 def test_stats_dependencies_measured_on_empty_table(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["dependencies"] = [
         {"determinant": "accession_id", "dependent": "accession_code", "strength": 1.0},
@@ -1148,7 +1441,7 @@ def test_stats_dependencies_measured_on_empty_table(print_dir: Path) -> None:
 
 
 def test_stats_timeline_unknown_column(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["timeline"]["column"] = "not_a_column"
     _write_yaml_file(target, data)
@@ -1157,7 +1450,7 @@ def test_stats_timeline_unknown_column(print_dir: Path) -> None:
 
 
 def test_stats_timeline_anchor_not_temporal(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["timeline"]["column"] = "accession_id"
     _write_yaml_file(target, data)
@@ -1166,7 +1459,7 @@ def test_stats_timeline_anchor_not_temporal(print_dir: Path) -> None:
 
 
 def test_stats_timeline_anchor_redacted(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["collected_on"]["redacted"] = "mask"
     _write_yaml_file(target, data)
@@ -1175,7 +1468,7 @@ def test_stats_timeline_anchor_redacted(print_dir: Path) -> None:
 
 
 def test_stats_timeline_under_scope(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["scope"] = {"rows_scanned": 20, "sample": 0.5}
     _write_yaml_file(target, data)
@@ -1184,7 +1477,7 @@ def test_stats_timeline_under_scope(print_dir: Path) -> None:
 
 
 def test_stats_timeline_on_empty_table(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["row_count"] = 0
     _write_yaml_file(target, data)
@@ -1193,7 +1486,7 @@ def test_stats_timeline_on_empty_table(print_dir: Path) -> None:
 
 
 def test_stats_timeline_buckets_unordered(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["timeline"]["buckets"] = list(reversed(data["timeline"]["buckets"]))
     _write_yaml_file(target, data)
@@ -1202,9 +1495,36 @@ def test_stats_timeline_buckets_unordered(print_dir: Path) -> None:
 
 
 def test_stats_timeline_coverage_mismatch(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["timeline"]["coverage"] = 0.01
+    _write_yaml_file(target, data)
+
+    assert "stats.timeline-coverage-mismatch" in _codes(validate_print(print_dir))
+
+
+def test_stats_timeline_buckets_exceeding_rows_scanned_warns_instead_of_failing(
+    print_dir: Path,
+) -> None:
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
+    data = _load_yaml_file(target)
+    start = data["timeline"]["buckets"][0]["start"]
+    data["timeline"]["buckets"] = [{"start": start, "count": data["row_count"] + 3}]
+    data["timeline"]["coverage"] = 0.999999
+    _write_yaml_file(target, data)
+
+    codes = _codes(validate_print(print_dir))
+
+    assert "stats.timeline-buckets-exceed-rows-scanned" in codes
+    assert "stats.timeline-coverage-mismatch" not in codes
+
+
+def test_stats_timeline_coverage_of_one_over_a_partial_sum_still_fails(print_dir: Path) -> None:
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
+    data = _load_yaml_file(target)
+    start = data["timeline"]["buckets"][0]["start"]
+    data["timeline"]["buckets"] = [{"start": start, "count": 7}]
+    data["timeline"]["coverage"] = 1.0
     _write_yaml_file(target, data)
 
     assert "stats.timeline-coverage-mismatch" in _codes(validate_print(print_dir))
@@ -1213,7 +1533,7 @@ def test_stats_timeline_coverage_mismatch(print_dir: Path) -> None:
 def test_stats_timeline_absent_is_conformant(print_dir: Path) -> None:
     """A MINOR-version addition (SPEC 5): its absence must not fail schema validation."""
 
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data.pop("timeline", None)
     _write_yaml_file(target, data)
@@ -1226,7 +1546,7 @@ def test_stats_populated_without_timeline(print_dir: Path) -> None:
     once `timeline` itself is removed.
     """
 
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     assert "populated" in data["columns"]["traits"]
     data.pop("timeline", None)
@@ -1235,8 +1555,21 @@ def test_stats_populated_without_timeline(print_dir: Path) -> None:
     assert "stats.populated-without-timeline" in _codes(validate_print(print_dir))
 
 
+def test_stats_populated_out_of_anchor_range_warns_without_failing(print_dir: Path) -> None:
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
+    data = _load_yaml_file(target)
+    data["columns"]["traits"]["populated"]["to"] = "2099-01-01T00:00:00"
+    _write_yaml_file(target, data)
+    issues = validate_print(print_dir)
+    excursions = [i for i in issues if i.code == "stats.populated-out-of-anchor-range"]
+
+    assert [i.severity for i in excursions] == ["warning"]
+    assert "2099-01-01T00:00:00" in excursions[0].detail
+    assert [i.code for i in issues if i.severity == "error"] == []
+
+
 def test_stats_populated_out_of_anchor_range(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["traits"]["populated"]["from"] = "1900-01-01"
     _write_yaml_file(target, data)
@@ -1247,7 +1580,7 @@ def test_stats_populated_out_of_anchor_range(print_dir: Path) -> None:
 def test_stats_depends_on_on_table(print_dir: Path) -> None:
     """SPEC 2.2.17: `depends_on` names what a view/matview reads, never a plain table."""
 
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     assert data["type"] == "table"
     data["depends_on"] = []
@@ -1259,7 +1592,7 @@ def test_stats_depends_on_on_table(print_dir: Path) -> None:
 def test_stats_populated_absent_is_conformant(print_dir: Path) -> None:
     """A MINOR-version addition (SPEC 5): its absence must not fail schema validation."""
 
-    target = print_dir / "seedbank/accession/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     del data["columns"]["traits"]["populated"]
     _write_yaml_file(target, data)
@@ -1270,7 +1603,7 @@ def test_stats_populated_absent_is_conformant(print_dir: Path) -> None:
 def test_stats_distribution_mismatch(print_dir: Path) -> None:
     """The mismatch check only verifies against an exhaustive `values` list (SPEC 2.2.5)."""
 
-    target = print_dir / "seedbank/taxon/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/taxon/statistics.yaml"
     data = _load_yaml_file(target)
     # rank is exhaustive and currently 'dominant_value'; lie and say 'uniform'
     data["columns"]["rank"]["distribution"] = "uniform"
@@ -1279,7 +1612,7 @@ def test_stats_distribution_mismatch(print_dir: Path) -> None:
 
 
 def test_stats_sketch_unknown_method(print_dir: Path) -> None:
-    target = print_dir / "seedbank/collector/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/collector/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["collector_id"]["sketch"]["method"] = "kmv_sha256"
     _write_yaml_file(target, data)
@@ -1288,7 +1621,7 @@ def test_stats_sketch_unknown_method(print_dir: Path) -> None:
 
 
 def test_stats_sketch_invalid_encoding(print_dir: Path) -> None:
-    target = print_dir / "seedbank/collector/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/collector/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["collector_id"]["sketch"]["values"] = "not valid base64!!!"
     _write_yaml_file(target, data)
@@ -1297,7 +1630,7 @@ def test_stats_sketch_invalid_encoding(print_dir: Path) -> None:
 
 
 def test_stats_sketch_not_ascending(print_dir: Path) -> None:
-    target = print_dir / "seedbank/collector/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/collector/statistics.yaml"
     data = _load_yaml_file(target)
     encoded = data["columns"]["collector_id"]["sketch"]["values"]
     raw = base64.b64decode(encoded)
@@ -1311,7 +1644,7 @@ def test_stats_sketch_not_ascending(print_dir: Path) -> None:
 
 
 def test_stats_sketch_on_redacted_column(print_dir: Path) -> None:
-    target = print_dir / "seedbank/collector/statistics.yaml"
+    target = print_dir / "arboretum/seedbank/collector/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["collector_id"]["redacted"] = "mask"
     _write_yaml_file(target, data)
@@ -1323,7 +1656,7 @@ def test_stats_sketch_on_redacted_column(print_dir: Path) -> None:
 
 
 def test_relationships_column_array_length_mismatch(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/relationships.yaml"
+    target = print_dir / "arboretum/seedbank/accession/relationships.yaml"
     data = _load_yaml_file(target)
     data["refers_to"][0]["column"] = ["a", "b"]
     data["refers_to"][0]["target_column"] = ["x"]
@@ -1333,12 +1666,12 @@ def test_relationships_column_array_length_mismatch(print_dir: Path) -> None:
 
 def test_relationships_broken_reciprocity(print_dir: Path) -> None:
     # germination_trial's collector_id already infers an edge (SPEC 2.3.8), so name another table.
-    target = print_dir / "seedbank/collector/relationships.yaml"
+    target = print_dir / "arboretum/seedbank/collector/relationships.yaml"
     data = _load_yaml_file(target)
     data["referenced_by"].append(
         {
             "column": ["collector_id"],
-            "referencer_table": "seedbank.germination_by_taxon_mv",
+            "referencer_table": "arboretum.seedbank.germination_by_taxon_mv",
             "referencer_column": ["no_such_column_id"],
             "on_delete": "NO ACTION",
             "on_update": "NO ACTION",
@@ -1355,15 +1688,25 @@ def test_out_of_scope_referencer_does_not_break_reciprocity(print_dir: Path) -> 
     The self-reference pins that an absent manifest entry cannot bypass the check.
     """
 
-    target = print_dir / "seedbank/collector/relationships.yaml"
+    target = print_dir / "arboretum/seedbank/collector/relationships.yaml"
     data = _load_yaml_file(target)
 
     # Self-reference: makes collector a target of its own refers_to.
     data["refers_to"].append(
         {
             "column": ["parent_id"],
-            "target_table": "seedbank.collector",
+            "target_table": "arboretum.seedbank.collector",
             "target_column": ["collector_id"],
+            "on_delete": "NO ACTION",
+            "on_update": "NO ACTION",
+            "detection": "declared",
+        },
+    )
+    data["referenced_by"].append(
+        {
+            "column": ["collector_id"],
+            "referencer_table": "arboretum.seedbank.collector",
+            "referencer_column": ["parent_id"],
             "on_delete": "NO ACTION",
             "on_update": "NO ACTION",
             "detection": "declared",
@@ -1385,7 +1728,7 @@ def test_out_of_scope_referencer_does_not_break_reciprocity(print_dir: Path) -> 
 
 
 def test_a_target_coverage_above_one_fails_the_packaged_schema(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/relationships.yaml"
+    target = print_dir / "arboretum/seedbank/accession/relationships.yaml"
     data = _load_yaml_file(target)
     data["refers_to"][0]["observed"]["target_coverage"] = 5.60177
     _write_yaml_file(target, data)
@@ -1396,7 +1739,7 @@ def test_a_target_coverage_above_one_fails_the_packaged_schema(print_dir: Path) 
 def test_relationships_ineligible_target_is_referenced(print_dir: Path) -> None:
     """SPEC 2.3.8: nothing can reference an object with no column to target."""
 
-    target = print_dir / "seedbank/collector/relationships.yaml"
+    target = print_dir / "arboretum/seedbank/collector/relationships.yaml"
     data = _load_yaml_file(target)
     data["eligible_target"] = False
     _write_yaml_file(target, data)
@@ -1405,7 +1748,7 @@ def test_relationships_ineligible_target_is_referenced(print_dir: Path) -> None:
 
 
 def test_an_eligible_target_with_referenced_by_is_unaffected(print_dir: Path) -> None:
-    target = print_dir / "seedbank/collector/relationships.yaml"
+    target = print_dir / "arboretum/seedbank/collector/relationships.yaml"
     data = _load_yaml_file(target)
     data["eligible_target"] = True
     _write_yaml_file(target, data)
@@ -1414,7 +1757,7 @@ def test_an_eligible_target_with_referenced_by_is_unaffected(print_dir: Path) ->
 
 
 def test_an_ineligible_target_with_no_referenced_by_is_unaffected(print_dir: Path) -> None:
-    target = print_dir / "seedbank/collector/relationships.yaml"
+    target = print_dir / "arboretum/seedbank/collector/relationships.yaml"
     data = _load_yaml_file(target)
     data["eligible_target"] = False
     data["referenced_by"] = []
@@ -1426,7 +1769,7 @@ def test_an_ineligible_target_with_no_referenced_by_is_unaffected(print_dir: Pat
 def test_relationships_observed_fanout_mismatch(print_dir: Path) -> None:
     """SPEC 2.3.10: `fanout_avg` must recompute to row_count/cardinality on the referencing side."""
 
-    target = print_dir / "seedbank/accession/relationships.yaml"
+    target = print_dir / "arboretum/seedbank/accession/relationships.yaml"
     data = _load_yaml_file(target)
     data["refers_to"][0]["observed"]["fanout_avg"] = 999.0
     _write_yaml_file(target, data)
@@ -1437,9 +1780,9 @@ def test_relationships_observed_fanout_mismatch(print_dir: Path) -> None:
 def test_relationships_observed_fanout_mismatch_at_the_rounding_boundary(print_dir: Path) -> None:
     """SPEC 2.2.6: six decimals, not one - `8.3` is wrong even though it looks close."""
 
-    target = print_dir / "seedbank/accession/relationships.yaml"
+    target = print_dir / "arboretum/seedbank/accession/relationships.yaml"
     data = _load_yaml_file(target)
-    assert data["refers_to"][1]["target_table"] == "seedbank.taxon"
+    assert data["refers_to"][1]["target_table"] == "arboretum.seedbank.taxon"
     data["refers_to"][1]["observed"]["fanout_avg"] = 8.3
     _write_yaml_file(target, data)
 
@@ -1449,7 +1792,7 @@ def test_relationships_observed_fanout_mismatch_at_the_rounding_boundary(print_d
 def test_relationships_observed_coverage_mismatch(print_dir: Path) -> None:
     """SPEC 2.3.10: `target_coverage` must recompute to the two endpoints' own cardinality."""
 
-    target = print_dir / "seedbank/accession/relationships.yaml"
+    target = print_dir / "arboretum/seedbank/accession/relationships.yaml"
     data = _load_yaml_file(target)
     data["refers_to"][0]["observed"]["target_coverage"] = 0.001
     _write_yaml_file(target, data)
@@ -1460,9 +1803,9 @@ def test_relationships_observed_coverage_mismatch(print_dir: Path) -> None:
 def test_relationships_observed_containment_mismatch_on_a_declared_edge(print_dir: Path) -> None:
     """SPEC 2.2.14: an enforced edge recomputes to 1.0; a lower published value is caught."""
 
-    target = print_dir / "seedbank/germination_trial/relationships.yaml"
+    target = print_dir / "arboretum/seedbank/germination_trial/relationships.yaml"
     data = _load_yaml_file(target)
-    assert data["refers_to"][0]["target_table"] == "seedbank.accession"
+    assert data["refers_to"][0]["target_table"] == "arboretum.seedbank.accession"
     assert data["refers_to"][0]["detection"] == "declared"
     data["refers_to"][0]["observed"]["containment"] = 0.9
     _write_yaml_file(target, data)
@@ -1473,9 +1816,9 @@ def test_relationships_observed_containment_mismatch_on_a_declared_edge(print_di
 def test_relationships_observed_answerable_count_mismatch(print_dir: Path) -> None:
     """SPEC 2.2.14/2.3.10: `answerable_count` must recompute to the two endpoints' sketches."""
 
-    target = print_dir / "seedbank/germination_trial/relationships.yaml"
+    target = print_dir / "arboretum/seedbank/germination_trial/relationships.yaml"
     data = _load_yaml_file(target)
-    assert data["refers_to"][0]["target_table"] == "seedbank.accession"
+    assert data["refers_to"][0]["target_table"] == "arboretum.seedbank.accession"
     data["refers_to"][0]["observed"]["answerable_count"] += 1
     _write_yaml_file(target, data)
 
@@ -1486,7 +1829,7 @@ def test_relationships_observed_answerable_count_mismatch(print_dir: Path) -> No
 def test_relationships_observed_coherent_mismatch(print_dir: Path) -> None:
     """SPEC 2.3.10: `coherent` must agree with the referencing/referenced cardinality comparison."""
 
-    target = print_dir / "seedbank/accession/relationships.yaml"
+    target = print_dir / "arboretum/seedbank/accession/relationships.yaml"
     data = _load_yaml_file(target)
     data["refers_to"][0]["observed"]["coherent"] = False
     _write_yaml_file(target, data)
@@ -1543,7 +1886,7 @@ def test_eligible_target_rejects_a_non_boolean() -> None:
 def test_relationships_measured_detection_is_schema_valid(print_dir: Path) -> None:
     """The reference example's own measured edge (accession.seed_count) validates clean."""
 
-    target = print_dir / "seedbank/accession/relationships.yaml"
+    target = print_dir / "arboretum/seedbank/accession/relationships.yaml"
     data = _load_yaml_file(target)
     measured = [e for e in data["refers_to"] if e.get("detection") == "measured"]
     assert measured, "reference example expected to carry a measured edge"
@@ -1557,7 +1900,7 @@ def test_relationships_measured_edge_relabeled_declared_still_needs_on_delete(
 ) -> None:
     """Widening the enum does not loosen `declared`'s own on_delete/on_update requirement."""
 
-    target = print_dir / "seedbank/accession/relationships.yaml"
+    target = print_dir / "arboretum/seedbank/accession/relationships.yaml"
     data = _load_yaml_file(target)
     entry = next(e for e in data["refers_to"] if e.get("detection") == "measured")
     entry["detection"] = "declared"
@@ -1645,7 +1988,7 @@ def test_diff_statistic_changed_delta_on_non_numeric(print_dir: Path) -> None:
 
 
 def test_stats_mean_outside_range(print_dir: Path) -> None:
-    stats_path = print_dir / "seedbank/accession/statistics.yaml"
+    stats_path = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     stats = _load_yaml_file(stats_path)
     column = next(
         c for c in stats["columns"].values() if isinstance(c.get("range"), dict) and "mean" in c
@@ -1663,7 +2006,7 @@ def test_a_mean_within_its_bounds_is_not_reported(print_dir: Path) -> None:
 
 
 def test_privacy_redacted_value_compared(print_dir: Path) -> None:
-    stats_path = print_dir / "seedbank/accession/statistics.yaml"
+    stats_path = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     stats = _load_yaml_file(stats_path)
     stats["columns"]["accession_id"]["redacted"] = "mask"
     _write_yaml_file(stats_path, stats)
@@ -1673,7 +2016,7 @@ def test_privacy_redacted_value_compared(print_dir: Path) -> None:
     data["changes"].append(
         {
             "kind": "statistic_changed",
-            "table": "seedbank.accession",
+            "table": "arboretum.seedbank.accession",
             "column": "accession_id",
             "stat": "values",
             "before": [{"value": 4271, "count": 1}],
@@ -1688,7 +2031,7 @@ def test_privacy_redacted_value_compared(print_dir: Path) -> None:
 def test_a_count_on_a_redacted_column_is_not_reported(print_dir: Path) -> None:
     """The control: SPEC 2.2.9 leaves every measurement comparable, only the literals withheld."""
 
-    stats_path = print_dir / "seedbank/accession/statistics.yaml"
+    stats_path = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     stats = _load_yaml_file(stats_path)
     stats["columns"]["accession_id"]["redacted"] = "mask"
     _write_yaml_file(stats_path, stats)
@@ -1698,7 +2041,7 @@ def test_a_count_on_a_redacted_column_is_not_reported(print_dir: Path) -> None:
     data["changes"].append(
         {
             "kind": "statistic_changed",
-            "table": "seedbank.accession",
+            "table": "arboretum.seedbank.accession",
             "column": "accession_id",
             "stat": "null_count",
             "before": 0,
@@ -1777,7 +2120,7 @@ def test_diff_physical_layout_changed_no_change(print_dir: Path) -> None:
 def test_diff_depends_on_changed_no_change(print_dir: Path) -> None:
     target = print_dir / "diff.yaml"
     data = _load_yaml_file(target)
-    block = ["seedbank.germination_trial"]
+    block = ["arboretum.seedbank.germination_trial"]
     data["changes"].append(
         {"kind": "depends_on_changed", "table": "a", "before": block, "after": block},
     )
@@ -1790,12 +2133,12 @@ def test_diff_depends_on_changed_no_change(print_dir: Path) -> None:
 
 
 def test_ddl_empty_file(print_dir: Path) -> None:
-    (print_dir / "seedbank/accession/ddl.sql").write_text("")
+    (print_dir / "arboretum/seedbank/accession/ddl.sql").write_text("")
     assert "ddl.empty-file" in _codes(validate_print(print_dir))
 
 
 def test_ddl_missing_trailing_newline(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/ddl.sql"
+    target = print_dir / "arboretum/seedbank/accession/ddl.sql"
     content = target.read_text().rstrip("\n")
     target.write_text(content)
     assert "ddl.missing-trailing-newline" in _codes(validate_print(print_dir))
@@ -1804,7 +2147,7 @@ def test_ddl_missing_trailing_newline(print_dir: Path) -> None:
 # --- Scope (SPEC 2.2.8) ---------------------------------------------
 
 
-_STATS = "seedbank/accession/statistics.yaml"
+_STATS = "arboretum/seedbank/accession/statistics.yaml"
 
 
 def _with_scope(print_dir: Path, scope: Any, row_count_method: Any = None) -> list[Issue]:
@@ -1919,6 +2262,43 @@ def test_six_decimal_places_is_accepted(print_dir: Path) -> None:
     _write_yaml_file(target, data)
 
     assert "stats.excess-precision" not in _codes(validate_print(print_dir))
+
+
+def test_a_floored_small_measurement_is_accepted(print_dir: Path) -> None:
+    """SPEC 2.2.6's floor: six decimals would zero it, so six significant figures is the rule."""
+
+    target = print_dir / _STATS
+    data = _load_yaml_file(target)
+    column = next(c for c in data["columns"].values() if "mean" in c)
+    column["mean"] = 1.72241e-10
+
+    _write_yaml_file(target, data)
+
+    assert "stats.excess-precision" not in _codes(validate_print(print_dir))
+
+
+def test_a_small_measurement_past_six_significant_figures_is_refused(print_dir: Path) -> None:
+    target = print_dir / _STATS
+    data = _load_yaml_file(target)
+    column = next(c for c in data["columns"].values() if "mean" in c)
+    column["mean"] = 1.234567891e-10
+
+    _write_yaml_file(target, data)
+
+    assert "stats.excess-precision" in _codes(validate_print(print_dir))
+
+
+def test_a_ratio_below_its_own_floor_is_refused(print_dir: Path) -> None:
+    """SPEC 2.2.6: a ratio floors at six decimals, so a smaller one skipped its floor."""
+
+    target = print_dir / _STATS
+    data = _load_yaml_file(target)
+    column = next(c for c in data["columns"].values() if "values_coverage" in c)
+    column["values_coverage"] = 4e-07
+
+    _write_yaml_file(target, data)
+
+    assert "stats.excess-precision" in _codes(validate_print(print_dir))
 
 
 def test_privacy_unredacted_sensitive(print_dir: Path) -> None:
@@ -2040,7 +2420,7 @@ def test_a_real_subset_with_the_population_marker_on_every_column_is_conformant(
 
 # --- Annotations (SPEC 2.7.1) -----------------------------------------
 
-_ANNOTATIONS = "seedbank/accession/statistics.annotations.yaml"
+_ANNOTATIONS = "arboretum/seedbank/accession/statistics.annotations.yaml"
 
 
 def test_annotations_registered_no_unknown_file_warning(print_dir: Path) -> None:
@@ -2075,7 +2455,7 @@ def test_annotations_stale_key_does_not_fail_the_run(print_dir: Path) -> None:
 def test_annotations_stale_key_check_reaches_a_view(print_dir: Path) -> None:
     """A stale annotation key is checkable against a view's catalog-only columns (SPEC 2.2.15)."""
 
-    target = print_dir / "seedbank/accession_summary/statistics.annotations.yaml"
+    target = print_dir / "arboretum/seedbank/accession_summary/statistics.annotations.yaml"
     data = _load_yaml_file(target)
     data["columns"]["not_a_real_column"] = {"note": "stale key"}
     _write_yaml_file(target, data)
@@ -2223,7 +2603,7 @@ def test_annotations_grain_never_gates_conformance(print_dir: Path) -> None:
 
 # --- Relationship annotations (SPEC 2.7.2) ---------------------------
 
-_REL_ANNOTATIONS = "seedbank/germination_trial/relationships.annotations.yaml"
+_REL_ANNOTATIONS = "arboretum/seedbank/germination_trial/relationships.annotations.yaml"
 
 
 def _declare_relationship_annotations(print_dir: Path) -> None:
@@ -2235,9 +2615,9 @@ def _declare_relationship_annotations(print_dir: Path) -> None:
 
     manifest_path = print_dir / "manifest.yaml"
     manifest = _load_yaml_file(manifest_path)
-    manifest["tables"]["seedbank.germination_trial"]["artifacts"]["relationships_annotations"] = (
-        "relationships.annotations.yaml"
-    )
+    manifest["tables"]["arboretum.seedbank.germination_trial"]["artifacts"][
+        "relationships_annotations"
+    ] = "relationships.annotations.yaml"
     _write_yaml_file(manifest_path, manifest)
 
 
@@ -2261,7 +2641,7 @@ def test_relationship_annotations_verdict_on_inferred_edge_is_silent(print_dir: 
             "refers_to": [
                 {
                     "column": ["collector_id"],
-                    "target_table": "seedbank.collector",
+                    "target_table": "arboretum.seedbank.collector",
                     "target_column": ["collector_id"],
                     "verdict": "rejected",
                     "note": "name coincidence, not a real FK",
@@ -2288,7 +2668,7 @@ def test_relationship_annotations_verdict_on_declared_edge_is_reported(print_dir
             "refers_to": [
                 {
                     "column": ["accession_id"],
-                    "target_table": "seedbank.accession",
+                    "target_table": "arboretum.seedbank.accession",
                     "target_column": ["accession_id"],
                     "verdict": "rejected",
                 },
@@ -2371,7 +2751,7 @@ def test_relationship_annotations_never_gates_conformance(print_dir: Path) -> No
             "refers_to": [
                 {
                     "column": ["accession_id"],
-                    "target_table": "seedbank.accession",
+                    "target_table": "arboretum.seedbank.accession",
                     "target_column": ["accession_id"],
                     "verdict": "rejected",
                 },
@@ -2402,7 +2782,7 @@ def test_relationship_annotations_claim_contradicts_observed(print_dir: Path) ->
             "refers_to": [
                 {
                     "column": ["collector_id"],
-                    "target_table": "seedbank.collector",
+                    "target_table": "arboretum.seedbank.collector",
                     "target_column": ["collector_id"],
                     "claims": {"observed.fanout_max": {"max": 1}},
                 },
@@ -2427,7 +2807,7 @@ def test_relationship_annotations_claim_matching_observed_is_silent(print_dir: P
             "refers_to": [
                 {
                     "column": ["collector_id"],
-                    "target_table": "seedbank.collector",
+                    "target_table": "arboretum.seedbank.collector",
                     "target_column": ["collector_id"],
                     "claims": {"observed.fanout_max": {"max": 5}},
                 },
@@ -2453,7 +2833,7 @@ def test_relationship_annotations_claim_contradicts_answerable_count(print_dir: 
             "refers_to": [
                 {
                     "column": ["collector_id"],
-                    "target_table": "seedbank.collector",
+                    "target_table": "arboretum.seedbank.collector",
                     "target_column": ["collector_id"],
                     "claims": {"observed.answerable_count": {"max": 1}},
                 },
@@ -2480,7 +2860,7 @@ def test_relationship_annotations_claim_matching_answerable_count_is_silent(
             "refers_to": [
                 {
                     "column": ["collector_id"],
-                    "target_table": "seedbank.collector",
+                    "target_table": "arboretum.seedbank.collector",
                     "target_column": ["collector_id"],
                     "claims": {"observed.answerable_count": {"min": 400}},
                 },
@@ -2504,7 +2884,7 @@ def test_relationship_annotations_claim_unknown_stat_is_unassertable(print_dir: 
             "refers_to": [
                 {
                     "column": ["collector_id"],
-                    "target_table": "seedbank.collector",
+                    "target_table": "arboretum.seedbank.collector",
                     "target_column": ["collector_id"],
                     "claims": {"null_rate": 0.0},
                 },
@@ -2558,7 +2938,7 @@ def test_relationship_annotations_claims_never_gate_conformance(print_dir: Path)
             "refers_to": [
                 {
                     "column": ["collector_id"],
-                    "target_table": "seedbank.collector",
+                    "target_table": "arboretum.seedbank.collector",
                     "target_column": ["collector_id"],
                     "claims": {"observed.fanout_max": {"max": 1}, "null_rate": 0.0},
                 },
@@ -2573,7 +2953,7 @@ def test_relationship_annotations_claims_never_gate_conformance(print_dir: Path)
 
 
 def test_path_endpoint_on_a_single_column_edge_validates(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/relationships.yaml"
+    target = print_dir / "arboretum/seedbank/accession/relationships.yaml"
     data = _load_yaml_file(target)
     data["refers_to"][0]["path"] = ["id"]
     _write_yaml_file(target, data)
@@ -2587,7 +2967,7 @@ def test_path_endpoint_on_a_single_column_edge_validates(print_dir: Path) -> Non
 def test_path_on_a_composite_column_endpoint_is_rejected(print_dir: Path) -> None:
     """`accession.refers_to` targets `vault` via the composite (vault_id, shelf_code) pair."""
 
-    target = print_dir / "seedbank/accession/relationships.yaml"
+    target = print_dir / "arboretum/seedbank/accession/relationships.yaml"
     data = _load_yaml_file(target)
     composite = next(e for e in data["refers_to"] if len(e["column"]) > 1)
     composite["path"] = ["id"]
@@ -2601,7 +2981,7 @@ def test_path_on_a_composite_column_endpoint_is_rejected(print_dir: Path) -> Non
 
 
 def test_target_path_on_a_composite_target_column_is_rejected(print_dir: Path) -> None:
-    target = print_dir / "seedbank/accession/relationships.yaml"
+    target = print_dir / "arboretum/seedbank/accession/relationships.yaml"
     data = _load_yaml_file(target)
     composite = next(e for e in data["refers_to"] if len(e["target_column"]) > 1)
     composite["target_path"] = ["id"]
@@ -2625,7 +3005,7 @@ def test_path_endpoint_authored_via_relationship_annotations_validates(print_dir
                 {
                     "column": ["notes"],
                     "path": ["collector_email"],
-                    "target_table": "seedbank.collector",
+                    "target_table": "arboretum.seedbank.collector",
                     "target_column": ["institution_email"],
                     "note": "join key lives inside the notes JSON payload",
                 },
@@ -2647,7 +3027,7 @@ def test_composite_path_authored_via_relationship_annotations_is_rejected(print_
                 {
                     "column": ["a", "b"],
                     "path": ["id"],
-                    "target_table": "seedbank.collector",
+                    "target_table": "arboretum.seedbank.collector",
                     "target_column": ["collector_id"],
                 },
             ],
@@ -2661,7 +3041,7 @@ def test_composite_path_authored_via_relationship_annotations_is_rejected(print_
 
 # --- Value-grain annotations (SPEC 2.7.1) -------------------------------
 
-_VAULT_ID_VALUES = "seedbank/accession/statistics.yaml"
+_VAULT_ID_VALUES = "arboretum/seedbank/accession/statistics.yaml"
 
 
 def test_value_note_on_a_published_value_is_silent(print_dir: Path) -> None:
@@ -2777,7 +3157,7 @@ class TestWrongShapeManifest:
     ) -> None:
         target = print_dir / "manifest.yaml"
         data = _load_yaml_file(target)
-        data["tables"]["seedbank.accession"]["artifacts"] = 5
+        data["tables"]["arboretum.seedbank.accession"]["artifacts"] = 5
         _write_yaml_file(target, data)
 
         assert "schema.type-mismatch" in _codes(validate_print(print_dir))
@@ -2789,7 +3169,7 @@ class TestWrongShapeManifest:
         data = _load_yaml_file(target)
         data["tables"]["seedbank.herbarium"] = "not an entry"
         _write_yaml_file(target, data)
-        (print_dir / "seedbank/accession/statistics.yaml").unlink()
+        (print_dir / "arboretum/seedbank/accession/statistics.yaml").unlink()
 
         assert "manifest.missing-artifact" in _codes(validate_print(print_dir))
 
@@ -2798,7 +3178,7 @@ class TestASchemaIssueNamesItsField:
     """A schema violation addresses its field; jsonschema names the value, never the location."""
 
     def test_a_nested_enum_violation_names_the_column_and_field(self, print_dir: Path) -> None:
-        target = print_dir / "seedbank/accession/statistics.yaml"
+        target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
         data = _load_yaml_file(target)
         # `taxon_id` may carry no `inferred` block at all (SPEC 4.1.5 withholds `numeric_string`
         # on this numeric-typed FK column) - inject the field regardless.
@@ -2806,19 +3186,22 @@ class TestASchemaIssueNamesItsField:
         _write_yaml_file(target, data)
         paths = {i.path for i in validate_print(print_dir)}
 
-        assert "seedbank/accession/statistics.yaml::columns.taxon_id.inferred.sensitivity" in paths
+        assert (
+            "arboretum/seedbank/accession/statistics.yaml::columns.taxon_id.inferred.sensitivity"
+            in paths
+        )
 
     def test_a_nested_type_violation_names_the_column_and_field(self, print_dir: Path) -> None:
-        target = print_dir / "seedbank/accession/statistics.yaml"
+        target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
         data = _load_yaml_file(target)
         data["columns"]["taxon_id"]["null_rate"] = "not a number"
         _write_yaml_file(target, data)
         paths = {i.path for i in validate_print(print_dir)}
 
-        assert "seedbank/accession/statistics.yaml::columns.taxon_id.null_rate" in paths
+        assert "arboretum/seedbank/accession/statistics.yaml::columns.taxon_id.null_rate" in paths
 
     def test_an_array_member_names_its_index(self, print_dir: Path) -> None:
-        target = print_dir / "seedbank/accession/statistics.yaml"
+        target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
         data = _load_yaml_file(target)
         column = next(c for c in data["columns"].values() if c.get("values"))
         column["values"][0]["count"] = "not a number"
@@ -2826,13 +3209,13 @@ class TestASchemaIssueNamesItsField:
         addressed = [
             i.path
             for i in validate_print(print_dir)
-            if i.path.startswith("seedbank/accession/statistics.yaml::columns.")
+            if i.path.startswith("arboretum/seedbank/accession/statistics.yaml::columns.")
         ]
 
         assert any(p.endswith(".values[0].count") for p in addressed), addressed
 
     def test_a_document_level_violation_keeps_the_file_path_alone(self, print_dir: Path) -> None:
-        target = print_dir / "seedbank/accession/statistics.yaml"
+        target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
         data = _load_yaml_file(target)
         del data["row_count"]
         _write_yaml_file(target, data)
@@ -2840,7 +3223,7 @@ class TestASchemaIssueNamesItsField:
             i
             for i in validate_print(print_dir)
             if i.code == "schema.missing-required-field"
-            and i.path == "seedbank/accession/statistics.yaml"
+            and i.path == "arboretum/seedbank/accession/statistics.yaml"
         ]
 
         assert match
@@ -2850,7 +3233,7 @@ class TestASchemaIssueNamesItsField:
 
         manifest_path = print_dir / "manifest.yaml"
         manifest = _load_yaml_file(manifest_path)
-        manifest["tables"]["seedbank.accession"]["columns"] = "not a number"
+        manifest["tables"]["arboretum.seedbank.accession"]["columns"] = "not a number"
         _write_yaml_file(manifest_path, manifest)
 
         diff_path = print_dir / "diff.yaml"
@@ -2859,13 +3242,13 @@ class TestASchemaIssueNamesItsField:
         _write_yaml_file(diff_path, diff)
         paths = {i.path for i in validate_print(print_dir)}
 
-        assert "manifest.yaml::tables.seedbank.accession.columns" in paths
+        assert "manifest.yaml::tables.arboretum.seedbank.accession.columns" in paths
         assert "diff.yaml::summary.tables_added" in paths
 
     def test_the_verdict_does_not_move(self, print_dir: Path) -> None:
         """Only where an issue says it is changes; what it says is wrong does not."""
 
-        target = print_dir / "seedbank/accession/statistics.yaml"
+        target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
         data = _load_yaml_file(target)
         data["columns"]["taxon_id"]["null_rate"] = "not a number"
         _write_yaml_file(target, data)
@@ -2891,3 +3274,177 @@ class TestADocumentLevelFindingKeepsTheFilePath:
         }
 
         assert paths == {"manifest.yaml"}
+
+
+# --- Mirror agreement (SPEC 2.3.3, 2.3.6) -----------------------------
+
+
+_COLLECTOR = "arboretum/seedbank/collector/relationships.yaml"
+_ACCESSION = "arboretum/seedbank/accession/relationships.yaml"
+_MIRROR_MUTATIONS = {
+    "detection": lambda e: e.update(detection="inferred"),
+    "on_delete": lambda e: e.update(on_delete="CASCADE"),
+    "on_update": lambda e: e.update(on_update="CASCADE"),
+    "constraint_name": lambda e: e.update(constraint_name=e["constraint_name"] + "_renamed"),
+    "observed": lambda e: e["observed"].update(
+        target_coverage=e["observed"]["target_coverage"] / 2,
+    ),
+}
+
+
+def _issues_with(issues: list[Issue], code: str) -> list[Issue]:
+    return [i for i in issues if i.code == code]
+
+
+def test_every_mirrored_field_has_a_mutation() -> None:
+    from dbprint.conformance.relationships import MIRRORED_FIELDS
+
+    assert set(_MIRROR_MUTATIONS) == MIRRORED_FIELDS
+
+
+@pytest.mark.parametrize("field", sorted(_MIRROR_MUTATIONS))
+def test_a_mirror_differing_on_one_field_is_a_mismatch(print_dir: Path, field: str) -> None:
+    target = print_dir / _COLLECTOR
+    data = _load_yaml_file(target)
+    _MIRROR_MUTATIONS[field](data["referenced_by"][0])
+    _write_yaml_file(target, data)
+    found = _issues_with(validate_print(print_dir), "relationships.mirror-mismatch")
+
+    assert [(i.path, i.severity) for i in found] == [(f"{_COLLECTOR}::referenced_by[0]", "error")]
+    assert field in found[0].detail
+    assert _ACCESSION in found[0].detail
+
+
+def test_a_mirror_missing_a_field_the_refers_to_has_is_a_mismatch(print_dir: Path) -> None:
+    target = print_dir / _COLLECTOR
+    data = _load_yaml_file(target)
+    del data["referenced_by"][0]["observed"]
+    _write_yaml_file(target, data)
+
+    assert "relationships.mirror-mismatch" in _codes(validate_print(print_dir))
+
+
+def test_a_refers_to_without_its_mirror_is_unmirrored(print_dir: Path) -> None:
+    target = print_dir / _COLLECTOR
+    data = _load_yaml_file(target)
+    data["referenced_by"] = [
+        e for e in data["referenced_by"] if e["referencer_table"] != "arboretum.seedbank.accession"
+    ]
+    _write_yaml_file(target, data)
+    refers_to = _load_yaml_file(print_dir / _ACCESSION)["refers_to"]
+    index = next(
+        i for i, e in enumerate(refers_to) if e["target_table"] == "arboretum.seedbank.collector"
+    )
+    found = _issues_with(validate_print(print_dir), "relationships.unmirrored-refers-to")
+
+    assert [i.path for i in found] == [f"{_ACCESSION}::refers_to[{index}]"]
+
+
+def test_a_referenced_by_without_its_refers_to_is_reported_once(print_dir: Path) -> None:
+    target = print_dir / _ACCESSION
+    data = _load_yaml_file(target)
+    data["refers_to"] = []
+    _write_yaml_file(target, data)
+    codes = _codes(validate_print(print_dir))
+
+    assert "relationships.broken-reciprocity" in codes
+    assert not {"relationships.mirror-mismatch", "relationships.unmirrored-refers-to"} & codes
+
+
+def test_two_constraints_over_one_address_mirrored_on_both_sides_agree(print_dir: Path) -> None:
+    for path, section, match in (
+        (_ACCESSION, "refers_to", "target_table"),
+        (_COLLECTOR, "referenced_by", "referencer_table"),
+    ):
+        target = print_dir / path
+        data = _load_yaml_file(target)
+        other = (
+            "arboretum.seedbank.collector"
+            if section == "refers_to"
+            else "arboretum.seedbank.accession"
+        )
+        entry = next(e for e in data[section] if e[match] == other)
+        data[section].append(dict(entry, constraint_name="accession_collector_twin_fkey"))
+        _write_yaml_file(target, data)
+
+    codes = _codes(validate_print(print_dir))
+
+    assert not {"relationships.mirror-mismatch", "relationships.unmirrored-refers-to"} & codes
+
+
+def test_a_refers_to_into_a_table_outside_the_print_needs_no_mirror(print_dir: Path) -> None:
+    target = print_dir / _ACCESSION
+    data = _load_yaml_file(target)
+    data["refers_to"].append(
+        {
+            "column": ["collector_id"],
+            "target_table": "fixture.staging.not_in_this_print",
+            "target_column": ["id"],
+            "detection": "inferred",
+        },
+    )
+    _write_yaml_file(target, data)
+
+    assert "relationships.unmirrored-refers-to" not in _codes(validate_print(print_dir))
+
+
+# --- Diff families (SPEC 2.6.6) ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("change", "code"),
+    [
+        (
+            {
+                "kind": "table_type_changed",
+                "table": "arboretum.seedbank.taxon",
+                "before": "table",
+                "after": "table",
+            },
+            "diff.table-type-changed-no-change",
+        ),
+        (
+            {
+                "kind": "column_physical_name_changed",
+                "table": "arboretum.seedbank.taxon",
+                "column": "rank",
+                "before": "rank",
+                "after": "rank",
+            },
+            "diff.column-physical-name-changed-no-change",
+        ),
+        (
+            {
+                "kind": "column_collation_changed",
+                "table": "arboretum.seedbank.taxon",
+                "column": "rank",
+                "before": "C",
+                "after": "C",
+            },
+            "diff.column-collation-changed-no-change",
+        ),
+        (
+            {
+                "kind": "statistic_changed",
+                "table": "arboretum.seedbank.taxon",
+                "column": "rank",
+                "stat": "physical_name",
+                "before": "rank",
+                "after": "Rank",
+            },
+            "diff.statistic-changed-not-a-measurement",
+        ),
+    ],
+    ids=["type", "physical_name", "collation", "not_a_measurement"],
+)
+def test_a_diff_event_the_families_forbid(
+    print_dir: Path,
+    change: dict[str, Any],
+    code: str,
+) -> None:
+    target = print_dir / "diff.yaml"
+    data = _load_yaml_file(target)
+    data["changes"] = [*(data.get("changes") or []), change]
+    _write_yaml_file(target, data)
+
+    assert code in _codes(validate_print(print_dir))

@@ -1,7 +1,7 @@
 """INFORMATION_SCHEMA queries for MySQL structural metadata.
 
 No schema layer below the database: the FQN is `<database>.<table>`, enumeration scoped to
-`DATABASE()`. At `lower_case_table_names=0` reads past enumeration bind `Identity`'s spelling.
+the configured database or every readable one. At `lower_case_table_names=0` reads past enumeration bind `Identity`'s spelling.
 """
 
 from __future__ import annotations
@@ -9,8 +9,8 @@ from __future__ import annotations
 import re
 
 from dbprint.config.selectors import expand
+from dbprint.spec.fqn import join as join_fqn
 from .connection import Cursor, exec_query
-from .identity import Identity
 from ..base import (
     ColumnMeta,
     CommentsMeta,
@@ -23,13 +23,7 @@ from ..base import (
     TableType,
     UniqueKeyMeta,
 )
-
-
-PATH_SEGMENT_RE = re.compile(r"^[a-z0-9_][a-z0-9_.-]*$")
-
-
-class IdentifierRejected(ValueError):
-    """Raised when a MySQL identifier fails SPEC 1.5 path-segment rules; format SPEC 1.5.5."""
+from ..identifiers import Identity, column_meta, enforce_table_identifiers, fold, table_meta
 
 
 _TABLE_TYPE_MAP: dict[str, TableType] = {
@@ -52,25 +46,34 @@ _Candidate = tuple[TableMeta, tuple[str, str]]
 
 def list_tables(
     cursor: Cursor,
+    database: str | None,
     include: list[str],
     exclude: list[str],
-) -> tuple[list[TableMeta], dict[str, tuple[str, str]]]:
-    """Enumerate tables/views in the connected database, filtered by selectors."""
+) -> list[_Candidate]:
+    """Enumerate tables/views in `database`, or in every database the account can read."""
 
+    where, params = _schema_predicate("tbl.table_schema", database)
     rows = exec_query(
         cursor,
-        """
-        SELECT table_schema, table_name, table_type
-        FROM information_schema.tables
-        WHERE table_schema = DATABASE()
-        ORDER BY table_schema, table_name
+        f"""
+        SELECT
+          tbl.table_schema,
+          tbl.table_name,
+          tbl.table_type
+        FROM
+          information_schema.tables tbl
+        WHERE
+          {where}
+        ORDER BY
+          tbl.table_schema, tbl.table_name
         """,
+        params,
     ).fetchall()
 
     candidates: list[_Candidate] = []
 
     for schema, name, table_type in rows:
-        schema_lower = _norm(schema)
+        schema_lower = fold(schema)
 
         if schema_lower in _SYSTEM_SCHEMAS:
             continue
@@ -80,17 +83,7 @@ def list_tables(
         if canonical_type is None:
             continue
 
-        name_lower = _norm(name)
-        candidates.append(
-            (
-                TableMeta(
-                    fqn=f"{schema_lower}.{name_lower}",
-                    type=canonical_type,
-                    namespace_path=(schema_lower, name_lower),
-                ),
-                (schema, name),
-            ),
-        )
+        candidates.append((table_meta((schema, name), canonical_type), (schema, name)))
 
     in_scope = set(
         expand(
@@ -100,12 +93,9 @@ def list_tables(
         ),
     )
     selected = [entry for entry in candidates if entry[0].fqn in in_scope]
-    _enforce_identifier_rules(selected)
+    enforce_table_identifiers(selected)
 
-    return (
-        [meta for meta, _ in selected],
-        {meta.fqn: parts for meta, parts in selected},
-    )
+    return selected
 
 
 def columns(cursor: Cursor, identity: Identity) -> list[ColumnMeta]:
@@ -119,23 +109,31 @@ def columns(cursor: Cursor, identity: Identity) -> list[ColumnMeta]:
     rows = exec_query(
         cursor,
         """
-        SELECT column_name, ordinal_position, column_type, is_nullable, column_default,
-               collation_name
-        FROM information_schema.columns
-        WHERE table_schema = %s AND table_name = %s
-        ORDER BY ordinal_position
+        SELECT
+          col.column_name,
+          col.ordinal_position,
+          col.column_type,
+          col.is_nullable,
+          col.column_default,
+          col.collation_name
+        FROM
+          information_schema.columns col
+        WHERE
+          col.table_schema = %s
+          AND col.table_name = %s
+        ORDER BY
+          col.ordinal_position
         """,
         identity.parts,
     ).fetchall()
 
     return [
-        ColumnMeta(
-            name=_norm(col_name),
+        column_meta(
+            col_name,
             sql_type=str(column_type),
             nullable=(is_nullable == "YES"),
             default=col_default,
             ordinal=int(ordinal),
-            physical_name=None if col_name == _norm(col_name) else col_name.strip("`"),
             collation=collation_name,
         )
         for col_name, ordinal, column_type, is_nullable, col_default, collation_name in rows
@@ -157,21 +155,27 @@ def relationships(cursor: Cursor, identity: Identity) -> list[ForeignKeyMeta]:
         cursor,
         """
         SELECT
-            kcu.constraint_name,
-            kcu.column_name,
-            kcu.referenced_table_schema,
-            kcu.referenced_table_name,
-            kcu.referenced_column_name,
-            rc.update_rule,
-            rc.delete_rule
-        FROM information_schema.key_column_usage kcu
-        JOIN information_schema.referential_constraints rc
-          ON rc.constraint_schema = kcu.constraint_schema
-         AND rc.constraint_name = kcu.constraint_name
-        WHERE kcu.table_schema = %s
+          kcu.constraint_name,
+          kcu.column_name,
+          kcu.referenced_table_schema,
+          kcu.referenced_table_name,
+          kcu.referenced_column_name,
+          rfc.update_rule,
+          rfc.delete_rule
+
+        FROM
+          information_schema.key_column_usage kcu
+          JOIN information_schema.referential_constraints rfc ON
+            rfc.constraint_schema = kcu.constraint_schema
+            AND rfc.constraint_name = kcu.constraint_name
+
+        WHERE
+          kcu.table_schema = %s
           AND kcu.table_name = %s
           AND kcu.referenced_table_name IS NOT NULL
-        ORDER BY kcu.constraint_name, kcu.ordinal_position
+
+        ORDER BY
+          kcu.constraint_name, kcu.ordinal_position
         """,
         identity.parts,
     ).fetchall()
@@ -186,14 +190,14 @@ def relationships(cursor: Cursor, identity: Identity) -> list[ForeignKeyMeta]:
             src_cols[name] = []
             dst_cols[name] = []
             targets[name] = (
-                f"{_norm(ref_schema)}.{_norm(ref_table)}",
+                join_fqn((fold(ref_schema), fold(ref_table))),
                 _FK_ACTIONS.get(str(update_rule).upper(), "NO ACTION"),
                 _FK_ACTIONS.get(str(delete_rule).upper(), "NO ACTION"),
             )
             order.append(name)
 
-        src_cols[name].append(_norm(column))
-        dst_cols[name].append(_norm(ref_column))
+        src_cols[name].append(fold(column))
+        dst_cols[name].append(fold(ref_column))
 
     out: list[ForeignKeyMeta] = []
 
@@ -219,13 +223,21 @@ def indexes(cursor: Cursor, identity: Identity) -> list[IndexMeta]:
     rows = exec_query(
         cursor,
         """
-        SELECT index_name, column_name, non_unique, index_type, seq_in_index
-        FROM information_schema.statistics
-        WHERE table_schema = %s
-          AND table_name = %s
-          AND index_name <> 'PRIMARY'
-          AND non_unique = 1
-        ORDER BY index_name, seq_in_index
+        SELECT
+          sts.index_name,
+          sts.column_name,
+          sts.non_unique,
+          sts.index_type,
+          sts.seq_in_index
+        FROM
+          information_schema.statistics sts
+        WHERE
+          sts.table_schema = %s
+          AND sts.table_name = %s
+          AND sts.index_name <> 'PRIMARY'
+          AND sts.non_unique = 1
+        ORDER BY
+          sts.index_name, sts.seq_in_index
         """,
         identity.parts,
     ).fetchall()
@@ -246,11 +258,11 @@ def indexes(cursor: Cursor, identity: Identity) -> list[IndexMeta]:
             index_type_by_name[index_name] = str(index_type).lower()
             order.append(index_name)
 
-        index_cols[index_name].append(_norm(column_name))
+        index_cols[index_name].append(fold(column_name))
 
     return [
         IndexMeta(
-            name=_norm(index_name),
+            name=fold(index_name),
             columns=tuple(index_cols[index_name]),
             unique=index_unique[index_name],
             type=index_type_by_name[index_name],
@@ -264,22 +276,37 @@ def comments(cursor: Cursor, identity: Identity) -> CommentsMeta:
 
     table_row = exec_query(
         cursor,
-        "SELECT table_comment FROM information_schema.tables "
-        "WHERE table_schema = %s AND table_name = %s",
+        """
+        SELECT
+          tbl.table_comment
+        FROM
+          information_schema.tables tbl
+        WHERE
+          tbl.table_schema = %s
+          AND tbl.table_name = %s
+        """,
         identity.parts,
     ).fetchone()
     table_comment = table_row[0] if table_row and table_row[0] else None
 
     col_rows = exec_query(
         cursor,
-        "SELECT column_name, column_comment FROM information_schema.columns "
-        "WHERE table_schema = %s AND table_name = %s",
+        """
+        SELECT
+          col.column_name,
+          col.column_comment
+        FROM
+          information_schema.columns col
+        WHERE
+          col.table_schema = %s
+          AND col.table_name = %s
+        """,
         identity.parts,
     ).fetchall()
 
     return CommentsMeta(
         table=table_comment,
-        columns={_norm(name): comment for name, comment in col_rows if comment},
+        columns={fold(name): comment for name, comment in col_rows if comment},
     )
 
 
@@ -292,12 +319,18 @@ def unique_keys(cursor: Cursor, identity: Identity) -> list[UniqueKeyMeta]:
     rows = exec_query(
         cursor,
         """
-        SELECT index_name, column_name, seq_in_index
-        FROM information_schema.statistics
-        WHERE table_schema = %s
-          AND table_name = %s
-          AND non_unique = 0
-        ORDER BY index_name, seq_in_index
+        SELECT
+          sts.index_name,
+          sts.column_name,
+          sts.seq_in_index
+        FROM
+          information_schema.statistics sts
+        WHERE
+          sts.table_schema = %s
+          AND sts.table_name = %s
+          AND sts.non_unique = 0
+        ORDER BY
+          sts.index_name, sts.seq_in_index
         """,
         identity.parts,
     ).fetchall()
@@ -309,7 +342,7 @@ def unique_keys(cursor: Cursor, identity: Identity) -> list[UniqueKeyMeta]:
             # Functional/expression key part: see `indexes()`'s identical skip above.
             continue
 
-        grouped.setdefault(str(index_name), []).append(_norm(column_name))
+        grouped.setdefault(str(index_name), []).append(fold(column_name))
 
     ordered = sorted(grouped, key=lambda name: (name != "PRIMARY", name))
 
@@ -333,9 +366,17 @@ def physical_layout(cursor: Cursor, identity: Identity) -> PhysicalLayout | None
 
     row = exec_query(
         cursor,
-        "SELECT partition_expression FROM information_schema.partitions "
-        "WHERE table_schema = %s AND table_name = %s AND partition_name IS NOT NULL "
-        "LIMIT 1",
+        """
+        SELECT
+          prt.partition_expression
+        FROM
+          information_schema.partitions prt
+        WHERE
+          prt.table_schema = %s
+          AND prt.table_name = %s
+          AND prt.partition_name IS NOT NULL
+        LIMIT 1
+        """,
         identity.parts,
     ).fetchone()
 
@@ -357,38 +398,44 @@ def _partition_key(expression: str) -> PhysicalLayoutKey:
 
     return PhysicalLayoutKey(
         expression=expression,
-        column=_norm(match.group(1)) if match else None,
+        column=fold(match.group(1)) if match else None,
     )
 
 
-def view_dependencies(cursor: Cursor) -> dict[str, tuple[str, ...]]:
+def view_dependencies(cursor: Cursor, database: str | None) -> dict[str, tuple[str, ...]]:
     """Every view's direct object dependencies, one query for the whole connection - the LEFT
     JOIN seeds every view, so one reading nothing answers `()` rather than going absent.
     """
 
+    where, params = _schema_predicate("tbl.table_schema", database)
     rows = exec_query(
         cursor,
-        """
+        f"""
         SELECT
-            t.table_schema AS view_schema,
-            t.table_name   AS view_name,
-            u.table_schema AS source_schema,
-            u.table_name   AS source_name
-        FROM information_schema.tables t
-        LEFT JOIN information_schema.view_table_usage u
-            ON u.view_schema = t.table_schema AND u.view_name = t.table_name
-        WHERE t.table_schema = DATABASE() AND t.table_type = 'VIEW'
+          tbl.table_schema AS view_schema,
+          tbl.table_name AS view_name,
+          usg.table_schema AS source_schema,
+          usg.table_name AS source_name
+        FROM
+          information_schema.tables tbl
+          LEFT JOIN information_schema.view_table_usage usg ON
+            usg.view_schema = tbl.table_schema
+            AND usg.view_name = tbl.table_name
+        WHERE
+          {where}
+          AND tbl.table_type = 'VIEW'
         """,
+        params,
     ).fetchall()
 
     out: dict[str, list[str]] = {}
 
     for view_schema, view_name, source_schema, source_name in rows:
-        key = f"{_norm(view_schema)}.{_norm(view_name)}"
+        key = join_fqn((fold(view_schema), fold(view_name)))
         out.setdefault(key, [])
 
         if source_schema is not None and source_name is not None:
-            out[key].append(f"{_norm(source_schema)}.{_norm(source_name)}")
+            out[key].append(join_fqn((fold(source_schema), fold(source_name))))
 
     return {k: tuple(v) for k, v in out.items()}
 
@@ -398,8 +445,15 @@ def table_rows_estimate(cursor: Cursor, identity: Identity) -> int:
 
     row = exec_query(
         cursor,
-        "SELECT table_rows FROM information_schema.tables "
-        "WHERE table_schema = %s AND table_name = %s",
+        """
+        SELECT
+          tbl.table_rows
+        FROM
+          information_schema.tables tbl
+        WHERE
+          tbl.table_schema = %s
+          AND tbl.table_name = %s
+        """,
         identity.parts,
     ).fetchone()
 
@@ -409,53 +463,11 @@ def table_rows_estimate(cursor: Cursor, identity: Identity) -> int:
     return int(row[0])
 
 
-def _enforce_identifier_rules(selected: list[_Candidate]) -> None:
-    """Reject identifiers that violate SPEC 1.5 before any artifact is written.
+def _schema_predicate(column: str, database: str | None) -> tuple[str, tuple[str, ...]]:
+    # Information-schema rows are privilege-filtered, so an unreadable database is absent.
+    if database is not None:
+        return f"{column} = %s", (database,)
 
-    Two names differing only by case collapse onto one path, so one would overwrite the other.
-    """
+    placeholders = ", ".join("%s" for _ in _SYSTEM_SCHEMAS)
 
-    seen: dict[str, tuple[str, str]] = {}
-
-    for meta, parts in selected:
-        for seg in meta.namespace_path:
-            if seg.startswith("."):
-                raise IdentifierRejected(_reject_message(meta.fqn, "leading-period", seg))
-
-            if not PATH_SEGMENT_RE.match(seg):
-                raise IdentifierRejected(
-                    _reject_message(meta.fqn, "contains-unsafe-character", seg),
-                )
-
-        previous = seen.get(meta.fqn)
-
-        if previous is not None and previous != parts:
-            raise IdentifierRejected(
-                _reject_message(
-                    meta.fqn,
-                    f"case-collides-with-{'.'.join(previous)}",
-                    ".".join(parts),
-                ),
-            )
-
-        seen[meta.fqn] = parts
-
-
-def _reject_message(fqn: str, reason: str, detail: str) -> str:
-    """SPEC 1.5.5 error format - verbatim."""
-
-    return (
-        f"ERROR: Table identifier rejected: {fqn}\n"
-        f"  Reason: {reason}\n"
-        f"  Detail: {detail!r}\n"
-        f"  Resolution: Either rename the identifier in the database, OR "
-        f"exclude it via .dbprint.yaml selectors:\n"
-        f"    exclude:\n"
-        f'      - "{fqn}"'
-    )
-
-
-def _norm(name: str) -> str:
-    """Lowercase an identifier and strip backticks - the `columns` map key (SPEC 2.2.1)."""
-
-    return name.strip("`").lower()
+    return f"{column} NOT IN ({placeholders})", _SYSTEM_SCHEMAS

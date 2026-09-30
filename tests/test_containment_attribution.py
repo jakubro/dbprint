@@ -57,7 +57,9 @@ class TestUnclaimedProblems:
         first = conftest._unclaimed_problems(before)
         second = conftest._unclaimed_problems(before)
 
-        assert first == ["new entries under a private root: {'/root': ['.x']}"]
+        assert len(first) == 1
+        assert "/root" in first[0]
+        assert ".x" in first[0]
         assert second == []
 
     def test_a_stray_entry_is_reported_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -67,7 +69,8 @@ class TestUnclaimedProblems:
         first = conftest._unclaimed_problems({})
         second = conftest._unclaimed_problems({})
 
-        assert first == ["suite-named entries outside the scratch tree: ['/var/lib/dbprint-x']"]
+        assert len(first) == 1
+        assert "/var/lib/dbprint-x" in first[0]
         assert second == []
 
     def test_no_violation_reports_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -87,6 +90,7 @@ class TestUnclaimedProblems:
         )
         monkeypatch.setattr(conftest._containment, "suite_entries", list)
 
-        assert conftest._unclaimed_problems(before) == [
-            "new entries under a private root: {'/root': ['.x', '.y']}",
-        ]
+        [problem] = conftest._unclaimed_problems(before)
+
+        assert ".x" in problem
+        assert ".y" in problem

@@ -6,12 +6,12 @@ filters `WHERE table_name = %s` against nothing and reports the table empty.
 
 from __future__ import annotations
 
-import re
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from dbprint.config.selectors import expand
-from .connection import exec_query
-from .identity import Identity
+from dbprint.spec.fqn import join as join_fqn
+from .connection import DIALECT, exec_query
 from ..base import (
     ColumnMeta,
     CommentsMeta,
@@ -19,22 +19,17 @@ from ..base import (
     IndexMeta,
     PhysicalLayout,
     PhysicalLayoutKey,
+    SkippedNamespace,
     TableMeta,
     TableType,
     UniqueKeyMeta,
 )
 from ..errors import QueryFailed
+from ..identifiers import Identity, column_meta, enforce_table_identifiers, fold, quote, table_meta
 
 
 if TYPE_CHECKING:
     from .connection import Cursor
-
-
-PATH_SEGMENT_RE = re.compile(r"^[a-z0-9_][a-z0-9_.-]*$")
-
-
-class IdentifierRejected(ValueError):
-    """Raised when an identifier fails SPEC 1.5 path-segment rules; format is SPEC 1.5.5."""
 
 
 _TABLE_TYPE_MAP: dict[str, TableType] = {
@@ -43,7 +38,7 @@ _TABLE_TYPE_MAP: dict[str, TableType] = {
     "MATERIALIZED VIEW": "matview",
 }
 
-_Candidate = tuple[TableMeta, str]
+_Candidate = tuple[TableMeta, tuple[str, str]]
 
 # `materialize()`'s scratch prefix (`adapters.base.materialized_name`) - a BigQuery sampled copy
 # is a real dataset object, not a session temp table, so it is excluded by name, not by lifetime.
@@ -53,42 +48,34 @@ _SCRATCH_PREFIX = "dbprint_sample_"
 def list_tables(
     cursor: Cursor,
     project: str,
-    dataset: str,
+    datasets: Sequence[str],
     include: list[str],
     exclude: list[str],
-) -> tuple[list[TableMeta], dict[str, str], dict[str, str]]:
-    """Enumerate tables/views/materialized views in the dataset, filtered by selectors.
+) -> tuple[list[_Candidate], dict[str, str], tuple[SkippedNamespace, ...]]:
+    """Enumerate tables/views/materialized views in each of `datasets`, filtered by selectors.
 
-    Also returns the lowercase-FQN-to-physical-name map (the only point where both forms are
-    visible) and the `fqn`-keyed DDL cache `extract_ddl` reads before querying.
+    Each comes with its physical spelling, beside the DDL cache and each dataset that failed.
     """
 
-    try:
-        rows = exec_query(
-            cursor,
-            f"""
-            SELECT table_name, table_type, ddl
-            FROM `{project}`.`{dataset}`.INFORMATION_SCHEMA.TABLES
-            ORDER BY table_name
-            """,
-        ).fetchall()
-    except Exception:  # noqa: BLE001 - retry without a column this connection cannot see
-        rows = [
-            (name, table_type, None)
-            for name, table_type in exec_query(
-                cursor,
-                f"""
-                SELECT table_name, table_type
-                FROM `{project}`.`{dataset}`.INFORMATION_SCHEMA.TABLES
-                ORDER BY table_name
-                """,
-            ).fetchall()
-        ]
+    rows: list[tuple[str, Any, Any, Any]] = []
+    skipped: list[SkippedNamespace] = []
+
+    for dataset in datasets:
+        try:
+            listed = _dataset_tables(cursor, project, dataset)
+        except QueryFailed as exc:
+            if exc.timed_out:
+                raise
+
+            skipped.append(SkippedNamespace(name=dataset, cause=str(exc)))
+            continue
+
+        rows.extend((dataset, *row) for row in listed)
 
     candidates: list[_Candidate] = []
     ddl_by_fqn: dict[str, str] = {}
 
-    for name, table_type, ddl in rows:
+    for dataset, name, table_type, ddl in rows:
         canonical_type = _TABLE_TYPE_MAP.get(str(table_type).upper())
 
         if canonical_type is None:
@@ -98,33 +85,20 @@ def list_tables(
 
         if name.startswith(_SCRATCH_PREFIX):
             continue
-        # BigQuery dataset names may carry capitals and SPEC 1.5 requires a lowercase path segment,
-        # so the artifact side is folded here; the physical `dataset` keeps its catalog spelling.
-        name_lower = name.lower()
-        dataset_lower = dataset.lower()
-        fqn = f"{dataset_lower}.{name_lower}"
-        candidates.append(
-            (
-                TableMeta(
-                    fqn=fqn,
-                    type=canonical_type,
-                    namespace_path=(dataset_lower, name_lower),
-                ),
-                name,
-            ),
-        )
+        meta = table_meta((dataset, name), canonical_type)
+        candidates.append((meta, (dataset, name)))
 
         if ddl:
-            ddl_by_fqn[fqn] = str(ddl)
+            ddl_by_fqn[meta.fqn] = str(ddl)
 
     selected_fqns = expand([meta.fqn for meta, _ in candidates], include, exclude)
     selected = [entry for entry in candidates if entry[0].fqn in selected_fqns]
-    _enforce_identifier_rules(selected)
+    enforce_table_identifiers(selected)
 
     return (
-        [meta for meta, _ in selected],
+        selected,
         {fqn: ddl for fqn, ddl in ddl_by_fqn.items() if fqn in selected_fqns},
-        {meta.fqn: physical for meta, physical in selected},
+        tuple(skipped),
     )
 
 
@@ -132,28 +106,37 @@ def columns(
     cursor: Cursor,
     project: str,
     identity: Identity,
-) -> tuple[list[ColumnMeta], dict[str, str]]:
-    """`INFORMATION_SCHEMA.COLUMNS` in ordinal order, plus a lowercase-to-physical column-name map.
+) -> list[ColumnMeta]:
+    """`INFORMATION_SCHEMA.COLUMNS` in ordinal order.
 
-    `column_default` is absent from that view, so every column reports `default=None`; `is_hidden`
-    drops the pseudo columns whose NULL `ordinal_position` would otherwise shift every real ordinal.
-    `collation_name` is empty absent an explicit `COLLATE` (SPEC 2.2.2).
+    The view has no `column_default`, so every default is None; `is_hidden` pseudo columns are dropped.
     """
 
     base_select = f"""
-        SELECT column_name, data_type, is_nullable, ordinal_position{{collation}}
-        FROM `{project}`.`{identity.dataset}`.INFORMATION_SCHEMA.COLUMNS
-        WHERE table_name = %s AND is_hidden = 'NO'
-        ORDER BY ordinal_position
+        SELECT
+          col.column_name,
+          col.data_type,
+          col.is_nullable,
+          col.ordinal_position{{collation}}
+        FROM
+          {_info_schema(project, identity.parts[0])}.COLUMNS col
+        WHERE
+          col.table_name = %s
+          AND col.is_hidden = 'NO'
+        ORDER BY
+          col.ordinal_position
         """
 
     try:
         rows = exec_query(
             cursor,
-            base_select.format(collation=", collation_name"),
+            base_select.format(collation=", col.collation_name"),
             (identity.table,),
         ).fetchall()
-    except Exception:  # noqa: BLE001 - retry without the column this connection cannot see
+    except Exception as exc:
+        if getattr(exc, "timed_out", False):
+            raise
+
         rows = [
             (name, data_type, is_nullable, ordinal, None)
             for name, data_type, is_nullable, ordinal in exec_query(
@@ -163,20 +146,17 @@ def columns(
             ).fetchall()
         ]
 
-    metas = [
-        ColumnMeta(
-            name=str(name).lower(),
+    return [
+        column_meta(
+            str(name),
             sql_type=str(data_type),
             nullable=str(is_nullable).upper() != "NO",
             default=None,
             ordinal=int(ordinal),
-            physical_name=None if str(name) == str(name).lower() else str(name),
             collation=str(collation) if collation else None,
         )
         for name, data_type, is_nullable, ordinal, collation in rows
     ]
-
-    return metas, {str(name).lower(): str(name) for name, *_rest in rows}
 
 
 def default_collation() -> str:
@@ -193,15 +173,22 @@ def relationships(cursor: Cursor, project: str, identity: Identity) -> list[Fore
     carries no ordinal, so it is read only for the referenced table's name.
     """
 
+    info = _info_schema(project, identity.parts[0])
     fk_rows = exec_query(
         cursor,
         f"""
-        SELECT kcu.constraint_name, kcu.column_name, kcu.position_in_unique_constraint
-        FROM `{project}`.`{identity.dataset}`.INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
-        JOIN `{project}`.`{identity.dataset}`.INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
-            ON tc.constraint_name = kcu.constraint_name
-        WHERE tc.table_name = %s AND tc.constraint_type = 'FOREIGN KEY'
-        ORDER BY kcu.constraint_name, kcu.ordinal_position
+        SELECT
+          kcu.constraint_name,
+          kcu.column_name,
+          kcu.position_in_unique_constraint
+        FROM
+          {info}.TABLE_CONSTRAINTS tcn
+          JOIN {info}.KEY_COLUMN_USAGE kcu ON tcn.constraint_name = kcu.constraint_name
+        WHERE
+          tcn.table_name = %s
+          AND tcn.constraint_type = 'FOREIGN KEY'
+        ORDER BY
+          kcu.constraint_name, kcu.ordinal_position
         """,
         (identity.table,),
     ).fetchall()
@@ -213,18 +200,18 @@ def relationships(cursor: Cursor, project: str, identity: Identity) -> list[Fore
 
     for constraint_name, column_name, position_in_unique in fk_rows:
         grouped.setdefault(str(constraint_name), []).append(
-            (str(column_name).lower(), int(position_in_unique)),
+            (fold(str(column_name)), int(position_in_unique)),
         )
 
     out: list[ForeignKeyMeta] = []
 
     for name, columns_and_positions in grouped.items():
-        ref_table = _referenced_table(cursor, project, identity.dataset, name)
+        ref_table = _referenced_table(cursor, project, identity.parts[0], name)
 
         if ref_table is None:
             continue
 
-        ref_ordinals = _primary_key_ordinals(cursor, project, identity.dataset, ref_table)
+        ref_ordinals = _primary_key_ordinals(cursor, project, identity.parts[0], ref_table)
         resolved: list[str] = []
 
         for _col, position in columns_and_positions:
@@ -238,7 +225,7 @@ def relationships(cursor: Cursor, project: str, identity: Identity) -> list[Fore
             out.append(
                 ForeignKeyMeta(
                     column=tuple(col for col, _position in columns_and_positions),
-                    target_table=f"{identity.dataset.lower()}.{ref_table.lower()}",
+                    target_table=join_fqn((fold(identity.parts[0]), fold(ref_table))),
                     target_column=tuple(resolved),
                     constraint_name=name,
                     # `enforced` is documented "Only `NO`" here, so this is the fact, not a guess.
@@ -261,9 +248,12 @@ def _referenced_table(
     row = exec_query(
         cursor,
         f"""
-        SELECT table_name
-        FROM `{project}`.`{dataset}`.INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE
-        WHERE constraint_name = %s
+        SELECT
+          usg.table_name
+        FROM
+          {_info_schema(project, dataset)}.CONSTRAINT_COLUMN_USAGE usg
+        WHERE
+          usg.constraint_name = %s
         LIMIT 1
         """,
         (constraint_name,),
@@ -275,19 +265,24 @@ def _referenced_table(
 def _primary_key_ordinals(cursor: Cursor, project: str, dataset: str, table: str) -> dict[int, str]:
     """The referenced primary key as an ordinal-to-column map - what an FK's ordinal indexes into."""
 
+    info = _info_schema(project, dataset)
     rows = exec_query(
         cursor,
         f"""
-        SELECT kcu.ordinal_position, kcu.column_name
-        FROM `{project}`.`{dataset}`.INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
-        JOIN `{project}`.`{dataset}`.INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
-            ON tc.constraint_name = kcu.constraint_name
-        WHERE tc.table_name = %s AND tc.constraint_type = 'PRIMARY KEY'
+        SELECT
+          kcu.ordinal_position,
+          kcu.column_name
+        FROM
+          {info}.TABLE_CONSTRAINTS tcn
+          JOIN {info}.KEY_COLUMN_USAGE kcu ON tcn.constraint_name = kcu.constraint_name
+        WHERE
+          tcn.table_name = %s
+          AND tcn.constraint_type = 'PRIMARY KEY'
         """,
         (table,),
     ).fetchall()
 
-    return {int(position): str(column).lower() for position, column in rows}
+    return {int(position): fold(str(column)) for position, column in rows}
 
 
 def indexes(cursor: Cursor, fqn: str) -> list[IndexMeta]:
@@ -303,15 +298,21 @@ def indexes(cursor: Cursor, fqn: str) -> list[IndexMeta]:
 def unique_keys(cursor: Cursor, project: str, identity: Identity) -> list[UniqueKeyMeta]:
     """The primary key alone - BigQuery has no UNIQUE constraint type."""
 
+    info = _info_schema(project, identity.parts[0])
     rows = exec_query(
         cursor,
         f"""
-        SELECT kcu.column_name, tc.constraint_name
-        FROM `{project}`.`{identity.dataset}`.INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
-        JOIN `{project}`.`{identity.dataset}`.INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
-            ON tc.constraint_name = kcu.constraint_name
-        WHERE tc.table_name = %s AND tc.constraint_type = 'PRIMARY KEY'
-        ORDER BY kcu.ordinal_position
+        SELECT
+          kcu.column_name,
+          tcn.constraint_name
+        FROM
+          {info}.TABLE_CONSTRAINTS tcn
+          JOIN {info}.KEY_COLUMN_USAGE kcu ON tcn.constraint_name = kcu.constraint_name
+        WHERE
+          tcn.table_name = %s
+          AND tcn.constraint_type = 'PRIMARY KEY'
+        ORDER BY
+          kcu.ordinal_position
         """,
         (identity.table,),
     ).fetchall()
@@ -319,7 +320,7 @@ def unique_keys(cursor: Cursor, project: str, identity: Identity) -> list[Unique
     if not rows:
         return []
 
-    columns_in_order = tuple(str(r[0]).lower() for r in rows)
+    columns_in_order = tuple(fold(str(r[0])) for r in rows)
 
     return [UniqueKeyMeta(columns=columns_in_order, primary=True)]
 
@@ -332,20 +333,29 @@ def physical_layout(cursor: Cursor, project: str, identity: Identity) -> Physica
     # Hidden columns stay in the read: on an ingestion-time-partitioned table the pseudo-column is
     # the only `is_partitioning_column` row; dropping it publishes "not partitioned" (SPEC 2.2.11).
     base_select = f"""
-        SELECT column_name, is_partitioning_column, is_hidden{{clustering}}
-        FROM `{project}`.`{identity.dataset}`.INFORMATION_SCHEMA.COLUMNS
-        WHERE table_name = %s
-        ORDER BY ordinal_position
+        SELECT
+          col.column_name,
+          col.is_partitioning_column,
+          col.is_hidden{{clustering}}
+        FROM
+          {_info_schema(project, identity.parts[0])}.COLUMNS col
+        WHERE
+          col.table_name = %s
+        ORDER BY
+          col.ordinal_position
         """
 
     try:
         rows = exec_query(
             cursor,
-            base_select.format(clustering=", clustering_ordinal_position"),
+            base_select.format(clustering=", col.clustering_ordinal_position"),
             (identity.table,),
         ).fetchall()
         has_clustering_column = True
-    except Exception:  # noqa: BLE001 - retry without the column this connection cannot see
+    except Exception as exc:
+        if getattr(exc, "timed_out", False):
+            raise
+
         rows = exec_query(
             cursor,
             base_select.format(clustering=""),
@@ -385,7 +395,7 @@ def _layout_key(row: tuple[Any, ...]) -> PhysicalLayoutKey:
     name = str(row[0])
     hidden = str(row[2]).upper() == "YES"
 
-    return PhysicalLayoutKey(expression=name, column=None if hidden else name.lower())
+    return PhysicalLayoutKey(expression=name, column=None if hidden else fold(name))
 
 
 def view_dependencies(cursor: Cursor) -> None:
@@ -406,9 +416,13 @@ def comments(cursor: Cursor, project: str, identity: Identity) -> CommentsMeta:
     table_row = exec_query(
         cursor,
         f"""
-        SELECT option_value
-        FROM `{project}`.`{identity.dataset}`.INFORMATION_SCHEMA.TABLE_OPTIONS
-        WHERE table_name = %s AND option_name = 'description'
+        SELECT
+          opt.option_value
+        FROM
+          {_info_schema(project, identity.parts[0])}.TABLE_OPTIONS opt
+        WHERE
+          opt.table_name = %s
+          AND opt.option_name = 'description'
         """,
         (identity.table,),
     ).fetchone()
@@ -418,16 +432,22 @@ def comments(cursor: Cursor, project: str, identity: Identity) -> CommentsMeta:
         column_rows = exec_query(
             cursor,
             f"""
-            SELECT column_name, description
-            FROM `{project}`.`{identity.dataset}`.INFORMATION_SCHEMA.COLUMN_FIELD_PATHS
-            WHERE table_name = %s AND field_path = column_name AND description IS NOT NULL
+            SELECT
+              fpt.column_name,
+              fpt.description
+            FROM
+              {_info_schema(project, identity.parts[0])}.COLUMN_FIELD_PATHS fpt
+            WHERE
+              fpt.table_name = %s
+              AND fpt.field_path = fpt.column_name
+              AND fpt.description IS NOT NULL
             """,
             (identity.table,),
         ).fetchall()
     except Exception:  # noqa: BLE001 - a connection with no such view at all
         column_rows = []
 
-    column_comments = {str(name).lower(): str(description) for name, description in column_rows}
+    column_comments = {fold(str(name)): str(description) for name, description in column_rows}
 
     return CommentsMeta(table=table_comment, columns=column_comments)
 
@@ -450,9 +470,12 @@ def estimate_row_count(cursor: Cursor, project: str, identity: Identity) -> int 
     row = exec_query(
         cursor,
         f"""
-        SELECT SUM(total_rows)
-        FROM `{project}`.`{identity.dataset}`.INFORMATION_SCHEMA.PARTITIONS
-        WHERE table_name = %s
+        SELECT
+          SUM(prt.total_rows)
+        FROM
+          {_info_schema(project, identity.parts[0])}.PARTITIONS prt
+        WHERE
+          prt.table_name = %s
         """,
         (identity.table,),
     ).fetchone()
@@ -472,42 +495,41 @@ def row_count_hint(cursor: Cursor, project: str, identity: Identity) -> int | No
         return None
 
 
-def _enforce_identifier_rules(selected: list[_Candidate]) -> None:
-    """Reject SPEC 1.5 violations before any write - two names differing only by case collapse
-    onto one path, so one would overwrite the other.
-    """
+def _dataset_tables(cursor: Cursor, project: str, dataset: str) -> list[tuple[Any, ...]]:
+    try:
+        return exec_query(
+            cursor,
+            f"""
+            SELECT
+              tbl.table_name,
+              tbl.table_type,
+              tbl.ddl
+            FROM
+              {_info_schema(project, dataset)}.TABLES tbl
+            ORDER BY
+              tbl.table_name
+            """,
+        ).fetchall()
+    except Exception as exc:
+        if getattr(exc, "timed_out", False):
+            raise
 
-    seen: dict[str, str] = {}
-
-    for meta, physical in selected:
-        for seg in meta.namespace_path:
-            if seg.startswith("."):
-                raise IdentifierRejected(_reject_message(meta.fqn, "leading-period", seg))
-
-            if not PATH_SEGMENT_RE.match(seg):
-                raise IdentifierRejected(
-                    _reject_message(meta.fqn, "contains-unsafe-character", seg),
-                )
-
-        previous = seen.get(meta.fqn)
-
-        if previous is not None and previous != physical:
-            raise IdentifierRejected(
-                _reject_message(meta.fqn, f"case-collides-with-{previous}", physical),
-            )
-
-        seen[meta.fqn] = physical
+        return [
+            (name, table_type, None)
+            for name, table_type in exec_query(
+                cursor,
+                f"""
+                SELECT
+                  tbl.table_name,
+                  tbl.table_type
+                FROM
+                  {_info_schema(project, dataset)}.TABLES tbl
+                ORDER BY
+                  tbl.table_name
+                """,
+            ).fetchall()
+        ]
 
 
-def _reject_message(fqn: str, reason: str, detail: str) -> str:
-    """SPEC 1.5.5 error format - verbatim."""
-
-    return (
-        f"ERROR: Table identifier rejected: {fqn}\n"
-        f"  Reason: {reason}\n"
-        f"  Detail: {detail!r}\n"
-        f"  Resolution: Either rename the identifier in the database, OR "
-        f"exclude it via .dbprint.yaml selectors:\n"
-        f"    exclude:\n"
-        f'      - "{fqn}"'
-    )
+def _info_schema(project: str, dataset: str) -> str:
+    return f"{quote(project, DIALECT)}.{quote(dataset, DIALECT)}.INFORMATION_SCHEMA"

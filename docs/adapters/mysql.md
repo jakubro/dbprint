@@ -26,7 +26,7 @@ GRANT CREATE TEMPORARY TABLES ON my_db.* TO 'dbprint_ro'@'%';
 |---|---|---|
 | `SELECT` | the database | connecting, enumerating, DDL and statistics — a plain view takes it for DDL only, since no statement is issued against one |
 | `SHOW VIEW` | the database | a view's DDL only |
-| `CREATE TEMPORARY TABLES` | the database | the sampled-table copy - without it, a `sample`-scoped table is refused rather than degraded |
+| `CREATE TEMPORARY TABLES` | the database | the sampled-table copy — without it, a `sample`-scoped table is refused rather than degraded |
 
 ### What an under-privileged account does
 
@@ -80,6 +80,22 @@ across statements. Narrow with a filter instead of a sample fraction.
 MySQL reports the underlying cause as a plain access-denied error rather than one naming temporary tables specifically, so the parenthesized cause is worth reading in full before concluding the account lost its `SELECT` rather than `CREATE TEMPORARY TABLES`.
 
 There is no fallback path to choose here: setting `materialize_sample: false` on a `sample`-scoped table refuses it before any statement runs, for the same reason — MySQL's undocumented `RAND(seed)` guarantee means an unmaterialized draw is never trusted.
+
+## Listed values
+
+A `SET` column lists its values as MySQL's own text, members in declared order (`red,blue`); a `BIT` column lists the integer a query compares with (`b'101'` is `5`).
+
+## Namespaces
+
+`database` is optional. Omitted, the session has no default database and the connection reads every database `information_schema` shows the account, less `information_schema`, `mysql`, `performance_schema` and `sys`; a database the account cannot read is simply absent. A sampled table's copy lands in the table's own database, so `CREATE TEMPORARY TABLES` is needed on each database holding a sampled table. With no database, an unqualified name in `dbprint check --online` SQL assertions has nothing to resolve against.
+
+## Statement timeout
+
+`statement_timeout` is applied once per session. On Oracle MySQL it is `max_execution_time`, which bounds read-only `SELECT` statements only: `SHOW CREATE TABLE`, the sample copy (`CREATE TEMPORARY TABLE ... SELECT`), `DROP` and statements inside stored programs run unbounded there. On MariaDB it is `max_statement_time`, which covers every statement but is checked at intervals, so a statement can overrun it briefly. A statement that exceeds the limit is cancelled by the server.
+
+## Parallelism
+
+`parallelism: N` opens N connections and profiles up to N tables at once. Each counts against the server's `max_connections` and the account's `MAX_USER_CONNECTIONS`; a connection the server refuses leaves the run on the rest, with a warning.
 
 ## Reference
 

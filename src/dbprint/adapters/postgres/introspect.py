@@ -12,8 +12,8 @@ import re
 from typing import TYPE_CHECKING, cast
 
 from dbprint.config.selectors import expand
+from dbprint.spec.fqn import join as join_fqn
 from .connection import exec_query
-from .identity import Identity
 from ..base import (
     ColumnMeta,
     CommentsMeta,
@@ -26,17 +26,11 @@ from ..base import (
     TableType,
     UniqueKeyMeta,
 )
+from ..identifiers import Identity, column_meta, enforce_table_identifiers, fold, table_meta
 
 
 if TYPE_CHECKING:
     import psycopg
-
-
-PATH_SEGMENT_RE = re.compile(r"^[a-z0-9_][a-z0-9_.-]*$")
-
-
-class IdentifierRejected(ValueError):
-    """Raised when a Postgres identifier fails SPEC 1.5 path-segment rules; format SPEC 1.5.5."""
 
 
 _RELKIND_TO_TYPE: dict[str, TableType] = {
@@ -54,45 +48,67 @@ _FK_ACTIONS = {
     "d": "SET DEFAULT",
 }
 
-_Candidate = tuple[TableMeta, tuple[str, str]]
+_Candidate = tuple[TableMeta, tuple[str, str, str]]
 
 
-def list_tables(
-    conn: psycopg.Connection,
-    include: list[str],
-    exclude: list[str],
-) -> tuple[list[TableMeta], dict[str, tuple[str, str]]]:
-    """Enumerate tables/views/matviews in user schemas, filtered by selectors.
-
-    Also returns the fqn-to-physical map; a quoted-created relation's case is unrecoverable later.
-    """
+def list_databases(conn: psycopg.Connection) -> tuple[str, ...]:
+    """Every database a session can connect to, templates excluded."""
 
     rows = exec_query(
         conn,
         """
-        SELECT n.nspname AS schema, c.relname AS name, c.relkind AS kind
-        FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE c.relkind IN ('r', 'p', 'v', 'm')
-          AND NOT c.relispartition
-          AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-          AND n.nspname NOT LIKE 'pg_toast%'
-          AND n.nspname NOT LIKE 'pg_temp_%'
-        ORDER BY n.nspname, c.relname
+        SELECT
+          dbs.datname
+        FROM
+          pg_database dbs
+        WHERE
+          dbs.datallowconn
+          AND NOT dbs.datistemplate
+        ORDER BY
+          dbs.datname
         """,
     ).fetchall()
 
-    candidates: list[_Candidate] = [
-        (
-            TableMeta(
-                fqn=f"{schema.lower()}.{name.lower()}",
-                type=_RELKIND_TO_TYPE[kind],
-                namespace_path=(schema.lower(), name.lower()),
-            ),
-            (schema, name),
-        )
+    return tuple(str(name) for (name,) in rows)
+
+
+def relations(conn: psycopg.Connection, database: str) -> list[_Candidate]:
+    """Tables/views/matviews in the user schemas of `database`, read on its own session."""
+
+    rows = exec_query(
+        conn,
+        """
+        SELECT
+          nsp.nspname AS schema,
+          cls.relname AS name,
+          cls.relkind AS kind
+        FROM
+          pg_class cls
+          JOIN pg_namespace nsp ON nsp.oid = cls.relnamespace
+        WHERE
+          cls.relkind IN ('r', 'p', 'v', 'm')
+          AND NOT cls.relispartition
+          AND nsp.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND nsp.nspname NOT LIKE 'pg_toast%'
+          AND nsp.nspname NOT LIKE 'pg_temp_%'
+        ORDER BY
+          nsp.nspname, cls.relname
+        """,
+    ).fetchall()
+
+    return [
+        (table_meta((database, schema, name), _RELKIND_TO_TYPE[kind]), (database, schema, name))
         for schema, name, kind in rows
     ]
+
+
+def select_tables(
+    candidates: list[_Candidate],
+    include: list[str],
+    exclude: list[str],
+) -> list[_Candidate]:
+    """Filter `candidates` by selectors, refusing SPEC 1.5 violations across every database."""
+
     in_scope = set(
         expand(
             [meta.fqn for meta, _ in candidates],
@@ -101,12 +117,9 @@ def list_tables(
         ),
     )
     selected = [entry for entry in candidates if entry[0].fqn in in_scope]
-    _enforce_identifier_rules(selected)
+    enforce_table_identifiers(selected)
 
-    return (
-        [meta for meta, _ in selected],
-        {meta.fqn: parts for meta, parts in selected},
-    )
+    return selected
 
 
 def columns(conn: psycopg.Connection, identity: Identity) -> list[ColumnMeta]:
@@ -122,38 +135,48 @@ def columns(conn: psycopg.Connection, identity: Identity) -> list[ColumnMeta]:
         conn,
         """
         SELECT
-            a.attname                                              AS name,
-            pg_catalog.format_type(a.atttypid, a.atttypmod)        AS sql_type,
-            NOT a.attnotnull                                       AS nullable,
-            pg_get_expr(d.adbin, d.adrelid)                        AS default_expr,
-            a.attnum                                               AS ordinal,
-            isc.collation_name                                     AS collation_name
-        FROM pg_attribute a
-        JOIN pg_class c       ON c.oid = a.attrelid
-        JOIN pg_namespace n   ON n.oid = c.relnamespace
-        LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
-        LEFT JOIN information_schema.columns isc
-               ON isc.table_schema = n.nspname
-              AND isc.table_name = c.relname
-              AND isc.column_name = a.attname
-        WHERE n.nspname = %s
-          AND c.relname = %s
-          AND a.attnum > 0
-          AND NOT a.attisdropped
-        ORDER BY a.attnum
+          att.attname AS name,
+          pg_catalog.FORMAT_TYPE(att.atttypid, att.atttypmod) AS sql_type,
+          NOT att.attnotnull AS nullable,
+          PG_GET_EXPR(adf.adbin, adf.adrelid) AS default_expr,
+          att.attnum AS ordinal,
+          isc.collation_name AS collation_name
+
+        FROM
+          pg_attribute att
+          JOIN pg_class cls ON cls.oid = att.attrelid
+          JOIN pg_namespace nsp ON nsp.oid = cls.relnamespace
+          LEFT JOIN pg_attrdef adf ON
+            adf.adrelid = att.attrelid
+            AND adf.adnum = att.attnum
+          LEFT JOIN information_schema.columns isc ON
+            isc.table_schema = nsp.nspname
+            AND isc.table_name = cls.relname
+            AND isc.column_name = att.attname
+
+        WHERE
+          nsp.nspname = %s
+          AND cls.relname = %s
+          AND att.attnum > 0
+          AND NOT att.attisdropped
+
+        ORDER BY
+          att.attnum
         """,
-        identity.parts,
+        identity.addressed,
     ).fetchall()
 
+    bases = _resolved_bases(conn, identity)
+
     return [
-        ColumnMeta(
-            name=name.lower(),
+        column_meta(
+            name,
             sql_type=sql_type,
             nullable=nullable,
             default=default,
             ordinal=ordinal,
-            physical_name=None if name == name.lower() else name,
             collation=collation_name,
+            classify_as=_classify_as(*bases[name]),
         )
         for name, sql_type, nullable, default, ordinal, collation_name in rows
     ]
@@ -167,33 +190,11 @@ def composite_columns(conn: psycopg.Connection, identity: Identity) -> frozenset
     `pg_type.typtype = 'c'`, since a composite type's name is whatever its author chose.
     """
 
-    rows = exec_query(
-        conn,
-        """
-        WITH RECURSIVE base_type AS (
-            SELECT a.attname AS name, a.atttypid AS oid
-            FROM pg_attribute a
-            JOIN pg_class c     ON c.oid = a.attrelid
-            JOIN pg_namespace n ON n.oid = c.relnamespace
-            WHERE n.nspname = %s
-              AND c.relname = %s
-              AND a.attnum > 0
-              AND NOT a.attisdropped
-            UNION ALL
-            SELECT bt.name, t.typbasetype
-            FROM base_type bt
-            JOIN pg_type t ON t.oid = bt.oid
-            WHERE t.typtype = 'd' AND t.typbasetype <> 0
-        )
-        SELECT DISTINCT bt.name
-        FROM base_type bt
-        JOIN pg_type t ON t.oid = bt.oid
-        WHERE t.typtype = 'c'
-        """,
-        identity.parts,
-    ).fetchall()
-
-    return frozenset(name.lower() for (name,) in rows)
+    return frozenset(
+        fold(name)
+        for name, (_, typtype, _) in _resolved_bases(conn, identity).items()
+        if typtype == "c"
+    )
 
 
 def default_collation(conn: psycopg.Connection) -> str:
@@ -201,7 +202,14 @@ def default_collation(conn: psycopg.Connection) -> str:
 
     row = exec_query(
         conn,
-        "SELECT datcollate FROM pg_database WHERE datname = current_database()",
+        """
+        SELECT
+          dbs.datcollate
+        FROM
+          pg_database dbs
+        WHERE
+          dbs.datname = CURRENT_DATABASE()
+        """,
     ).fetchone()
 
     return row[0] if row else ""
@@ -214,26 +222,32 @@ def relationships(conn: psycopg.Connection, identity: Identity) -> list[ForeignK
         conn,
         """
         SELECT
-            con.conname                  AS constraint_name,
-            con.conkey                   AS src_attnums,
-            con.confkey                  AS dst_attnums,
-            tn.nspname                   AS dst_schema,
-            tc.relname                   AS dst_table,
-            con.confdeltype              AS on_delete,
-            con.confupdtype              AS on_update,
-            con.conrelid                 AS src_relid,
-            con.confrelid                AS dst_relid
-        FROM pg_constraint con
-        JOIN pg_class      sc ON sc.oid = con.conrelid
-        JOIN pg_namespace  sn ON sn.oid = sc.relnamespace
-        JOIN pg_class      tc ON tc.oid = con.confrelid
-        JOIN pg_namespace  tn ON tn.oid = tc.relnamespace
-        WHERE con.contype = 'f'
-          AND sn.nspname = %s
-          AND sc.relname = %s
-        ORDER BY con.conname
+          con.conname AS constraint_name,
+          con.conkey AS src_attnums,
+          con.confkey AS dst_attnums,
+          tnp.nspname AS dst_schema,
+          tcl.relname AS dst_table,
+          con.confdeltype AS on_delete,
+          con.confupdtype AS on_update,
+          con.conrelid AS src_relid,
+          con.confrelid AS dst_relid
+
+        FROM
+          pg_constraint con
+          JOIN pg_class scl ON scl.oid = con.conrelid
+          JOIN pg_namespace snp ON snp.oid = scl.relnamespace
+          JOIN pg_class tcl ON tcl.oid = con.confrelid
+          JOIN pg_namespace tnp ON tnp.oid = tcl.relnamespace
+
+        WHERE
+          con.contype = 'f'
+          AND snp.nspname = %s
+          AND scl.relname = %s
+
+        ORDER BY
+          con.conname
         """,
-        identity.parts,
+        identity.addressed,
     ).fetchall()
 
     out: list[ForeignKeyMeta] = []
@@ -254,7 +268,8 @@ def relationships(conn: psycopg.Connection, identity: Identity) -> list[ForeignK
         out.append(
             ForeignKeyMeta(
                 column=tuple(src_cols),
-                target_table=f"{dst_schema.lower()}.{dst_table.lower()}",
+                # A constraint references a relation in its own database only.
+                target_table=join_fqn((fold(identity.parts[0]), fold(dst_schema), fold(dst_table))),
                 target_column=tuple(dst_cols),
                 on_delete=cast(FkAction, _FK_ACTIONS[on_del]),
                 on_update=cast(FkAction, _FK_ACTIONS[on_upd]),
@@ -277,27 +292,38 @@ def indexes(conn: psycopg.Connection, identity: Identity) -> list[IndexMeta]:
         conn,
         """
         SELECT
-            ic.relname                                              AS index_name,
-            string_to_array(ix.indkey::text, ' ')::int[]            AS attnums,
-            ix.indisunique                                          AS is_unique,
-            am.amname                                               AS index_type,
-            ix.indrelid                                             AS table_relid
-        FROM pg_index    ix
-        JOIN pg_class    ic ON ic.oid = ix.indexrelid
-        JOIN pg_class    tc ON tc.oid = ix.indrelid
-        JOIN pg_namespace n ON n.oid = tc.relnamespace
-        JOIN pg_am       am ON am.oid = ic.relam
-        WHERE n.nspname = %s
-          AND tc.relname = %s
-          AND NOT ix.indisprimary
+          icl.relname AS index_name,
+          STRING_TO_ARRAY(idx.indkey::TEXT, ' ')::INT[] AS attnums,
+          idx.indisunique AS is_unique,
+          acm.amname AS index_type,
+          idx.indrelid AS table_relid
+
+        FROM
+          pg_index idx
+          JOIN pg_class icl ON icl.oid = idx.indexrelid
+          JOIN pg_class tcl ON tcl.oid = idx.indrelid
+          JOIN pg_namespace nsp ON nsp.oid = tcl.relnamespace
+          JOIN pg_am acm ON acm.oid = icl.relam
+
+        WHERE
+          nsp.nspname = %s
+          AND tcl.relname = %s
+          AND NOT idx.indisprimary
           AND NOT EXISTS (
-            SELECT 1 FROM pg_constraint con
-            WHERE con.conindid = ix.indexrelid AND con.contype IN ('p', 'u')
+            SELECT
+              1
+            FROM
+              pg_constraint con
+            WHERE
+              con.conindid = idx.indexrelid
+              AND con.contype IN ('p', 'u')
           )
-          AND NOT (ix.indisunique AND ix.indpred IS NULL)
-        ORDER BY ic.relname
+          AND NOT (idx.indisunique AND idx.indpred IS NULL)
+
+        ORDER BY
+          icl.relname
         """,
-        identity.parts,
+        identity.addressed,
     ).fetchall()
 
     out: list[IndexMeta] = []
@@ -322,36 +348,48 @@ def comments(conn: psycopg.Connection, identity: Identity) -> CommentsMeta:
     table_row = exec_query(
         conn,
         """
-        SELECT d.description
-        FROM pg_class c
-        JOIN pg_namespace n   ON n.oid = c.relnamespace
-        LEFT JOIN pg_description d ON d.objoid = c.oid AND d.objsubid = 0
-        WHERE n.nspname = %s AND c.relname = %s
+        SELECT
+          dsc.description
+        FROM
+          pg_class cls
+          JOIN pg_namespace nsp ON nsp.oid = cls.relnamespace
+          LEFT JOIN pg_description dsc ON
+            dsc.objoid = cls.oid
+            AND dsc.objsubid = 0
+        WHERE
+          nsp.nspname = %s
+          AND cls.relname = %s
         """,
-        identity.parts,
+        identity.addressed,
     ).fetchone()
     table_comment = table_row[0] if table_row else None
 
     col_rows = exec_query(
         conn,
         """
-        SELECT a.attname, d.description
-        FROM pg_attribute a
-        JOIN pg_class c        ON c.oid = a.attrelid
-        JOIN pg_namespace n    ON n.oid = c.relnamespace
-        JOIN pg_description d  ON d.objoid = c.oid AND d.objsubid = a.attnum
-        WHERE n.nspname = %s
-          AND c.relname = %s
-          AND a.attnum > 0
-          AND NOT a.attisdropped
+        SELECT
+          att.attname,
+          dsc.description
+        FROM
+          pg_attribute att
+          JOIN pg_class cls ON cls.oid = att.attrelid
+          JOIN pg_namespace nsp ON nsp.oid = cls.relnamespace
+          JOIN pg_description dsc ON
+            dsc.objoid = cls.oid
+            AND dsc.objsubid = att.attnum
+        WHERE
+          nsp.nspname = %s
+          AND cls.relname = %s
+          AND att.attnum > 0
+          AND NOT att.attisdropped
         """,
-        identity.parts,
+        identity.addressed,
     ).fetchall()
 
     return CommentsMeta(
         table=table_comment,
         columns={
-            name.lower(): description for name, description in col_rows if description is not None
+            fold(name): description for name, description in col_rows if description is not None
         },
     )
 
@@ -369,36 +407,52 @@ def unique_keys(conn: psycopg.Connection, identity: Identity) -> list[UniqueKeyM
     rows = exec_query(
         conn,
         """
-        SELECT con.conkey::int[] AS conkey, con.conrelid AS relid, con.contype AS contype,
-               con.conname AS name
-        FROM pg_constraint con
-        JOIN pg_class     c ON c.oid = con.conrelid
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE con.contype IN ('p', 'u')
-          AND n.nspname = %s
-          AND c.relname = %s
+        SELECT
+          con.conkey::INT[] AS conkey,
+          con.conrelid AS relid,
+          con.contype AS contype,
+          con.conname AS name
+        FROM
+          pg_constraint con
+          JOIN pg_class cls ON cls.oid = con.conrelid
+          JOIN pg_namespace nsp ON nsp.oid = cls.relnamespace
+        WHERE
+          con.contype IN ('p', 'u')
+          AND nsp.nspname = %s
+          AND cls.relname = %s
 
         UNION ALL
 
-        SELECT string_to_array(ix.indkey::text, ' ')::int[] AS conkey, ix.indrelid AS relid,
-               'u' AS contype, ic.relname AS name
-        FROM pg_index     ix
-        JOIN pg_class     ic ON ic.oid = ix.indexrelid
-        JOIN pg_class     c  ON c.oid = ix.indrelid
-        JOIN pg_namespace n  ON n.oid = c.relnamespace
-        WHERE ix.indisunique
-          AND NOT ix.indisprimary
-          AND ix.indpred IS NULL
-          AND n.nspname = %s
-          AND c.relname = %s
+        SELECT
+          STRING_TO_ARRAY(idx.indkey::TEXT, ' ')::INT[] AS conkey,
+          idx.indrelid AS relid,
+          'u' AS contype,
+          icl.relname AS name
+        FROM
+          pg_index idx
+          JOIN pg_class icl ON icl.oid = idx.indexrelid
+          JOIN pg_class cls ON cls.oid = idx.indrelid
+          JOIN pg_namespace nsp ON nsp.oid = cls.relnamespace
+        WHERE
+          idx.indisunique
+          AND NOT idx.indisprimary
+          AND idx.indpred IS NULL
+          AND nsp.nspname = %s
+          AND cls.relname = %s
           AND NOT EXISTS (
-            SELECT 1 FROM pg_constraint con2
-            WHERE con2.conindid = ix.indexrelid AND con2.contype IN ('p', 'u')
+            SELECT
+              1
+            FROM
+              pg_constraint cns
+            WHERE
+              cns.conindid = idx.indexrelid
+              AND cns.contype IN ('p', 'u')
           )
 
-        ORDER BY contype, name
+        ORDER BY
+          contype, name
         """,
-        identity.parts * 2,
+        identity.addressed * 2,
     ).fetchall()
 
     return [
@@ -426,12 +480,17 @@ def physical_layout(conn: psycopg.Connection, identity: Identity) -> PhysicalLay
     row = exec_query(
         conn,
         """
-        SELECT pg_get_partkeydef(c.oid)
-        FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = %s AND c.relname = %s AND c.relkind = 'p'
+        SELECT
+          PG_GET_PARTKEYDEF(cls.oid)
+        FROM
+          pg_class cls
+          JOIN pg_namespace nsp ON nsp.oid = cls.relnamespace
+        WHERE
+          nsp.nspname = %s
+          AND cls.relname = %s
+          AND cls.relkind = 'p'
         """,
-        identity.parts,
+        identity.addressed,
     ).fetchone()
 
     if not row or not row[0]:
@@ -455,7 +514,7 @@ def _partition_key(expression: str) -> PhysicalLayoutKey:
 
     return PhysicalLayoutKey(
         expression=expression,
-        column=match.group(1).lower() if match else None,
+        column=fold(match.group(1)) if match else None,
     )
 
 
@@ -483,8 +542,8 @@ def _split_top_level_commas(text: str) -> list[str]:
     return parts
 
 
-def view_dependencies(conn: psycopg.Connection) -> dict[str, tuple[str, ...]]:
-    """Every view/matview's direct object dependencies, one query for the whole connection -
+def view_dependencies(conn: psycopg.Connection, database: str) -> dict[str, tuple[str, ...]]:
+    """Every view/matview's direct object dependencies in `database`, one query on its own session -
     the LEFT joins seed every view, so absence means "not a view", never "reads nothing".
     """
 
@@ -492,37 +551,46 @@ def view_dependencies(conn: psycopg.Connection) -> dict[str, tuple[str, ...]]:
         conn,
         """
         SELECT DISTINCT
-            vn.nspname AS view_schema,
-            v.relname  AS view_name,
-            sn.nspname AS source_schema,
-            s.relname  AS source_name
-        FROM pg_class v
-        JOIN pg_namespace vn ON vn.oid = v.relnamespace
-        LEFT JOIN pg_rewrite r ON r.ev_class = v.oid
-        LEFT JOIN pg_depend dep ON dep.objid = r.oid
+          vnp.nspname AS view_schema,
+          vew.relname AS view_name,
+          snp.nspname AS source_schema,
+          scl.relname AS source_name
+
+        FROM
+          pg_class vew
+          JOIN pg_namespace vnp ON vnp.oid = vew.relnamespace
+          LEFT JOIN pg_rewrite rwr ON rwr.ev_class = vew.oid
+          LEFT JOIN pg_depend dep ON
+            dep.objid = rwr.oid
             AND dep.refobjsubid > 0
             AND dep.deptype = 'n'
-        LEFT JOIN pg_class s ON s.oid = dep.refobjid
-            AND s.oid <> v.oid
-            AND s.relkind IN ('r', 'p', 'v', 'm', 'f')
-        LEFT JOIN pg_namespace sn ON sn.oid = s.relnamespace
-            AND sn.nspname NOT IN ('pg_catalog', 'information_schema')
-            AND sn.nspname NOT LIKE 'pg_toast%'
-        WHERE v.relkind IN ('v', 'm')
-          AND vn.nspname NOT IN ('pg_catalog', 'information_schema')
-          AND vn.nspname NOT LIKE 'pg_toast%'
-        ORDER BY 1, 2, 3, 4
+          LEFT JOIN pg_class scl ON
+            scl.oid = dep.refobjid
+            AND scl.oid <> vew.oid
+            AND scl.relkind IN ('r', 'p', 'v', 'm', 'f')
+          LEFT JOIN pg_namespace snp ON
+            snp.oid = scl.relnamespace
+            AND snp.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND snp.nspname NOT LIKE 'pg_toast%'
+
+        WHERE
+          vew.relkind IN ('v', 'm')
+          AND vnp.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND vnp.nspname NOT LIKE 'pg_toast%'
+
+        ORDER BY
+          1, 2, 3, 4
         """,
     ).fetchall()
 
     out: dict[str, list[str]] = {}
 
     for view_schema, view_name, source_schema, source_name in rows:
-        key = f"{view_schema.lower()}.{view_name.lower()}"
+        key = join_fqn((fold(database), fold(view_schema), fold(view_name)))
         out.setdefault(key, [])
 
         if source_schema is not None and source_name is not None:
-            out[key].append(f"{source_schema.lower()}.{source_name.lower()}")
+            out[key].append(join_fqn((fold(database), fold(source_schema), fold(source_name))))
 
     return {k: tuple(v) for k, v in out.items()}
 
@@ -533,90 +601,19 @@ def reltuples_estimate(conn: psycopg.Connection, identity: Identity) -> float:
     row = exec_query(
         conn,
         """
-        SELECT c.reltuples::double precision
-        FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = %s AND c.relname = %s
+        SELECT
+          cls.reltuples::DOUBLE PRECISION
+        FROM
+          pg_class cls
+          JOIN pg_namespace nsp ON nsp.oid = cls.relnamespace
+        WHERE
+          nsp.nspname = %s
+          AND cls.relname = %s
         """,
-        identity.parts,
+        identity.addressed,
     ).fetchone()
 
     return float(row[0]) if row else -1.0
-
-
-def resolve_column(conn: psycopg.Connection, identity: Identity, column: str) -> str:
-    """The catalog's own spelling for a lowercased column name (SPEC 2.2.1's map key).
-
-    For a caller holding only the artifact key, not the `columns()` read `physical_name`
-    rides on: `sample_values` (SPEC 4.1.2), which the engine addresses by map key.
-    """
-
-    row = exec_query(
-        conn,
-        """
-        SELECT a.attname
-        FROM pg_attribute a
-        JOIN pg_class c     ON c.oid = a.attrelid
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = %s
-          AND c.relname = %s
-          AND lower(a.attname) = %s
-          AND a.attnum > 0
-          AND NOT a.attisdropped
-        """,
-        (*identity.parts, column),
-    ).fetchone()
-
-    if row is None:
-        raise KeyError(f"no column named {column!r} (case-insensitive) on {identity.dotted()!r}")
-
-    return row[0]
-
-
-def _enforce_identifier_rules(selected: list[_Candidate]) -> None:
-    """Reject identifiers that violate SPEC 1.5 before any artifact is written.
-
-    Two names differing only by case collapse onto one path, so one would overwrite the other.
-    """
-
-    seen: dict[str, tuple[str, str]] = {}
-
-    for meta, parts in selected:
-        for seg in meta.namespace_path:
-            if seg.startswith("."):
-                raise IdentifierRejected(_reject_message(meta.fqn, "leading-period", seg))
-
-            if not PATH_SEGMENT_RE.match(seg):
-                raise IdentifierRejected(
-                    _reject_message(meta.fqn, "contains-unsafe-character", seg),
-                )
-
-        previous = seen.get(meta.fqn)
-
-        if previous is not None and previous != parts:
-            raise IdentifierRejected(
-                _reject_message(
-                    meta.fqn,
-                    f"case-collides-with-{'.'.join(previous)}",
-                    ".".join(parts),
-                ),
-            )
-
-        seen[meta.fqn] = parts
-
-
-def _reject_message(fqn: str, reason: str, detail: str) -> str:
-    """SPEC 1.5.5 error format - verbatim."""
-
-    return (
-        f"ERROR: Table identifier rejected: {fqn}\n"
-        f"  Reason: {reason}\n"
-        f"  Detail: {detail!r}\n"
-        f"  Resolution: Either rename the identifier in the database, OR "
-        f"exclude it via .dbprint.yaml selectors:\n"
-        f"    exclude:\n"
-        f'      - "{fqn}"'
-    )
 
 
 def _attnums_to_names(conn: psycopg.Connection, relid: int, attnums: list[int]) -> list[str]:
@@ -632,12 +629,90 @@ def _attnums_to_names(conn: psycopg.Connection, relid: int, attnums: list[int]) 
     rows = exec_query(
         conn,
         """
-        SELECT attnum, attname
-        FROM pg_attribute
-        WHERE attrelid = %s AND attnum = ANY(%s) AND NOT attisdropped
+        SELECT
+          att.attnum,
+          att.attname
+        FROM
+          pg_attribute att
+        WHERE
+          att.attrelid = %s
+          AND att.attnum = ANY(%s)
+          AND NOT att.attisdropped
         """,
         (relid, list(attnums)),
     ).fetchall()
-    name_by_attnum = {attnum: attname.lower() for attnum, attname in rows}
+    name_by_attnum = {attnum: fold(attname) for attnum, attname in rows}
 
     return [name_by_attnum[a] for a in attnums if a in name_by_attnum]
+
+
+# The built-in name classification reads for each user-definable family; a composite is declined.
+_PSEUDO_TYPES = {"e": "anyenum", "r": "anyrange", "m": "anymultirange", "c": "record"}
+
+
+def _resolved_bases(
+    conn: psycopg.Connection,
+    identity: Identity,
+) -> dict[str, tuple[str, str, bool]]:
+    """Per physical column name: its ultimate base type, that type's `typtype`, and whether a
+    domain chain led there.
+    """
+
+    rows = exec_query(
+        conn,
+        """
+        WITH RECURSIVE
+          chain AS (
+
+            SELECT
+              att.attname AS name,
+              att.atttypid AS oid,
+              att.atttypmod AS typmod,
+              0 AS depth
+            FROM
+              pg_attribute att
+              JOIN pg_class cls ON cls.oid = att.attrelid
+              JOIN pg_namespace nsp ON nsp.oid = cls.relnamespace
+            WHERE
+              nsp.nspname = %s
+              AND cls.relname = %s
+              AND att.attnum > 0
+              AND NOT att.attisdropped
+
+            UNION ALL
+
+            SELECT
+              chn.name,
+              typ.typbasetype,
+              typ.typtypmod,
+              chn.depth + 1
+            FROM
+              chain chn
+              JOIN pg_type typ ON typ.oid = chn.oid
+            WHERE
+              typ.typtype = 'd'
+              AND typ.typbasetype <> 0
+
+          )
+        SELECT
+          chn.name,
+          pg_catalog.FORMAT_TYPE(chn.oid, chn.typmod),
+          typ.typtype::TEXT,
+          chn.depth > 0
+        FROM
+          chain chn
+          JOIN pg_type typ ON typ.oid = chn.oid
+        WHERE
+          typ.typtype <> 'd'
+        """,
+        identity.addressed,
+    ).fetchall()
+
+    return {name: (base, typtype, via_domain) for name, base, typtype, via_domain in rows}
+
+
+def _classify_as(base: str, typtype: str, via_domain: bool) -> str | None:
+    if typtype in _PSEUDO_TYPES:
+        return _PSEUDO_TYPES[typtype]
+
+    return base if via_domain else None

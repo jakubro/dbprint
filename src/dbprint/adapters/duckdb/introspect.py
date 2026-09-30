@@ -7,6 +7,7 @@ from __future__ import annotations
 import re
 
 from dbprint.config.selectors import expand
+from dbprint.spec.fqn import join as join_fqn
 from .connection import Cursor, exec_query
 from ..base import (
     ColumnMeta,
@@ -17,19 +18,13 @@ from ..base import (
     TableMeta,
     UniqueKeyMeta,
 )
-
-
-PATH_SEGMENT_RE = re.compile(r"^[a-z0-9_][a-z0-9_.-]*$")
-
-
-class IdentifierRejected(ValueError):
-    """Raised when an identifier fails SPEC 1.5 path-segment rules; format is SPEC 1.5.5."""
+from ..identifiers import Identity, column_meta, enforce_table_identifiers, fold, table_meta
 
 
 _Candidate = tuple[TableMeta, tuple[str, str, str]]
 
 
-def list_tables(cursor: Cursor, include: list[str], exclude: list[str]) -> list[TableMeta]:
+def list_tables(cursor: Cursor, include: list[str], exclude: list[str]) -> list[_Candidate]:
     """Enumerate tables and views in scope, filtered by selectors - the catalog functions
     exclude internal objects, and there is no materialized-view concept here.
     """
@@ -37,23 +32,28 @@ def list_tables(cursor: Cursor, include: list[str], exclude: list[str]) -> list[
     candidates: list[_Candidate] = []
 
     for source, name_column, table_type in (
-        ("duckdb_tables()", "table_name", "table"),
-        ("duckdb_views()", "view_name", "view"),
+        ("DUCKDB_TABLES()", "table_name", "table"),
+        ("DUCKDB_VIEWS()", "view_name", "view"),
     ):
         rows = exec_query(
             cursor,
             f"""
-            SELECT database_name, schema_name, {name_column}
-            FROM {source}
-            WHERE NOT internal
-            ORDER BY database_name, schema_name, {name_column}
+            SELECT
+              obj.database_name,
+              obj.schema_name,
+              obj.{name_column}
+            FROM
+              {source} obj
+            WHERE
+              NOT obj.internal
+            ORDER BY
+              obj.database_name, obj.schema_name, obj.{name_column}
             """,
         ).fetchall()
 
         for database, schema, name in rows:
-            path = (database.lower(), schema.lower(), name.lower())
-            meta = TableMeta(fqn=".".join(path), type=table_type, namespace_path=path)
-            candidates.append((meta, (database, schema, name)))
+            physical = (database, schema, name)
+            candidates.append((table_meta(physical, table_type), physical))
 
     in_scope = set(
         expand(
@@ -63,36 +63,45 @@ def list_tables(cursor: Cursor, include: list[str], exclude: list[str]) -> list[
         ),
     )
     selected = [entry for entry in candidates if entry[0].fqn in in_scope]
-    _enforce_identifier_rules(selected)
+    enforce_table_identifiers(selected)
 
-    return [meta for meta, _ in selected]
+    return selected
 
 
-def columns(cursor: Cursor, fqn: str) -> list[ColumnMeta]:
+def columns(cursor: Cursor, identity: Identity) -> list[ColumnMeta]:
     """Per-column structural metadata in ordinal order - `name` is lowercased for the map key
     (SPEC 2.2.1), and `collation` is always `None`, duckdb exposing no per-column surface.
     """
 
-    database, schema, table = _split_fqn(fqn)
+    database, schema, table = identity.parts
     rows = exec_query(
         cursor,
         """
-        SELECT column_name, column_index, data_type, is_nullable, column_default
-        FROM duckdb_columns()
-        WHERE lower(database_name) = ? AND lower(schema_name) = ? AND lower(table_name) = ?
-        ORDER BY column_index
+        SELECT
+          col.column_name,
+          col.column_index,
+          col.data_type,
+          col.is_nullable,
+          col.column_default
+        FROM
+          DUCKDB_COLUMNS() col
+        WHERE
+          col.database_name = ?
+          AND col.schema_name = ?
+          AND col.table_name = ?
+        ORDER BY
+          col.column_index
         """,
         (database, schema, table),
     ).fetchall()
 
     return [
-        ColumnMeta(
-            name=name.lower(),
+        column_meta(
+            name,
             sql_type=sql_type,
             nullable=nullable,
             default=default,
             ordinal=int(ordinal),
-            physical_name=None if name == name.lower() else name,
         )
         for name, ordinal, sql_type, nullable, default in rows
     ]
@@ -108,28 +117,43 @@ def default_collation(cursor: Cursor) -> str:
 
     row = exec_query(
         cursor,
-        "SELECT value FROM duckdb_settings() WHERE name = 'default_collation'",
+        """
+        SELECT
+          stg.value
+        FROM
+          DUCKDB_SETTINGS() stg
+        WHERE
+          stg.name = 'default_collation'
+        """,
     ).fetchone()
     value = row[0] if row else ""
 
     return value or DEFAULT_COLLATION
 
 
-def relationships(cursor: Cursor, fqn: str) -> list[ForeignKeyMeta]:
+def relationships(cursor: Cursor, identity: Identity) -> list[ForeignKeyMeta]:
     """Declared outgoing FKs; one entry per constraint (composite as arrays) - duckdb parses
     no action clause at all, so every edge is unconditionally `NO ACTION` on both sides.
     """
 
-    database, schema, table = _split_fqn(fqn)
+    database, schema, table = identity.parts
     rows = exec_query(
         cursor,
         """
-        SELECT constraint_name, constraint_column_names, referenced_table,
-               referenced_column_names
-        FROM duckdb_constraints()
-        WHERE constraint_type = 'FOREIGN KEY'
-          AND lower(database_name) = ? AND lower(schema_name) = ? AND lower(table_name) = ?
-        ORDER BY constraint_name
+        SELECT
+          cns.constraint_name,
+          cns.constraint_column_names,
+          cns.referenced_table,
+          cns.referenced_column_names
+        FROM
+          DUCKDB_CONSTRAINTS() cns
+        WHERE
+          cns.constraint_type = 'FOREIGN KEY'
+          AND cns.database_name = ?
+          AND cns.schema_name = ?
+          AND cns.table_name = ?
+        ORDER BY
+          cns.constraint_name
         """,
         (database, schema, table),
     ).fetchall()
@@ -137,7 +161,7 @@ def relationships(cursor: Cursor, fqn: str) -> list[ForeignKeyMeta]:
     return [
         ForeignKeyMeta(
             column=tuple(source_columns),
-            target_table=f"{database}.{schema}.{target_table}".lower(),
+            target_table=join_fqn([fold(part) for part in (database, schema, target_table)]),
             target_column=tuple(target_columns),
             on_delete="NO ACTION",
             on_update="NO ACTION",
@@ -147,44 +171,58 @@ def relationships(cursor: Cursor, fqn: str) -> list[ForeignKeyMeta]:
     ]
 
 
-def indexes(cursor: Cursor, fqn: str) -> list[IndexMeta]:
+def indexes(cursor: Cursor, identity: Identity) -> list[IndexMeta]:
     """Secondary, non-unique indexes only (SPEC 2.6.7) - constraints and bare indexes live in
     separate catalog functions that never overlap, so no exclusion join is needed.
     """
 
-    database, schema, table = _split_fqn(fqn)
+    database, schema, table = identity.parts
     rows = exec_query(
         cursor,
         """
-        SELECT index_name, sql
-        FROM duckdb_indexes()
-        WHERE NOT is_unique
-          AND lower(database_name) = ? AND lower(schema_name) = ? AND lower(table_name) = ?
-        ORDER BY index_name
+        SELECT
+          idx.index_name,
+          idx.sql
+        FROM
+          DUCKDB_INDEXES() idx
+        WHERE
+          NOT idx.is_unique
+          AND idx.database_name = ?
+          AND idx.schema_name = ?
+          AND idx.table_name = ?
+        ORDER BY
+          idx.index_name
         """,
         (database, schema, table),
     ).fetchall()
 
     return [
-        IndexMeta(name=name.lower(), columns=tuple(_index_columns(sql)), unique=False, type="art")
+        IndexMeta(name=fold(name), columns=tuple(_index_columns(sql)), unique=False, type="art")
         for name, sql in rows
     ]
 
 
-def unique_keys(cursor: Cursor, fqn: str) -> list[UniqueKeyMeta]:
+def unique_keys(cursor: Cursor, identity: Identity) -> list[UniqueKeyMeta]:
     """Declared-unique column groups: primary key, unique constraints, bare unique indexes."""
 
-    database, schema, table = _split_fqn(fqn)
+    database, schema, table = identity.parts
     out: list[UniqueKeyMeta] = []
 
     constraint_rows = exec_query(
         cursor,
         """
-        SELECT constraint_type, constraint_column_names
-        FROM duckdb_constraints()
-        WHERE constraint_type IN ('PRIMARY KEY', 'UNIQUE')
-          AND lower(database_name) = ? AND lower(schema_name) = ? AND lower(table_name) = ?
-        ORDER BY constraint_index
+        SELECT
+          cns.constraint_type,
+          cns.constraint_column_names
+        FROM
+          DUCKDB_CONSTRAINTS() cns
+        WHERE
+          cns.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
+          AND cns.database_name = ?
+          AND cns.schema_name = ?
+          AND cns.table_name = ?
+        ORDER BY
+          cns.constraint_index
         """,
         (database, schema, table),
     ).fetchall()
@@ -197,11 +235,18 @@ def unique_keys(cursor: Cursor, fqn: str) -> list[UniqueKeyMeta]:
     index_rows = exec_query(
         cursor,
         """
-        SELECT sql
-        FROM duckdb_indexes()
-        WHERE is_unique AND NOT is_primary
-          AND lower(database_name) = ? AND lower(schema_name) = ? AND lower(table_name) = ?
-        ORDER BY index_name
+        SELECT
+          idx.sql
+        FROM
+          DUCKDB_INDEXES() idx
+        WHERE
+          idx.is_unique
+          AND NOT idx.is_primary
+          AND idx.database_name = ?
+          AND idx.schema_name = ?
+          AND idx.table_name = ?
+        ORDER BY
+          idx.index_name
         """,
         (database, schema, table),
     ).fetchall()
@@ -212,10 +257,10 @@ def unique_keys(cursor: Cursor, fqn: str) -> list[UniqueKeyMeta]:
     return out
 
 
-def physical_layout(cursor: Cursor, fqn: str) -> PhysicalLayout | None:
+def physical_layout(cursor: Cursor, identity: Identity) -> PhysicalLayout | None:
     """duckdb has no declarative clustering/partitioning key for an ordinary table."""
 
-    del cursor, fqn
+    del cursor, identity
 
     return None
 
@@ -228,18 +273,32 @@ def view_dependencies(cursor: Cursor) -> None:
     del cursor
 
 
-def comments(cursor: Cursor, fqn: str) -> CommentsMeta:
+def comments(cursor: Cursor, identity: Identity) -> CommentsMeta:
     """Table comment + per-column comments from `duckdb_tables()`/`duckdb_columns()`."""
 
-    database, schema, table = _split_fqn(fqn)
+    database, schema, table = identity.parts
     table_row = exec_query(
         cursor,
         """
-        SELECT comment FROM duckdb_tables()
-        WHERE lower(database_name) = ? AND lower(schema_name) = ? AND lower(table_name) = ?
+        SELECT
+          tbl.comment
+        FROM
+          DUCKDB_TABLES() tbl
+        WHERE
+          tbl.database_name = ?
+          AND tbl.schema_name = ?
+          AND tbl.table_name = ?
+
         UNION ALL
-        SELECT comment FROM duckdb_views()
-        WHERE lower(database_name) = ? AND lower(schema_name) = ? AND lower(view_name) = ?
+
+        SELECT
+          vew.comment
+        FROM
+          DUCKDB_VIEWS() vew
+        WHERE
+          vew.database_name = ?
+          AND vew.schema_name = ?
+          AND vew.view_name = ?
         """,
         (database, schema, table, database, schema, table),
     ).fetchone()
@@ -247,31 +306,42 @@ def comments(cursor: Cursor, fqn: str) -> CommentsMeta:
     col_rows = exec_query(
         cursor,
         """
-        SELECT column_name, comment FROM duckdb_columns()
-        WHERE lower(database_name) = ? AND lower(schema_name) = ? AND lower(table_name) = ?
+        SELECT
+          col.column_name,
+          col.comment
+        FROM
+          DUCKDB_COLUMNS() col
+        WHERE
+          col.database_name = ?
+          AND col.schema_name = ?
+          AND col.table_name = ?
         """,
         (database, schema, table),
     ).fetchall()
 
     return CommentsMeta(
         table=table_row[0] if table_row else None,
-        columns={
-            col_name.lower(): comment for col_name, comment in col_rows if comment is not None
-        },
+        columns={fold(col_name): comment for col_name, comment in col_rows if comment is not None},
     )
 
 
-def row_count_estimate(cursor: Cursor, fqn: str) -> int:
+def row_count_estimate(cursor: Cursor, identity: Identity) -> int:
     """`estimated_size` from `duckdb_tables()`; -1 for a view or an unknown table - a view
     carries no such column, matching SPEC 2.2.15's never-queried, never-estimated rule.
     """
 
-    database, schema, table = _split_fqn(fqn)
+    database, schema, table = identity.parts
     row = exec_query(
         cursor,
         """
-        SELECT estimated_size FROM duckdb_tables()
-        WHERE lower(database_name) = ? AND lower(schema_name) = ? AND lower(table_name) = ?
+        SELECT
+          tbl.estimated_size
+        FROM
+          DUCKDB_TABLES() tbl
+        WHERE
+          tbl.database_name = ?
+          AND tbl.schema_name = ?
+          AND tbl.table_name = ?
         """,
         (database, schema, table),
     ).fetchone()
@@ -295,57 +365,4 @@ def _index_columns(create_sql: str) -> list[str]:
     if not match:
         return []
 
-    return [c.strip().strip('"').lower() for c in match.group(1).split(",") if c.strip()]
-
-
-def _split_fqn(fqn: str) -> tuple[str, str, str]:
-    database, schema, table = fqn.split(".")
-
-    return database, schema, table
-
-
-def _enforce_identifier_rules(selected: list[_Candidate]) -> None:
-    """Reject identifiers that violate SPEC 1.5 before any artifact is written - two objects
-    differing only by case would collapse onto one path, the second overwriting it.
-
-    No physical-spelling carrier is needed: resolution is ASCII-case-insensitive, quoted included.
-    """
-
-    seen: dict[str, tuple[str, str, str]] = {}
-
-    for meta, parts in selected:
-        for seg in meta.namespace_path:
-            if seg.startswith("."):
-                raise IdentifierRejected(_reject_message(meta.fqn, "leading-period", seg))
-
-            if not PATH_SEGMENT_RE.match(seg):
-                raise IdentifierRejected(
-                    _reject_message(meta.fqn, "contains-unsafe-character", seg),
-                )
-
-        previous = seen.get(meta.fqn)
-
-        if previous is not None and previous != parts:
-            raise IdentifierRejected(
-                _reject_message(
-                    meta.fqn,
-                    f"case-collides-with-{'.'.join(previous)}",
-                    ".".join(parts),
-                ),
-            )
-
-        seen[meta.fqn] = parts
-
-
-def _reject_message(fqn: str, reason: str, detail: str) -> str:
-    """SPEC 1.5.5 error format - verbatim."""
-
-    return (
-        f"ERROR: Table identifier rejected: {fqn}\n"
-        f"  Reason: {reason}\n"
-        f"  Detail: {detail!r}\n"
-        f"  Resolution: Either rename the identifier in the database, OR "
-        f"exclude it via .dbprint.yaml selectors:\n"
-        f"    exclude:\n"
-        f'      - "{fqn}"'
-    )
+    return [fold(c.strip().strip('"')) for c in match.group(1).split(",") if c.strip()]

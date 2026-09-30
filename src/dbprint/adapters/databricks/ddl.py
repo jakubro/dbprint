@@ -5,17 +5,16 @@ Databricks filtering table properties from its own output (documented).
 from __future__ import annotations
 
 from .connection import Cursor, exec_query
-from .introspect import _split_fqn
+from ..identifiers import Identity
 
 
-def extract_ddl(cursor: Cursor, fqn: str) -> str:
+def extract_ddl(cursor: Cursor, identity: Identity) -> str:
     """Return native-dialect DDL for the object, post-normalization."""
 
-    schema, table = _split_fqn(fqn)
-    row = exec_query(cursor, f"SHOW CREATE TABLE `{schema}`.`{table}`").fetchone()
+    row = exec_query(cursor, f"SHOW CREATE TABLE {identity.quoted()}").fetchone()
 
     if not row or not row[0]:
-        raise ValueError(f"no DDL available for {fqn!r}; not found in catalog")
+        raise ValueError(f"no DDL available for {identity.fqn!r}; not found in catalog")
 
     return normalize(str(row[0]))
 

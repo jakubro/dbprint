@@ -6,8 +6,7 @@ every other helper derives from it, so the two sides can never round differently
 
 from __future__ import annotations
 
-import math
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 
 
@@ -18,22 +17,22 @@ STALE_CEILING_DAYS = 90
 
 
 def day_count(earlier: datetime, later: datetime) -> int:
-    """Whole elapsed days between two instants: floor(elapsed seconds / 86400)."""
+    """Whole elapsed days between two instants, fractional seconds included, with no float."""
 
-    return math.floor((later - earlier).total_seconds() / 86400)
+    return (later - earlier) // timedelta(days=1)
 
 
 def parse_instant(value: object) -> datetime | None:
     """`value` as a UTC-aware datetime, or None when it carries no date to compute against.
 
-    A `datetime` passes through; a bare int is a MySQL YEAR value, read as Jan 1 of that
-    year. Anything `fromisoformat` rejects - TIME-only, `infinity`, BC, a year outside
-    0001-9999 - carries no date, and SPEC 2.2.4 forbids a day count against it. A naive
-    reading is treated as UTC per SPEC 2.2.4, at the cost of an at-most-one-day residual.
+    A date reads as midnight UTC, an int as a YEAR's Jan 1, and a naive reading as UTC (SPEC 2.2.4).
     """
 
     if isinstance(value, datetime):
         return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day, tzinfo=UTC)
 
     if isinstance(value, int) and not isinstance(value, bool):
         try:

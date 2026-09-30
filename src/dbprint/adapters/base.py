@@ -9,20 +9,23 @@ from __future__ import annotations
 
 import hashlib
 from abc import ABC, abstractmethod
-from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any, ClassVar, Literal
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from typing import Any, ClassVar, Literal, Self
 
 from dbprint.config import StatisticsConfig
-from dbprint.spec.classification import has_day_resolution
+from dbprint.spec.classification import base_type, has_day_resolution, is_recognised_type
 from dbprint.spec.coverage import coverage_share
 from dbprint.spec.distribution import Distribution, Frequencies
+from dbprint.spec.rounding import UnrepresentableValue
 from dbprint.spec.sketch import SketchKind
 from dbprint.spec.temporal_age import FreshnessClassification
+from dbprint.spec.value_text import scalar_text, value_order_key
 
 
 __all__ = [
     "MIN_SAMPLE_DRAW",
+    "PHASE_A_EXPRESSION_BUDGET",
     "Adapter",
     "AdapterType",
     "BaseStats",
@@ -54,8 +57,10 @@ __all__ = [
     "TableMeta",
     "TableScope",
     "TableType",
+    "TemporalShape",
     "UniqueKeyMeta",
     "ValueCount",
+    "batched_by_cost",
     "has_measurable_nulls",
     "materialized_name",
     "null_flags",
@@ -82,6 +87,8 @@ Detection = Literal["declared", "inferred", "measured"]
 GrainDetection = Literal["declared", "measured"]
 CardinalityMethod = Literal["exact", "approximate"]
 RowCountMethod = Literal["exact", "approximate"]
+# What a temporal value is on its own engine - `timestamp` tz-awareness differs per vendor.
+TemporalShape = Literal["date", "time", "time_tz", "timestamp", "timestamp_tz", "year"]
 
 # Below this many distinct values a draw is too thin to trust (ARCHITECTURE.md 2).
 MIN_SAMPLE_DRAW = 20
@@ -134,7 +141,7 @@ def null_flags(quoted_columns: list[str], *, concat: bool) -> str:
     flags = [f"CASE WHEN {column} IS NULL THEN '1' ELSE '0' END" for column in quoted_columns]
 
     if concat:
-        return "CONCAT(" + ", ".join(flags) + ")"
+        return f"CONCAT({', '.join(flags)})"
 
     return " || ".join(flags)
 
@@ -154,7 +161,9 @@ def null_patterns_from_rows(
     names = [c.name for c in columns]
     entries = [
         NullPattern(
-            columns=tuple(sorted(name for name, flag in zip(names, flags) if flag == "1")),
+            columns=tuple(
+                sorted(name for name, flag in zip(names, flags, strict=True) if flag == "1"),
+            ),
             count=int(count),
         )
         for flags, count in rows[:cap]
@@ -218,9 +227,7 @@ class TableMeta:
 class ColumnMeta:
     """Per-column structural metadata sourced from the catalog (no data).
 
-    `name` is always lowercase - the artifact's map key (SPEC 2.2.1). `physical_name` is the
-    catalog's spelling, None when the two coincide, so read `col.physical_name or col.name`.
-    `collation` (SPEC 2.2.2) is None where the connection default applies.
+    `name` is the lowercase map key and `physical_name` the catalog's spelling when they differ (SPEC 2.2.1).
     """
 
     name: str
@@ -230,6 +237,13 @@ class ColumnMeta:
     ordinal: int
     physical_name: str | None = None
     collation: str | None = None
+    classify_as: str | None = None
+
+    @property
+    def classified_type(self) -> str:
+        """The type classification reads - what a user-defined type resolves to, else `sql_type`."""
+
+        return self.classify_as or self.sql_type
 
 
 @dataclass(frozen=True)
@@ -497,9 +511,7 @@ class TableCounts:
 class BaseStats:
     """Phase A output for one column. See ARCHITECTURE.md 2 (Intermediate dataclass types).
 
-    `supported` is reported, not re-derived: an adapter's unsupported-type list names vendor
-    types the format's does not, so `classify()` reads it (via `cardinality` being None)
-    rather than recognizing the type name.
+    `supported` is reported, not re-derived: a declined column is `unsupported` whatever its type name.
     """
 
     null_count: int
@@ -549,17 +561,215 @@ class ColumnStats:
     # SPEC 2.2.4: the REQUIRED fields this run attempted and could not obtain. Names them so
     # their absence is not read as the structural cause SPEC 7.2 would otherwise imply.
     unmeasured: tuple[str, ...] | None = None
+    # Why `unmeasured` is set, for the engine's warning; never serialized.
+    unmeasured_cause: BaseException | None = field(default=None, compare=False, repr=False)
+
+
+# An engine compiles the whole statement before reading a row, and phase A builds one aggregate
+# expression per statistic per column. A conservative bound, not any one engine's limit.
+PHASE_A_EXPRESSION_BUDGET = 600
+
+
+def batched_by_cost(
+    columns: list[ColumnMeta],
+    cost: Callable[[ColumnMeta], int],
+    budget: int = PHASE_A_EXPRESSION_BUDGET,
+) -> Iterator[list[ColumnMeta]]:
+    """Groups of `columns` whose summed `cost` stays inside `budget`, never yielding an empty one.
+
+    A column costing more than `budget` still gets a group - one statement per column is the floor.
+    """
+
+    group: list[ColumnMeta] = []
+    spent = 0
+
+    for column in columns:
+        price = cost(column)
+
+        if group and spent + price > budget:
+            yield group
+            group, spent = [], 0
+
+        group.append(column)
+        spent += price
+
+    if group:
+        yield group
+
+
+@dataclass(frozen=True)
+class SkippedNamespace:
+    """A namespace enumeration found but could not list; the run continues without it."""
+
+    name: str
+    cause: str
+
+
+# SPEC 4.2's 0.9999 candidate-key threshold, with headroom for an estimate's own error.
+EXACT_PROBE_RATIO = 0.85
+
+
+@dataclass(frozen=True)
+class PhaseA:
+    """Phase A's per-column output, and what it could not measure.
+
+    `unmeasured` maps a column no statement could measure to its null count, read on its own.
+    """
+
+    stats: dict[str, BaseStats]
+    unmeasured: dict[str, int] = field(default_factory=dict)
+    failures: tuple[Exception, ...] = ()
+    recount_failure: Exception | None = None
+
+
+def run_phase_a(
+    columns: list[ColumnMeta],
+    cost: Callable[[ColumnMeta], int],
+    statement: Callable[[list[ColumnMeta]], tuple[int, dict[str, BaseStats]]],
+    null_counts: Callable[[list[ColumnMeta]], tuple[int, dict[str, int]]],
+    recount: Callable[[list[ColumnMeta]], Sequence[Any] | None] | None = None,
+    budget: int = PHASE_A_EXPRESSION_BUDGET,
+    *,
+    declines: Callable[[ColumnMeta], bool] = lambda _: False,
+) -> tuple[int, PhaseA]:
+    """Run phase A in batches; a failed batch is retried per column, then null-counted alone.
+
+    Every `declines` column is null-counted in one statement and reported unsupported.
+    """
+
+    rows_scanned: int | None = None
+    stats: dict[str, BaseStats] = {}
+    unmeasured: dict[str, int] = {}
+    failures: list[Exception] = []
+    declined = [c for c in columns if declines(c)]
+    columns = [c for c in columns if not declines(c)]
+
+    if declined:
+        rows_scanned, nulls = null_counts(declined)
+        stats.update(
+            (
+                column.name,
+                BaseStats(
+                    null_count=min(nulls[column.name], rows_scanned),
+                    cardinality=0,
+                    cardinality_method="exact",
+                    supported=False,
+                ),
+            )
+            for column in declined
+        )
+
+    for batch in batched_by_cost(columns, cost, budget):
+        try:
+            counted, measured = statement(batch)
+        except Exception as exc:
+            # A retry cannot outrun the limit that cancelled the batch; it only multiplies the wait.
+            if getattr(exc, "timed_out", False):
+                raise
+
+            failures.append(exc)
+        else:
+            rows_scanned = counted if rows_scanned is None else rows_scanned
+            stats.update(measured)
+            continue
+
+        for column in batch:
+            if len(batch) > 1:
+                try:
+                    counted, measured = statement([column])
+                except Exception as exc:
+                    if getattr(exc, "timed_out", False):
+                        raise
+
+                    failures.append(exc)
+                else:
+                    rows_scanned = counted if rows_scanned is None else rows_scanned
+                    stats.update(measured)
+                    continue
+
+            counted, nulls = null_counts([column])
+            rows_scanned = counted if rows_scanned is None else rows_scanned
+            unmeasured[column.name] = min(nulls[column.name], rows_scanned)
+
+    rows_scanned = rows_scanned or 0
+    recount_failure = None
+
+    if recount is not None:
+        recount_failure = _settle_near_unique(columns, stats, rows_scanned, recount)
+
+    return rows_scanned, PhaseA(stats, unmeasured, tuple(failures), recount_failure)
+
+
+@dataclass(frozen=True)
+class PhaseB(Mapping[str, ColumnStats]):
+    """Phase B's per-column statistics as a mapping, and the columns no statement could measure.
+
+    `unmeasured` names each column whose statistics failed; `failures` holds their causes in order.
+    """
+
+    stats: dict[str, ColumnStats]
+    unmeasured: tuple[str, ...] = ()
+    failures: tuple[Exception, ...] = ()
+
+    def __getitem__(self, key: str) -> ColumnStats:
+        return self.stats[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.stats)
+
+    def __len__(self) -> int:
+        return len(self.stats)
+
+
+def run_phase_b(
+    columns: list[ColumnMeta],
+    measure: Callable[[ColumnMeta], ColumnStats],
+    batch: Callable[[list[ColumnMeta]], dict[str, ColumnStats]] | None = None,
+) -> PhaseB:
+    """Measure each column on its own; a column whose statement fails is named, never the table.
+
+    `batch` runs first when given, falling back per column; a timeout degrades its column too.
+    """
+
+    if batch is not None and columns:
+        try:
+            return PhaseB(batch(columns))
+        except Exception:  # noqa: BLE001, S110 - the fallback below measures each column alone
+            pass
+
+    stats: dict[str, ColumnStats] = {}
+    unmeasured: list[str] = []
+    failures: list[Exception] = []
+
+    for column in columns:
+        try:
+            stats[column.name] = measure(column)
+        except UnrepresentableValue as exc:
+            exc.column = column.name
+            raise
+        except Exception as exc:  # noqa: BLE001 - one column's failure, the table measures on
+            unmeasured.append(column.name)
+            failures.append(exc)
+
+    return PhaseB(stats, tuple(unmeasured), tuple(failures))
+
+
+def order_values(entries: Iterable[ValueCount]) -> tuple[ValueCount, ...]:
+    """`entries` in SPEC 2.2.4's order: count descending, ties by the text the print publishes."""
+
+    return tuple(sorted(entries, key=lambda v: value_order_key(v.count, scalar_text(v.value))))
 
 
 class Adapter(ABC):
     """Single integration surface for a database. See ARCHITECTURE.md 2.
 
-    Lifecycle: `connect()` -> introspection/extraction -> `close()`, sync, no in-adapter
-    parallelism; `REQUIRED_KEYS`/`OPTIONAL_KEYS` are the credential contract (ARCHITECTURE.md 7).
+    One instance is one session, used by one thread at a time; `new_session` makes more.
     """
 
     REQUIRED_KEYS: ClassVar[tuple[str, ...]] = ()
     OPTIONAL_KEYS: ClassVar[tuple[str, ...]] = ()
+    # Credential keys naming a local file: resolved against the project root, refused if absent.
+    PATH_KEYS: ClassVar[tuple[str, ...]] = ()
 
     # Whether an unmaterialized `sample` scope stays coherent across statements - a seeded per-row
     # predicate (Postgres/duckdb BERNOULLI) redraws identically, an unseeded construct does not.
@@ -568,6 +778,13 @@ class Adapter(ABC):
     # Whether `materialize_scope`'s copy dies with the session on its own, so a failed
     # `release_scope` still leaves nothing behind. False names what cleans it up instead.
     MATERIALIZED_SCOPE_SESSION_SCOPED: ClassVar[bool] = True
+    # The vendor spellings this adapter knowingly declines or profiles as text by representability.
+    KNOWN_TYPES: ClassVar[tuple[str, ...]] = ()
+
+    def recognises_type(self, sql_type: str) -> bool:
+        """Whether `sql_type` is named by a shared table or this adapter's own declared spellings."""
+
+        return is_recognised_type(sql_type) or base_type(sql_type) in self.KNOWN_TYPES
 
     @abstractmethod
     def connect(self) -> None:
@@ -576,6 +793,13 @@ class Adapter(ABC):
     @abstractmethod
     def close(self) -> None:
         """Release the connection; idempotent."""
+
+    @abstractmethod
+    def new_session(self) -> Self:
+        """Another unconnected instance on the same target, sharing this one's identifier maps.
+
+        Called after `list_tables`, which rebinds the maps a session spawned earlier would miss.
+        """
 
     @abstractmethod
     def list_tables(self, include: list[str], exclude: list[str]) -> list[TableMeta]:
@@ -628,8 +852,9 @@ class Adapter(ABC):
 
     @abstractmethod
     def introspect_view_dependencies(self) -> dict[str, tuple[str, ...]] | None:
-        """Every view/matview's direct object dependencies, one catalog query for the whole
-        connection - `None`, or an absent key, both mean the source could not be asked.
+        """Each view's direct dependencies within the namespaces the last `list_tables` selected.
+
+        `None` or a missing key: not asked; a failed namespace is in `unread_dependency_namespaces`.
         """
 
     @abstractmethod
@@ -647,7 +872,7 @@ class Adapter(ABC):
         columns: list[ColumnMeta],
         config: StatisticsConfig,
         scope: TableScope | None = None,
-    ) -> tuple[TableCounts, dict[str, BaseStats]]:
+    ) -> tuple[TableCounts, PhaseA]:
         """Phase A: counts plus per-column null_count and cardinality. See ARCHITECTURE.md 2."""
 
     @abstractmethod
@@ -663,7 +888,7 @@ class Adapter(ABC):
         suppress_values: frozenset[str] = frozenset(),
         on_column: ColumnProgress | None = None,
         scope: TableScope | None = None,
-    ) -> dict[str, ColumnStats]:
+    ) -> PhaseB:
         """Phase B: classification-specific statistics, keyed by column name. See ARCHITECTURE.md 2.
 
         `counts`/`base` are Phase A's output, passed back rather than recomputed; a column in
@@ -679,16 +904,16 @@ class Adapter(ABC):
         fk_source_columns: frozenset[str],
         on_column: ColumnProgress | None = None,
         scope: TableScope | None = None,
-    ) -> tuple[TableCounts, dict[str, ColumnStats]]:
+    ) -> tuple[TableCounts, PhaseB]:
         """Both phases in order, for a caller with nothing to decide between them."""
 
-        counts, base = self.compute_base_statistics(fqn, columns, config, scope)
+        counts, phase_a = self.compute_base_statistics(fqn, columns, config, scope)
         stats = self.compute_column_statistics(
             fqn,
-            columns,
+            [c for c in columns if c.name in phase_a.stats],
             config,
             counts,
-            base,
+            phase_a.stats,
             fk_source_columns,
             on_column=on_column,
             scope=scope,
@@ -707,6 +932,16 @@ class Adapter(ABC):
         del fqn
 
         return scope
+
+    def skipped_namespaces(self) -> tuple[SkippedNamespace, ...]:
+        """Namespaces the last `list_tables` found but could not list; empty unless it enumerated."""
+
+        return ()
+
+    def unread_dependency_namespaces(self) -> tuple[SkippedNamespace, ...]:
+        """Namespaces the last `introspect_view_dependencies` could not read; empty by default."""
+
+        return ()
 
     def release_scope(self, fqn: str, scope: TableScope) -> None:
         """Drop whatever `materialize_scope` created; a no-op on a scope it declined.
@@ -743,11 +978,9 @@ class Adapter(ABC):
         candidates: tuple[tuple[str, str], ...],
         scope: TableScope | None = None,
     ) -> tuple[tuple[str, str], ...]:
-        """Test each candidate pair for a distinct count matching the row count. SPEC 2.2.12.
+        """Return the candidate pairs whose distinct count equals the row count (SPEC 2.2.12).
 
-        `candidates` is already pruned and capped by the caller. One batched multi-column
-        `COUNT(DISTINCT ...)` where the dialect guard accepts it, else one
-        `SELECT COUNT(*) FROM (SELECT DISTINCT ...)` per pair. Returns the subset proved unique.
+        The caller prunes and caps `candidates`; without batching, one query counts each pair.
         """
 
     @abstractmethod
@@ -802,12 +1035,11 @@ class Adapter(ABC):
         column: str,
         n: int,
         scope: TableScope | None = None,
+        sql_type: str | None = None,
     ) -> list[Any]:
-        """Return up to n distinct non-null sampled values, for looks_like detection.
+        """Return up to n distinct non-null values drawn uniformly (SPEC 4.1.2), for looks_like.
 
-        `column` is the artifact's lowercased map key (`ColumnMeta.name`, SPEC 2.2.1); an
-        adapter spelling it differently resolves the case internally. Uniformly random over
-        the scanned set's distinct values (SPEC 4.1.2); see ARCHITECTURE.md 2 for the draw.
+        `column` is the lowercased artifact key; given `sql_type`, strings come as `render_text`.
         """
 
     @abstractmethod
@@ -834,7 +1066,8 @@ class Adapter(ABC):
         scope: TableScope | None = None,
     ) -> int:
         """The distinct count of `column` once trimmed and case-folded (SPEC 2.2.4) - computed
-        in-database over the same scanned set `scope` narrows `cardinality` to (SPEC 2.2.8).
+        in-database over the set `scope` narrows `cardinality` to (SPEC 2.2.8). A materialized
+        `scope` is the same rows; without one this is a later read of a table that may have moved.
         """
 
     @abstractmethod
@@ -844,3 +1077,41 @@ class Adapter(ABC):
         Read-only session per ASSERTIONS.md 3.4; errors propagate for the SQL assertion
         evaluator to turn into an Issue.
         """
+
+
+def _settle_near_unique(
+    columns: list[ColumnMeta],
+    stats: dict[str, BaseStats],
+    rows_scanned: int,
+    recount: Callable[[list[ColumnMeta]], Sequence[Any] | None],
+) -> Exception | None:
+    near_unique = [
+        column
+        for column in columns
+        if (base := stats.get(column.name)) is not None
+        and base.supported
+        and rows_scanned
+        and base.cardinality / rows_scanned >= EXACT_PROBE_RATIO
+    ]
+
+    if not near_unique:
+        return None
+
+    try:
+        row = recount(near_unique)
+    except Exception as exc:  # noqa: BLE001 - the approximate counts stand, and say so
+        return exc
+
+    if row is None:
+        return None
+
+    for column, value in zip(near_unique, row, strict=True):
+        base = stats[column.name]
+        # A separate statement may read a different snapshot than phase A, so clamp to non_null.
+        stats[column.name] = replace(
+            base,
+            cardinality=min(rows_scanned - base.null_count, int(value)),
+            cardinality_method="exact",
+        )
+
+    return None

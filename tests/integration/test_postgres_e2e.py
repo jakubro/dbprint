@@ -82,6 +82,7 @@ def test_postgres_end_to_end(
 ) -> None:
     """Full pipeline runs cleanly + conformance passes + sanity checks hold."""
 
+    db = e2e_postgres_db["database"]
     project_dir = tmp_path / "project"
     _write_project(project_dir)
     env = _credential_env(e2e_postgres_db)
@@ -107,7 +108,7 @@ def test_postgres_end_to_end(
         f"  {e.code} at {e.path}: {e.detail}" for e in errors
     )
 
-    curator_stats = yaml.safe_load((print_dir / "public/curator/statistics.yaml").read_text())
+    curator_stats = yaml.safe_load((print_dir / f"{db}/public/curator/statistics.yaml").read_text())
     assert curator_stats["columns"]["id"]["classification"] == "text"
     assert curator_stats["columns"]["email"]["classification"] == "text"
     assert curator_stats["columns"]["email"]["inferred"]["looks_like"] == "email"
@@ -116,28 +117,32 @@ def test_postgres_end_to_end(
     assert curator_stats["columns"]["traits"]["classification"] == "json"
 
     fieldwork_rel = yaml.safe_load(
-        (print_dir / "public/fieldwork/relationships.yaml").read_text(),
+        (print_dir / f"{db}/public/fieldwork/relationships.yaml").read_text(),
     )
     composite_fks = [
         fk
         for fk in fieldwork_rel["refers_to"]
-        if len(fk["column"]) == 2 and fk["target_table"] == "public.curator"
+        if len(fk["column"]) == 2 and fk["target_table"] == f"{db}.public.curator"
     ]
     assert composite_fks, "expected composite FK from fieldwork to curator"
     assert set(composite_fks[0]["column"]) == {"curator_id", "herbarium_id"}
     assert set(composite_fks[0]["target_column"]) == {"id", "herbarium_id"}
 
-    botanist_rel = yaml.safe_load((print_dir / "public/botanist/relationships.yaml").read_text())
-    assert botanist_rel["refers_to"][0]["target_table"] == "public.botanist"
+    botanist_rel = yaml.safe_load(
+        (print_dir / f"{db}/public/botanist/relationships.yaml").read_text(),
+    )
+    assert botanist_rel["refers_to"][0]["target_table"] == f"{db}.public.botanist"
 
     # curator.referenced_by populated by the second-pass relationship graph.
-    curator_rel = yaml.safe_load((print_dir / "public/curator/relationships.yaml").read_text())
+    curator_rel = yaml.safe_load(
+        (print_dir / f"{db}/public/curator/relationships.yaml").read_text(),
+    )
     referencer_tables = {entry["referencer_table"] for entry in curator_rel["referenced_by"]}
-    assert "public.fieldwork" in referencer_tables
+    assert f"{db}.public.fieldwork" in referencer_tables
 
     # active_curators_v is a view -> DDL, relationships, and a catalog-only statistics.yaml
     # (SPEC 2.2.15): every column the catalog read found, nothing measured.
-    view_dir = print_dir / "public/active_curators_v"
+    view_dir = print_dir / f"{db}/public/active_curators_v"
     assert (view_dir / "ddl.sql").is_file()
     view_stats = yaml.safe_load((view_dir / "statistics.yaml").read_text())
     assert view_stats["catalog_only"] is True
@@ -145,19 +150,19 @@ def test_postgres_end_to_end(
     assert "row_count" not in view_stats
 
     # daily_viability_mv is a matview -> DDL + statistics + relationships.
-    mv_dir = print_dir / "public/daily_viability_mv"
+    mv_dir = print_dir / f"{db}/public/daily_viability_mv"
     assert (mv_dir / "ddl.sql").is_file()
     assert (mv_dir / "statistics.yaml").is_file()
 
     manifest = yaml.safe_load((print_dir / "manifest.yaml").read_text())
     expected_tables = {
-        "public.herbarium",
-        "public.curator",
-        "public.fieldwork",
-        "public.botanist",
-        "public.curation_event",
-        "public.active_curators_v",
-        "public.daily_viability_mv",
+        f"{db}.public.herbarium",
+        f"{db}.public.curator",
+        f"{db}.public.fieldwork",
+        f"{db}.public.botanist",
+        f"{db}.public.curation_event",
+        f"{db}.public.active_curators_v",
+        f"{db}.public.daily_viability_mv",
     }
     assert expected_tables <= set(manifest["tables"]), (
         f"missing tables in manifest: {expected_tables - set(manifest['tables'])}"
@@ -171,6 +176,7 @@ def test_categorical_classification_for_biome(
 ) -> None:
     """herbarium.biome has cardinality 3 -> categorical with exhaustive values."""
 
+    db = e2e_postgres_db["database"]
     project_dir = tmp_path / "project"
     _write_project(project_dir)
     env = _credential_env(e2e_postgres_db)
@@ -178,7 +184,7 @@ def test_categorical_classification_for_biome(
     assert result.exit_code in (0, 3), result.output
 
     stats = yaml.safe_load(
-        (project_dir / "prints" / CONN_NAME / "public/herbarium/statistics.yaml").read_text(),
+        (project_dir / "prints" / CONN_NAME / f"{db}/public/herbarium/statistics.yaml").read_text(),
     )
     biome = stats["columns"]["biome"]
     assert biome["classification"] == "categorical"
@@ -194,6 +200,7 @@ def test_temporal_classification_for_curation_event_created_at(
 ) -> None:
     """curation_event.created_at has high cardinality + timestamp type -> temporal."""
 
+    db = e2e_postgres_db["database"]
     project_dir = tmp_path / "project"
     _write_project(project_dir)
     env = _credential_env(e2e_postgres_db)
@@ -201,7 +208,9 @@ def test_temporal_classification_for_curation_event_created_at(
     assert result.exit_code in (0, 3), result.output
 
     stats = yaml.safe_load(
-        (project_dir / "prints" / CONN_NAME / "public/curation_event/statistics.yaml").read_text(),
+        (
+            project_dir / "prints" / CONN_NAME / f"{db}/public/curation_event/statistics.yaml"
+        ).read_text(),
     )
     created_at = stats["columns"]["created_at"]
     assert created_at["classification"] == "temporal"
@@ -217,6 +226,7 @@ def test_approximate_path_activates_under_low_threshold(
 ) -> None:
     """Force APPROXIMATE_THRESHOLD low so even seeded data hits the approximate path."""
 
+    db = e2e_postgres_db["database"]
     from dbprint.adapters.postgres import stats as stats_module
 
     monkeypatch.setattr(stats_module, "APPROXIMATE_THRESHOLD", 10)
@@ -228,10 +238,13 @@ def test_approximate_path_activates_under_low_threshold(
     assert result.exit_code in (0, 3), result.output
 
     curation_event_stats = yaml.safe_load(
-        (project_dir / "prints" / CONN_NAME / "public/curation_event/statistics.yaml").read_text(),
+        (
+            project_dir / "prints" / CONN_NAME / f"{db}/public/curation_event/statistics.yaml"
+        ).read_text(),
     )
-    # pg_stats may lag so cardinality can read 0; only completion without error is asserted.
-    assert "columns" in curation_event_stats
+    methods = {c["cardinality_method"] for c in curation_event_stats["columns"].values()}
+
+    assert "approximate" in methods
 
 
 def test_statement_tracing(
@@ -241,6 +254,7 @@ def test_statement_tracing(
 ) -> None:
     """generate traces every statement it sent, params kept separate from the text."""
 
+    db = e2e_postgres_db["database"]
     project_dir = tmp_path / "project"
     _write_project(project_dir)
     env = _credential_env(e2e_postgres_db)
@@ -254,8 +268,8 @@ def test_statement_tracing(
     text = files[0].read_text()
 
     # At least one statement record per profiled table, with elapsed.
-    assert "fqn=public.curator" in text
-    assert "fqn=public.herbarium" in text
+    assert f"fqn={db}.public.curator" in text
+    assert f"fqn={db}.public.herbarium" in text
     assert "statement conn=e2e_conn" in text
     assert "elapsed_ms=" in text
 
@@ -301,6 +315,7 @@ def test_a_narrowed_read_over_a_stale_estimate_conforms(
 ) -> None:
     """SPEC 2.2.8 forbids clamping row_count to a planner estimate the scan overtook."""
 
+    db = e2e_postgres_db["database"]
     _seed_lagging_estimate(e2e_postgres_db)
 
     project_dir = tmp_path / "stale"
@@ -311,7 +326,7 @@ def test_a_narrowed_read_over_a_stale_estimate_conforms(
     assert result.exit_code in (0, 3), result.output
 
     print_dir = project_dir / "prints" / CONN_NAME
-    stats = yaml.safe_load((print_dir / "public/lagging/statistics.yaml").read_text())
+    stats = yaml.safe_load((print_dir / f"{db}/public/lagging/statistics.yaml").read_text())
 
     assert stats["row_count_method"] == "approximate"
     assert stats["scope"]["rows_scanned"] > stats["row_count"], (
@@ -331,9 +346,9 @@ connections:
     adapter: postgres
     auto: true
     output: prints
-    include: ["public.lagging"]
+    include: ["*.public.lagging"]
     rules:
-      - include: ["public.lagging"]
+      - include: ["*.public.lagging"]
         sample: 1.0
 """
 

@@ -15,6 +15,8 @@ Annotations are where that half lives. They sit beside the generated artifacts, 
 
 Create any of them by hand and every later `dbprint generate` preserves it. The naming is deliberate: a print root holds both producer-written and human-written files, and `<artifact>.annotations.yaml` makes authorship legible from the name alone.
 
+Annotations outlive their table. When a table leaves the database, `generate` deletes its producer-written files and leaves the annotations where they are; `check` reports each as a `manifest.orphaned-artifact` warning, and a table that returns under the same name picks them up again.
+
 The three YAML files carry a `format_version` header and a closed root — a key the format does not define is rejected rather than silently accepted, so a human always gets a signal when what they wrote reaches no consumer. `description.md` is unstructured prose and carries neither.
 
 ## What goes in one

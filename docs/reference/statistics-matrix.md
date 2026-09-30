@@ -1,23 +1,10 @@
 # Statistics required-field matrix
 
-Generated from `spec/statistics_matrix.py` - do not edit by hand. Run `just docs` to
-regenerate. [SPEC 2.2.3](../format/v1/SPEC.md#223-required--optional--forbidden-field-matrix-per-classification) is the
-normative table this page mirrors; this page exists so a third-party producer can diff its
-own emission logic against something checked cell for cell, rather than reconstructing the
-matrix from prose that can silently move underneath it.
+Generated from `spec/statistics_matrix.py` — do not edit by hand. Run `just docs` to regenerate. [SPEC 2.2.3](../format/v1/SPEC.md#223-required--optional--forbidden-field-matrix-per-classification) is the normative table this page mirrors; this page exists so a third-party producer can diff its own emission logic against something checked cell for cell, rather than reconstructing the matrix from prose that can silently move underneath it.
 
-Every classification but `unsupported` requires eight base fields, listed once here rather
-than in every row: `sql_type`, `nullable`, `null_count`, `null_rate`, `cardinality`,
-`cardinality_ratio`, `cardinality_method`, `classification`. `unsupported` requires only the
-first four - `cardinality`, `cardinality_ratio` and `cardinality_method` are FORBIDDEN on it
-instead of required, so its row lists its actual required set in full rather than a diff
-against the base. `rows_scanned` appears in neither column below - it is conditioned on the
-file's own `scope` block, not on a classification.
+Every classification but `unsupported` requires eight base fields, listed once here rather than in every row: `sql_type`, `nullable`, `null_count`, `null_rate`, `cardinality`, `cardinality_ratio`, `cardinality_method`, `classification`. `unsupported` requires only the first four — `cardinality`, `cardinality_ratio` and `cardinality_method` are FORBIDDEN on it instead of required, so its row lists its actual required set in full rather than a diff against the base. `rows_scanned` appears in neither column below — it is conditioned on the file's own `scope` block, not on a classification.
 
-A field absent from both columns for a classification is a footnoted case: `SPEC 2.2.3`'s own
-footnotes (marked with a symbol) subtract a required field or add an exception under a stated
-condition (an all-null column, redaction, a `sql_type` without day granularity). This page
-carries only the unconditional rows; read the footnote text in SPEC for the conditional ones.
+A field absent from both columns for a classification is a footnoted case: `SPEC 2.2.3`'s own footnotes (marked with a symbol) subtract a required field or add an exception under a stated condition (an all-null column, redaction, a `sql_type` without day granularity). This page carries only the unconditional rows; read the footnote text in SPEC for the conditional ones.
 
 | Classification | Required beyond the base 8 | Forbidden |
 |---|---|---|

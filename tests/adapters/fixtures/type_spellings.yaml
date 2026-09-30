@@ -1,0 +1,337 @@
+# Every column type spelling each registered adapter's introspection can report, with the
+# classification a measured high-cardinality column of that type must publish (SPEC 3.1-3.3).
+bigquery:
+  INT64: numeric
+  NUMERIC: numeric
+  NUMERIC(10, 2): numeric
+  BIGNUMERIC: numeric
+  BIGNUMERIC(40, 2): numeric
+  FLOAT64: numeric
+  BOOL: boolean
+  STRING: text
+  STRING(10): text
+  BYTES: unsupported
+  BYTES(16): unsupported
+  DATE: temporal
+  DATETIME: temporal
+  TIME: temporal
+  TIMESTAMP: temporal
+  GEOGRAPHY: unsupported
+  JSON: json
+  INTERVAL: text
+  RANGE<DATE>: text
+  RANGE<TIMESTAMP>: text
+  ARRAY<STRING>: unsupported
+  STRUCT<a INT64, b STRING>: unsupported
+
+clickhouse:
+  Int8: numeric
+  Int16: numeric
+  Int32: numeric
+  Int64: numeric
+  Int128: numeric
+  Int256: numeric
+  UInt8: numeric
+  UInt16: numeric
+  UInt32: numeric
+  UInt64: numeric
+  UInt128: numeric
+  UInt256: numeric
+  Float32: numeric
+  Float64: numeric
+  BFloat16: numeric
+  Decimal(10, 2): numeric
+  Decimal(76, 2): numeric
+  Bool: boolean
+  String: text
+  FixedString(4): text
+  UUID: text
+  IPv4: text
+  IPv6: text
+  Enum8('a' = 1): text
+  Enum16('a' = 1): text
+  IntervalNanosecond: text
+  IntervalMicrosecond: text
+  IntervalMillisecond: text
+  IntervalSecond: text
+  IntervalMinute: text
+  IntervalHour: text
+  IntervalDay: text
+  IntervalWeek: text
+  IntervalMonth: text
+  IntervalQuarter: text
+  IntervalYear: text
+  Date: temporal
+  Date32: temporal
+  DateTime: temporal
+  DateTime('UTC'): temporal
+  DateTime64(3): temporal
+  DateTime64(9, 'UTC'): temporal
+  Time: temporal
+  Time64(3): temporal
+  JSON: json
+  Nullable(Int32): numeric
+  Nullable(DateTime64(6, 'UTC')): temporal
+  LowCardinality(String): text
+  LowCardinality(Nullable(String)): text
+  Array(String): unsupported
+  Map(String, UInt8): unsupported
+  Tuple(String, UInt8): unsupported
+  Nested(a String): unsupported
+  AggregateFunction(uniq, UInt64): unsupported
+  SimpleAggregateFunction(sum, UInt64): unsupported
+  Variant(String, UInt8): json
+  Dynamic: unsupported
+  Point: unsupported
+  Ring: unsupported
+  LineString: unsupported
+  MultiLineString: unsupported
+  Polygon: unsupported
+  MultiPolygon: unsupported
+  Geometry: unsupported
+  QBit(Float32, 8): unsupported
+  Nothing: unsupported
+
+databricks:
+  tinyint: numeric
+  smallint: numeric
+  int: numeric
+  bigint: numeric
+  decimal(10,2): numeric
+  float: numeric
+  double: numeric
+  boolean: boolean
+  string: text
+  varchar(10): text
+  char(3): text
+  date: temporal
+  timestamp: temporal
+  timestamp_ntz: temporal
+  variant: json
+  binary: unsupported
+  interval year: unsupported
+  interval year to month: unsupported
+  interval month: unsupported
+  interval day: unsupported
+  interval day to hour: unsupported
+  interval day to minute: unsupported
+  interval day to second: unsupported
+  interval hour: unsupported
+  interval hour to minute: unsupported
+  interval hour to second: unsupported
+  interval minute: unsupported
+  interval minute to second: unsupported
+  interval second: unsupported
+  void: unsupported
+  geography(4326): unsupported
+  geometry(4326): unsupported
+  array<string>: unsupported
+  map<string,int>: unsupported
+  struct<a:int>: unsupported
+
+duckdb:
+  TINYINT: numeric
+  SMALLINT: numeric
+  INTEGER: numeric
+  BIGINT: numeric
+  HUGEINT: numeric
+  UTINYINT: numeric
+  USMALLINT: numeric
+  UINTEGER: numeric
+  UBIGINT: numeric
+  UHUGEINT: numeric
+  BIGNUM: numeric
+  FLOAT: numeric
+  DOUBLE: numeric
+  DECIMAL(18,3): numeric
+  BOOLEAN: boolean
+  VARCHAR: text
+  UUID: text
+  BIT: text
+  INTERVAL: text
+  ENUM('a', 'b'): text
+  DATE: temporal
+  TIME: temporal
+  TIME_NS: temporal
+  TIME WITH TIME ZONE: temporal
+  TIMESTAMP: temporal
+  TIMESTAMP_S: temporal
+  TIMESTAMP_MS: temporal
+  TIMESTAMP_NS: temporal
+  TIMESTAMP WITH TIME ZONE: temporal
+  JSON: json
+  VARIANT: json
+  BLOB: unsupported
+  GEOMETRY: unsupported
+  INTEGER[]: unsupported
+  INTEGER[3]: unsupported
+  STRUCT(a INTEGER): unsupported
+  MAP(VARCHAR, INTEGER): unsupported
+  UNION(n INTEGER, s VARCHAR): unsupported
+
+mysql:
+  tinyint: numeric
+  tinyint unsigned: numeric
+  smallint: numeric
+  mediumint: numeric
+  int: numeric
+  int unsigned: numeric
+  bigint: numeric
+  bigint unsigned: numeric
+  decimal(12,2): numeric
+  float: numeric
+  double: numeric
+  tinyint(1): boolean
+  char(3): text
+  varchar(20): text
+  tinytext: text
+  text: text
+  mediumtext: text
+  longtext: text
+  enum('a','b'): text
+  set('a','b'): text
+  bit(1): text
+  bit(8): text
+  date: temporal
+  time: temporal
+  datetime: temporal
+  datetime(6): temporal
+  timestamp: temporal
+  year: temporal
+  json: json
+  binary(4): unsupported
+  varbinary(8): unsupported
+  tinyblob: unsupported
+  blob: unsupported
+  mediumblob: unsupported
+  longblob: unsupported
+  geometry: unsupported
+  point: unsupported
+  linestring: unsupported
+  polygon: unsupported
+  multipoint: unsupported
+  multilinestring: unsupported
+  multipolygon: unsupported
+  geometrycollection: unsupported
+  vector(3): unsupported
+
+postgres:
+  smallint: numeric
+  integer: numeric
+  bigint: numeric
+  numeric: numeric
+  numeric(12,2): numeric
+  real: numeric
+  double precision: numeric
+  money: numeric
+  boolean: boolean
+  text: text
+  character(3): text
+  character varying(20): text
+  '"char"': text
+  name: text
+  citext: text
+  uuid: text
+  inet: text
+  cidr: text
+  macaddr: text
+  macaddr8: text
+  interval: text
+  bit(1): text
+  bit varying(8): text
+  tsvector: text
+  tsquery: text
+  pg_lsn: text
+  oid: text
+  xid8: text
+  tid: text
+  regclass: text
+  regcollation: text
+  regconfig: text
+  regdictionary: text
+  regnamespace: text
+  regoper: text
+  regoperator: text
+  regproc: text
+  regprocedure: text
+  regrole: text
+  regtype: text
+  int2vector: text
+  oidvector: text
+  anyenum: text
+  anyrange: text
+  anymultirange: text
+  date: temporal
+  time without time zone: temporal
+  time with time zone: temporal
+  timestamp without time zone: temporal
+  timestamp with time zone: temporal
+  json: json
+  jsonb: json
+  bytea: unsupported
+  point: unsupported
+  line: unsupported
+  lseg: unsupported
+  box: unsupported
+  path: unsupported
+  polygon: unsupported
+  circle: unsupported
+  xml: unsupported
+  jsonpath: unsupported
+  aclitem: unsupported
+  cid: unsupported
+  xid: unsupported
+  gtsvector: unsupported
+  refcursor: unsupported
+  pg_snapshot: unsupported
+  txid_snapshot: unsupported
+  geometry: unsupported
+  geography: unsupported
+  vector(3): unsupported
+  integer[]: unsupported
+
+redshift:
+  smallint: numeric
+  integer: numeric
+  bigint: numeric
+  numeric(12,2): numeric
+  real: numeric
+  double precision: numeric
+  boolean: boolean
+  character(3): text
+  character varying(20): text
+  bpchar: text
+  date: temporal
+  time without time zone: temporal
+  time with time zone: temporal
+  timestamp without time zone: temporal
+  timestamp with time zone: temporal
+  super: json
+  varbyte: unsupported
+  binary varying: unsupported
+  varbinary: unsupported
+  geometry: unsupported
+  geography: unsupported
+  hllsketch: unsupported
+
+snowflake:
+  NUMBER: numeric
+  DECFLOAT: numeric
+  FLOAT: numeric
+  TEXT: text
+  BOOLEAN: boolean
+  DATE: temporal
+  TIME: temporal
+  TIMESTAMP_NTZ: temporal
+  TIMESTAMP_LTZ: temporal
+  TIMESTAMP_TZ: temporal
+  VARIANT: json
+  OBJECT: json
+  BINARY: unsupported
+  ARRAY: unsupported
+  MAP: unsupported
+  GEOGRAPHY: unsupported
+  GEOMETRY: unsupported
+  VECTOR: unsupported
+  FILE: unsupported
+  UNKNOWN: unsupported

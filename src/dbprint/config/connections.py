@@ -7,13 +7,14 @@ raise `ConfigError` listing every unresolved one at once.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 import yaml
 from dotenv import dotenv_values
 
-from .project import ConfigError
+from .project import ConfigError, resolve_project_path
 
 
 CONNECTIONS_FILE_DEFAULT = Path("~/.dbprint/connections.yaml")
@@ -22,6 +23,8 @@ DOTENV_FILE = ".env"
 # The keys whose empty value is itself the credential: a trust-authenticated cluster is reached
 # with a password of none, and a variable set to empty is how a runner supplies exactly that.
 _EMPTY_IS_A_VALUE = frozenset({"password"})
+# No local file, so passed through: duckdb's `:memory:` family, or a URI (`md:`, `s3://`).
+_NOT_A_FILE_RE = re.compile(r"^(:|[A-Za-z][A-Za-z0-9+.-]+:)")
 
 
 def resolve(
@@ -31,11 +34,11 @@ def resolve(
     connections_file: Path | None = None,
     env: dict[str, str] | None = None,
     optional_keys: list[str] | None = None,
+    path_keys: list[str] | None = None,
 ) -> dict[str, str]:
     """Resolve credential keys for connection_name; precedence per SPEC + ARCHITECTURE.md 7.
 
-    Missing `required_keys` raise `ConfigError` listing every unresolved one; `optional_keys`
-    follow the same precedence but are silently omitted when absent. `env` defaults to `os.environ`.
+    Missing required keys raise `ConfigError`; a `path_keys` file anchors at `project_root`.
     """
 
     env_map = env if env is not None else dict(os.environ)
@@ -73,6 +76,10 @@ def resolve(
         if value is not None:
             resolved[key] = value
 
+    for key in path_keys or []:
+        if key in resolved and not _NOT_A_FILE_RE.match(resolved[key]):
+            resolved[key] = _existing_path(connection_name, key, resolved[key], project_root)
+
     return resolved
 
 
@@ -101,6 +108,19 @@ def _resolve_one(
         return str(carried)
     else:
         return None
+
+
+def _existing_path(connection_name: str, key: str, value: str, project_root: Path) -> str:
+    path = resolve_project_path(value, project_root)
+
+    if not path.exists():
+        raise ConfigError(
+            f"Connection {connection_name!r}: {key} {value!r} resolves to {str(path)!r}, which "
+            f"does not exist. A relative path resolves against the project root, not the current "
+            f"directory.",
+        )
+
+    return str(path)
 
 
 def _carries_value(value: str | None, key: str) -> bool:

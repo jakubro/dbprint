@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import importlib
+import time
 from types import ModuleType
 from unittest.mock import patch
 
@@ -15,8 +17,10 @@ from dbprint.cli.adapter_registry import ADAPTERS
 from dbprint.spec import sketch as sketch_module
 from dbprint.spec.classification import base_type
 from dbprint.spec.sketch import (
+    SketchKind,
     answerable_count,
     answerable_subset_containment,
+    canonical_form,
     contains_value,
     decode_sketch,
     estimate_intersection,
@@ -38,6 +42,7 @@ class TestVectors:
             pytest.param("hello", 13362634815750784402, id="text"),
             pytest.param("true", 317521853213362953, id="boolean"),
             pytest.param("2026-05-17T22:48:01Z", 11467405332662396900, id="temporal"),
+            pytest.param("00:00:37", 10604805012337869669, id="time_of_day"),
         ],
     )
     def test_low64_md5_matches_the_published_vector(self, canonical: str, expected: int) -> None:
@@ -310,3 +315,88 @@ class TestContainsValue:
     def test_a_malformed_payload_raises_rather_than_reading_as_unanswerable(self) -> None:
         with pytest.raises(ValueError):
             contains_value("not valid base64!!!", 42, "integer")
+
+
+class TestDatelessTemporalForms:
+    """SPEC 2.2.14's time-of-day and year bytes - no fabricated date, UTC with `Z` when aware."""
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            pytest.param(dt.time(0, 0, 37), "00:00:37", id="time"),
+            pytest.param(dt.time(12, 30, 0, 250000), "12:30:00.250000", id="fractional_time"),
+            pytest.param(
+                dt.time(1, 0, 0, 250000, tzinfo=dt.timezone(dt.timedelta(hours=2))),
+                "23:00:00.250000Z",
+                id="time_with_time_zone",
+            ),
+            pytest.param(1990, "1990", id="year"),
+        ],
+    )
+    def test_the_canonical_form_carries_no_date(self, value: object, expected: str) -> None:
+        assert canonical_form(value, "temporal") == expected
+
+    def test_a_one_digit_tinyint_sketches_as_the_boolean_it_classifies_as(self) -> None:
+        assert (sketch_kind("tinyint(1)"), sketch_kind("tinyint")) == ("boolean", "integer")
+
+
+@pytest.mark.parametrize(
+    ("value", "kind", "expected"),
+    [
+        (True, "boolean", "true"),
+        (False, "boolean", "false"),
+        (0, "boolean", "false"),
+        (dt.datetime(2024, 1, 2, 3, 4, 5, tzinfo=dt.UTC), "temporal", "2024-01-02T03:04:05Z"),
+        (dt.date(2024, 1, 2), "temporal", "2024-01-02"),
+        ("2024-01-02", "temporal", "2024-01-02"),
+    ],
+)
+def test_the_canonical_form_of_a_boolean_and_a_temporal(
+    value: object,
+    kind: SketchKind,
+    expected: str,
+) -> None:
+    assert canonical_form(value, kind) == expected
+
+
+def test_an_aware_time_is_moved_to_utc_whatever_the_host_zone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TZ", "Asia/Tokyo")
+    time.tzset()
+    value = dt.time(14, 0, tzinfo=dt.timezone(dt.timedelta(hours=2)))
+
+    try:
+        assert canonical_form(value, "temporal") == "12:00:00Z"
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+
+
+def test_membership_hashes_the_value_under_its_kind() -> None:
+    encoded = pack_sketch([low64_md5("true")])
+
+    assert contains_value(encoded, True, "boolean") is True
+
+
+def test_a_malformed_payload_is_named_in_the_error() -> None:
+    with pytest.raises(ValueError, match=r"^not a valid sketch payload: '!!!'$"):
+        contains_value("!!!", 1, "integer")
+
+
+def test_a_payload_with_characters_outside_the_alphabet_is_refused() -> None:
+    assert decode_sketch("AAAA AAAA AAA=") is None
+
+
+def test_the_retained_maximum_sits_outside_the_estimate() -> None:
+    full = list(range(1, 1025))
+
+    assert estimate_intersection(full, full) == round(1023 * 2**64 / 1024)
+
+
+def test_an_exact_parent_answers_for_every_child_hash() -> None:
+    assert answerable_subset_containment([1, 3], [1, 2]) == (0.5, 2)
+
+
+def test_a_child_hash_at_the_parents_threshold_is_not_answerable() -> None:
+    assert answerable_subset_containment([1024, 5000], list(range(1, 1025))) is None

@@ -15,11 +15,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from dbprint.config.duration import format_duration_seconds
 from .. import trace_context
+from ..dialect import Dialect
 from ..errors import QueryFailed
 
 
+# The connection opens with paramstyle="qmark"; statements bind via `?`.
+DIALECT = Dialect(vendor="snowflake", paramstyle="qmark", quote_char='"')
+
 _LOG = logging.getLogger(__name__)
+
+# The vendor's own ceiling; a larger limit is refused rather than silently clamped.
+STATEMENT_TIMEOUT_CEILING_SECONDS = 604_800
 
 
 class SnowflakeConnectionError(RuntimeError):
@@ -36,37 +44,47 @@ class ConnectionParams:
     account: str
     user: str
     warehouse: str
-    database: str
     role: str
+    database: str | None = None
     password: str | None = None
     private_key_file: str | None = None
     private_key_file_pwd: str | None = None
     schema: str | None = None
+    statement_timeout: int | None = None
 
     @classmethod
-    def from_credentials(cls, creds: dict[str, str]) -> ConnectionParams:
+    def from_credentials(
+        cls,
+        creds: dict[str, str],
+        statement_timeout: int | None = None,
+    ) -> ConnectionParams:
         try:
             params = cls(
                 account=creds["account"],
                 user=creds["user"],
                 warehouse=creds["warehouse"],
-                database=creds["database"],
+                database=creds.get("database"),
                 role=creds["role"],
                 password=creds.get("password"),
                 private_key_file=creds.get("private_key_file"),
                 private_key_file_pwd=creds.get("private_key_file_pwd"),
                 schema=creds.get("schema"),
+                statement_timeout=statement_timeout,
             )
         except KeyError as exc:
             raise SnowflakeConnectionError(
                 f"missing required credential key: {exc.args[0]!r}",
             ) from exc
 
+        if params.schema is not None and params.database is None:
+            raise SnowflakeConnectionError("'schema' requires 'database'.")
+
         if (params.password is not None) == (params.private_key_file is not None):
             raise SnowflakeConnectionError(
                 "Snowflake auth requires exactly one of a password or an RSA private key. "
                 "Provide either 'password' or 'private_key_file' (env "
-                "DBPRINT_<CONN>_PASSWORD or DBPRINT_<CONN>_PRIVATE_KEY_FILE), not both.",
+                "DBPRINT_<CONNECTION>_PASSWORD or DBPRINT_<CONNECTION>_PRIVATE_KEY_FILE), "
+                "not both.",
             )
 
         return params
@@ -99,7 +117,22 @@ class Connection:
         self._factory = cursor_factory or _default_cursor_factory
         self._cursor: Cursor | None = None
 
+    def sibling(self) -> Connection:
+        """An unopened connection with the same parameters and cursor factory."""
+
+        return Connection(self.params, self._factory)
+
     def open(self) -> None:
+        limit = self.params.statement_timeout
+
+        if limit is not None and limit > STATEMENT_TIMEOUT_CEILING_SECONDS:
+            ceiling = format_duration_seconds(STATEMENT_TIMEOUT_CEILING_SECONDS)
+
+            raise SnowflakeConnectionError(
+                f"statement_timeout {format_duration_seconds(limit)} exceeds Snowflake's ceiling "
+                f"of {ceiling} ({STATEMENT_TIMEOUT_CEILING_SECONDS} seconds).",
+            )
+
         try:
             self._cursor = self._factory(self.params)
         except SnowflakeConnectionError:
@@ -141,7 +174,7 @@ def exec_query(cursor: Cursor, sql: str, params: Any = None) -> Cursor:
         else:
             cursor.execute(sql, params)
     except Exception as exc:
-        failure = QueryFailed(exc, sql, params)
+        failure = QueryFailed(exc, sql, params, timed_out=_is_timeout(exc))
         trace_context.log_failure(_LOG, started, failure)
 
         raise failure from exc
@@ -166,15 +199,22 @@ def _default_cursor_factory(params: ConnectionParams) -> Any:
         "account": params.account,
         "user": params.user,
         "warehouse": params.warehouse,
-        "database": params.database,
         "role": params.role,
         # The adapter writes `?` placeholders; the connector's default pyformat binds
         # client-side via `command % params` and fails on them.
         "paramstyle": "qmark",
     }
 
+    if params.database is not None:
+        connect_kwargs["database"] = params.database
+
     if params.schema is not None:
         connect_kwargs["schema"] = params.schema
+
+    if params.statement_timeout is not None:
+        connect_kwargs["session_parameters"] = {
+            "STATEMENT_TIMEOUT_IN_SECONDS": params.statement_timeout,
+        }
 
     if params.private_key_file is not None:
         connect_kwargs["private_key"] = _load_private_key(
@@ -219,3 +259,8 @@ def _load_private_key(path: str, passphrase: str | None) -> bytes:
         raise SnowflakeConnectionError(
             f"could not load Snowflake private key from {path!r}: {exc}",
         ) from exc
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    # 000630: "Statement reached its statement or warehouse timeout ... and was canceled."
+    return getattr(exc, "errno", None) == 630

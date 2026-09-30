@@ -7,6 +7,10 @@
 
 <h1>{{ fqn }} <span class="muted">{{ conn }}{% if adapter %} &middot; {{ adapter }}{% endif %}</span></h1>
 
+{% if unprofiled_notice %}
+  <div class="notice">{{ unprofiled_notice }} - this page shows an earlier run's print.</div>
+{% endif %}
+
 {% if missing_artifacts_notice %}
   <div class="notice">{{ missing_artifacts_notice }}</div>
 {% endif %}
@@ -27,20 +31,20 @@
   </div>
   <div class="card">
     <div class="label">rows</div>
-    <div class="big">{{ row_count.row_count|human }}</div>
+    <div class="big">{{ row_count.row_count|number }}</div>
     {% if row_count.method %}<div class="muted">{{ row_count.method }}</div>{% endif %}
-    {% if row_count.share_pct is not none %}
+    {% if row_count.share is not none %}
       <div class="muted">
-        scanned {{ row_count.rows_scanned|human }} ({{ row_count.share_pct }}%)
-        {% if row_count.sample is not none %}, sample {{ row_count.sample }}{% endif %}
+        scanned {{ row_count.rows_scanned|number }} ({{ row_count.share|percent }})
+        {% if row_count.sample is not none %}, sample {{ row_count.sample|number }}{% endif %}
         {% if row_count.filter %}, filter <code>{{ row_count.filter }}</code>{% endif %}
       </div>
-      <div class="bar-track"><span class="bar-fill bar-fill-muted" style="width:{{ row_count.share_pct }}%"></span></div>
+      <div class="bar-track"><span class="bar-fill bar-fill-muted" style="width:{{ row_count.share * 100 }}%"></span></div>
     {% endif %}
   </div>
   <div class="card">
     <div class="label">columns</div>
-    <div class="big">{{ entry.columns|human }}</div>
+    <div class="big">{{ entry.columns|number }}</div>
     {% if skyline %}
       <div class="skyline skyline-mini">
         {% for s in skyline %}
@@ -98,7 +102,7 @@
     <div class="card">
       <div class="label">data through</div>
       <div class="big big-sm">{{ cards.freshest.max|dt }}</div>
-      <div class="muted">{{ cards.freshest.classification }} &middot; {{ cards.freshest.column }}</div>
+      <div class="muted">{{ cards.freshest.classification }} &middot; {{ cards.freshest.column }}{% if cards.freshest.clause %} &middot; {{ cards.freshest.clause }}{% endif %}</div>
     </div>
   {% endif %}
   {% if cards %}
@@ -116,11 +120,11 @@
   {% if cardinality %}
     <div class="card">
       <div class="label">cardinality</div>
-      <div class="big">{{ cardinality.avg_pct }}%</div>
+      <div class="big">{{ cardinality.avg|percent }}</div>
       <div class="muted">avg across {{ cardinality.n_columns }} of {{ cardinality.n_total }} columns</div>
       <div class="mini-bars">
         {% for b in cardinality.bars %}
-          <a href="#col-{{ b.name }}" class="mini-bar-col" title="{{ b.name }}: {{ b.pct }}%">
+          <a href="#col-{{ b.name }}" class="mini-bar-col" title="{{ b.name }}: {{ b.ratio|percent }}">
             <span class="mini-bar" style="--h:{{ b.pct }}%"></span>
           </a>
         {% endfor %}
@@ -130,7 +134,7 @@
   {% if completeness %}
     <div class="card">
       <div class="label">completeness</div>
-      <div class="big">{{ completeness.avg_pct }}%</div>
+      <div class="big">{{ completeness.avg|percent }}</div>
       <div class="muted">avg across {{ completeness.n_columns }} columns</div>
       <div class="stacked-bar">
         {% for bucket, count in completeness.buckets %}
@@ -173,7 +177,7 @@
       {% elif grain.exhausted == false %}
         <div class="hedge">Search for an undeclared grain was bounded; none found within the cap.</div>
       {% elif grain.search_ran %}
-        <div class="hedge">Grain search ran but reported no verdict.</div>
+        <div class="hedge">Grain search ran; the file records no result.</div>
       {% else %}
         <div class="hedge">Not determined - nothing declared, and no measured search ran.</div>
       {% endif %}
@@ -184,9 +188,8 @@
     <div class="hedge-block">
       <h2>Timeline - <a href="#col-{{ timeline.column }}">{{ timeline.column }}</a> by {{ timeline.unit }}</h2>
       <div class="hedge">
-        {# floor, not round: a coverage below 1 must never render as a 100.0% it is withheld from claiming #}
         Bucketed non-null counts,
-        {{ 'every scanned row' if timeline.coverage >= 1 else ((timeline.coverage * 1000)|round(0, 'floor') / 10) ~ '% of scanned rows' }}.
+        {{ 'every scanned row' if timeline.coverage >= 1 else timeline.coverage|percent ~ ' of scanned rows' }}.
         A missing bucket is a gap - no rows fell in that {{ timeline.unit }}.
       </div>
       {% if timeline.buckets %}
@@ -218,7 +221,7 @@
           {% endfor %}
         </ul>
       {% else %}
-        <div class="hedge">Reads nothing else printed.</div>
+        <div class="hedge">Depends on no other object in the print.</div>
       {% endif %}
     </div>
   {% endif %}
@@ -228,7 +231,7 @@
       <h2>{{ {'cluster': 'Clustered by', 'partition': 'Partitioned by', 'sort': 'Sorted by'}
           .get(physical_layout.mechanism, 'Partitioned by') }}</h2>
       <div class="hedge">
-        Declared, not measured - not a claim about how well this holds today.
+        Declared in the catalog, not measured - it names the key, not how closely the rows follow it.
       </div>
       <ol>
         {% for k in physical_layout.key_list %}
@@ -242,8 +245,7 @@
     <div class="hedge-block">
       <h2>Clustering or partitioning</h2>
       <div class="hedge">
-        Attempted and lost - this run asked and got no answer, so whether a key is declared
-        is unknown here, not answered "none".
+        Named in the file's <code>unmeasured</code> list: {{ unmeasured['physical_layout'] }}
       </div>
     </div>
   {% endif %}
@@ -259,7 +261,7 @@
             <tr>
               <td><a href="#col-{{ d.determinant }}">{{ d.determinant }}</a></td>
               <td><a href="#col-{{ d.dependent }}">{{ d.dependent }}</a></td>
-              <td class="num">{{ (d.strength * 100)|round(1) }}%</td>
+              <td class="num">{{ d.strength|percent }}</td>
             </tr>
           {% endfor %}
         </tbody>
@@ -271,15 +273,22 @@
     <div class="hedge-block">
       <h2>Dependencies</h2>
       <div class="hedge">
-        Attempted and lost - the probe did not answer, so no pair here is ruled out.
+        Named in the file's <code>unmeasured</code> list: {{ unmeasured['dependencies'] }}
       </div>
     </div>
   {% endif %}
 
+  {% for name, message in unmeasured.items() if name not in ('physical_layout', 'dependencies', 'null_patterns') %}
+    <div class="hedge-block">
+      <h2><code>{{ name }}</code></h2>
+      <div class="hedge">Named in the file's <code>unmeasured</code> list: {{ message }}</div>
+    </div>
+  {% endfor %}
+
   {% if columns_empty_notice %}
     <div class="notice">{{ columns_empty_notice }}</div>
   {% elif columns %}
-    <h2>Column skyline</h2>
+    <h2>Cardinality and completeness by column</h2>
     <div class="chart-panel" data-chart>
       <button type="button" class="fs-btn" data-fs-toggle aria-label="Full screen" title="Full screen">
         <span class="fs-icon" aria-hidden="true"></span>
@@ -370,22 +379,22 @@
             <td>
               <div class="bar-inline">
                 <span class="bar-track"><span class="bar-fill" style="width:{{ ((col.null_rate or 0) * 100)|round(2) }}%"></span></span>
-                <span class="num" title="{{ col.null_count }}">{{ col.null_count|human }}</span>
+                <span class="num" title="{{ col.null_count }}">{{ col.null_count|number }}</span>
               </div>
               {% if col.zero_count or col.negative_count or col.empty_count %}
                 <div class="muted">
-                  {% if col.zero_count %}{{ col.zero_count|human }} zero{% endif %}
+                  {% if col.zero_count %}{{ col.zero_count|number }} zero{% endif %}
                   {% if col.zero_count and col.negative_count %}&middot;{% endif %}
-                  {% if col.negative_count %}{{ col.negative_count|human }} negative{% endif %}
+                  {% if col.negative_count %}{{ col.negative_count|number }} negative{% endif %}
                   {% if (col.zero_count or col.negative_count) and col.empty_count %}&middot;{% endif %}
-                  {% if col.empty_count %}{{ col.empty_count|human }} empty{% endif %}
+                  {% if col.empty_count %}{{ col.empty_count|number }} empty{% endif %}
                 </div>
               {% endif %}
             </td>
             <td>
               {% if col.cardinality %}
                 <div class="bar-inline">
-                  <span class="num" title="{{ col.cardinality.value }}">{{ col.cardinality.value|human }}</span>
+                  <span class="num" title="{{ col.cardinality.value }}">{{ col.cardinality.value|number }}</span>
                   {% if col.cardinality.approximate %}<span class="muted">(approx)</span>{% endif %}
                   {% if col.cardinality.saturates %}<span class="muted">(= scanned rows)</span>{% endif %}
                 </div>
@@ -396,7 +405,7 @@
             <td>
               {% if col.distribution %}<div class="badge badge-accent">{{ col.distribution|replace('_', ' ') }}</div>{% endif %}
               {% if col.redacted %}<div class="badge badge-redacted">redacted ({{ col.redacted }})</div>{% endif %}
-              {% if col.unmeasured %}<div class="muted">attempted and lost: {{ col.unmeasured|join(', ') }}</div>{% endif %}
+              {% if col.unmeasured %}<div class="muted">unmeasured: {{ col.unmeasured|join(', ') }}</div>{% endif %}
 
               {% if col.value_list %}
                 {% if col.value_list.bars %}
@@ -405,15 +414,15 @@
                       <div class="bar-row">
                         <span class="bar-label">{{ v.value }}</span>
                         <span class="bar-track"><span class="bar-fill" style="width:{{ v.pct }}%"></span></span>
-                        <span class="bar-count muted">{{ v.count|human }}</span>
+                        <span class="bar-count muted">{{ v.count|number }}</span>
                       </div>
                     {% endfor %}
                   </div>
                 {% endif %}
                 {% if col.value_list.coverage is not none %}
                   <div class="muted">
-                    {{ (col.value_list.coverage * 100)|round(1) }}% covered
-                    {% if col.value_list.coverage_method == 'bounded' %}<span class="badge badge-muted">clamped</span>{% endif %}
+                    {{ col.value_list.coverage_text }}
+                    {% if col.value_list.coverage_method == 'bounded' %}<span class="badge badge-muted">bounded</span>{% endif %}
                   </div>
                 {% endif %}
               {% endif %}
@@ -447,24 +456,24 @@
                 {% endif %}
                 {% if col.range.mean is not none or col.range.sum is not none %}
                   <div class="muted">
-                    {% if col.range.mean is not none %}mean {{ col.range.mean }}{% endif %}
+                    {% if col.range.mean is not none %}mean {{ col.range.mean|number }}{% endif %}
                     {% if col.range.mean is not none and col.range.sum is not none %}&middot;{% endif %}
-                    {% if col.range.sum is not none %}sum {{ col.range.sum|human }}{% endif %}
+                    {% if col.range.sum is not none %}sum {{ col.range.sum|number }}{% endif %}
                   </div>
                 {% endif %}
                 {% if col.range.frequencies %}
                   <div class="muted">
-                    top {{ col.range.frequencies.top|human }} &middot; bottom {{ col.range.frequencies.bottom|human }}
-                    &middot; {{ col.range.frequencies.listed }} listed of {{ col.range.frequencies.total|human }}
+                    top {{ col.range.frequencies.top|number }} &middot; bottom {{ col.range.frequencies.bottom|number }}
+                    &middot; {{ col.range.frequencies.listed }} listed of {{ col.range.frequencies.total|number }}
                   </div>
                 {% endif %}
                 {% if col.range.freshness %}
-                  <div class="muted">{{ col.range.freshness.classification }} &middot; {{ col.range.freshness.max_age_days }}d old</div>
+                  <div class="muted">{{ col.range.freshness.classification }} &middot; {{ col.range.freshness.max_age_days }}d old{% if col.range.freshness_clause %} &middot; {{ col.range.freshness_clause }}{% endif %}</div>
                 {% endif %}
               {% endif %}
               {% if col.length %}
                 <div class="muted">
-                  length {{ col.length.min|human }}-{{ col.length.max|human }} &middot; avg {{ col.length.avg }} &middot; p95 {{ col.length.p95 }}
+                  length {{ col.length.min|number }}-{{ col.length.max|number }} &middot; avg {{ col.length.avg|number }} &middot; p95 {{ col.length.p95|number }}
                 </div>
               {% endif %}
             </td>
@@ -485,7 +494,7 @@
           <tbody>
             {% for p in null_patterns.patterns %}
               <tr>
-                <td class="num">{{ p.count|human }}</td>
+                <td class="num">{{ p.count|number }}</td>
                 <td>{{ col_links(p.columns) if p.columns else '(none - fully populated)' }}</td>
               </tr>
             {% endfor %}
@@ -494,7 +503,7 @@
         {% if null_patterns.coverage is not none %}
           <div class="muted">
             Observed over
-            {{ 'every scanned row' if null_patterns.coverage >= 1 else ((null_patterns.coverage * 1000)|round(0, 'floor') / 10) ~ '% of scanned rows' }}{% if null_patterns.coverage_method == 'bounded' %} (bounded){% endif %}.
+            {{ 'every scanned row' if null_patterns.coverage >= 1 else null_patterns.coverage|percent ~ ' of scanned rows' }}{% if null_patterns.coverage_method == 'bounded' %} (bounded){% endif %}.
           </div>
         {% endif %}
       </div>
@@ -504,8 +513,7 @@
       <div class="hedge-block">
         <h2>Columns null on the same rows</h2>
         <div class="hedge">
-          Attempted and lost - the census did not answer, so which columns share their nulls
-          is unknown here, not answered "none".
+          Named in the file's <code>unmeasured</code> list: {{ unmeasured['null_patterns'] }}
         </div>
       </div>
     {% endif %}
@@ -538,10 +546,10 @@
                   <div class="rel-observed muted">scopes not comparable</div>
                 {% else %}
                   <div class="rel-observed">
-                    fanout avg {{ '%.1f'|format(r.observed.fanout_avg) }}{% if r.observed.fanout_max is not none %} (max {{ r.observed.fanout_max }}){% endif %},
-                    covers {{ (r.observed.target_coverage * 100)|round(1) }}% of target
-                    {% if r.observed.containment is not none %}, {{ (r.observed.containment * 100)|round(1) }}% of referencing values contained{% endif %}
-                    {% if r.observed.containment is not none and r.observed.answerable_count is not none %}({{ r.observed.answerable_count }} answerable){% endif %}
+                    fanout avg {{ r.observed.fanout_avg|number }}{% if r.observed.fanout_max is not none %} (max {{ r.observed.fanout_max|number }}){% endif %},
+                    covers {{ r.observed.target_coverage|percent }} of target
+                    {% if r.observed.containment is not none %}, {{ r.observed.containment|percent }} of referencing values contained{% endif %}
+                    {% if r.observed.containment is not none and r.observed.answerable_count is not none %}({{ r.observed.answerable_count|number }} answerable){% endif %}
                   </div>
                   {% if r.observed.coherent == false %}<div class="rel-incoherent">INCOHERENT: referencing cardinality exceeds the target's</div>{% endif %}
                 {% endif %}
@@ -565,10 +573,10 @@
                   <div class="rel-observed muted">scopes not comparable</div>
                 {% else %}
                   <div class="rel-observed">
-                    fanout avg {{ '%.1f'|format(r.observed.fanout_avg) }}{% if r.observed.fanout_max is not none %} (max {{ r.observed.fanout_max }}){% endif %},
-                    covers {{ (r.observed.target_coverage * 100)|round(1) }}% of target
-                    {% if r.observed.containment is not none %}, {{ (r.observed.containment * 100)|round(1) }}% of referencing values contained{% endif %}
-                    {% if r.observed.containment is not none and r.observed.answerable_count is not none %}({{ r.observed.answerable_count }} answerable){% endif %}
+                    fanout avg {{ r.observed.fanout_avg|number }}{% if r.observed.fanout_max is not none %} (max {{ r.observed.fanout_max|number }}){% endif %},
+                    covers {{ r.observed.target_coverage|percent }} of target
+                    {% if r.observed.containment is not none %}, {{ r.observed.containment|percent }} of referencing values contained{% endif %}
+                    {% if r.observed.containment is not none and r.observed.answerable_count is not none %}({{ r.observed.answerable_count|number }} answerable){% endif %}
                   </div>
                   {% if r.observed.coherent == false %}<div class="rel-incoherent">INCOHERENT: referencing cardinality exceeds the target's</div>{% endif %}
                 {% endif %}

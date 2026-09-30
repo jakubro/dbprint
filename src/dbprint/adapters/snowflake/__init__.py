@@ -3,13 +3,9 @@
 from __future__ import annotations
 
 from .adapter import SnowflakeAdapter
-from .connection import ConnectionParams, Cursor, CursorFactory, SnowflakeConnectionError
-from .introspect import IdentifierRejected
-from ..dialect import Dialect
+from .connection import DIALECT, ConnectionParams, Cursor, CursorFactory, SnowflakeConnectionError
+from ..identifiers import IdentifierRejected
 
-
-# Connector opens with paramstyle="qmark" (connection.py); statements bind via `?`.
-DIALECT = Dialect(vendor="snowflake", paramstyle="qmark")
 
 __all__ = [
     "DIALECT",

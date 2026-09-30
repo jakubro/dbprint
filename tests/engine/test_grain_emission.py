@@ -7,6 +7,7 @@ including the pruning and cap applied before the probe is called and the skips t
 
 from __future__ import annotations
 
+from itertools import combinations
 from pathlib import Path
 from typing import Any
 
@@ -111,10 +112,12 @@ class TestMeasuredSearch:
     def test_exhausted_false_when_the_cap_cuts_the_search_short(self, tmp_path: Path) -> None:
         """9 null-free columns of equal cardinality make 36 prunable pairs - over the cap of 32."""
 
-        payload = _generate(tmp_path, unique_keys=[], mode="wide")
+        # Every one of the 36 pairs is unique, so only the cap can stop at 32 reported keys.
+        every_pair = set(combinations(_MODE_COLUMNS["wide"], 2))
+        payload = _generate(tmp_path, unique_keys=[], measured_pairs=every_pair, mode="wide")
 
         assert payload["grain"]["search"] == {"exhausted": False}
-        assert len(payload["grain"]["keys"]) <= 32
+        assert len(payload["grain"]["keys"]) == 32
 
 
 class TestSkipConditions:

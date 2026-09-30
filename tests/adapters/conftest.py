@@ -48,7 +48,8 @@ from dbprint.adapters import (
     UniqueKeyMeta,
     ValueCount,
 )
-from tests.conftest import MysqlCluster, PostgresCluster
+from tests import _substrates
+from tests.conftest import MysqlCluster, PostgresCluster, _scratch_root
 
 
 # Adapter factory parameterization.
@@ -75,6 +76,8 @@ SQL_PARAMS = [
     "bigquery",
 ]
 
+_BIGQUERY_EMULATOR_IMAGE = "ghcr.io/goccy/bigquery-emulator:0.8.1"
+
 
 # The wide contract table. The narrow tables (3 rows) pre-classify boolean/categorical, so
 # the numeric, temporal, top-values and distribution branches never run on them.
@@ -99,6 +102,10 @@ _WIDE_RANKS = ("us", "eu", "ap")
 _WITHIN_DAY_START = datetime(2026, 1, 1, 1, 0, 0)  # noqa: DTZ001 - seeds a naive temporal column
 _ACROSS_MIDNIGHT_START = datetime(2026, 1, 1, 23, 50, 0)  # noqa: DTZ001 - seeds a naive column
 _LATE_EVENING_START = datetime(2025, 11, 3, 23, 59, 59)  # noqa: DTZ001 - seeds a naive column
+# The minimum's sub-second part exceeds the maximum's, so a count of second boundaries reads one
+# day more than the 58.99999 days that elapsed; only exact elapsed time gives 58.
+_SUBSECOND_START = datetime(2026, 1, 1, 0, 0, 0, 250000)  # noqa: DTZ001 - seeds a naive column
+_SUBSECOND_MIN = datetime(2026, 1, 1, 0, 0, 0, 500000)  # noqa: DTZ001 - seeds a naive column
 
 # Future-dated columns (SPEC 2.2.4 clamp), pinned to fixed far-future instants rather than
 # offsets from the clock so the fixture stays deterministic: `scheduled_at` is future
@@ -108,7 +115,7 @@ _SCHEDULED_START = datetime(3000, 1, 1, 12, 0, 0)  # noqa: DTZ001 - seeds a naiv
 _EXPIRES_START = datetime(2020, 1, 1, 12, 0, 0)  # noqa: DTZ001 - seeds a naive temporal column
 _EXPIRES_STEP_DAYS = 6000
 
-WideRow = tuple[str, str, str, int, str, str, str, str, str, str, str]
+WideRow = tuple[str, str, str, int, str, str, str, str, str, str, str, str]
 
 # Each temporal column's maximum and mandated span, so the battery's expectation derives
 # from the seed, not from an adapter's output.
@@ -117,12 +124,14 @@ WIDE_TEMPORAL_MAX = {
     "within_day_at": _WITHIN_DAY_START + timedelta(minutes=20 * (WIDE_DISTINCT - 1)),
     "across_midnight_at": _ACROSS_MIDNIGHT_START + timedelta(seconds=20 * (WIDE_DISTINCT - 1)),
     "late_evening_at": _LATE_EVENING_START + timedelta(days=WIDE_DISTINCT - 1),
+    "subsecond_at": _SUBSECOND_START + timedelta(days=WIDE_DISTINCT - 1),
 }
 WIDE_TEMPORAL_SPAN_DAYS = {
     "observed_at": 59,
     "within_day_at": 0,
     "across_midnight_at": 0,
     "late_evening_at": 59,
+    "subsecond_at": 58,
 }
 
 # Columns whose maximum has not happened yet: age clamps to 0 rather than going negative.
@@ -157,6 +166,7 @@ def _wide_rows() -> list[WideRow]:
                 _stamp(_LATE_EVENING_START + timedelta(days=bucket)),
                 _stamp(_SCHEDULED_START + timedelta(days=bucket)),
                 _stamp(_EXPIRES_START + timedelta(days=_EXPIRES_STEP_DAYS * bucket)),
+                _stamp(_SUBSECOND_START + timedelta(days=bucket) if bucket else _SUBSECOND_MIN),
             ),
         )
 
@@ -164,7 +174,7 @@ def _wide_rows() -> list[WideRow]:
 
 
 # Positions of `WideRow`'s temporal fields - the rest are id-, label- and score-shaped.
-_WIDE_TEMPORAL_POSITIONS = (4, 6, 7, 8, 9, 10)
+_WIDE_TEMPORAL_POSITIONS = (4, 6, 7, 8, 9, 10, 11)
 
 
 def _wide_values_clause(*, explicit_utc: bool = False) -> str:
@@ -184,13 +194,32 @@ def _wide_values_clause(*, explicit_utc: bool = False) -> str:
         return cells
 
     return ",\n".join(
-        "('{}', '{}', '{}', {}, '{}', '{}', '{}', '{}', '{}', '{}', '{}')".format(*_cells(row))
+        "('{}', '{}', '{}', {}, '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}')".format(
+            *_cells(row),
+        )
         for row in _wide_rows()
     )
 
 
+def _tie_spellings_values(span: Callable[[int], str] | None = None) -> str:
+    """Rows for `seedbank.tie_spellings`: every column ties five against five, `weight` and
+    `span` on values whose driver `str()` orders opposite to their published text (SPEC 2.2.4).
+    """
+
+    rows = []
+
+    for i in range(10):
+        hours, cells = (
+            (9, [i, "0.0000001", -5, "'b'"]) if i % 2 == 0 else (10, [i, "0.5", -10, "'B'"])
+        )
+        cells += [span(hours)] if span else []
+        rows.append(f"({', '.join(str(c) for c in cells)})")
+
+    return ",\n".join(rows)
+
+
 def _stamp(value: datetime) -> str:
-    return value.strftime("%Y-%m-%d %H:%M:%S")
+    return value.strftime("%Y-%m-%d %H:%M:%S.%f" if value.microsecond else "%Y-%m-%d %H:%M:%S")
 
 
 @pytest.fixture(params=PARAMS, ids=PARAMS)
@@ -372,10 +401,18 @@ class SnowflakeDialectShim:
         self._cluster_by = {name.lower(): value for name, value in (cluster_by or {}).items()}
 
     def execute(self, sql: str, params: Any = None) -> SnowflakeDialectShim:
+        # duckdb's own INFORMATION_SCHEMA spans every attached catalog, so an unqualified read
+        # would pass here and fail on Snowflake; every read must name its database.
+        if _UNQUALIFIED_INFO_SCHEMA_RE.search(sql):
+            raise AssertionError(f"unqualified information_schema read: {sql}")
+
+        sql = _QUALIFIED_INFO_SCHEMA_RE.sub("information_schema.", sql)
         flat = " ".join(sql.lower().split())
         self._rows = None
 
-        if "get_ddl(" in flat:
+        if flat.startswith("show databases"):
+            self._rows = self._show_databases(sql)
+        elif "get_ddl(" in flat:
             self._rows = self._get_ddl(sql)
         elif flat.startswith("show imported keys in table"):
             self._rows = self._imported_keys(sql)
@@ -389,11 +426,13 @@ class SnowflakeDialectShim:
             self._rows = self._object_dependencies(params)
         elif "information_schema.indexes" in flat:
             self._rows = self._indexes(params)
-        elif flat.startswith("select row_count from information_schema.tables"):
+        elif flat.startswith("select tbl.row_count from information_schema.tables tbl"):
             self._rows = self._row_count(params)
-        elif flat.startswith("select comment from information_schema.tables"):
+        elif flat.startswith("select tbl.comment from information_schema.tables tbl"):
             self._rows = self._table_comment(params)
-        elif flat.startswith("select column_name, comment from information_schema.columns"):
+        elif flat.startswith(
+            "select col.column_name, col.comment from information_schema.columns col",
+        ):
             self._rows = self._column_comments(params)
         elif params is None:
             self._con.execute(_to_duckdb(sql))
@@ -415,15 +454,32 @@ class SnowflakeDialectShim:
         self._con.close()
 
     def _get_ddl(self, sql: str) -> list[tuple[Any, ...]]:
-        object_type, fqn = re.findall(r"'([^']*)'", sql)
-        _, schema, name = fqn.split(".")
+        object_type, name_string = (
+            literal.replace("''", "'") for literal in re.findall(r"'((?:[^']|'')*)'", sql)
+        )
+        database, schema, name = _snowflake_name_parts(name_string)
         source = "duckdb_views()" if object_type == "VIEW" else "duckdb_tables()"
         name_column = "view_name" if object_type == "VIEW" else "table_name"
 
         return self._con.execute(
-            f"SELECT sql FROM {source} WHERE schema_name = ? AND {name_column} = ?",
-            [schema, name],
+            f"SELECT sql FROM {source} "
+            f"WHERE database_name = ? AND schema_name = ? AND {name_column} = ?",
+            [database, schema, name],
         ).fetchall()
+
+    def _show_databases(self, sql: str) -> list[tuple[Any, ...]]:
+        like = re.search(r"LIKE '((?:[^']|'')*)'", sql, re.IGNORECASE)
+        names = self._con.execute(
+            "SELECT database_name FROM duckdb_databases() "
+            "WHERE NOT internal AND database_name NOT IN ('system', 'temp') "
+            "ORDER BY database_name",
+        ).fetchall()
+
+        return [
+            (None, name, "N", "N", None, None, None, None, None, "STANDARD")
+            for (name,) in names
+            if like is None or name.lower() == like.group(1).replace("''", "'").lower()
+        ]
 
     def _show_tables(self, sql: str) -> list[tuple[Any, ...]]:
         """Fabricate `SHOW TABLES` rows: name at offset 1, cluster_by at 6, rest placeholder."""
@@ -476,9 +532,7 @@ class SnowflakeDialectShim:
         column, key_sequence, constraint_name, rely, comment.
         """
 
-        database, schema, table = (
-            part.strip('"') for part in sql.split("TABLE", 1)[1].strip().split(".")
-        )
+        database, schema, table = _snowflake_name_parts(sql.split("TABLE", 1)[1].strip())
         rows = self._con.execute(
             "SELECT constraint_name, constraint_column_names FROM duckdb_constraints() "
             "WHERE constraint_type = ? AND database_name = ? "
@@ -517,9 +571,7 @@ class SnowflakeDialectShim:
         adapter reads the tuple positionally.
         """
 
-        database, schema, table = (
-            part.strip('"') for part in sql.split("TABLE", 1)[1].strip().split(".")
-        )
+        database, schema, table = _snowflake_name_parts(sql.split("TABLE", 1)[1].strip())
         rows = self._con.execute(
             "SELECT constraint_name, constraint_column_names, referenced_table, "
             "referenced_column_names FROM duckdb_constraints() "
@@ -532,7 +584,7 @@ class SnowflakeDialectShim:
 
         for fk_name, source_columns, target_table, target_columns in rows:
             for sequence, (source, target) in enumerate(
-                zip(source_columns, target_columns),
+                zip(source_columns, target_columns, strict=True),
                 start=1,
             ):
                 out.append(
@@ -563,7 +615,7 @@ class SnowflakeDialectShim:
         object names - duckdb tracks no dependency edge, so this proves row shape, not resolution.
         """
 
-        database = str(params[0]) if params else ""
+        databases = {str(database).upper() for database in params or ()}
         views = self._con.execute(
             "SELECT database_name, schema_name, view_name, sql FROM duckdb_views() "
             "WHERE NOT internal",
@@ -577,7 +629,7 @@ class SnowflakeDialectShim:
         rows: list[tuple[Any, ...]] = []
 
         for v_db, v_schema, v_name, v_sql in views:
-            if v_db.upper() != database.upper():
+            if v_db.upper() not in databases:
                 continue
 
             body = (v_sql or "").lower()
@@ -608,31 +660,37 @@ class SnowflakeDialectShim:
         ]
 
 
+_QUALIFIED_INFO_SCHEMA_RE = re.compile(r'"(?:[^"]|"")+"\.information_schema\.', re.IGNORECASE)
+_UNQUALIFIED_INFO_SCHEMA_RE = re.compile(r'(?<!")(?<!\.)\binformation_schema\.', re.IGNORECASE)
+
+_SAMPLE_ALIAS_RE = re.compile(r"\s([a-z_][a-z0-9_]*)$")
 _SAMPLE_ROWS_RE = re.compile(r"\s+SAMPLE\s+ROW\s*\(\s*(\d+)\s+ROWS\s*\)", re.IGNORECASE)
 _SAMPLE_FRACTION_RE = re.compile(
     r"\s+SAMPLE\s+(?:SYSTEM|BLOCK|BERNOULLI)?\s*\(\s*([\d.]+)\s*\)"
     r"(?:\s+(?:SEED|REPEATABLE)\s*\(\s*(\d+)\s*\))?",
     re.IGNORECASE,
 )
-# The argument is a bare derived-table alias (`mn`, `p_01`, ...) or a quoted column identifier.
+# The argument is a qualified derived-table column (`agg.mn`) or a qualified column identifier.
 _CONVERT_TIMEZONE_RE = re.compile(
-    r"CONVERT_TIMEZONE\('UTC',\s*(\"(?:[^\"]|\"\")+\"|\w+)\)",
+    r"CONVERT_TIMEZONE\('UTC',\s*(\w+\.(?:\"(?:[^\"]|\"\")+\"|\w+))\)",
     re.IGNORECASE,
 )
-# The adapter emits exactly these two pictures, so a non-greedy capture to the literal suffices.
+# The adapter emits exactly these pictures, so a non-greedy capture to the literal suffices.
 _TO_VARCHAR_TS_RE = re.compile(
     r"TO_VARCHAR\((.+?), 'YYYY-MM-DD\"T\"HH24:MI:SS\.FF6'\)",
     re.IGNORECASE,
 )
+_NANOSECOND_PART_RE = re.compile(r"DATE_PART\('nanosecond', (\w+\.\w+)\)", re.IGNORECASE)
 _TO_VARCHAR_DATE_RE = re.compile(r"TO_VARCHAR\((.+?), 'YYYY-MM-DD'\)", re.IGNORECASE)
-# The sketch's non-temporal canonical cast (SPEC 2.2.14) - bare column, no picture argument.
-_TO_VARCHAR_BARE_RE = re.compile(r"TO_VARCHAR\((\"(?:[^\"]|\"\")+\")\)", re.IGNORECASE)
+_TO_VARCHAR_CLOCK_RE = re.compile(r"TO_VARCHAR\((.+?), 'HH24:MI:SS\.FF6'\)", re.IGNORECASE)
+# The sketch's non-temporal canonical cast (SPEC 2.2.14) - one column, no picture argument.
+_TO_VARCHAR_BARE_RE = re.compile(r"TO_VARCHAR\((\w+\.\"(?:[^\"]|\"\")+\")\)", re.IGNORECASE)
 # The sketch's low-64-bit hash (SPEC 2.2.14) - a fixed 16-X hex format model over MD5.
 _TO_NUMBER_HEX_RE = re.compile(r"TO_NUMBER\((.+?), 'X{16}'\)", re.IGNORECASE)
 _MATERIALIZED_RE = re.compile(r'"[^"]+"\."[^"]+"\.("dbprint_sample_[0-9a-f]+")')
 # `probe_grain` (SPEC 2.2.12) emits exactly two quoted columns per expression.
 _COUNT_DISTINCT_MULTI_RE = re.compile(
-    r'COUNT\(DISTINCT ("(?:[^"]|"")+"), ("(?:[^"]|"")+")\)',
+    r'COUNT\(DISTINCT (\w+\."(?:[^"]|"")+"), (\w+\."(?:[^"]|"")+")\)',
     re.IGNORECASE,
 )
 
@@ -642,9 +700,17 @@ def _to_duckdb(sql: str) -> str:
 
     return _rewrite_sketch_hash(
         _rewrite_count_distinct_multi(
-            _rewrite_temporal_render(_rewrite_sample(_unqualify_materialized(sql))),
+            _rewrite_temporal_render(
+                _rewrite_nanosecond_part(_rewrite_sample(_unqualify_materialized(sql))),
+            ),
         ),
     )
+
+
+def _rewrite_nanosecond_part(sql: str) -> str:
+    """Snowflake's sub-second `DATE_PART('nanosecond', x)` -> duckdb's, which also counts seconds."""
+
+    return _NANOSECOND_PART_RE.sub(r"((date_part('microseconds', \1) % 1000000) * 1000)", sql)
 
 
 def _rewrite_count_distinct_multi(sql: str) -> str:
@@ -673,6 +739,10 @@ def _rewrite_temporal_render(sql: str) -> str:
     sql = _CONVERT_TIMEZONE_RE.sub(r"(\1 AT TIME ZONE 'UTC')", sql)
     sql = _TO_VARCHAR_TS_RE.sub(r"strftime(\1, '%Y-%m-%dT%H:%M:%S.%f')", sql)
     sql = _TO_VARCHAR_DATE_RE.sub(r"strftime(\1, '%Y-%m-%d')", sql)
+    sql = _TO_VARCHAR_CLOCK_RE.sub(
+        r"strftime(DATE '1970-01-01' + CAST(\1 AS TIME), '%H:%M:%S.%f')",
+        sql,
+    )
 
     return _TO_VARCHAR_BARE_RE.sub(r"CAST(\1 AS VARCHAR)", sql)
 
@@ -723,10 +793,14 @@ def _rewrite_sample_form(
         if match is None:
             return sql
 
-        start = _sampled_source_start(sql, match.start())
-        source = sql[start : match.start()]
+        alias = _SAMPLE_ALIAS_RE.search(sql, 0, match.start())
+        end = alias.start() if alias else match.start()
+        start = _sampled_source_start(sql, end)
+        source = sql[start:end]
+        suffix = f" {alias.group(1)}" if alias else ""
         sql = (
-            f"{sql[:start]}(SELECT * FROM {source} USING SAMPLE {build(match)}){sql[match.end() :]}"
+            f"{sql[:start]}(SELECT * FROM {source} USING SAMPLE {build(match)}){suffix}"
+            f"{sql[match.end() :]}"
         )
 
 
@@ -866,14 +940,23 @@ def _seed_contract_schema_duckdb(con: duckdb.DuckDBPyConnection) -> None:
             across_midnight_at TIMESTAMP NOT NULL,
             late_evening_at TIMESTAMP NOT NULL,
             scheduled_at TIMESTAMP NOT NULL,
-            expires_at TIMESTAMP NOT NULL
+            expires_at TIMESTAMP NOT NULL,
+            subsecond_at TIMESTAMP NOT NULL
         )
         """,
     )
     con.execute(
         "INSERT INTO seedbank.viability_check "
-        "(id, herbarium_id, label, score, observed_at, rank, within_day_at, across_midnight_at, late_evening_at, scheduled_at, expires_at) VALUES\n"
+        "(id, herbarium_id, label, score, observed_at, rank, within_day_at, across_midnight_at, late_evening_at, scheduled_at, expires_at, subsecond_at) VALUES\n"
         + _wide_values_clause(),
+    )
+    con.execute(
+        "CREATE TABLE seedbank.tie_spellings "
+        "(id INTEGER PRIMARY KEY, weight DOUBLE, step INTEGER, letter VARCHAR, span INTERVAL)",
+    )
+    con.execute(
+        "INSERT INTO seedbank.tie_spellings VALUES\n"
+        + _tie_spellings_values(lambda hours: f"INTERVAL '{hours} hours'"),
     )
 
 
@@ -962,7 +1045,8 @@ def _seed_contract_schema_clickhouse(conn: Any) -> None:
             across_midnight_at DateTime64(0),
             late_evening_at DateTime64(0),
             scheduled_at DateTime64(0),
-            expires_at DateTime64(0)
+            expires_at DateTime64(0),
+            subsecond_at DateTime64(6)
         ) ENGINE = MergeTree
         ORDER BY (sipHash64(id), id)
         SAMPLE BY sipHash64(id)
@@ -970,9 +1054,18 @@ def _seed_contract_schema_clickhouse(conn: Any) -> None:
     )
     cur.execute(
         "INSERT INTO seedbank.viability_check "
-        "(id, herbarium_id, label, score, observed_at, rank, within_day_at, across_midnight_at, late_evening_at, scheduled_at, expires_at) VALUES\n"
+        "(id, herbarium_id, label, score, observed_at, rank, within_day_at, across_midnight_at, late_evening_at, scheduled_at, expires_at, subsecond_at) VALUES\n"
         + _wide_values_clause(),
     )
+    cur.execute(
+        """
+        CREATE TABLE seedbank.tie_spellings (id Int32, weight Float64, step Int32, letter String)
+        ENGINE = MergeTree
+        ORDER BY (sipHash64(id), id)
+        SAMPLE BY sipHash64(id)
+        """,
+    )
+    cur.execute("INSERT INTO seedbank.tie_spellings VALUES\n" + _tie_spellings_values())
 
     # Every other table above declares `SAMPLE BY`; this one deliberately does not - the
     # shape `SAMPLE` cannot run against at any fraction (SAMPLING_NOT_SUPPORTED).
@@ -996,10 +1089,13 @@ def _seed_contract_schema_clickhouse(conn: Any) -> None:
 
 # Per-test postgres database seeded with the contract-test schema.
 
+# Seeded once per cluster; every contract database is a copy of it.
+_CONTRACT_TEMPLATE = "dbprint_contract_template"
+
 
 @pytest.fixture
 def postgres_test_db(postgres_cluster: PostgresCluster) -> Iterator[dict[str, str]]:
-    """Create a fresh DB in the shared cluster, seeded with the contract schema."""
+    """Create a fresh DB in the shared cluster, copied from the seeded contract template."""
 
     db_name = f"contract_{secrets.token_hex(4)}"
     admin_creds = {
@@ -1009,10 +1105,8 @@ def postgres_test_db(postgres_cluster: PostgresCluster) -> Iterator[dict[str, st
         "user": postgres_cluster.superuser,
         "password": "",
     }
-    _exec_admin(admin_creds, sql.SQL("CREATE DATABASE {}").format(sql.Identifier(db_name)))
-
+    _contract_database_from_template(admin_creds, db_name)
     db_creds = {**admin_creds, "database": db_name}
-    _seed_contract_schema(db_creds)
 
     try:
         yield db_creds
@@ -1020,6 +1114,48 @@ def postgres_test_db(postgres_cluster: PostgresCluster) -> Iterator[dict[str, st
         _exec_admin(
             admin_creds,
             sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(db_name)),
+        )
+
+
+def _contract_database_from_template(admin_creds: dict[str, str], db_name: str) -> None:
+    """Create `db_name` from the cluster's contract template, statistics included, seeding it on first use.
+
+    The template is seeded under another name and renamed, so a failed seed never becomes it.
+    """
+
+    template = sql.Identifier(_CONTRACT_TEMPLATE)
+
+    with psycopg.connect(
+        host=admin_creds["host"],
+        port=int(admin_creds["port"]),
+        dbname=admin_creds["database"],
+        user=admin_creds["user"],
+        password=admin_creds["password"],
+        autocommit=True,
+    ) as conn:
+        conn.execute("SELECT pg_advisory_lock(hashtext(%s))", (_CONTRACT_TEMPLATE,))
+
+        try:
+            seeded = conn.execute(
+                "SELECT 1 FROM pg_database WHERE datname = %s",
+                (_CONTRACT_TEMPLATE,),
+            ).fetchone()
+
+            if seeded is None:
+                staging = f"{_CONTRACT_TEMPLATE}_{secrets.token_hex(4)}"
+                conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(staging)))
+                _seed_contract_schema({**admin_creds, "database": staging})
+                conn.execute(
+                    sql.SQL("ALTER DATABASE {} RENAME TO {}").format(
+                        sql.Identifier(staging),
+                        template,
+                    ),
+                )
+        finally:
+            conn.execute("SELECT pg_advisory_unlock(hashtext(%s))", (_CONTRACT_TEMPLATE,))
+
+        conn.execute(
+            sql.SQL("CREATE DATABASE {} TEMPLATE {}").format(sql.Identifier(db_name), template),
         )
 
 
@@ -1099,7 +1235,8 @@ def _seed_contract_schema(creds: dict[str, str]) -> None:
                 across_midnight_at timestamp NOT NULL,
                 late_evening_at timestamp NOT NULL,
                 scheduled_at timestamp NOT NULL,
-                expires_at timestamp NOT NULL
+                expires_at timestamp NOT NULL,
+                subsecond_at timestamp NOT NULL
             )
             """,
         )
@@ -1108,8 +1245,22 @@ def _seed_contract_schema(creds: dict[str, str]) -> None:
             cast(
                 LiteralString,
                 "INSERT INTO seedbank.viability_check "
-                "(id, herbarium_id, label, score, observed_at, rank, within_day_at, across_midnight_at, late_evening_at, scheduled_at, expires_at) VALUES\n"
+                "(id, herbarium_id, label, score, observed_at, rank, within_day_at, across_midnight_at, late_evening_at, scheduled_at, expires_at, subsecond_at) VALUES\n"
                 + _wide_values_clause(),
+            ),
+        )
+        conn.execute(
+            """
+            CREATE TABLE seedbank.tie_spellings (
+                id integer PRIMARY KEY, weight double precision, step integer, letter varchar(4), span interval
+            )
+            """,
+        )
+        conn.execute(
+            cast(
+                LiteralString,
+                "INSERT INTO seedbank.tie_spellings VALUES\n"
+                + _tie_spellings_values(lambda hours: f"interval '{hours} hours'"),
             ),
         )
 
@@ -1214,15 +1365,22 @@ def _seed_contract_schema_mysql(port: int, db_name: str) -> None:
             late_evening_at DATETIME NOT NULL,
             scheduled_at DATETIME NOT NULL,
             expires_at DATETIME NOT NULL,
+            subsecond_at DATETIME(6) NOT NULL,
             CONSTRAINT metrics_herbarium_fk FOREIGN KEY (herbarium_id)
                 REFERENCES herbarium (id)
         )
         """,
-        "INSERT INTO viability_check (id, herbarium_id, label, score, observed_at, rank, within_day_at, across_midnight_at, late_evening_at, scheduled_at, expires_at) VALUES\n"
+        "INSERT INTO viability_check (id, herbarium_id, label, score, observed_at, rank, within_day_at, across_midnight_at, late_evening_at, scheduled_at, expires_at, subsecond_at) VALUES\n"
         + _wide_values_clause(),
         # InnoDB leaves information_schema.table_rows at 0 until analyzed, so without this
         # the wide table takes the small-table shortcut.
         "ANALYZE TABLE viability_check",
+        (
+            "CREATE TABLE tie_spellings "
+            "(id INT PRIMARY KEY, weight DOUBLE, step INT, letter VARCHAR(4) COLLATE utf8mb4_bin, span TIME)"
+        ),
+        "INSERT INTO tie_spellings VALUES\n"
+        + _tie_spellings_values(lambda hours: f"'{hours:02d}:00:00'"),
     ]
     _mysql_exec_many(port, db_name, statements)
 
@@ -1291,12 +1449,15 @@ _REDSHIFT_DATEDIFF_DAY_RE = re.compile(
     r"DATEDIFF\('day',\s*MIN\((.+?)\),\s*MAX\((.+?)\)\)",
     re.IGNORECASE,
 )
+# Postgres 14+'s EXTRACT(EPOCH ...) is numeric, so the microsecond count stays exact.
+_REDSHIFT_DATEDIFF_MICROSECOND_RE = re.compile(
+    r"DATEDIFF\('microsecond',\s*MIN\((.+?)\),\s*MAX\((.+?)\)\)",
+    re.IGNORECASE,
+)
 
 
 def _to_postgres(sql: str) -> str:
-    """Rewrite the three Redshift constructs Postgres spells differently - everything else the
-    adapter emits is already Postgres-compatible SQL and passes through unchanged.
-    """
+    """Rewrite the Redshift constructs Postgres spells differently; the rest passes unchanged."""
 
     # Redshift's two 8-hex-digit STRTOL halves -> Postgres's `bit(32)` cast, as postgres/sketch.py
     # does; NUMERIC drops because the `::bigint::numeric` chain already lands there.
@@ -1307,6 +1468,11 @@ def _to_postgres(sql: str) -> str:
 
     # `APPROXIMATE` has no Postgres equivalent - there PERCENTILE_DISC is the ordinary form.
     rewritten = _REDSHIFT_APPROX_DISC_RE.sub("PERCENTILE_DISC(", rewritten)
+
+    rewritten = _REDSHIFT_DATEDIFF_MICROSECOND_RE.sub(
+        r"(EXTRACT(EPOCH FROM (MAX(\2) - MIN(\1))) * 1000000)::bigint",
+        rewritten,
+    )
 
     return _REDSHIFT_DATEDIFF_DAY_RE.sub(r"(MAX(\2) - MIN(\1))", rewritten)
 
@@ -1321,8 +1487,12 @@ class RedshiftDialectShim:
         conn: psycopg.Connection,
         sortkey_by_table: dict[str, tuple[tuple[str, int], ...]] | None = None,
         late_binding_views: frozenset[str] | None = None,
+        database: str | None = None,
     ) -> None:
         self._conn = conn
+        # The Redshift database this Postgres one stands in for; unset, the first one the adapter
+        # asks for, since the tests configure a name the substrate's own database never carries.
+        self.database = database
         self._cursor = conn.cursor()
         self._rows: list[tuple[Any, ...]] | None = None
         # Postgres has no SORTKEY concept, so a test injects one here rather than reading it
@@ -1338,8 +1508,10 @@ class RedshiftDialectShim:
 
         if flat.startswith(("show table ", "show view ")):
             self._rows = self._show_table(sql)
+        elif "svv_redshift_databases" in flat:
+            self._rows = [(self.database,)] if self.database is not None else []
         elif "svv_redshift_tables" in flat:
-            self._rows = self._svv_tables()
+            self._rows = self._svv_tables(params)
         elif "svv_redshift_columns" in flat and "sortkey <> 0" in flat:
             self._rows = self._svv_physical_layout(params)
         elif "svv_redshift_columns" in flat and "lower(column_name)" in flat:
@@ -1409,12 +1581,17 @@ class RedshiftDialectShim:
 
         return [(f'CREATE {kind} "{schema}"."{table}" (\n{columns}\n);\n',)]
 
-    def _svv_tables(self) -> list[tuple[Any, ...]]:
+    def _svv_tables(self, params: Any) -> list[tuple[Any, ...]]:
         """`is_matview` rides on Postgres's real `relkind = 'm'` - the adapter joins `STV_MV_INFO`
         for the same fact on a real cluster.
         """
 
-        return self._cursor.execute(
+        database = self.database if self.database is not None else params[0]
+
+        if database not in params:
+            return []
+
+        rows = self._cursor.execute(
             """
             SELECT n.nspname, c.relname, CASE WHEN c.relkind = 'v' THEN 'VIEW' ELSE 'TABLE' END,
                    c.relkind = 'm'
@@ -1425,6 +1602,8 @@ class RedshiftDialectShim:
             ORDER BY n.nspname, c.relname
             """,
         ).fetchall()
+
+        return [(database, *row) for row in rows]
 
     def _svv_columns(self, params: Any) -> list[tuple[Any, ...]]:
         schema, table = params
@@ -1508,9 +1687,8 @@ def redshift_postgres_connection(
         "user": postgres_cluster.superuser,
         "password": "",
     }
-    _exec_admin(admin_creds, sql.SQL("CREATE DATABASE {}").format(sql.Identifier(db_name)))
+    _contract_database_from_template(admin_creds, db_name)
     db_creds = {**admin_creds, "database": db_name}
-    _seed_contract_schema(db_creds)
 
     conn = psycopg.connect(
         host=db_creds["host"],
@@ -1520,9 +1698,6 @@ def redshift_postgres_connection(
         password=db_creds["password"],
         autocommit=True,
     )
-    # `pg_class.reltuples` (what `_svv_table_info` reads) stays 0 until analyzed - the same
-    # staleness `_seed_contract_schema_mysql`'s own `ANALYZE TABLE` works around.
-    conn.execute("ANALYZE")
 
     try:
         yield RedshiftDialectShim(conn)
@@ -1594,7 +1769,7 @@ def _render_params(sql_text: str, params: Any, placeholder: str) -> str:
 
     out = parts[0]
 
-    for value, part in zip(rendered, parts[1:]):
+    for value, part in zip(rendered, parts[1:], strict=True):
         out += value + part
 
     return out
@@ -1602,16 +1777,14 @@ def _render_params(sql_text: str, params: Any, placeholder: str) -> str:
 
 @pytest.fixture(scope="session")
 def databricks_spark_session() -> Iterator[Any]:
-    """One local PySpark + Delta session per worker - startup runs 30-40s, so per-test is not
-    viable. No emulator exists; this proves dialect shape only, never real Unity Catalog.
+    """One local PySpark + Delta session per worker (startup takes 30-40s); proves dialect shape only.
 
-    A container without a JVM gets one installed; a host without one skips, as does an Ivy
-    resolver that cannot reach Maven - an absent substrate skips tests one by one, never the run.
+    Skips only for a missing JVM or Delta jars; a session that has both and will not start fails.
     """
 
-    import tempfile
+    import shutil
 
-    from tests._provisioning import SPARK_IVY_CACHE_PATH, ensure_java
+    from tests._provisioning import SPARK_IVY_CACHE_PATH, delta_jars_cached, ensure_java
 
     try:
         ensure_java()
@@ -1622,38 +1795,51 @@ def databricks_spark_session() -> Iterator[Any]:
     from pyspark.errors import PySparkRuntimeError
     from pyspark.sql import SparkSession
 
-    # Spark's default warehouse would litter the repo tree every run, so it is routed under this
-    # worker's temp space. The Ivy cache stays a fixed shared path, warmed once by `just install`.
-    warehouse_dir = tempfile.mkdtemp(prefix="dbprint-spark-warehouse-")
-    SPARK_IVY_CACHE_PATH.mkdir(parents=True, exist_ok=True)
+    root = _scratch_root()
+    name = "dbprint-spark-warehouse-" + secrets.token_hex(4)
+    warehouse_dir = root / name
 
-    builder = (
-        SparkSession.builder.master("local[2]")
-        .appName("dbprint-contract-suite")
-        .config("spark.jars.ivy", str(SPARK_IVY_CACHE_PATH))
-        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-        .config(
-            "spark.sql.catalog.spark_catalog",
-            "org.apache.spark.sql.delta.catalog.DeltaCatalog",
-        )
-        .config("spark.sql.warehouse.dir", warehouse_dir)
-        .config("spark.ui.enabled", "false")
-        # Deliberately non-UTC: a session left on the JVM default cannot catch a renderer that
-        # reinterprets the session zone as UTC rather than converting to it.
-        .config("spark.sql.session.timeZone", "America/New_York")
-    )
+    with _substrates.registered(root, name, "spark-warehouse", path=str(warehouse_dir)):
+        try:
+            # Spark's default warehouse would litter the repo tree every run. The Ivy cache stays
+            # a fixed shared path, warmed once by `just install`.
+            warehouse_dir.mkdir()
+            SPARK_IVY_CACHE_PATH.mkdir(parents=True, exist_ok=True)
 
-    try:
-        spark = configure_spark_with_delta_pip(builder).getOrCreate()
-    except PySparkRuntimeError as exc:
-        pytest.skip(f"Databricks fixture could not start a Spark session: {exc}")
+            builder = (
+                SparkSession.builder.master("local[2]")
+                .appName("dbprint-contract-suite")
+                .config("spark.jars.ivy", str(SPARK_IVY_CACHE_PATH))
+                .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+                .config(
+                    "spark.sql.catalog.spark_catalog",
+                    "org.apache.spark.sql.delta.catalog.DeltaCatalog",
+                )
+                .config("spark.sql.warehouse.dir", str(warehouse_dir))
+                .config("spark.ui.enabled", "false")
+                # Deliberately non-UTC: a session left on the JVM default cannot catch a renderer
+                # that reinterprets the session zone as UTC rather than converting to it.
+                .config("spark.sql.session.timeZone", "America/New_York")
+            )
 
-    spark.sparkContext.setLogLevel("ERROR")
+            try:
+                spark = configure_spark_with_delta_pip(builder).getOrCreate()
+            except PySparkRuntimeError as exc:
+                if not delta_jars_cached():
+                    pytest.skip(f"Delta's jars are not cached and could not be resolved: {exc}")
 
-    try:
-        yield spark
-    finally:
-        spark.stop()
+                message = _substrates.start_failure("databricks (local Spark)", str(exc), root)
+
+                raise RuntimeError(message) from exc
+
+            spark.sparkContext.setLogLevel("ERROR")
+
+            try:
+                yield spark
+            finally:
+                spark.stop()
+        finally:
+            shutil.rmtree(warehouse_dir, ignore_errors=True)
 
 
 @pytest.fixture
@@ -1688,21 +1874,30 @@ class RecordedResponseCursor:
     def execute(self, sql: str, params: Any = None) -> RecordedResponseCursor:
         del params
         flat = " ".join(sql.lower().split())
+        # Each catalog's information_schema describes that catalog alone, so a response may be
+        # keyed `<name>:<catalog>` to prove a read went to the catalog it names.
+        qualifier = re.search(r"`([^`]+)`\.information_schema\.", sql)
+        catalog = qualifier.group(1) if qualifier else None
 
-        if flat.startswith("select 1 from information_schema.tables where 1 = 0"):
+        if catalog is not None and catalog in self._responses.get("unreadable_catalogs", ()):
+            raise RuntimeError(f"[INSUFFICIENT_PERMISSIONS] catalog {catalog!r}")
+
+        if flat.startswith("select 1 from ") and flat.endswith("where 1 = 0"):
             self._rows = []
         elif flat == "select current_catalog()":
             self._rows = self._responses.get("current_catalog", [("garden",)])
+        elif "system.information_schema.catalogs" in flat:
+            self._rows = self._responses.get("catalogs", [("garden",)])
         elif "table_constraints" in flat:
-            self._rows = self._responses.get("table_constraints", [])
+            self._rows = self._response("table_constraints", catalog)
         elif "key_column_usage" in flat and "referential_constraints" in flat:
-            self._rows = self._responses.get("key_column_usage_fk", [])
+            self._rows = self._response("key_column_usage_fk", catalog)
         elif "information_schema.tables" in flat:
-            self._rows = self._responses.get("tables", [])
+            self._rows = self._response("tables", catalog)
         elif "information_schema.columns" in flat:
-            self._rows = self._responses.get("columns", [])
+            self._rows = self._response("columns", catalog)
         elif "key_column_usage" in flat:
-            self._rows = self._responses.get("key_column_usage", [])
+            self._rows = self._response("key_column_usage", catalog)
         elif "describe table extended" in flat and "as json" in flat:
             self._rows = self._responses.get("describe_extended_json", [])
         elif flat == "set spark.sql.session.collation.default":
@@ -1723,6 +1918,9 @@ class RecordedResponseCursor:
 
     def close(self) -> None:
         pass
+
+    def _response(self, name: str, catalog: str | None) -> list[tuple[Any, ...]]:
+        return self._responses.get(f"{name}:{catalog}", self._responses.get(name, []))
 
 
 def _seed_contract_schema_databricks(cursor: SparkCursor, schema: str) -> None:
@@ -1781,15 +1979,21 @@ def _seed_contract_schema_databricks(cursor: SparkCursor, schema: str) -> None:
             across_midnight_at TIMESTAMP NOT NULL,
             late_evening_at TIMESTAMP NOT NULL,
             scheduled_at TIMESTAMP NOT NULL,
-            expires_at TIMESTAMP NOT NULL
+            expires_at TIMESTAMP NOT NULL,
+            subsecond_at TIMESTAMP NOT NULL
         ) USING DELTA
         """,
     )
     cursor.execute(
         "INSERT INTO `" + schema + "`.viability_check "
-        "(id, herbarium_id, label, score, observed_at, rank, within_day_at, across_midnight_at, late_evening_at, scheduled_at, expires_at) VALUES\n"
+        "(id, herbarium_id, label, score, observed_at, rank, within_day_at, across_midnight_at, late_evening_at, scheduled_at, expires_at, subsecond_at) VALUES\n"
         + _wide_values_clause(explicit_utc=True),
     )
+    cursor.execute(
+        f"CREATE TABLE `{schema}`.tie_spellings "
+        "(id INT, weight DOUBLE, step INT, letter STRING) USING DELTA",
+    )
+    cursor.execute(f"INSERT INTO `{schema}`.tie_spellings VALUES\n" + _tie_spellings_values())
 
 
 # Session-scoped goccy/bigquery-emulator container, one per xdist worker; per-test dataset.
@@ -1827,7 +2031,10 @@ class BigqueryEmulatorCursor:
 
         self._fields = payload.get("schema", {}).get("fields", [])
         self._rows = [
-            tuple(_convert_cell(cell["v"], field) for cell, field in zip(row["f"], self._fields))
+            tuple(
+                _convert_cell(cell["v"], field)
+                for cell, field in zip(row["f"], self._fields, strict=True)
+            )
             for row in payload.get("rows", [])
         ]
 
@@ -1871,7 +2078,7 @@ def _convert_one(value: Any, bq_type: str, field: dict[str, Any]) -> Any:
     if bq_type == "RECORD":
         return {
             subfield["name"]: _convert_cell(cell["v"], subfield)
-            for cell, subfield in zip(value["f"], field["fields"])
+            for cell, subfield in zip(value["f"], field["fields"], strict=True)
         }
 
     return _convert_scalar(value, bq_type)
@@ -1930,11 +2137,9 @@ def _emulator_ready(base_url: str) -> bool:
 
 @pytest.fixture(scope="session")
 def bigquery_emulator() -> Iterator[tuple[str, str]]:
-    """One `goccy/bigquery-emulator` container per xdist worker session, torn down on exit - it
-    proves statement shape only, contradicting the vendor on sampling (ARCHITECTURE.md 10).
+    """One `goccy/bigquery-emulator` container per xdist worker; proves statement shape only.
 
-    Skips (never errors) when no container runtime is on PATH, the image cannot start, or the
-    emulator never becomes ready - an absent substrate degrades each `bigquery` test individually.
+    Skips only for a missing container runtime or image; one that has both and will not start fails.
     """
 
     import shutil
@@ -1942,50 +2147,74 @@ def bigquery_emulator() -> Iterator[tuple[str, str]]:
     if shutil.which("podman") is None:
         pytest.skip("no podman on PATH - BigQuery fixture needs a container runtime")
 
+    if not _image_available(_BIGQUERY_EMULATOR_IMAGE):
+        pytest.skip(f"{_BIGQUERY_EMULATOR_IMAGE} is not present locally and could not be pulled")
+
     project = "dbprint-test"
     port = _free_tcp_port()
     grpc_port = _free_tcp_port()
     container = "dbprint-bq-" + secrets.token_hex(4)
     base_url = f"http://127.0.0.1:{port}"
+    root = _scratch_root()
+    owner = _substrates.current_owner()
 
-    # `--network=host` with the emulator's own `--port`, not `-p` publishing: measured on this
-    # runtime, only the identity mapping (9050:9050) ever becomes reachable.
-    try:
-        subprocess.run(
-            [
-                "podman",
-                "run",
-                "-d",
-                "--rm",
-                "--network=host",
-                "--name",
-                container,
-                "ghcr.io/goccy/bigquery-emulator:0.8.1",
-                f"--project={project}",
-                f"--port={port}",
-                f"--grpc-port={grpc_port}",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        pytest.skip(f"bigquery-emulator container could not start: {exc.stderr.strip()}")
+    with _substrates.registered(root, container, "bigquery", container=container):
+        try:
+            # `--network=host` with the emulator's own `--port`, not `-p` publishing: measured on
+            # this runtime, only the identity mapping (9050:9050) ever becomes reachable.
+            try:
+                subprocess.run(
+                    [
+                        "podman",
+                        "run",
+                        "-d",
+                        "--rm",
+                        "--network=host",
+                        "--name",
+                        container,
+                        "--label",
+                        f"{_substrates.OWNER_LABEL}={owner.label()}",
+                        _BIGQUERY_EMULATOR_IMAGE,
+                        f"--project={project}",
+                        f"--port={port}",
+                        f"--grpc-port={grpc_port}",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            except subprocess.CalledProcessError as exc:
+                message = _substrates.start_failure("bigquery-emulator", exc.stderr, root, port)
 
-    try:
-        deadline = time.monotonic() + 30
+                raise RuntimeError(message) from exc
 
-        while time.monotonic() < deadline:
-            if _emulator_ready(base_url):
-                break
+            deadline = time.monotonic() + 30
 
-            time.sleep(0.2)
-        else:
-            pytest.skip("bigquery-emulator did not become ready within 30s")
+            while time.monotonic() < deadline:
+                if _emulator_ready(base_url):
+                    break
 
-        yield base_url, project
-    finally:
-        subprocess.run(["podman", "stop", "-t", "0", container], check=False, capture_output=True)
+                time.sleep(0.2)
+            else:
+                said = "did not become ready within 30s"
+
+                raise RuntimeError(_substrates.start_failure("bigquery-emulator", said, root, port))
+
+            yield base_url, project
+        finally:
+            subprocess.run(
+                ["podman", "stop", "-t", "0", container],
+                check=False,
+                capture_output=True,
+            )
+
+
+def _image_available(image: str) -> bool:
+    for argv in (["podman", "image", "exists", image], ["podman", "pull", "-q", image]):
+        if subprocess.run(argv, check=False, capture_output=True).returncode == 0:
+            return True
+
+    return False
 
 
 @pytest.fixture
@@ -2033,7 +2262,7 @@ def _wide_values_clause_bigquery() -> str:
     literal resolves against a non-UTC zone on this emulator (measured), unlike the constructor.
     """
 
-    temporal_positions = {4, 6, 7, 8, 9, 10}
+    temporal_positions = set(_WIDE_TEMPORAL_POSITIONS)
 
     def render(row: WideRow) -> str:
         cells = [
@@ -2107,15 +2336,20 @@ def _seed_contract_schema_bigquery(
             across_midnight_at TIMESTAMP NOT NULL,
             late_evening_at TIMESTAMP NOT NULL,
             scheduled_at TIMESTAMP NOT NULL,
-            expires_at TIMESTAMP NOT NULL
+            expires_at TIMESTAMP NOT NULL,
+            subsecond_at TIMESTAMP NOT NULL
         )
         """,
     )
     cursor.execute(
         f"INSERT INTO {q}.viability_check "
-        "(id, herbarium_id, label, score, observed_at, rank, within_day_at, across_midnight_at, late_evening_at, scheduled_at, expires_at) VALUES\n"
+        "(id, herbarium_id, label, score, observed_at, rank, within_day_at, across_midnight_at, late_evening_at, scheduled_at, expires_at, subsecond_at) VALUES\n"
         + _wide_values_clause_bigquery(),
     )
+    cursor.execute(
+        f"CREATE TABLE {q}.tie_spellings (id INT64, weight FLOAT64, step INT64, letter STRING)",
+    )
+    cursor.execute(f"INSERT INTO {q}.tie_spellings VALUES\n" + _tie_spellings_values())
 
 
 # Reference fixture for the mock (exercises every classification + FK + index + comments).
@@ -2379,3 +2613,37 @@ def empty_stats_config() -> Any:
     from dbprint.config import StatisticsConfig
 
     return StatisticsConfig()
+
+
+def _snowflake_name_parts(text: str) -> list[str]:
+    """A name string's parts as Snowflake resolves them: unquoted upper-cased, quoted verbatim.
+
+    A period inside quotes belongs to the name, and `""` inside quotes is one quote.
+    """
+
+    parts: list[str] = []
+    current = ""
+    was_quoted = False
+    in_quotes = False
+    index = 0
+
+    while index < len(text):
+        char = text[index]
+
+        if in_quotes and char == '"' and text[index + 1 : index + 2] == '"':
+            current += '"'
+            index += 1
+        elif char == '"':
+            in_quotes = not in_quotes
+            was_quoted = True
+        elif char == "." and not in_quotes:
+            parts.append(current if was_quoted else current.strip().upper())
+            current, was_quoted = "", False
+        else:
+            current += char
+
+        index += 1
+
+    parts.append(current if was_quoted else current.strip().upper())
+
+    return parts

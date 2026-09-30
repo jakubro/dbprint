@@ -6,6 +6,7 @@ import json
 from io import StringIO
 from typing import Any
 
+import pytest
 import yaml
 
 from dbprint.cli.rendering.diff_data import (
@@ -13,6 +14,7 @@ from dbprint.cli.rendering.diff_data import (
     render_data,
     render_human_text,
 )
+from dbprint.spec.drift import DATA_CHANGE_KINDS, SHAPE_CHANGE_KINDS
 
 
 def _options(threshold_override: float | None = None) -> DiffRenderOptions:
@@ -668,3 +670,134 @@ class TestStructuredOutput:
         render_data([diff], "json", buf)
         data = json.loads(buf.getvalue())
         assert data[0]["changes"][0]["kind"] == "statistic_changed"
+
+
+# The kinds whose operands are not scalars, each with the shape its own section reads.
+_STRUCTURED_OPERANDS: dict[str, dict[str, Any]] = {
+    "depends_on_changed": {"before": ["s.a"], "after": ["s.b"]},
+    "grain_changed": {"before": {"keys": []}, "after": {"keys": [{"columns": ["id"]}]}},
+    "index_modified": {
+        "index_name": "t_b_idx",
+        "before": {"columns": ["b"], "unique": True, "type": "btree"},
+        "after": {"columns": ["b"], "unique": False, "type": "btree"},
+    },
+    "physical_layout_changed": {
+        "before": None,
+        "after": {"mechanism": "cluster", "keys": [{"expression": "b"}]},
+    },
+}
+
+
+class TestEveryKindRenders:
+    """A kind the drift mapping declares but no section lists would render nowhere."""
+
+    def test_the_three_catalog_kinds_render_their_operands(self) -> None:
+        text = render_human_text(
+            _diff_with(
+                [
+                    {
+                        "kind": "table_type_changed",
+                        "table": "s.t",
+                        "before": "table",
+                        "after": "view",
+                    },
+                    {
+                        "kind": "column_physical_name_changed",
+                        "table": "s.t",
+                        "column": "b",
+                        "before": "b",
+                        "after": "B",
+                    },
+                    {
+                        "kind": "column_collation_changed",
+                        "table": "s.t",
+                        "column": "b",
+                        "before": "en_US",
+                        "after": "C",
+                    },
+                ],
+            ),
+            _options(),
+        )
+
+        assert "~ object type table -> view" in text
+        assert "~ b: spelled 'b' -> 'B'" in text
+        assert "~ b: collation 'en_US' -> 'C'" in text
+
+    @pytest.mark.parametrize("kind", sorted(SHAPE_CHANGE_KINDS | DATA_CHANGE_KINDS))
+    def test_every_declared_kind_lands_in_a_section(self, kind: str) -> None:
+        event = {
+            "kind": kind,
+            "table": "s.t",
+            "column": "b",
+            "stat": "cardinality_ratio",
+            "before": 1,
+            "after": 2,
+            "delta": 1,
+            "delta_pct": 1.0,
+            **_STRUCTURED_OPERANDS.get(kind, {}),
+        }
+
+        text = render_human_text(_diff_with([event]), _options(threshold_override=0.0))
+
+        assert text.count("(none)") == 9, f"{kind} rendered in no section"
+
+
+class TestNumberSpelling:
+    @pytest.mark.parametrize(
+        ("stat", "before", "after", "delta_pct", "line"),
+        [
+            ("null_rate", 0.9996, 0.9995, -0.0001, "sparse null_rate: 0.9996 -> 0.9995 (-0.01%)"),
+            (
+                "mean",
+                0.00000005,
+                0.00000006,
+                0.0002,
+                "sparse mean: 0.00000005 -> 0.00000006 (+0.02%)",
+            ),
+            (
+                "mean",
+                18446744073709548000.0,
+                18446744073709543000.0,
+                -0.00001,
+                "sparse mean: 18446744073709548000.0 -> 18446744073709543000.0 (-0.001%)",
+            ),
+        ],
+    )
+    def test_a_statistic_line_spells_numbers_as_the_artifact_does(
+        self,
+        stat: str,
+        before: float,
+        after: float,
+        delta_pct: float,
+        line: str,
+    ) -> None:
+        change = {
+            "kind": "statistic_changed",
+            "table": "public.gauge",
+            "column": "sparse",
+            "stat": stat,
+            "before": before,
+            "after": after,
+            "delta": after - before,
+            "delta_pct": delta_pct,
+        }
+
+        text = render_human_text(_diff_with([change]), _options(threshold_override=0.0))
+
+        assert line in text
+        assert "e-" not in text and "e+" not in text
+
+    def test_a_values_change_is_spelled_inline_not_as_a_python_repr(self) -> None:
+        change = {
+            "kind": "statistic_changed",
+            "table": "public.gauge",
+            "column": "status",
+            "stat": "values",
+            "before": [{"value": "ok", "count": 2}],
+            "after": [{"value": "ok", "count": 3}],
+        }
+
+        text = render_human_text(_diff_with([change]), _options(threshold_override=0.0))
+
+        assert "status values: [{value: ok, count: 2}] -> [{value: ok, count: 3}]" in text

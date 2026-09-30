@@ -10,14 +10,18 @@ accepts the statement; only running it against that engine does.
 from __future__ import annotations
 
 import contextlib
+import itertools
+import re
 from collections import Counter
 from collections.abc import Callable, Iterator
 from types import ModuleType
 from typing import Any
 
+import duckdb
 import pytest
 
 from dbprint.adapters import Adapter, StatisticsConfig
+from dbprint.adapters.base import TableScope
 from dbprint.adapters.bigquery import DIALECT as BIGQUERY_DIALECT
 from dbprint.adapters.bigquery import stats as bigquery_stats
 from dbprint.adapters.clickhouse import DIALECT as CLICKHOUSE_DIALECT
@@ -35,6 +39,10 @@ from dbprint.adapters.redshift import DIALECT as REDSHIFT_DIALECT
 from dbprint.adapters.redshift import stats as redshift_stats
 from dbprint.adapters.snowflake import DIALECT as SNOWFLAKE_DIALECT
 from dbprint.adapters.snowflake import stats as snowflake_stats
+from dbprint.spec.classification import is_string_like_type, is_temporal_type
+from dbprint.spec.sketch import sketch_kind
+from tests.adapters._sql_style import alias_violations, violations
+from tests.adapters.conftest import _render_params as render_params
 
 
 DIALECTS: dict[str, Dialect] = {
@@ -112,6 +120,9 @@ SAMPLE_CLAUSES: dict[str, str] = {
 
 NARROW_TABLES = ["*.curator", "*.herbarium"]
 
+# A filter the user writes is kept verbatim (SPEC 2.2.8), so the style guard swaps it out first.
+SENTINEL_FILTER = "lower('x') = 'x'"
+
 
 def _foreign_fragments(statement: str, vendor: Vendor) -> list[str]:
     """Fragments in `statement` that `vendor`'s engine does not accept."""
@@ -121,7 +132,7 @@ def _foreign_fragments(statement: str, vendor: Vendor) -> list[str]:
     return sorted(
         fragment
         for fragment, accepted_by in VENDOR_SUPPORT.items()
-        if fragment in flat and vendor not in accepted_by
+        if re.search(r"(?<![a-z_])" + re.escape(fragment), flat) and vendor not in accepted_by
     )
 
 
@@ -131,9 +142,11 @@ class Recorder:
     def __init__(self) -> None:
         self.statements: list[str] = []
         self.bound: list[tuple[str, Any]] = []
+        self.calls: list[tuple[str, Any]] = []
 
     def record(self, sql: str, params: Any) -> None:
         self.statements.append(sql)
+        self.calls.append((sql, params))
 
         if params is not None:
             self.bound.append((sql, params))
@@ -189,10 +202,20 @@ class Sweep:
     def dialect(self) -> Dialect:
         return DIALECTS[self.vendor]
 
-    def run(self, include: list[str] | None = None) -> Recorder:
-        """Call every SQL-emitting adapter method over the selected tables."""
+    def run(self, include: list[str] | None = None, *, wide: bool = False) -> Recorder:
+        """Call every SQL-emitting adapter method over the selected tables.
+
+        `wide` adds the post-statistics methods, unscoped, sampled and filtered, so each source emits.
+        """
 
         config = StatisticsConfig()
+
+        if wide:
+            self.adapter.default_collation()
+
+            # The emulator has no view-usage view, and MariaDB no VIEW_TABLE_USAGE (measured).
+            if self.vendor not in ("bigquery", "mysql"):
+                self.adapter.introspect_view_dependencies()
 
         for table in self.adapter.list_tables(include=include or ["*"], exclude=[]):
             # Both substrates lack a DDL statement entirely (measured) - a substrate limitation,
@@ -236,7 +259,70 @@ class Sweep:
             for column in columns:
                 self.adapter.sample_values(table.fqn, column.name, n=5)
 
+            if wide:
+                self._run_after_statistics(table.fqn, columns, config)
+
         return self.recorder
+
+    def _run_after_statistics(self, fqn: str, columns: list[Any], config: StatisticsConfig) -> None:
+        for scope in (None, TableScope(sample=0.5), TableScope(filter=SENTINEL_FILTER)):
+            read = self._materialized(fqn, scope)
+
+            if scope is not None and read is None:
+                continue
+
+            counts, phase_a = self.adapter.compute_base_statistics(fqn, columns, config, read)
+
+            if read is not None:
+                self.adapter.compute_column_statistics(
+                    fqn,
+                    columns,
+                    config,
+                    counts,
+                    phase_a.stats,
+                    frozenset(),
+                    scope=read,
+                )
+
+            self.adapter.compute_null_patterns(fqn, columns, config, counts, phase_a.stats, read)
+            pairs = tuple(
+                (first.name, second.name) for first, second in itertools.pairwise(columns[:3])
+            )
+            self.adapter.probe_grain(fqn, columns, counts, pairs, read)
+            self.adapter.probe_dependencies(fqn, columns, counts, phase_a.stats, pairs, read)
+            temporal = [c for c in columns if is_temporal_type(c.classified_type)]
+
+            if temporal:
+                anchor = temporal[0].name
+                self.adapter.probe_timeline(fqn, columns, counts, anchor, "day", read)
+                subjects = tuple(c.name for c in columns if c.name != anchor)[:2]
+                self.adapter.compute_populated_windows(fqn, columns, counts, anchor, subjects, read)
+
+            for column in columns:
+                if is_string_like_type(column.classified_type):
+                    self.adapter.compute_normalized_cardinality(fqn, column.name, read)
+
+                self.adapter.sample_values(fqn, column.name, n=5, scope=read)
+
+            if read is not None:
+                self.adapter.release_scope(fqn, read)
+
+        for column in columns:
+            if (kind := sketch_kind(column.sql_type)) is not None:
+                self.adapter.compute_key_sketch(fqn, column.name, column.sql_type, kind, 8)
+
+    def _materialized(self, fqn: str, scope: TableScope | None) -> TableScope | None:
+        """The scope a generate run would read, or None where the engine refuses the table."""
+
+        if scope is None or scope.sample is None:
+            return scope
+
+        try:
+            read = self.adapter.materialize_scope(fqn, scope)
+        except Exception:  # noqa: BLE001 - a refused copy degrades to the unmaterialized draw
+            read = scope
+
+        return read if read.materialized or self.adapter.SAMPLE_FALLBACK_COHERENT else None
 
 
 class TestEveryAdapterIsCovered:
@@ -248,6 +334,16 @@ class TestEveryAdapterIsCovered:
         missing = set(ADAPTERS) - set(DIALECTS)
 
         assert not missing, f"these adapters declare no DIALECT for the sweep: {sorted(missing)}"
+        assert {vendor: DIALECTS[vendor].quote_char for vendor in ADAPTERS} == {
+            "bigquery": "`",
+            "clickhouse": "`",
+            "databricks": "`",
+            "duckdb": '"',
+            "mysql": "`",
+            "postgres": '"',
+            "redshift": '"',
+            "snowflake": '"',
+        }
 
     def test_every_registered_adapter_is_swept(self) -> None:
         from dbprint.cli.adapter_registry import ADAPTERS
@@ -260,7 +356,7 @@ class TestEveryAdapterIsCovered:
 
 class TestDialectConformance:
     def test_no_statement_carries_foreign_vendor_syntax(self, sweep: Sweep) -> None:
-        recorder = sweep.run()
+        recorder = sweep.run(wide=True)
         offenders = [
             (statement, _foreign_fragments(statement, sweep.dialect.vendor))
             for statement in recorder.statements
@@ -292,6 +388,25 @@ class TestDialectConformance:
             f"{sweep.vendor} emitted a placeholder its driver's paramstyle "
             f"({sweep.dialect.paramstyle}) does not bind: "
             + "; ".join(repr(" ".join(sql.split())) for sql in offenders)
+        )
+
+
+class TestSqlStyle:
+    def test_every_statement_follows_the_house_style(self, sweep: Sweep) -> None:
+        recorder = sweep.run(wide=True)
+        placeholder = sweep.dialect.placeholder
+        offenders = {}
+
+        for sql, params in recorder.calls:
+            text = render_params(sql, params, placeholder) if params else sql
+            text = text.replace(SENTINEL_FILTER, "1 = 1")
+            found = violations(text, sweep.vendor) + alias_violations(text, sweep.vendor)
+
+            if found:
+                offenders[sql] = found
+
+        assert not offenders, f"{sweep.vendor}: {len(offenders)} statements\n" + "\n".join(
+            f"{sorted(set(found))} in\n{sql}" for sql, found in offenders.items()
         )
 
 
@@ -515,7 +630,8 @@ class TestDeclaredParamstyleMatchesDriver:
         connection.open()
 
         assert captured, "duckdb.connection never reached the driver; the check would be vacuous."
-        assert DUCKDB_DIALECT.paramstyle == "qmark"
+        assert "paramstyle" not in captured
+        assert DUCKDB_DIALECT.paramstyle == duckdb.paramstyle
 
     def test_bigquery_dbapi_declares_pyformat(self) -> None:
         """BigQuery's factory calls `dbapi.connect(client)` positionally, which the shared stub

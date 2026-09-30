@@ -11,12 +11,17 @@ class TestErrorConstructors:
         assert err.code == -32602
         assert "foo" in err.detail
         assert "primary" in err.detail
-        assert "dbprint list primary" in err.detail
+        assert "Call list_tables" in err.detail
 
     def test_unknown_connection_lists_configured(self) -> None:
         err = errors.unknown_connection("zzz", ["a", "b"])
         assert err.code == -32602
         assert "a" in err.detail and "b" in err.detail
+
+    def test_no_default_connection_names_the_argument_to_pass(self) -> None:
+        err = errors.no_default_connection(["a", "b"])
+        assert err.code == -32602
+        assert "pass connection explicitly" in err.detail
 
     def test_malformed_pattern(self) -> None:
         err = errors.malformed_pattern("x[")
@@ -37,15 +42,6 @@ class TestErrorConstructors:
         err = errors.unknown_tool("nope", ["a", "b"])
         assert err.code == -32601
         assert "a" in err.detail and "b" in err.detail
-
-    def test_malformed_uri(self) -> None:
-        err = errors.malformed_uri("not://a/dbprint/uri")
-        assert err.code == -32602
-
-    def test_invalid_argument(self) -> None:
-        err = errors.invalid_argument("list_tables takes no argument 'schema'.")
-        assert err.code == -32602
-        assert "takes no argument" in err.detail
 
     def test_no_diff_available(self) -> None:
         err = errors.no_diff_available("/tmp/x/diff.yaml")

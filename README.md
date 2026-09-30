@@ -1,9 +1,6 @@
 # dbprint
 
-[![PyPI](https://img.shields.io/pypi/v/dbprint.svg)](https://pypi.org/project/dbprint/)
-[![Docs](https://img.shields.io/badge/docs-jakubro.github.io-blue.svg)](https://jakubro.github.io/dbprint/)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/jakubro/dbprint/blob/main/LICENSE)
-[![Status](https://img.shields.io/badge/status-actively_developed-green.svg)](#)
+[![PyPI](https://img.shields.io/pypi/v/dbprint.svg)](https://pypi.org/project/dbprint/) [![Docs](https://img.shields.io/badge/docs-jakubro.github.io-blue.svg)](https://jakubro.github.io/dbprint/) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/jakubro/dbprint/blob/main/LICENSE) [![Status](https://img.shields.io/badge/status-actively_developed-green.svg)](#)
 
 **A new engineer onboards once. Your agent onboards every session.**
 
@@ -93,7 +90,7 @@ Alongside it, `relationships.yaml` carries the join graph:
 refers_to:
 - column:
   - collector_id
-  target_table: seedbank.collector
+  target_table: arboretum.seedbank.collector
   target_column:
   - collector_id
   on_delete: RESTRICT
@@ -156,10 +153,10 @@ connections:
     adapter: postgres
     auto: true
     include:
-      - "public.*"
+      - "*.public.*"
 ```
 
-Credentials resolve from `DBPRINT_<CONN>_<KEY>` environment variables first, then `~/.dbprint/connections.yaml`, then a project-root `.env`. Every key of both files is in [`docs/CONFIG.md`](https://github.com/jakubro/dbprint/blob/main/docs/CONFIG.md).
+Credentials resolve from `DBPRINT_<CONNECTION>_<KEY>` environment variables first, then `~/.dbprint/connections.yaml`, then a project-root `.env`. Every key of both files is in [`docs/CONFIG.md`](https://github.com/jakubro/dbprint/blob/main/docs/CONFIG.md).
 
 Profile it:
 
@@ -232,7 +229,7 @@ The server reads the committed print and never connects to a database, so the cl
 
 ```bash
 dbprint list --project https://github.com/acme/demo
-dbprint context seedbank.accession --project git@github.com:acme/demo.git#main:srv/analytics
+dbprint context arboretum.seedbank.accession --project git@github.com:acme/demo.git#main:srv/analytics
 ```
 
 dbprint clones it for you and asks for no credentials of its own — your existing SSH agent or credential helper covers a private repository. It's read-only: commands that write or connect live to a database (`generate`, `diff`, `check --online`) refuse a remote locator; every other command works against it exactly as it does locally.
@@ -244,9 +241,9 @@ dbprint clones it for you and asks for no credentials of its own — your existi
 - **Assertions.** Write data-quality checks in YAML against any statistic, or as raw SQL. Statistic assertions are evaluated against the committed print by plain `dbprint check`, with no database in reach; SQL assertions need `dbprint check --online`. See [`docs/ASSERTIONS.md`](https://github.com/jakubro/dbprint/blob/main/docs/ASSERTIONS.md).
 - **CI exit codes.** `0` ok, `1` malformed print or unusable config, `2` stale, `3` drift, `4` connection failure, `5` partial run, `6` assertion failure, `7` total failure. `diff`, `check` and `context` all speak `--format json|yaml`.
 - **Scoped profiling.** Per-table rules can sample (seeded from the table name, where the engine supports seeding), apply a row filter, or change what's measured — gated on table size, so one rule covers every fact table you haven't named yet. A table read this way carries a `scope` block and a per-column `rows_scanned`, and every count in the file is denominated in the rows actually read, never silently in the whole table.
-- **MCP server.** `dbprint serve` exposes 6 tools — `get_table_context`, `list_tables`, `search_columns`, `get_manifest`, `get_diff`, `get_reference` — plus every artifact as a resource. It reads the committed print only and never opens a database connection. See [`docs/MCP.md`](https://github.com/jakubro/dbprint/blob/main/docs/MCP.md).
+- **MCP server.** `dbprint serve` exposes 7 tools — `get_table_context`, `list_tables`, `search_columns`, `resolve_value`, `get_manifest`, `get_diff`, `get_reference` — plus every artifact as a resource. It reads the committed print only and never opens a database connection. See [`docs/MCP.md`](https://github.com/jakubro/dbprint/blob/main/docs/MCP.md).
 - **Markdown skill.** For clients that take markdown rules or custom instructions, a drop-in skill file tells an agent what a committed print answers, which tool answers it, and what each number covers — no process to run. It sits at [`docs/examples/skill/`](https://github.com/jakubro/dbprint/tree/main/docs/examples/skill) so you can read it before installing anything.
-- **Token-budgeted context.** `dbprint context seedbank.accession --budget 4000` fits the Markdown view into a token budget, dropping the lowest-priority sections first.
+- **Token-budgeted context.** `dbprint context arboretum.seedbank.accession --budget 4000` fits the Markdown view into a token budget, dropping the lowest-priority sections first.
 
 ## Closest neighbours
 

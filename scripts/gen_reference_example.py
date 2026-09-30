@@ -100,16 +100,16 @@ def build_example(credentials: dict[str, str], target: Path) -> None:
 
 EXPECTED_OBJECTS = frozenset(
     {
-        "seedbank.taxon",
-        "seedbank.collector",
-        "seedbank.vault",
-        "seedbank.accession",
-        "seedbank.germination_trial",
-        "seedbank.specimen_image",
-        "seedbank.storage_reading",
-        "seedbank.accession_summary",
-        "seedbank.germination_by_taxon_mv",
-        "fixture.shape_probe",
+        "arboretum.seedbank.taxon",
+        "arboretum.seedbank.collector",
+        "arboretum.seedbank.vault",
+        "arboretum.seedbank.accession",
+        "arboretum.seedbank.germination_trial",
+        "arboretum.seedbank.specimen_image",
+        "arboretum.seedbank.storage_reading",
+        "arboretum.seedbank.accession_summary",
+        "arboretum.seedbank.germination_by_taxon_mv",
+        "arboretum.fixture.shape_probe",
     },
 )
 

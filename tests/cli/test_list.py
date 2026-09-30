@@ -137,6 +137,7 @@ class TestFormatOption:
                 "stale": 1,
                 "dormant": 0,
                 "described": 0,
+                "failed_tables": [],
             },
         ]
 
@@ -202,21 +203,6 @@ class TestFormatOption:
         result = CliRunner().invoke(main, ["list", "--format", "json", "--tui"])
 
         json.loads(result.stdout)  # still parses clean - no Rich panel framing mixed in
-
-
-class TestListNoManifest:
-    def test_missing_manifest_reports_and_errors(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _setup_project(tmp_path)
-        monkeypatch.chdir(tmp_path)
-        runner = CliRunner()
-        result = runner.invoke(main, ["list", "--no-tui"])
-        assert result.exit_code == 1
-        assert "no manifest" in result.stdout
-        assert "no manifest" in result.stderr
 
 
 class TestFreshnessClassification:
@@ -839,18 +825,6 @@ class TestWrongShapeManifest:
 class TestADroppedConnectionIsReported:
     """A connection `list` could not summarise reaches stdout, not stderr alone."""
 
-    def test_a_missing_manifest_is_named_on_stdout(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _setup_project(tmp_path)
-        monkeypatch.chdir(tmp_path)
-        result = CliRunner().invoke(main, ["list", "--no-tui"])
-
-        assert "primary\tnot_run\tno manifest at" in result.stdout
-        assert result.exit_code == 1
-
     def test_an_unparseable_manifest_is_named_on_stdout(
         self,
         tmp_path: Path,
@@ -862,7 +836,10 @@ class TestADroppedConnectionIsReported:
         monkeypatch.chdir(tmp_path)
         result = CliRunner().invoke(main, ["list", "--no-tui"])
 
+        assert result.exit_code == 1
         assert "primary\tnot_run\tcould not parse" in result.stdout
+        assert "could not parse" in result.stderr
+        assert "no manifest" not in result.stderr
 
     def test_a_wrongly_shaped_manifest_is_named_on_stdout(
         self,
@@ -919,7 +896,8 @@ class TestTheCauseIsNotDuplicatedForAHuman:
         monkeypatch.chdir(tmp_path)
         result = CliRunner().invoke(main, ["list", "--no-tui"])
 
-        assert "primary\tnot_run\t" in result.stdout
+        assert result.exit_code == 1
+        assert "primary\tnot_run\tno manifest at" in result.stdout
         assert "no manifest at" in result.stderr
 
     def test_the_terminal_form_carries_it_once(

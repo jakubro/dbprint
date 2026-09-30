@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +19,18 @@ from dbprint.spec.sketch import (
 from .issue import Issue
 from .layout import declared_artifacts, walkable_tables
 from .progress import TableSink
+from .schema_validation import relationships_schema
 from .yaml_utils import load_yaml
+
+
+# The fields that locate one edge, spelled from each side; every other field both entry schemas
+# define is the edge's content and must agree across the mirror (SPEC 2.3.3).
+REFERS_TO_ADDRESS = frozenset({"column", "target_table", "target_column", "path", "target_path"})
+REFERENCED_BY_ADDRESS = frozenset({"column", "referencer_table", "referencer_column"})
+MIRRORED_FIELDS = frozenset(
+    (set(relationships_schema()["$defs"]["RefersTo"]["properties"]) - REFERS_TO_ADDRESS)
+    & (set(relationships_schema()["$defs"]["ReferencedBy"]["properties"]) - REFERENCED_BY_ADDRESS),
+)
 
 
 def check_entry(data: Any, path: str, tbl_fqn: str) -> list[Issue]:
@@ -122,11 +134,17 @@ def check_reciprocity(
     *,
     on_table: TableSink | None = None,
 ) -> list[Issue]:
-    """Verify that every referenced_by entry has a matching refers_to in the source table."""
+    """Verify that both files of every in-print edge state it, and state it the same way.
+
+    Emits `broken-reciprocity`, `unmirrored-refers-to` and `mirror-mismatch` (shared fields).
+    """
 
     issues: list[Issue] = []
     refers_index: dict[str, list[tuple[str, list, list]]] = {}
     referenced_index: dict[str, list[tuple[str, str, list, list]]] = {}
+    outgoing: dict[tuple, list[tuple[str, dict]]] = {}
+    incoming: dict[tuple, list[tuple[str, dict]]] = {}
+    readable: set[str] = set()
     tables = walkable_tables(manifest_data)
     total = len(tables)
 
@@ -152,7 +170,10 @@ def check_reciprocity(
         if not isinstance(data, dict):
             continue
 
-        for entry in data.get("refers_to", []) or []:
+        readable.add(tbl_fqn)
+        rel = str(rel_path.relative_to(print_root))
+
+        for j, entry in enumerate(data.get("refers_to", []) or []):
             if not isinstance(entry, dict):
                 continue
 
@@ -164,18 +185,34 @@ def check_reciprocity(
                 ),
             )
 
-        for entry in data.get("referenced_by", []) or []:
+            if address := _address(
+                tbl_fqn,
+                entry.get("column"),
+                entry.get("target_table"),
+                entry.get("target_column"),
+            ):
+                outgoing.setdefault(address, []).append((f"{rel}::refers_to[{j}]", entry))
+
+        for j, entry in enumerate(data.get("referenced_by", []) or []):
             if not isinstance(entry, dict):
                 continue
 
             referenced_index.setdefault(tbl_fqn, []).append(
                 (
-                    str(rel_path.relative_to(print_root)),
+                    rel,
                     entry.get("referencer_table", ""),
                     list(entry.get("referencer_column", [])),
                     list(entry.get("column", [])),
                 ),
             )
+
+            if address := _address(
+                entry.get("referencer_table"),
+                entry.get("referencer_column"),
+                tbl_fqn,
+                entry.get("column"),
+            ):
+                incoming.setdefault(address, []).append((f"{rel}::referenced_by[{j}]", entry))
 
     for tbl_fqn, rb_entries in referenced_index.items():
         for rel_path_str, referencer_table, referencer_column, this_column in rb_entries:
@@ -183,10 +220,10 @@ def check_reciprocity(
             if referencer_table not in manifest_data.get("tables", {}):
                 continue
 
-            outgoing = refers_index.get(referencer_table, [])
+            refs = refers_index.get(referencer_table, [])
             match = any(
                 target == tbl_fqn and ref_col == referencer_column and tgt_col == this_column
-                for target, ref_col, tgt_col in outgoing
+                for target, ref_col, tgt_col in refs
             )
 
             if not match:
@@ -200,7 +237,82 @@ def check_reciprocity(
                     ),
                 )
 
+    for address, entries in outgoing.items():
+        # A target outside the print, or one with no readable file, has nowhere to mirror into.
+        if address[2] not in readable:
+            continue
+
+        mirrors = incoming.get(address)
+
+        if mirrors is None:
+            issues.extend(
+                Issue(
+                    where,
+                    "relationships.unmirrored-refers-to",
+                    "error",
+                    f"refers_to entry into {address[2]} has no referenced_by mirror in that table's file.",
+                    "§2.3.6",
+                )
+                for where, _ in entries
+            )
+            continue
+
+        differing = _mirror_differences(entries, mirrors)
+
+        if differing:
+            issues.append(
+                Issue(
+                    mirrors[0][0],
+                    "relationships.mirror-mismatch",
+                    "error",
+                    f"disagrees with its refers_to at {entries[0][0]}: {differing}.",
+                    "§2.3.3",
+                ),
+            )
+
     return issues
+
+
+def _address(referencer: Any, columns: Any, target: Any, target_columns: Any) -> tuple | None:
+    if not all(isinstance(v, str) for v in (referencer, target)):
+        return None
+
+    if not all(
+        isinstance(v, list) and all(isinstance(c, str) for c in v)
+        for v in (columns, target_columns)
+    ):
+        return None
+
+    return (referencer, tuple(columns), target, tuple(target_columns))
+
+
+def _mirror_differences(
+    refers_to: list[tuple[str, dict]],
+    referenced_by: list[tuple[str, dict]],
+) -> str:
+    """Each field whose values differ across the two sides, with both; empty when they agree."""
+
+    def projections(entries: list[tuple[str, dict]]) -> list[str]:
+        return sorted(
+            json.dumps({f: e.get(f) for f in sorted(MIRRORED_FIELDS)}, sort_keys=True, default=str)
+            for _, e in entries
+        )
+
+    if projections(refers_to) == projections(referenced_by):
+        return ""
+
+    parts = []
+
+    for field in sorted(MIRRORED_FIELDS):
+        left = sorted(json.dumps(e.get(field), sort_keys=True, default=str) for _, e in refers_to)
+        right = sorted(
+            json.dumps(e.get(field), sort_keys=True, default=str) for _, e in referenced_by
+        )
+
+        if left != right:
+            parts.append(f"{field} refers_to={', '.join(left)} referenced_by={', '.join(right)}")
+
+    return "; ".join(parts) or "the pairing of fields across entries"
 
 
 def check_observed_arithmetic(
@@ -211,9 +323,7 @@ def check_observed_arithmetic(
 ) -> list[Issue]:
     """SPEC 2.3.10: an `observed` block must recompute to what its two endpoints measured.
 
-    Walks `refers_to` only, since `referenced_by`'s mirror entry states the same physical
-    edge with the same numbers. Needs both endpoints' `statistics.yaml`, so it runs as its
-    own pass rather than inside the per-artifact `_check_artifact` dispatch.
+    Walks `refers_to` only (mirrors are held to it) and reads both endpoints' `statistics.yaml`.
     """
 
     issues: list[Issue] = []

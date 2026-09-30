@@ -10,10 +10,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from . import stats
-from .connection import exec_query
-from .identity import Identity
-from .introspect import reltuples_estimate, resolve_column
+from .connection import DIALECT, exec_query
+from .introspect import reltuples_estimate
+from .rendering import render_operand, render_text
 from ..base import MIN_SAMPLE_DRAW, TableScope
+from ..identifiers import Identity, quote
+from ..sql_layout import indented
 
 
 if TYPE_CHECKING:
@@ -30,6 +32,7 @@ def sample_distinct(
     column: str,
     n: int,
     scope: TableScope | None = None,
+    sql_type: str | None = None,
 ) -> list[Any]:
     """Return up to n distinct non-null sampled values for the column.
 
@@ -39,20 +42,20 @@ def sample_distinct(
     """
 
     quoted = identity.quoted()
-    cn = stats._quote_ident(resolve_column(conn, identity, column))
+    cn = identity.source_column(column)
     seed = stats._seed(identity)
     scoped = stats._source(quoted, scope, seed)
     estimate = _scoped_estimate(reltuples_estimate(conn, identity), scope)
 
     if estimate <= 0 or estimate < n * SMALL_TABLE_FACTOR:
-        return _distinct(conn, scoped, cn, n, seed)
+        return _distinct(conn, scoped, cn, n, seed, sql_type=sql_type)
 
     fraction = min(1.0, max(0.0001, (n * SAMPLE_RATE_MULTIPLIER) / estimate))
     source, conjunct = _sub_drawn_source(quoted, scope, fraction, seed)
-    values = _distinct(conn, source, cn, n, seed, conjunct)
+    values = _distinct(conn, source, cn, n, seed, conjunct, sql_type=sql_type)
 
     if _starved(scope, values, n):
-        return _distinct(conn, scoped, cn, n, seed)
+        return _distinct(conn, scoped, cn, n, seed, sql_type=sql_type)
 
     return values
 
@@ -74,16 +77,12 @@ def _sub_drawn_source(
 ) -> tuple[str, str]:
     """Scoped source carrying this module's own draw, plus any extra conjunct.
 
-    A materialized scope already holds the drawn rows, so the draw attaches at its own
-    rate; composing against the scope's fraction would apply it twice. A filtering scope
-    wraps the table in a subquery, where TABLESAMPLE cannot attach, so the draw becomes a
-    `random()` predicate. Otherwise the two fractions collapse into one rate. The seed is
-    the table's own, so a smaller composed rate selects a subset of the same rows.
+    A copy draws at its own rate, a filter by `RANDOM()` conjunct, a sample at one composed rate.
     """
 
     if scope is not None and scope.materialized is not None:
         drawn = stats._source(
-            stats._quote_ident(scope.materialized),
+            quote(scope.materialized, DIALECT),
             TableScope(sample=min(1.0, fraction)),
             seed,
         )
@@ -91,7 +90,7 @@ def _sub_drawn_source(
         return drawn, ""
 
     if scope is not None and scope.filter:
-        return stats._source(quoted_fqn, scope, seed), f" AND random() < {fraction}"
+        return stats._source(quoted_fqn, scope, seed), f" AND RANDOM() < {fraction}"
 
     composed = fraction * scope.sample if scope is not None and scope.sample else fraction
 
@@ -117,6 +116,8 @@ def _distinct(
     n: int,
     seed: int,
     conjunct: str = "",
+    *,
+    sql_type: str | None,
 ) -> list[Any]:
     """Up to n distinct non-null values of the column from one source expression.
 
@@ -126,15 +127,29 @@ def _distinct(
     expression on a `SELECT DISTINCT` to appear in the select list.
     """
 
+    selected = (
+        render_text(quoted_col, sql_type)
+        if sql_type is not None and stats._is_string_like(sql_type)
+        else render_operand(quoted_col, sql_type)
+        if sql_type is not None
+        else quoted_col
+    )
     rows = exec_query(
         conn,
         f"""
-        SELECT v FROM (
-            SELECT DISTINCT {quoted_col} AS v
-            FROM {source}
-            WHERE {quoted_col} IS NOT NULL{conjunct}
-        ) t
-        ORDER BY MD5(%s || CAST(v AS VARCHAR))
+        SELECT
+          drw.v
+        FROM
+          (
+            SELECT DISTINCT
+              {indented(selected, 14)} AS v
+            FROM
+              {indented(source, 14)}
+            WHERE
+              {quoted_col} IS NOT NULL{conjunct}
+          ) drw
+        ORDER BY
+          MD5(%s || CAST(drw.v AS VARCHAR))
         LIMIT %s
         """,
         (str(seed), n),

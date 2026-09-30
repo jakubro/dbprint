@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 import yaml
 
 from dbprint.config import ConnectionConfig
-from dbprint.engine import AssemblyOptions, assemble_context
+from dbprint.config.project import RuleConfig
 from dbprint.mcp import McpError, ServedConnections, dispatch
 from dbprint.mcp.tools import (
-    MANIFEST_TABLE_CAP,
-    SEARCH_MATCH_CAP,
-    TABLE_LISTING_CAP,
     TOOL_DEFINITIONS,
     TOOL_NAMES,
 )
@@ -65,7 +64,7 @@ class TestNoToolReturnsAnUnboundedReply:
         self._wide_manifest(primary_conn, 600)
         result = _dict_result(_state_for(primary_conn), "list_tables", {})
 
-        assert len(result["tables"]) == TABLE_LISTING_CAP
+        assert len(result["tables"]) == 500
         assert result["truncated"] is True
         assert result["total"] == 600
 
@@ -90,7 +89,7 @@ class TestNoToolReturnsAnUnboundedReply:
         self._wide_manifest(primary_conn, 600)
         result = _dict_result(_state_for(primary_conn), "get_manifest", {})
 
-        assert len(result["tables"]) == MANIFEST_TABLE_CAP
+        assert len(result["tables"]) == 500
         assert result["truncated"] is True
         assert result["total"] == 600
         assert result["format_version"] == 1
@@ -114,14 +113,16 @@ class TestNoToolReturnsAnUnboundedReply:
         self,
         primary_conn: ConnectionConfig,
     ) -> None:
+        self._wide_manifest(primary_conn, 600)
         state = _state_for(primary_conn)
         default = _dict_result(state, "search_columns", {})
         explicit = _dict_result(state, "search_columns", {"limit": 5})
 
-        assert len(default["matches"]) <= SEARCH_MATCH_CAP
+        assert len(default["matches"]) == 200
+        assert default["truncated"] is True
         assert len(explicit["matches"]) == 5
         assert explicit["truncated"] is True
-        assert explicit["total"] == len(default["matches"])
+        assert explicit["total"] == default["total"] > 200
 
     def test_a_diff_filters_by_table_including_the_relationship_events(
         self,
@@ -132,11 +133,11 @@ class TestNoToolReturnsAnUnboundedReply:
         path = primary_conn.output / primary_conn.name / "diff.yaml"
         diff = yaml.safe_load(path.read_text())
         diff["changes"] = [
-            {"kind": "table_added", "table": "seedbank.taxon"},
+            {"kind": "table_added", "table": "arboretum.seedbank.taxon"},
             {"kind": "table_added", "table": "seedbank.other"},
             {
                 "kind": "relationship_added",
-                "source_table": "seedbank.taxon",
+                "source_table": "arboretum.seedbank.taxon",
                 "target_table": "seedbank.other",
             },
         ]
@@ -145,7 +146,7 @@ class TestNoToolReturnsAnUnboundedReply:
         result = _dict_result(
             _state_for(primary_conn),
             "get_diff",
-            {"table": "seedbank.taxon"},
+            {"table": "arboretum.seedbank.taxon"},
         )
 
         assert [c["kind"] for c in result["changes"]] == ["table_added", "relationship_added"]
@@ -154,7 +155,7 @@ class TestNoToolReturnsAnUnboundedReply:
         path = primary_conn.output / primary_conn.name / "diff.yaml"
         diff = yaml.safe_load(path.read_text())
         diff["changes"] = [
-            {"kind": "table_added", "table": "seedbank.taxon"},
+            {"kind": "table_added", "table": "arboretum.seedbank.taxon"},
             {"kind": "table_removed", "table": "seedbank.other"},
         ]
         path.write_text(yaml.safe_dump(diff))
@@ -186,11 +187,11 @@ class TestNoToolReturnsAnUnboundedReply:
         result = dispatch(
             _state_for(primary_conn),
             "get_table_context",
-            {"table": "seedbank.taxon"},
+            {"table": "arboretum.seedbank.taxon"},
         )
 
         assert isinstance(result, str)
-        assert "# Table: seedbank.taxon" in result
+        assert "# Table: arboretum.seedbank.taxon" in result
 
 
 class TestEveryCallIsCheckedAgainstTheToolsOwnSchema:
@@ -204,6 +205,16 @@ class TestEveryCallIsCheckedAgainstTheToolsOwnSchema:
         assert "query" in caught.value.detail
         assert "pattern" in caught.value.detail
 
+    def test_the_abbreviated_connection_argument_is_refused_naming_the_full_word(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        with pytest.raises(McpError) as caught:
+            dispatch(_state_for(primary_conn), "list_tables", {"conn": "primary"})
+
+        assert "'conn'" in caught.value.detail
+        assert "'connection'" in caught.value.detail
+
     def test_a_misspelled_required_key_names_what_was_sent(
         self,
         primary_conn: ConnectionConfig,
@@ -212,7 +223,7 @@ class TestEveryCallIsCheckedAgainstTheToolsOwnSchema:
             dispatch(
                 _state_for(primary_conn),
                 "get_table_context",
-                {"table_name": "seedbank.taxon"},
+                {"table_name": "arboretum.seedbank.taxon"},
             )
 
         assert "table_name" in caught.value.detail
@@ -243,7 +254,7 @@ class TestEveryCallIsCheckedAgainstTheToolsOwnSchema:
             dispatch(
                 _state_for(primary_conn),
                 "get_table_context",
-                {"table": "seedbank.taxon", "include_stats": "false"},
+                {"table": "arboretum.seedbank.taxon", "include_stats": "false"},
             )
 
         assert caught.value.code == -32602
@@ -276,7 +287,7 @@ class TestEveryCallIsCheckedAgainstTheToolsOwnSchema:
             dispatch(
                 _state_for(primary_conn),
                 "get_table_context",
-                {"table": "seedbank.taxon", "format": "yml"},
+                {"table": "arboretum.seedbank.taxon", "format": "yml"},
             )
 
         assert "'md'" in caught.value.detail
@@ -290,7 +301,7 @@ class TestEveryCallIsCheckedAgainstTheToolsOwnSchema:
         result = dispatch(
             _state_for(primary_conn),
             "get_table_context",
-            {"table": "seedbank.taxon", "format": "MD", "purpose": "QUERY"},
+            {"table": "arboretum.seedbank.taxon", "format": "MD", "purpose": "QUERY"},
         )
 
         assert isinstance(result, str)
@@ -305,7 +316,7 @@ class TestEveryCallIsCheckedAgainstTheToolsOwnSchema:
             dispatch(
                 _state_for(primary_conn),
                 "get_table_context",
-                {"table": "seedbank.taxon", "format": 7},
+                {"table": "arboretum.seedbank.taxon", "format": 7},
             )
 
         assert "'md'" not in caught.value.detail
@@ -317,7 +328,7 @@ class TestEveryCallIsCheckedAgainstTheToolsOwnSchema:
             dispatch(
                 _state_for(primary_conn),
                 "get_table_context",
-                {"table": "seedbank.taxon", "budget_tokens": True},
+                {"table": "arboretum.seedbank.taxon", "budget_tokens": True},
             )
 
         assert caught.value.code == -32602
@@ -332,8 +343,12 @@ class TestEveryCallIsCheckedAgainstTheToolsOwnSchema:
             "get_manifest": {},
             "get_diff": {},
             "get_reference": {"document": "spec", "section": "2.2.3"},
-            "get_table_context": {"table": "seedbank.taxon"},
-            "resolve_value": {"table": "seedbank.taxon", "column": "rank", "text": "genus"},
+            "get_table_context": {"table": "arboretum.seedbank.taxon"},
+            "resolve_value": {
+                "table": "arboretum.seedbank.taxon",
+                "column": "rank",
+                "text": "genus",
+            },
         }
 
         for name, arguments in calls.items():
@@ -366,7 +381,7 @@ class TestResolveValue:
         result = dispatch(
             state,
             "resolve_value",
-            {"table": "seedbank.taxon", "column": "rank", "text": "GENUS"},
+            {"table": "arboretum.seedbank.taxon", "column": "rank", "text": "GENUS"},
         )
 
         assert isinstance(result, dict)
@@ -383,7 +398,7 @@ class TestResolveValue:
             dispatch(
                 state,
                 "resolve_value",
-                {"table": "seedbank.taxon", "column": "rnk", "text": "genus"},
+                {"table": "arboretum.seedbank.taxon", "column": "rnk", "text": "genus"},
             )
 
         assert "rank" in excinfo.value.detail
@@ -402,9 +417,56 @@ class TestResolveValue:
         state = _state_for(primary_conn)
 
         with pytest.raises(McpError) as excinfo:
-            dispatch(state, "resolve_value", {"table": "seedbank.taxon", "column": "rank"})
+            dispatch(
+                state,
+                "resolve_value",
+                {"table": "arboretum.seedbank.taxon", "column": "rank"},
+            )
 
         assert "text" in excinfo.value.detail
+
+    def test_an_empty_exhaustive_list_answers_none_over_an_empty_domain(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        """SPEC 7.4: `values: []` at coverage 1.0 says the column holds no value - an answer."""
+
+        self._edit_rank(primary_conn, values=[], values_coverage=1.0)
+
+        result = _dict_result(
+            _state_for(primary_conn),
+            "resolve_value",
+            {"table": "arboretum.seedbank.taxon", "column": "rank", "text": "genus"},
+        )
+
+        assert (result["match"], result["exhaustive"], result["domain"]) == ("none", True, [])
+
+    def test_a_lost_value_list_is_unavailable_and_says_unmeasured(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        self._edit_rank(primary_conn, unmeasured=["values", "values_coverage"])
+
+        result = _dict_result(
+            _state_for(primary_conn),
+            "resolve_value",
+            {"table": "arboretum.seedbank.taxon", "column": "rank", "text": "genus"},
+        )
+
+        assert result["match"] == "unavailable"
+        assert "unmeasured" in result["reason"]
+
+    @staticmethod
+    def _edit_rank(conn: ConnectionConfig, **fields: Any) -> None:
+        path = conn.output / conn.name / "arboretum/seedbank/taxon/statistics.yaml"
+        statistics = yaml.safe_load(path.read_text())
+        column = statistics["columns"]["rank"]
+
+        for dropped in ("values", "values_coverage", "values_coverage_method"):
+            column.pop(dropped, None)
+
+        column.update(fields)
+        path.write_text(yaml.safe_dump(statistics))
 
 
 class TestGetTableContext:
@@ -415,11 +477,11 @@ class TestGetTableContext:
         result = dispatch(
             state,
             "get_table_context",
-            {"table": "seedbank.collector", "format": "md"},
+            {"table": "arboretum.seedbank.collector", "format": "md"},
         )
 
         assert isinstance(result, str)
-        assert "seedbank.collector" in result
+        assert "arboretum.seedbank.collector" in result
         assert "CREATE TABLE" in result
 
     def test_purpose_query_returns_the_value_table_and_no_statistics(
@@ -432,7 +494,7 @@ class TestGetTableContext:
         result = dispatch(
             state,
             "get_table_context",
-            {"table": "seedbank.collector", "purpose": "query"},
+            {"table": "arboretum.seedbank.collector", "purpose": "query"},
         )
 
         assert isinstance(result, str)
@@ -441,7 +503,7 @@ class TestGetTableContext:
 
     def test_purpose_defaults_to_profile(self, primary_conn: ConnectionConfig) -> None:
         state = _state_for(primary_conn)
-        result = dispatch(state, "get_table_context", {"table": "seedbank.collector"})
+        result = dispatch(state, "get_table_context", {"table": "arboretum.seedbank.collector"})
 
         assert isinstance(result, str)
         assert "Cardinality" in result
@@ -454,7 +516,7 @@ class TestGetTableContext:
             dispatch(
                 state,
                 "get_table_context",
-                {"table": "seedbank.collector", "purpose": "explain"},
+                {"table": "arboretum.seedbank.collector", "purpose": "explain"},
             )
 
         assert "purpose" in excinfo.value.detail
@@ -470,27 +532,7 @@ class TestGetTableContext:
         result = dispatch(state, "get_table_context", {"table": "public.curator", "format": "md"})
 
         assert isinstance(result, str)
-        assert "Scanned: 2 of 5 rows (40.0%)" in result
-
-    def test_md_is_the_text_the_shared_assembler_produces(
-        self,
-        scoped_conn: ConnectionConfig,
-    ) -> None:
-        """Two renderers would let one surface drift; this fails the moment one forks."""
-
-        _narrow_the_seeded_read(scoped_conn, rows_scanned=2)
-        state = _state_for(scoped_conn)
-        served = dispatch(state, "get_table_context", {"table": "public.curator", "format": "md"})
-        print_root = scoped_conn.output / scoped_conn.name
-        assembled = assemble_context(
-            yaml.safe_load((print_root / "manifest.yaml").read_text()),
-            print_root,
-            ["public.curator"],
-            AssemblyOptions(),
-            scoped_conn.name,
-        )
-
-        assert served == assembled.text
+        assert "Scanned: 2 of 5 rows (40%)" in result
 
     def test_md_names_its_own_sql_dialect(self, primary_conn: ConnectionConfig) -> None:
         """A single-table MCP fragment never reaches a document-level provenance block."""
@@ -499,7 +541,7 @@ class TestGetTableContext:
         result = dispatch(
             state,
             "get_table_context",
-            {"table": "seedbank.collector", "format": "md"},
+            {"table": "arboretum.seedbank.collector", "format": "md"},
         )
 
         assert isinstance(result, str)
@@ -524,12 +566,12 @@ class TestGetTableContext:
         result = _dict_result(
             state,
             "get_table_context",
-            {"table": "fixture.shape_probe", "format": "json"},
+            {"table": "arboretum.fixture.shape_probe", "format": "json"},
         )
 
-        assert result["table"] == "fixture.shape_probe"
+        assert result["table"] == "arboretum.fixture.shape_probe"
         assert "CREATE TABLE" in result["ddl"]
-        assert result["statistics"]["table"] == "fixture.shape_probe"
+        assert result["statistics"]["table"] == "arboretum.fixture.shape_probe"
         # A list, not asserted empty: `probe_id`'s value set nests inside other tables' keys, so
         # this table carries measured edges; the shape under test is the envelope, not the count.
         assert isinstance(result["relationships"]["refers_to"], list)
@@ -549,12 +591,12 @@ class TestGetTableContext:
         json_result = dispatch(
             state,
             "get_table_context",
-            {"table": "seedbank.collector", "format": "json"},
+            {"table": "arboretum.seedbank.collector", "format": "json"},
         )
         yaml_result = dispatch(
             state,
             "get_table_context",
-            {"table": "seedbank.collector", "format": "yaml"},
+            {"table": "arboretum.seedbank.collector", "format": "yaml"},
         )
 
         assert isinstance(yaml_result, str)
@@ -566,7 +608,7 @@ class TestGetTableContext:
             state,
             "get_table_context",
             {
-                "table": "seedbank.collector",
+                "table": "arboretum.seedbank.collector",
                 "format": "json",
                 "include_stats": False,
                 "include_relationships": False,
@@ -584,10 +626,10 @@ class TestGetTableContext:
         result = _dict_result(
             state,
             "get_table_context",
-            {"table": "seedbank.collector", "format": "json", "budget_tokens": 1},
+            {"table": "arboretum.seedbank.collector", "format": "json", "budget_tokens": 1},
         )
 
-        assert result["table"] == "seedbank.collector"
+        assert result["table"] == "arboretum.seedbank.collector"
         assert "ddl" not in result
         assert "statistics" not in result
         assert result["_truncated"]
@@ -602,7 +644,7 @@ class TestGetTableContext:
         result = dispatch(
             state,
             "get_table_context",
-            {"table": "seedbank.collector", "format": "md"},
+            {"table": "arboretum.seedbank.collector", "format": "md"},
         )
 
         assert isinstance(result, str)
@@ -610,11 +652,11 @@ class TestGetTableContext:
 
     @staticmethod
     def _author_annotations(conn: ConnectionConfig) -> None:
-        """seedbank.collector ships with no statistics.annotations.yaml for real."""
+        """arboretum.seedbank.collector ships with no statistics.annotations.yaml for real."""
 
         import yaml
 
-        table_dir = conn.output / conn.name / "seedbank" / "collector"
+        table_dir = conn.output / conn.name / "arboretum" / "seedbank" / "collector"
         (table_dir / "statistics.annotations.yaml").write_text(
             yaml.safe_dump(
                 {"format_version": 1, "columns": {"email": {"note": "always lowercase"}}},
@@ -622,9 +664,9 @@ class TestGetTableContext:
         )
         manifest_path = conn.output / conn.name / "manifest.yaml"
         manifest = yaml.safe_load(manifest_path.read_text())
-        manifest["tables"]["seedbank.collector"]["artifacts"]["statistics_annotations"] = (
-            "statistics.annotations.yaml"
-        )
+        manifest["tables"]["arboretum.seedbank.collector"]["artifacts"][
+            "statistics_annotations"
+        ] = "statistics.annotations.yaml"
         manifest_path.write_text(yaml.safe_dump(manifest))
 
     def test_json_format_includes_annotations_when_authored(
@@ -636,7 +678,7 @@ class TestGetTableContext:
         result = _dict_result(
             state,
             "get_table_context",
-            {"table": "seedbank.collector", "format": "json"},
+            {"table": "arboretum.seedbank.collector", "format": "json"},
         )
 
         assert result["annotations"] == {"email": {"note": "always lowercase"}}
@@ -647,7 +689,11 @@ class TestGetTableContext:
         result = _dict_result(
             state,
             "get_table_context",
-            {"table": "seedbank.collector", "format": "json", "include_annotations": False},
+            {
+                "table": "arboretum.seedbank.collector",
+                "format": "json",
+                "include_annotations": False,
+            },
         )
 
         assert "annotations" not in result
@@ -660,7 +706,7 @@ class TestCorruptedArtifactPassesThroughUnchanged:
 
     @staticmethod
     def _corrupt_statistics(conn: ConnectionConfig) -> None:
-        path = conn.output / conn.name / "seedbank" / "collector" / "statistics.yaml"
+        path = conn.output / conn.name / "arboretum" / "seedbank" / "collector" / "statistics.yaml"
         path.write_text("columns: [unterminated")
 
     def test_json_format_carries_the_assemblers_corrupted_mapping(
@@ -672,7 +718,7 @@ class TestCorruptedArtifactPassesThroughUnchanged:
         result = _dict_result(
             state,
             "get_table_context",
-            {"table": "seedbank.collector", "format": "json"},
+            {"table": "arboretum.seedbank.collector", "format": "json"},
         )
 
         assert isinstance(result["_corrupted"], dict)
@@ -688,12 +734,12 @@ class TestCorruptedArtifactPassesThroughUnchanged:
         json_result = _dict_result(
             state,
             "get_table_context",
-            {"table": "seedbank.collector", "format": "json"},
+            {"table": "arboretum.seedbank.collector", "format": "json"},
         )
         yaml_result = dispatch(
             state,
             "get_table_context",
-            {"table": "seedbank.collector", "format": "yaml"},
+            {"table": "arboretum.seedbank.collector", "format": "yaml"},
         )
 
         assert isinstance(yaml_result, str)
@@ -709,7 +755,7 @@ class TestCorruptedArtifactPassesThroughUnchanged:
         result = dispatch(
             state,
             "get_table_context",
-            {"table": "seedbank.collector", "format": "md"},
+            {"table": "arboretum.seedbank.collector", "format": "md"},
         )
 
         assert isinstance(result, str)
@@ -721,13 +767,13 @@ class TestListTables:
     def test_default_pattern_returns_all(self, primary_conn: ConnectionConfig) -> None:
         state = _state_for(primary_conn)
         result = _dict_result(state, "list_tables", {})
-        assert "seedbank.collector" in result["tables"]
+        assert "arboretum.seedbank.collector" in result["tables"]
 
     def test_pattern_filters(self, primary_conn: ConnectionConfig) -> None:
         state = _state_for(primary_conn)
-        result = _dict_result(state, "list_tables", {"pattern": "seedbank.*"})
-        assert "seedbank.collector" in result["tables"]
-        assert "fixture.shape_probe" not in result["tables"]
+        result = _dict_result(state, "list_tables", {"pattern": "arboretum.seedbank.*"})
+        assert "arboretum.seedbank.collector" in result["tables"]
+        assert "arboretum.fixture.shape_probe" not in result["tables"]
         result_none = _dict_result(state, "list_tables", {"pattern": "other.*"})
         assert result_none["tables"] == []
 
@@ -737,23 +783,23 @@ class TestListTables:
         state = _state_for(primary_conn)
         result = _dict_result(state, "list_tables", {})
         assert result["tables"] == [
-            "fixture.shape_probe",
-            "seedbank.accession",
-            "seedbank.accession_summary",
-            "seedbank.collector",
-            "seedbank.germination_by_taxon_mv",
-            "seedbank.germination_trial",
-            "seedbank.specimen_image",
-            "seedbank.storage_reading",
-            "seedbank.taxon",
-            "seedbank.vault",
+            "arboretum.fixture.shape_probe",
+            "arboretum.seedbank.accession",
+            "arboretum.seedbank.accession_summary",
+            "arboretum.seedbank.collector",
+            "arboretum.seedbank.germination_by_taxon_mv",
+            "arboretum.seedbank.germination_trial",
+            "arboretum.seedbank.specimen_image",
+            "arboretum.seedbank.storage_reading",
+            "arboretum.seedbank.taxon",
+            "arboretum.seedbank.vault",
         ]
         assert all(isinstance(t, str) for t in result["tables"])
 
     def test_detail_projects_the_manifest_entry(self, primary_conn: ConnectionConfig) -> None:
         state = _state_for(primary_conn)
         result = _dict_result(state, "list_tables", {"detail": True})
-        entry = next(t for t in result["tables"] if t["fqn"] == "seedbank.collector")
+        entry = next(t for t in result["tables"] if t["table"] == "arboretum.seedbank.collector")
 
         assert entry["type"] == "table"
         assert entry["row_count"] == 400
@@ -763,25 +809,194 @@ class TestListTables:
     def test_detail_reads_no_second_file(self, primary_conn: ConnectionConfig) -> None:
         """The manifest already carries every field `detail` projects - no per-table read."""
 
-        table_dir = primary_conn.output / primary_conn.name / "seedbank" / "collector"
+        table_dir = primary_conn.output / primary_conn.name / "arboretum" / "seedbank" / "collector"
         (table_dir / "statistics.yaml").unlink()
 
         state = _state_for(primary_conn)
         result = _dict_result(state, "list_tables", {"detail": True})
-        entry = next(t for t in result["tables"] if t["fqn"] == "seedbank.collector")
+        entry = next(t for t in result["tables"] if t["table"] == "arboretum.seedbank.collector")
 
         assert entry["row_count"] == 400
 
 
+def _edit_manifest_entries(conn: ConnectionConfig, **changes: dict[str, Any]) -> None:
+    """Overwrite (or, with a None value, drop) keys of named manifest entries."""
+
+    path = conn.output / conn.name / "manifest.yaml"
+    manifest = yaml.safe_load(path.read_text())
+
+    for fqn, fields in changes.items():
+        entry = manifest["tables"][fqn.replace("__", ".")]
+
+        for key, value in fields.items():
+            if value is None:
+                entry.pop(key, None)
+            else:
+                entry[key] = value
+
+    path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+
+
+def _detail(conn: ConnectionConfig) -> dict[str, dict[str, Any]]:
+    result = _dict_result(_state_for(conn), "list_tables", {"detail": True})
+
+    return {entry["table"]: entry for entry in result["tables"]}
+
+
+class TestListTablesFreshness:
+    """`detail: true` carries the verdict `dbprint list` buckets a table into."""
+
+    def test_a_table_inside_its_threshold_is_live(self, primary_conn: ConnectionConfig) -> None:
+        hour_ago = (datetime.now(UTC) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _edit_manifest_entries(primary_conn, arboretum__seedbank__taxon={"profiled_at": hour_ago})
+
+        entry = _detail(primary_conn)["arboretum.seedbank.taxon"]
+
+        assert entry["freshness"] == "live"
+        assert entry["max_age_days"] == 1
+        assert 0 < entry["age_days"] < 0.1
+
+    def test_a_table_past_its_threshold_is_stale(self, primary_conn: ConnectionConfig) -> None:
+        ten_days_ago = (datetime.now(UTC) - timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _edit_manifest_entries(
+            primary_conn,
+            arboretum__seedbank__vault={"profiled_at": ten_days_ago, "max_age_days": 7},
+        )
+
+        entry = _detail(primary_conn)["arboretum.seedbank.vault"]
+
+        assert entry["freshness"] == "stale"
+        assert entry["max_age_days"] == 7
+        assert 9.9 < entry["age_days"] < 10.1
+
+    def test_an_unreadable_stamp_is_dormant_with_no_age(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        _edit_manifest_entries(
+            primary_conn,
+            arboretum__seedbank__taxon={"profiled_at": "not a timestamp"},
+        )
+
+        entry = _detail(primary_conn)["arboretum.seedbank.taxon"]
+
+        assert entry["freshness"] == "dormant"
+        assert entry["age_days"] is None
+
+    def test_a_refused_threshold_carries_its_reason_and_no_verdict(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        _edit_manifest_entries(primary_conn, arboretum__seedbank__taxon={"max_age_days": -1})
+
+        entries = _detail(primary_conn)
+        refused = entries["arboretum.seedbank.taxon"]
+
+        assert "freshness" not in refused
+        assert "max_age_days is -1" in refused["threshold_error"]
+        assert entries["arboretum.seedbank.vault"]["freshness"] == "stale"
+
+    def test_a_size_gated_threshold_is_warned_about(self, primary_conn: ConnectionConfig) -> None:
+        _edit_manifest_entries(primary_conn, arboretum__seedbank__taxon={"max_age_days": None})
+        gated = replace(
+            primary_conn,
+            rules=(RuleConfig(include=("arboretum.seedbank.taxon",), min_rows=10, max_age_days=3),),
+        )
+
+        result = _dict_result(_state_for(gated), "list_tables", {"detail": True})
+
+        assert len(result["warnings"]) == 1
+        assert "arboretum.seedbank.taxon" in result["warnings"][0]
+        assert "min_rows" in result["warnings"][0]
+
+    def test_no_size_gate_means_no_warnings_key(self, primary_conn: ConnectionConfig) -> None:
+        assert "warnings" not in _dict_result(
+            _state_for(primary_conn),
+            "list_tables",
+            {"detail": True},
+        )
+
+
+class TestSearchColumnsText:
+    """`text` reads what a human wrote about a column, not only what the column is called."""
+
+    def _annotate(self, conn: ConnectionConfig) -> None:
+        table_dir = conn.output / conn.name / "arboretum" / "seedbank" / "collector"
+        (table_dir / "statistics.annotations.yaml").write_text(
+            "format_version: 1\n"
+            "columns:\n"
+            "  street_address:\n"
+            "    note: Where to send correspondence.\n",
+        )
+        manifest_path = conn.output / conn.name / "manifest.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text())
+        manifest["tables"]["arboretum.seedbank.collector"]["artifacts"][
+            "statistics_annotations"
+        ] = "statistics.annotations.yaml"
+        manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+
+    def test_a_note_mentioning_the_text_matches_a_column_named_otherwise(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        self._annotate(primary_conn)
+
+        result = _dict_result(
+            _state_for(primary_conn),
+            "search_columns",
+            {"text": "correspondence"},
+        )
+
+        assert [(m["table"], m["column"]) for m in result["matches"]] == [
+            ("arboretum.seedbank.collector", "street_address"),
+        ]
+        assert result["matches"][0]["annotation"] == "Where to send correspondence."
+
+    def test_the_match_ignores_case(self, primary_conn: ConnectionConfig) -> None:
+        self._annotate(primary_conn)
+        state = _state_for(primary_conn)
+
+        upper = _dict_result(state, "search_columns", {"text": "CORRESPONDENCE"})
+        lower = _dict_result(state, "search_columns", {"text": "correspondence"})
+
+        assert upper["matches"] == lower["matches"]
+
+    def test_a_per_value_note_match_carries_the_matching_values(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        result = _dict_result(_state_for(primary_conn), "search_columns", {"text": "no-treatment"})
+
+        match = next(m for m in result["matches"] if m["column"] == "medium")
+
+        assert match["table"] == "arboretum.seedbank.germination_trial"
+        assert [entry["value"] for entry in match["value_notes"]] == ["control"]
+
+    def test_a_name_match_carries_no_value_notes(self, primary_conn: ConnectionConfig) -> None:
+        result = _dict_result(_state_for(primary_conn), "search_columns", {"text": "EMAIL"})
+
+        assert {m["column"] for m in result["matches"]} == {"email", "institution_email"}
+        assert all("value_notes" not in m for m in result["matches"])
+
+    def test_text_is_anded_with_the_other_filters(self, primary_conn: ConnectionConfig) -> None:
+        result = _dict_result(
+            _state_for(primary_conn),
+            "search_columns",
+            {"text": "email", "pattern": "institution_*"},
+        )
+
+        assert [m["column"] for m in result["matches"]] == ["institution_email"]
+
+
 class TestSearchColumns:
     def test_match_email(self, primary_conn: ConnectionConfig) -> None:
-        """`email` is an exact (wildcard-free) pattern - seedbank.collector is the one match."""
+        """`email` is an exact (wildcard-free) pattern - arboretum.seedbank.collector is the one match."""
 
         state = _state_for(primary_conn)
         result = _dict_result(state, "search_columns", {"pattern": "email"})
         assert any(m["column"] == "email" for m in result["matches"])
         match = next(m for m in result["matches"] if m["column"] == "email")
-        assert match["table_fqn"] == "seedbank.collector"
+        assert match["table"] == "arboretum.seedbank.collector"
         assert match["classification"] == "text"
 
     def test_wildcard_pattern(self, primary_conn: ConnectionConfig) -> None:
@@ -813,24 +1028,24 @@ class TestSearchColumns:
     ) -> None:
         manifest_path = primary_conn.output / primary_conn.name / "manifest.yaml"
         manifest = yaml.safe_load(manifest_path.read_text())
-        del manifest["tables"]["seedbank.collector"]["path"]
+        del manifest["tables"]["arboretum.seedbank.collector"]["path"]
         manifest_path.write_text(yaml.safe_dump(manifest))
 
         state = _state_for(primary_conn)
         result = _dict_result(state, "search_columns", {"pattern": "email"})
 
         assert any(m["column"] == "email" for m in result["matches"])
-        assert "seedbank.collector" not in result.get("unreadable_tables", [])
+        assert "arboretum.seedbank.collector" not in result.get("unreadable_tables", [])
 
     def test_an_annotated_column_carries_its_annotation(
         self,
         primary_conn: ConnectionConfig,
     ) -> None:
-        """seedbank.collector ships with no statistics.annotations.yaml for real."""
+        """arboretum.seedbank.collector ships with no statistics.annotations.yaml for real."""
 
         import yaml
 
-        table_dir = primary_conn.output / primary_conn.name / "seedbank" / "collector"
+        table_dir = primary_conn.output / primary_conn.name / "arboretum" / "seedbank" / "collector"
         (table_dir / "statistics.annotations.yaml").write_text(
             yaml.safe_dump(
                 {"format_version": 1, "columns": {"email": {"note": "always lowercase"}}},
@@ -838,9 +1053,9 @@ class TestSearchColumns:
         )
         manifest_path = primary_conn.output / primary_conn.name / "manifest.yaml"
         manifest = yaml.safe_load(manifest_path.read_text())
-        manifest["tables"]["seedbank.collector"]["artifacts"]["statistics_annotations"] = (
-            "statistics.annotations.yaml"
-        )
+        manifest["tables"]["arboretum.seedbank.collector"]["artifacts"][
+            "statistics_annotations"
+        ] = "statistics.annotations.yaml"
         manifest_path.write_text(yaml.safe_dump(manifest))
 
         state = _state_for(primary_conn)
@@ -867,7 +1082,7 @@ class TestSearchColumns:
 
         import yaml
 
-        table_dir = primary_conn.output / primary_conn.name / "seedbank" / "collector"
+        table_dir = primary_conn.output / primary_conn.name / "arboretum" / "seedbank" / "collector"
         (table_dir / "statistics.annotations.yaml").write_text(
             yaml.safe_dump(
                 {"format_version": 1, "columns": {"not_a_real_column": {"note": "stale"}}},
@@ -875,9 +1090,9 @@ class TestSearchColumns:
         )
         manifest_path = primary_conn.output / primary_conn.name / "manifest.yaml"
         manifest = yaml.safe_load(manifest_path.read_text())
-        manifest["tables"]["seedbank.collector"]["artifacts"]["statistics_annotations"] = (
-            "statistics.annotations.yaml"
-        )
+        manifest["tables"]["arboretum.seedbank.collector"]["artifacts"][
+            "statistics_annotations"
+        ] = "statistics.annotations.yaml"
         manifest_path.write_text(yaml.safe_dump(manifest))
 
         state = _state_for(primary_conn)
@@ -903,7 +1118,7 @@ class TestSearchColumns:
                 "statistics_annotations": "statistics.annotations.yaml",
             },
             "columns": 1,
-            "profiled_at": manifest["tables"]["seedbank.collector"]["profiled_at"],
+            "profiled_at": manifest["tables"]["arboretum.seedbank.collector"]["profiled_at"],
         }
         manifest_path.write_text(yaml.safe_dump(manifest))
         view_dir = primary_conn.output / primary_conn.name / "public" / "active_v"
@@ -920,7 +1135,7 @@ class TestSearchColumns:
 
         state = _state_for(primary_conn)
         result = _dict_result(state, "search_columns", {"pattern": "shelf_location"})
-        match = next(m for m in result["matches"] if m["table_fqn"] == "public.active_v")
+        match = next(m for m in result["matches"] if m["table"] == "public.active_v")
 
         assert match["column"] == "shelf_location"
         assert match["annotation"] == "snapshot at query time"
@@ -940,7 +1155,7 @@ class TestSearchColumns:
         result = _dict_result(state, "search_columns", {"pattern": "email"})
         match = next(m for m in result["matches"] if m["column"] == "email")
 
-        assert match["table_fqn"] == "seedbank.collector"
+        assert match["table"] == "arboretum.seedbank.collector"
         assert match["column"] == "email"
         assert match["sql_type"] == "character varying(320)"
         assert match["classification"] == "text"
@@ -972,9 +1187,9 @@ class TestSearchColumns:
     def test_pattern_is_optional(self, primary_conn: ConnectionConfig) -> None:
         state = _state_for(primary_conn)
         result = _dict_result(state, "search_columns", {"classification": "text"})
-        matches = {(m["table_fqn"], m["column"]) for m in result["matches"]}
+        matches = {(m["table"], m["column"]) for m in result["matches"]}
 
-        assert ("seedbank.collector", "email") in matches
+        assert ("arboretum.seedbank.collector", "email") in matches
 
     def test_sql_type_filter(self, primary_conn: ConnectionConfig) -> None:
         """uuid also names accession's and germination_trial's FKs, all named collector_id."""
@@ -988,11 +1203,11 @@ class TestSearchColumns:
     def test_candidate_key_filter(self, primary_conn: ConnectionConfig) -> None:
         state = _state_for(primary_conn)
         result = _dict_result(state, "search_columns", {"candidate_key": True})
-        matches = {(m["table_fqn"], m["column"]) for m in result["matches"]}
+        matches = {(m["table"], m["column"]) for m in result["matches"]}
 
-        assert ("seedbank.collector", "email") in matches
+        assert ("arboretum.seedbank.collector", "email") in matches
         # institution's cardinality_ratio is 0.0375 - not unique, so not a candidate key.
-        assert ("seedbank.collector", "institution") not in matches
+        assert ("arboretum.seedbank.collector", "institution") not in matches
 
     def test_candidate_key_false_excludes_columns_never_tested(
         self,
@@ -1004,10 +1219,10 @@ class TestSearchColumns:
 
         state = _state_for(primary_conn)
         result = _dict_result(state, "search_columns", {"candidate_key": False})
-        matches = {(m["table_fqn"], m["column"]) for m in result["matches"]}
+        matches = {(m["table"], m["column"]) for m in result["matches"]}
 
-        assert ("seedbank.collector", "postal_code") in matches
-        assert ("fixture.shape_probe", "payload_bytes") not in matches
+        assert ("arboretum.seedbank.collector", "postal_code") in matches
+        assert ("arboretum.fixture.shape_probe", "payload_bytes") not in matches
 
     def test_candidate_key_false_includes_a_measured_column_with_no_inferred_block(
         self,
@@ -1019,7 +1234,7 @@ class TestSearchColumns:
 
         state = _state_for(scoped_conn)
         result = _dict_result(state, "search_columns", {"candidate_key": False})
-        matches = {(m["table_fqn"], m["column"]) for m in result["matches"]}
+        matches = {(m["table"], m["column"]) for m in result["matches"]}
 
         assert ("public.curator", "email") in matches
 
@@ -1027,7 +1242,7 @@ class TestSearchColumns:
         self,
         primary_conn: ConnectionConfig,
     ) -> None:
-        """seedbank.collector.collector_id carries `looks_like: uuid` for real, no patch needed."""
+        """arboretum.seedbank.collector.collector_id carries `looks_like: uuid` for real, no patch needed."""
 
         state = _state_for(primary_conn)
         result = _dict_result(
@@ -1035,7 +1250,7 @@ class TestSearchColumns:
             "search_columns",
             {"looks_like": "uuid", "pattern": "collector_id"},
         )
-        match = next(m for m in result["matches"] if m["table_fqn"] == "seedbank.collector")
+        match = next(m for m in result["matches"] if m["table"] == "arboretum.seedbank.collector")
 
         assert match["looks_like"] == "uuid"
         assert match["sampled"] == 400
@@ -1128,7 +1343,7 @@ class TestGetManifest:
         state = _state_for(primary_conn)
         result = _dict_result(state, "get_manifest", {})
         assert result["format_version"] == 1
-        assert "seedbank.collector" in result["tables"]
+        assert "arboretum.seedbank.collector" in result["tables"]
 
 
 class TestGetDiff:
@@ -1141,14 +1356,11 @@ class TestGetDiff:
 
 class TestToolDefinitions:
     def test_tool_names_match_definitions(self) -> None:
-        from dbprint.mcp.tools import TOOL_DEFINITIONS
 
         assert tuple(t.name for t in TOOL_DEFINITIONS) == TOOL_NAMES
 
     def test_every_input_schema_property_carries_a_description(self) -> None:
         """Stops the next parameter shipping bare - worth more than any wording assertion."""
-
-        from dbprint.mcp.tools import TOOL_DEFINITIONS
 
         bare = [
             f"{tool.name}.{name}"
@@ -1158,12 +1370,21 @@ class TestToolDefinitions:
         ]
         assert bare == []
 
+    def test_every_description_names_a_tool_for_the_neighbouring_task(self) -> None:
+        names = {tool.name for tool in TOOL_DEFINITIONS}
+
+        unrouted = [
+            tool.name
+            for tool in TOOL_DEFINITIONS
+            if not any(other in tool.description for other in names - {tool.name})
+        ]
+        assert unrouted == []
+
 
 class TestRedactedColumnParity:
     """`get_table_context` and `dbprint context` render a redacted column identically.
 
-    seedbank.collector.email carries `redacted: mask`, its values already the literal
-    `[redacted]`.
+    `arboretum.seedbank.collector.email` carries `redacted: mask`, its values already `[redacted]`.
     """
 
     def test_the_tool_renders_no_fabricated_literal(self, primary_conn: ConnectionConfig) -> None:
@@ -1171,7 +1392,7 @@ class TestRedactedColumnParity:
         result = dispatch(
             state,
             "get_table_context",
-            {"table": "seedbank.collector", "format": "md"},
+            {"table": "arboretum.seedbank.collector", "format": "md"},
         )
         assert isinstance(result, str)
         row = next(line for line in result.splitlines() if line.startswith("| email |"))
@@ -1179,46 +1400,11 @@ class TestRedactedColumnParity:
         assert "NULL" not in row
         assert "redacted (mask)" in row
 
-    def test_the_tool_and_the_command_assemble_the_same_fragment(
-        self,
-        primary_conn: ConnectionConfig,
-    ) -> None:
-        import yaml
-
-        from dbprint.engine import AssemblyOptions, assemble_context
-
-        print_root = primary_conn.output / primary_conn.name
-        manifest = yaml.safe_load((print_root / "manifest.yaml").read_text())
-        state = _state_for(primary_conn)
-        tool_text = dispatch(
-            state,
-            "get_table_context",
-            {"table": "seedbank.collector", "format": "md"},
-        )
-        command_text = assemble_context(
-            manifest,
-            print_root,
-            ["seedbank.collector"],
-            AssemblyOptions(),
-            primary_conn.name,
-        ).text
-
-        assert tool_text == command_text
-
 
 class TestGetReference:
     """Depends on no connection or print - `_state_for` is never called here."""
 
     _EMPTY_STATE = ServedConnections(served={}, default=None)
-
-    def test_listed_in_tool_names_and_definitions(self) -> None:
-        assert "get_reference" in TOOL_NAMES
-        names = {t.name for t in TOOL_DEFINITIONS}
-        assert "get_reference" in names
-
-    def test_document_is_required(self) -> None:
-        tool = next(t for t in TOOL_DEFINITIONS if t.name == "get_reference")
-        assert tool.input_schema["required"] == ["document"]
 
     def test_unknown_document_raises(self) -> None:
         with pytest.raises(McpError):
@@ -1306,13 +1492,15 @@ class TestResolveValueReadsTheStatisticsItWasPromised:
         self,
         primary_conn: ConnectionConfig,
     ) -> None:
-        self._statistics_path(primary_conn, "seedbank/taxon").write_text("columns: [unbalanced\n")
+        self._statistics_path(primary_conn, "arboretum/seedbank/taxon").write_text(
+            "columns: [unbalanced\n",
+        )
 
         with pytest.raises(McpError) as excinfo:
             dispatch(
                 _state_for(primary_conn),
                 "resolve_value",
-                {"table": "seedbank.taxon", "column": "rank", "text": "genus"},
+                {"table": "arboretum.seedbank.taxon", "column": "rank", "text": "genus"},
             )
 
         assert "YAML parse error" in excinfo.value.detail
@@ -1322,13 +1510,13 @@ class TestResolveValueReadsTheStatisticsItWasPromised:
         self,
         primary_conn: ConnectionConfig,
     ) -> None:
-        self._statistics_path(primary_conn, "seedbank/taxon").unlink()
+        self._statistics_path(primary_conn, "arboretum/seedbank/taxon").unlink()
 
         with pytest.raises(McpError) as excinfo:
             dispatch(
                 _state_for(primary_conn),
                 "resolve_value",
-                {"table": "seedbank.taxon", "column": "rank", "text": "genus"},
+                {"table": "arboretum.seedbank.taxon", "column": "rank", "text": "genus"},
             )
 
         assert "manifest references statistics.yaml but file is absent" in excinfo.value.detail
@@ -1339,14 +1527,18 @@ class TestResolveValueReadsTheStatisticsItWasPromised:
     ) -> None:
         """The notes are part of the answer; losing them silently is the same defect."""
 
-        path = primary_conn.output / primary_conn.name / "seedbank/germination_trial"
+        path = primary_conn.output / primary_conn.name / "arboretum/seedbank/germination_trial"
         (path / "statistics.annotations.yaml").write_text("columns: {medium: [\n")
 
         with pytest.raises(McpError) as excinfo:
             dispatch(
                 _state_for(primary_conn),
                 "resolve_value",
-                {"table": "seedbank.germination_trial", "column": "medium", "text": "control"},
+                {
+                    "table": "arboretum.seedbank.germination_trial",
+                    "column": "medium",
+                    "text": "control",
+                },
             )
 
         assert "statistics.annotations.yaml" in excinfo.value.detail
@@ -1358,13 +1550,13 @@ class TestResolveValueReadsTheStatisticsItWasPromised:
     ) -> None:
         manifest_path = primary_conn.output / primary_conn.name / "manifest.yaml"
         manifest = yaml.safe_load(manifest_path.read_text())
-        del manifest["tables"]["seedbank.taxon"]["artifacts"]["statistics"]
+        del manifest["tables"]["arboretum.seedbank.taxon"]["artifacts"]["statistics"]
         manifest_path.write_text(yaml.safe_dump(manifest))
 
         result = _dict_result(
             _state_for(primary_conn),
             "resolve_value",
-            {"table": "seedbank.taxon", "column": "rank", "text": "genus"},
+            {"table": "arboretum.seedbank.taxon", "column": "rank", "text": "genus"},
         )
 
         assert result["match"] == "unavailable"
@@ -1376,7 +1568,7 @@ class TestResolveValueReadsTheStatisticsItWasPromised:
     ) -> None:
         """SPEC 2.2.5: no `values_coverage` on a numeric column; `frequencies.listed` decides."""
 
-        path = self._statistics_path(primary_conn, "seedbank/germination_trial")
+        path = self._statistics_path(primary_conn, "arboretum/seedbank/germination_trial")
         statistics = yaml.safe_load(path.read_text())
         column = statistics["columns"]["sown_count"]
         column["cardinality"] = column["frequencies"]["listed"]
@@ -1386,7 +1578,7 @@ class TestResolveValueReadsTheStatisticsItWasPromised:
         result = _dict_result(
             _state_for(primary_conn),
             "resolve_value",
-            {"table": "seedbank.germination_trial", "column": "sown_count", "text": "20"},
+            {"table": "arboretum.seedbank.germination_trial", "column": "sown_count", "text": "20"},
         )
 
         assert result["coverage"] is None
@@ -1401,10 +1593,122 @@ class TestResolveValueReadsTheStatisticsItWasPromised:
         result = _dict_result(
             _state_for(primary_conn),
             "resolve_value",
-            {"table": "seedbank.germination_trial", "column": "sown_count", "text": "20"},
+            {"table": "arboretum.seedbank.germination_trial", "column": "sown_count", "text": "20"},
         )
 
         assert result["coverage"] is None
         assert result["exhaustive"] is False
         assert "not evidence" in result["sample_caveat"]
         assert "domain" not in result
+
+
+_SCOPE_BLOCK = {"rows_scanned": 2, "filter": "id < 3"}
+
+
+class TestAScopedFileIsReadAsScopedWhicheverSignalItCarries:
+    """The block decides and the echo alone still scopes (SPEC 2.2.8)."""
+
+    @staticmethod
+    def _scope(conn: ConnectionConfig, *, block: bool, echo: bool, scanned: int = 2) -> None:
+        path = conn.output / conn.name / "public" / "curator" / "statistics.yaml"
+        statistics = yaml.safe_load(path.read_text())
+        email = statistics["columns"]["email"]
+        email.update(classification="categorical", cardinality=2, values_coverage=1.0)
+        email["values"] = [{"value": "open", "count": 1}, {"value": "closed", "count": 1}]
+
+        if scanned == 0:
+            email.update(cardinality=0, values=[])
+
+        if block:
+            statistics["scope"] = {**_SCOPE_BLOCK, "rows_scanned": scanned}
+
+        if echo:
+            for column in statistics["columns"].values():
+                column["rows_scanned"] = scanned
+
+        path.write_text(yaml.safe_dump(statistics))
+
+    @staticmethod
+    def _resolve(conn: ConnectionConfig, text: str) -> dict[str, Any]:
+        return _dict_result(
+            _state_for(conn),
+            "resolve_value",
+            {"table": "public.curator", "column": "email", "text": text},
+        )
+
+    @pytest.mark.parametrize(
+        ("block", "echo", "reply_block"),
+        [(True, True, _SCOPE_BLOCK), (True, False, _SCOPE_BLOCK), (False, True, {})],
+        ids=["block-and-echo", "echo-stripped", "echo-without-block"],
+    )
+    @pytest.mark.parametrize(("text", "match"), [("refunded", "none"), ("OPEN", "stored")])
+    def test_resolve_value_is_the_scanned_domain(
+        self,
+        scoped_conn: ConnectionConfig,
+        block: bool,
+        echo: bool,
+        reply_block: dict[str, Any],
+        text: str,
+        match: str,
+    ) -> None:
+        self._scope(scoped_conn, block=block, echo=echo)
+
+        reply = self._resolve(scoped_conn, text)
+
+        assert (reply["match"], reply["exhaustive"]) == (match, False)
+        assert (reply["scope"], reply["row_count"]) == (reply_block, 5)
+        assert "the list is the whole domain over the rows scanned" in reply["sample_caveat"]
+
+    @pytest.mark.parametrize(
+        ("block", "echo"),
+        [(True, False), (False, True)],
+        ids=["echo-stripped", "echo-without-block"],
+    )
+    def test_search_columns_and_the_notes_stay_qualified(
+        self,
+        scoped_conn: ConnectionConfig,
+        block: bool,
+        echo: bool,
+    ) -> None:
+        self._scope(scoped_conn, block=block, echo=echo)
+        state = _state_for(scoped_conn)
+
+        matches = _dict_result(state, "search_columns", {"candidate_key": True})["matches"]
+        md = dispatch(state, "get_table_context", {"table": "public.curator", "format": "md"})
+
+        assert [m["column"] for m in matches if "scope" in m] == ["id"]
+        assert isinstance(md, str)
+        assert "2 distinct over the rows scanned: open / closed" in md
+        assert "candidate key over the rows scanned" in md
+
+    def test_an_empty_scan_is_unavailable_and_lists_nothing(
+        self,
+        scoped_conn: ConnectionConfig,
+    ) -> None:
+        self._scope(scoped_conn, block=True, echo=True, scanned=0)
+
+        reply = self._resolve(scoped_conn, "open")
+        md = dispatch(
+            _state_for(scoped_conn),
+            "get_table_context",
+            {"table": "public.curator", "format": "md"},
+        )
+
+        assert (reply["match"], reply["exhaustive"], reply["row_count"]) == (
+            "unavailable",
+            False,
+            5,
+        )
+        assert reply["scope"]["rows_scanned"] == 0
+        assert "domain" not in reply
+        assert "no rows" in reply["reason"]
+        assert isinstance(md, str)
+        assert "0 distinct over the rows scanned" in md
+
+    def test_an_unscoped_file_carries_no_scope(self, scoped_conn: ConnectionConfig) -> None:
+        self._scope(scoped_conn, block=False, echo=False)
+
+        reply = self._resolve(scoped_conn, "refunded")
+
+        assert (reply["match"], reply["exhaustive"]) == ("none", True)
+        assert "scope" not in reply

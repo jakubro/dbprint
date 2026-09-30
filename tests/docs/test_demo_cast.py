@@ -24,8 +24,8 @@ EXPECTED_COMMANDS = (
     "dbprint init",
     "dbprint generate",
     "dbprint list",
-    "dbprint context public.taxon --no-stats --no-relationships",
-    "dbprint context public.taxon --no-ddl",
+    "dbprint context seedbank.public.taxon --no-stats --no-relationships",
+    "dbprint context seedbank.public.taxon --no-ddl",
 )
 
 

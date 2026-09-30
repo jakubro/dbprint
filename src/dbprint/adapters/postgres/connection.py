@@ -15,8 +15,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, LiteralString, cast
 
 from .. import trace_context
+from ..dialect import Dialect
 from ..errors import QueryFailed
 
+
+# psycopg3 defaults to pyformat and the adapter does not override it.
+DIALECT = Dialect(vendor="postgres", paramstyle="pyformat", quote_char='"', addressed_parts=2)
 
 if TYPE_CHECKING:
     import psycopg
@@ -39,19 +43,25 @@ class ConnectionParams:
 
     host: str
     port: int
-    database: str
     user: str
     password: str
+    database: str | None = None
+    statement_timeout: int | None = None
 
     @classmethod
-    def from_credentials(cls, creds: dict[str, str]) -> ConnectionParams:
+    def from_credentials(
+        cls,
+        creds: dict[str, str],
+        statement_timeout: int | None = None,
+    ) -> ConnectionParams:
         try:
             return cls(
                 host=creds["host"],
                 port=int(creds["port"]),
-                database=creds["database"],
+                database=creds.get("database"),
                 user=creds["user"],
                 password=creds["password"],
+                statement_timeout=statement_timeout,
             )
         except KeyError as exc:
             raise PostgresConnectionError(
@@ -60,13 +70,13 @@ class ConnectionParams:
         except ValueError as exc:
             raise PostgresConnectionError(f"invalid port {creds.get('port')!r}: {exc}") from exc
 
-    def env_for_pg_dump(self) -> dict[str, str]:
-        """libpq env vars consumed by pg_dump subprocess invocations."""
+    def env_for_pg_dump(self, database: str) -> dict[str, str]:
+        """libpq env vars consumed by a pg_dump of one relation in `database`."""
 
         return {
             "PGHOST": self.host,
             "PGPORT": str(self.port),
-            "PGDATABASE": self.database,
+            "PGDATABASE": database,
             "PGUSER": self.user,
             "PGPASSWORD": self.password,
         }
@@ -78,6 +88,11 @@ class Connection:
     def __init__(self, params: ConnectionParams) -> None:
         self.params = params
         self._conn: psycopg.Connection | None = None
+
+    def sibling(self) -> Connection:
+        """An unopened connection with the same parameters."""
+
+        return Connection(self.params)
 
     def open(self) -> None:
         psycopg = _import_psycopg()
@@ -91,6 +106,7 @@ class Connection:
                 user=self.params.user,
                 password=self.params.password,
                 autocommit=True,
+                **_session_options(self.params.statement_timeout),
             )
         except psycopg.Error as exc:
             raise PostgresConnectionError(
@@ -125,7 +141,7 @@ def exec_query(conn: psycopg.Connection, query: str, params: Any = None) -> psyc
     try:
         cursor = conn.execute(cast(LiteralString, query), params)
     except Exception as exc:
-        failure = QueryFailed(exc, query, params)
+        failure = QueryFailed(exc, query, params, timed_out=_is_timeout(exc))
         trace_context.log_failure(_LOG, started, failure)
 
         raise failure from exc
@@ -168,3 +184,15 @@ def _import_psycopg() -> Any:
             "psycopg is not installed. Install dbprint with the [postgres] extra: "
             "`pip install dbprint[postgres]`.",
         ) from exc
+
+
+def _session_options(statement_timeout: int | None) -> dict[str, str]:
+    # Sent in the startup packet, so the limit costs no round trip of its own.
+    if statement_timeout is None:
+        return {}
+
+    return {"options": f"-c statement_timeout={statement_timeout * 1000}"}
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    return getattr(exc, "sqlstate", None) == "57014"

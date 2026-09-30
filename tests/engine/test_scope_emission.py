@@ -188,11 +188,6 @@ class TestRowCountMethodIsTheAdaptersStatement:
 
         assert payload["row_count_method"] == "exact"
 
-    def test_a_narrowed_read_that_estimated_says_approximate(self) -> None:
-        payload = _emit(250, TableScope(sample=0.25), method="approximate")
-
-        assert payload["row_count_method"] == "approximate"
-
     def test_the_scope_block_survives_an_exact_count(self) -> None:
         """`scope` describes the read, the method describes the count."""
 

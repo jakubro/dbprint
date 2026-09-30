@@ -26,11 +26,11 @@ Seven outcomes from `check`, ordered so a pipeline can decide how much each one 
 | `1` | generic — a malformed print, or a table whose rules narrow it both by a predicate and by a fraction, which the command refuses to judge |
 | `2` | staleness — a print is older than its own threshold |
 | `3` | drift (`--online`) — the committed print no longer matches the database |
-| `4` | connection (`--online`) — the database could not be reached |
-| `5` | partial extraction (`--online`) — the connection was reached but some tables could not be re-extracted; the ones that were are still compared and reported |
+| `4` | connection (`--online`) — the database could not be reached, or the target lists none of the committed tables |
+| `5` | partial extraction — the committed manifest names a table the last `generate` could not profile, or (`--online`) the connection was reached but some tables could not be re-extracted; the ones that were are still compared and reported |
 | `6` | assertion — a data-quality assertion failed |
 
-Across several connections the top-level exit is the highest of the per-connection codes.
+Across several connections the top-level exit is the highest of the per-connection codes, and within one connection the highest code among its outcomes wins the same way. So while the manifest names a table the last `generate` could not profile, offline `check` returns at least `5` until a `generate` profiles it, and a malformed print, a stale one or drift reads as `5`. A pipeline that switches on the number reads `--format json`, which lists every issue.
 
 One more code exists in the family and `check` never returns it: `7`, total failure, which `dbprint generate` uses when every table it touched failed. A pipeline treating any non-zero as fatal does not care; one that switches on the number should not expect `7` from a gate job.
 
@@ -73,7 +73,7 @@ jobs:
 
 No extra is needed: the offline path opens no connection, so it loads no driver.
 
-For the online job, install the extra for your engine and supply credentials through the environment. Every credential key reads from `DBPRINT_<CONN>_<KEY>`, upper-cased, which keeps them out of the repository:
+For the online job, install the extra for your engine and supply credentials through the environment. Every credential key reads from `DBPRINT_<CONNECTION>_<KEY>`, upper-cased, which keeps them out of the repository:
 
 ```yaml
   drift:
@@ -108,19 +108,13 @@ A scheduled regenerate job switches on a different set, since `generate` connect
 | `5` | partial — some tables failed; the rest were written |
 | `7` | total failure — every table it touched failed |
 
-`3` reports *schema* movement only. A statistic that moved lands in `diff.yaml` without changing the
-exit code, so a job that gates on data movement reads the artifact rather than the status.
+`3` reports *schema* movement only. A statistic that moved lands in `diff.yaml` without changing the exit code, so a job that gates on data movement reads the artifact rather than the status.
 
 ## Output and progress
 
-Both commands render differently to a terminal than to a pipe, and both take flags to force the
-choice. `--no-tui` gives the plain tab-separated form a log should capture; `--tui` forces the Rich
-form.
+Both commands render differently to a terminal than to a pipe, and both take flags to force the choice. `--no-tui` gives the plain tab-separated form a log should capture; `--tui` forces the Rich form.
 
-`generate`'s progress is on stderr, the same as `check` and `diff` - merge it into the pipe to
-capture it. One tab-separated record per event that has something to report, with a
-`start`/`done` pair per preparatory phase, a pair per table, and a `sketched` line for each table
-that got a join-key sketch:
+`generate`'s progress is on stderr, the same as `check` and `diff` — merge it into the pipe to capture it. One tab-separated record per event that has something to report, with a `start`/`done` pair per preparatory phase, a pair per table, and a `sketched` line for each table that got a join-key sketch:
 
 ```console
 $ dbprint generate 2>&1 | tee generate.log
@@ -130,23 +124,22 @@ primary	listing	start
 primary	listing	done
 primary	inventory	start
 primary	inventory	done
-primary	inventory	schema	public	4 objects	0.0s
-primary	public.accession	start
-primary	public.accession	ok	2,500 rows	0.2s
-primary	public.collector	start
-primary	public.collector	ok	120 rows	0.1s
-primary	public.taxon	start
-primary	public.taxon	ok	300 rows	0.1s
-primary	public.taxon_names	start
-primary	public.taxon_names	ok	- rows	0.1s
-primary	public.accession	sketched	0.0s
-primary	public.collector	sketched	0.0s
-primary	public.taxon	sketched	0.0s
+primary	inventory	schema	arboretum.public	4 objects	0.0s
+primary	arboretum.public.accession	start
+primary	arboretum.public.accession	ok	2,500 rows	0.2s
+primary	arboretum.public.collector	start
+primary	arboretum.public.collector	ok	120 rows	0.1s
+primary	arboretum.public.taxon	start
+primary	arboretum.public.taxon	ok	300 rows	0.1s
+primary	arboretum.public.taxon_names	start
+primary	arboretum.public.taxon_names	ok	- rows	0.1s
+primary	arboretum.public.accession	sketched	0.0s
+primary	arboretum.public.collector	sketched	0.0s
+primary	arboretum.public.taxon	sketched	0.0s
 primary	summary	4 ok / 0 failed / 0 skipped	932ms
 ```
 
-`-q` silences stderr progress on every command - `generate`, `diff` and `check` all put it there,
-so a pipeline reaching for `-q` to quieten a log never affects a command's own stdout payload.
+`-q` silences stderr progress on every command — `generate`, `diff` and `check` all put it there, so a pipeline reaching for `-q` to quieten a log never affects a command's own stdout payload.
 
 ## The machine envelope
 
@@ -165,8 +158,7 @@ so a pipeline reaching for `-q` to quieten a log never affects a command's own s
 | `not_run` | tables that could not be judged, each with a `severity` |
 | `summary` | per-category counts |
 
-Every entry in `issues`, `drift_issues` and `assertion_issues` carries `path`, `code`, `severity`,
-`detail` and `spec_ref`, so one `jq` filter works across all three.
+Every entry in `issues`, `drift_issues` and `assertion_issues` carries `path`, `code`, `severity`, `detail` and `spec_ref`, so one `jq` filter works across all three.
 
 ## Assertions
 
@@ -178,7 +170,7 @@ connections:
   primary:
     assertions:
       tables:
-        seedbank.collector:
+        arboretum.seedbank.collector:
           columns:
             email:
               null_rate: 0

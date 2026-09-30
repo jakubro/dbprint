@@ -14,8 +14,10 @@ from typing import Any
 
 from . import introspect, stats
 from .connection import Cursor, exec_query
-from .identity import Identity
+from .rendering import render_operand, render_text
 from ..base import MIN_SAMPLE_DRAW, TableScope, seed_from_fqn
+from ..identifiers import SOURCE_ALIAS, Identity
+from ..sql_layout import derived, indented
 
 
 SMALL_TABLE_FACTOR = 10  # row_count < n * factor -> direct DISTINCT path
@@ -28,34 +30,42 @@ def sample_distinct(
     column: str,
     n: int,
     scope: TableScope | None = None,
+    sql_type: str | None = None,
 ) -> list[Any]:
     """Return up to n distinct non-null sampled values for the column.
 
     Scoped like every other statistic; a predicate-starved draw is re-taken directly.
     """
 
-    cn = identity.quoted_column(column)
-    seed = seed_from_fqn(identity.dotted().lower(), stats.SEED_MODULUS)
+    cn = identity.source_column(column)
+    seed = seed_from_fqn(identity.fqn, stats.SEED_MODULUS)
     source = stats._source(identity, scope, seed)
     estimate = _scoped_estimate(introspect.row_count_estimate(cursor, identity), scope)
 
     if estimate <= 0 or estimate < n * SMALL_TABLE_FACTOR:
-        return _distinct(cursor, source, cn, n, seed)
+        return _distinct(cursor, source, cn, n, seed, sql_type)
 
     # A materialized scope is a plain table the draw binds to directly; only an
     # unmaterialized narrowing has to be wrapped first.
     wrapped = scope is not None and scope.narrows and scope.materialized is None
-    narrowed = f"(SELECT * FROM {source})" if wrapped else source
+    narrowed = derived(f"SELECT src.* FROM {source}", SOURCE_ALIAS) if wrapped else source
     # The SAMPLE ROW draw stays row-random and unseedable (SPEC 4.1.2 names the
     # frequency-weighting this costs); only the final `_distinct` step is hash-ordered.
-    oversampled = (
-        f"(SELECT {cn} AS v FROM {narrowed} SAMPLE ROW ({int(n * SAMPLE_RATE_MULTIPLIER)} ROWS) "
-        f"WHERE {cn} IS NOT NULL) sampled"
+    oversampled = derived(
+        f"""
+        SELECT
+          {cn} AS v
+        FROM
+          {indented(narrowed, 10)} SAMPLE ROW ({int(n * SAMPLE_RATE_MULTIPLIER)} ROWS)
+        WHERE
+          {cn} IS NOT NULL
+        """,
+        "ovs",
     )
-    values = _distinct(cursor, oversampled, "v", n, seed)
+    values = _distinct(cursor, oversampled, "ovs.v", n, seed, sql_type)
 
     if _starved(scope, values, n):
-        return _distinct(cursor, source, cn, n, seed)
+        return _distinct(cursor, source, cn, n, seed, sql_type)
 
     return values
 
@@ -84,7 +94,14 @@ def _scoped_estimate(estimate: int, scope: TableScope | None) -> float:
     return estimate * scope.sample
 
 
-def _distinct(cursor: Cursor, source: str, quoted_col: str, n: int, seed: int) -> list[Any]:
+def _distinct(
+    cursor: Cursor,
+    source: str,
+    quoted_col: str,
+    n: int,
+    seed: int,
+    sql_type: str | None,
+) -> list[Any]:
     """Up to n distinct non-null values of the column from one source expression.
 
     Ordered by a hash of the value (SPEC 4.1.2): a fixed permutation of the distinct set,
@@ -93,15 +110,29 @@ def _distinct(cursor: Cursor, source: str, quoted_col: str, n: int, seed: int) -
     integers, never user input.
     """
 
+    selected = (
+        render_text(quoted_col, sql_type)
+        if sql_type is not None and stats._is_string_like(sql_type)
+        else render_operand(quoted_col, sql_type)
+        if sql_type is not None
+        else quoted_col
+    )
     rows = exec_query(
         cursor,
         f"""
-        SELECT v FROM (
-            SELECT DISTINCT {quoted_col} AS v
-            FROM {source}
-            WHERE {quoted_col} IS NOT NULL
-        ) t
-        ORDER BY MD5('{seed}' || CAST(v AS VARCHAR))
+        SELECT
+          drw.v
+        FROM
+          (
+            SELECT DISTINCT
+              {indented(selected, 14)} AS v
+            FROM
+              {indented(source, 14)}
+            WHERE
+              {quoted_col} IS NOT NULL
+          ) drw
+        ORDER BY
+          MD5('{seed}' || CAST(drw.v AS VARCHAR))
         LIMIT {int(n)}
         """,
     ).fetchall()

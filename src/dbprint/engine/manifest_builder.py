@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from dbprint import __version__ as DBPRINT_VERSION
 from dbprint.adapters.base import TableType
+from dbprint.config import ConnectionConfig, StatisticsConfig
 from dbprint.spec.v1 import FORMAT_VERSION
 from .diff import DiffSelectors
 
@@ -25,10 +26,7 @@ ARTIFACT_FILENAMES = {
 class ManifestTableEntry:
     """One table's manifest payload - input to `build`.
 
-    `max_age_days` is the freshness threshold that governed this table on the run writing
-    the entry (SPEC 2.5); None means never recorded, and emits an absent key, not null.
-    `statistics_params` carries only the keys where this table's resolved
-    `StatisticsConfig` differs from the connection default (SPEC 2.5), None when it matched.
+    The params blocks carry only keys differing from the connection's (SPEC 2.5); None means they matched.
     """
 
     fqn: str
@@ -44,6 +42,28 @@ class ManifestTableEntry:
     profiled_at: str
     max_age_days: int | None = None
     statistics_params: dict[str, Any] | None = None
+    max_rows_scanned: int | None = None
+    profiling_params: dict[str, Any] | None = None
+
+
+def statistics_params_dict(cfg: StatisticsConfig) -> dict[str, Any]:
+    """A `StatisticsConfig` as the manifest records it, `percentiles` as a list."""
+
+    values = asdict(cfg)
+    values["percentiles"] = list(values["percentiles"])
+
+    return values
+
+
+def profiling_params_dict(conn: ConnectionConfig) -> dict[str, bool]:
+    """The connection's profiling switches as the manifest records them (SPEC 2.5)."""
+
+    return {
+        "infer_relationships": conn.infer_relationships,
+        "sketch_all_columns": conn.sketch_all_columns,
+        "compute_timeline": conn.compute_timeline,
+        "materialize_sample": conn.materialize_sample,
+    }
 
 
 def build(
@@ -53,17 +73,16 @@ def build(
     generated_at: str,
     *,
     statistics_params: dict[str, Any],
+    profiling_params: dict[str, Any],
     selectors: DiffSelectors,
     redaction_rules_configured: int,
     default_collation: str,
+    failed_tables: tuple[str, ...] = (),
     has_manifest_annotations: bool = False,
 ) -> dict[str, Any]:
     """Return the manifest dict ready for YAML serialization.
 
-    `statistics_params`/`selectors`/`redaction_rules_configured`/`default_collation` are the
-    producer-provenance fields (SPEC 2.5): what this run resolved, so the print decodes
-    itself without the `.dbprint.yaml` that produced it. `has_manifest_annotations` reports
-    whether the human-authored `manifest.annotations.yaml` exists (SPEC 2.7.3).
+    The provenance fields record what this run resolved, so the print decodes itself (SPEC 2.5).
     """
 
     tables: dict[str, dict[str, Any]] = {}
@@ -102,6 +121,12 @@ def build(
 
         if e.statistics_params is not None:
             table_payload["statistics_params"] = e.statistics_params
+
+        if e.max_rows_scanned is not None:
+            table_payload["max_rows_scanned"] = e.max_rows_scanned
+
+        if e.profiling_params is not None:
+            table_payload["profiling_params"] = e.profiling_params
         tables[e.fqn] = table_payload
 
     payload: dict[str, Any] = {
@@ -111,10 +136,14 @@ def build(
         "adapter": adapter_kind,
         "dbprint_version": DBPRINT_VERSION,
         "statistics_params": statistics_params,
+        "profiling_params": profiling_params,
         "selectors": {"include": list(selectors.include), "exclude": list(selectors.exclude)},
         "redaction_rules_configured": redaction_rules_configured,
         "default_collation": default_collation,
     }
+
+    if failed_tables:
+        payload["failed_tables"] = sorted(failed_tables)
 
     if has_manifest_annotations:
         payload["manifest_annotations"] = "manifest.annotations.yaml"
@@ -122,32 +151,3 @@ def build(
     payload["tables"] = tables
 
     return payload
-
-
-def entry_from_payload(fqn: str, payload: dict[str, Any]) -> ManifestTableEntry:
-    """Rebuild an entry from a payload a previous run wrote.
-
-    A run re-extracts only part of its scope, so tables it left alone reach the new manifest
-    from the old one. `profiled_at` rides along unchanged, since advancing it would renew
-    freshness for a table never re-read; `max_age_days` too, and an absent key stays absent.
-    """
-
-    artifacts = payload.get("artifacts")
-    artifacts = artifacts if isinstance(artifacts, dict) else {}
-    statistics_params = payload.get("statistics_params")
-
-    return ManifestTableEntry(
-        fqn=fqn,
-        type=payload.get("type", "table"),
-        path=payload.get("path", ""),
-        has_statistics="statistics" in artifacts,
-        has_relationships="relationships" in artifacts,
-        has_description="description" in artifacts,
-        has_statistics_annotations="statistics_annotations" in artifacts,
-        has_relationships_annotations="relationships_annotations" in artifacts,
-        row_count=payload.get("row_count"),
-        columns=payload.get("columns", 0),
-        profiled_at=payload.get("profiled_at", ""),
-        max_age_days=payload.get("max_age_days"),
-        statistics_params=statistics_params if isinstance(statistics_params, dict) else None,
-    )

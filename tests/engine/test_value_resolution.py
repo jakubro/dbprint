@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from dbprint.engine.value_resolution import DOMAIN_LIMIT, fold, resolve, spelling_groups
+from dbprint.spec.scope import scope_of
 
 
 RANK_ENTRIES: list[Any] = [
@@ -213,7 +214,7 @@ class TestExhaustivenessIsStatedOnEveryReply:
     def test_an_exhaustive_list_without_a_coverage_carries_the_domain_and_no_caveat(self) -> None:
         entries: list[Any] = [{"value": 2018, "count": 1}, {"value": 2019, "count": 2}]
 
-        reply = resolve("2019", entries, {}, coverage=None, exhaustive=True)
+        reply = resolve("2019", entries, {}, coverage=None, complete=True)
 
         assert reply["match"] == "stored"
         assert reply["exhaustive"] is True
@@ -224,3 +225,32 @@ class TestExhaustivenessIsStatedOnEveryReply:
         reply = resolve("x", [], {}, coverage=None, unavailable_reason="no values")
 
         assert reply["exhaustive"] is False
+
+
+class TestScopedReplies:
+    """Under `scope` a complete list is the scanned rows' domain, never the column's (SPEC 2.2.8)."""
+
+    _SCOPE = scope_of({"row_count": 900, "scope": {"rows_scanned": 300, "filter": "plot < 4"}})
+
+    def test_a_complete_scoped_list_is_not_exhaustive_and_says_why(self) -> None:
+        reply = resolve("cultivar", RANK_ENTRIES, {}, coverage=1.0, scope=self._SCOPE)
+
+        assert (reply["match"], reply["exhaustive"]) == ("none", False)
+        assert reply["scope"] == {"rows_scanned": 300, "filter": "plot < 4"}
+        assert reply["row_count"] == 900
+        assert "the list is the whole domain over the rows scanned" in reply["sample_caveat"]
+        assert [e["value"] for e in reply["domain"]] == ["species", "genus", "family"]
+
+    def test_an_unavailable_scoped_reply_carries_the_scope_and_no_domain(self) -> None:
+        reply = resolve(
+            "x",
+            RANK_ENTRIES,
+            {},
+            coverage=1.0,
+            scope=self._SCOPE,
+            unavailable_reason="column is redacted",
+        )
+
+        assert (reply["match"], reply["exhaustive"]) == ("unavailable", False)
+        assert reply["scope"]["filter"] == "plot < 4"
+        assert "domain" not in reply

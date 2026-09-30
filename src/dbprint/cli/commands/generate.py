@@ -40,7 +40,7 @@ from ..run_log import close_run_log, log_run_header, log_run_summary, open_run_l
 
 
 @click.command(name="generate")
-@click.argument("conn", required=False)
+@click.argument("connection", required=False)
 @project_option
 @click.option(
     "--force",
@@ -59,7 +59,7 @@ from ..run_log import close_run_log, log_run_header, log_run_summary, open_run_l
     "include_patterns",
     multiple=True,
     help="Narrow scope to tables also matching PATTERN (intersects config include); "
-    "repeatable. e.g. `--include 'public.*'`",
+    "repeatable. e.g. `--include '*.public.*'`",
 )
 @click.option(
     "--exclude",
@@ -67,6 +67,13 @@ from ..run_log import close_run_log, log_run_header, log_run_summary, open_run_l
     multiple=True,
     help="Also drop tables matching PATTERN (unions config exclude); repeatable. "
     "e.g. `--exclude '*.audit_*'`",
+)
+@click.option(
+    "--confirm-all-removed",
+    is_flag=True,
+    default=False,
+    help="Record every committed table as removed when the target lists none of them. "
+    "Without it, such a run exits 4 and writes nothing.",
 )
 @click.option(
     "--fail-fast",
@@ -91,12 +98,13 @@ from ..run_log import close_run_log, log_run_header, log_run_summary, open_run_l
 @click.pass_context
 def generate_command(
     ctx: click.Context,
-    conn: str | None,
+    connection: str | None,
     project: str | None,
     force: bool,
     dry_run: bool,
     include_patterns: tuple[str, ...],
     exclude_patterns: tuple[str, ...],
+    confirm_all_removed: bool,
     fail_fast: bool,
     tui: bool | None,
     quiet: bool,
@@ -105,9 +113,11 @@ def generate_command(
 
     Connects to each resolved connection, scans the tables matched by the
     include/exclude selectors, extracts DDL + column statistics +
-    relationships, and writes one print per table plus a `prints/<conn>/diff.yaml`
-    describing what changed. Per-table writes are atomic and a user-authored
-    `description.md` or `statistics.annotations.yaml` is never touched. Auto connections run
+    relationships, and writes one print per table plus a `prints/<connection>/diff.yaml`
+    describing what changed. A run's writes land together when it finishes, and a run that
+    ends early leaves the committed print as it was. A user-authored
+    `description.md` or `statistics.annotations.yaml` is never touched. A table the database
+    no longer has loses its producer-written files; its user-authored files are kept. Auto connections run
     sequentially, each isolated so one failure does not block the rest. Writes one run log to
     `~/.dbprint/logs/<project-slug>/`, keeping the 3 most recent.
 
@@ -117,7 +127,7 @@ def generate_command(
 
     **Arguments:**
 
-    - `CONN`: connection to profile; resolved from `.dbprint.yaml` when omitted
+    - `CONNECTION`: connection to profile; resolved from `.dbprint.yaml` when omitted
       (the `auto: true` set, or the sole connection).
 
     **Exit codes:**
@@ -128,7 +138,8 @@ def generate_command(
       a table, column, relationship, index or comment). Statistics that moved
       are recorded in `diff.yaml` but do not set this code;
       `dbprint check --online` reports both
-    - `4`: connection
+    - `4`: connection (also when the target lists none of the committed tables in scope, a
+      wrong path or missing grants; `--confirm-all-removed` records a real total removal)
     - `5`: partial (some tables failed, others succeeded or were skipped; or every
       table succeeded but the sketch pass that runs after them did not)
     - `7`: total failure (no table was profiled)
@@ -137,7 +148,7 @@ def generate_command(
 
     - `dbprint generate`: all auto connections
     - `dbprint generate warehouse`: one connection
-    - `dbprint generate --include 'public.*'`: narrow scope for this run
+    - `dbprint generate --include '*.public.*'`: narrow scope for this run
     - `dbprint generate --dry-run`: preview plan + diff, write nothing
     - `dbprint generate --fail-fast`: stop at the first table failure
     """
@@ -146,7 +157,7 @@ def generate_command(
     project_config = resolve_project(project)
 
     try:
-        connections = resolve(project_config, conn)
+        connections = resolve(project_config, connection)
     except ConnectionResolutionError as exc:
         click.echo(str(exc), err=True)
         ctx.exit(EXIT_GENERIC)
@@ -192,6 +203,7 @@ def generate_command(
                             cli_include=include_patterns,
                             cli_exclude=exclude_patterns,
                             fail_fast=fail_fast,
+                            confirm_all_removed=confirm_all_removed,
                             on_progress=renderer.on_event if renderer is not None else None,
                         )
 
@@ -229,7 +241,7 @@ def generate_command(
                             deferred.append(
                                 f"{result.connection_name}: stopped at the first failure "
                                 f"(--fail-fast); {result.not_attempted} matched table(s) not "
-                                "attempted, and the previous manifest is unchanged",
+                                "attempted, and nothing was written",
                             )
                         exit_codes.append(result.exit_code)
                     finally:
@@ -260,6 +272,7 @@ def _run_one(
     cli_include: tuple[str, ...] = (),
     cli_exclude: tuple[str, ...] = (),
     fail_fast: bool = False,
+    confirm_all_removed: bool = False,
     on_progress: ProgressCallback | None = None,
 ) -> GenerateResult:
     """Construct adapter + Engine for one connection; return GenerateResult."""
@@ -278,6 +291,7 @@ def _run_one(
         cli_exclude=cli_exclude,
         on_progress=on_progress,
         fail_fast=fail_fast,
+        confirm_all_removed=confirm_all_removed,
     )
 
     return setup.engine.generate(request)

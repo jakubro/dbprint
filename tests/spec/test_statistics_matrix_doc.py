@@ -27,29 +27,39 @@ def _load_generator():
 
 gen = _load_generator()
 
+# SPEC 2.2.3's base fields, typed out rather than read off the generator so its own set cannot cancel out.
+_BASE_8 = frozenset(
+    {
+        "sql_type",
+        "nullable",
+        "null_count",
+        "null_rate",
+        "cardinality",
+        "cardinality_ratio",
+        "cardinality_method",
+        "classification",
+    },
+)
 _ROW = re.compile(r"^\| `(\w+)` \| (.+) \| (.+) \|$", re.MULTILINE)
 
 
 def _page_rows(text: str) -> dict[str, tuple[frozenset[str], frozenset[str]]]:
-    """Per classification: (required-beyond-base, forbidden), parsed off the backticked cells."""
+    """Per classification: (required, forbidden), with the page's base-8 compression undone."""
 
     return {
-        classification: (_cell_fields(required), _cell_fields(forbidden))
+        classification: (_required(required), _cell_fields(forbidden))
         for classification, required, forbidden in _ROW.findall(text)
     }
 
 
+def _required(cell: str) -> frozenset[str]:
+    fields = _cell_fields(cell)
+
+    return fields if cell.endswith("(fewer than the base 8)") else fields | _BASE_8
+
+
 def _cell_fields(cell: str) -> frozenset[str]:
     return frozenset(re.findall(r"`(\w+)`", cell))
-
-
-def _reconstructed_required(classification: str, cell_fields: frozenset[str]) -> frozenset[str]:
-    """Undo the generator's own base-8 compression, mirroring `gen._row`'s branch."""
-
-    if gen._BASE_FIELDS <= REQUIRED_FIELDS[classification]:
-        return cell_fields | gen._BASE_FIELDS
-
-    return cell_fields
 
 
 def test_the_page_still_parses() -> None:
@@ -72,16 +82,11 @@ def test_committed_page_matches_a_fresh_render() -> None:
 
 class TestModuleAgreement:
     def test_required_fields_agree_cell_for_cell(self) -> None:
-        """`unsupported`'s cell already carries its full set (SPEC 2.2.3: fewer than the base
-        8), so only the other seven reconstruct by re-adding the base before comparing.
-        """
-
         rows = _page_rows(gen.DOCS_PATH.read_text())
         mismatched = [
             classification
             for classification in gen._CLASSIFICATIONS
-            if _reconstructed_required(classification, rows[classification][0])
-            != REQUIRED_FIELDS[classification]
+            if rows[classification][0] != REQUIRED_FIELDS[classification]
         ]
 
         assert not mismatched, f"required fields disagree with the module for: {mismatched}"

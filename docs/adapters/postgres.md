@@ -6,7 +6,7 @@ $ pip install 'dbprint[postgres]'
 
 The extra carries psycopg 3. PostgreSQL additionally needs the **`pg_dump` client binary on `PATH`**: DDL comes from `pg_dump --schema-only`, not from a query. The binary is probed when the connection opens, before any query runs, so a container that installs the Python package alone does not profile statistics and then fail on DDL — it fails at `connecting` with `pg_dump binary not found on PATH`, exits `4`, and writes nothing. `pg_dump` must also be at least the server's major version; an older client refuses a newer server outright, which fails every table's DDL.
 
-Fully-qualified names are `schema.table`.
+Fully-qualified names are `database.schema.table`, whether or not `database` is set.
 
 ## Privileges
 
@@ -40,11 +40,11 @@ GRANT TEMPORARY ON DATABASE my_db TO dbprint_ro;
 - **DDL** fails per table, grouped on stderr at the end of the run with the exit status and `pg_dump`'s own stderr carried through. Without `USAGE` on the schema:
 
   ```
-  1 table failed: PostgresConnectionError: pg_dump failed for 'seedbank.accession': exit 1;
+  1 table failed: PostgresConnectionError: pg_dump failed for 'arboretum.seedbank.accession': exit 1;
   stderr: pg_dump: error: query failed: ERROR:  permission denied for schema seedbank
   pg_dump: detail: Query was: LOCK TABLE seedbank.accession IN ACCESS SHARE MODE
     operation: extract_ddl
-    first: seedbank.accession
+    first: arboretum.seedbank.accession
   ```
 
   With `USAGE` but no `SELECT` on the table, the same message ends `permission denied for table accession`. Both are raised by the `ACCESS SHARE` lock `pg_dump` takes before reading, which is why the last clause is the quickest way to tell which grant is still missing.
@@ -73,12 +73,32 @@ Where it does fire, the drawn rows are copied once into a session-lifetime tempo
 Where `TEMPORARY` is absent the run does not fail. It warns on stderr and falls back to re-evaluating the sample per statement:
 
 ```
-table 'seedbank.germination_trial': could not materialize its sample of 0.25
+table 'arboretum.seedbank.germination_trial': could not materialize its sample of 0.25
 (InsufficientPrivilege: permission denied to create temporary tables in database "my_db");
 each statistic for it is measured over its own draw of the rows
 ```
 
 The fallback is not an equivalent path. Each statement then draws its own rows, so a column's listed value counts and the non-null figure they are a share of come from different reads, and the file can disagree with itself on a table nobody wrote to. Setting `materialize_sample: false` chooses that trade deliberately, which is the right call where the tool must stay strictly read-only — and the wrong one where it was chosen to avoid a grant.
+
+## Types without a comparison operator
+
+A `json` column is counted by its text, so two documents differing only in whitespace or key order count as two, and a `money` column is measured as `numeric`, publishing plain numbers rather than the session's currency spelling. A type with no equality operator at all (`point`, `xml`, `xid`, ...) is published `unsupported` with its null count, and a type nothing declares that fails a statement degrades that one column to `unmeasured`.
+
+## Listed values
+
+A network (`inet`, `cidr`), range, multirange or `interval` column lists its values as PostgreSQL's own text (`10.0.0.1/32`, `[1,5)`, `1 year 2 mons`), the text `length` is measured over — so every listed value, cast back to the column's type, selects its own rows.
+
+## Namespaces
+
+`database` is optional. Omitted, the connection first opens `postgres` and reads every database that accepts connections and is not a template. A PostgreSQL session is bound to one database, so the connection opens one session per database holding a selected table, with the same credentials, and runs every statement — `pg_dump` included — against the table's own database; a table whose database compares under a different default collation than the connection's first says so on each of its string columns. The grants below are needed in each database profiled. A database whose session will not open, or whose listing fails, is skipped with a warning. A database no `include` pattern can reach by its name is never opened at all. View dependencies are read only in databases holding a selected object; a database whose dependency read fails is named in a warning and its views omit `depends_on` for that run, while every other database's views keep theirs.
+
+## Statement timeout
+
+`statement_timeout` is sent as the session's own `statement_timeout` setting in the connection's start-up packet, so it bounds every statement the session runs, lock waits included, and a statement that exceeds it is cancelled by the server. `pg_dump`, which extracts each table's DDL, zeroes that setting on its own session; there the limit becomes `--lock-wait-timeout`, bounding the wait for the table lock, while the dump as a whole keeps its fixed 60-second ceiling.
+
+## Parallelism
+
+`parallelism: N` opens up to N sessions per database the run reads, each on first use, and profiles up to N tables at once. `pg_dump` opens a connection of its own for each table's DDL, so the connection count on the server can reach twice N; size `max_connections` and any per-role `CONNECTION LIMIT` for that.
 
 ## Reference
 

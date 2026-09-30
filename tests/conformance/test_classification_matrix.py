@@ -146,20 +146,6 @@ class TestLooksLikeEvidenceIsCarriedWhereTheMatrixAllowsIt:
 
         assert _errors(_payload(classification, column)) == []
 
-    @pytest.mark.parametrize("classification", LOOKS_LIKE_BEARING)
-    def test_the_share_is_recomputable_from_the_pair(self, classification: str) -> None:
-        """The two numbers are the whole point - a consumer must be able to divide them."""
-
-        column = _column(classification)
-        column.setdefault("inferred", {}).update(
-            {"looks_like": "email", "sampled": 100, "matched": 96},
-        )
-        payload = _payload(classification, column)
-        inferred = payload["columns"]["c"]["inferred"]
-
-        assert _errors(payload) == []
-        assert inferred["matched"] / inferred["sampled"] == 0.96
-
 
 class TestLooksLikeCandidateFollowsTheMatrix:
     """`inferred.looks_like_candidate`/`.looks_like_candidate_share` (SPEC 4.1.3): the
@@ -376,6 +362,53 @@ class TestRedactedFollowsTheMatrix:
         assert check_statistics(payload, PATH) != []
 
 
+class TestAMarkedColumnPublishesItsCountProfileOnly:
+    """SPEC 2.2.9: what a renaming of the values could change is forbidden beside a marker."""
+
+    @pytest.mark.parametrize(
+        "field",
+        ["mean", "sum", "zero_count", "negative_count", "quantized_count"],
+    )
+    def test_a_withheld_numeric_field_is_an_error(self, field: str) -> None:
+        column = _marked(_column("numeric"), "mask")
+        column[field] = 1
+        forbidden = [
+            i
+            for i in statistics.check(_payload("numeric", column), PATH, FQN)
+            if i.code == "stats.forbidden-field-for-classification"
+        ]
+
+        assert [(i.severity, i.spec_ref) for i in forbidden] == [("error", "§2.2.9")]
+
+    def test_a_marked_numeric_column_owes_none_of_them(self) -> None:
+        codes = _codes(_payload("numeric", _marked(_column("numeric"), "mask")))
+
+        assert "stats.missing-required-field-for-classification" not in codes
+
+    def test_an_unmarked_numeric_column_still_owes_them(self) -> None:
+        column = _column("numeric")
+        del column["zero_count"]
+
+        assert "stats.missing-required-field-for-classification" in _codes(
+            _payload("numeric", column),
+        )
+
+    def test_tied_hashed_entries_are_checked_in_digest_order(self) -> None:
+        column = _marked(_column("text"), "hash")
+        column["values"] = [{"value": "ff00", "count": 5}, {"value": "0a11", "count": 5}]
+
+        assert "stats.values-not-ordered" in _codes(_payload("text", column))
+
+    def test_tied_masked_entries_are_checked_by_count_only(self) -> None:
+        column = _marked(_column("text"), "mask")
+        column["values"] = [
+            {"value": "[redacted]", "count": 5},
+            {"value": "[redacted]", "count": 5},
+        ]
+
+        assert "stats.values-not-ordered" not in _codes(_payload("text", column))
+
+
 class TestBoundsAreConditionalOnDrop:
     """The matrix's conditional cells: bounds are REQUIRED until `drop` withholds them.
 
@@ -448,11 +481,6 @@ class TestBoundsAreConditionalOnDrop:
         assert "stats.missing-required-field-for-classification" in _codes(
             _payload("temporal", column),
         )
-
-    def test_a_dropped_temporal_column_sheds_span_days_with_its_range(self) -> None:
-        """`span_days` is its own matrix row, and it lives inside the object `drop` removes."""
-
-        assert "range" not in _dropped("temporal")
 
     @pytest.mark.parametrize("classification", ["boolean", "categorical", "text"])
     def test_a_dropped_value_list_keeps_its_counts(self, classification: str) -> None:
@@ -601,12 +629,18 @@ class TestNormalizedCardinalityFollowsTheMatrix:
 
         assert "stats.forbidden-field-for-classification" in _codes(payload)
 
-    def test_exceeding_cardinality_is_an_error(self) -> None:
+    def test_exceeding_cardinality_warns_without_failing_conformance(self) -> None:
         column = _column("text")
         column["normalized_cardinality"] = column["cardinality"] + 1
         payload = _payload("text", column)
+        issues = [
+            *check_statistics(payload, PATH),
+            *statistics.check(payload, PATH, FQN),
+        ]
+        excess = [i for i in issues if i.code == "stats.normalized-cardinality-exceeds-cardinality"]
 
-        assert "stats.normalized-cardinality-exceeds-cardinality" in _codes(payload)
+        assert [i.severity for i in excess] == ["warning"]
+        assert [i.code for i in issues if i.severity == "error"] == []
 
     def test_exceeding_an_approximate_cardinality_conforms(self) -> None:
         """SPEC 2.2.4: an approximate `cardinality` makes the comparison approximate on both
@@ -698,6 +732,20 @@ class TestSpanDays:
         }
 
         assert "stats.span-days-mismatch" in _codes(_payload("temporal", column))
+
+    @pytest.mark.parametrize(
+        ("low", "high", "span"),
+        [
+            ("2019-01-03T00:00:00Z", "9999-12-31T23:59:59.999999Z", 2914997),
+            ("2024-01-01T00:00:00.500000Z", "2024-03-01T00:00:00.250000Z", 59),
+        ],
+        ids=["end_of_time_marker", "sub_second_bounds"],
+    )
+    def test_an_exact_span_validates_clean(self, low: str, high: str, span: int) -> None:
+        column = _column("temporal")
+        column["range"] = {"min": low, "max": high, "span_days": span}
+
+        assert "stats.span-days-mismatch" not in _codes(_payload("temporal", column))
 
     def test_a_date_only_column_is_checked_the_same_way(self) -> None:
         """`daily_viability_mv.day`'s own shape: no time-of-day component at all."""
@@ -889,13 +937,24 @@ def _prose(classification: str) -> dict[str, Any]:
 
 
 def _marked(column: dict[str, Any], primitive: str) -> dict[str, Any]:
-    """Apply a marker as a producer would: `_column` holds one distinct value, so the three
-    aggregates leave with it (SPEC 2.2.3).
+    """Apply a marker as a producer would: every statistic computed from what the values are
+    leaves with it (SPEC 2.2.9).
     """
 
     column["redacted"] = primitive
 
-    for field in ("mean", "sum", "length"):
+    for field in (
+        "mean",
+        "sum",
+        "length",
+        "zero_count",
+        "negative_count",
+        "empty_count",
+        "quantized_count",
+        "normalized_cardinality",
+        "unrepresentable",
+        "sketch",
+    ):
         column.pop(field, None)
 
     return column

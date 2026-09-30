@@ -28,6 +28,7 @@ def render_piped(connection_name: str, summary: dict[str, object], out: TextIO) 
     out.write(f"{connection_name}\tstale\t{summary.get('stale', 0)}\n")
     out.write(f"{connection_name}\tdormant\t{summary.get('dormant', 0)}\n")
     out.write(f"{connection_name}\tdescribed\t{summary.get('described', 0)}\n")
+    out.writelines(f"{connection_name}\tfailed_table\t{fqn}\n" for fqn in _failed(summary))
 
 
 def render_data(entries: list[dict[str, Any]], fmt: str, stream: TextIO) -> None:
@@ -40,3 +41,9 @@ def render_data(entries: list[dict[str, Any]], fmt: str, stream: TextIO) -> None
     else:
         json.dump(entries, stream, indent=2, default=str, sort_keys=False)
         stream.write("\n")
+
+
+def _failed(summary: dict[str, object]) -> list[str]:
+    failed = summary.get("failed_tables")
+
+    return [fqn for fqn in failed if isinstance(fqn, str)] if isinstance(failed, list) else []

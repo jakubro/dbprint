@@ -6,9 +6,11 @@ Mermaid's `maxTextSize`, which a connection-wide graph can exceed.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from typing import Any
 from urllib.parse import quote
 
+from dbprint.spec.fqn import split as split_fqn
 from . import catalogue
 
 
@@ -26,9 +28,12 @@ def build(
     rows: dict[str, Any] | None,
     conn_name: str,
     depends_on: tuple[str, ...] = (),
+    *,
+    in_print: Collection[str],
 ) -> str | None:
-    """A `flowchart LR` of this table's FK relationships plus what it reads (SPEC 2.2.17) -
-    `rows` arrives normalized, and `depends_on` renders with its own arrow shape.
+    """A `flowchart LR` of this table's FK relationships plus what it reads (SPEC 2.2.17).
+
+    `rows` arrives normalized; a table not `in_print` is drawn opaque and unlinked (SPEC 1.3).
     """
 
     refers_to = (rows or {}).get("refers_to") or []
@@ -45,8 +50,10 @@ def build(
     )
     node_ids = {t: f"n{i}" for i, t in enumerate(sorted(tables))}
 
+    printed = sorted(t for t in tables if t == name or t in in_print)
     lines = ["flowchart LR"]
-    _emit_subgraphs(lines, catalogue.prefix_tree(sorted(tables)), node_ids, counter=[0])
+    lines += [f'  {node_ids[t]}["{t}"]' for t in sorted(tables.difference(printed))]
+    _emit_subgraphs(lines, catalogue.prefix_tree(printed), node_ids, counter=[0])
 
     rejected_links: list[int] = []
     depends_on_links: list[int] = []
@@ -77,7 +84,7 @@ def build(
         depends_on_links.append(link_index)
         link_index += 1
 
-    for t in sorted(tables):
+    for t in printed:
         lines.append(f'  click {node_ids[t]} "/t/{conn_name}/{quote(t)}" "{t}"')
 
     lines.append("  classDef current fill:#4a90d922,stroke:#4a90d9,stroke-width:2px;")
@@ -105,7 +112,7 @@ def _emit_subgraphs(
     """Recursively wrap a prefix tree's groups in nested Mermaid subgraph blocks."""
 
     for t in tree.leaves:
-        lines.append(f'  {node_ids[t]}["{t.split(".")[-1]}"]')
+        lines.append(f'  {node_ids[t]}["{split_fqn(t)[-1]}"]')
 
     for group_name, subtree in tree.groups.items():
         counter[0] += 1

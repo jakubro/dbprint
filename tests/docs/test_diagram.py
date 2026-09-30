@@ -2,15 +2,36 @@
 
 from __future__ import annotations
 
+import re
+
 from dbprint.docs import diagram
+
+
+_PRINT = frozenset(
+    {
+        "public.orphan",
+        "seedbank.accession",
+        "seedbank.a_v",
+        "seedbank.germination_trial",
+        "seedbank.taxon",
+    },
+)
 
 
 class TestBuild:
     def test_no_relationships_is_none(self) -> None:
-        assert diagram.build("public.orphan", {"refers_to": [], "referenced_by": []}, "c") is None
+        assert (
+            diagram.build(
+                "public.orphan",
+                {"refers_to": [], "referenced_by": []},
+                "c",
+                in_print=_PRINT,
+            )
+            is None
+        )
 
     def test_absent_relationships_block_is_none(self) -> None:
-        assert diagram.build("public.orphan", None, "c") is None
+        assert diagram.build("public.orphan", None, "c", in_print=_PRINT) is None
 
     def test_declared_edge_uses_a_solid_arrow(self) -> None:
         relationships = {
@@ -20,7 +41,7 @@ class TestBuild:
             "referenced_by": [],
         }
 
-        source = diagram.build("seedbank.accession", relationships, "primary")
+        source = diagram.build("seedbank.accession", relationships, "primary", in_print=_PRINT)
 
         assert source is not None
         assert "flowchart LR" in source
@@ -35,7 +56,7 @@ class TestBuild:
             "referenced_by": [],
         }
 
-        source = diagram.build("seedbank.accession", relationships, "primary")
+        source = diagram.build("seedbank.accession", relationships, "primary", in_print=_PRINT)
 
         assert source is not None
         assert '-.->|"taxon_id"|' in source
@@ -50,7 +71,7 @@ class TestBuild:
             "referenced_by": [],
         }
 
-        source = diagram.build("seedbank.accession", relationships, "primary")
+        source = diagram.build("seedbank.accession", relationships, "primary", in_print=_PRINT)
 
         assert source is not None
         assert '-.->|"taxon_id"|' in source
@@ -69,7 +90,7 @@ class TestBuild:
             "referenced_by": [],
         }
 
-        source = diagram.build("seedbank.accession", relationships, "primary")
+        source = diagram.build("seedbank.accession", relationships, "primary", in_print=_PRINT)
 
         assert source is not None
         assert "linkStyle 0" in source
@@ -87,7 +108,7 @@ class TestBuild:
             "referenced_by": [],
         }
 
-        source = diagram.build("seedbank.accession", relationships, "primary")
+        source = diagram.build("seedbank.accession", relationships, "primary", in_print=_PRINT)
 
         assert source is not None
         assert "linkStyle" not in source
@@ -106,7 +127,7 @@ class TestBuild:
             ],
         }
 
-        source = diagram.build("seedbank.accession", relationships, "primary")
+        source = diagram.build("seedbank.accession", relationships, "primary", in_print=_PRINT)
 
         assert source is not None
         assert "click" in source
@@ -122,11 +143,16 @@ class TestBuild:
             "referenced_by": [],
         }
 
-        source = diagram.build("seedbank.accession", relationships, "primary")
+        source = diagram.build("seedbank.accession", relationships, "primary", in_print=_PRINT)
 
         assert source is not None
-        assert "classDef current" in source
-        assert source.count("class n") >= 1  # the current-table node is classed
+        current = re.search(r'(n\d+)\["accession"\]', source)
+        other = re.search(r'(n\d+)\["taxon"\]', source)
+
+        assert current is not None
+        assert other is not None
+        assert f"class {current[1]} current;" in source
+        assert f"class {other[1]} current;" not in source
 
     def test_shared_prefix_nests_into_a_subgraph(self) -> None:
         relationships = {
@@ -136,7 +162,7 @@ class TestBuild:
             "referenced_by": [],
         }
 
-        source = diagram.build("seedbank.accession", relationships, "primary")
+        source = diagram.build("seedbank.accession", relationships, "primary", in_print=_PRINT)
 
         assert source is not None
         assert 'subgraph sg1["seedbank"]' in source
@@ -150,6 +176,7 @@ class TestBuild:
             {"refers_to": [], "referenced_by": []},
             "primary",
             ("seedbank.taxon",),
+            in_print=_PRINT,
         )
 
         assert source is not None
@@ -168,6 +195,7 @@ class TestBuild:
             relationships,
             "primary",
             ("seedbank.taxon",),
+            in_print=_PRINT,
         )
 
         assert source is not None
@@ -182,12 +210,29 @@ class TestBuild:
             {"refers_to": [], "referenced_by": []},
             "primary",
             ("seedbank.taxon",),
+            in_print=_PRINT,
         )
 
         assert source is not None
         assert "linkStyle 0 stroke:#888" in source
 
-    def test_no_relationships_and_no_depends_on_is_none(self) -> None:
-        assert (
-            diagram.build("public.orphan", {"refers_to": [], "referenced_by": []}, "c", ()) is None
-        )
+    def test_a_table_outside_the_print_is_drawn_whole_ungrouped_and_unlinked(self) -> None:
+        """SPEC 1.3: an out-of-print name is opaque, so its periods are no schema boundary."""
+
+        relationships = {
+            "refers_to": [
+                {
+                    "column": ["bed_id"],
+                    "target_table": "archive.2025.old beds",
+                    "detection": "declared",
+                },
+            ],
+            "referenced_by": [],
+        }
+
+        source = diagram.build("seedbank.accession", relationships, "primary", in_print=_PRINT)
+
+        assert source is not None
+        assert 'n0["archive.2025.old beds"]' in source
+        assert 'subgraph sg1["seedbank"]' in source
+        assert "archive" not in source.split('n0["archive.2025.old beds"]', 1)[1]

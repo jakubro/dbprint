@@ -106,6 +106,19 @@ class TestOnAHost:
         assert "--unshare-net" in argv
         assert "--die-with-parent" in argv
 
+    def test_nothing_the_run_starts_outlives_it(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        recorded_exec: list[list[str]],
+    ) -> None:
+        monkeypatch.setattr(conftest, "in_container", lambda: False)
+        monkeypatch.setattr(conftest.shutil, "which", lambda _: "/usr/bin/bwrap")
+
+        conftest._reexec_under_sandbox()
+        argv = recorded_exec[0]
+
+        assert "--unshare-pid" in argv[: argv.index("--die-with-parent")]
+
     def test_the_child_is_marked_so_it_does_not_sandbox_itself(
         self,
         monkeypatch: pytest.MonkeyPatch,

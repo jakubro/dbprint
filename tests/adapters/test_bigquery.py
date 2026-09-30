@@ -7,10 +7,9 @@ from __future__ import annotations
 import pytest
 
 from dbprint.adapters import BigqueryAdapter, StatisticsConfig
-from dbprint.adapters.bigquery import introspect
-from dbprint.adapters.bigquery.identity import Identity
-from dbprint.adapters.bigquery.introspect import IdentifierRejected
+from dbprint.adapters.bigquery import DIALECT, introspect
 from dbprint.adapters.errors import QueryFailed
+from dbprint.adapters.identifiers import IdentifierRejected, Identity
 from dbprint.spec.sketch import low64_md5
 
 
@@ -54,32 +53,9 @@ class TestKeySketch:
 
         expected = sorted(low64_md5(v) for v in values)
 
+        # A hash with the top bit set is what a signed or dropped-half recombination gets wrong.
+        assert any(h >= 2**63 for h in expected)
         assert list(sketch) == expected
-
-    def test_every_value_fits_in_64_bits(self, bigquery_test_dataset) -> None:
-        """A value at or above 2**64 would prove the recombination overflowed or lost bits."""
-
-        cursor, dataset = bigquery_test_dataset
-        values = [f"probe-{i}" for i in range(500)]
-        rows = ", ".join(f"('{v}')" for v in values)
-        cursor.execute(f"CREATE TABLE `{dataset}`.hashed2 (v STRING)")
-        cursor.execute(f"INSERT INTO `{dataset}`.hashed2 (v) VALUES {rows}")
-
-        adapter = _bigquery_adapter(cursor, dataset)
-
-        try:
-            table = next(
-                t
-                for t in adapter.list_tables(include=["*"], exclude=[])
-                if t.fqn.split(".")[-1] == "hashed2"
-            )
-            adapter.introspect_columns(table.fqn)  # populates Identity's physical column map
-            sketch = adapter.compute_key_sketch(table.fqn, "v", "string", "text", k=1000)
-        finally:
-            adapter.close()
-
-        assert sketch, "the probe table seeded no distinct values"
-        assert all(0 <= h < 2**64 for h in sketch)
 
 
 class TestNoViewDependencies:
@@ -246,7 +222,7 @@ class TestRowCountEstimateAddress:
         estimate = introspect.estimate_row_count(
             cursor,
             _PROJECT,
-            Identity(parts=("seedbank", "accession")),
+            Identity.of(("seedbank", "accession"), DIALECT),
         )
 
         assert estimate == 1234
@@ -262,9 +238,13 @@ class TestRowCountEstimateAddress:
 
         cursor = _RecordingCursor([(9,)])
 
-        introspect.estimate_row_count(cursor, _PROJECT, Identity(parts=("seedbank", "accession")))
+        introspect.estimate_row_count(
+            cursor,
+            _PROJECT,
+            Identity.of(("seedbank", "accession"), DIALECT),
+        )
 
-        assert "SUM(total_rows)" in cursor.statements[0]
+        assert "SUM(prt.total_rows)" in cursor.statements[0]
 
     def test_a_table_with_no_partition_row_has_no_estimate(self) -> None:
         """SPEC-independent, but the engine's own reading: absent is not zero."""
@@ -275,7 +255,7 @@ class TestRowCountEstimateAddress:
             introspect.estimate_row_count(
                 cursor,
                 _PROJECT,
-                Identity(parts=("seedbank", "accession")),
+                Identity.of(("seedbank", "accession"), DIALECT),
             )
             is None
         )
@@ -287,7 +267,7 @@ class TestRowCountEstimateAddress:
             introspect.estimate_row_count(
                 _RefusingCursor([]),
                 _PROJECT,
-                Identity(parts=("seedbank", "accession")),
+                Identity.of(("seedbank", "accession"), DIALECT),
             )
 
 
@@ -392,7 +372,12 @@ class TestArrayAndStructColumnsDoNotFailTheTable:
         try:
             table = _table(adapter, dataset, "array_col")
             columns = adapter.introspect_columns(table.fqn)
-            counts, base = adapter.compute_base_statistics(table.fqn, columns, StatisticsConfig())
+            counts, phase_a = adapter.compute_base_statistics(
+                table.fqn,
+                columns,
+                StatisticsConfig(),
+            )
+            base = phase_a.stats
         finally:
             adapter.close()
 
@@ -415,7 +400,12 @@ class TestArrayAndStructColumnsDoNotFailTheTable:
         try:
             table = _table(adapter, dataset, "struct_col")
             columns = adapter.introspect_columns(table.fqn)
-            counts, base = adapter.compute_base_statistics(table.fqn, columns, StatisticsConfig())
+            counts, phase_a = adapter.compute_base_statistics(
+                table.fqn,
+                columns,
+                StatisticsConfig(),
+            )
+            base = phase_a.stats
         finally:
             adapter.close()
 
@@ -444,7 +434,12 @@ class TestGeographyAndJsonColumnsDoNotFailTheTable:
         try:
             table = _table(adapter, dataset, "geo_col")
             columns = adapter.introspect_columns(table.fqn)
-            counts, base = adapter.compute_base_statistics(table.fqn, columns, StatisticsConfig())
+            counts, phase_a = adapter.compute_base_statistics(
+                table.fqn,
+                columns,
+                StatisticsConfig(),
+            )
+            base = phase_a.stats
         finally:
             adapter.close()
 
@@ -467,7 +462,12 @@ class TestGeographyAndJsonColumnsDoNotFailTheTable:
         try:
             table = _table(adapter, dataset, "json_col")
             columns = adapter.introspect_columns(table.fqn)
-            counts, base = adapter.compute_base_statistics(table.fqn, columns, StatisticsConfig())
+            counts, phase_a = adapter.compute_base_statistics(
+                table.fqn,
+                columns,
+                StatisticsConfig(),
+            )
+            base = phase_a.stats
         finally:
             adapter.close()
 
@@ -494,7 +494,12 @@ class TestNearUniqueColumnsAreRecountedExactly:
         try:
             table = _table(adapter, dataset, "near_unique")
             columns = adapter.introspect_columns(table.fqn)
-            _counts, base = adapter.compute_base_statistics(table.fqn, columns, StatisticsConfig())
+            _counts, phase_a = adapter.compute_base_statistics(
+                table.fqn,
+                columns,
+                StatisticsConfig(),
+            )
+            base = phase_a.stats
         finally:
             adapter.close()
 
@@ -533,7 +538,12 @@ class TestTemporalValueListFailureDegradesTheWholeBlock:
         try:
             table = _table(adapter, dataset, "temporal_fail")
             columns = adapter.introspect_columns(table.fqn)
-            counts, base = adapter.compute_base_statistics(table.fqn, columns, StatisticsConfig())
+            counts, phase_a = adapter.compute_base_statistics(
+                table.fqn,
+                columns,
+                StatisticsConfig(),
+            )
+            base = phase_a.stats
             enriched = adapter.compute_column_statistics(
                 table.fqn,
                 columns,

@@ -11,11 +11,14 @@ from .issue import Issue
 from .yaml_utils import load_yaml
 
 
-PATH_SEGMENT_RE = re.compile(r"^[a-z0-9_][a-z0-9_.-]*$")
+PATH_SEGMENT_RE = re.compile(r"^[a-z0-9_][a-z0-9_-]*$")
+PRODUCER_ARTIFACTS = {"ddl.sql", "statistics.yaml", "relationships.yaml"}
+_STALE_TABLE_REMEDY = (
+    " A table an earlier release printed under this name is refused now: exclude it, delete this "
+    "directory, and the next generate drops its entry."
+)
 CANONICAL_ARTIFACTS = {
-    "ddl.sql",
-    "statistics.yaml",
-    "relationships.yaml",
+    *PRODUCER_ARTIFACTS,
     "description.md",
     "statistics.annotations.yaml",
     "relationships.annotations.yaml",
@@ -117,20 +120,17 @@ def _check_path_segments(print_root: Path) -> list[Issue]:
     issues: list[Issue] = []
 
     for path in print_root.rglob("*"):
-        rel = path.relative_to(print_root)
-
-        for seg in rel.parts:
-            if not PATH_SEGMENT_RE.match(seg):
-                issues.append(
-                    Issue(
-                        str(rel),
-                        "layout.invalid-path-segment",
-                        "error",
-                        f"Path segment {seg!r} fails the allowlist regex {PATH_SEGMENT_RE.pattern!r}.",
-                        "§1.5.1",
-                    ),
-                )
-                break
+        if path.is_dir() and not PATH_SEGMENT_RE.match(path.name):
+            issues.append(
+                Issue(
+                    str(path.relative_to(print_root)),
+                    "layout.invalid-path-segment",
+                    "error",
+                    f"Path segment {path.name!r} fails the allowlist regex {PATH_SEGMENT_RE.pattern!r}."
+                    + _STALE_TABLE_REMEDY,
+                    "§1.5.1",
+                ),
+            )
 
     return issues
 
@@ -199,7 +199,10 @@ def _check_diff_present(print_root: Path, manifest_data: dict) -> list[Issue]:
 
 
 def _check_directory_depth(print_root: Path, manifest_data: dict) -> list[Issue]:
-    """Canonical artifacts must appear in directories matching some manifest table path."""
+    """Producer-written artifacts must sit in a directory some manifest table path declares.
+
+    A user-authored file outside one is `manifest.orphaned-artifact`'s alone (SPEC 1.4).
+    """
 
     issues: list[Issue] = []
     valid_table_dirs = {
@@ -208,7 +211,7 @@ def _check_directory_depth(print_root: Path, manifest_data: dict) -> list[Issue]
     }
 
     for path in print_root.rglob("*"):
-        if not path.is_file() or path.name not in CANONICAL_ARTIFACTS:
+        if not path.is_file() or path.name not in PRODUCER_ARTIFACTS:
             continue
 
         parent_parts = path.parent.resolve().parts
@@ -221,7 +224,7 @@ def _check_directory_depth(print_root: Path, manifest_data: dict) -> list[Issue]
                 str(path.relative_to(print_root)),
                 "layout.unexpected-directory-level",
                 "error",
-                f"Canonical artifact {path.name!r} appears in a directory not listed in manifest.tables[*].path.",
+                f"Producer-written artifact {path.name!r} appears in a directory not listed in manifest.tables[*].path.",
                 "§1.4",
             ),
         )

@@ -5,26 +5,41 @@ carry the `CREATE` statement verbatim, so there is no `GET_DDL`/`pg_dump` step.
 from __future__ import annotations
 
 from .connection import Cursor, exec_query
+from ..identifiers import Identity
 
 
-def extract_ddl(cursor: Cursor, fqn: str) -> str:
+def extract_ddl(cursor: Cursor, identity: Identity) -> str:
     """Return the object's own `CREATE` statement, post-normalization."""
 
-    database, schema, table = fqn.split(".")
+    database, schema, table = identity.parts
     row = exec_query(
         cursor,
         """
-        SELECT sql FROM duckdb_tables()
-        WHERE lower(database_name) = ? AND lower(schema_name) = ? AND lower(table_name) = ?
+        SELECT
+          tbl.sql
+        FROM
+          DUCKDB_TABLES() tbl
+        WHERE
+          tbl.database_name = ?
+          AND tbl.schema_name = ?
+          AND tbl.table_name = ?
+
         UNION ALL
-        SELECT sql FROM duckdb_views()
-        WHERE lower(database_name) = ? AND lower(schema_name) = ? AND lower(view_name) = ?
+
+        SELECT
+          vew.sql
+        FROM
+          DUCKDB_VIEWS() vew
+        WHERE
+          vew.database_name = ?
+          AND vew.schema_name = ?
+          AND vew.view_name = ?
         """,
         (database, schema, table, database, schema, table),
     ).fetchone()
 
     if row is None or not row[0]:
-        raise ValueError(f"no DDL available for {fqn!r}; not found in catalog")
+        raise ValueError(f"no DDL available for {identity.fqn!r}; not found in catalog")
 
     return normalize(row[0])
 

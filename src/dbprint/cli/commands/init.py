@@ -29,7 +29,7 @@ connections:
     adapter: postgres
     auto: true
     include:
-      - "public.*"
+      - "*.public.*"
 """
 
 CONNECTIONS_TEMPLATE = """\

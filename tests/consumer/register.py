@@ -22,6 +22,16 @@ class ClaimState:
 
 REGISTER: tuple[ClaimState, ...] = (
     ClaimState(
+        "extreme_number_statistics",
+        "Renders each float statistic as statistics.yaml spells it - positional, never in "
+        "exponent form; a structured surface carries the same number unrounded.",
+    ),
+    ClaimState(
+        "near_boundary_share",
+        "Never renders a share strictly between 0 and 1 as 0% or 100%; a structured surface "
+        "carries the share unrounded.",
+    ),
+    ClaimState(
         "scoped_table",
         "States the scanned population for the scoped table; never presents a scanned-set "
         "count as if it covered the whole table.",
@@ -68,9 +78,28 @@ REGISTER: tuple[ClaimState, ...] = (
         "from a kind the manifest never declared for that table.",
     ),
     ClaimState(
+        "scoped_complete_list",
+        "Never presents the scoped table's complete value list as the column's whole domain - "
+        "every enumeration, coverage statement, exhaustive/domain field, none match or "
+        "accepted_values verdict about it carries the scanned-set clause or is downgraded.",
+    ),
+    ClaimState(
+        "scoped_candidate_key",
+        "Never presents a key measured unique over the rows scanned as unique over the table.",
+    ),
+    ClaimState(
+        "scoped_latest_value",
+        "Never presents the scoped table's latest date or freshness verdict as the table's.",
+    ),
+    ClaimState(
         "delimiter_in_a_value",
         "Renders a value carrying a table delimiter or a line break without letting it add, "
         "end or split a cell of the table the surface draws around it.",
+    ),
+    ClaimState(
+        "value_spelling",
+        "Spells a stored 'NULL', an empty, a whitespace-only and a long spaced value so each "
+        "reads back as exactly itself on one line - never as a genuine null, nothing, or a fold.",
     ),
 )
 

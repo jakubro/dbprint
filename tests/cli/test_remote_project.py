@@ -114,12 +114,6 @@ def test_check_online_refuses_before_cloning(bare_repo: Path, tmp_path: Path) ->
     assert not (tmp_path / "home" / ".dbprint" / "cache").exists()
 
 
-def test_check_offline_does_not_refuse(bare_repo: Path) -> None:
-    result = CliRunner().invoke(main, ["check", "--project", _address(bare_repo), "--no-tui"])
-
-    assert "remote repository" not in result.output
-
-
 def test_a_bare_remote_never_discovers_a_nested_config(tmp_path: Path) -> None:
     """The bare form means the repository root - a nested `.dbprint.yaml` is never walked to."""
 

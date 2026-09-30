@@ -23,13 +23,18 @@
             data-columns="{{ e.columns or 0 }}" data-profiled="{{ e.profiled_at }}">
           <td><a href="{{ url_for('table', conn=c.name, table=fqn) }}">{{ fqn }}</a></td>
           <td>{{ e.type|capitalize }}</td>
-          <td class="num">{{ e.row_count|human }}</td>
-          <td class="num">{{ e.columns|human }}</td>
+          <td class="num">{{ e.row_count|number }}</td>
+          <td class="num">{{ e.columns|number }}</td>
           <td class="muted">{{ e.profiled_at|dt }}</td>
         </tr>
       {% endfor %}
     </tbody>
   </table>
+  {% if c.failed_tables %}
+    <p class="muted">Not profiled by the last run ({{ c.failed_tables|length }}):
+      {% for fqn in c.failed_tables %}<code>{{ fqn }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+      - they exist; run <code>dbprint generate</code> to see why.</p>
+  {% endif %}
 {% endfor %}
 
 {% endblock %}

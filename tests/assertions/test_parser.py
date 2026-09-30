@@ -3,8 +3,17 @@
 from __future__ import annotations
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
-from dbprint.assertions import AssertionSet, ParseError, parse_block
+from dbprint.assertions import (
+    AssertionSet,
+    ParseError,
+    ParseFault,
+    QueryAssertion,
+    TablePredicates,
+    parse_block,
+)
 
 
 class TestEmptyForms:
@@ -186,3 +195,159 @@ class TestQueriesParsing:
             {"queries": [{"name": "q1", "sql": "x", "expect": 0, "severity": "critical"}]},
         )
         assert result.queries[0].severity == "warning"
+
+
+_YAML_SCALARS = st.none() | st.booleans() | st.integers() | st.floats() | st.text(max_size=8)
+_YAML_VALUES = st.recursive(
+    _YAML_SCALARS,
+    lambda inner: (
+        st.lists(inner, max_size=3)
+        | st.dictionaries(st.text(max_size=8) | st.integers(), inner, max_size=3)
+    ),
+    max_leaves=15,
+)
+_ASSERTION_KEYS = st.sampled_from(["tables", "queries"]) | st.text(max_size=8)
+
+
+class TestParseProperties:
+    @given(st.dictionaries(_ASSERTION_KEYS, _YAML_VALUES, max_size=3))
+    def test_any_mapping_parses_without_raising(self, raw: dict[object, object]) -> None:
+        assert isinstance(parse_block(raw), AssertionSet)
+
+    @given(_YAML_VALUES.filter(lambda value: value is not None and not isinstance(value, dict)))
+    def test_a_non_mapping_raises_parse_error_alone(self, raw: object) -> None:
+        with pytest.raises(ParseError):
+            parse_block(raw)
+
+
+def _fault(path: str, detail: str, code: str = "assertion.malformed-block") -> ParseFault:
+    spec_ref = (
+        "ASSERTIONS.md §3.5" if code == "assertion.duplicate-query-name" else "ASSERTIONS.md §1.2"
+    )
+
+    return ParseFault(path=path, code=code, detail=detail, spec_ref=spec_ref)
+
+
+class TestEveryFaultNamesItsPathCodeDetailAndSection:
+    """ASSERTIONS.md 1.2 and 3.5: a malformed entry is reported where it sits, never fatally."""
+
+    def test_the_root_that_is_not_a_mapping_names_its_type(self) -> None:
+        with pytest.raises(ParseError, match=r"^assertions: must be a mapping, got list$"):
+            parse_block([])
+
+    def test_tables_that_are_not_a_mapping(self) -> None:
+        assert parse_block({"tables": [1]}).faults == (
+            _fault("tables", "assertions.tables: must be a mapping, got list"),
+        )
+
+    def test_every_malformed_table_is_reported_not_only_the_first(self) -> None:
+        result = parse_block({"tables": {"s.a": 1, "s.b": "x", "s.c": {"row_count": 3}}})
+
+        assert result.faults == (
+            _fault("tables.s.a", "assertions.tables.s.a: must be a mapping, got int"),
+            _fault("tables.s.b", "assertions.tables.s.b: must be a mapping, got str"),
+        )
+        assert result.tables == {"s.c": TablePredicates(fqn="s.c", row_count=3)}
+
+    def test_a_table_with_no_body_is_an_empty_table(self) -> None:
+        result = parse_block({"tables": {"s.a": None}})
+
+        assert result.faults == ()
+        assert result.tables == {"s.a": TablePredicates(fqn="s.a")}
+
+    def test_columns_that_are_not_a_mapping(self) -> None:
+        assert parse_block({"tables": {"s.a": {"columns": [1]}}}).faults == (
+            _fault(
+                "tables.s.a.columns",
+                "assertions.tables.s.a.columns: must be a mapping, got list",
+            ),
+        )
+
+    def test_every_malformed_column_is_reported_and_an_empty_one_kept(self) -> None:
+        result = parse_block(
+            {"tables": {"s.a": {"columns": {"x": 1, "y": None, "z": [2], "w": {"null_count": 0}}}}},
+        )
+
+        assert result.faults == (
+            _fault(
+                "tables.s.a.columns.x",
+                "assertions.tables.s.a.columns.x: must be a mapping, got int",
+            ),
+            _fault(
+                "tables.s.a.columns.z",
+                "assertions.tables.s.a.columns.z: must be a mapping, got list",
+            ),
+        )
+        assert result.tables["s.a"].columns == {"y": {}, "w": {"null_count": 0}}
+
+    def test_queries_that_are_not_a_list(self) -> None:
+        assert parse_block({"queries": {"q": 1}}).faults == (
+            _fault("queries", "assertions.queries: must be a list, got dict"),
+        )
+
+    def test_a_query_that_is_not_a_mapping(self) -> None:
+        assert parse_block({"queries": ["SELECT 1"]}).faults == (
+            _fault("queries[0]", "assertions.queries[0]: must be a mapping, got str"),
+        )
+
+    def test_a_query_with_an_empty_name(self) -> None:
+        assert parse_block({"queries": [{"name": "", "sql": "SELECT 0", "expect": 0}]}).faults == (
+            _fault("queries[0]", "assertions.queries[0]: `name` is required and must be a string"),
+        )
+
+    def test_a_query_with_no_sql(self) -> None:
+        assert parse_block({"queries": [{"name": "q", "sql": " ", "expect": 0}]}).faults == (
+            _fault("queries.q", "assertions.queries[0] 'q': `sql` is required"),
+        )
+
+    def test_a_query_with_an_unknown_expectation(self) -> None:
+        assert parse_block({"queries": [{"name": "q", "sql": "SELECT 0", "expect": 1}]}).faults == (
+            _fault("queries.q", "assertions.queries[0] 'q': `expect` must be 0 or empty"),
+        )
+
+    def test_a_duplicate_query_name(self) -> None:
+        entry = {"name": "q", "sql": "SELECT 0", "expect": 0}
+
+        assert parse_block({"queries": [entry, entry]}).faults == (
+            _fault(
+                "queries.q",
+                "assertions.queries: duplicate name 'q' - names must be unique",
+                code="assertion.duplicate-query-name",
+            ),
+        )
+
+
+class TestQueryFieldsAreNormalized:
+    def test_expect_zero_written_as_a_string_is_zero(self) -> None:
+        result = parse_block({"queries": [{"name": "q", "sql": "SELECT 0", "expect": "0"}]})
+
+        assert result.queries == (QueryAssertion(name="q", sql="SELECT 0", expect="0"),)
+
+    def test_expect_empty_is_kept(self) -> None:
+        result = parse_block({"queries": [{"name": "q", "sql": "SELECT 1", "expect": "empty"}]})
+
+        assert result.queries[0].expect == "empty"
+
+    def test_an_explicit_warning_severity_is_kept(self) -> None:
+        result = parse_block(
+            {"queries": [{"name": "q", "sql": "SELECT 0", "expect": 0, "severity": "warning"}]},
+        )
+
+        assert result.queries[0].severity == "warning"
+
+    def test_an_explicit_error_severity_is_kept(self) -> None:
+        result = parse_block(
+            {"queries": [{"name": "q", "sql": "SELECT 0", "expect": 0, "severity": "error"}]},
+        )
+
+        assert result.queries[0].severity == "error"
+
+
+class TestADuplicateNameDropsOnlyTheDuplicate:
+    def test_queries_after_a_duplicate_are_kept(self) -> None:
+        first = {"name": "q", "sql": "SELECT 0", "expect": 0}
+        later = {"name": "r", "sql": "SELECT 1", "expect": "empty"}
+
+        result = parse_block({"queries": [first, first, later]})
+
+        assert [query.name for query in result.queries] == ["q", "r"]

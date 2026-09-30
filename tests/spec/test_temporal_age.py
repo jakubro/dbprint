@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 from dbprint.spec.temporal_age import (
     day_count,
@@ -34,6 +34,15 @@ class TestDayCount:
         later = datetime(2026, 1, 2, 0, 10, 0, tzinfo=UTC)
 
         assert day_count(earlier, later) == 0
+
+    def test_one_microsecond_short_of_a_day_boundary_at_float_precision_limits(self) -> None:
+        earlier = datetime(2000, 1, 1, tzinfo=UTC)
+        later = earlier + timedelta(days=198842) - timedelta(microseconds=1)
+
+        assert day_count(earlier, later) == 198841
+
+    def test_a_far_past_maximum_one_microsecond_past_the_clock_ages_exactly(self) -> None:
+        assert max_age_days("1400-03-01T12:18:38.000001", "2026-09-24T12:18:38Z") == 228848
 
 
 class TestParseInstant:
@@ -128,3 +137,9 @@ class TestFreshnessClassification:
 
     def test_ninety_days_is_dormant(self) -> None:
         assert freshness_classification(90) == "dormant"
+
+
+def test_an_aware_instant_keeps_its_offset() -> None:
+    at_two = datetime(2024, 1, 1, 12, tzinfo=timezone(timedelta(hours=2)))
+
+    assert parse_instant(at_two) == datetime(2024, 1, 1, 10, tzinfo=UTC)

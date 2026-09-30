@@ -42,6 +42,12 @@ _RELATIONSHIPS_ANNOTATIONS = _load_schema("relationships_annotations.schema.json
 _MANIFEST_ANNOTATIONS = _load_schema("manifest_annotations.schema.json")
 
 
+def relationships_schema() -> dict[str, Any]:
+    """The packaged relationships.yaml JSON Schema, as loaded once at import."""
+
+    return _REL
+
+
 def check_statistics(data: Any, path: str) -> list[Issue]:
     """Validate a statistics.yaml body against the packaged JSON Schema."""
 

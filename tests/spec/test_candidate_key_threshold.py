@@ -10,7 +10,6 @@ from __future__ import annotations
 import pytest
 
 from dbprint.spec.classification import (
-    CANDIDATE_KEY_THRESHOLD,
     compute_candidate_key_exception,
     compute_cardinality_ratio,
     is_candidate_key,
@@ -43,8 +42,8 @@ class TestSharedHelper:
         raw = 9998 / 9999
         rounded = compute_cardinality_ratio(9998, 9999)
 
-        assert raw < CANDIDATE_KEY_THRESHOLD
-        assert rounded >= CANDIDATE_KEY_THRESHOLD
+        assert raw < 0.9999
+        assert rounded == 0.9999
 
     def test_the_floor_does_not_approach_the_candidate_key_threshold(self) -> None:
         """A floored near-zero ratio must stay far below 0.9999, not drift toward it."""
@@ -58,24 +57,6 @@ class TestSharedHelper:
 class TestCandidateKeyException:
     """SPEC 4.2's exception marker, at the ratio boundaries `is_candidate_key` shares."""
 
-    def test_ratio_one_carries_no_exception_regardless_of_method(self) -> None:
-        for method in ("exact", "approximate"):
-            result = compute_candidate_key_exception(10000, 1.0, method, 10000, 0)
-
-            assert result is None
-
-    def test_exactly_on_the_threshold_measured_exact(self) -> None:
-        """9999 of 10000 scanned distinct, exact - one duplicate was actually counted."""
-
-        result = compute_candidate_key_exception(9999, 0.9999, "exact", 10000, 0)
-
-        assert result == "measured_duplicates"
-
-    def test_exactly_on_the_threshold_estimated_approximate(self) -> None:
-        result = compute_candidate_key_exception(9999, 0.9999, "approximate", 10000, 0)
-
-        assert result == "estimated"
-
     def test_just_below_one_measured_exact(self) -> None:
         result = compute_candidate_key_exception(999999, 0.999999, "exact", 1000000, 0)
 
@@ -85,10 +66,3 @@ class TestCandidateKeyException:
         result = compute_candidate_key_exception(999999, 0.999999, "approximate", 1000000, 0)
 
         assert result == "estimated"
-
-    def test_nulls_alone_are_not_measured_duplicates(self) -> None:
-        """9 of 10 scanned rows are non-null and every one is distinct - no value repeats."""
-
-        result = compute_candidate_key_exception(9, 0.9, "exact", 10, 1)
-
-        assert result is None

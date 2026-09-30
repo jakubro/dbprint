@@ -12,10 +12,14 @@ import datetime
 import decimal
 import math
 import re
+import unicodedata
 import uuid
 from typing import Any
 
 import yaml
+
+from dbprint.spec.rounding import UnrepresentableValue
+from dbprint.spec.value_text import scalar_text
 
 
 class ArtifactDumper(yaml.SafeDumper):
@@ -23,39 +27,29 @@ class ArtifactDumper(yaml.SafeDumper):
 
 
 def _represent_uuid(dumper: yaml.SafeDumper, data: Any) -> yaml.ScalarNode:
-    return dumper.represent_scalar("tag:yaml.org,2002:str", str(data))
+    return dumper.represent_scalar("tag:yaml.org,2002:str", scalar_text(data))
 
 
 def _represent_decimal(dumper: yaml.SafeDumper, data: Any) -> yaml.ScalarNode:
-    return dumper.represent_scalar("tag:yaml.org,2002:str", str(data))
+    if not data.is_finite():
+        return _represent_float(dumper, float(data))
+
+    return dumper.represent_scalar("tag:yaml.org,2002:float", scalar_text(data))
 
 
 def _represent_datetime(dumper: yaml.SafeDumper, data: Any) -> yaml.ScalarNode:
-    iso = data.isoformat()
-
-    if iso.endswith("+00:00"):
-        iso = iso[:-6] + "Z"
-
-    return dumper.represent_scalar("tag:yaml.org,2002:str", iso)
+    return dumper.represent_scalar("tag:yaml.org,2002:str", scalar_text(data))
 
 
 def _represent_float(dumper: yaml.SafeDumper, data: Any) -> yaml.ScalarNode:
-    """Emit a float positionally per SPEC 2.2.6, losslessly.
-
-    PyYAML's `repr` fallback switches to the exponent form SPEC 2.2.6 disallows below 1e-4
-    and at/above 1e16; `Decimal(repr(v))` then `f` expands it without re-rounding.
+    """Emit a float positionally per SPEC 2.2.6, losslessly - PyYAML's `repr` fallback switches
+    to the exponent form SPEC 2.2.6 disallows below 1e-4 and at/above 1e16.
     """
 
     if not math.isfinite(data):
         return yaml.SafeDumper.represent_float(dumper, data)
 
-    text = f"{decimal.Decimal(repr(data)):f}"
-
-    # `f` drops an integral value's fractional part, which YAML would load back as an int.
-    if "." not in text:
-        text = f"{text}.0"
-
-    return dumper.represent_scalar("tag:yaml.org,2002:float", text)
+    return dumper.represent_scalar("tag:yaml.org,2002:float", scalar_text(data))
 
 
 # YAML v1.2 core schema productions (yaml.org spec 10.3.2): what a conformant 1.2 parser
@@ -90,25 +84,26 @@ def _represent_str(dumper: yaml.SafeDumper, data: str) -> yaml.ScalarNode:
     this only adds the shapes 1.1 misses, chiefly the exponent-form float production.
     """
 
-    style = "'" if _looks_like_yaml12_scalar(data) else None
+    if "\x85" in data:
+        # PyYAML writes NEL raw in a plain or single-quoted scalar, and its reader folds it as a
+        # line break; only the double-quoted style escapes it.
+        style = '"'
+    elif _looks_like_yaml12_scalar(data):
+        style = "'"
+    else:
+        style = None
 
     return dumper.represent_scalar("tag:yaml.org,2002:str", data, style=style)
 
 
 def _represent_timedelta(dumper: yaml.SafeDumper, data: Any) -> yaml.ScalarNode:
-    # Integer arithmetic: total_seconds() drops microseconds near MySQL TIME's +/-838:59:59.
-    microseconds = (data.days * 86400 + data.seconds) * 1_000_000 + data.microseconds
-    sign = "-" if microseconds < 0 else ""
-    seconds, fraction = divmod(abs(microseconds), 1_000_000)
-    hours, remainder = divmod(seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
+    return dumper.represent_scalar("tag:yaml.org,2002:str", scalar_text(data))
 
-    clock = f"{sign}{hours:02d}:{minutes:02d}:{seconds:02d}"
 
-    if fraction:
-        clock = f"{clock}.{fraction:06d}"
+def _refuse(dumper: yaml.SafeDumper, data: Any) -> yaml.Node:
+    """Raise where `SafeDumper` would write `!!set`/`!!binary` or fail with an anonymous error."""
 
-    return dumper.represent_scalar("tag:yaml.org,2002:str", clock)
+    raise UnrepresentableValue(data)
 
 
 def _register_representers() -> None:
@@ -120,6 +115,9 @@ def _register_representers() -> None:
     ArtifactDumper.add_representer(datetime.date, _represent_datetime)
     ArtifactDumper.add_representer(datetime.time, _represent_datetime)
     ArtifactDumper.add_representer(datetime.timedelta, _represent_timedelta)
+
+    for refused in (bytes, bytearray, memoryview, set, frozenset, None):
+        ArtifactDumper.add_representer(refused, _refuse)
 
 
 _register_representers()
@@ -138,18 +136,89 @@ def dump_yaml(payload: Any) -> str:
 
 
 def spell_inline(value: Any) -> str:
-    """Spell one value the way an artifact would, on a single line (flow style).
+    """Spell one value on one physical line such that `yaml.safe_load` of the result equals it.
 
-    Reuses `dump_yaml`'s representer set, so a value rendered into a prompt agrees with the
-    artifact's own spelling; PyYAML's `...` marker and the trailing newline are stripped.
+    A string with whitespace is quoted, and one with a line break or invisible character escaped.
     """
 
+    if isinstance(value, list | tuple):
+        return "[" + ", ".join(_spell_nested(item) for item in value) + "]"
+
+    if isinstance(value, dict):
+        pairs = (f"{_spell_nested(k)}: {_spell_nested(v)}" for k, v in value.items())
+
+        return "{" + ", ".join(pairs) + "}"
+
+    if isinstance(value, str) and any(_escaped(char) for char in value):
+        return _double_quoted(value)
+
+    text = _dump_flow(value)
+
+    if (
+        isinstance(value, str)
+        and not text.startswith(("'", '"'))
+        and any(c.isspace() for c in text)
+    ):
+        return "'" + value.replace("'", "''") + "'"
+
+    return text
+
+
+def spell_value(value: Any) -> str:
+    """Spell one stored value for a human or agent: `NULL` for a genuine null, else `spell_inline`."""
+
+    return "NULL" if value is None else spell_inline(value)
+
+
+# Printed raw these read as nothing or as an ordinary space; U+0020 is the one space left bare.
+_ESCAPED_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Co", "Cs", "Cn"})
+_SHORT_ESCAPES = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t", "\0": "\\0"}
+
+
+def _escaped(char: str) -> bool:
+    category = unicodedata.category(char)
+
+    return category in _ESCAPED_CATEGORIES or (category == "Zs" and char != " ")
+
+
+def _escape(char: str) -> str:
+    if char in _SHORT_ESCAPES:
+        return _SHORT_ESCAPES[char]
+
+    if not _escaped(char):
+        return char
+
+    code = ord(char)
+
+    if code <= 0xFF:
+        return f"\\x{code:02x}"
+
+    return f"\\u{code:04x}" if code <= 0xFFFF else f"\\U{code:08x}"
+
+
+def _spell_nested(value: Any) -> str:
+    if isinstance(value, list | tuple | dict):
+        return spell_inline(value)
+
+    if isinstance(value, str) and any(_escaped(char) for char in value):
+        return _double_quoted(value)
+
+    # Dumped as a one-element sequence so PyYAML quotes it for a flow context, not a document.
+    return _dump_flow([value])[1:-1]
+
+
+def _dump_flow(value: Any) -> str:
     text = yaml.dump(
         value,
         Dumper=ArtifactDumper,
         default_flow_style=True,
         sort_keys=False,
         allow_unicode=True,
+        width=math.inf,
     )
 
     return text.removesuffix("\n...\n").removesuffix("\n")
+
+
+def _double_quoted(value: str) -> str:
+    return '"' + "".join(_escape(char) for char in value) + '"'

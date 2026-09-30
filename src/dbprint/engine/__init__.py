@@ -7,11 +7,12 @@ vocabulary, including codes only the CLI returns.
 
 from __future__ import annotations
 
+from dbprint.config.duration import DurationError, parse_duration
 from .context_assembler import AssemblyOptions, AssemblyResult, PayloadResult, Purpose
 from .context_assembler import assemble as assemble_context
 from .context_assembler import assemble_payloads as assemble_context_payloads
 from .context_assembler import assemble_structured as assemble_structured_context
-from .freshness import DurationError, StaleEntry, parse_duration
+from .freshness import StaleEntry
 from .freshness import evaluate as evaluate_freshness
 from .freshness import format_age as format_freshness_age
 from .orchestrator import Engine

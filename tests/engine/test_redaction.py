@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import random
 from collections import Counter
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 import yaml
@@ -23,7 +24,12 @@ from dbprint.adapters import (
     ValueCount,
 )
 from dbprint.config import ConfigError, load_project
-from dbprint.config.project import RedactRule, bind_redaction_salt
+from dbprint.config.project import (
+    ConnectionConfig,
+    RedactRule,
+    StatisticsConfig,
+    bind_redaction_salt,
+)
 from dbprint.engine import Engine
 from dbprint.spec.redaction import MASK_PLACEHOLDER, Primitive, redact_value
 from tests.conftest import normalize_instants
@@ -607,10 +613,8 @@ class TestBoundsUnderARedactedColumn:
         assert dropped["cardinality"] == masked["cardinality"]
         assert dropped["distribution"] == masked["distribution"]
 
-    def test_drop_removes_unrepresentable_too_and_mask_keeps_it(self, tmp_path: Path) -> None:
-        """`unrepresentable` names `max`, so `drop` removing `range` must remove the marker
-        too - a name pointing at a dropped bound fails conformance (SPEC 2.2.4).
-        """
+    def test_every_primitive_withholds_unrepresentable(self, tmp_path: Path) -> None:
+        """Which withheld bound lies outside years 0001-9999 is a fact about the literal."""
 
         dropped = self._observed_at(tmp_path / "d", "drop")
         masked = self._observed_at(tmp_path / "m", "mask")
@@ -618,7 +622,7 @@ class TestBoundsUnderARedactedColumn:
         assert "range" not in dropped
         assert "unrepresentable" not in dropped
         assert masked["range"]["min"] == MASK_PLACEHOLDER
-        assert masked["unrepresentable"] == ["max"]
+        assert "unrepresentable" not in masked
 
     def test_a_sensitivity_targeted_rule_reaches_the_same_outcome(self, tmp_path: Path) -> None:
         """`phone` reports `contact` from its column name with no sample drawn, so a
@@ -665,11 +669,19 @@ class TestBoundsUnderARedactedColumn:
 
 
 class TestAggregatesUnderARedactedColumn:
-    """SPEC 2.2.3's redacted-aggregate footnote, end-to-end through `generate` - a redacted
-    column with at most one non-null row must not publish an aggregate equal to that row.
+    """SPEC 2.2.9 end-to-end through `generate`: a redacted column publishes its count profile
+    and withholds every statistic computed from what its values are, at any size.
     """
 
-    def _amount(self, tmp_path: Path, *, values: tuple[int, ...]) -> dict[str, Any]:
+    WITHHELD_NUMERIC = ("mean", "sum", "zero_count", "negative_count", "quantized_count")
+
+    def _amount(
+        self,
+        tmp_path: Path,
+        *,
+        values: tuple[int, ...],
+        redact: bool = True,
+    ) -> dict[str, Any]:
         """`values` is the scanned rows themselves, so repeats decide `cardinality`."""
 
         counts = Counter(values)
@@ -726,7 +738,7 @@ class TestAggregatesUnderARedactedColumn:
         # cardinality, so both scenarios below classify `numeric` - the footnote's own axis.
         conn = replace(
             _conn_config(tmp_path, enumeration_threshold=0),
-            redact=(RedactRule(columns=("*.amount",), with_="mask"),),
+            redact=(RedactRule(columns=("*.amount",), with_="mask"),) if redact else (),
         )
         Engine(MockAdapter({"fixture.staging": table}), conn, tmp_path).generate()
         payload = yaml.safe_load(
@@ -745,12 +757,19 @@ class TestAggregatesUnderARedactedColumn:
         # The bound itself is unaffected by this rule - `mask` substitutes it, never omits it.
         assert amount["range"]["min"] == MASK_PLACEHOLDER
 
-    def test_survives_once_more_than_one_row_is_non_null(self, tmp_path: Path) -> None:
+    def test_withheld_over_many_distinct_values(self, tmp_path: Path) -> None:
         amount = self._amount(tmp_path, values=(10, 20, 30))
 
         assert amount["classification"] == "numeric"
         assert amount["redacted"] == "mask"
-        assert amount["mean"] == 20.0
+        assert not set(self.WITHHELD_NUMERIC) & amount.keys()
+        assert amount["cardinality"] == 3
+        assert [entry["count"] for entry in amount["values"]] == [1, 1, 1]
+
+    def test_published_on_the_same_column_unredacted(self, tmp_path: Path) -> None:
+        amount = self._amount(tmp_path, values=(10, 20, 30), redact=False)
+
+        assert set(self.WITHHELD_NUMERIC) <= amount.keys()
         assert amount["sum"] == 60.0
 
     def _institution(self, tmp_path: Path, *, distinct: int) -> dict[str, Any]:
@@ -812,11 +831,12 @@ class TestAggregatesUnderARedactedColumn:
         assert institution["redacted"] == "mask"
         assert "length" not in institution
 
-    def test_length_survives_on_two_distinct_values(self, tmp_path: Path) -> None:
+    def test_length_is_withheld_on_two_distinct_values(self, tmp_path: Path) -> None:
         institution = self._institution(tmp_path, distinct=2)
 
         assert institution["redacted"] == "mask"
-        assert institution["length"]["min"] == 23
+        assert "length" not in institution
+        assert [entry["count"] for entry in institution["values"]] == [240, 240]
 
     def test_withheld_on_many_rows_carrying_one_distinct_value(self, tmp_path: Path) -> None:
         """480 rows of one number: the mean is that number and the sum divides back to it."""
@@ -828,15 +848,14 @@ class TestAggregatesUnderARedactedColumn:
         assert "mean" not in amount
         assert "sum" not in amount
 
-    def test_survives_once_a_second_distinct_value_appears(self, tmp_path: Path) -> None:
-        """The threshold is distinctness, not size: one more value and neither lands on it."""
+    def test_withheld_once_a_second_distinct_value_appears(self, tmp_path: Path) -> None:
+        """No threshold on distinctness makes an aggregate safe beside the value counts."""
 
         amount = self._amount(tmp_path, values=(85,) * 479 + (86,))
 
         assert amount["cardinality"] == 2
         assert amount["redacted"] == "mask"
-        assert 85 < amount["mean"] < 86
-        assert amount["sum"] > 85
+        assert not set(self.WITHHELD_NUMERIC) & amount.keys()
 
 
 class TestRedactedDayCounts:
@@ -1187,3 +1206,191 @@ def _sketchable_prose_fixture() -> dict[str, MockTable]:
             row_count=40,
         ),
     }
+
+
+class TestARedactedColumnPublishesItsCountProfile:
+    """SPEC 2.2.9 on real duckdb data: twins renamed one-to-one publish the same count profile.
+
+    Unredacted twins must differ, or the test proves nothing.
+    """
+
+    SEEDS = (565, 566, 567)
+    POOLS: ClassVar[dict[str, tuple[str, tuple[Any, ...]]]] = {
+        "integer": ("INTEGER", tuple(range(-6, 40))),
+        "string": (
+            "VARCHAR",
+            ("", "a", "bb", "Ab", "ab", "ab ", "ccc", "delta", "x9", "q", "zz top"),
+        ),
+        "timestamp": (
+            "TIMESTAMP",
+            tuple(f"2024-03-01 {d % 24:02d}:{7 * (d % 3):02d}:00" for d in range(20))
+            + ("infinity",),
+        ),
+    }
+
+    @pytest.mark.parametrize("primitive", ["mask", "drop", "hash"])
+    @pytest.mark.parametrize("kind", ["integer", "string", "timestamp", "unique_key"])
+    def test_relabelled_twins_publish_the_same_statistics(
+        self,
+        tmp_path: Path,
+        primitive: str,
+        kind: str,
+    ) -> None:
+        pairs = self._build(tmp_path, kind)
+        columns = self._generate(tmp_path, primitive)
+
+        for left, right in pairs["redacted"]:
+            assert self._comparable(columns[left]) == self._comparable(columns[right]), (
+                left,
+                right,
+            )
+
+        assert any(
+            self._comparable(columns[left]) != self._comparable(columns[right])
+            for left, right in pairs["control"]
+        )
+
+    def _build(self, tmp_path: Path, kind: str) -> dict[str, list[tuple[str, str]]]:
+        import duckdb
+
+        con = duckdb.connect(str(tmp_path / "twins.duckdb"))
+        pairs: dict[str, list[tuple[str, str]]] = {"redacted": [], "control": []}
+
+        for seed in self.SEEDS:
+            rng = random.Random(f"{kind}-{seed}")
+            sql_type, pool = self.POOLS["string" if kind == "unique_key" else kind]
+            size = rng.randint(3, 5)
+            picked = rng.sample(pool, 2 * size)
+            counts = (
+                [1] * size if kind == "unique_key" else [rng.randint(1, 9) for _ in range(size)]
+            )
+            nulls = 0 if kind == "unique_key" else rng.randint(0, 3)
+
+            for group in ("redacted", "control"):
+                names = []
+
+                for side, literals in (("l", picked[:size]), ("r", picked[size:])):
+                    name = f"{group}_{seed}_{side}"
+                    rows = [lit for lit, c in zip(literals, counts, strict=True) for _ in range(c)]
+                    rows += [None] * nulls
+                    rng.shuffle(rows)
+                    con.execute(f"CREATE TABLE {name} (id INTEGER PRIMARY KEY, v {sql_type})")
+                    con.executemany(
+                        f"INSERT INTO {name} VALUES (?, CAST(? AS {sql_type}))",
+                        [(i, None if r is None else str(r)) for i, r in enumerate(rows)],
+                    )
+                    names.append(name)
+
+                pairs[group].append((names[0], names[1]))
+
+        con.close()
+
+        return pairs
+
+    def _generate(self, tmp_path: Path, primitive: str) -> dict[str, dict[str, Any]]:
+        from dbprint.adapters.duckdb import DuckdbAdapter
+
+        conn = ConnectionConfig(
+            name="twins",
+            adapter="duckdb",
+            output=tmp_path / "prints",
+            statistics=StatisticsConfig(enumeration_threshold=1),
+            redact=(RedactRule(columns=("*.redacted_*.v",), with_=primitive),),
+            redaction_salt="relabelling-salt",
+        )
+        adapter = DuckdbAdapter({"database": str(tmp_path / "twins.duckdb")})
+        Engine(adapter, conn, tmp_path).generate()
+
+        return {
+            path.parent.name: yaml.safe_load(path.read_text())["columns"]["v"]
+            for path in (tmp_path / "prints" / "twins").rglob("statistics.yaml")
+        }
+
+    @staticmethod
+    def _comparable(column: dict[str, Any]) -> dict[str, Any]:
+        out = {field: value for field, value in column.items() if field not in _SPELLS_THE_VALUES}
+
+        if "values" in column:
+            out["values"] = [entry["count"] for entry in column["values"]]
+
+        return out
+
+
+# Fields a relabelled twin legitimately publishes differently: the literals themselves, and what is
+# read off them (freshness from the range, looks_like and epoch_unit from the values).
+_SPELLS_THE_VALUES = frozenset({"percentiles", "range", "values", "freshness", "inferred"})
+
+
+class TestNoAggregateSolvesAMaskedColumn:
+    """Three masked columns whose values the published aggregates would otherwise solve for exactly."""
+
+    _WITHHELD = (
+        "sum",
+        "mean",
+        "zero_count",
+        "negative_count",
+        "quantized_count",
+        "length",
+        "empty_count",
+    )
+
+    @pytest.mark.parametrize("threshold", [50, 1], ids=["default", "threshold-1"])
+    def test_no_redacted_column_publishes_an_aggregate_that_solves_it(
+        self,
+        tmp_path: Path,
+        threshold: int,
+    ) -> None:
+        import duckdb
+
+        from dbprint.adapters.duckdb import DuckdbAdapter
+
+        con = duckdb.connect(str(tmp_path / "garden.duckdb"))
+        con.execute("CREATE TABLE curator (id INTEGER, stipend INTEGER)")
+        con.executemany(
+            "INSERT INTO curator VALUES (?, ?)",
+            [(i, 7250 if i % 6 == 0 else 0) for i in range(60)],
+        )
+        con.execute("CREATE TABLE plot (id INTEGER, visits INTEGER)")
+        rows = [v for v in range(1, 21) for _ in range(60 - 2 * v)] + list(range(21, 56))
+        con.executemany("INSERT INTO plot VALUES (?, ?)", list(enumerate(rows)))
+        con.execute("CREATE TABLE vault (id INTEGER, code VARCHAR)")
+        con.executemany(
+            "INSERT INTO vault VALUES (?, ?)",
+            [(i, "" if i < 40 else "AB12CD34EF56") for i in range(50)],
+        )
+        con.close()
+        conn = ConnectionConfig(
+            name="garden",
+            adapter="duckdb",
+            output=tmp_path / "prints",
+            statistics=StatisticsConfig(enumeration_threshold=threshold),
+            redact=(
+                RedactRule(
+                    columns=("*.curator.stipend", "*.plot.visits", "*.vault.code"),
+                    with_="mask",
+                ),
+            ),
+        )
+        Engine(
+            DuckdbAdapter({"database": str(tmp_path / "garden.duckdb")}),
+            conn,
+            tmp_path,
+        ).generate()
+
+        published = {
+            path.parent.name: yaml.safe_load(path.read_text())["columns"]
+            for path in (tmp_path / "prints" / "garden").rglob("statistics.yaml")
+        }
+        columns = {
+            "curator": published["curator"]["stipend"],
+            "plot": published["plot"]["visits"],
+            "vault": published["vault"]["code"],
+        }
+
+        assert {
+            table: sorted(set(col) & set(self._WITHHELD)) for table, col in columns.items()
+        } == {
+            "curator": [],
+            "plot": [],
+            "vault": [],
+        }

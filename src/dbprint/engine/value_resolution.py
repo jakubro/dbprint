@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from dbprint.spec.normalization import fold
+from dbprint.spec.scope import SCANNED_DOMAIN_STATEMENT, ScanScope, reply_scope
 
 
 NEAREST_FLOOR = 0.3  # Jaccard over character trigrams; below this a "nearest" is noise
@@ -18,6 +19,11 @@ DOMAIN_LIMIT = 50  # an exhaustive list this short rides along, so one call answ
 
 SAMPLE_CAVEAT = (
     "the print lists {listed} of the column's values; a spelling absent here is not evidence "
+    "that it is absent from the column"
+)
+
+SCOPED_CAVEAT = (
+    f"{SCANNED_DOMAIN_STATEMENT}, not over the table; a spelling absent here is not evidence "
     "that it is absent from the column"
 )
 
@@ -55,34 +61,39 @@ def resolve(
     notes: dict[str, str],
     *,
     coverage: float | None,
-    exhaustive: bool | None = None,
+    complete: bool | None = None,
+    scope: ScanScope | None = None,
     unavailable_reason: str | None = None,
 ) -> dict[str, Any]:
     """Answer `text` against one column's listed values, in the order MCP.md 4.7 declares.
 
-    `exhaustive` defaults to `coverage == 1.0`; a numeric list has none and the caller decides.
+    `complete` defaults to `coverage == 1.0`; under `scope` a complete list is never `exhaustive`.
     """
 
     listed = [entry for entry in entries if isinstance(entry, dict)]
 
-    if exhaustive is None:
-        exhaustive = coverage == 1.0
+    if complete is None:
+        complete = coverage == 1.0
+
+    reply: dict[str, Any] = {
+        "coverage": coverage,
+        "exhaustive": complete and scope is None,
+        "listed": len(listed),
+        **reply_scope(scope),
+    }
+
+    if not complete:
+        reply["sample_caveat"] = SAMPLE_CAVEAT.format(listed=len(listed))
+    elif scope is not None:
+        reply["sample_caveat"] = SCOPED_CAVEAT
 
     if unavailable_reason is not None:
-        return {
-            "match": "unavailable",
-            "reason": unavailable_reason,
-            "coverage": coverage,
-            "exhaustive": exhaustive,
-            "listed": len(listed),
-        }
+        if scope is None:
+            reply.pop("sample_caveat", None)
 
-    reply: dict[str, Any] = {"coverage": coverage, "exhaustive": exhaustive, "listed": len(listed)}
+        return {"match": "unavailable", "reason": unavailable_reason, **reply}
 
-    if not exhaustive:
-        reply["sample_caveat"] = SAMPLE_CAVEAT.format(listed=len(listed))
-
-    if exhaustive and len(listed) <= DOMAIN_LIMIT:
+    if complete and len(listed) <= DOMAIN_LIMIT:
         reply["domain"] = [_entry_payload(entry, notes) for entry in listed]
 
     stored = _stored(text, listed, notes)

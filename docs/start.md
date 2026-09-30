@@ -44,7 +44,7 @@ connections:
       - "seedbank.*"
 ```
 
-`include` is the one line worth reading twice. It decides which tables are profiled, as `fnmatch` globs over the lowercased fully-qualified name; the shape of that name is the engine's own — `database.table` on MySQL, `schema.table` on PostgreSQL and Redshift, `database.schema.table` on Snowflake. Your adapter page states the shape for your engine. Omitting `include` entirely profiles everything the connection can see, which on a warehouse is rarely what you want.
+`include` is the one line worth reading twice. It decides which tables are profiled, as `fnmatch` globs over the lowercased fully-qualified name; the shape of that name is the engine's own — `database.table` on MySQL and ClickHouse, `database.schema.table` on PostgreSQL, Redshift and Snowflake, `catalog.schema.table` on Databricks. Your adapter page states the shape for your engine. Omitting `include` entirely profiles everything the connection can see, which on a warehouse is rarely what you want.
 
 `auto: true` means a bare `dbprint generate` runs this connection without naming it.
 

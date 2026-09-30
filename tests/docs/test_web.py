@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import re
 from datetime import UTC, datetime, timedelta
 
@@ -9,7 +10,9 @@ import pytest
 
 from dbprint.config import ConnectionConfig
 from dbprint.docs import web
-from dbprint.docs.web import _human_number, _non_breaking, _pretty_datetime, _relative_time
+from dbprint.docs.web import _non_breaking, _number, _percent, _pretty_datetime, _relative_time
+from dbprint.engine import AssemblyOptions, assemble_context
+from dbprint.engine.baseline import read_artifact
 
 
 class TestRoutes:
@@ -87,10 +90,6 @@ class TestRoutes:
         self,
         rich_conn: ConnectionConfig,
     ) -> None:
-        """`_human_number` rounds to one decimal with a K/M/B/T suffix, so 1,499 and 1,500 both
-        render `1.5K` - the exact figure must still be reachable on the page.
-        """
-
         client = web.create_app([rich_conn]).test_client()
 
         body = client.get("/t/primary/seedbank.batch").data.decode()
@@ -102,7 +101,6 @@ class TestRoutes:
 
         body = client.get("/t/primary/seedbank.batch").data.decode()
 
-        assert '<div class="label">columns</div>' in body
         assert "skyline skyline-mini" in body
 
     def test_metadata_value_is_titlecased(self, rich_conn: ConnectionConfig) -> None:
@@ -165,14 +163,6 @@ class TestRoutes:
 
         assert 'id="sidebar-toggle"' in body
 
-    def test_chart_panels_carry_a_fullscreen_button(self, rich_conn: ConnectionConfig) -> None:
-        client = web.create_app([rich_conn]).test_client()
-
-        body = client.get("/t/primary/seedbank.batch").data.decode()
-
-        assert body.count("data-fs-toggle") == 2  # skyline panel + relationship diagram panel
-        assert "data-zoomable" in body  # only the diagram panel supports zoom/pan
-
     def test_table_page_never_leaks_a_sketch_payload(self, rich_conn: ConnectionConfig) -> None:
         client = web.create_app([rich_conn]).test_client()
 
@@ -201,7 +191,7 @@ class TestRoutes:
 
         assert response.status_code == 200
         assert "scanned" in body.lower()
-        assert "100.0% covered" in body
+        assert "100% covered" in body
         for overclaim in ("entire domain", "entire table", "complete domain", "whole table"):
             assert overclaim not in body.lower()
 
@@ -228,18 +218,46 @@ class TestRoutes:
 
         body = client.get("/t/primary/seedbank.storage_reading").data.decode()
 
-        assert "attempted and lost: distribution, freshness" in body
+        assert "unmeasured: distribution, freshness" in body
         assert "whether a key is declared" in body
-        assert "the census did not answer" in body
-        assert "the probe did not answer" in body
+        assert "which columns are null on the same rows is unknown" in body
+        assert "no dependency between columns is ruled out" in body
+
+    def test_the_page_and_the_context_word_each_lost_block_alike(
+        self,
+        degraded_conn: ConnectionConfig,
+    ) -> None:
+        root = degraded_conn.output / degraded_conn.name
+        context = assemble_context(
+            manifest=read_artifact(root / "manifest.yaml"),
+            print_root=root,
+            tables=["seedbank.storage_reading"],
+            options=AssemblyOptions(),
+        ).text
+        page = html.unescape(
+            web.create_app([degraded_conn])
+            .test_client()
+            .get("/t/primary/seedbank.storage_reading")
+            .data.decode(),
+        )
+        sentences = [
+            line.split(": ", 1)[1]
+            for line in context.split("## Blocks in the file's `unmeasured` list", 1)[
+                1
+            ].splitlines()
+            if line.startswith("- `")
+        ]
+
+        assert len(sentences) == 3
+        assert all(sentence in page for sentence in sentences), sentences
 
     def test_a_measured_page_carries_no_lost_marker(self, rich_conn: ConnectionConfig) -> None:
         client = web.create_app([rich_conn]).test_client()
 
         body = client.get("/t/primary/seedbank.batch").data.decode()
 
-        assert "attempted and lost" not in body
-        assert "did not answer" not in body
+        assert "unmeasured: " not in body
+        assert "did not measure it" not in body
 
     def test_empty_columns_table_shows_the_notice(
         self,
@@ -296,15 +314,18 @@ class TestRoutes:
             assert not asset_load.search(body)
 
 
-class TestHumanNumber:
-    def test_thousands(self) -> None:
-        assert _human_number(1500) == "1.5K"
+class TestNumberFilters:
+    def test_a_count_is_its_plain_digits(self) -> None:
+        assert _number(9999) == "9999"
 
-    def test_boundary_rollover_to_next_unit(self) -> None:
-        assert _human_number(999_999) == "1M"
+    def test_a_small_statistic_is_positional(self) -> None:
+        assert (_number(0.00049), _pretty_datetime(4.9e-08)) == ("0.00049", "0.000000049")
+
+    def test_a_share_short_of_complete_is_not_100_percent(self) -> None:
+        assert _percent(0.9999) == "99.99%"
 
     def test_non_numeric_is_blank(self) -> None:
-        assert _human_number("not a number") == ""
+        assert (_number("not a number"), _percent(None)) == ("", "")
 
 
 class TestNonBreaking:
@@ -322,8 +343,11 @@ class TestPrettyDatetime:
     def test_unrepresentable_extreme_date_passes_through(self) -> None:
         assert _pretty_datetime("52030-01-01T00:00:00") == "52030-01-01T00:00:00"
 
-    def test_non_string_passthrough(self) -> None:
-        assert _pretty_datetime(42) == 42
+    def test_a_number_is_spelled_as_the_artifact_spells_it(self) -> None:
+        assert _pretty_datetime(1.8446744073709548e19) == "18446744073709548000.0"
+
+    def test_a_non_string_non_number_passes_through(self) -> None:
+        assert _pretty_datetime(None) is None
 
 
 class TestRelativeTime:

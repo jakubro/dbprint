@@ -14,14 +14,16 @@ import yaml
 from dbprint.config import ConnectionConfig
 from dbprint.engine.baseline import (
     declared_artifacts,
+    failed_tables,
     manifest_shape_error,
     missing_artifacts,
     table_directory,
+    unprofiled_message,
     walkable_tables,
 )
-
-
-_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+from dbprint.spec import artifact_yaml
+from dbprint.spec.fqn import join as join_fqn
+from dbprint.spec.fqn import split as split_fqn
 
 
 @dataclass(frozen=True)
@@ -32,6 +34,7 @@ class PrintConnection:
     root: Path
     manifest: dict[str, Any]
     tables: dict[str, dict[str, Any]]
+    failed_tables: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -78,6 +81,7 @@ def load_connections(connections: list[ConnectionConfig]) -> list[PrintConnectio
                 root=root,
                 manifest=manifest,
                 tables=walkable_tables(manifest),
+                failed_tables=failed_tables(manifest),
             ),
         )
 
@@ -143,9 +147,9 @@ def load_relationships(conn: PrintConnection, fqn: str) -> dict[str, Any] | None
 def schema_key(table_name: str) -> str:
     """A table's schema-equivalent grouping key - every dotted-name segment but the leaf."""
 
-    parts = table_name.split(".")
+    parts = split_fqn(table_name)
 
-    return ".".join(parts[:-1]) if len(parts) > 1 else "(none)"
+    return join_fqn(parts[:-1]) if len(parts) > 1 else "(none)"
 
 
 def tables_in_schema(conn: PrintConnection, schema: str) -> dict[str, dict[str, Any]]:
@@ -178,7 +182,7 @@ def leaf_targets(conn: PrintConnection, current: str) -> dict[str, str]:
     targets: dict[str, str] = {}
 
     for t in sorted(conn.tables):
-        leaf = t.split(".")[-1]
+        leaf = split_fqn(t)[-1]
 
         if leaf not in targets or schema_key(t) == current_schema:
             targets[leaf] = table_target(conn.name, t)
@@ -193,7 +197,7 @@ def prefix_tree(names: list[str], prefix_len: int = 0) -> PrefixTree:
     leaves: list[str] = []
 
     for n in names:
-        rest = n.split(".")[prefix_len:]
+        rest = split_fqn(n)[prefix_len:]
 
         if len(rest) <= 1:
             leaves.append(n)
@@ -213,7 +217,7 @@ def _read_yaml_status(path: Path) -> tuple[dict[str, Any] | None, bool]:
         return None, False
 
     try:
-        data = yaml.load(path.read_text(encoding="utf-8"), _LOADER)
+        data = artifact_yaml.load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError:
         return None, True
 
@@ -254,3 +258,9 @@ def _read_yaml(
         corrupted.append(kind)
 
     return data
+
+
+def unprofiled_note(conn: PrintConnection, fqn: str) -> str | None:
+    """The phrase a page shows for a table the last run could not profile, else None."""
+
+    return unprofiled_message(fqn) if fqn in conn.failed_tables else None

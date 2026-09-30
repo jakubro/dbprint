@@ -196,7 +196,7 @@ def _degrade(
     finally:
         adapter.close()
 
-    return stats
+    return dict(stats)
 
 
 class TestTheDegradeRunsAndNamesWhatItLost:
@@ -219,6 +219,7 @@ class TestTheDegradeRunsAndNamesWhatItLost:
         carried = [name for name in stat.unmeasured if name != "freshness"]
 
         assert all(getattr(stat, name) is None for name in carried)
+        assert stat.unrepresentable is None
 
     def test_the_statements_that_did_answer_survive(
         self,
@@ -265,10 +266,12 @@ class TestADayAlignedTypeNamesNoDayTruncation:
         # The adapter binds the spelling `list_tables` observed, so enumeration comes first.
         adapter.list_tables(include=["*"], exclude=[])
 
+        fqn = f"{postgres_test_db['database']}.fixture.date_probe"
+
         try:
-            columns = adapter.introspect_columns("fixture.date_probe")
+            columns = adapter.introspect_columns(fqn)
             _counts, stats = adapter.compute_statistics(
-                "fixture.date_probe",
+                fqn,
                 columns,
                 StatisticsConfig(),
                 frozenset(),

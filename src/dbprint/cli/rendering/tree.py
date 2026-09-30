@@ -4,6 +4,8 @@ line-width budget (`min(120, terminal width)`), an invariant no rendered line ma
 
 from __future__ import annotations
 
+from dbprint.spec.fqn import split as split_fqn
+
 
 _INDENT = 2
 _ELLIPSIS = "..."
@@ -28,13 +30,13 @@ def resolve_cap(terminal_width: int | None) -> int:
 def header_path(connection: str, fqn: str) -> tuple[str, ...]:
     """Return the header chain for a table: connection then every FQN part but the leaf."""
 
-    return (connection, *fqn.split(".")[:-1])
+    return (connection, *split_fqn(fqn)[:-1])
 
 
 def leaf_name(fqn: str) -> str:
-    """Return the table name - the last dotted FQN segment."""
+    """Return the table name - the last FQN segment."""
 
-    return fqn.split(".")[-1]
+    return split_fqn(fqn)[-1]
 
 
 def divergent_headers(prev: tuple[str, ...], curr: tuple[str, ...]) -> list[tuple[int, str]]:

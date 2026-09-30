@@ -15,4 +15,12 @@ def render_human(connection_name: str, summary: dict[str, object], console: Cons
     for key in ("adapter", "generated_at", "table_count", "live", "stale", "dormant", "described"):
         table.add_row(key, str(summary.get(key, "")))
 
+    failed = summary.get("failed_tables")
+
+    if isinstance(failed, list) and failed:
+        table.add_row(
+            "failed_tables",
+            f"{len(failed)} table(s) the last run could not profile: {', '.join(map(str, failed))}",
+        )
+
     console.print(Panel.fit(table, title=connection_name))

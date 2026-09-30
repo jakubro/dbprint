@@ -3,12 +3,8 @@
 from __future__ import annotations
 
 from .adapter import PostgresAdapter
-from .connection import ConnectionParams, PostgresConnectionError
-from ..dialect import Dialect
+from .connection import DIALECT, ConnectionParams, PostgresConnectionError
 
-
-# psycopg3 defaults to pyformat and the adapter does not override it.
-DIALECT = Dialect(vendor="postgres", paramstyle="pyformat")
 
 __all__ = [
     "DIALECT",

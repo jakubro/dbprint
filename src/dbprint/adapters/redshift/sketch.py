@@ -7,10 +7,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from dbprint.spec.sketch import SketchKind
-from . import stats
 from .connection import exec_query
-from .identity import Identity
-from .introspect import resolve_column
+from .rendering import render_canonical
+from ..identifiers import SOURCE_ALIAS, Identity
+from ..sql_layout import indented
 
 
 if TYPE_CHECKING:
@@ -28,36 +28,31 @@ def compute_key_sketch(
     """The k smallest low-64-bit MD5 hashes of the column's distinct non-null values."""
 
     quoted_table = identity.quoted()
-    quoted_col = stats._quote_ident(resolve_column(cursor, identity, column))
-    canonical = _canonical_expr(quoted_col, kind, sql_type)
-    low64 = _low64_expr("v")
+    quoted_col = identity.source_column(column)
+    canonical = render_canonical(quoted_col, sql_type, kind)
+    low64 = _low64_expr("dst.v")
 
     rows = exec_query(
         cursor,
         f"""
-        SELECT {low64} AS h
-        FROM (
-            SELECT DISTINCT {canonical} AS v
-            FROM {quoted_table}
-            WHERE {quoted_col} IS NOT NULL
-        ) t
-        ORDER BY h
+        SELECT
+          {indented(low64, 10)} AS h
+        FROM
+          (
+            SELECT DISTINCT
+              {indented(canonical, 14)} AS v
+            FROM
+              {quoted_table} {SOURCE_ALIAS}
+            WHERE
+              {quoted_col} IS NOT NULL
+          ) dst
+        ORDER BY
+          h
         LIMIT {int(k)}
         """,
     ).fetchall()
 
     return tuple(int(r[0]) for r in rows)
-
-
-def _canonical_expr(quoted_col: str, kind: SketchKind, sql_type: str) -> str:
-    """SPEC 2.2.14's canonical byte form for one SQL value, as a SQL expression - `::varchar`
-    already matches for every non-temporal kind, and temporal reuses `_render_calendar_bound`.
-    """
-
-    if kind == "temporal":
-        return stats._render_calendar_bound(quoted_col, sql_type)
-
-    return f"{quoted_col}::varchar"
 
 
 def _low64_expr(value_expr: str) -> str:

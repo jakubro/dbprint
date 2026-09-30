@@ -6,6 +6,7 @@ import fnmatch
 import importlib.resources
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast, get_args
 
@@ -19,17 +20,22 @@ from dbprint.engine import (
     Purpose,
     assemble_context,
     assemble_structured_context,
+    thresholds,
     value_resolution,
 )
 from dbprint.engine.baseline import (
     declared_artifacts,
+    failed_tables,
     manifest_shape_error,
     table_directory,
     walkable_tables,
 )
+from dbprint.engine.freshness import age_days, evaluate
+from dbprint.spec.absence import Absence, column_value, read_column_field
 from dbprint.spec.classification import Classification
 from dbprint.spec.looks_like import LooksLike
 from dbprint.spec.redaction import Primitive as RedactionPrimitive
+from dbprint.spec.scope import ScanScope, list_is_complete, reply_scope, rows_scanned, scope_of
 from dbprint.spec.sensitivity import Sensitivity
 from . import errors, reference
 from .reference import ReferenceDocument
@@ -76,16 +82,16 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
     ToolDef(
         name="get_table_context",
         description=(
-            "Return one table as an assembled context fragment, selected for what "
-            "the read is for. `purpose: profile` describes the data - DDL, "
-            "statistics, relationships, description and annotations. `purpose: "
-            "query` is what to read before writing SQL against the table - DDL, the "
-            "Joins list (every edge the print knows, declared or not, with its "
-            "detection), a data dictionary, and the value lists a predicate can be "
-            "written from, with their counts and coverage. A profile's statistics "
-            "describe the data rather than what a predicate needs. A budgeted "
-            "call may omit sections to fit, and never returns empty on success - a "
-            "truncation marker names what was dropped or, for json/yaml, a "
+            "Read one table. Call it before writing SQL against a table, with "
+            "`purpose: query`: DDL, the Joins list (every edge the print knows, declared "
+            "or not, with its detection), a data dictionary, and the value lists a "
+            "predicate is written from, with their counts and coverage. Call it with the "
+            "default `purpose: profile` to describe the data - statistics such as null "
+            "rates, cardinality and ranges, relationships, the description and notes. "
+            "Use search_columns or list_tables first when the table is not yet known, "
+            "and resolve_value to check how one phrase is spelled in one column. A "
+            "budgeted call may omit whole sections to fit and never returns empty on "
+            "success - a truncation marker names what was dropped or, for json/yaml, a "
             "`_corrupted` field names any declared artifact that failed to parse."
         ),
         input_schema={
@@ -95,21 +101,27 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                 "table": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Fully-qualified table name",
+                    "description": (
+                        "Dotted fully-qualified table name, as list_tables and "
+                        "search_columns return it"
+                    ),
                 },
-                "conn": {
+                "connection": {
                     "type": "string",
-                    "description": "Optional; falls back to default connection",
+                    "description": (
+                        "Connection name from .dbprint.yaml; omit it to use the server's "
+                        "default connection"
+                    ),
                 },
                 "purpose": {
                     "type": "string",
                     "enum": ["profile", "query"],
                     "default": "profile",
                     "description": (
-                        "profile: the table described - statistics, relationships, notes. "
-                        "query: what to read before writing SQL - DDL, the Joins list, data "
-                        "dictionary, and the value lists with counts and coverage, and "
-                        "nothing measured"
+                        "query before writing SQL: DDL, the Joins list, data dictionary and "
+                        "the value lists with counts and coverage, with no other statistics. "
+                        "profile (default) to describe the data: statistics, relationships, "
+                        "notes"
                     ),
                 },
                 "format": {
@@ -121,7 +133,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                         "per-column Notes summary rather than the raw statistics fields "
                         "json and yaml carry. All three omit each column's sketch payload; "
                         "the verbatim statistics.yaml, sketch included, is reachable as the "
-                        "dbprint://<conn>/<fqn>/statistics resource."
+                        "dbprint://<connection>/<table>/statistics resource."
                     ),
                 },
                 "include_stats": {
@@ -155,10 +167,10 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                     "minimum": 1,
                     "description": (
                         "Soft cap in tokens, defaulting to 8000. Sections drop whole, never "
-                        "truncated mid-section: "
-                        "the table's identity is charged first, then each section in priority "
-                        "order is measured against what is left, so one that does not fit is "
-                        "skipped rather than closing the door behind it"
+                        "truncated mid-section: the table's identity is charged first, then "
+                        "each section in priority order is measured against what is left, and "
+                        "one that does not fit is skipped while later, smaller ones may still "
+                        "be included"
                     ),
                 },
             },
@@ -168,9 +180,15 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
     ToolDef(
         name="list_tables",
         description=(
-            "List tables matching an fnmatch pattern across a connection. "
-            "`detail: true` projects each entry's type, row_count, columns and "
-            "profiled_at from the manifest alongside its FQN, in one call. "
+            "List a connection's tables, optionally narrowed by an fnmatch pattern over "
+            "the dotted names. Use it to see which tables exist, their row counts, and "
+            "whether each table's statistics are stale: `detail: true` adds each "
+            "table's type, row_count, columns and profiled_at, and the freshness verdict "
+            "`dbprint list` and `dbprint check` give it - `live`, `stale`, or `dormant` "
+            "when profiled_at is unreadable - with its age_days and the max_age_days it "
+            "is judged against. A table whose threshold cannot be resolved carries "
+            "`threshold_error` instead of a verdict. To find columns rather than tables, "
+            "use search_columns; for the raw manifest index, get_manifest. "
             "Capped at 500 entries; narrow with `pattern` to reach past the cap, and a capped "
             "reply carries `truncated: true` with the `total` it was cut from."
         ),
@@ -178,21 +196,27 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "conn": {
+                "connection": {
                     "type": "string",
-                    "description": "Optional; falls back to default connection",
+                    "description": (
+                        "Connection name from .dbprint.yaml; omit it to use the server's "
+                        "default connection"
+                    ),
                 },
                 "pattern": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "fnmatch glob; defaults to '*'",
+                    "description": (
+                        "fnmatch glob over dotted table names, e.g. 'sales.*'; defaults to '*'"
+                    ),
                 },
                 "detail": {
                     "type": "boolean",
                     "default": False,
                     "description": (
                         "Project each entry's type/row_count/columns/profiled_at from "
-                        "the manifest; false returns bare FQN strings, unchanged"
+                        "the manifest plus its freshness verdict; false returns bare FQN "
+                        "strings, unchanged"
                     ),
                 },
             },
@@ -201,11 +225,15 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
     ToolDef(
         name="search_columns",
         description=(
-            "Entry point for locating a fact across the print - an optional name glob "
-            "plus optional classification/sql_type/sensitivity/looks_like/redacted glob "
-            "filters and a candidate_key match, ANDed. A match on a scoped table carries "
-            "rows_scanned/row_count so a caller can tell a scanned-set number from a "
-            "table-wide one; a match carrying a looks_like verdict carries the "
+            "Find columns across every table - the first call when the table holding a "
+            "fact is not yet known. Filters, all optional and ANDed: a name glob, a `text` "
+            "search over column names and their notes, and classification/sql_type/"
+            "sensitivity/looks_like/redacted globs and a candidate_key match - for "
+            "example every column holding an email address (`looks_like: email`) or "
+            "contact details (`sensitivity: contact`). Read a table found this way with "
+            "get_table_context; list tables rather than columns with list_tables. A match on a table read in part "
+            "carries its `scope` block with rows_scanned/row_count, so a caller can tell a "
+            "scanned-set number or key from a table-wide one; a match carrying a looks_like verdict carries the "
             "sampled/matched draw behind it, since a verdict from two values reads "
             "identically to one from ten thousand otherwise. A match carries "
             "sensitivity/redacted/candidate_key (and candidate_key_exception where the "
@@ -269,14 +297,26 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                     "type": "boolean",
                     "description": "Exact match against inferred.candidate_key",
                 },
+                "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Case-insensitive substring matched against the column name, its "
+                        "annotation note and its per-value notes - words, not meaning. A "
+                        "match found through per-value notes carries them as `value_notes`"
+                    ),
+                },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
                     "description": "Cap on returned matches; a capped response carries `truncated: true`",
                 },
-                "conn": {
+                "connection": {
                     "type": "string",
-                    "description": "Optional; falls back to default connection",
+                    "description": (
+                        "Connection name from .dbprint.yaml; omit it to use the server's "
+                        "default connection"
+                    ),
                 },
             },
         },
@@ -285,16 +325,20 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
         name="resolve_value",
         description=(
             "Resolve a phrase, a code or a spelling against one column's published "
-            "values, before writing a literal into a filter. Answers, in order of "
+            "values, before writing a literal into a filter whose stored spelling "
+            "get_table_context does not already list in full. Answers, in order of "
             "preference: `stored` - the text is a listed value, or folds to one, and "
             "the reply carries the spelling a predicate must use; `definition` - the "
             "text names what a value's note says it means; `nearest` - the listed "
             "values closest to the text, ranked; `none`; or `unavailable` where the "
-            "column publishes no values. Every reply carries the column's `coverage` "
-            "and how many values the print `listed`, plus a caveat sentence wherever "
-            "that list is a sample - a spelling absent from a sample is not evidence "
-            "it is absent from the column. An exhaustive list of at most fifty values "
-            "rides along whole as `domain`, so a small vocabulary needs one call."
+            "column publishes no value list, lost it this run, or redacts it. Every "
+            "reply carries the column's `coverage` and how many values the print "
+            "`listed`, plus a caveat sentence wherever that list is a sample - a "
+            "spelling absent from a sample is not evidence it is absent from the "
+            "column. An exhaustive list of at most fifty values rides along whole as "
+            "`domain`, so a small vocabulary needs one call; on a table read in part, "
+            "`exhaustive` is false, the reply carries the table's `scope` and "
+            "`row_count`, and `domain` is the scanned rows' whole domain."
         ),
         input_schema={
             "type": "object",
@@ -313,11 +357,14 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                 "text": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "The phrase, code or spelling to resolve",
+                    "description": "The phrase, code or spelling from the question, as written",
                 },
-                "conn": {
+                "connection": {
                     "type": "string",
-                    "description": "Optional; falls back to default connection",
+                    "description": (
+                        "Connection name from .dbprint.yaml; omit it to use the server's "
+                        "default connection"
+                    ),
                 },
             },
             "required": ["table", "column", "text"],
@@ -328,24 +375,31 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
         description=(
             "Return the parsed manifest.yaml for a connection - an index of "
             "tables and their artifacts, not a semantic catalogue of what they mean. "
+            "Use it for a manifest field no other tool projects; for table names, row "
+            "counts and staleness, list_tables with `detail: true` is shorter and "
+            "already judges each table's freshness. "
             "The `tables` map is capped at 500 entries and every other key of "
-            "the document is returned whole; narrow with `pattern` to reach past the cap, and "
+            "the document is returned whole, `failed_tables` filtered by `pattern` like `tables`; "
+            "narrow with `pattern` to reach past the cap, and "
             "a capped reply carries `truncated: true` with the `total` it was cut from."
         ),
         input_schema={
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "conn": {
+                "connection": {
                     "type": "string",
-                    "description": "Optional; falls back to default connection",
+                    "description": (
+                        "Connection name from .dbprint.yaml; omit it to use the server's "
+                        "default connection"
+                    ),
                 },
                 "pattern": {
                     "type": "string",
                     "minLength": 1,
                     "description": (
                         "fnmatch glob over the FQN keys of `tables`, the same spelling "
-                        "`list_tables` takes; filters that map only"
+                        "`list_tables` takes; filters that map and `failed_tables` only"
                     ),
                 },
             },
@@ -354,19 +408,26 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
     ToolDef(
         name="get_diff",
         description=(
-            "Return the parsed diff.yaml for a connection - a per-column "
-            "reliability signal for which statistics are stable and which "
-            "drift run to run. The `changes` list is capped at 500 events and every other key "
+            "Answer what changed between the connection's last two generate runs: "
+            "the parsed diff.yaml, whose `summary` counts every kind of change and whose "
+            "`changes` list names each one - tables and columns added, removed or "
+            "retyped, relationships changed, statistics that drifted. A statistic with "
+            "no drift event did not change between the two runs; a table "
+            "counted in `unevaluated_tables` was not compared. The `changes` list is capped at 500 events and every other key "
             "of the document is returned whole; narrow with `table` or `kind` to reach past the "
-            "cap, and a capped reply carries `truncated: true` with the `total` it was cut from."
+            "cap, and a capped reply carries `truncated: true` with the `total` it was cut from. "
+            "A table's current state, rather than what changed, is get_table_context's answer."
         ),
         input_schema={
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "conn": {
+                "connection": {
                     "type": "string",
-                    "description": "Optional; falls back to default connection",
+                    "description": (
+                        "Connection name from .dbprint.yaml; omit it to use the server's "
+                        "default connection"
+                    ),
                 },
                 "table": {
                     "type": "string",
@@ -387,9 +448,11 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
     ToolDef(
         name="get_reference",
         description=(
-            "Return a slice of the format spec or the assertion DSL spec, by section "
-            "number - what a finding's own spec_ref names. Omit section for the heading "
-            "tree instead of the whole document. Depends on no connection or print."
+            "Look up the dbprint format specification or the assertion DSL "
+            "specification by section number: what a print's field means, or what a "
+            "finding's spec_ref (e.g. '§2.2.4') refers to. Omit section for the "
+            "heading tree instead of the whole document. Depends on no connection or "
+            "print; what one print's tables hold is get_table_context's and list_tables' answer."
         ),
         input_schema={
             "type": "object",
@@ -511,13 +574,13 @@ def _tool_get_table_context(
     state: ServedConnections,
     arguments: dict[str, Any],
 ) -> dict[str, Any] | str:
-    conn = state.resolve(arguments.get("conn"))
+    conn = state.resolve(arguments.get("connection"))
     table = arguments["table"]
-    manifest = _load_manifest(conn)
+    manifest = _load_manifest(state, conn)
     entry = (manifest.get("tables") or {}).get(table) if manifest else None
 
     if manifest is None or entry is None:
-        raise errors.unknown_table(table, conn.name)
+        raise _absent_table(table, conn.name, manifest)
 
     fmt = arguments.get("format", "md")
     budget = arguments.get("budget_tokens", CONTEXT_BUDGET_TOKENS)
@@ -543,6 +606,7 @@ def _tool_get_table_context(
             print_root=_print_root(conn),
             table=table,
             options=options,
+            read=state.files.read,
         )
 
     if options.format == "yaml":
@@ -551,6 +615,7 @@ def _tool_get_table_context(
             print_root=_print_root(conn),
             table=table,
             options=options,
+            read=state.files.read,
         )
 
         return yaml.safe_dump(structured, sort_keys=False, default_flow_style=False)
@@ -561,34 +626,88 @@ def _tool_get_table_context(
         tables=[table],
         options=options,
         connection_name=conn.name,
+        read=state.files.read,
     ).text
 
 
 def _tool_list_tables(state: ServedConnections, arguments: dict[str, Any]) -> dict[str, Any]:
-    conn = state.resolve(arguments.get("conn"))
+    conn = state.resolve(arguments.get("connection"))
     pattern = str(arguments.get("pattern") or "*")
     detail = bool(arguments.get("detail", False))
-    manifest = _load_manifest(conn) or {}
+    manifest = _load_manifest(state, conn) or {}
     entries = manifest.get("tables") or {}
     # fnmatch.fnmatchcase never raises for a string pattern - no parse error to catch.
     matched = sorted(fqn for fqn in entries if fnmatch.fnmatchcase(fqn, pattern))
     kept = matched[:TABLE_LISTING_CAP]
 
+    reply: dict[str, Any] = {}
+
     if detail:
-        listing: list[Any] = [
+        verdicts, size_gated = _freshness(conn, manifest)
+        reply["tables"] = [
             {
-                "fqn": fqn,
+                "table": fqn,
                 "type": entries[fqn].get("type"),
                 "row_count": entries[fqn].get("row_count"),
                 "columns": entries[fqn].get("columns"),
                 "profiled_at": entries[fqn].get("profiled_at"),
+                **verdicts[fqn],
             }
             for fqn in kept
         ]
-    else:
-        listing = list(kept)
 
-    return _capped({"tables": listing}, kept=len(kept), total=len(matched))
+        if gated := [fqn for fqn in size_gated if fqn in kept]:
+            reply["warnings"] = [thresholds.size_gate_warning(conn.name, gated)]
+    else:
+        reply["tables"] = list(kept)
+
+    if failed := [fqn for fqn in failed_tables(manifest) if fnmatch.fnmatchcase(fqn, pattern)]:
+        reply["failed_tables"] = failed
+
+    return _capped(reply, kept=len(kept), total=len(matched))
+
+
+def _freshness(
+    conn: ConnectionConfig,
+    manifest: dict[str, Any],
+) -> tuple[dict[str, dict[str, Any]], tuple[str, ...]]:
+    """A refused table gets its refusal and no verdict; the connection default never stands in."""
+
+    resolved = thresholds.resolve(conn, manifest)
+    now = datetime.now(UTC)
+    tables = manifest.get("tables") or {}
+    judged = {fqn: entry for fqn, entry in tables.items() if fqn not in resolved.refused}
+    stale = {
+        entry.fqn: entry
+        for entry in evaluate(
+            {**manifest, "tables": judged},
+            0.0,
+            now,
+            threshold_for=resolved.threshold_for,
+        )
+    }
+    verdicts: dict[str, dict[str, Any]] = {
+        fqn: {"threshold_error": cause} for fqn, cause in resolved.refused.items()
+    }
+
+    for fqn, entry in judged.items():
+        stale_entry = stale.get(fqn)
+
+        if stale_entry is None:
+            verdict, age = "live", age_days(entry.get("profiled_at"), now)
+        elif stale_entry.age_days == float("inf"):
+            verdict, age = "dormant", None
+        else:
+            verdict, age = "stale", stale_entry.age_days
+
+        threshold = resolved.resolved[fqn]
+        verdicts[fqn] = {
+            "freshness": verdict,
+            "age_days": None if age is None else round(age, 2),
+            "max_age_days": int(threshold) if threshold.is_integer() else threshold,
+        }
+
+    return verdicts, resolved.size_gated
 
 
 @dataclass(frozen=True)
@@ -631,33 +750,27 @@ def _field_matches(value: Any, glob: str | None) -> bool:
 
 
 def _column_matches(col: dict[str, Any], filters: _ColumnFilters) -> bool:
-    raw_inferred = col.get("inferred")
-    inferred = raw_inferred or {}
-
     if not _field_matches(col.get("classification"), filters.classification):
         return False
 
     if not _field_matches(col.get("sql_type"), filters.sql_type):
         return False
 
-    if not _field_matches(inferred.get("sensitivity"), filters.sensitivity):
+    if not _field_matches(column_value(col, "inferred.sensitivity"), filters.sensitivity):
         return False
 
-    if not _field_matches(inferred.get("looks_like"), filters.looks_like):
+    if not _field_matches(column_value(col, "inferred.looks_like"), filters.looks_like):
         return False
 
-    if not _field_matches(col.get("redacted"), filters.redacted):
+    if not _field_matches(column_value(col, "redacted"), filters.redacted):
         return False
 
     if filters.candidate_key is None:
         return True
 
-    # `candidate_key` is a bare `true`, so "tested, not a key" and "never tested" both read as
-    # absent - `cardinality`, never emitted for a `catalog_only` column, tells them apart.
-    if col.get("cardinality") is None:
-        return False
+    candidate_key = read_column_field(col, "inferred.candidate_key")
 
-    return bool(inferred.get("candidate_key")) == filters.candidate_key
+    return candidate_key.known and bool(candidate_key.value) == filters.candidate_key
 
 
 def _search_match(
@@ -666,12 +779,12 @@ def _search_match(
     col_name: str,
     col: dict[str, Any],
     annotation: dict[str, Any],
+    scope: ScanScope | None,
 ) -> dict[str, Any]:
     """One `search_columns` match - the artifact's own fields, no re-derivation."""
 
-    inferred = col.get("inferred") or {}
     match: dict[str, Any] = {
-        "table_fqn": fqn,
+        "table": fqn,
         "column": col_name,
         "sql_type": col.get("sql_type", ""),
         "classification": col.get("classification", ""),
@@ -682,32 +795,38 @@ def _search_match(
     if row_count is not None:
         match["row_count"] = row_count
 
-    rows_scanned = col.get("rows_scanned")
+    scanned = rows_scanned(col, scope)
 
-    if rows_scanned is not None:
-        match["rows_scanned"] = rows_scanned
+    if scanned is not None:
+        match["rows_scanned"] = scanned
+
+    match.update(reply_scope(scope))
 
     # A looks_like verdict from a draw of two reads identically to one from ten
     # thousand without these - carry the evidence, not just the classification.
-    if "looks_like" in inferred:
-        match["looks_like"] = inferred["looks_like"]
+    looks_like = read_column_field(col, "inferred.looks_like")
+
+    if looks_like.state is Absence.PRESENT:
+        match["looks_like"] = looks_like.value
 
         for key in ("sampled", "matched"):
-            if inferred.get(key) is not None:
-                match[key] = inferred[key]
+            if (evidence := column_value(col, f"inferred.{key}")) is not None:
+                match[key] = evidence
 
     # The remaining predicates `_column_matches` filters on - a match needs its category.
-    if "sensitivity" in inferred:
-        match["sensitivity"] = inferred["sensitivity"]
+    sensitivity = read_column_field(col, "inferred.sensitivity")
 
-    redacted = col.get("redacted")
+    if sensitivity.state is Absence.PRESENT:
+        match["sensitivity"] = sensitivity.value
+
+    redacted = column_value(col, "redacted")
 
     if isinstance(redacted, str) and redacted:
         match["redacted"] = redacted
 
-    if inferred.get("candidate_key"):
+    if column_value(col, "inferred.candidate_key"):
         match["candidate_key"] = True
-        exception = inferred.get("candidate_key_exception")
+        exception = column_value(col, "inferred.candidate_key_exception")
 
         if exception is not None:
             match["candidate_key_exception"] = exception
@@ -722,10 +841,11 @@ def _search_match(
 
 def _tool_search_columns(state: ServedConnections, arguments: dict[str, Any]) -> dict[str, Any]:
     pattern = arguments.get("pattern")
+    text = arguments.get("text")
     filters = _column_filters(arguments)
     limit = arguments.get("limit", SEARCH_MATCH_CAP)
-    conn = state.resolve(arguments.get("conn"))
-    manifest = _load_manifest(conn) or {}
+    conn = state.resolve(arguments.get("connection"))
+    manifest = _load_manifest(state, conn) or {}
     print_root = _print_root(conn)
 
     matches: list[dict[str, Any]] = []
@@ -737,8 +857,14 @@ def _tool_search_columns(state: ServedConnections, arguments: dict[str, Any]) ->
     for fqn, entry in sorted(walkable_tables(manifest).items()):
         artifacts = declared_artifacts(entry)
         table_dir = table_directory(print_root, fqn, entry)
-        stats_columns, stats_error = _load_statistics_columns(table_dir, artifacts)
-        annotation_columns, annotation_error = _load_annotation_columns(table_dir, artifacts)
+        statistics, stats_error = _load_statistics(state, table_dir, artifacts)
+        stats_columns = _columns_of(statistics)
+        scope = scope_of(statistics)
+        annotation_columns, annotation_error = _load_annotation_columns(
+            state,
+            table_dir,
+            artifacts,
+        )
 
         if stats_error is not None or annotation_error is not None:
             unreadable.append(fqn)
@@ -760,18 +886,23 @@ def _tool_search_columns(state: ServedConnections, arguments: dict[str, Any]) ->
             if not _column_matches(col, filters):
                 continue
 
+            annotation = annotation_columns.get(col_name) or {}
+            value_notes = _matching_value_notes(annotation, text) if text is not None else []
+
+            if text is not None and not (
+                value_notes or _names_or_notes(col_name, annotation, text)
+            ):
+                continue
+
             total += 1
 
             if len(matches) < limit:
-                matches.append(
-                    _search_match(
-                        fqn,
-                        entry,
-                        col_name,
-                        col,
-                        annotation_columns.get(col_name) or {},
-                    ),
-                )
+                match = _search_match(fqn, entry, col_name, col, annotation, scope)
+
+                if value_notes:
+                    match["value_notes"] = value_notes
+
+                matches.append(match)
 
     result = _capped({"matches": matches}, kept=len(matches), total=total)
 
@@ -781,18 +912,42 @@ def _tool_search_columns(state: ServedConnections, arguments: dict[str, Any]) ->
     return result
 
 
+def _names_or_notes(col_name: str, annotation: dict[str, Any], text: str) -> bool:
+    note = annotation.get("note")
+    needle = text.casefold()
+
+    return needle in col_name.casefold() or (isinstance(note, str) and needle in note.casefold())
+
+
+def _matching_value_notes(annotation: dict[str, Any], text: str) -> list[dict[str, Any]]:
+    entries = annotation.get("values")
+
+    if not isinstance(entries, list):
+        return []
+
+    needle = text.casefold()
+
+    return [
+        {"value": entry.get("value"), "note": " ".join(entry["note"].split())}
+        for entry in entries
+        if isinstance(entry, dict)
+        and isinstance(entry.get("note"), str)
+        and needle in entry["note"].casefold()
+    ]
+
+
 def _tool_resolve_value(state: ServedConnections, arguments: dict[str, Any]) -> dict[str, Any]:
     """MCP.md 4.7: one column's answer to a phrase, read off the print alone."""
 
-    conn = state.resolve(arguments.get("conn"))
+    conn = state.resolve(arguments.get("connection"))
     table = arguments["table"]
     column = arguments["column"]
     text = arguments["text"]
-    manifest = _load_manifest(conn)
+    manifest = _load_manifest(state, conn)
     entry = (manifest.get("tables") or {}).get(table) if manifest else None
 
     if manifest is None or entry is None:
-        raise errors.unknown_table(table, conn.name)
+        raise _absent_table(table, conn.name, manifest)
 
     artifacts = declared_artifacts(entry)
     table_dir = table_directory(_print_root(conn), table, entry)
@@ -816,12 +971,14 @@ def _tool_resolve_value(state: ServedConnections, arguments: dict[str, Any]) -> 
     if not stats_path.is_file():
         raise errors.manifest_references_missing_file(artifacts["statistics"], str(stats_path))
 
-    stats_columns, stats_error = _load_statistics_columns(table_dir, artifacts)
+    statistics, stats_error = _load_statistics(state, table_dir, artifacts)
 
     if stats_error is not None:
         raise errors.yaml_parse_error(str(stats_path), stats_error)
 
-    annotation_columns, annotation_error = _load_annotation_columns(table_dir, artifacts)
+    stats_columns = _columns_of(statistics)
+
+    annotation_columns, annotation_error = _load_annotation_columns(state, table_dir, artifacts)
 
     if annotation_error is not None:
         annotation_path = table_dir / artifacts["statistics_annotations"]
@@ -832,44 +989,32 @@ def _tool_resolve_value(state: ServedConnections, arguments: dict[str, Any]) -> 
         raise errors.unknown_column(column, table, sorted(stats_columns))
 
     col = stats_columns[column] or {}
-    entries = col.get("values")
-    redaction = col.get("redacted")
+    values = read_column_field(col, "values")
+    entries = values.value if isinstance(values.value, list) else []
+    redaction = column_value(col, "redacted")
+    scope = scope_of(statistics)
     reason = None
 
-    if not isinstance(entries, list) or not entries:
-        reason = f"column {column!r} publishes no values"
+    if values.state is Absence.UNMEASURED:
+        reason = f"column {column!r} values are unmeasured: {values.cause}"
+    elif values.state is not Absence.PRESENT:
+        reason = f"column {column!r} publishes no values: {values.cause}"
     elif isinstance(redaction, str) and redaction:
         reason = f"column {column!r} is redacted ({redaction}), so its values are withheld"
+    elif scope is not None and scope.rows_scanned == 0:
+        reason = "the scan read no rows, so there is no value list to match the phrase against"
 
     resolution = value_resolution.resolve(
         text,
-        entries if isinstance(entries, list) else [],
+        entries,
         _column_value_notes(annotation_columns.get(column)),
-        coverage=col.get("values_coverage"),
-        exhaustive=_list_is_exhaustive(col),
+        coverage=column_value(col, "values_coverage"),
+        complete=list_is_complete(col),
+        scope=scope,
         unavailable_reason=reason,
     )
 
     return {"table": table, "column": column, "text": text, **resolution}
-
-
-def _list_is_exhaustive(col: dict[str, Any]) -> bool:
-    """Whether `values` carries every distinct value the column has (SPEC 2.2.4, 2.2.5).
-
-    Without a `values_coverage`, `frequencies.listed` against an exact `cardinality` decides.
-    """
-
-    if col.get("values_coverage") == 1.0:
-        return True
-
-    frequencies = col.get("frequencies")
-
-    return (
-        isinstance(frequencies, dict)
-        and col.get("cardinality_method") == "exact"
-        and frequencies.get("listed") == col.get("cardinality")
-        and isinstance(col.get("cardinality"), int)
-    )
 
 
 def _column_value_notes(annotation: Any) -> dict[str, str]:
@@ -891,8 +1036,8 @@ def _column_value_notes(annotation: Any) -> dict[str, str]:
 
 
 def _tool_get_manifest(state: ServedConnections, arguments: dict[str, Any]) -> dict[str, Any]:
-    conn = state.resolve(arguments.get("conn"))
-    manifest = _load_manifest(conn)
+    conn = state.resolve(arguments.get("connection"))
+    manifest = _load_manifest(state, conn)
 
     if manifest is None:
         raise errors.manifest_references_missing_file(
@@ -908,19 +1053,28 @@ def _tool_get_manifest(state: ServedConnections, arguments: dict[str, Any]) -> d
         if pattern is None or fnmatch.fnmatchcase(fqn, pattern)
     }
     kept = dict(list(matched.items())[:MANIFEST_TABLE_CAP])
+    reply = {**manifest, "tables": kept}
+    reply.pop("failed_tables", None)
 
-    return _capped({**manifest, "tables": kept}, kept=len(kept), total=len(matched))
+    if failed := [
+        fqn
+        for fqn in failed_tables(manifest)
+        if pattern is None or fnmatch.fnmatchcase(fqn, pattern)
+    ]:
+        reply["failed_tables"] = failed
+
+    return _capped(reply, kept=len(kept), total=len(matched))
 
 
 def _tool_get_diff(state: ServedConnections, arguments: dict[str, Any]) -> dict[str, Any]:
-    conn = state.resolve(arguments.get("conn"))
+    conn = state.resolve(arguments.get("connection"))
     diff_path = _print_root(conn) / "diff.yaml"
 
     if not diff_path.is_file():
         raise errors.no_diff_available(str(diff_path))
 
     try:
-        data = yaml.safe_load(diff_path.read_text(encoding="utf-8"))
+        data = state.files.read(diff_path)
     except yaml.YAMLError as exc:
         raise errors.yaml_parse_error(str(diff_path), str(exc)) from exc
 
@@ -950,7 +1104,7 @@ def _change_matches(change: dict[str, Any], arguments: dict[str, Any]) -> bool:
 
 
 def _tool_get_reference(arguments: dict[str, Any]) -> str:
-    """No `conn` - the two reference documents depend on no connection or print."""
+    """No `connection` - the two reference documents depend on no connection or print."""
 
     document_ = cast(ReferenceDocument, arguments["document"])
     section_number = arguments.get("section")
@@ -986,14 +1140,14 @@ def _print_root(conn: ConnectionConfig) -> Path:
     return conn.output / conn.name
 
 
-def _load_manifest(conn: ConnectionConfig) -> dict[str, Any] | None:
+def _load_manifest(state: ServedConnections, conn: ConnectionConfig) -> dict[str, Any] | None:
     manifest_path = _print_root(conn) / "manifest.yaml"
 
     if not manifest_path.is_file():
         return None
 
     try:
-        data = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+        data = state.files.read(manifest_path)
     except yaml.YAMLError as exc:
         raise errors.yaml_parse_error(str(manifest_path), str(exc)) from exc
 
@@ -1005,14 +1159,14 @@ def _load_manifest(conn: ConnectionConfig) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def _load_statistics_columns(
+def _load_statistics(
+    state: ServedConnections,
     table_dir: Path,
     artifacts: dict[str, str],
 ) -> tuple[dict[str, Any], str | None]:
-    """One table's `statistics.yaml` `columns` map, plus its own parse error if it has one.
+    """One table's `statistics.yaml` document, plus its own parse error if it has one.
 
-    The error is absent when the kind was never declared, the file is missing, or the shape is
-    merely malformed rather than unparseable.
+    The error is absent for an undeclared kind, a missing file, or a merely malformed shape.
     """
 
     if "statistics" not in artifacts:
@@ -1024,26 +1178,27 @@ def _load_statistics_columns(
         return {}, None
 
     try:
-        data = yaml.safe_load(stats_path.read_text(encoding="utf-8")) or {}
+        data = state.files.read(stats_path) or {}
     except yaml.YAMLError as exc:
         return {}, str(exc)
 
-    if not isinstance(data, dict):
-        return {}, None
+    return (data if isinstance(data, dict) else {}), None
 
-    columns = data.get("columns")
 
-    return (columns if isinstance(columns, dict) else {}), None
+def _columns_of(statistics: dict[str, Any]) -> dict[str, Any]:
+    columns = statistics.get("columns")
+
+    return columns if isinstance(columns, dict) else {}
 
 
 def _load_annotation_columns(
+    state: ServedConnections,
     table_dir: Path,
     artifacts: dict[str, str],
 ) -> tuple[dict[str, dict[str, Any]], str | None]:
     """One table's `statistics.annotations.yaml` `columns` map, plus its own parse error.
 
-    Each entry is `{note: <str>, claims: {<stat>: <predicate>}}`, both optional (SPEC 2.7.1).
-    See `_load_statistics_columns` for what the error half covers.
+    Each entry is `{note, claims}`, both optional (SPEC 2.7.1).
     """
 
     if "statistics_annotations" not in artifacts:
@@ -1055,7 +1210,7 @@ def _load_annotation_columns(
         return {}, None
 
     try:
-        data = yaml.safe_load(ann_path.read_text(encoding="utf-8")) or {}
+        data = state.files.read(ann_path) or {}
     except yaml.YAMLError as exc:
         return {}, str(exc)
 
@@ -1068,3 +1223,14 @@ def _load_annotation_columns(
         return {}, None
 
     return {name: entry for name, entry in columns.items() if isinstance(entry, dict)}, None
+
+
+def _absent_table(
+    table: str,
+    connection: str,
+    manifest: dict[str, Any] | None,
+) -> errors.McpError:
+    if table in failed_tables(manifest):
+        return errors.unprofiled_table(table)
+
+    return errors.unknown_table(table, connection)

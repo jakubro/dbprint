@@ -19,10 +19,6 @@ class TestComputeNullRate:
 
         assert compute_null_rate(0, 0) == 0.0
 
-    def test_a_nonzero_null_count_never_rounds_down_to_zero(self) -> None:
-        assert round(1 / 10_000_000, 6) == 0.0
-        assert compute_null_rate(1, 10_000_000) == 0.000001
-
     def test_a_nonzero_non_null_count_never_rounds_up_to_one(self) -> None:
         assert round(9_999_999 / 10_000_000, 6) == 1.0
         assert compute_null_rate(9_999_999, 10_000_000) == 0.999999

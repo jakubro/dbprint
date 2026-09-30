@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from dbprint.spec.coverage import coverage_share, is_incoherent
+from dbprint.spec.coverage import coverage_share, enumeration_limit, is_incoherent
 
 
 class TestCoverageShare:
@@ -76,3 +76,20 @@ class TestAllThreeAdaptersShareOneFunction:
         assert postgres_coverage_share is coverage_share
         assert mysql_coverage_share is coverage_share
         assert snowflake_coverage_share is coverage_share
+
+
+def test_the_enumeration_limit_is_the_larger_setting() -> None:
+    assert enumeration_limit(50, 20) == 50
+    assert enumeration_limit(10, 20) == 20
+
+
+def test_a_share_is_rounded_to_six_places() -> None:
+    assert coverage_share(1, 3, exhaustive=False) == 0.333333
+
+
+@pytest.mark.parametrize(
+    ("listed", "non_null", "incoherent"),
+    [(1, 0, False), (2, 1, True), (1, 1, False)],
+)
+def test_incoherence_needs_rows_to_exceed(listed: int, non_null: int, incoherent: bool) -> None:
+    assert is_incoherent(listed, non_null) is incoherent

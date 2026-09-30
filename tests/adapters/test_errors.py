@@ -40,6 +40,14 @@ class TestDetailBlock:
         assert "    SELECT a" in exc.detail()
         assert "            SELECT a" not in exc.detail()
 
+    def test_the_statement_keeps_its_relative_indentation(self) -> None:
+        exc = QueryFailed(
+            TypeError("x"),
+            "\n        SELECT\n          src.a\n        FROM t src\n        ",
+        )
+
+        assert exc.detail().splitlines()[-3:] == ["    SELECT", "      src.a", "    FROM t src"]
+
     def test_long_statement_truncated(self) -> None:
         detail = QueryFailed(TypeError("x"), "\n".join(f"line {i}" for i in range(40))).detail()
 

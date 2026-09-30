@@ -123,7 +123,7 @@ def _fixture() -> dict[str, MockTable]:
 
 
 def _degraded() -> ColumnStats:
-    """The temporal column whose whole block was attempted and lost."""
+    """The temporal column whose whole block this run did not measure."""
 
     return ColumnStats(
         sql_type="timestamp",

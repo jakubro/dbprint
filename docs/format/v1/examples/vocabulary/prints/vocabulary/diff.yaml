@@ -32,5 +32,5 @@ summary:
   unevaluated_tables: 0
 changes:
 - kind: table_added
-  table: public.shapes
+  table: vocabulary.public.shapes
   type: table

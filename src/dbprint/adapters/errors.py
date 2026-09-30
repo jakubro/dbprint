@@ -7,6 +7,7 @@ per-table result; the CLI renders `detail()` in its grouped failure report.
 
 from __future__ import annotations
 
+import textwrap
 from typing import Any
 
 
@@ -17,13 +18,23 @@ _TRUNCATED = "... (truncated)"
 
 
 class QueryFailed(RuntimeError):
-    """A database statement raised; carries the statement and its parameters."""
+    """A database statement raised; carries the statement, its parameters, and whether the
+    driver reported it cancelled by a statement time limit.
+    """
 
-    def __init__(self, cause: BaseException, sql: str, params: Any = None) -> None:
+    def __init__(
+        self,
+        cause: BaseException,
+        sql: str,
+        params: Any = None,
+        *,
+        timed_out: bool = False,
+    ) -> None:
         super().__init__(str(cause))
         self.cause = cause
         self.sql = sql
         self.params = params
+        self.timed_out = timed_out
 
     def __str__(self) -> str:
         return f"{type(self.cause).__name__}: {self.cause}"
@@ -42,7 +53,7 @@ class QueryFailed(RuntimeError):
     def detail_untruncated(self) -> str:
         """Render the statement and its parameters as an indented block, unclipped."""
 
-        body = "\n".join(f"    {line}" for line in _dedent_sql(self.sql).splitlines())
+        body = "\n".join(f"    {line}" for line in dedent_sql(self.sql).splitlines())
         lines = ["  statement:", body]
 
         if self.params is not None:
@@ -51,18 +62,16 @@ class QueryFailed(RuntimeError):
         return "\n".join(lines)
 
 
-def _dedent_sql(sql: str) -> str:
-    """Strip per-line indentation and blank lines, keeping content only."""
+def dedent_sql(sql: str) -> str:
+    """Remove the indentation every line shares and the blank edge lines; the layout stays."""
 
-    lines = [line.strip() for line in sql.strip().splitlines() if line.strip()]
-
-    return "\n".join(lines)
+    return textwrap.dedent(sql).strip("\n")
 
 
 def _clip_sql(sql: str) -> str:
     """Dedent, then clip to the line / character budget."""
 
-    lines = _dedent_sql(sql).splitlines()
+    lines = dedent_sql(sql).splitlines()
 
     if len(lines) > _SQL_MAX_LINES:
         lines = [*lines[:_SQL_MAX_LINES], _TRUNCATED]

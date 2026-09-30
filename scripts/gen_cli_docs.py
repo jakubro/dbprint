@@ -32,13 +32,15 @@ COMMANDS = (
     "docs build",
 )
 
-_HEADER = """\
-# dbprint CLI reference
-
-Complete `--help` for every command, captured verbatim. This file is generated
-from the CLI itself - do not edit it by hand. Run `just docs` to regenerate it
-after changing a command's docstring, options, or help sections.
-"""
+_HEADER_PARAGRAPHS = (
+    "# dbprint CLI reference",
+    (
+        "Complete `--help` for every command, captured verbatim. This file is generated from the "
+        "CLI itself — do not edit it by hand. Run `just docs` to regenerate it after changing a "
+        "command's docstring, options, or help sections."
+    ),
+)
+_HEADER = "\n\n".join(_HEADER_PARAGRAPHS) + "\n"
 
 
 def build_document() -> str:

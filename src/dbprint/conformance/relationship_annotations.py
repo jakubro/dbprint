@@ -7,10 +7,13 @@ from typing import Any
 
 import yaml
 
-from dbprint.assertions.predicate import MalformedPredicate, is_assertable_edge_stat
-from dbprint.assertions.predicate import evaluate as eval_predicate
-from dbprint.assertions.predicate import parse as parse_predicate
-from dbprint.assertions.predicate import resolve as resolve_stat
+from dbprint.spec.predicate import (
+    MalformedPredicate,
+    is_assertable_edge_stat,
+    resolve_edge_stat,
+)
+from dbprint.spec.predicate import evaluate as eval_predicate
+from dbprint.spec.predicate import parse as parse_predicate
 from .issue import Issue
 from .layout import declared_artifacts, walkable_tables
 from .progress import TableSink
@@ -176,12 +179,13 @@ def _check_claim(path: str, stat: str, raw: Any, edge: dict[str, Any]) -> list[I
     if not isinstance(stat, str) or not is_assertable_edge_stat(stat):
         return [_unassertable(claim_path, f"{stat!r} is not a checkable edge stat")]
 
-    predicate = parse_predicate(stat, raw)
+    # No edge stat is a set, pattern or enum stat, so every one parses by shape alone.
+    predicate = parse_predicate(stat, raw)  # pragma: no mutate
 
     if isinstance(predicate, MalformedPredicate):
         return [_unassertable(claim_path, predicate.reason)]
 
-    ref = resolve_stat(edge, stat)
+    ref = resolve_edge_stat(edge, stat)
 
     if not ref.found:
         return [_unassertable(claim_path, f"{stat!r} not emitted for this edge")]
@@ -190,6 +194,9 @@ def _check_claim(path: str, stat: str, raw: Any, edge: dict[str, Any]) -> list[I
 
     if outcome.passed:
         return []
+
+    if outcome.malformed:
+        return [_unassertable(claim_path, outcome.detail)]
 
     return [
         Issue(

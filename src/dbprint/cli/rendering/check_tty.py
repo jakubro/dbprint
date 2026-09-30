@@ -8,8 +8,9 @@ from __future__ import annotations
 
 from typing import TextIO
 
+from dbprint.config.duration import format_threshold
 from dbprint.conformance import Issue
-from dbprint.engine.freshness import format_age, format_threshold
+from dbprint.engine.freshness import format_age
 from .check_data import CheckResult
 
 

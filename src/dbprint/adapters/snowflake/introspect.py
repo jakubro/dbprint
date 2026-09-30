@@ -8,11 +8,12 @@ schemas are excluded from `list_tables` regardless of selectors.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from typing import Any, cast
 
 from dbprint.config.selectors import expand
-from .connection import Cursor, exec_query
-from .identity import Identity, quote_ident
+from dbprint.spec.fqn import join as join_fqn
+from .connection import DIALECT, Cursor, exec_query
 from ..base import (
     ColumnMeta,
     CommentsMeta,
@@ -21,17 +22,21 @@ from ..base import (
     IndexMeta,
     PhysicalLayout,
     PhysicalLayoutKey,
+    SkippedNamespace,
     TableMeta,
     TableType,
     UniqueKeyMeta,
 )
-
-
-PATH_SEGMENT_RE = re.compile(r"^[a-z0-9_][a-z0-9_.-]*$")
-
-
-class IdentifierRejected(ValueError):
-    """Raised when an identifier fails SPEC 1.5 path-segment rules; format is SPEC 1.5.5."""
+from ..errors import QueryFailed
+from ..identifiers import (
+    Identity,
+    column_meta,
+    enforce_table_identifiers,
+    fold,
+    quote,
+    table_meta,
+)
+from ..sql_layout import listed
 
 
 # The spellings information_schema.tables.table_type actually reports for Snowflake.
@@ -53,6 +58,12 @@ _FK_ACTIONS: dict[str, FkAction] = {
 
 # Only Snowflake's own system schema; a MAIN or PG_CATALOG here is a user schema to profile.
 _SYSTEM_SCHEMAS = ("information_schema",)
+
+# Snowflake's own shared database, listed by SHOW DATABASES as `kind = APPLICATION`.
+_SYSTEM_DATABASE = "SNOWFLAKE"
+
+# Column offset of `name` in a `SHOW DATABASES` row: created_on, name, is_default, ...
+_SHOW_DATABASES_NAME = 1
 
 # SHOW output is a fixed result-set shape, not a view, so this module reads it positionally.
 
@@ -89,28 +100,46 @@ _Candidate = tuple[TableMeta, tuple[str, str, str]]
 
 def list_tables(
     cursor: Cursor,
+    databases: Sequence[str],
     include: list[str],
     exclude: list[str],
-) -> tuple[list[TableMeta], dict[str, tuple[str, str, str]]]:
-    """Enumerate tables/views/matviews in user schemas, filtered by selectors.
+) -> tuple[list[_Candidate], tuple[SkippedNamespace, ...]]:
+    """Enumerate tables/views/matviews in user schemas of `databases`, filtered by selectors.
 
-    Also returns the lowercased-FQN-to-physical map; this is the only point where both
-    forms are visible to capture.
+    Each comes with its physical spelling, beside every database that failed to list.
     """
 
-    rows = exec_query(
-        cursor,
-        """
-        SELECT table_catalog, table_schema, table_name, table_type
-        FROM information_schema.tables
-        ORDER BY table_catalog, table_schema, table_name
-        """,
-    ).fetchall()
+    rows: list[tuple[Any, ...]] = []
+    skipped: list[SkippedNamespace] = []
+
+    for database in databases:
+        # Each database's INFORMATION_SCHEMA describes that database alone; the bound catalog
+        # filter is what confines the read on a substrate whose schema spans every catalog.
+        try:
+            rows += exec_query(
+                cursor,
+                f"""
+                SELECT
+                  tbl.table_catalog,
+                  tbl.table_schema,
+                  tbl.table_name,
+                  tbl.table_type
+                FROM
+                  {_info_schema(database, "tables")} tbl
+                WHERE
+                  tbl.table_catalog = ?
+                ORDER BY
+                  tbl.table_catalog, tbl.table_schema, tbl.table_name
+                """,
+                [database],
+            ).fetchall()
+        except QueryFailed as exc:
+            skipped.append(SkippedNamespace(name=database, cause=str(exc)))
 
     candidates: list[_Candidate] = []
 
     for catalog, schema, name, table_type in rows:
-        if schema.lower() in _SYSTEM_SCHEMAS:
+        if fold(schema) in _SYSTEM_SCHEMAS:
             continue
 
         canonical_type = _TABLE_TYPE_MAP.get(table_type)
@@ -118,9 +147,8 @@ def list_tables(
         if canonical_type is None:
             continue
 
-        path = (catalog.lower(), schema.lower(), name.lower())
-        meta = TableMeta(fqn=".".join(path), type=canonical_type, namespace_path=path)
-        candidates.append((meta, (catalog, schema, name)))
+        physical = (catalog, schema, name)
+        candidates.append((table_meta(physical, canonical_type), physical))
 
     in_scope = set(
         expand(
@@ -130,45 +158,60 @@ def list_tables(
         ),
     )
     selected = [entry for entry in candidates if entry[0].fqn in in_scope]
-    _enforce_identifier_rules(selected)
+    enforce_table_identifiers(selected)
 
-    return [meta for meta, _ in selected], {meta.fqn: parts for meta, parts in selected}
+    return selected, tuple(skipped)
 
 
-def columns(cursor: Cursor, identity: Identity) -> tuple[list[ColumnMeta], dict[str, str]]:
+def list_databases(cursor: Cursor, like: str | None = None) -> tuple[str, ...]:
+    """Databases the role holds a privilege on, less Snowflake's own; `like` narrows by name."""
+
+    statement = "SHOW DATABASES" if like is None else f"SHOW DATABASES LIKE '{_like(like)}'"
+    rows = exec_query(cursor, statement).fetchall()
+    names = (str(row[_SHOW_DATABASES_NAME]) for row in rows)
+
+    return tuple(name for name in names if name.upper() != _SYSTEM_DATABASE)
+
+
+def columns(cursor: Cursor, identity: Identity) -> list[ColumnMeta]:
     """Per-column structural metadata in ordinal order.
 
-    Returns the metadata plus a lowercase-to-physical column-name map, which later
-    statements need to quote the real identifiers. `collation_name` is NULL for a column
-    with no explicit `COLLATE` (SPEC 2.2.2), and Snowflake has no default to fill in.
+    `collation_name` is NULL without an explicit `COLLATE` (SPEC 2.2.2); Snowflake has no default.
     """
 
     rows = exec_query(
         cursor,
-        """
-        SELECT column_name, ordinal_position, data_type, is_nullable, column_default,
-               collation_name
-        FROM information_schema.columns
-        WHERE table_catalog = ? AND table_schema = ? AND table_name = ?
-        ORDER BY ordinal_position
+        f"""
+        SELECT
+          col.column_name,
+          col.ordinal_position,
+          col.data_type,
+          col.is_nullable,
+          col.column_default,
+          col.collation_name
+        FROM
+          {_info_schema(identity.parts[0], "columns")} col
+        WHERE
+          col.table_catalog = ?
+          AND col.table_schema = ?
+          AND col.table_name = ?
+        ORDER BY
+          col.ordinal_position
         """,
         identity.parts,
     ).fetchall()
 
-    metas = [
-        ColumnMeta(
-            name=col_name.lower(),
+    return [
+        column_meta(
+            col_name,
             sql_type=data_type,
             nullable=(is_nullable == "YES"),
             default=col_default,
             ordinal=int(ordinal),
-            physical_name=None if col_name == col_name.lower() else col_name,
             collation=collation_name,
         )
         for col_name, ordinal, data_type, is_nullable, col_default, collation_name in rows
     ]
-
-    return metas, {row[0].lower(): row[0] for row in rows}
 
 
 # Snowflake carries no database- or session-level default collation to query: a column with
@@ -206,15 +249,15 @@ def relationships(cursor: Cursor, identity: Identity) -> list[ForeignKeyMeta]:
     for fk_name, fk_rows in grouped.items():
         ordered = sorted(fk_rows, key=lambda r: int(r[_IK_KEY_SEQUENCE]))
         head = ordered[0]
-        target = ".".join(
-            str(head[index]).lower() for index in (_IK_PK_DATABASE, _IK_PK_SCHEMA, _IK_PK_TABLE)
+        target = join_fqn(
+            [fold(str(head[index])) for index in (_IK_PK_DATABASE, _IK_PK_SCHEMA, _IK_PK_TABLE)],
         )
 
         out.append(
             ForeignKeyMeta(
-                column=tuple(str(r[_IK_FK_COLUMN]).lower() for r in ordered),
+                column=tuple(fold(str(r[_IK_FK_COLUMN])) for r in ordered),
                 target_table=target,
-                target_column=tuple(str(r[_IK_PK_COLUMN]).lower() for r in ordered),
+                target_column=tuple(fold(str(r[_IK_PK_COLUMN])) for r in ordered),
                 on_delete=_FK_ACTIONS.get(str(head[_IK_DELETE_RULE]).upper(), "NO ACTION"),
                 on_update=_FK_ACTIONS.get(str(head[_IK_UPDATE_RULE]).upper(), "NO ACTION"),
                 constraint_name=fk_name,
@@ -235,16 +278,27 @@ def indexes(cursor: Cursor, identity: Identity) -> list[IndexMeta]:
 
     rows = exec_query(
         cursor,
-        """
-        SELECT i.name, i.is_unique, c.name
-        FROM information_schema.indexes i
-        JOIN information_schema.index_columns c
-          ON c.table_catalog = i.table_catalog
-         AND c.table_schema = i.table_schema
-         AND c.table_name = i.table_name
-         AND c.index_name = i.name
-        WHERE i.table_catalog = ? AND i.table_schema = ? AND i.table_name = ?
-        ORDER BY i.name, c.key_sequence
+        f"""
+        SELECT
+          idx.name,
+          idx.is_unique,
+          icl.name
+
+        FROM
+          {_info_schema(identity.parts[0], "indexes")} idx
+          JOIN {_info_schema(identity.parts[0], "index_columns")} icl ON
+            icl.table_catalog = idx.table_catalog
+            AND icl.table_schema = idx.table_schema
+            AND icl.table_name = idx.table_name
+            AND icl.index_name = idx.name
+
+        WHERE
+          idx.table_catalog = ?
+          AND idx.table_schema = ?
+          AND idx.table_name = ?
+
+        ORDER BY
+          idx.name, icl.key_sequence
         """,
         identity.parts,
     ).fetchall()
@@ -253,10 +307,10 @@ def indexes(cursor: Cursor, identity: Identity) -> list[IndexMeta]:
 
     for index_name, is_unique, column_name in rows:
         _unique, index_columns = grouped.setdefault(index_name, (_is_true(is_unique), []))
-        index_columns.append(column_name.lower())
+        index_columns.append(fold(column_name))
 
     return [
-        IndexMeta(name=name.lower(), columns=tuple(cols), unique=unique, type="btree")
+        IndexMeta(name=fold(name), columns=tuple(cols), unique=unique, type="btree")
         for name, (unique, cols) in grouped.items()
     ]
 
@@ -266,9 +320,15 @@ def comments(cursor: Cursor, identity: Identity) -> CommentsMeta:
 
     table_row = exec_query(
         cursor,
-        """
-        SELECT comment FROM information_schema.tables
-        WHERE table_catalog = ? AND table_schema = ? AND table_name = ?
+        f"""
+        SELECT
+          tbl.comment
+        FROM
+          {_info_schema(identity.parts[0], "tables")} tbl
+        WHERE
+          tbl.table_catalog = ?
+          AND tbl.table_schema = ?
+          AND tbl.table_name = ?
         """,
         identity.parts,
     ).fetchone()
@@ -276,18 +336,23 @@ def comments(cursor: Cursor, identity: Identity) -> CommentsMeta:
 
     col_rows = exec_query(
         cursor,
-        """
-        SELECT column_name, comment FROM information_schema.columns
-        WHERE table_catalog = ? AND table_schema = ? AND table_name = ?
+        f"""
+        SELECT
+          col.column_name,
+          col.comment
+        FROM
+          {_info_schema(identity.parts[0], "columns")} col
+        WHERE
+          col.table_catalog = ?
+          AND col.table_schema = ?
+          AND col.table_name = ?
         """,
         identity.parts,
     ).fetchall()
 
     return CommentsMeta(
         table=table_comment,
-        columns={
-            col_name.lower(): comment for col_name, comment in col_rows if comment is not None
-        },
+        columns={fold(col_name): comment for col_name, comment in col_rows if comment is not None},
     )
 
 
@@ -314,7 +379,7 @@ def unique_keys(cursor: Cursor, identity: Identity) -> list[UniqueKeyMeta]:
             ordered = sorted(grouped[name], key=lambda r: int(r[_KEY_SEQUENCE]))
             out.append(
                 UniqueKeyMeta(
-                    columns=tuple(str(r[_KEY_COLUMN]).lower() for r in ordered),
+                    columns=tuple(fold(str(r[_KEY_COLUMN])) for r in ordered),
                     primary=primary,
                 ),
             )
@@ -330,11 +395,12 @@ def physical_layout(cursor: Cursor, identity: Identity) -> PhysicalLayout | None
     match the wrong table.
     """
 
-    schema_ref = f"{quote_ident(identity.database)}.{quote_ident(identity.schema)}"
+    database, schema, table = identity.parts
+    schema_ref = f"{quote(database, DIALECT)}.{quote(schema, DIALECT)}"
     rows = exec_query(cursor, f"SHOW TABLES IN SCHEMA {schema_ref}").fetchall()
 
     for row in rows:
-        if str(row[_SHOW_TABLES_NAME]).lower() != identity.table.lower():
+        if fold(str(row[_SHOW_TABLES_NAME])) != fold(table):
             continue
 
         cluster_by = row[_SHOW_TABLES_CLUSTER_BY]
@@ -359,7 +425,7 @@ def _cluster_key(expression: str) -> PhysicalLayoutKey:
 
     return PhysicalLayoutKey(
         expression=expression,
-        column=match.group(1).lower() if match else None,
+        column=fold(match.group(1)) if match else None,
     )
 
 
@@ -387,43 +453,62 @@ def _split_top_level_commas(text: str) -> list[str]:
     return parts
 
 
-def view_dependencies(cursor: Cursor, database: str) -> dict[str, tuple[str, ...]]:
-    """Every view/matview's direct object dependencies, for the whole connection - two
-    statements, the second reading an account-wide catalog that lags up to three hours.
+def view_dependencies(cursor: Cursor, databases: Sequence[str]) -> dict[str, tuple[str, ...]]:
+    """Every view/matview's direct object dependencies in `databases` - one seed read per
+    database, then one read of an account-wide catalog that lags up to three hours.
     """
 
-    view_rows = exec_query(
-        cursor,
-        """
-        SELECT table_catalog, table_schema, table_name
-        FROM information_schema.tables
-        WHERE table_type IN ('VIEW', 'MATERIALIZED VIEW')
-        """,
-    ).fetchall()
+    view_rows = [
+        row
+        for database in databases
+        for row in exec_query(
+            cursor,
+            f"""
+            SELECT
+              tbl.table_catalog,
+              tbl.table_schema,
+              tbl.table_name
+            FROM
+              {_info_schema(database, "tables")} tbl
+            WHERE
+              tbl.table_catalog = ?
+              AND tbl.table_type IN ('VIEW', 'MATERIALIZED VIEW')
+            """,
+            [database],
+        ).fetchall()
+    ]
 
     out: dict[str, list[str]] = {
-        f"{catalog.lower()}.{schema.lower()}.{name.lower()}": []
+        join_fqn((fold(catalog), fold(schema), fold(name))): []
         for catalog, schema, name in view_rows
     }
 
     dep_rows = exec_query(
         cursor,
-        """
+        f"""
         SELECT
-            referencing_database, referencing_schema, referencing_object_name,
-            referenced_database, referenced_schema, referenced_object_name
-        FROM snowflake.account_usage.object_dependencies
-        WHERE referencing_object_domain IN ('VIEW', 'MATERIALIZED VIEW')
-          AND referenced_object_domain IN ('TABLE', 'VIEW', 'MATERIALIZED VIEW', 'EXTERNAL TABLE')
-          AND UPPER(referencing_database) = UPPER(?)
+          dep.referencing_database,
+          dep.referencing_schema,
+          dep.referencing_object_name,
+          dep.referenced_database,
+          dep.referenced_schema,
+          dep.referenced_object_name
+        FROM
+          snowflake.account_usage.object_dependencies dep
+        WHERE
+          dep.referencing_object_domain IN ('VIEW', 'MATERIALIZED VIEW')
+          AND dep.referenced_object_domain IN ('TABLE', 'VIEW', 'MATERIALIZED VIEW', 'EXTERNAL TABLE')
+          AND UPPER(dep.referencing_database) IN (
+            {listed(["UPPER(?)"] * len(databases), 12)}
+          )
         """,
-        [database],
+        list(databases),
     ).fetchall()
 
     for view_db, view_schema, view_name, source_db, source_schema, source_name in dep_rows:
-        key = f"{view_db.lower()}.{view_schema.lower()}.{view_name.lower()}"
+        key = join_fqn((fold(view_db), fold(view_schema), fold(view_name)))
         out.setdefault(key, []).append(
-            f"{source_db.lower()}.{source_schema.lower()}.{source_name.lower()}",
+            join_fqn((fold(source_db), fold(source_schema), fold(source_name))),
         )
 
     return {k: tuple(v) for k, v in out.items()}
@@ -434,9 +519,15 @@ def row_count_estimate(cursor: Cursor, identity: Identity) -> int:
 
     row = exec_query(
         cursor,
-        """
-        SELECT row_count FROM information_schema.tables
-        WHERE table_catalog = ? AND table_schema = ? AND table_name = ?
+        f"""
+        SELECT
+          tbl.row_count
+        FROM
+          {_info_schema(identity.parts[0], "tables")} tbl
+        WHERE
+          tbl.table_catalog = ?
+          AND tbl.table_schema = ?
+          AND tbl.table_name = ?
         """,
         identity.parts,
     ).fetchone()
@@ -447,52 +538,6 @@ def row_count_estimate(cursor: Cursor, identity: Identity) -> int:
     return int(row[0])
 
 
-def _enforce_identifier_rules(selected: list[_Candidate]) -> None:
-    """Reject identifiers that violate SPEC 1.5 before any artifact is written.
-
-    Two objects differing only by case collapse onto one path, the second overwriting it.
-    """
-
-    seen: dict[str, tuple[str, str, str]] = {}
-
-    for meta, parts in selected:
-        for seg in meta.namespace_path:
-            if seg.startswith("."):
-                raise IdentifierRejected(_reject_message(meta.fqn, "leading-period", seg))
-
-            if not PATH_SEGMENT_RE.match(seg):
-                raise IdentifierRejected(
-                    _reject_message(meta.fqn, "contains-unsafe-character", seg),
-                )
-
-        previous = seen.get(meta.fqn)
-
-        if previous is not None and previous != parts:
-            raise IdentifierRejected(
-                _reject_message(
-                    meta.fqn,
-                    f"case-collides-with-{'.'.join(previous)}",
-                    ".".join(parts),
-                ),
-            )
-
-        seen[meta.fqn] = parts
-
-
-def _reject_message(fqn: str, reason: str, detail: str) -> str:
-    """SPEC 1.5.5 error format - verbatim."""
-
-    return (
-        f"ERROR: Table identifier rejected: {fqn}\n"
-        f"  Reason: {reason}\n"
-        f"  Detail: {detail!r}\n"
-        f"  Resolution: Either rename the identifier in the database, OR "
-        f"exclude it via .dbprint.yaml selectors:\n"
-        f"    exclude:\n"
-        f'      - "{fqn}"'
-    )
-
-
 def _is_true(value: Any) -> bool:
     """Normalize a catalog boolean that may arrive as a bool or a YES/NO string."""
 
@@ -500,3 +545,13 @@ def _is_true(value: Any) -> bool:
         return value.strip().upper() in ("YES", "TRUE", "Y")
 
     return bool(value)
+
+
+def _info_schema(database: str, view: str) -> str:
+    # Unqualified, INFORMATION_SCHEMA resolves only against a session's current database.
+    return f"{quote(database, DIALECT)}.information_schema.{view}"
+
+
+def _like(name: str) -> str:
+    # A wildcard in the name only widens the match; the caller keeps the exact one.
+    return name.replace("'", "''")

@@ -11,11 +11,20 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from dbprint.config.duration import format_duration_seconds
 from .. import trace_context
+from ..dialect import Dialect
 from ..errors import QueryFailed
 
 
+# databricks-sql-connector defaults to native parameter binding (use_inline_params=False), which
+# the adapter does not override, and native positional binding takes `?` markers.
+DIALECT = Dialect(vendor="databricks", paramstyle="qmark", quote_char="`")
+
 _LOG = logging.getLogger(__name__)
+
+# The vendor's own ceiling; a larger limit is refused rather than silently clamped.
+STATEMENT_TIMEOUT_CEILING_SECONDS = 172_800
 
 
 class DatabricksConnectionError(RuntimeError):
@@ -29,16 +38,22 @@ class ConnectionParams:
     server_hostname: str
     http_path: str
     access_token: str
-    catalog: str
+    catalog: str | None = None
+    statement_timeout: int | None = None
 
     @classmethod
-    def from_credentials(cls, creds: dict[str, str]) -> ConnectionParams:
+    def from_credentials(
+        cls,
+        creds: dict[str, str],
+        statement_timeout: int | None = None,
+    ) -> ConnectionParams:
         try:
             return cls(
                 server_hostname=creds["server_hostname"],
                 http_path=creds["http_path"],
                 access_token=creds["access_token"],
-                catalog=creds["catalog"],
+                catalog=creds.get("catalog"),
+                statement_timeout=statement_timeout,
             )
         except KeyError as exc:
             raise DatabricksConnectionError(
@@ -73,7 +88,22 @@ class Connection:
         self._factory = cursor_factory or _default_cursor_factory
         self._cursor: Cursor | None = None
 
+    def sibling(self) -> Connection:
+        """An unopened connection with the same parameters and cursor factory."""
+
+        return Connection(self.params, self._factory)
+
     def open(self) -> None:
+        limit = self.params.statement_timeout
+
+        if limit is not None and limit > STATEMENT_TIMEOUT_CEILING_SECONDS:
+            ceiling = format_duration_seconds(STATEMENT_TIMEOUT_CEILING_SECONDS)
+
+            raise DatabricksConnectionError(
+                f"statement_timeout {format_duration_seconds(limit)} exceeds Databricks's ceiling "
+                f"of {ceiling} ({STATEMENT_TIMEOUT_CEILING_SECONDS} seconds).",
+            )
+
         try:
             self._cursor = self._factory(self.params)
         except DatabricksConnectionError:
@@ -114,7 +144,7 @@ def exec_query(cursor: Cursor, sql: str, params: Any = None) -> Cursor:
         else:
             cursor.execute(sql, params)
     except Exception as exc:
-        failure = QueryFailed(exc, sql, params)
+        failure = QueryFailed(exc, sql, params, timed_out=_is_timeout(exc))
         trace_context.log_failure(_LOG, started, failure)
 
         raise failure from exc
@@ -137,11 +167,20 @@ def _default_cursor_factory(params: ConnectionParams) -> Any:
             "[databricks] extra: `pip install dbprint[databricks]`.",
         ) from exc
 
+    session_configuration = (
+        {} if params.statement_timeout is None else {"STATEMENT_TIMEOUT": params.statement_timeout}
+    )
     conn = sql.connect(
         server_hostname=params.server_hostname,
         http_path=params.http_path,
         access_token=params.access_token,
         catalog=params.catalog,
+        session_configuration=session_configuration,
     )
 
     return conn.cursor()
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    # The connector exposes no SQLSTATE, only the error class in its message.
+    return "QUERY_EXECUTION_TIMEOUT_EXCEEDED" in str(exc)

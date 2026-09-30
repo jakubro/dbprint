@@ -2,7 +2,7 @@ format_version: 1
 generated_at: '2026-05-17T22:48:01Z'
 connection: production
 adapter: postgres
-dbprint_version: 0.8.0
+dbprint_version: 0.9.0
 statistics_params:
   enumeration_threshold: 50
   top_n_values: 30
@@ -14,19 +14,24 @@ statistics_params:
   - 50
   - 75
   - 99
+profiling_params:
+  infer_relationships: true
+  sketch_all_columns: false
+  compute_timeline: true
+  materialize_sample: true
 selectors:
   include:
-  - seedbank.*
-  - fixture.*
+  - arboretum.seedbank.*
+  - arboretum.fixture.*
   exclude:
-  - seedbank.audit_*
+  - arboretum.seedbank.audit_*
 redaction_rules_configured: 4
 default_collation: en_US.UTF-8
 manifest_annotations: manifest.annotations.yaml
 tables:
-  fixture.shape_probe:
+  arboretum.fixture.shape_probe:
     type: table
-    path: fixture/shape_probe
+    path: arboretum/fixture/shape_probe
     artifacts:
       ddl: ddl.sql
       statistics: statistics.yaml
@@ -35,9 +40,9 @@ tables:
     profiled_at: '2026-05-17T22:48:01Z'
     row_count: 50
     max_age_days: 1
-  seedbank.accession:
+  arboretum.seedbank.accession:
     type: table
-    path: seedbank/accession
+    path: arboretum/seedbank/accession
     artifacts:
       ddl: ddl.sql
       statistics: statistics.yaml
@@ -49,9 +54,9 @@ tables:
     profiled_at: '2026-05-17T22:48:01Z'
     row_count: 2500
     max_age_days: 1
-  seedbank.accession_summary:
+  arboretum.seedbank.accession_summary:
     type: view
-    path: seedbank/accession_summary
+    path: arboretum/seedbank/accession_summary
     artifacts:
       ddl: ddl.sql
       statistics: statistics.yaml
@@ -61,9 +66,9 @@ tables:
     columns: 8
     profiled_at: '2026-05-17T22:48:01Z'
     max_age_days: 1
-  seedbank.collector:
+  arboretum.seedbank.collector:
     type: table
-    path: seedbank/collector
+    path: arboretum/seedbank/collector
     artifacts:
       ddl: ddl.sql
       statistics: statistics.yaml
@@ -73,9 +78,9 @@ tables:
     profiled_at: '2026-05-17T22:48:01Z'
     row_count: 400
     max_age_days: 1
-  seedbank.germination_by_taxon_mv:
+  arboretum.seedbank.germination_by_taxon_mv:
     type: matview
-    path: seedbank/germination_by_taxon_mv
+    path: arboretum/seedbank/germination_by_taxon_mv
     artifacts:
       ddl: ddl.sql
       statistics: statistics.yaml
@@ -85,9 +90,9 @@ tables:
     profiled_at: '2026-05-17T22:48:01Z'
     row_count: 770
     max_age_days: 30
-  seedbank.germination_trial:
+  arboretum.seedbank.germination_trial:
     type: table
-    path: seedbank/germination_trial
+    path: arboretum/seedbank/germination_trial
     artifacts:
       ddl: ddl.sql
       statistics: statistics.yaml
@@ -98,9 +103,9 @@ tables:
     profiled_at: '2026-05-17T22:48:01Z'
     row_count: 900
     max_age_days: 1
-  seedbank.specimen_image:
+  arboretum.seedbank.specimen_image:
     type: table
-    path: seedbank/specimen_image
+    path: arboretum/seedbank/specimen_image
     artifacts:
       ddl: ddl.sql
       statistics: statistics.yaml
@@ -109,9 +114,9 @@ tables:
     profiled_at: '2026-05-17T22:48:01Z'
     row_count: 700
     max_age_days: 1
-  seedbank.storage_reading:
+  arboretum.seedbank.storage_reading:
     type: table
-    path: seedbank/storage_reading
+    path: arboretum/seedbank/storage_reading
     artifacts:
       ddl: ddl.sql
       statistics: statistics.yaml
@@ -120,9 +125,9 @@ tables:
     profiled_at: '2026-05-17T22:48:01Z'
     row_count: 0
     max_age_days: 1
-  seedbank.taxon:
+  arboretum.seedbank.taxon:
     type: table
-    path: seedbank/taxon
+    path: arboretum/seedbank/taxon
     artifacts:
       ddl: ddl.sql
       statistics: statistics.yaml
@@ -133,9 +138,9 @@ tables:
     profiled_at: '2026-05-17T22:48:01Z'
     row_count: 300
     max_age_days: 1
-  seedbank.vault:
+  arboretum.seedbank.vault:
     type: table
-    path: seedbank/vault
+    path: arboretum/seedbank/vault
     artifacts:
       ddl: ddl.sql
       statistics: statistics.yaml

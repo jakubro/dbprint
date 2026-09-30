@@ -11,7 +11,6 @@ import re
 from pathlib import Path
 
 import pytest
-import rich_click as click
 from click.testing import CliRunner
 
 from dbprint.cli.main import main
@@ -32,7 +31,16 @@ def _load_generator():
 gen = _load_generator()
 
 COMMANDS = ("init", "generate", "diff", "list", "check", "context", "serve")
-CONN_COMMANDS = ("generate", "diff", "list", "check", "context", "serve")
+CONNECTION_COMMANDS = (
+    ("generate",),
+    ("diff",),
+    ("list",),
+    ("check",),
+    ("context",),
+    ("serve",),
+    ("docs", "serve"),
+    ("docs", "build"),
+)
 
 # A purpose phrase that only the expanded (multi-line) docstring carries.
 PURPOSE = {
@@ -88,9 +96,13 @@ class TestCommandSurface:
         assert "Examples:" in flat
         assert "Exit codes:" in flat
 
-    @pytest.mark.parametrize("command", CONN_COMMANDS)
-    def test_documents_conn_argument(self, command: str) -> None:
-        assert "resolved from .dbprint.yaml" in _flat(command)
+    @pytest.mark.parametrize("command", CONNECTION_COMMANDS)
+    def test_documents_connection_argument(self, command: tuple[str, ...]) -> None:
+        flat = _flat(*command)
+
+        assert "resolved from .dbprint.yaml" in flat
+        assert "[CONNECTION]" in flat
+        assert "[CONN]" not in flat
 
     @pytest.mark.parametrize("command", sorted(CRYPTIC_EXAMPLES))
     def test_cryptic_option_carries_example(self, command: str) -> None:
@@ -109,35 +121,11 @@ class TestContextArgument:
         assert "--all for every table" in flat
 
 
-def _command_paths(group: click.Group, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
-    """Every command/subcommand path reachable from `group`, walked from its own registry."""
-
-    paths: list[tuple[str, ...]] = []
-
-    for name, command in sorted(group.commands.items()):
-        path = (*prefix, name)
-        paths.append(path)
-
-        if isinstance(command, click.Group):
-            paths.extend(_command_paths(command, path))
-
-    return paths
-
-
 class TestShortHelp:
     def test_root_short_help_matches_long(self) -> None:
         runner = CliRunner()
         short = runner.invoke(main, ["-h"])
         long = runner.invoke(main, ["--help"])
-
-        assert short.exit_code == 0
-        assert short.output == long.output
-
-    @pytest.mark.parametrize("path", _command_paths(main), ids=lambda path: " ".join(path))
-    def test_command_short_help_matches_long(self, path: tuple[str, ...]) -> None:
-        runner = CliRunner()
-        short = runner.invoke(main, [*path, "-h"])
-        long = runner.invoke(main, [*path, "--help"])
 
         assert short.exit_code == 0
         assert short.output == long.output

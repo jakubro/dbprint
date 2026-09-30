@@ -67,7 +67,7 @@ def build_example(credentials: dict[str, str], target: Path) -> None:
     _normalize_timestamps(target / "prints" / CONNECTION)
 
 
-EXPECTED_OBJECTS = frozenset({"public.shapes"})
+EXPECTED_OBJECTS = frozenset({"vocabulary.public.shapes"})
 
 
 def _require_complete(result: Any) -> None:

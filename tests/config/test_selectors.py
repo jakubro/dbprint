@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from dbprint.config import expand, match
+import pytest
+
+from dbprint.config import expand, match, selectors
 
 
 class TestMatch:
@@ -127,3 +129,23 @@ class TestExpand:
 
     def test_empty_input(self) -> None:
         assert expand([], ["*"], []) == []
+
+
+class TestMayHold:
+    @pytest.mark.parametrize(
+        ("include", "held"),
+        [
+            (["orchard.*"], True),
+            (["grove.*"], False),
+            (["*.public.bed"], True),
+            (["orch*"], True),
+            (["Orchard.public.*"], True),
+            (["orchardx.*", "grove.*"], False),
+        ],
+    )
+    def test_a_namespace_no_pattern_can_reach_is_skippable(
+        self,
+        include: list[str],
+        held: bool,
+    ) -> None:
+        assert selectors.may_hold("orchard", include) is held

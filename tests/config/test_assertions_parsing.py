@@ -25,7 +25,7 @@ _COMMENTED_BLOCK = """\
 #    # ../../../../ASSERTIONS.md.
 #    assertions:
 #      tables:
-#        seedbank.collector:
+#        arboretum.seedbank.collector:
 #          columns:
 #            email:
 #              null_rate: 0
@@ -34,7 +34,7 @@ _COMMENTED_BLOCK = """\
 _TABLES_ONLY_BLOCK = """\
     assertions:
       tables:
-        seedbank.collector:
+        arboretum.seedbank.collector:
           columns:
             email:
               null_rate: 0
@@ -51,7 +51,7 @@ _QUERIES_ONLY_BLOCK = """\
 _FULL_BLOCK = """\
     assertions:
       tables:
-        seedbank.collector:
+        arboretum.seedbank.collector:
           columns:
             email:
               null_rate: 0
@@ -102,7 +102,7 @@ class TestAssertionsBlockParsing:
         block = cfg.connections["production"].assertions_raw
         assert "tables" in block
         assert "queries" not in block
-        assert block["tables"]["seedbank.collector"]["columns"]["email"]["null_rate"] == 0
+        assert block["tables"]["arboretum.seedbank.collector"]["columns"]["email"]["null_rate"] == 0
 
     def test_queries_block_captured(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         _write_config(tmp_path, _QUERIES_ONLY_BLOCK)

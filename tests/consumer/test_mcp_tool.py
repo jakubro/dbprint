@@ -6,9 +6,17 @@ out, not wire framing, which tests/mcp/test_server.py owns.
 
 from __future__ import annotations
 
+import ast
+import os
 import re
+from pathlib import Path
 
+import yaml
+from click.testing import CliRunner
+
+from dbprint.cli.main import main
 from dbprint.mcp import ServedConnections, dispatch
+from dbprint.mcp.tools import TOOL_NAMES
 from tests.fixtures.adversarial import (
     APPROXIMATE_ROW_COUNT_TABLE,
     DECLARED_MISSING_KIND,
@@ -16,11 +24,20 @@ from tests.fixtures.adversarial import (
     DELIMITER_TABLE,
     DELIMITER_VALUE,
     EMPTY_COLUMNS_TABLE,
+    EXPONENT_FORM,
+    EXTREME_NULL_RATE,
+    EXTREME_TABLE,
     FUTURE_DATED_COLUMN,
     INCOMPLETE_GRAIN_TABLE,
     NEVER_DECLARED_KIND,
+    PARTIAL_AS_WHOLE,
     REDACTED_COLUMN,
+    SCOPED_COMPLETE_LIST_COLUMN,
+    SCOPED_KEY_COLUMN,
+    SCOPED_LATEST_COLUMN,
     SCOPED_TABLE,
+    SPELLING_COLUMN,
+    SPELLING_VALUES,
     TRUNCATED_FK_COLUMN,
     UNEVALUATED_TABLE,
     AdversarialPrint,
@@ -40,6 +57,12 @@ COVERS = frozenset(
         "catalog_only_table",
         "declared_missing_artifact",
         "delimiter_in_a_value",
+        "value_spelling",
+        "scoped_complete_list",
+        "scoped_candidate_key",
+        "scoped_latest_value",
+        "extreme_number_statistics",
+        "near_boundary_share",
     },
 )
 
@@ -90,7 +113,7 @@ def test_scoped_table_carries_the_population(adversarial_print: AdversarialPrint
     statistics = _statistics(adversarial_print, SCOPED_TABLE)
 
     assert statistics["scope"]["rows_scanned"] == 250
-    assert "Scanned: 250 of 1,000 rows (25.0%)" in _md(adversarial_print, SCOPED_TABLE)
+    assert "Scanned: 250 of 1000 rows (25%)" in _md(adversarial_print, SCOPED_TABLE)
 
 
 def test_redacted_column_carries_no_real_literal(adversarial_print: AdversarialPrint) -> None:
@@ -110,21 +133,11 @@ def test_resolve_value_refuses_a_redacted_column(adversarial_print: AdversarialP
         {"table": SCOPED_TABLE, "column": REDACTED_COLUMN, "text": "a@example.com"},
     )
 
-    assert result["match"] == "unavailable"
+    assert (result["match"], result["exhaustive"]) == ("unavailable", False)
     assert "redacted" in result["reason"]
-
-
-def test_resolve_value_says_a_truncated_list_is_a_sample(
-    adversarial_print: AdversarialPrint,
-) -> None:
-    result = _dict_result(
-        adversarial_print,
-        "resolve_value",
-        {"table": SCOPED_TABLE, "column": TRUNCATED_FK_COLUMN, "text": "rank-00"},
-    )
-
-    assert result["match"] == "stored"
-    assert "not evidence" in result["sample_caveat"]
+    assert (result["scope"]["rows_scanned"], result["row_count"]) == (250, 1000)
+    assert "domain" not in result
+    assert "a@example.com" not in repr({k: v for k, v in result.items() if k != "text"})
 
 
 def test_future_dated_temporal_freshness_reads_live(adversarial_print: AdversarialPrint) -> None:
@@ -157,7 +170,7 @@ def test_empty_columns_map_carries_the_zero_scan_marker(
     statistics = _statistics(adversarial_print, EMPTY_COLUMNS_TABLE)
 
     assert statistics["columns"] == {}
-    assert "Scanned: 0 of 500 rows (0.0%)" in _md(adversarial_print, EMPTY_COLUMNS_TABLE)
+    assert "Scanned: 0 of 500 rows (0%)" in _md(adversarial_print, EMPTY_COLUMNS_TABLE)
     assert "no columns" not in _md(adversarial_print, EMPTY_COLUMNS_TABLE).lower()
 
 
@@ -231,3 +244,163 @@ def test_a_delimiter_in_a_value_does_not_split_a_row(adversarial_print: Adversar
         len([c for c in re.split(r"(?<!\\)\|", row.strip()) if c.strip()]) == 3 for row in rows
     )
     assert DELIMITER_VALUE.replace("|", "\\|") in fragment
+
+
+_SCOPE_EXEMPT_TOOLS = {
+    "list_tables": "table-wide manifest fields only",
+    "get_manifest": "table-wide manifest fields only",
+    "get_diff": "comparability between reads, not a statement about the table",
+    "get_reference": "reads no print",
+}
+
+
+def test_every_tool_is_exercised_by_the_sweep_or_exempt() -> None:
+    called = _tools_called(ast.parse(Path(__file__).read_text(encoding="utf-8")))
+
+    assert set(TOOL_NAMES) - called - set(_SCOPE_EXEMPT_TOOLS) == set()
+    assert set(_SCOPE_EXEMPT_TOOLS) - set(TOOL_NAMES) == set(), "stale exemptions"
+
+
+def test_the_coverage_sweep_sees_an_uncalled_tool() -> None:
+    planted = ast.parse(
+        "def _helper(p):\n"
+        "    return _dict_result(p, 'search_columns', {})\n"
+        "def _unused(p):\n"
+        "    return dispatch(state, 'get_manifest', {})\n"
+        "def test_a(p):\n"
+        "    _helper(p)\n"
+        "    _dict_result(p, 'resolve_value', {})\n",
+    )
+
+    assert _tools_called(planted) == {"search_columns", "resolve_value"}
+
+
+def test_scoped_complete_list_resolves_as_the_scanned_domain(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    reply = _dict_result(
+        adversarial_print,
+        "resolve_value",
+        {"table": SCOPED_TABLE, "column": SCOPED_COMPLETE_LIST_COLUMN, "text": "abandoned"},
+    )
+
+    assert reply["match"] == "none"
+    assert reply["exhaustive"] is False
+    assert reply["scope"]["rows_scanned"] == 250
+    assert "the list is the whole domain over the rows scanned" in reply["sample_caveat"]
+
+
+def test_a_scoped_stored_phrase_resolves_over_the_scanned_domain(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    reply = _dict_result(
+        adversarial_print,
+        "resolve_value",
+        {"table": SCOPED_TABLE, "column": SCOPED_COMPLETE_LIST_COLUMN, "text": "SOWN"},
+    )
+
+    assert (reply["match"], reply["exhaustive"]) == ("stored", False)
+    assert [s["value"] for s in reply["spellings"]] == ["sown"]
+    assert (reply["scope"]["rows_scanned"], reply["row_count"]) == (250, 1000)
+    assert "the list is the whole domain over the rows scanned" in reply["sample_caveat"]
+
+
+def test_scoped_candidate_key_match_carries_the_scope(adversarial_print: AdversarialPrint) -> None:
+    matches = _dict_result(adversarial_print, "search_columns", {"candidate_key": True})["matches"]
+    key = next(m for m in matches if (m["table"], m["column"]) == (SCOPED_TABLE, SCOPED_KEY_COLUMN))
+
+    assert key["scope"]["sample"] == 0.25
+    assert "candidate key over the rows scanned" in _md(adversarial_print, SCOPED_TABLE)
+
+
+def test_scoped_latest_value_carries_the_clause(adversarial_print: AdversarialPrint) -> None:
+    row = next(
+        line
+        for line in _md(adversarial_print, SCOPED_TABLE).splitlines()
+        if line.startswith(f"| {SCOPED_LATEST_COLUMN} |")
+    )
+
+    assert "freshness dormant over the rows scanned" in row
+
+
+def test_a_value_is_spelled_so_it_reads_back_as_itself(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    """A stored 'NULL' or '' printed raw reads as a null or as nothing; a long one folds."""
+
+    row = next(
+        line
+        for line in _md(adversarial_print, DELIMITER_TABLE).splitlines()
+        if line.startswith(f"| {SPELLING_COLUMN} |")
+    )
+    listed = row.split("3 distinct: ", 1)[1].split(", uniform", 1)[0]
+
+    assert [yaml.safe_load(v) for v in listed.split(" / ")] == list(SPELLING_VALUES)
+
+
+def test_an_extreme_statistic_is_spelled_as_the_artifact_spells_it(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    text = _md(adversarial_print, EXTREME_TABLE)
+
+    assert EXPONENT_FORM.findall(text) == []
+    assert "mean=0.00000005" in text
+
+
+def test_a_share_near_a_boundary_is_not_rounded_onto_it(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    text = _md(adversarial_print, EXTREME_TABLE)
+
+    assert PARTIAL_AS_WHOLE.findall(text) == []
+    assert "99.96% null" in text
+    assert (
+        _statistics(adversarial_print, EXTREME_TABLE)["columns"]["sparse"]["null_rate"]
+        == EXTREME_NULL_RATE
+    )
+
+
+def _tools_called(module: ast.Module) -> set[str]:
+    """Tool names the module's tests dispatch, directly or through the helpers they call."""
+
+    functions = {f.name: f for f in module.body if isinstance(f, ast.FunctionDef)}
+    called: set[str] = set()
+    seen: set[str] = set()
+    pending = [name for name in functions if name.startswith("test_")]
+
+    while pending:
+        name = pending.pop()
+
+        if name in seen:
+            continue
+
+        seen.add(name)
+
+        for call in (n for n in ast.walk(functions[name]) if isinstance(n, ast.Call)):
+            callee = call.func.id if isinstance(call.func, ast.Name) else None
+            called.update(
+                a.value
+                for a in call.args
+                if isinstance(a, ast.Constant) and isinstance(a.value, str)
+            )
+
+            if callee in functions:
+                pending.append(callee)
+
+    return called & set(TOOL_NAMES)
+
+
+def test_the_tool_serves_the_fragment_the_context_command_prints(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    runner = CliRunner()
+    old_cwd = Path.cwd()
+    os.chdir(adversarial_print.conn.output.parent)
+
+    try:
+        result = runner.invoke(main, ["context", SCOPED_TABLE, "--format", "md"])
+    finally:
+        os.chdir(old_cwd)
+
+    assert result.exit_code == 0, result.output
+    assert _md(adversarial_print, SCOPED_TABLE) + "\n" == result.output

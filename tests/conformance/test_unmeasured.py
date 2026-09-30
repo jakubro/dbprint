@@ -72,6 +72,26 @@ _LOST = [
 ]
 
 
+_UNSAMPLED: dict[str, Any] = {
+    "sql_type": "VARCHAR",
+    "nullable": True,
+    "classification": "categorical",
+    "null_count": 0,
+    "null_rate": 0.0,
+    "cardinality": 2,
+    "cardinality_ratio": 0.033333,
+    "cardinality_method": "exact",
+    "length": {"min": 4, "max": 4, "avg": 4.0, "p95": 4.0},
+    "unmeasured": [
+        "distribution",
+        "inferred.epoch_unit",
+        "inferred.looks_like",
+        "values",
+        "values_coverage",
+    ],
+}
+
+
 class TestADegradedColumnValidates:
     def test_naming_what_a_failed_query_cost_replaces_eight_errors_with_none(self) -> None:
         """Without the marker, eight required-field errors on a print whose producer did nothing."""
@@ -152,6 +172,26 @@ class TestTheTableLevelTwin:
         data = _file({**col, "classification": "geospatial", "unmeasured": ["distribution"]})
 
         assert _codes(data) == []
+
+
+class TestAFailedSampleDraw:
+    """A sampled classification may name the two verdicts the sample decides (SPEC 2.2.4)."""
+
+    def test_a_categorical_column_naming_both_verdicts_passes_both_validators(self) -> None:
+        data = _file(_UNSAMPLED)
+
+        assert _schema_codes(data) == []
+        assert _codes(data) == []
+
+    def test_naming_a_verdict_the_column_also_emits_is_one_error(self) -> None:
+        data = _file({**_UNSAMPLED, "inferred": {"looks_like": "uuid"}})
+
+        assert _codes(data) == ["stats.unmeasured-names-emitted-field"]
+
+    def test_a_classification_that_draws_no_sample_may_not_name_one(self) -> None:
+        assert _codes(_file(_column(unmeasured=["inferred.looks_like"]))) == [
+            "stats.unmeasured-names-unrequired-field",
+        ]
 
 
 class TestBothValidatorsAgree:

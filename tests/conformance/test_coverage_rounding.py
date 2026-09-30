@@ -27,8 +27,8 @@ def _codes(column: dict[str, Any], row_count: int) -> set[str]:
     return {i.code for i in statistics.check(payload, PATH, FQN)}
 
 
-def _truncated_column(listed: int, non_null: int) -> dict[str, Any]:
-    """A categorical column whose truncated list sums to `listed` of `non_null`."""
+def _truncated_column(listed: int, non_null: int, coverage: float) -> dict[str, Any]:
+    """A categorical column listing `listed` of `non_null`, publishing a literal `coverage`."""
 
     return {
         "sql_type": "TEXT",
@@ -39,7 +39,7 @@ def _truncated_column(listed: int, non_null: int) -> dict[str, Any]:
         "cardinality_ratio": round(21 / non_null, 6),
         "cardinality_method": "exact",
         "values": [{"value": "a", "count": listed}],
-        "values_coverage": coverage_share(listed, non_null, exhaustive=False),
+        "values_coverage": coverage,
         "distribution": "dominant_value",
     }
 
@@ -54,9 +54,8 @@ class TestABoundaryTruncatedListValidatesClean:
         assert coverage_share(24_999_996, 25_000_000, exhaustive=False) < 1.0
 
     def test_an_ordinary_truncated_tail_is_unaffected(self) -> None:
-        column = _truncated_column(800, 1000)
+        column = _truncated_column(800, 1000, 0.8)
 
-        assert column["values_coverage"] == 0.8
         assert "stats.values-coverage-mismatch" not in _codes(column, 1000)
 
 
@@ -64,13 +63,13 @@ class TestTheRuleStillCatchesWhatItExistsToCatch:
     """Widening a tolerance until nothing fails is not a fix - these must still fail."""
 
     def test_a_deliberately_wrong_coverage_fails(self) -> None:
-        column = _truncated_column(24_999_999, 25_000_000)
+        column = _truncated_column(24_999_999, 25_000_000, 0.999999)
         column["values_coverage"] = 0.5
 
         assert "stats.values-coverage-mismatch" in _codes(column, 25_000_000)
 
     def test_an_exhaustive_list_summing_to_non_null_passes(self) -> None:
-        column = _truncated_column(1000, 1000)
+        column = _truncated_column(1000, 1000, 1.0)
         column["values_coverage"] = 1.0
 
         assert "stats.values-coverage-mismatch" not in _codes(column, 1000)
@@ -82,7 +81,7 @@ class TestTheRuleStillCatchesWhatItExistsToCatch:
         checking the claim directly do: short of `cardinality`, and not summing to non_null.
         """
 
-        column = _truncated_column(999, 1000)
+        column = _truncated_column(999, 1000, 0.999)
         column["values_coverage"] = 1.0
 
         codes = _codes(column, 1000)
@@ -104,18 +103,13 @@ def _exhaustive_column(listed: int, non_null: int, cardinality: int) -> dict[str
         "cardinality_ratio": round(cardinality / non_null, 6),
         "cardinality_method": "exact",
         "values": [{"value": "a", "count": listed}],
-        "values_coverage": coverage_share(listed, non_null, exhaustive=True),
+        "values_coverage": 1.0,
         "distribution": "dominant_value",
     }
 
 
 class TestAnExhaustiveListPublishesOneRegardlessOfTheRawRatio:
     """`exhaustive` decides `values_coverage`, so a complete list never under-claims."""
-
-    def test_the_published_coverage_is_one(self) -> None:
-        column = _exhaustive_column(listed=499_636, non_null=500_000, cardinality=1)
-
-        assert column["values_coverage"] == 1.0
 
     def test_an_exhaustive_list_publishes_exactly_one(self) -> None:
         """Exhaustive is 1.0 whatever the raw quotient of the two reads comes to."""
@@ -148,14 +142,14 @@ class TestAnIncoherentTruncatedListIsReportedNotAbsorbed:
     """Listed exceeding non_null clamps to the same coverage an honest tail can also reach."""
 
     def test_listed_exceeding_non_null_is_reported(self) -> None:
-        codes = _codes(_truncated_column(1_000_001, 1_000_000), 1_000_000)
+        codes = _codes(_truncated_column(1_000_001, 1_000_000, 0.999999), 1_000_000)
 
         assert "stats.values-sum-mismatch" in codes
         assert "stats.values-coverage-mismatch" not in codes
 
     def test_an_honest_tail_at_the_same_published_coverage_stays_silent(self) -> None:
         assert "stats.values-sum-mismatch" not in _codes(
-            _truncated_column(999_999, 1_000_000),
+            _truncated_column(999_999, 1_000_000, 0.999999),
             1_000_000,
         )
 

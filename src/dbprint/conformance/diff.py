@@ -8,6 +8,8 @@ from typing import Any, TypeGuard
 
 import yaml
 
+from dbprint.spec.drift import Data, column_field_rule
+from dbprint.spec.redaction import NOT_COMPARED_UNDER_REDACTION
 from .issue import Issue
 from .layout import declared_artifacts, walkable_tables
 from .yaml_utils import load_yaml
@@ -19,17 +21,8 @@ _NON_NUMERIC_STATS = {
     "values",
 }
 
-# The cell-value statistics a `redacted` marker withholds (SPEC 2.2.9), by path head.
-_VALUE_BEARING_STATS = frozenset(
-    {
-        "values",
-        "range",
-        "percentiles",
-        "mean",
-        "sum",
-        "length",
-    },
-)
+# The statistics a `redacted` marker withholds or substitutes (SPEC 2.2.9), by path head.
+_VALUE_BEARING_STATS = NOT_COMPARED_UNDER_REDACTION
 
 _KIND_TO_SUMMARY_KEY: dict[str, str] = {
     "table_added": "tables_added",
@@ -95,6 +88,12 @@ def check(data: Any, path: str) -> list[Issue]:
             issues.extend(_check_physical_layout_changed(change, where))
         elif kind == "depends_on_changed":
             issues.extend(_check_depends_on_changed(change, where))
+        elif kind == "table_type_changed":
+            issues.extend(_check_table_type_changed(change, where))
+        elif kind == "column_physical_name_changed":
+            issues.extend(_check_physical_name_changed(change, where))
+        elif kind == "column_collation_changed":
+            issues.extend(_check_collation_changed(change, where))
 
     return issues
 
@@ -311,6 +310,17 @@ def _check_statistic(change: dict, where: str) -> list[Issue]:
     if not isinstance(stat, str):
         return []
 
+    if not _is_measurement(stat):
+        return [
+            Issue(
+                where,
+                "diff.statistic-changed-not-a-measurement",
+                "error",
+                f"statistic_changed names {stat!r}, which is not a measured statistic (SPEC 2.6.6).",
+                "§2.6.6",
+            ),
+        ]
+
     is_non_numeric = stat in _NON_NUMERIC_STATS or stat.endswith(".classification")
 
     if is_non_numeric and ("delta" in change or "delta_pct" in change):
@@ -343,6 +353,59 @@ def _check_delta_sign_agreement(change: dict, where: str) -> list[Issue]:
             "diff.statistic-changed-delta-pct-sign-mismatch",
             "error",
             f"delta={delta!r} and delta_pct={delta_pct!r} disagree in sign.",
+            "§2.6.6",
+        ),
+    ]
+
+
+def _is_measurement(stat: str) -> bool:
+    try:
+        return isinstance(column_field_rule(stat), Data)
+    except KeyError:
+        # The rule table maps the statistics root, so no column path reaches here.
+        return False  # pragma: no mutate
+
+
+def _check_table_type_changed(change: dict, where: str) -> list[Issue]:
+    if change.get("before") != change.get("after"):
+        return []
+
+    return [
+        Issue(
+            where,
+            "diff.table-type-changed-no-change",
+            "error",
+            "table_type_changed event's before and after are identical.",
+            "§2.6.6",
+        ),
+    ]
+
+
+def _check_physical_name_changed(change: dict, where: str) -> list[Issue]:
+    if change.get("before") != change.get("after"):
+        return []
+
+    return [
+        Issue(
+            where,
+            "diff.column-physical-name-changed-no-change",
+            "error",
+            "column_physical_name_changed event's before and after are identical.",
+            "§2.6.6",
+        ),
+    ]
+
+
+def _check_collation_changed(change: dict, where: str) -> list[Issue]:
+    if change.get("before") != change.get("after"):
+        return []
+
+    return [
+        Issue(
+            where,
+            "diff.column-collation-changed-no-change",
+            "error",
+            "column_collation_changed event's before and after are identical.",
             "§2.6.6",
         ),
     ]

@@ -53,9 +53,9 @@ class TestSelection:
     ) -> None:
         _write_project(tmp_path)
         monkeypatch.chdir(tmp_path)
-        result = CliRunner().invoke(main, ["context", "seedbank.accession"])
+        result = CliRunner().invoke(main, ["context", "arboretum.seedbank.accession"])
         assert result.exit_code == 0
-        assert "# Table: seedbank.accession" in result.output
+        assert "# Table: arboretum.seedbank.accession" in result.output
 
     def test_pattern_matches_multiple(
         self,
@@ -65,10 +65,10 @@ class TestSelection:
     ) -> None:
         _write_project(tmp_path)
         monkeypatch.chdir(tmp_path)
-        result = CliRunner().invoke(main, ["context", "seedbank.*"])
+        result = CliRunner().invoke(main, ["context", "arboretum.seedbank.*"])
         assert result.exit_code == 0
-        assert "# Table: seedbank.accession" in result.output
-        assert "# Table: seedbank.taxon" in result.output
+        assert "# Table: arboretum.seedbank.accession" in result.output
+        assert "# Table: arboretum.seedbank.taxon" in result.output
 
     def test_all_includes_every_table(
         self,
@@ -80,9 +80,9 @@ class TestSelection:
         monkeypatch.chdir(tmp_path)
         result = CliRunner().invoke(main, ["context", "--all"])
         assert result.exit_code == 0
-        assert "# Table: seedbank.accession" in result.output
-        assert "# Table: seedbank.taxon" in result.output
-        assert "# Table: fixture.shape_probe" in result.output
+        assert "# Table: arboretum.seedbank.accession" in result.output
+        assert "# Table: arboretum.seedbank.taxon" in result.output
+        assert "# Table: arboretum.fixture.shape_probe" in result.output
 
     def test_no_match_exact_errors_with_hint(
         self,
@@ -96,7 +96,7 @@ class TestSelection:
         assert result.exit_code != 0
         # Levenshtein hint should propose the closest match
         combined = result.output + (result.stderr or "")
-        assert "Did you mean: seedbank.accession" in combined
+        assert "Did you mean: arboretum.seedbank.accession" in combined
 
     def test_no_match_pattern_errors(
         self,
@@ -132,7 +132,7 @@ class TestFlags:
         monkeypatch.chdir(tmp_path)
         result = CliRunner().invoke(
             main,
-            ["context", "seedbank.accession", "--format", "json"],
+            ["context", "arboretum.seedbank.accession", "--format", "json"],
         )
         assert result.exit_code == 0
         assert result.output.lstrip().startswith("{")
@@ -145,7 +145,7 @@ class TestFlags:
     ) -> None:
         _write_project(tmp_path)
         monkeypatch.chdir(tmp_path)
-        result = CliRunner().invoke(main, ["context", "seedbank.accession", "--no-ddl"])
+        result = CliRunner().invoke(main, ["context", "arboretum.seedbank.accession", "--no-ddl"])
         assert result.exit_code == 0
         assert "## DDL" not in result.output
 
@@ -159,7 +159,7 @@ class TestFlags:
         monkeypatch.chdir(tmp_path)
         result = CliRunner().invoke(
             main,
-            ["context", "seedbank.accession", "--purpose", "query"],
+            ["context", "arboretum.seedbank.accession", "--purpose", "query"],
         )
 
         assert result.exit_code == 0
@@ -173,17 +173,17 @@ class TestFlags:
         committed_print: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """`seedbank.accession` already ships `statistics.annotations.yaml` - nothing to seed."""
+        """`arboretum.seedbank.accession` already ships `statistics.annotations.yaml` - nothing to seed."""
 
         _write_project(tmp_path)
         monkeypatch.chdir(tmp_path)
 
-        with_section = CliRunner().invoke(main, ["context", "seedbank.accession"])
+        with_section = CliRunner().invoke(main, ["context", "arboretum.seedbank.accession"])
         assert "## Annotations" in with_section.output
 
         without_section = CliRunner().invoke(
             main,
-            ["context", "seedbank.accession", "--no-annotations"],
+            ["context", "arboretum.seedbank.accession", "--no-annotations"],
         )
         assert without_section.exit_code == 0
         assert "## Annotations" not in without_section.output
@@ -192,42 +192,23 @@ class TestFlags:
 class TestBudget:
     """`--budget` means the same thing on md, json and yaml."""
 
-    def test_json_is_truncated_and_carries_the_marker(
+    @pytest.mark.parametrize("fmt", ["json", "yaml"])
+    def test_a_structured_format_is_truncated_and_carries_the_marker(
         self,
         tmp_path: Path,
         committed_print: Path,
         monkeypatch: pytest.MonkeyPatch,
+        fmt: str,
     ) -> None:
         _write_project(tmp_path)
         monkeypatch.chdir(tmp_path)
         unbudgeted = CliRunner().invoke(
             main,
-            ["context", "seedbank.accession", "--format", "json"],
+            ["context", "arboretum.seedbank.accession", "--format", fmt],
         )
         budgeted = CliRunner().invoke(
             main,
-            ["context", "seedbank.accession", "--format", "json", "--budget", "20"],
-        )
-
-        assert budgeted.exit_code == 0
-        assert len(budgeted.output) < len(unbudgeted.output)
-        assert "_truncated" in yaml.safe_load(budgeted.output)
-
-    def test_yaml_is_truncated_and_carries_the_marker(
-        self,
-        tmp_path: Path,
-        committed_print: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _write_project(tmp_path)
-        monkeypatch.chdir(tmp_path)
-        unbudgeted = CliRunner().invoke(
-            main,
-            ["context", "seedbank.accession", "--format", "yaml"],
-        )
-        budgeted = CliRunner().invoke(
-            main,
-            ["context", "seedbank.accession", "--format", "yaml", "--budget", "20"],
+            ["context", "arboretum.seedbank.accession", "--format", fmt, "--budget", "20"],
         )
 
         assert budgeted.exit_code == 0
@@ -280,7 +261,7 @@ class TestBudget:
         monkeypatch.chdir(tmp_path)
         result = CliRunner().invoke(
             main,
-            ["context", "seedbank.accession", "--format", "json"],
+            ["context", "arboretum.seedbank.accession", "--format", "json"],
         )
         payload = yaml.safe_load(result.output)
 
@@ -300,7 +281,7 @@ class TestBudget:
         monkeypatch.chdir(tmp_path)
         result = CliRunner().invoke(
             main,
-            ["context", "seedbank.accession", "--budget", "4000"],
+            ["context", "arboretum.seedbank.accession", "--budget", "4000"],
         )
 
         assert result.exit_code == 0
@@ -321,11 +302,11 @@ class TestOutput:
         out_file = tmp_path / "out.md"
         result = CliRunner().invoke(
             main,
-            ["context", "seedbank.accession", "--output", str(out_file)],
+            ["context", "arboretum.seedbank.accession", "--output", str(out_file)],
         )
         assert result.exit_code == 0
         assert out_file.is_file()
-        assert "# Table: seedbank.accession" in out_file.read_text()
+        assert "# Table: arboretum.seedbank.accession" in out_file.read_text()
 
     def test_a_run_that_assembled_nothing_leaves_the_target_alone(
         self,
@@ -406,7 +387,7 @@ class TestAWronglyShapedPrintDegradesRatherThanFails:
         """A corrupt statistics.yaml must not abort the whole render, only its own section."""
 
         _write_project(tmp_path)
-        broken = "seedbank.accession"
+        broken = "arboretum.seedbank.accession"
         stats = committed_print / "production" / broken.replace(".", "/") / "statistics.yaml"
         stats.write_text("{ not: valid")
         monkeypatch.chdir(tmp_path)
@@ -417,8 +398,8 @@ class TestAWronglyShapedPrintDegradesRatherThanFails:
         }
 
         assert result.exit_code == 0, result.output
-        assert "Cardinality" not in fragments[f"{broken}  (2,500 rows, 16 columns)"]
-        assert "Cardinality" in fragments["seedbank.taxon  (300 rows, 8 columns)"]
+        assert "Cardinality" not in fragments[f"{broken}  (2500 rows, 16 columns)"]
+        assert "Cardinality" in fragments["arboretum.seedbank.taxon  (300 rows, 8 columns)"]
 
 
 class TestCatalogOnlyView:
@@ -430,11 +411,11 @@ class TestCatalogOnlyView:
         committed_print: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """`seedbank.accession_summary` is the print's real catalog-only view (SPEC 2.2.15)."""
+        """`arboretum.seedbank.accession_summary` is the print's real catalog-only view (SPEC 2.2.15)."""
 
         _write_project(tmp_path)
         monkeypatch.chdir(tmp_path)
-        result = CliRunner().invoke(main, ["context", "seedbank.accession_summary"])
+        result = CliRunner().invoke(main, ["context", "arboretum.seedbank.accession_summary"])
 
         assert result.exit_code == 0, result.output
         assert "## Columns (not queried)" in result.output
@@ -454,7 +435,7 @@ class TestCatalogOnlyView:
         monkeypatch.chdir(tmp_path)
         result = CliRunner().invoke(
             main,
-            ["context", "seedbank.accession_summary", "--format", "json"],
+            ["context", "arboretum.seedbank.accession_summary", "--format", "json"],
         )
         payload = json.loads(result.output)
 
@@ -473,7 +454,7 @@ class TestTuiRendering:
     ) -> None:
         _write_project(tmp_path)
         monkeypatch.chdir(tmp_path)
-        result = CliRunner().invoke(main, ["context", "seedbank.taxon", "--tui"])
+        result = CliRunner().invoke(main, ["context", "arboretum.seedbank.taxon", "--tui"])
 
         assert result.exit_code == 0
         assert "\x1b[" in result.output
@@ -486,8 +467,8 @@ class TestTuiRendering:
     ) -> None:
         _write_project(tmp_path)
         monkeypatch.chdir(tmp_path)
-        piped = CliRunner().invoke(main, ["context", "seedbank.taxon", "--no-tui"])
-        tui = CliRunner().invoke(main, ["context", "seedbank.taxon", "--tui"])
+        piped = CliRunner().invoke(main, ["context", "arboretum.seedbank.taxon", "--no-tui"])
+        tui = CliRunner().invoke(main, ["context", "arboretum.seedbank.taxon", "--tui"])
 
         assert piped.exit_code == 0
         assert tui.exit_code == 0
@@ -506,7 +487,7 @@ class TestTuiRendering:
         _write_project(tmp_path)
         monkeypatch.chdir(tmp_path)
         monkeypatch.delenv("NO_COLOR", raising=False)
-        result = CliRunner().invoke(main, ["context", "seedbank.taxon", "--tui"])
+        result = CliRunner().invoke(main, ["context", "arboretum.seedbank.taxon", "--tui"])
         codes = set(re.findall(r"\x1b\[([0-9;]*)m(?=CREATE)", result.output))
         heading_codes = set(re.findall(r"\x1b\[([0-9;]*)m(?=## )", result.output))
 
@@ -522,8 +503,8 @@ class TestTuiRendering:
     ) -> None:
         _write_project(tmp_path)
         monkeypatch.chdir(tmp_path)
-        default = CliRunner().invoke(main, ["context", "seedbank.taxon"])
-        no_tui = CliRunner().invoke(main, ["context", "seedbank.taxon", "--no-tui"])
+        default = CliRunner().invoke(main, ["context", "arboretum.seedbank.taxon"])
+        no_tui = CliRunner().invoke(main, ["context", "arboretum.seedbank.taxon", "--no-tui"])
 
         assert "\x1b[" not in default.output
         assert default.output == no_tui.output
@@ -538,7 +519,7 @@ class TestTuiRendering:
         monkeypatch.chdir(tmp_path)
         result = CliRunner().invoke(
             main,
-            ["context", "seedbank.taxon", "--format", "json", "--tui"],
+            ["context", "arboretum.seedbank.taxon", "--format", "json", "--tui"],
         )
 
         assert result.exit_code == 0
@@ -556,7 +537,7 @@ class TestTuiRendering:
         out_file = tmp_path / "out.md"
         result = CliRunner().invoke(
             main,
-            ["context", "seedbank.taxon", "--output", str(out_file), "--tui"],
+            ["context", "arboretum.seedbank.taxon", "--output", str(out_file), "--tui"],
         )
 
         assert result.exit_code == 0
@@ -579,7 +560,7 @@ class TestSeveralConnections:
     ) -> None:
         self._two_connections(tmp_path, committed_print)
         monkeypatch.chdir(tmp_path)
-        result = CliRunner().invoke(main, ["context", "seedbank.accession"])
+        result = CliRunner().invoke(main, ["context", "arboretum.seedbank.accession"])
 
         assert result.exit_code == 0
         assert "# Context for connection production (1 table)" in result.output
@@ -593,13 +574,16 @@ class TestSeveralConnections:
     ) -> None:
         self._two_connections(tmp_path, committed_print)
         monkeypatch.chdir(tmp_path)
-        result = CliRunner().invoke(main, ["context", "seedbank.accession", "--format", "json"])
+        result = CliRunner().invoke(
+            main,
+            ["context", "arboretum.seedbank.accession", "--format", "json"],
+        )
         payload = json.loads(result.output)
 
         assert [entry["connection"] for entry in payload] == ["production", "staging"]
         assert [t["table"] for entry in payload for t in entry["tables"]] == [
-            "seedbank.accession",
-            "seedbank.accession",
+            "arboretum.seedbank.accession",
+            "arboretum.seedbank.accession",
         ]
 
     def test_yaml_is_one_document_per_connection(
@@ -610,11 +594,14 @@ class TestSeveralConnections:
     ) -> None:
         self._two_connections(tmp_path, committed_print)
         monkeypatch.chdir(tmp_path)
-        result = CliRunner().invoke(main, ["context", "seedbank.accession", "--format", "yaml"])
+        result = CliRunner().invoke(
+            main,
+            ["context", "arboretum.seedbank.accession", "--format", "yaml"],
+        )
         documents = list(yaml.safe_load_all(result.output))
 
         assert [d["connection"] for d in documents] == ["production", "staging"]
-        assert all(d["tables"][0]["table"] == "seedbank.accession" for d in documents)
+        assert all(d["tables"][0]["table"] == "arboretum.seedbank.accession" for d in documents)
 
     def test_one_connection_gains_neither_a_banner_nor_a_wrapper(
         self,
@@ -626,8 +613,11 @@ class TestSeveralConnections:
 
         _write_project(tmp_path)
         monkeypatch.chdir(tmp_path)
-        markdown = CliRunner().invoke(main, ["context", "seedbank.accession"])
-        structured = CliRunner().invoke(main, ["context", "seedbank.accession", "--format", "json"])
+        markdown = CliRunner().invoke(main, ["context", "arboretum.seedbank.accession"])
+        structured = CliRunner().invoke(
+            main,
+            ["context", "arboretum.seedbank.accession", "--format", "json"],
+        )
 
         assert "# Context for connection" not in markdown.output
-        assert json.loads(structured.output)["table"] == "seedbank.accession"
+        assert json.loads(structured.output)["table"] == "arboretum.seedbank.accession"

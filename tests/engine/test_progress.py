@@ -21,7 +21,7 @@ from dbprint.adapters import (
     TableScope,
     ValueCount,
 )
-from dbprint.adapters.base import ColumnProgress
+from dbprint.adapters.base import ColumnProgress, PhaseB
 from dbprint.config.project import ConnectionConfig, DiffConfig
 from dbprint.engine import DiffRequest, Engine, GenerateRequest, ProgressEvent
 from dbprint.spec.sketch import SketchKind
@@ -571,7 +571,7 @@ class _RaisingAdapter(MockAdapter):
         suppress_values: frozenset[str] = frozenset(),
         on_column: ColumnProgress | None = None,
         scope: TableScope | None = None,
-    ) -> dict[str, ColumnStats]:
+    ) -> PhaseB:
         if fqn == self._bad_fqn:
             raise RuntimeError("stats boom")
 

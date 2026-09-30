@@ -67,7 +67,7 @@ class TestBannerBox:
 
     def test_label_centred(self) -> None:
         _, middle, _ = tree.banner_box("Hi", cap=10).split("\n")
-        assert middle == "│" + "Hi".center(8) + "│"
+        assert middle == "│   Hi   │"
 
     def test_label_head_kept_when_narrower_than_cap_allows(self) -> None:
         _, middle, _ = tree.banner_box("Checking assertions", cap=12).split("\n")
@@ -95,7 +95,8 @@ class TestLeafAlignment:
         # Every ok leaf fills the cap exactly, so rows/elapsed share a flush-right end column.
         assert all(len(line) == cap for line in lines)
         assert [
-            line.endswith(tree.duration_text(ms)) for line, (_, _, ms) in zip(lines, cases)
+            line.endswith(tree.duration_text(ms))
+            for line, (_, _, ms) in zip(lines, cases, strict=True)
         ] == [
             True,
             True,

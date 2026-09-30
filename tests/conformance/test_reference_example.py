@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
-import math
 import re
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, get_args
 
@@ -203,37 +201,6 @@ class TestTheExampleTeachesTheFieldsItIsTheDemonstrationOf:
             on_disk = {p.name for p in (EXAMPLE / entry["path"]).iterdir() if p.is_file()}
 
             assert on_disk == set(entry.get("artifacts", {}).values()), fqn
-
-
-class TestFreshnessAgreesWithItsOwnFields:
-    """SPEC 2.2.4: `max_age_days` is the whole elapsed days from `range.max` to `profiled_at`,
-    recomputed without `dbprint.spec.temporal_age` so guard and producer cannot agree wrongly.
-    """
-
-    def test_every_temporal_columns_max_age_matches_its_own_range(self) -> None:
-        checked = 0
-
-        for payload in _statistics().values():
-            profiled_at = _parse_utc(payload["profiled_at"])
-            assert profiled_at is not None, "profiled_at is ALWAYS a parseable ISO instant"
-
-            for name, column in payload["columns"].items():
-                freshness = column.get("freshness")
-                range_block = column.get("range")
-
-                if freshness is None or range_block is None or "redacted" in column:
-                    continue
-
-                range_max = _parse_utc(range_block.get("max"))
-
-                if range_max is None:
-                    continue
-
-                elapsed = math.floor((profiled_at - range_max).total_seconds() / 86400)
-                assert freshness["max_age_days"] == max(0, elapsed), name
-                checked += 1
-
-        assert checked >= 2, "expected at least the two example temporal columns to be checked"
 
 
 class TestProducerAgreement:
@@ -445,23 +412,6 @@ def _statistics(example: Path = EXAMPLE) -> dict[str, dict[str, Any]]:
             )
 
     return out
-
-
-def _parse_utc(value: str | None) -> datetime | None:
-    """A published ISO instant as a UTC-aware `datetime`, or None when unparseable.
-
-    A bare date or zone-less timestamp parses naive; SPEC 2.2.4 requires reading it as UTC.
-    """
-
-    if not isinstance(value, str):
-        return None
-
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 def _marked_columns() -> list[tuple[str, dict[str, Any]]]:

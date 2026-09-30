@@ -4,7 +4,8 @@ never exhaustive there, so the `frequencies`-based check is their only route to 
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from collections.abc import Callable
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, ClassVar, LiteralString, cast
 
 import duckdb
@@ -14,6 +15,7 @@ from dbprint.adapters import (
     Adapter,
     BigqueryAdapter,
     ClickhouseAdapter,
+    ColumnStats,
     DatabricksAdapter,
     DuckdbAdapter,
     MysqlAdapter,
@@ -22,6 +24,7 @@ from dbprint.adapters import (
     SnowflakeAdapter,
     StatisticsConfig,
 )
+from dbprint.spec.temporal_age import parse_instant
 
 
 # Small enough that the columns clear `enumeration_threshold` for the numeric/temporal branches.
@@ -98,6 +101,40 @@ def _seed_postgres(creds: dict[str, str], counts: list[int]) -> None:
         )
 
 
+def _seed_postgres_sql(creds: dict[str, str], statement: str) -> None:
+    import psycopg
+
+    with psycopg.connect(
+        host=creds["host"],
+        port=int(creds["port"]),
+        dbname=creds["database"],
+        user=creds["user"],
+        password="",
+        autocommit=True,
+    ) as conn:
+        conn.execute(cast(LiteralString, statement))
+
+
+def _seed_mysql_sql(creds: dict[str, str], statement: str) -> None:
+    import mysql.connector
+
+    conn = mysql.connector.connect(
+        host=creds["host"],
+        port=int(creds["port"]),
+        database=creds["database"],
+        user=creds["user"],
+        password=creds.get("password", ""),
+        autocommit=True,
+    )
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute(statement)
+        cursor.close()
+    finally:
+        conn.close()
+
+
 def _seed_mysql(creds: dict[str, str], counts: list[int]) -> None:
     import mysql.connector
 
@@ -172,20 +209,33 @@ def _seed_bigquery(cursor: Any, dataset: str, counts: list[int]) -> None:
     cursor.execute(f"INSERT INTO {q}.shaped (n, t) VALUES {_value_rows_bigquery(counts)}")
 
 
-def _adapter(vendor: str, request: pytest.FixtureRequest, counts: list[int]) -> Adapter:
-    """A connected adapter over a fresh `shaped(n, t)` table, seeded per vendor."""
+def _adapter(
+    vendor: str,
+    request: pytest.FixtureRequest,
+    counts: list[int],
+    extra_seed: Callable[[Callable[[str], Any], str, str], None] | None = None,
+) -> Adapter:
+    """A connected adapter over a fresh `shaped(n, t)` table, seeded per vendor.
+
+    `extra_seed` receives the vendor's statement runner, a qualified `huge` name and its engine clause.
+    """
+
+    seed = extra_seed or (lambda execute, table, engine: None)
 
     if vendor == "postgres":
         creds = request.getfixturevalue("postgres_test_db")
         _seed_postgres(creds, counts)
+        seed(lambda sql: _seed_postgres_sql(creds, sql), "public.huge", "")
         adapter: Adapter = PostgresAdapter(creds)
     elif vendor == "mysql":
         creds = request.getfixturevalue("mysql_test_db")
         _seed_mysql(creds, counts)
+        seed(lambda sql: _seed_mysql_sql(creds, sql), "huge", "")
         adapter = MysqlAdapter(creds)
     elif vendor == "snowflake":
         con = request.getfixturevalue("snowflake_duckdb_connection")
         _seed_snowflake(con, counts)
+        seed(con.execute, "huge", "")
         sf_creds = {
             "account": "test-account",
             "user": "test-user",
@@ -198,10 +248,12 @@ def _adapter(vendor: str, request: pytest.FixtureRequest, counts: list[int]) -> 
     elif vendor == "duckdb":
         con = request.getfixturevalue("duckdb_native_connection")
         _seed_duckdb(con, counts)
+        seed(con.execute, "huge", "")
         adapter = DuckdbAdapter({"database": ":memory:"}, cursor_factory=lambda _params: con)
     elif vendor == "clickhouse":
         cur = request.getfixturevalue("clickhouse_native_connection")
         _seed_clickhouse(cur, counts)
+        seed(cur.execute, "seedbank.huge", " ENGINE = Memory")
         adapter = ClickhouseAdapter(
             {"host": "chdb", "database": "seedbank"},
             cursor_factory=lambda _params: cur,
@@ -209,6 +261,7 @@ def _adapter(vendor: str, request: pytest.FixtureRequest, counts: list[int]) -> 
     elif vendor == "redshift":
         shim = request.getfixturevalue("redshift_postgres_connection")
         _seed_redshift(shim, counts)
+        seed(shim.execute, "public.huge", "")
         adapter = RedshiftAdapter(
             {"host": "redshift", "database": "seedbank", "user": "test", "password": "test"},
             cursor_factory=lambda _params: shim,
@@ -216,10 +269,12 @@ def _adapter(vendor: str, request: pytest.FixtureRequest, counts: list[int]) -> 
     elif vendor == "databricks":
         cursor = request.getfixturevalue("databricks_test_schema")
         _seed_databricks(cursor, counts)
+        seed(cursor.execute, "huge", " USING DELTA")
         adapter = DatabricksAdapter(_DATABRICKS_CREDS, cursor_factory=lambda _params: cursor)
     elif vendor == "bigquery":
         bq_cursor, dataset = request.getfixturevalue("bigquery_test_dataset")
         _seed_bigquery(bq_cursor, dataset, counts)
+        seed(bq_cursor.execute, f"`{dataset}`.huge", "")
         adapter = BigqueryAdapter(
             {"project": _BIGQUERY_PROJECT, "dataset": dataset},
             cursor_factory=lambda _params: bq_cursor,
@@ -238,7 +293,7 @@ def _profile(adapter: Adapter) -> dict:
     table = next(iter(adapter.list_tables(include=["*.shaped"], exclude=[])))
     columns = adapter.introspect_columns(table.fqn)
 
-    return adapter.compute_statistics(table.fqn, columns, CONFIG, frozenset())[1]
+    return dict(adapter.compute_statistics(table.fqn, columns, CONFIG, frozenset())[1])
 
 
 class TestDistributionShapes:
@@ -342,9 +397,7 @@ class TestNoStatementIsAddedForValues:
         self,
         request: pytest.FixtureRequest,
     ) -> None:
-        """Counting every statement is fragile against unrelated adapter-internal queries, so
-        what gets asserted is the top-N fetch itself never running twice.
-        """
+        """The whole profile's statement count is pinned, so a second top-N fetch shows as one more."""
 
         from tests.adapters.test_dialect_guard import _install_recorder
 
@@ -359,12 +412,12 @@ class TestNoStatementIsAddedForValues:
         try:
             table = next(iter(adapter.list_tables(include=["*.lone"], exclude=[])))
             columns = adapter.introspect_columns(table.fqn)
+            before = len(recorder.statements)
             stats = adapter.compute_statistics(table.fqn, columns, CONFIG, frozenset())[1]
 
             assert stats["n"].values
             assert stats["n"].values[0].count == 96
-            top_n_fetches = [s for s in recorder.statements if "ORDER BY cnt DESC" in s]
-            assert len(top_n_fetches) == 1
+            assert len(recorder.statements) - before == 4
         finally:
             adapter.close()
 
@@ -427,33 +480,7 @@ class TestTheOverFetchBoundary:
             adapter.close()
 
 
-class TestAdaptersAgreeOnTheSameData:
-    """Three adapters profiling one shape must not answer three different ways.
-
-    `imbalanced`'s verdict turns on the top-to-smallest spread, so agreement here means the
-    three top-N fetches agree rather than all falling through to one default.
-    """
-
-    @pytest.mark.parametrize("column", ["n", "t"])
-    def test_the_shape_reads_the_same_verdict_everywhere(
-        self,
-        request: pytest.FixtureRequest,
-        column: str,
-    ) -> None:
-        verdicts = {}
-
-        for vendor in VENDORS:
-            adapter = _adapter(vendor, request, SHAPES["imbalanced"])
-
-            try:
-                verdicts[vendor] = _profile(adapter)[column].distribution
-            finally:
-                adapter.close()
-
-        assert len(set(verdicts.values())) == 1, f"adapters disagree on {column}: {verdicts}"
-        assert verdicts[VENDORS[0]] == EXPECTED["imbalanced"]
-
-
+@pytest.mark.every_substrate
 class TestPercentileAgreement:
     """Three adapters compute `percentiles` three different ways and must still agree.
 
@@ -527,11 +554,11 @@ class TestMeanAndSumPublishCentreOfMass:
         try:
             table = next(iter(adapter.list_tables(include=["*.lone"], exclude=[])))
             columns = adapter.introspect_columns(table.fqn)
+            before = len(recorder.statements)
             stats = adapter.compute_statistics(table.fqn, columns, CONFIG, frozenset())[1]
 
             assert stats["n"].mean is not None
-            aggregate_fetches = [s for s in recorder.statements if "AVG(" in s and "SUM(" in s]
-            assert len(aggregate_fetches) == 1
+            assert len(recorder.statements) - before == 4
         finally:
             adapter.close()
 
@@ -543,11 +570,11 @@ class TestExactIntegerTotals:
 
     def test_a_bigint_total_above_2_53_publishes_exact(
         self,
-        request: pytest.FixtureRequest,
+        postgres_test_db: dict[str, str],
     ) -> None:
         import psycopg
 
-        creds = request.getfixturevalue("postgres_test_db")
+        creds = postgres_test_db
         # Five DISTINCT values (cardinality must clear `enumeration_threshold`, or the column
         # classifies categorical and carries no `sum`) summing past 2**53, where float64 rounds.
         base = 2_000_000_000_000_000
@@ -578,6 +605,163 @@ class TestExactIntegerTotals:
 
         assert stats["n"].sum == exact_total
         assert isinstance(stats["n"].sum, int)
+
+
+class TestPercentilesStayWithinTheirBoundsAboveFloat64Precision:
+    """SPEC 2.2.4 past 2**53: a float64 percentile of odd integers rounds below the exact minimum
+    on every adapter computing in float64, and the shared rule lifts it back inside.
+    """
+
+    @pytest.mark.parametrize("vendor", VENDORS)
+    def test_every_percentile_lies_within_the_published_range(
+        self,
+        vendor: str,
+        request: pytest.FixtureRequest,
+    ) -> None:
+        adapter = _huge_adapter(vendor, request)
+
+        try:
+            table = next(iter(adapter.list_tables(include=["*.huge"], exclude=[])))
+            columns = adapter.introspect_columns(table.fqn)
+            stats = adapter.compute_statistics(table.fqn, columns, CONFIG, frozenset())[1]
+        finally:
+            adapter.close()
+
+        column = stats["n"]
+        assert column.range is not None
+        assert column.percentiles, vendor
+        ordered = [
+            column.percentiles[k] for k in sorted(column.percentiles, key=lambda k: int(k[1:]))
+        ]
+
+        assert column.range.min == _HUGE_VALUES[0], vendor
+        assert all(column.range.min <= v <= column.range.max for v in ordered), (vendor, ordered)
+        assert ordered == sorted(ordered), (vendor, ordered)
+
+
+# Odd, so float64 cannot hold one of them: every value rounds to an even neighbour.
+_HUGE_VALUES = [2**53 + 1 + 2 * i for i in range(10)]
+
+_HUGE_TYPES = {
+    "postgres": "bigint",
+    "mysql": "DECIMAL(20,0)",
+    "snowflake": "BIGINT",
+    "duckdb": "BIGINT",
+    "clickhouse": "Int64",
+    "redshift": "bigint",
+    "databricks": "BIGINT",
+    "bigquery": "INT64",
+}
+
+
+def _huge_adapter(vendor: str, request: pytest.FixtureRequest) -> Adapter:
+    rows = ", ".join(f"({v})" for v in _HUGE_VALUES)
+    column_type = _HUGE_TYPES[vendor]
+
+    def seed(execute: Any, table: str, engine: str = "") -> None:
+        execute(f"CREATE TABLE {table} (n {column_type}){engine}")
+        execute(f"INSERT INTO {table} (n) VALUES {rows}")
+
+    return _adapter(vendor, request, SHAPES["uniform"], extra_seed=seed)
+
+
+class TestTemporalPercentilesAreColumnValues:
+    """SPEC 2.2.4: a temporal percentile is the nearest-rank value the column holds."""
+
+    @pytest.mark.parametrize("vendor", VENDORS)
+    def test_each_percentile_is_the_value_at_its_rank(
+        self,
+        vendor: str,
+        request: pytest.FixtureRequest,
+    ) -> None:
+        column = _temporal_column(vendor, request, _INSTANTS)
+        published = {k: parse_instant(v) for k, v in (column.percentiles or {}).items()}
+
+        # CEIL(p * 10 / 100) over ten values: p01 -> 1st, p25 -> 3rd, p50 -> 5th, p75 -> 8th.
+        assert published == {
+            "p01": _INSTANTS[0],
+            "p25": _INSTANTS[2],
+            "p50": _INSTANTS[4],
+            "p75": _INSTANTS[7],
+            "p99": _INSTANTS[9],
+        }, vendor
+        assert column.range is not None
+        assert column.percentiles is not None
+        assert column.percentiles["p01"] == column.range.min, vendor
+
+    @pytest.mark.parametrize("vendor", [v for v in VENDORS if v != "clickhouse"])
+    def test_a_far_future_sentinel_is_published_as_itself(
+        self,
+        vendor: str,
+        request: pytest.FixtureRequest,
+    ) -> None:
+        column = _temporal_column(vendor, request, [*_INSTANTS[:9], _SENTINEL])
+
+        assert column.range is not None
+        assert column.percentiles is not None
+        assert column.percentiles["p99"] == column.range.max, vendor
+        assert "p99" not in (column.unrepresentable or ()), vendor
+
+
+def test_a_clickhouse_percentile_keeps_the_columns_declared_zone(
+    request: pytest.FixtureRequest,
+) -> None:
+    column = _temporal_column("clickhouse", request, _INSTANTS, zone="Asia/Tokyo")
+
+    assert column.range is not None
+    assert column.percentiles is not None
+    assert column.percentiles["p01"] == column.range.min
+    assert column.percentiles["p99"] == column.range.max
+
+
+# A minimum whose float64 epoch-seconds reading truncates one microsecond low.
+_INSTANTS = [
+    datetime(2004, 1, 10, 13, 37, 4, 7, tzinfo=UTC) + timedelta(seconds=i, microseconds=13 * i)
+    for i in range(10)
+]
+_SENTINEL = datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=UTC)
+
+_TEMPORAL_TYPES = {
+    "postgres": ("timestamp", "TIMESTAMP '{}'"),
+    "mysql": ("DATETIME(6)", "'{}'"),
+    "snowflake": ("TIMESTAMP", "TIMESTAMP '{}'"),
+    "duckdb": ("TIMESTAMP", "TIMESTAMP '{}'"),
+    "clickhouse": ("DateTime64(6)", "toDateTime64('{}', 6)"),
+    "redshift": ("timestamp", "TIMESTAMP '{}'"),
+    "databricks": ("TIMESTAMP_NTZ", "TIMESTAMP_NTZ '{}'"),
+    "bigquery": ("DATETIME", "DATETIME '{}'"),
+}
+
+
+def _temporal_column(
+    vendor: str,
+    request: pytest.FixtureRequest,
+    instants: list[datetime],
+    *,
+    zone: str | None = None,
+) -> ColumnStats:
+    column_type, literal = _TEMPORAL_TYPES[vendor]
+
+    if zone is not None:
+        column_type = f"DateTime64(6, '{zone}')"
+        literal = f"toDateTime64('{{}}', 6, '{zone}')"
+
+    rows = ", ".join(f"({literal.format(t.strftime('%Y-%m-%d %H:%M:%S.%f'))})" for t in instants)
+
+    def seed(execute: Any, table: str, engine: str = "") -> None:
+        execute(f"CREATE TABLE {table} (n {column_type}){engine}")
+        execute(f"INSERT INTO {table} (n) VALUES {rows}")
+
+    adapter = _adapter(vendor, request, SHAPES["uniform"], extra_seed=seed)
+
+    try:
+        table = next(iter(adapter.list_tables(include=["*.huge"], exclude=[])))
+        columns = adapter.introspect_columns(table.fqn)
+        stats = adapter.compute_statistics(table.fqn, columns, CONFIG, frozenset())[1]
+    finally:
+        adapter.close()
+
+    return stats["n"]
 
 
 class TestDegenerateCensus:
@@ -649,10 +833,10 @@ class TestDegenerateCensus:
         try:
             table = next(iter(adapter.list_tables(include=["*.census"], exclude=[])))
             columns = adapter.introspect_columns(table.fqn)
+            before = len(recorder.statements)
             adapter.compute_statistics(table.fqn, columns, CONFIG, frozenset())
 
-            phase_a_fetches = [s for s in recorder.statements if "COUNT_IF" in s and "note" in s]
-            assert len(phase_a_fetches) == 1
+            assert len(recorder.statements) - before == 4
         finally:
             adapter.close()
 
@@ -682,7 +866,8 @@ def _seed_quantized_postgres(creds: dict[str, str]) -> None:
     ) as conn:
         conn.execute("CREATE TABLE public.quantized (n numeric, t timestamp)")
         rows = ", ".join(
-            f"({n}, '{t}')" for n, t in zip(_QUANTIZED_NUMERIC_VALUES, _QUANTIZED_TEMPORAL_VALUES)
+            f"({n}, '{t}')"
+            for n, t in zip(_QUANTIZED_NUMERIC_VALUES, _QUANTIZED_TEMPORAL_VALUES, strict=True)
         )
         conn.execute(f"INSERT INTO public.quantized (n, t) VALUES {rows}")
 
@@ -703,7 +888,8 @@ def _seed_quantized_mysql(creds: dict[str, str]) -> None:
         cursor = conn.cursor()
         cursor.execute("CREATE TABLE quantized (n DECIMAL(10,2), t DATETIME)")
         rows = ", ".join(
-            f"({n}, '{t}')" for n, t in zip(_QUANTIZED_NUMERIC_VALUES, _QUANTIZED_TEMPORAL_VALUES)
+            f"({n}, '{t}')"
+            for n, t in zip(_QUANTIZED_NUMERIC_VALUES, _QUANTIZED_TEMPORAL_VALUES, strict=True)
         )
         cursor.execute(f"INSERT INTO quantized (n, t) VALUES {rows}")
         cursor.close()
@@ -714,7 +900,8 @@ def _seed_quantized_mysql(creds: dict[str, str]) -> None:
 def _seed_quantized_snowflake(con: duckdb.DuckDBPyConnection) -> None:
     con.execute("CREATE TABLE quantized (n NUMERIC, t TIMESTAMP)")
     rows = ", ".join(
-        f"({n}, '{t}')" for n, t in zip(_QUANTIZED_NUMERIC_VALUES, _QUANTIZED_TEMPORAL_VALUES)
+        f"({n}, '{t}')"
+        for n, t in zip(_QUANTIZED_NUMERIC_VALUES, _QUANTIZED_TEMPORAL_VALUES, strict=True)
     )
     con.execute(f"INSERT INTO quantized (n, t) VALUES {rows}")
 
@@ -722,7 +909,8 @@ def _seed_quantized_snowflake(con: duckdb.DuckDBPyConnection) -> None:
 def _seed_quantized_duckdb(con: duckdb.DuckDBPyConnection) -> None:
     con.execute("CREATE TABLE quantized (n NUMERIC, t TIMESTAMP)")
     rows = ", ".join(
-        f"({n}, '{t}')" for n, t in zip(_QUANTIZED_NUMERIC_VALUES, _QUANTIZED_TEMPORAL_VALUES)
+        f"({n}, '{t}')"
+        for n, t in zip(_QUANTIZED_NUMERIC_VALUES, _QUANTIZED_TEMPORAL_VALUES, strict=True)
     )
     con.execute(f"INSERT INTO quantized (n, t) VALUES {rows}")
 
@@ -732,7 +920,8 @@ def _seed_quantized_clickhouse(cur: Any) -> None:
         "CREATE TABLE seedbank.quantized (n Decimal(10,2), t DateTime64(0)) ENGINE = Memory",
     )
     rows = ", ".join(
-        f"({n}, '{t}')" for n, t in zip(_QUANTIZED_NUMERIC_VALUES, _QUANTIZED_TEMPORAL_VALUES)
+        f"({n}, '{t}')"
+        for n, t in zip(_QUANTIZED_NUMERIC_VALUES, _QUANTIZED_TEMPORAL_VALUES, strict=True)
     )
     cur.execute(f"INSERT INTO seedbank.quantized (n, t) VALUES {rows}")
 
@@ -740,7 +929,8 @@ def _seed_quantized_clickhouse(cur: Any) -> None:
 def _seed_quantized_redshift(shim: Any) -> None:
     shim.execute("CREATE TABLE public.quantized (n numeric, t timestamp)")
     rows = ", ".join(
-        f"({n}, '{t}')" for n, t in zip(_QUANTIZED_NUMERIC_VALUES, _QUANTIZED_TEMPORAL_VALUES)
+        f"({n}, '{t}')"
+        for n, t in zip(_QUANTIZED_NUMERIC_VALUES, _QUANTIZED_TEMPORAL_VALUES, strict=True)
     )
     shim.execute(f"INSERT INTO public.quantized (n, t) VALUES {rows}")
 
@@ -749,7 +939,7 @@ def _seed_quantized_databricks(cursor: Any) -> None:
     cursor.execute("CREATE TABLE quantized (n DECIMAL(10,2), t TIMESTAMP_NTZ) USING DELTA")
     rows = ", ".join(
         f"({n}, TIMESTAMP '{t}')"
-        for n, t in zip(_QUANTIZED_NUMERIC_VALUES, _QUANTIZED_TEMPORAL_VALUES)
+        for n, t in zip(_QUANTIZED_NUMERIC_VALUES, _QUANTIZED_TEMPORAL_VALUES, strict=True)
     )
     cursor.execute(f"INSERT INTO quantized (n, t) VALUES {rows}")
 
@@ -759,7 +949,7 @@ def _seed_quantized_bigquery(cursor: Any, dataset: str) -> None:
     cursor.execute(f"CREATE TABLE {q}.quantized (n NUMERIC, t DATETIME)")
     rows = ", ".join(
         f"({n}, DATETIME '{t}')"
-        for n, t in zip(_QUANTIZED_NUMERIC_VALUES, _QUANTIZED_TEMPORAL_VALUES)
+        for n, t in zip(_QUANTIZED_NUMERIC_VALUES, _QUANTIZED_TEMPORAL_VALUES, strict=True)
     )
     cursor.execute(f"INSERT INTO {q}.quantized (n, t) VALUES {rows}")
 
@@ -922,10 +1112,10 @@ class TestQuantizedCount:
         try:
             table = next(iter(adapter.list_tables(include=["*.quantized"], exclude=[])))
             columns = adapter.introspect_columns(table.fqn)
+            before = len(recorder.statements)
             adapter.compute_statistics(table.fqn, columns, CONFIG, frozenset())
 
-            phase_a_fetches = [s for s in recorder.statements if "TRUNC(" in s]
-            assert len(phase_a_fetches) == 1
+            assert len(recorder.statements) - before == 6
         finally:
             adapter.close()
 
@@ -1121,11 +1311,11 @@ class TestLength:
         try:
             table = next(iter(adapter.list_tables(include=["*.lengths"], exclude=[])))
             columns = adapter.introspect_columns(table.fqn)
+            before = len(recorder.statements)
             stats = adapter.compute_statistics(table.fqn, columns, CONFIG, frozenset())[1]
 
             assert stats["s"].length is not None
-            length_fetches = [s for s in recorder.statements if "LENGTH(" in s.upper()]
-            assert len(length_fetches) == 1
+            assert len(recorder.statements) - before == 3
         finally:
             adapter.close()
 

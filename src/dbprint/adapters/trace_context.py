@@ -11,6 +11,8 @@ from contextvars import ContextVar
 from logging import Logger
 from typing import TYPE_CHECKING, Any
 
+from .errors import dedent_sql
+
 
 if TYPE_CHECKING:
     from .errors import QueryFailed
@@ -35,14 +37,14 @@ def log_success(
     """
 
     logger.debug(
-        "statement conn=%s fqn=%s phase=%s elapsed_ms=%d rows=%s sql=%r params=%r",
+        "statement conn=%s fqn=%s phase=%s elapsed_ms=%d rows=%s params=%r\n%s",
         connection.get(),
         fqn.get(),
         phase.get(),
         _elapsed_ms(started),
         rowcount if isinstance(rowcount, int) and rowcount >= 0 else "-",
-        sql,
         params,
+        "\n".join(f"    {line}" for line in dedent_sql(sql).splitlines()),
     )
 
 

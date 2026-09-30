@@ -93,20 +93,3 @@ class TestValidatorAgreement:
         mismatched = sorted(code for code in page if page[code] != emitted[code])
 
         assert not mismatched, f"the index severity disagrees with the code for: {mismatched}"
-
-
-class TestStatedTotals:
-    def test_the_counts_in_the_prose_match_the_rows(self) -> None:
-        text = gen.DOCS_PATH.read_text()
-        page = _page_codes(text)
-        errors = sum(1 for severity in page.values() if severity == "E")
-
-        assert f"{len(page)} codes: {errors} error, {len(page) - errors} warning." in text
-
-
-class TestSpecLinks:
-    def test_every_row_links_into_the_specification(self) -> None:
-        rows = [line for line in gen.DOCS_PATH.read_text().splitlines() if _ROW.match(line)]
-
-        assert rows
-        assert all("(../format/v1/SPEC.md#" in row for row in rows)

@@ -123,6 +123,11 @@ _TEMPORAL_TYPES = (
     "datetime",
     "datetime64",
     "year",
+    "timestamp_ns",
+    "timestamp_ms",
+    "timestamp_s",
+    "time_ns",
+    "time64",
 )
 _NUMERIC_TYPES = (
     "smallint",
@@ -165,6 +170,10 @@ _NUMERIC_TYPES = (
     "bignumeric",
     "dec",
     "fixed",
+    "uhugeint",
+    "bignum",
+    "bfloat16",
+    "decfloat",
 )
 _CHARACTER_TYPES = (
     "varchar",
@@ -175,6 +184,9 @@ _CHARACTER_TYPES = (
     "string",
     "uuid",
     "fixedstring",
+    "tinytext",
+    "mediumtext",
+    "longtext",
 )
 _UNSUPPORTED_TYPES = (
     "bytea",
@@ -190,11 +202,13 @@ _UNSUPPORTED_TYPES = (
     "nested",
     "aggregatefunction",
     "simpleaggregatefunction",
+    "union",
 )
 
-# Matches one non-nested parenthesized group wherever it falls, not only at the end - some
-# types qualify after the group, and some carry non-digit content a digit-only pattern misses.
-_PRECISION_RE = re.compile(r"\([^()]*\)")
+# One or more trailing `[]`/`[n]` suffixes, read after every bracketed group is gone.
+_ARRAY_SUFFIX_RE = re.compile(r"(\[\d*\])+$")
+
+_GROUP_CLOSERS = {"(": ")", "<": ">"}
 
 # MySQL reports these inside `column_type` (`bigint unsigned`, `int unsigned zerofill`),
 # with no separating paren for a base-name split to key on.
@@ -208,8 +222,8 @@ _CLICKHOUSE_WRAPPER_RE = re.compile(r"^(nullable|lowcardinality)\((.+)\)$")
 
 
 def base_type(sql_type: str) -> str:
-    """Lowercase type name with wrappers, precision/length and MySQL's qualifiers stripped - the
-    one normalization every adapter's pre-classification and `classify` share.
+    """Lowercase type name with wrappers, every `(...)`/`<...>` group at any depth and MySQL's
+    qualifiers stripped - the one normalization every adapter and `classify` share.
     """
 
     lowered = sql_type.lower()
@@ -222,7 +236,7 @@ def base_type(sql_type: str) -> str:
 
         lowered = match.group(2)
 
-    stripped = _PRECISION_RE.sub("", lowered)
+    stripped = _without_groups(lowered)
     stripped = _MYSQL_NUMERIC_QUALIFIER_RE.sub("", stripped)
 
     return " ".join(stripped.split())
@@ -265,23 +279,21 @@ def classify(
     only in the unmatched-type fallthrough - `unsupported` and `text` respectively (SPEC 3.3).
     """
 
-    base = base_type(sql_type)
-
-    if _matches(base, _UNSUPPORTED_TYPES) or _is_array_type(sql_type):
+    if _matches(base_type(sql_type), _UNSUPPORTED_TYPES) or is_array_type(sql_type):
         return "unsupported"
-    elif _matches(base, _BOOLEAN_TYPES) or _is_mysql_boolean_type(sql_type):
+    elif is_boolean_type(sql_type):
         return "boolean"
-    elif _matches(base, _JSON_TYPES):
+    elif is_json_type(sql_type):
         return "json"
     elif has_declared_fk:
         return "foreign_key_candidate"
     elif cardinality is not None and cardinality <= enumeration_threshold:
         return "categorical"
-    elif _matches(base, _TEMPORAL_TYPES):
+    elif is_temporal_type(sql_type):
         return "temporal"
-    elif _matches(base, _NUMERIC_TYPES):
+    elif is_numeric_type(sql_type):
         return "numeric"
-    elif _matches(base, _CHARACTER_TYPES) or cardinality is not None or catalog_only:
+    elif _matches(base_type(sql_type), _CHARACTER_TYPES) or cardinality is not None or catalog_only:
         return "text"
     else:
         return "unsupported"
@@ -292,15 +304,13 @@ def is_string_like_type(sql_type: str) -> bool:
     the shared test the matrix and every adapter's Phase A use to decide whether `length` applies.
     """
 
-    base = base_type(sql_type)
-
     return not (
-        _matches(base, _UNSUPPORTED_TYPES)
-        or _is_array_type(sql_type)
-        or _matches(base, _BOOLEAN_TYPES)
-        or _matches(base, _JSON_TYPES)
-        or _matches(base, _TEMPORAL_TYPES)
-        or _matches(base, _NUMERIC_TYPES)
+        _matches(base_type(sql_type), _UNSUPPORTED_TYPES)
+        or is_array_type(sql_type)
+        or is_boolean_type(sql_type)
+        or is_json_type(sql_type)
+        or is_temporal_type(sql_type)
+        or is_numeric_type(sql_type)
     )
 
 
@@ -312,6 +322,8 @@ _NO_DAY_TEMPORAL_TYPES = (
     "time",
     "time with time zone",
     "time without time zone",
+    "time_ns",
+    "time64",
     "year",
 )
 
@@ -332,6 +344,8 @@ _NO_CALENDAR_TEMPORAL_TYPES = (
     "time",
     "time with time zone",
     "time without time zone",
+    "time_ns",
+    "time64",
     "year",
 )
 
@@ -346,12 +360,89 @@ def has_calendar_component(sql_type: str) -> bool:
     return _matches(base, _TEMPORAL_TYPES) and not _matches(base, _NO_CALENDAR_TEMPORAL_TYPES)
 
 
+def is_numeric_type(sql_type: str) -> bool:
+    """Whether `sql_type` belongs to the numeric family `classify` reads as numbers."""
+
+    return _matches(base_type(sql_type), _NUMERIC_TYPES)
+
+
+def is_temporal_type(sql_type: str) -> bool:
+    """Whether `sql_type` belongs to the temporal family - a date, instant, clock time or year."""
+
+    return _matches(base_type(sql_type), _TEMPORAL_TYPES)
+
+
+def is_boolean_type(sql_type: str) -> bool:
+    """Whether `sql_type` is a boolean, MySQL's `tinyint(1)` spelling included."""
+
+    return _matches(base_type(sql_type), _BOOLEAN_TYPES) or _is_mysql_boolean_type(sql_type)
+
+
+def is_json_type(sql_type: str) -> bool:
+    """Whether `sql_type` is a semi-structured document type."""
+
+    return _matches(base_type(sql_type), _JSON_TYPES)
+
+
+def is_recognised_type(sql_type: str) -> bool:
+    """Whether some shared table names `sql_type` - false means SPEC 3.3's fallthrough decides it."""
+
+    base = base_type(sql_type)
+
+    return (
+        is_array_type(sql_type)
+        or is_boolean_type(sql_type)
+        or any(
+            _matches(base, table)
+            for table in (
+                _UNSUPPORTED_TYPES,
+                _JSON_TYPES,
+                _TEMPORAL_TYPES,
+                _NUMERIC_TYPES,
+                _CHARACTER_TYPES,
+            )
+        )
+    )
+
+
+def is_array_type(sql_type: str) -> bool:
+    """Whether `sql_type` ends in `[]` or `[n]` suffixes at depth 0 - `INTEGER[2][2]`, not a
+    bracket inside a struct field's own type.
+    """
+
+    return _ARRAY_SUFFIX_RE.search(_without_groups(sql_type).rstrip()) is not None
+
+
 def _matches(base: str, types: tuple[str, ...]) -> bool:
     return base in types
 
 
-def _is_array_type(sql_type: str) -> bool:
-    return sql_type.rstrip().endswith("[]")
+def _without_groups(sql_type: str) -> str:
+    """`sql_type` with every balanced `(...)`/`<...>` group removed, quoted text skipped over.
+
+    Qualifiers after a group survive (`timestamp(3) with time zone`).
+    """
+
+    out: list[str] = []
+    closers: list[str] = []
+    quote: str | None = None
+
+    for char in sql_type:
+        if quote is not None:
+            quote = None if char == quote else quote
+        elif char in "\"'`":
+            quote = char
+        elif char in _GROUP_CLOSERS:
+            closers.append(_GROUP_CLOSERS[char])
+            continue
+        elif closers and char == closers[-1]:
+            closers.pop()
+            continue
+
+        if not closers:
+            out.append(char)
+
+    return "".join(out)
 
 
 def _is_mysql_boolean_type(sql_type: str) -> bool:

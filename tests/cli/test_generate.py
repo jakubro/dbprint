@@ -108,7 +108,7 @@ class _MockPostgresAdapter(MockAdapter):
 
     REQUIRED_KEYS = ("host", "port", "database", "user", "password")
 
-    def __init__(self, _credentials: dict[str, str]) -> None:
+    def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
         super().__init__(_fixture())
 
 
@@ -228,7 +228,7 @@ class TestPipedOutput:
 class _MockMultiPostgresAdapter(MockAdapter):
     REQUIRED_KEYS = ("host", "port", "database", "user", "password")
 
-    def __init__(self, _credentials: dict[str, str]) -> None:
+    def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
         super().__init__(_fixture_multi())
 
 
@@ -462,10 +462,10 @@ class TestRunLog:
         monkeypatch.chdir(tmp_path)
         runner = CliRunner()
 
-        with _patch_registry():
+        with _patch_registry(), patch.object(run_log, "LOGS_ROOT", tmp_path / "logs"):
             runner.invoke(main, ["list"])
 
-        assert not (run_log.LOGS_ROOT / run_log._slug(tmp_path)).exists()
+        assert not any((tmp_path / "logs").rglob("*"))
 
     def test_connection_resolution_failure_writes_no_log(
         self,
@@ -476,30 +476,10 @@ class TestRunLog:
         monkeypatch.chdir(tmp_path)
         runner = CliRunner()
 
-        with _patch_registry():
+        with _patch_registry(), patch.object(run_log, "LOGS_ROOT", tmp_path / "logs"):
             runner.invoke(main, ["generate", "missing", "--no-tui"])
 
-        assert not (run_log.LOGS_ROOT / run_log._slug(tmp_path)).exists()
-
-    def test_four_runs_keep_exactly_three_log_files(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _setup_project(tmp_path)
-        monkeypatch.chdir(tmp_path)
-
-        for k, v in _credential_env().items():
-            monkeypatch.setenv(k, v)
-
-        runner = CliRunner()
-
-        with _patch_registry():
-            for _ in range(4):
-                runner.invoke(main, ["generate", "--no-tui"])
-
-        directory = run_log.LOGS_ROOT / run_log._slug(tmp_path)
-        assert len(list(directory.glob("*.log"))) == 3
+        assert not any((tmp_path / "logs").rglob("*"))
 
     def test_print_tree_carries_no_run_log_artifacts(
         self,

@@ -38,10 +38,10 @@ connections:
     auto: true
     output: prints
     include:
-      - "seedbank.*"
-      - "fixture.*"
+      - "arboretum.seedbank.*"
+      - "arboretum.fixture.*"
     exclude:
-      - "seedbank.audit_*"
+      - "arboretum.seedbank.audit_*"
     max_age_days: 1
     statistics:
       top_n_values: 30
@@ -52,12 +52,12 @@ connections:
       # The matview is expensive to profile, so it is refreshed monthly rather
       # than daily. Its manifest entry records the 30 it resolved to, while
       # every other table records the connection's 1.
-      - include: ["seedbank.germination_by_taxon_mv"]
+      - include: ["arboretum.seedbank.germination_by_taxon_mv"]
         max_age_days: 30
 
-#      - include: ["seedbank.events*"]
+#      - include: ["arboretum.seedbank.events*"]
 #        sample: 0.01
-#      - include: ["seedbank.accession"]
+#      - include: ["arboretum.seedbank.accession"]
 #        filter: "collected_on >= current_date - interval '30 days'"
 
     # Two more redaction primitives on top of the project-wide `mask` above,
@@ -65,16 +65,16 @@ connections:
     # globs over `<fqn>.<column>` rather than a detected category. This is
     # the escape hatch for a column detection misses, per CONFIG.md.
     redact:
-      - columns: ["seedbank.collector.institution"]
+      - columns: ["arboretum.seedbank.collector.institution"]
         with: hash
-      - columns: ["seedbank.collector.street_address"]
+      - columns: ["arboretum.seedbank.collector.street_address"]
         with: drop
 
 #    # Data-quality checks evaluated by `dbprint check`, in the grammar at
 #    # ../../../../ASSERTIONS.md.
 #    assertions:
 #      tables:
-#        seedbank.collector:
+#        arboretum.seedbank.collector:
 #          columns:
 #            email:
 #              null_rate: 0

@@ -1,12 +1,14 @@
 """Deterministic in-memory adapter for engine tests. See ARCHITECTURE.md 2 (Mock adapter).
 
-Constructed from a dict keyed by FQN; each method returns its fixture content verbatim.
+Constructed from a dict keyed by FQN; each method returns its fixture verbatim, unless a test
+scripts answers for it - the only way a table changing between two statements is expressible.
 """
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field, replace
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, Self
 
 from dbprint.config import StatisticsConfig
 from dbprint.config.selectors import expand
@@ -21,6 +23,8 @@ from .base import (
     ForeignKeyMeta,
     IndexMeta,
     NullPatterns,
+    PhaseA,
+    PhaseB,
     PhysicalLayout,
     RowCountMethod,
     TableCounts,
@@ -85,19 +89,39 @@ class MockAdapter(Adapter):
         fixture: dict[str, MockTable],
         query_results: dict[str, list[tuple[Any, ...]]] | None = None,
         dependencies: dict[str, tuple[str, ...]] | None = None,
+        responses: dict[str, list[Any]] | None = None,
+        *,
+        statement_timeout: int | None = None,
     ) -> None:
+        self.statement_timeout = statement_timeout
         self._fixture = dict(fixture)
         self._connected = False
         self._query_results: dict[str, list[tuple[Any, ...]]] = dict(query_results or {})
         # Connection-scoped, like `default_collation` - not per-MockTable. None (the default)
         # means "not asked"; a dict (even empty) means the catalog answered.
         self._dependencies = dependencies
+        # Method name -> answers consumed in call order, so a test can state that one read
+        # disagreed with the next. Unset or exhausted, every read is the fixture's own.
+        self._responses = {name: list(queue) for name, queue in (responses or {}).items()}
+
+    def scripted(self, method: str) -> Any:
+        """The next scripted answer for `method`, or None where the fixture governs."""
+
+        queue = self._responses.get(method)
+
+        return queue.pop(0) if queue else None
 
     def connect(self) -> None:
         self._connected = True
 
     def close(self) -> None:
         self._connected = False
+
+    def new_session(self) -> Self:
+        session = copy.copy(self)
+        session._connected = False
+
+        return session
 
     def list_tables(self, include: list[str], exclude: list[str]) -> list[TableMeta]:
         self._require_connected()
@@ -155,7 +179,7 @@ class MockAdapter(Adapter):
         columns: list[ColumnMeta],
         config: StatisticsConfig,
         scope: TableScope | None = None,
-    ) -> tuple[TableCounts, dict[str, BaseStats]]:
+    ) -> tuple[TableCounts, PhaseA]:
         """Phase A read straight off the fixture's canned per-column statistics.
 
         `rows_scanned`/`row_count_method` are fixture-stated rather than derived from
@@ -164,6 +188,11 @@ class MockAdapter(Adapter):
         """
 
         del columns, config, scope
+        scripted = self.scripted("compute_base_statistics")
+
+        if scripted is not None:
+            return scripted
+
         tbl = self._lookup(fqn)
         counts = TableCounts(
             row_count=tbl.row_count,
@@ -181,7 +210,7 @@ class MockAdapter(Adapter):
             for name, s in tbl.stats.items()
         }
 
-        return counts, base
+        return counts, PhaseA(base)
 
     def compute_column_statistics(
         self,
@@ -195,7 +224,7 @@ class MockAdapter(Adapter):
         suppress_values: frozenset[str] = frozenset(),
         on_column: ColumnProgress | None = None,
         scope: TableScope | None = None,
-    ) -> dict[str, ColumnStats]:
+    ) -> PhaseB:
         """Phase B: the fixture verbatim, minus whatever was suppressed.
 
         Stats are pre-canned and never cross-checked, so config/counts/base/fk_source_columns
@@ -212,10 +241,12 @@ class MockAdapter(Adapter):
             for index, col in enumerate(columns, start=1):
                 on_column(index, total, col.name)
 
-        return {
-            name: _without_value_list(s) if name in suppress_values else s
-            for name, s in tbl.stats.items()
-        }
+        return PhaseB(
+            {
+                name: _without_value_list(s) if name in suppress_values else s
+                for name, s in tbl.stats.items()
+            },
+        )
 
     def materialize_scope(self, fqn: str, scope: TableScope) -> TableScope:
         """Mark a sampled draw materialized, with no real copy behind it.
@@ -272,6 +303,11 @@ class MockAdapter(Adapter):
     ) -> tuple[tuple[str, int], ...]:
         """Return the fixture's canned buckets for `column` - no SQL, no truncation math."""
 
+        scripted = self.scripted("probe_timeline")
+
+        if scripted is not None:
+            return scripted
+
         del columns, counts, unit, scope
 
         return self._lookup(fqn).timeline_buckets.get(column, ())
@@ -286,6 +322,11 @@ class MockAdapter(Adapter):
         scope: TableScope | None = None,
     ) -> dict[str, tuple[str, str]]:
         """Return the fixture's canned windows for `subject_columns` - no SQL, no aggregate."""
+
+        scripted = self.scripted("compute_populated_windows")
+
+        if scripted is not None:
+            return scripted
 
         del columns, counts, anchor_column, scope
         stated = self._lookup(fqn).populated_windows
@@ -314,6 +355,7 @@ class MockAdapter(Adapter):
         column: str,
         n: int,
         scope: TableScope | None = None,
+        sql_type: str | None = None,
     ) -> list[Any]:
         samples = self._lookup(fqn).samples.get(column, [])
 
@@ -355,6 +397,11 @@ class MockAdapter(Adapter):
         Raises on a `sample` scope with no materialized copy - every real adapter's read refuses
         the same state, so the wrong scope is caught rather than answered anyway.
         """
+
+        scripted = self.scripted("compute_normalized_cardinality")
+
+        if scripted is not None:
+            return scripted
 
         if scope is not None and scope.sample is not None and scope.materialized is None:
             raise ValueError(

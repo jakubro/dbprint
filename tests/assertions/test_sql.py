@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from dbprint.assertions import AssertionSet, QueryAssertion, evaluate_sql_assertions
+from dbprint.assertions import sql as sql_module
+from dbprint.conformance.issue import Issue
 
 
 class _FakeAdapter:
@@ -199,3 +201,85 @@ class TestDeterministicOrdering:
         issues = evaluate_sql_assertions(aset, "primary", adapter)
         paths = [i.path for i in issues]
         assert paths == sorted(paths)
+
+
+def _one(
+    result: list[tuple[Any, ...]] | Exception,
+    expect: Literal["0", "empty"] = "0",
+) -> list[Issue]:
+    query = QueryAssertion(name="q", sql="SELECT x", expect=expect, severity="warning")
+
+    return evaluate_sql_assertions(_set((query,)), "conn", _FakeAdapter({"SELECT x": result}))
+
+
+def _issue(code: str, detail: str) -> Issue:
+    return Issue(
+        path="assertions.conn.queries.q",
+        code=code,
+        severity="warning",
+        detail=detail,
+        spec_ref="ASSERTIONS.md §3",
+    )
+
+
+class TestEveryIssueCarriesItsPathSeverityAndSection:
+    """ASSERTIONS.md 3: each outcome is addressed by the query's path, at the query's severity."""
+
+    def test_a_query_the_database_refuses(self) -> None:
+        assert _one(RuntimeError("relation missing")) == [
+            _issue("assertion.sql-execution-error", "DB error: relation missing"),
+        ]
+
+    def test_no_rows_where_a_count_was_expected(self) -> None:
+        assert _one([]) == [
+            _issue(
+                "assertion.sql-empty-result",
+                "query returned zero rows; expect: 0 requires a scalar result",
+            ),
+        ]
+
+    def test_a_row_with_no_columns(self) -> None:
+        assert _one([()]) == [
+            _issue("assertion.sql-empty-result", "query returned a row with no columns"),
+        ]
+
+    def test_a_null_count(self) -> None:
+        assert _one([(None,)]) == [_issue("assertion.sql-non-zero", "actual: null (expected: 0)")]
+
+    def test_a_count_that_is_not_a_number(self) -> None:
+        assert _one([("three",)]) == [
+            _issue("assertion.sql-type-mismatch", "actual value 'three' not coercible to integer"),
+        ]
+
+    def test_a_fractional_count_is_spelled_positionally(self) -> None:
+        assert _one([(1e-07,)]) == [
+            _issue("assertion.sql-non-zero", "actual: 0.0000001 (expected: 0)"),
+        ]
+
+    def test_ten_rows_are_listed_whole(self) -> None:
+        rows = [(n,) for n in range(10)]
+
+        assert _one(rows, expect="empty") == [
+            _issue(
+                "assertion.sql-non-empty",
+                "returned 10 row(s); first 10: [(0,), (1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)]",
+            ),
+        ]
+
+    def test_rows_past_the_tenth_are_counted_not_listed(self) -> None:
+        rows = [(n,) for n in range(12)]
+
+        assert _one(rows, expect="empty") == [
+            _issue(
+                "assertion.sql-non-empty",
+                "returned 12 row(s); first 10: [(0,), (1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)] (... 2 more)",
+            ),
+        ]
+
+
+class TestACountIsSpelledAsTheNumberItIs:
+    def test_an_integral_decimal_sheds_its_scale(self) -> None:
+        assert sql_module._spell_count(Decimal("3.00")) == "3"
+
+    def test_a_value_that_is_not_a_number_is_spelled_as_its_text(self) -> None:
+        assert sql_module._spell_count("n/a") == "n/a"

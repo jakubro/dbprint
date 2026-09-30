@@ -237,14 +237,14 @@ class TestDiffExclusion:
             output=tmp_path,
             infer_relationships=False,
         )
-        Engine(MockAdapter(_fixture()), conn, tmp_path).generate()
+        # A non-unique parent proposes nothing; the second run's unique one proposes the edge.
+        Engine(MockAdapter(_fixture(parent_unique=False)), conn, tmp_path).generate()
         Engine(MockAdapter(_fixture()), conn, tmp_path).generate(GenerateRequest(force=True))
         diff = yaml.safe_load((tmp_path / "w" / "diff.yaml").read_text())
-        events = [
-            e
-            for e in diff.get("events", [])
-            if e.get("kind")
-            in {"relationship_added", "relationship_removed", "relationship_modified"}
-        ]
+        refers_to = yaml.safe_load(
+            (tmp_path / "w" / "public" / "a" / "relationships.yaml").read_text(),
+        )["refers_to"]
+        events = [c for c in diff["changes"] if c["kind"].startswith("relationship_")]
 
+        assert [e["detection"] for e in refers_to] == ["measured"]
         assert events == []

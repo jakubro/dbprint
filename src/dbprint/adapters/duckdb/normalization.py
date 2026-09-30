@@ -7,24 +7,36 @@ from __future__ import annotations
 from . import stats
 from .connection import Cursor, exec_query
 from ..base import TableScope, seed_from_fqn
+from ..identifiers import Identity
+from ..sql_layout import indented
 
 
 def compute_normalized_cardinality(
     cursor: Cursor,
-    fqn: str,
+    identity: Identity,
     column: str,
     scope: TableScope | None = None,
 ) -> int:
     """The distinct count of `column` once trimmed and case-folded (SPEC 2.2.4)."""
 
-    database, schema, table = fqn.split(".")
-    quoted_col = stats._quote_ident(column)
+    quoted_col = stats._qualified(column)
     normalized = f"LOWER(TRIM(CAST({quoted_col} AS VARCHAR)))"
-    source = stats._source(database, schema, table, scope, seed_from_fqn(fqn, stats.SEED_MODULUS))
+    source = stats._source(
+        identity.quoted(),
+        scope,
+        seed_from_fqn(identity.fqn, stats.SEED_MODULUS),
+    )
 
     row = exec_query(
         cursor,
-        f"SELECT COUNT(DISTINCT {normalized}) AS n FROM {source} WHERE {quoted_col} IS NOT NULL",
+        f"""
+        SELECT
+          COUNT(DISTINCT {normalized}) AS n
+        FROM
+          {indented(source, 10)}
+        WHERE
+          {quoted_col} IS NOT NULL
+        """,
     ).fetchone()
 
     return int(row[0]) if row and row[0] is not None else 0

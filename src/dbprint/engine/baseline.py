@@ -1,27 +1,44 @@
-"""Baseline manifest loading + per-table state hydration from disk.
+"""Readers of a committed manifest's shape, shared by every surface that walks a print.
 
-Column/index/comment fields stay empty in v1, where those live in DDL the format does not
-require parsing. A malformed artifact degrades to absent rather than crashing - the smallest
-unit holding the defect drops - and `conformance.validate_print` reports it.
+A malformed artifact degrades to absent - the smallest unit holding the defect drops.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from . import diff as diff_module
-from .relationship_graph import IncomingFk
+from dbprint.spec import artifact_yaml
+from dbprint.spec.fqn import split as split_fqn
 
 
 _LOG = logging.getLogger(__name__)
 
+# Parses one artifact file, raising OSError or `yaml.YAMLError` as `read_artifact` does.
+ArtifactReader = Callable[[Path], Any]
+
+_UNMEASURED_BLOCK_MESSAGE = {
+    "physical_layout": 'this run did not measure it, so whether a key is declared is unknown, not "none".',
+    "null_patterns": (
+        "this run did not measure it, so which columns are null on the same rows is unknown, "
+        'not "none".'
+    ),
+    "dependencies": "this run did not measure it, so no dependency between columns is ruled out.",
+}
+
+
+def read_artifact(path: Path) -> Any:
+    """Parse one artifact file afresh."""
+
+    return artifact_yaml.load(path.read_text(encoding="utf-8"))
+
 
 def load_baseline_manifest(prints_root: Path) -> dict[str, Any] | None:
-    """Load `prints/<conn>/manifest.yaml` if present and usable; otherwise None."""
+    """Load `prints/<connection>/manifest.yaml` if present and usable; otherwise None."""
 
     manifest = prints_root / "manifest.yaml"
 
@@ -29,7 +46,7 @@ def load_baseline_manifest(prints_root: Path) -> dict[str, Any] | None:
         return None
 
     try:
-        data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+        data = read_artifact(manifest)
     except yaml.YAMLError:
         return None
 
@@ -81,6 +98,35 @@ def walkable_tables(manifest: dict[str, Any] | None) -> dict[str, dict[str, Any]
     return out
 
 
+def failed_tables(manifest: Mapping[str, Any] | None) -> tuple[str, ...]:
+    """The tables the writing run attempted and could not profile (SPEC 2.5); `()` when absent.
+
+    A malformed value reads as empty here; conformance reports it.
+    """
+
+    listed = manifest.get("failed_tables") if manifest else None
+
+    if not isinstance(listed, list):
+        return ()
+
+    return tuple(fqn for fqn in listed if isinstance(fqn, str))
+
+
+def unmeasured_block_message(name: str) -> str:
+    """How every surface words a table-level block the file's `unmeasured` list names (SPEC 2.2.1)."""
+
+    return _UNMEASURED_BLOCK_MESSAGE.get(
+        name,
+        "this run did not measure it; its content is unknown.",
+    )
+
+
+def unprofiled_message(fqn: str) -> str:
+    """How every surface names a table the last run could not profile."""
+
+    return f"the last generate run could not profile {fqn!r}; run dbprint generate to see the cause"
+
+
 def table_directory(print_root: Path, fqn: str, entry: dict[str, Any]) -> Path:
     """One table's on-disk directory: its declared `path`, or the FQN's own slash form.
 
@@ -90,7 +136,7 @@ def table_directory(print_root: Path, fqn: str, entry: dict[str, Any]) -> Path:
 
     path = entry.get("path")
 
-    return print_root / (path if isinstance(path, str) and path else fqn.replace(".", "/"))
+    return print_root / (path if isinstance(path, str) and path else "/".join(split_fqn(fqn)))
 
 
 def declared_artifacts(entry: dict[str, Any]) -> dict[str, Any]:
@@ -113,213 +159,3 @@ def missing_artifacts(table_dir: Path, artifacts: dict[str, Any]) -> tuple[str, 
     return tuple(
         sorted(kind for kind, name in artifacts.items() if not (table_dir / name).is_file()),
     )
-
-
-def baseline_states_from_manifest(
-    baseline_manifest: dict[str, Any] | None,
-) -> dict[str, diff_module.TableState] | None:
-    """Build a thin TableState index from the manifest's table list.
-
-    Only `type` is set; `hydrate_baseline_states` fills the rest from the per-table YAML.
-    """
-
-    if not baseline_manifest:
-        return None
-
-    out: dict[str, diff_module.TableState] = {}
-
-    for fqn, entry in walkable_tables(baseline_manifest).items():
-        out[fqn] = diff_module.TableState(fqn=fqn, type=entry.get("type", "table"))
-
-    return out
-
-
-def hydrate_baseline_states(
-    states: dict[str, diff_module.TableState] | None,
-    prints_root: Path,
-    baseline_manifest: dict[str, Any] | None,
-) -> None:
-    """Fill `states` in-place from each table's relationships.yaml + statistics.yaml."""
-
-    if not states or not baseline_manifest:
-        return
-
-    for fqn, entry in walkable_tables(baseline_manifest).items():
-        if fqn not in states:
-            continue
-
-        tbl_dir = prints_root / entry.get("path", "")
-        artifacts = declared_artifacts(entry)
-
-        if "relationships" in artifacts:
-            _hydrate_relationships(states[fqn], tbl_dir / artifacts["relationships"])
-
-        if "statistics" in artifacts:
-            _hydrate_statistics(states[fqn], tbl_dir / artifacts["statistics"])
-
-
-def load_incoming_edges(
-    prints_root: Path,
-    baseline_manifest: dict[str, Any] | None,
-) -> dict[str, list[IncomingFk]]:
-    """Read every committed table's `referenced_by` list.
-
-    A run resolves incoming edges only from the tables it re-extracted; edges from tables it
-    left alone come from the prints that last recorded them.
-    """
-
-    out: dict[str, list[IncomingFk]] = {}
-
-    if not baseline_manifest:
-        return out
-
-    for fqn, entry in walkable_tables(baseline_manifest).items():
-        artifacts = declared_artifacts(entry)
-
-        if "relationships" not in artifacts:
-            continue
-
-        edges = _incoming_from_file(
-            prints_root / entry.get("path", "") / artifacts["relationships"],
-        )
-
-        if edges:
-            out[fqn] = edges
-
-    return out
-
-
-def _incoming_from_file(path: Path) -> list[IncomingFk]:
-    if not path.is_file():
-        return []
-
-    try:
-        data = _as_mapping(yaml.safe_load(path.read_text(encoding="utf-8")), path)
-    except yaml.YAMLError:
-        return []
-
-    if data is None:
-        return []
-
-    out: list[IncomingFk] = []
-
-    for entry in data.get("referenced_by") or []:
-        if not isinstance(entry, dict):
-            continue
-
-        try:
-            out.append(
-                IncomingFk(
-                    column=tuple(entry["column"]),
-                    referencer_table=entry["referencer_table"],
-                    referencer_column=tuple(entry["referencer_column"]),
-                    # Absent on an inferred edge (SPEC 2.3.8) - carried as None, never
-                    # defaulted to a real action or to the stronger claim `declared`.
-                    on_delete=entry.get("on_delete"),
-                    on_update=entry.get("on_update"),
-                    detection=entry.get("detection") or "inferred",
-                    constraint_name=entry.get("constraint_name"),
-                ),
-            )
-        except (KeyError, TypeError):
-            continue
-
-    return out
-
-
-def _hydrate_relationships(state: diff_module.TableState, path: Path) -> None:
-    if not path.is_file():
-        return
-
-    try:
-        data = _as_mapping(yaml.safe_load(path.read_text(encoding="utf-8")), path)
-    except yaml.YAMLError:
-        return
-
-    if data is None:
-        return
-
-    refers_to = data.get("refers_to") or []
-    fks: list[diff_module.FkState] = []
-
-    for entry in refers_to:
-        try:
-            fks.append(
-                diff_module.FkState(
-                    source_columns=tuple(entry["column"]),
-                    target_table=entry["target_table"],
-                    target_columns=tuple(entry["target_column"]),
-                    # Absent on an inferred edge (SPEC 2.3.8) - carried as None, never
-                    # defaulted to a real action or to the stronger claim `declared`.
-                    on_delete=entry.get("on_delete"),
-                    on_update=entry.get("on_update"),
-                    detection=entry.get("detection") or "inferred",
-                ),
-            )
-        except (KeyError, TypeError):
-            continue
-
-    state.relationships = fks
-
-
-def _hydrate_statistics(state: diff_module.TableState, path: Path) -> None:
-    if not path.is_file():
-        return
-
-    try:
-        data = _as_mapping(yaml.safe_load(path.read_text(encoding="utf-8")), path)
-    except yaml.YAMLError:
-        return
-
-    if data is None:
-        return
-
-    row_count = data.get("row_count")
-    state.row_count = row_count if isinstance(row_count, int) else None
-    row_count_method = data.get("row_count_method")
-    state.row_count_method = row_count_method if isinstance(row_count_method, str) else None
-    state.scoped = isinstance(data.get("scope"), dict)
-    state.catalog_only = data.get("catalog_only") is True
-    state.grain = diff_module.grain_from_block(data.get("grain"))
-    # SPEC 2.2.1: a block the baseline names unmeasured contributes nothing to compare - hydrating
-    # it would resurrect the "confirmed unclustered" sentinel and invent drift against a real read.
-    unmeasured = set(data.get("unmeasured") or [])
-
-    if "physical_layout" not in unmeasured:
-        state.physical_layout = diff_module.physical_layout_from_block(
-            data.get("physical_layout"),
-        )
-    depends_on = data.get("depends_on")
-    state.depends_on = tuple(depends_on) if isinstance(depends_on, list) else None
-
-    cols = data.get("columns") or {}
-
-    if not isinstance(cols, dict):
-        return
-
-    state.statistics = diff_module.comparable_columns(cols)
-
-    # v1 statistics.yaml carries no default, so default_known=False suppresses default drift.
-    state.columns = {
-        name: diff_module.ColumnState(
-            name=name,
-            sql_type=str(payload.get("sql_type", "")),
-            nullable=bool(payload.get("nullable", False)),
-            default=None,
-            default_known=False,
-        )
-        for name, payload in cols.items()
-        if isinstance(payload, dict)
-    }
-
-
-def _as_mapping(data: Any, path: Path) -> dict[str, Any] | None:
-    """One artifact as the mapping its reader assumes, or None with the file named."""
-
-    if isinstance(data, dict):
-        return data
-
-    if data is not None:
-        _LOG.warning("ignoring %s: expected a mapping, found %s", path, type(data).__name__)
-
-    return None

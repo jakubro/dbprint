@@ -6,10 +6,10 @@ This directory contains a markdown skill that teaches an AI agent to open a comm
 
 | Surface | Use when |
 |---|---|
-| **Skill (this directory)** | The client supports markdown rules / skills / custom instructions. It supplies the judgement — when to reach for a print, and how to read a scoped or inferred number — which no tool description can carry. |
+| **Skill (this directory)** | The client supports markdown rules / skills / custom instructions. It states when to read the print before querying the database, and how to read a scoped or inferred number — guidance no tool description can carry. |
 | **MCP server (`dbprint serve`)** | The client supports MCP and you want the tools themselves: native tool / resource primitives, multi-connection routing, and the token-budgeted `get_table_context`. |
 
-They are complements rather than alternatives — the skill tells an agent what to reach for, the server is what it reaches. Installed together, the skill's tool names resolve; installed alone, its shell route still works.
+They are complements rather than alternatives — the skill tells an agent which tool to call, the server provides the tools. Installed together, the skill's tool names resolve; installed alone, its shell route still works.
 
 ## Installing in Claude Code
 
@@ -28,6 +28,6 @@ They are complements rather than alternatives — the skill tells an agent what 
 
 ## Installing in any other client
 
-Most agent clients accept markdown instructions in some shape (system prompt, custom instructions, project rules). The skill file is small and self-contained, and names nothing outside a print and the commands that read one, so it transplants cleanly.
+Most agent clients accept markdown instructions in some shape (system prompt, custom instructions, project rules). The skill file is small and self-contained, and names nothing outside a print and the commands that read one, so it works in any client unchanged.
 
 The tools it points at are specified in [`../../MCP.md`](../../MCP.md); serve them with `dbprint serve`.

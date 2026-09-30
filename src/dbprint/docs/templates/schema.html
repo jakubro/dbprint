@@ -20,8 +20,8 @@
           data-columns="{{ e.columns or 0 }}" data-profiled="{{ e.profiled_at }}">
         <td><a href="{{ url_for('table', conn=conn, table=fqn) }}">{{ fqn }}</a></td>
         <td>{{ e.type|capitalize }}</td>
-        <td class="num">{{ e.row_count|human }}</td>
-        <td class="num">{{ e.columns|human }}</td>
+        <td class="num">{{ e.row_count|number }}</td>
+        <td class="num">{{ e.columns|number }}</td>
         <td class="muted">{{ e.profiled_at|dt }}</td>
       </tr>
     {% endfor %}

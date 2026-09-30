@@ -8,6 +8,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from dbprint.adapters.base import ColumnMeta, ForeignKeyMeta, TableType, UniqueKeyMeta
+from dbprint.spec.fqn import join as join_fqn
+from dbprint.spec.fqn import split as split_fqn
 from dbprint.spec.sketch import (
     K as SKETCH_K,
 )
@@ -269,10 +271,10 @@ def _resolve_target(
     ambiguous and infers nothing.
     """
 
-    namespace = source_fqn.rsplit(".", 1)[0] if "." in source_fqn else ""
+    namespace = split_fqn(source_fqn)[:-1]
 
     for candidate in _name_candidates(stem):
-        qualified = f"{namespace}.{candidate}" if namespace else candidate
+        qualified = join_fqn((*namespace, candidate))
         entry = inventory.get(qualified)
 
         if entry is not None and can_be_target(entry):
@@ -282,7 +284,7 @@ def _resolve_target(
         matches = [
             inv
             for fqn, inv in inventory.items()
-            if fqn.rsplit(".", 1)[-1] == candidate and can_be_target(inv)
+            if split_fqn(fqn)[-1] == candidate and can_be_target(inv)
         ]
 
         if len(matches) == 1:

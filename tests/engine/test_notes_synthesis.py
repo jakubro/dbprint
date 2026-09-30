@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from dbprint.engine.notes_synthesis import synthesize
+from dbprint.spec.scope import scope_of
 
 
 def _stats(classification: str, **fields: object) -> dict[str, object]:
@@ -893,3 +894,38 @@ class TestSpellingGroups:
 
         assert "Active (50%, 2 spellings)" in notes
         assert "ACTIVE" not in notes.replace("Active", "")
+
+
+class TestScopedClaims:
+    """Each claim one unread row could falsify carries the clause; measurements do not."""
+
+    _SCOPE = scope_of({"scope": {"rows_scanned": 90, "sample": 0.1}})
+
+    def test_a_complete_list_carries_the_clause(self) -> None:
+        column = {
+            "classification": "categorical",
+            "cardinality": 2,
+            "values": [{"value": "open", "count": 60}, {"value": "closed", "count": 30}],
+            "values_coverage": 1.0,
+        }
+
+        assert synthesize(column, scope=self._SCOPE).startswith(
+            "2 distinct over the rows scanned: open / closed",
+        )
+        assert synthesize(column).startswith("2 distinct: open / closed")
+
+    def test_a_candidate_key_carries_the_clause(self) -> None:
+        column = {"classification": "numeric", "inferred": {"candidate_key": True}}
+
+        assert "candidate key over the rows scanned" in synthesize(column, scope=self._SCOPE)
+
+    def test_a_freshness_verdict_carries_the_clause_and_a_range_does_not(self) -> None:
+        column = {
+            "classification": "temporal",
+            "range": {"min": "2020-01-01", "max": "2020-02-01"},
+            "freshness": {"classification": "dormant", "max_age_days": 900},
+        }
+        note = synthesize(column, scope=self._SCOPE)
+
+        assert "freshness dormant over the rows scanned" in note
+        assert "range 2020-01-01 -> 2020-02-01" in note

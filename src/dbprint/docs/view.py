@@ -14,6 +14,18 @@ from typing import Any
 import inflect
 
 from dbprint.engine import notes_synthesis
+from dbprint.engine.baseline import unmeasured_block_message
+from dbprint.engine.yaml_dumper import spell_value
+from dbprint.spec.absence import Absence, block_value, column_value, read_table_block
+from dbprint.spec.scope import (
+    SCANNED_CLAUSE,
+    ScanScope,
+    list_is_complete,
+    qualify,
+    rows_scanned,
+    scope_of,
+)
+from dbprint.spec.value_text import spell_percent
 from . import catalogue, diagram
 
 
@@ -50,9 +62,19 @@ _BUCKET_ORDER: tuple[str, ...] = (
 
 
 def build_index_view(connections: list[catalogue.PrintConnection]) -> list[dict[str, Any]]:
-    """Per-connection summary for the index page: name, manifest header, table list."""
+    """Per-connection summary for the index page: name, manifest header, table list, and the
+    tables the last run could not profile.
+    """
 
-    return [{"name": c.name, "manifest": c.manifest, "tables": c.tables} for c in connections]
+    return [
+        {
+            "name": c.name,
+            "manifest": c.manifest,
+            "tables": c.tables,
+            "failed_tables": c.failed_tables,
+        }
+        for c in connections
+    ]
 
 
 def build_schema_view(conn: catalogue.PrintConnection, schema: str) -> dict[str, Any] | None:
@@ -85,11 +107,12 @@ def build_table_view(
     relationships = artifacts.relationships
     columns = (statistics or {}).get("columns")
     columns = columns if isinstance(columns, dict) else {}
-    row_count = (statistics or {}).get("row_count", artifacts.entry.get("row_count"))
+    row_count = _row_count(statistics, artifacts.entry)
     # SPEC 2.2.15: nothing was queried, so the aggregate cards/skyline - built from
     # null_rate/cardinality_ratio defaulting to 0 - would fabricate a measurement no column
     # carries. Per-column cells already read `None` correctly; only the aggregates suppress.
-    catalog_only = bool(statistics) and statistics.get("catalog_only") is True
+    catalog_only = bool(statistics) and block_value(statistics, "catalog_only") is True
+    scope = scope_of(statistics)
 
     targets = catalogue.leaf_targets(conn, artifacts.fqn)
     targets.update({name: f"#col-{name}" for name in columns})  # columns win on name collision
@@ -115,6 +138,7 @@ def build_table_view(
             targets,
             null_patterns,
             statistics_params,
+            scope,
         )
         for name, col in columns.items()
     ]
@@ -146,6 +170,7 @@ def build_table_view(
         "fqn": artifacts.fqn,
         "entry": artifacts.entry,
         "adapter": conn.manifest.get("adapter"),
+        "unprofiled_notice": catalogue.unprofiled_note(conn, artifacts.fqn),
         "missing_artifacts_notice": missing_artifacts_notice(artifacts.missing),
         "corrupted_artifacts_notice": corrupted_artifacts_notice(artifacts.corrupted),
         "catalog_only_notice": catalog_only_notice(statistics),
@@ -154,12 +179,16 @@ def build_table_view(
         "null_patterns": null_patterns,
         "physical_layout": physical_layout_view(statistics) if statistics else None,
         "dependencies": dependencies_view(statistics) if statistics else [],
-        "unmeasured": unmeasured_view(statistics) if statistics else (),
+        "unmeasured": unmeasured_view(statistics) if statistics else {},
         "timeline": timeline_view(statistics) if statistics else None,
         "depends_on": depends_on,
         "columns_empty_notice": columns_empty_notice(statistics),
-        "cards": summary_cards(columns, relationships) if statistics and not catalog_only else None,
-        "cardinality": cardinality_view(columns, row_count)
+        "cards": (
+            summary_cards(columns, relationships, scope)
+            if statistics and not catalog_only
+            else None
+        ),
+        "cardinality": cardinality_view(columns, row_count, scope)
         if columns and not catalog_only
         else None,
         "completeness": completeness_view(columns) if columns and not catalog_only else None,
@@ -168,7 +197,13 @@ def build_table_view(
         "skyline_coverage": skyline_coverage,
         "columns": column_rows,
         "relationships": rows,
-        "diagram": diagram.build(artifacts.fqn, rows, conn.name, tuple(depends_on or ())),
+        "diagram": diagram.build(
+            artifacts.fqn,
+            rows,
+            conn.name,
+            tuple(depends_on or ()),
+            in_print=conn.tables,
+        ),
         "description": linkify(artifacts.description, targets),
         "ddl": artifacts.ddl,
     }
@@ -179,14 +214,14 @@ def row_count_view(entry: dict[str, Any], statistics: dict[str, Any] | None) -> 
     (SPEC 2.2.8); catalog-only (SPEC 2.2.15) queried nothing, so it carries no share at all.
     """
 
-    row_count = (statistics or {}).get("row_count", entry.get("row_count"))
-    catalog_only = bool(statistics) and statistics.get("catalog_only") is True
+    row_count = _row_count(statistics, entry)
+    catalog_only = bool(statistics) and block_value(statistics, "catalog_only") is True
     scope = scope_view(statistics) if statistics else None
 
     if scope is not None:
-        rows_scanned, share_pct, filter_, sample = (
+        rows_scanned, share, filter_, sample = (
             scope["rows_scanned"],
-            scope["share_pct"],
+            scope["share"],
             scope["filter"],
             scope["sample"],
         )
@@ -197,17 +232,17 @@ def row_count_view(entry: dict[str, Any], statistics: dict[str, Any] | None) -> 
         and row_count >= 0
     ):
         rows_scanned = row_count
-        share_pct = 100.0 if row_count > 0 else None
+        share = 1.0 if row_count > 0 else None
         filter_ = None
         sample = None
     else:
-        rows_scanned, share_pct, filter_, sample = None, None, None, None
+        rows_scanned, share, filter_, sample = None, None, None, None
 
     return {
         "row_count": row_count,
-        "method": (statistics or {}).get("row_count_method"),
+        "method": block_value(statistics or {}, "row_count_method"),
         "rows_scanned": rows_scanned,
-        "share_pct": share_pct,
+        "share": share,
         "filter": filter_,
         "sample": sample,
     }
@@ -220,24 +255,17 @@ def scope_view(statistics: dict[str, Any]) -> dict[str, Any] | None:
     which records what was asked for rather than what was read.
     """
 
-    block = statistics.get("scope")
+    scope = scope_of(statistics)
 
-    if not isinstance(block, dict):
+    if scope is None:
         return None
 
-    rows_scanned = block.get("rows_scanned")
-    row_count = statistics.get("row_count")
-    share_pct = None
-
-    if isinstance(rows_scanned, int) and isinstance(row_count, int) and row_count > 0:
-        share_pct = round(100 * rows_scanned / row_count, 1)
-
     return {
-        "rows_scanned": rows_scanned,
-        "row_count": row_count,
-        "share_pct": share_pct,
-        "sample": block.get("sample"),
-        "filter": block.get("filter"),
+        "rows_scanned": scope.rows_scanned,
+        "row_count": scope.row_count,
+        "share": scope.share,
+        "sample": scope.sample,
+        "filter": scope.filter,
     }
 
 
@@ -251,7 +279,7 @@ def grain_view(
     tagged `detection: annotated` - it adds a fact, never replaces the measurement.
     """
 
-    block = statistics.get("grain")
+    block = block_value(statistics, "grain")
 
     if not isinstance(block, dict) and not statistics_annotations:
         return None
@@ -294,7 +322,7 @@ def _annotated_grain_keys(statistics_annotations: dict[str, Any] | None) -> list
 def null_patterns_view(statistics: dict[str, Any]) -> dict[str, Any] | None:
     """Which columns are null together (SPEC 2.2.10) - present iff any column has a null."""
 
-    block = statistics.get("null_patterns")
+    block = block_value(statistics, "null_patterns")
 
     if not isinstance(block, dict):
         return None
@@ -335,7 +363,7 @@ def null_companions(null_patterns: dict[str, Any] | None, column: str) -> list[s
 def physical_layout_view(statistics: dict[str, Any]) -> dict[str, Any] | None:
     """The declared clustering/partitioning key (SPEC 2.2.11) - a schema fact, never a claim."""
 
-    block = statistics.get("physical_layout")
+    block = block_value(statistics, "physical_layout")
 
     if not isinstance(block, dict):
         return None
@@ -349,7 +377,7 @@ def physical_layout_view(statistics: dict[str, Any]) -> dict[str, Any] | None:
 def dependencies_view(statistics: dict[str, Any]) -> list[dict[str, Any]]:
     """Functional dependencies measured over the scanned rows (SPEC 2.2.13)."""
 
-    return [d for d in (statistics.get("dependencies") or []) if isinstance(d, dict)]
+    return [d for d in (block_value(statistics, "dependencies") or []) if isinstance(d, dict)]
 
 
 def depends_on_view(statistics: dict[str, Any]) -> list[str] | None:
@@ -357,7 +385,7 @@ def depends_on_view(statistics: dict[str, Any]) -> list[str] | None:
     producer could not ask, while an empty list means the catalog answered and found nothing.
     """
 
-    block = statistics.get("depends_on")
+    block = block_value(statistics, "depends_on")
 
     if not isinstance(block, list):
         return None
@@ -370,7 +398,7 @@ def timeline_view(statistics: dict[str, Any]) -> dict[str, Any] | None:
     several causes, all indistinguishable to a reader by design.
     """
 
-    block = statistics.get("timeline")
+    block = block_value(statistics, "timeline")
 
     if not isinstance(block, dict):
         return None
@@ -385,18 +413,18 @@ def timeline_view(statistics: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def unmeasured_view(statistics: dict[str, Any]) -> tuple[str, ...]:
-    """Table-level blocks this run attempted and could not obtain (SPEC 2.2.1).
+def unmeasured_view(statistics: dict[str, Any]) -> dict[str, str]:
+    """Each table-level block the file's `unmeasured` list names, with its wording (SPEC 2.2.1).
 
     Each named block is absent from the same file, so absence alone would read as a finding.
     """
 
-    named = statistics.get("unmeasured")
+    named = block_value(statistics, "unmeasured")
 
     if not isinstance(named, list):
-        return ()
+        return {}
 
-    return tuple(name for name in named if isinstance(name, str))
+    return {name: unmeasured_block_message(name) for name in named if isinstance(name, str)}
 
 
 def missing_artifacts_notice(missing: tuple[str, ...]) -> str | None:
@@ -439,7 +467,7 @@ def catalog_only_notice(statistics: dict[str, Any] | None) -> str | None:
     Without it the page cannot tell "not queried" from "no statistics at all".
     """
 
-    if not statistics or statistics.get("catalog_only") is not True:
+    if not statistics or block_value(statistics, "catalog_only") is not True:
         return None
 
     return "Catalog read only - no rows were queried, so cardinality is not measured here."
@@ -448,6 +476,7 @@ def catalog_only_notice(statistics: dict[str, Any] | None) -> str | None:
 def summary_cards(
     columns: dict[str, Any],
     relationships: dict[str, Any] | None,
+    scope: ScanScope | None = None,
 ) -> dict[str, Any]:
     """Cross-column summary figures (sensitivity, redaction, freshness, connections)."""
 
@@ -455,7 +484,7 @@ def summary_cards(
     freshest_value: float | None = None
 
     for col, s in columns.items():
-        rng, fresh = s.get("range"), s.get("freshness")
+        rng, fresh = column_value(s, "range"), column_value(s, "freshness")
 
         if not rng or not fresh:
             continue
@@ -467,14 +496,17 @@ def summary_cards(
 
         if freshest_value is None or value > freshest_value:
             freshest_value = value
-            freshest = {"column": col, "max": rng["max"], "classification": fresh["classification"]}
+            freshest = {
+                "column": col,
+                "max": rng["max"],
+                "classification": fresh["classification"],
+                "clause": _clause(scope),
+            }
 
     return {
         "n_columns": len(columns),
-        "sensitive": sum(
-            1 for s in columns.values() if (s.get("inferred") or {}).get("sensitivity")
-        ),
-        "redacted": sum(1 for s in columns.values() if s.get("redacted")),
+        "sensitive": sum(1 for s in columns.values() if column_value(s, "inferred.sensitivity")),
+        "redacted": sum(1 for s in columns.values() if column_value(s, "redacted")),
         "freshest": freshest,
         "refers_to": len((relationships or {}).get("refers_to") or []),
         "referenced_by": len((relationships or {}).get("referenced_by") or []),
@@ -484,7 +516,11 @@ def summary_cards(
 _COMPLETENESS_BUCKETS: tuple[str, ...] = ("full", "high", "mid", "low")
 
 
-def cardinality_view(columns: dict[str, Any], row_count: int | None) -> dict[str, Any] | None:
+def cardinality_view(
+    columns: dict[str, Any],
+    row_count: int | None,
+    scope: ScanScope | None = None,
+) -> dict[str, Any] | None:
     """Average cardinality ratio over populated rows, across every column that measures one.
 
     Divides by `rows_scanned - null_count`, not SPEC 2.2.2's `cardinality_ratio`, whose
@@ -495,18 +531,17 @@ def cardinality_view(columns: dict[str, Any], row_count: int | None) -> dict[str
     bars = []
 
     for name, stat in columns.items():
-        cardinality = stat.get("cardinality")
+        cardinality = column_value(stat, "cardinality")
 
         if cardinality is None:
             continue
 
-        rows_scanned = stat.get("rows_scanned")
-        rows_scanned = rows_scanned if isinstance(rows_scanned, int) else row_count
+        population = rows_scanned(stat, scope) if scope is not None else row_count
 
-        if not isinstance(rows_scanned, int):
+        if not isinstance(population, int):
             continue
 
-        populated = rows_scanned - (stat.get("null_count") or 0)
+        populated = population - (stat.get("null_count") or 0)
 
         if populated > 0:
             bars.append((name, min(1.0, cardinality / populated)))
@@ -514,15 +549,15 @@ def cardinality_view(columns: dict[str, Any], row_count: int | None) -> dict[str
     if not bars:
         return None
 
-    ratios = [pct for _, pct in bars]
+    ratios = [ratio for _, ratio in bars]
 
     return {
-        "avg_pct": round(100 * sum(ratios) / len(ratios), 1),
+        "avg": sum(ratios) / len(ratios),
         "n_columns": len(ratios),
         "n_total": len(columns),
         "bars": [
-            {"name": name, "pct": round(100 * pct, 1)}
-            for name, pct in sorted(bars, key=lambda b: b[1], reverse=True)
+            {"name": name, "ratio": ratio, "pct": round(100 * ratio, 1)}
+            for name, ratio in sorted(bars, key=lambda b: b[1], reverse=True)
         ],
     }
 
@@ -548,7 +583,7 @@ def completeness_view(columns: dict[str, Any]) -> dict[str, Any] | None:
             counts["low"] += 1
 
     return {
-        "avg_pct": round(100 * sum(values) / len(values), 1),
+        "avg": sum(values) / len(values),
         "n_columns": len(values),
         "buckets": [(bucket, counts[bucket]) for bucket in _COMPLETENESS_BUCKETS],
     }
@@ -567,9 +602,9 @@ def skyline_heights(columns: dict[str, Any]) -> dict[str, float]:
 
     epsilon = 1e-6
     measured = {
-        col: stat["cardinality_ratio"]
+        col: ratio
         for col, stat in columns.items()
-        if stat.get("cardinality_ratio") is not None
+        if (ratio := column_value(stat, "cardinality_ratio")) is not None
     }
 
     if not measured:
@@ -600,42 +635,46 @@ def skyline_order(columns: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
         _, col = item
         bucket = _CLASS_BUCKETS.get(col.get("classification"), "unsupported")
 
-        return (_BUCKET_ORDER.index(bucket), -(col.get("cardinality_ratio") or 0))
+        return (_BUCKET_ORDER.index(bucket), -(column_value(col, "cardinality_ratio") or 0))
 
     return sorted(columns.items(), key=sort_key)
 
 
-def cardinality_cell(col: dict[str, Any], row_count: int | None) -> dict[str, Any] | None:
+def cardinality_cell(
+    col: dict[str, Any],
+    row_count: int | None,
+    scope: ScanScope | None = None,
+) -> dict[str, Any] | None:
     """The distinct count, whether it saturates its population, and how it was counted."""
 
-    cardinality = col.get("cardinality")
+    cardinality = column_value(col, "cardinality")
 
     if cardinality is None:
         return None
 
-    rows_scanned = col.get("rows_scanned")
+    scanned = rows_scanned(col, scope)
     saturates = False
 
-    if isinstance(rows_scanned, int) and rows_scanned:
-        saturates = cardinality == rows_scanned
+    if scope is not None:
+        saturates = bool(scanned) and cardinality == scanned
     elif row_count:
         saturates = cardinality == row_count
 
     return {
         "value": cardinality,
-        "approximate": col.get("cardinality_method") == "approximate",
+        "approximate": column_value(col, "cardinality_method") == "approximate",
         "saturates": saturates,
-        "normalized_cardinality": col.get("normalized_cardinality"),
+        "normalized_cardinality": column_value(col, "normalized_cardinality"),
     }
 
 
-def values_view(col: dict[str, Any]) -> dict[str, Any] | None:
+def values_view(col: dict[str, Any], scope: ScanScope | None = None) -> dict[str, Any] | None:
     """Bar geometry for a `values` list, plus the coverage hedge - counts and coverage are true
     under every redaction primitive (SPEC 2.2.9); only the literal `value` is withheld.
     """
 
-    values = col.get("values")
-    coverage = col.get("values_coverage")
+    values = column_value(col, "values")
+    coverage = column_value(col, "values_coverage")
 
     if values is None and coverage is None:
         return None
@@ -644,7 +683,7 @@ def values_view(col: dict[str, Any]) -> dict[str, Any] | None:
     top = max((e.get("count", 0) for e in entries), default=0)
     bars = [
         {
-            "value": _format_value(e.get("value")),
+            "value": spell_value(e["value"]) if "value" in e else "(value withheld)",
             "count": e.get("count", 0),
             "pct": round(e.get("count", 0) / top * 100, 2) if top else 0.0,
         }
@@ -654,20 +693,20 @@ def values_view(col: dict[str, Any]) -> dict[str, Any] | None:
     return {
         "bars": bars,
         "coverage": coverage,
-        "coverage_method": col.get("values_coverage_method"),
-        "exhaustive": coverage == 1.0,
+        "coverage_text": _coverage_text(col, coverage, scope),
+        "coverage_method": column_value(col, "values_coverage_method"),
     }
 
 
-def range_view(col: dict[str, Any]) -> dict[str, Any] | None:
+def range_view(col: dict[str, Any], scope: ScanScope | None = None) -> dict[str, Any] | None:
     """Range, percentiles, mean/sum, freshness and frequencies for a numeric/temporal column -
     a `redacted` marker suppresses the box geometry and percentile list, but not aggregates.
     """
 
-    rng = col.get("range")
-    percentiles = col.get("percentiles") or {}
-    freshness = col.get("freshness")
-    frequencies = col.get("frequencies")
+    rng = column_value(col, "range")
+    percentiles = column_value(col, "percentiles") or {}
+    freshness = column_value(col, "freshness")
+    frequencies = column_value(col, "frequencies")
 
     if not (rng or percentiles or freshness or frequencies):
         return None
@@ -687,10 +726,11 @@ def range_view(col: dict[str, Any]) -> dict[str, Any] | None:
         "box": box,
         "percentiles": percentile_list,
         "bounds": rng if redaction is None else None,
-        "unrepresentable": tuple(col.get("unrepresentable") or ()),
-        "mean": col.get("mean"),
-        "sum": col.get("sum"),
+        "unrepresentable": tuple(column_value(col, "unrepresentable") or ()),
+        "mean": column_value(col, "mean"),
+        "sum": column_value(col, "sum"),
         "freshness": dict(freshness) if isinstance(freshness, dict) else None,
+        "freshness_clause": _clause(scope),
         "frequencies": dict(frequencies) if isinstance(frequencies, dict) else None,
     }
 
@@ -698,7 +738,7 @@ def range_view(col: dict[str, Any]) -> dict[str, Any] | None:
 def sketch_available(col: dict[str, Any]) -> bool:
     """Whether a KMV sketch was computed - never the payload, which is a multi-KB blob."""
 
-    return isinstance(col.get("sketch"), dict)
+    return isinstance(column_value(col, "sketch"), dict)
 
 
 def annotation_view(
@@ -735,6 +775,7 @@ def column_view(
     targets: dict[str, str],
     null_patterns: dict[str, Any] | None = None,
     statistics_params: dict[str, Any] | None = None,
+    scope: ScanScope | None = None,
 ) -> dict[str, Any]:
     """Everything the table page needs to render one column's row and expanded detail. `notes`
     reuses `engine.notes_synthesis.synthesize` in `hints_only` mode, shaped by `statistics_params`.
@@ -750,36 +791,39 @@ def column_view(
         "name": name,
         "sql_type": col.get("sql_type", ""),
         "nullable": col.get("nullable", True),
-        "collation": col.get("collation"),
+        "collation": column_value(col, "collation"),
         "classification": col.get("classification", "unsupported"),
         "redacted": _redaction_marker(col),
-        "cardinality": cardinality_cell(col, row_count),
+        "cardinality": cardinality_cell(col, row_count, scope),
         "null_rate": col.get("null_rate"),
         "null_count": col.get("null_count"),
         "null_companions": null_companions(null_patterns, name),
-        "zero_count": col.get("zero_count"),
-        "negative_count": col.get("negative_count"),
-        "empty_count": col.get("empty_count"),
-        "quantized_count": col.get("quantized_count"),
-        "populated": col.get("populated"),
-        "length": col.get("length"),
-        "distribution": col.get("distribution"),
+        "zero_count": column_value(col, "zero_count"),
+        "negative_count": column_value(col, "negative_count"),
+        "empty_count": column_value(col, "empty_count"),
+        "quantized_count": column_value(col, "quantized_count"),
+        "populated": column_value(col, "populated"),
+        "length": column_value(col, "length"),
+        "distribution": column_value(col, "distribution"),
         # SPEC 2.2.4: names the fields this run lost, so their cells are not read as forbidden.
-        "unmeasured": tuple(col.get("unmeasured") or ()),
+        "unmeasured": tuple(column_value(col, "unmeasured") or ()),
         "notes": notes_synthesis.synthesize(
             col,
             fk_target,
             hints_only=True,
             statistics_params=statistics_params,
+            scope=scope,
         ),
         # Not "values": Jinja resolves `.values` to the dict's bound method before item access.
-        "value_list": values_view(col),
-        "range": range_view(col),
+        "value_list": values_view(col, scope),
+        "range": range_view(col, scope),
         "sketch_available": sketch_available(col),
         "annotation_note": linkify(note_md, targets),
         "annotation_claims": sorted(claims.items()) if isinstance(claims, dict) else [],
         "annotation_values": [
-            (v.get("value"), v.get("note")) for v in (values_notes or []) if isinstance(v, dict)
+            (spell_value(v.get("value")), v.get("note"))
+            for v in (values_notes or [])
+            if isinstance(v, dict)
         ],
     }
 
@@ -1039,22 +1083,9 @@ def _box_geometry(rng: dict[str, Any], percentiles: dict[str, Any]) -> dict[str,
 def _redaction_marker(col: dict[str, Any]) -> str | None:
     """The `redacted` marker naming the primitive, or None when the values are real."""
 
-    marker = col.get("redacted")
+    marker = column_value(col, "redacted")
 
     return marker if isinstance(marker, str) and marker else None
-
-
-def _format_value(value: Any) -> str:
-    """A `values[]` entry's literal, or `NULL` for a genuine SQL null.
-
-    An absent `value` key is a distinct state the schema permits but no producer emits, so it
-    is conflated with null here.
-    """
-
-    if value is None:
-        return "NULL"
-
-    return str(value)
 
 
 def _as_number(value: Any) -> float:
@@ -1064,3 +1095,22 @@ def _as_number(value: Any) -> float:
         return float(value)
 
     return datetime.fromisoformat(value).timestamp()
+
+
+def _row_count(statistics: dict[str, Any] | None, entry: dict[str, Any]) -> Any:
+    reading = read_table_block(statistics or {}, "row_count")
+
+    return reading.value if reading.state is Absence.PRESENT else entry.get("row_count")
+
+
+def _clause(scope: ScanScope | None) -> str | None:
+    return None if scope is None else SCANNED_CLAUSE
+
+
+def _coverage_text(col: dict[str, Any], coverage: Any, scope: ScanScope | None) -> str | None:
+    if not isinstance(coverage, (int, float)) or isinstance(coverage, bool):
+        return None
+
+    text = f"{spell_percent(coverage)} covered"
+
+    return qualify(text, scope) if list_is_complete(col) else text

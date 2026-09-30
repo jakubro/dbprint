@@ -7,11 +7,12 @@ below the database, so the FQN is `<database>.<table>`.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
+from typing import Any
 
 from dbprint.config.selectors import expand
 from dbprint.spec.classification import is_nullable_type
 from .connection import Cursor, exec_query
-from .identity import Identity
 from ..base import (
     ColumnMeta,
     CommentsMeta,
@@ -19,13 +20,14 @@ from ..base import (
     IndexMeta,
     PhysicalLayout,
     PhysicalLayoutKey,
+    SkippedNamespace,
     TableMeta,
     TableType,
     UniqueKeyMeta,
 )
+from ..errors import QueryFailed
+from ..identifiers import Identity, column_meta, enforce_table_identifiers, fold, table_meta
 
-
-PATH_SEGMENT_RE = re.compile(r"^[a-z0-9_][a-z0-9_.-]*$")
 
 # The connection's default comparison collation (SPEC 2.2.2) - ClickHouse has no server-side
 # collation model, so this names the fixed byte-comparison semantic rather than querying it.
@@ -39,44 +41,55 @@ _TABLE_TYPE_BY_ENGINE: dict[str, TableType] = {
 _Candidate = tuple[TableMeta, tuple[str, str]]
 
 
-class IdentifierRejected(ValueError):
-    """Raised when a ClickHouse identifier fails SPEC 1.5 path-segment rules; format SPEC 1.5.5."""
-
-
 def list_tables(
     cursor: Cursor,
-    database: str,
+    databases: Sequence[str],
     include: list[str],
     exclude: list[str],
-) -> tuple[list[TableMeta], dict[str, bool], dict[str, tuple[str, str]]]:
-    """Enumerate tables/views/matviews in the connected database, filtered by selectors -
-    a matview's hidden `.inner_id.<uuid>` storage is excluded, never reported as its own table.
+) -> tuple[list[_Candidate], dict[str, bool], tuple[SkippedNamespace, ...]]:
+    """Enumerate tables/views/matviews in each of `databases`, less a matview's `.inner_id` storage.
 
-    Also returns fqn-to-samplable (from `system.tables.sampling_key`) and fqn-to-physical maps.
+    Each comes with its physical spelling, beside the samplable map and every database that failed to list.
     """
 
-    rows = exec_query(
-        cursor,
-        "SELECT name, engine, sampling_key FROM system.tables "
-        "WHERE database = %s AND name NOT LIKE '.inner_id.%%' "
-        "ORDER BY name",
-        (database,),
-    ).fetchall()
+    rows: list[tuple[str, Any, Any, Any]] = []
+    skipped: list[SkippedNamespace] = []
+
+    # One read per database, so a remote-engine database that fails is skipped alone.
+    for database in databases:
+        try:
+            listed = exec_query(
+                cursor,
+                """
+                SELECT
+                  tbl.name,
+                  tbl.engine,
+                  tbl.sampling_key
+                FROM
+                  system.tables tbl
+                WHERE
+                  tbl.database = %s
+                  AND tbl.name NOT LIKE '.inner_id.%%'
+                ORDER BY
+                  tbl.name
+                """,
+                (database,),
+            ).fetchall()
+        except QueryFailed as exc:
+            skipped.append(SkippedNamespace(name=database, cause=str(exc)))
+            continue
+
+        rows.extend((database, *row) for row in listed)
 
     candidates: list[_Candidate] = []
     samplable: dict[str, bool] = {}
 
-    for name, engine, sampling_key in rows:
+    for database, name, engine, sampling_key in rows:
         table_type = _TABLE_TYPE_BY_ENGINE.get(str(engine), "table")
-        path = (_norm(database), _norm(str(name)))
-        fqn = ".".join(path)
-        candidates.append(
-            (
-                TableMeta(fqn=fqn, type=table_type, namespace_path=path),
-                (database, str(name)),
-            ),
-        )
-        samplable[fqn] = bool(sampling_key)
+        physical = (database, str(name))
+        meta = table_meta(physical, table_type)
+        candidates.append((meta, physical))
+        samplable[meta.fqn] = bool(sampling_key)
 
     in_scope = set(
         expand(
@@ -86,41 +99,71 @@ def list_tables(
         ),
     )
     selected = [entry for entry in candidates if entry[0].fqn in in_scope]
-    _enforce_identifier_rules(selected)
+    enforce_table_identifiers(selected)
 
-    return (
-        [meta for meta, _ in selected],
-        {meta.fqn: samplable[meta.fqn] for meta, _ in selected},
-        {meta.fqn: parts for meta, parts in selected},
-    )
+    return selected, {meta.fqn: samplable[meta.fqn] for meta, _ in selected}, tuple(skipped)
 
 
-def columns(cursor: Cursor, identity: Identity) -> tuple[list[ColumnMeta], dict[str, str]]:
-    """Per-column metadata in ordinal order, plus a lowercase-to-physical column-name map.
+def list_databases(cursor: Cursor) -> tuple[str, ...]:
+    """Every database the user can see, less ClickHouse's own system databases."""
+
+    rows = exec_query(
+        cursor,
+        """
+        SELECT
+          dbs.name
+        FROM
+          system.databases dbs
+        WHERE
+          dbs.name NOT IN (
+          'system',
+          'INFORMATION_SCHEMA',
+          'information_schema',
+          '_temporary_and_external_tables'
+        )
+        ORDER BY
+          dbs.name
+        """,
+    ).fetchall()
+
+    return tuple(str(name) for (name,) in rows)
+
+
+def columns(cursor: Cursor, identity: Identity) -> list[ColumnMeta]:
+    """Per-column metadata in ordinal order.
 
     Nullability is encoded in the type as `Nullable(T)`, possibly nested; `sql_type` keeps it raw.
     """
 
     rows = exec_query(
         cursor,
-        "SELECT name, type, position, default_expression FROM system.columns "
-        "WHERE database = %s AND table = %s ORDER BY position",
+        """
+        SELECT
+          col.name,
+          col.type,
+          col.position,
+          col.default_expression
+        FROM
+          system.columns col
+        WHERE
+          col.database = %s
+          AND col.table = %s
+        ORDER BY
+          col.position
+        """,
         identity.parts,
     ).fetchall()
 
-    metas = [
-        ColumnMeta(
-            name=_norm(name),
+    return [
+        column_meta(
+            str(name),
             sql_type=str(col_type),
             nullable=is_nullable_type(str(col_type)),
             default=default_expression or None,
             ordinal=int(position),
-            physical_name=None if name == _norm(name) else name,
         )
         for name, col_type, position, default_expression in rows
     ]
-
-    return metas, {_norm(row[0]): str(row[0]) for row in rows}
 
 
 def default_collation(cursor: Cursor) -> str:
@@ -148,13 +191,23 @@ def indexes(cursor: Cursor, identity: Identity) -> list[IndexMeta]:
 
     rows = exec_query(
         cursor,
-        "SELECT name, type FROM system.data_skipping_indices "
-        "WHERE database = %s AND table = %s ORDER BY name",
+        """
+        SELECT
+          idx.name,
+          idx.type
+        FROM
+          system.data_skipping_indices idx
+        WHERE
+          idx.database = %s
+          AND idx.table = %s
+        ORDER BY
+          idx.name
+        """,
         identity.parts,
     ).fetchall()
 
     return [
-        IndexMeta(name=_norm(name), columns=(), unique=False, type=str(index_type))
+        IndexMeta(name=fold(name), columns=(), unique=False, type=str(index_type))
         for name, index_type in rows
     ]
 
@@ -174,7 +227,15 @@ def physical_layout(cursor: Cursor, identity: Identity) -> PhysicalLayout | None
 
     row = exec_query(
         cursor,
-        "SELECT partition_key FROM system.tables WHERE database = %s AND name = %s",
+        """
+        SELECT
+          tbl.partition_key
+        FROM
+          system.tables tbl
+        WHERE
+          tbl.database = %s
+          AND tbl.name = %s
+        """,
         identity.parts,
     ).fetchone()
 
@@ -195,7 +256,7 @@ def _partition_key(expression: str) -> PhysicalLayoutKey:
 
     return PhysicalLayoutKey(
         expression=expression,
-        column=_norm(match.group(1)) if match else None,
+        column=fold(match.group(1)) if match else None,
     )
 
 
@@ -212,20 +273,37 @@ def comments(cursor: Cursor, identity: Identity) -> CommentsMeta:
 
     table_row = exec_query(
         cursor,
-        "SELECT comment FROM system.tables WHERE database = %s AND name = %s",
+        """
+        SELECT
+          tbl.comment
+        FROM
+          system.tables tbl
+        WHERE
+          tbl.database = %s
+          AND tbl.name = %s
+        """,
         identity.parts,
     ).fetchone()
     table_comment = table_row[0] if table_row and table_row[0] else None
 
     col_rows = exec_query(
         cursor,
-        "SELECT name, comment FROM system.columns WHERE database = %s AND table = %s",
+        """
+        SELECT
+          col.name,
+          col.comment
+        FROM
+          system.columns col
+        WHERE
+          col.database = %s
+          AND col.table = %s
+        """,
         identity.parts,
     ).fetchall()
 
     return CommentsMeta(
         table=table_comment,
-        columns={_norm(name): comment for name, comment in col_rows if comment},
+        columns={fold(name): comment for name, comment in col_rows if comment},
     )
 
 
@@ -234,7 +312,15 @@ def estimate_row_count(cursor: Cursor, identity: Identity) -> float:
 
     row = exec_query(
         cursor,
-        "SELECT total_rows FROM system.tables WHERE database = %s AND name = %s",
+        """
+        SELECT
+          tbl.total_rows
+        FROM
+          system.tables tbl
+        WHERE
+          tbl.database = %s
+          AND tbl.name = %s
+        """,
         identity.parts,
     ).fetchone()
 
@@ -242,55 +328,3 @@ def estimate_row_count(cursor: Cursor, identity: Identity) -> float:
         return -1.0
 
     return float(row[0])
-
-
-def _enforce_identifier_rules(selected: list[_Candidate]) -> None:
-    """Reject identifiers SPEC 1.5 cannot spell, before any artifact is written.
-
-    Judged on folded segments (SPEC 1.5.1 after 1.3), so two names folding to one path are rejected.
-    """
-
-    seen: dict[str, tuple[str, str]] = {}
-
-    for meta, parts in selected:
-        for seg in meta.namespace_path:
-            if seg.startswith("."):
-                raise IdentifierRejected(_reject_message(meta.fqn, "leading-period", seg))
-
-            if not PATH_SEGMENT_RE.match(seg):
-                raise IdentifierRejected(
-                    _reject_message(meta.fqn, "contains-unsafe-character", seg),
-                )
-
-        previous = seen.get(meta.fqn)
-
-        if previous is not None and previous != parts:
-            raise IdentifierRejected(
-                _reject_message(
-                    meta.fqn,
-                    f"case-collides-with-{'.'.join(previous)}",
-                    ".".join(parts),
-                ),
-            )
-
-        seen[meta.fqn] = parts
-
-
-def _reject_message(fqn: str, reason: str, detail: str) -> str:
-    """SPEC 1.5.5 error format - verbatim, quoting the folded path an exclude then matches."""
-
-    return (
-        f"ERROR: Table identifier rejected: {fqn}\n"
-        f"  Reason: {reason}\n"
-        f"  Detail: {detail!r}\n"
-        f"  Resolution: Either rename the identifier in the database, OR "
-        f"exclude it via .dbprint.yaml selectors:\n"
-        f"    exclude:\n"
-        f'      - "{fqn}"'
-    )
-
-
-def _norm(name: str) -> str:
-    """Lowercase an identifier - the artifact's path segment and map key (SPEC 1.3, 2.2.1)."""
-
-    return name.lower()

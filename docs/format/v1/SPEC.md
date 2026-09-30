@@ -76,6 +76,8 @@ Per-adapter hierarchy:
 
 The number of segments is the adapter's, not the format's; a table's own `table` field (§2.2.1) carries the same shape as its path.
 
+A table's FQN is its namespace path's segments and its own name joined by `.`, in path order: `arboretum/seedbank/accession/` is `arboretum.seedbank.accession`. Because no segment contains `.` (§1.5.1), a manifest key names exactly one directory and a directory exactly one key. An FQN naming an object outside the print — a `target_table`, `referencer_table` or `depends_on` entry absent from `manifest.tables` — is that object's folded parts joined by `.`, with no allowlist applied. A consumer MUST treat such an FQN as opaque and MUST NOT derive segments or a path from it.
+
 Path segments MUST be lowercase. Producers MUST lowercase identifier segments when constructing paths. SQL identifier content inside `.sql` files MAY remain in native case (e.g., Snowflake's `GET_DDL` typically emits UPPERCASE).
 
 ### 1.4 Per-table directory
@@ -94,6 +96,8 @@ Each table/view/matview is a directory at the leaf of its namespace path. The di
 
 §7.3 collects what each of these files means when it is absent.
 
+When a table leaves the manifest, a producer removes the producer-written files in its directory (`ddl.sql`, `statistics.yaml`, `relationships.yaml`) and leaves the user-authored ones in place; a directory holding only user-authored files stays where it is, and a table that returns under the same path picks them up again.
+
 ### 1.5 Identifier handling
 
 The format maintains a 1:1 bijection between SQL identifiers and filesystem path segments, modulo case folding. Producers MUST reject identifiers that would break this bijection rather than escape, hash, or otherwise transform them.
@@ -103,21 +107,21 @@ The format maintains a 1:1 bijection between SQL identifiers and filesystem path
 After lowercase normalization (§1.3), a path segment MUST match the regex:
 
 ```
-^[a-z0-9_][a-z0-9_.-]*$
+^[a-z0-9_][a-z0-9_-]*$
 ```
 
 That is:
 - First character: ASCII lowercase letter, digit, or underscore (`[a-z0-9_]`)
-- Subsequent characters: those plus hyphen (`-`) and period (`.`)
-- Allowed character set (ASCII only): `a-z`, `0-9`, `_`, `-`, `.`
+- Subsequent characters: those plus hyphen (`-`)
+- Allowed character set (ASCII only): `a-z`, `0-9`, `_`, `-`
 
 Producers MUST reject identifiers that lowercase to a path segment not matching this regex, including:
 
-- All ASCII non-alphanumerics except `_`, `-`, `.`
+- All ASCII non-alphanumerics except `_`, `-`
 - All Unicode (BMP and beyond)
 - All control characters (0x00–0x1F)
 - All whitespace (space, tab, newline, etc.)
-- Segments beginning with `.` (Unix hidden-file convention)
+- Any `.`: it is the FQN separator (§1.3), and a segment containing it would make one FQN name two objects
 
 Leading hyphen (`-taxon`) and leading digit (`9taxon`) are allowed.
 
@@ -130,6 +134,8 @@ At scan time, after applying the allowlist check, producers MUST compute the low
 Example: a Snowflake schema with both quoted `"Taxon"` (stored as-is) and unquoted `TAXON` (stored UPPERCASE) → both lowercase to `taxon`. Rejected before any file is written.
 
 Rare in practice but the format's bijection invariant depends on it.
+
+**Column grain.** Two columns of one table whose names lowercase to the same `columns` map key (§2.2.1) cannot both be represented. A producer MUST NOT publish that table's statistics with either column dropped, merged, or keyed under another spelling; it MUST refuse the table with the §1.5.5 message at column grain. The collision is confined to one table's file, so the producer refuses that table alone and continues with the rest — unlike a table collision, which breaks the layout and so rejects the run.
 
 #### 1.5.3 No length enforcement
 
@@ -145,6 +151,7 @@ Long total paths may exceed Windows' default 260-char path limit. Documented as 
 - Loses greppability — `grep -r 'weird name' prints/` doesn't find it
 - Breaks the "path == identifier" mental model
 - Path becomes ambiguous: encoded `taxon%20v2` vs a literal SQL identifier named `taxon%20v2`
+- Quoting a dotted segment inside the FQN (`nursery."beds.v2"`) would force a quote-aware parser on every consumer and every selector
 
 **Hash** (e.g., `weird name` → `weird_a3f9b/`):
 
@@ -173,13 +180,30 @@ ERROR: Table identifier rejected: <FQN>
       - "<pattern that matches this identifier>"
 ```
 
+When the committed print still holds the refused table — written by a release that accepted its name — the message adds one line naming that directory, since excluding the table carries its old print forward instead of removing it:
+
+```
+  Stale print: <directory>/ - after excluding the table, delete this directory; the next generate drops its entry
+```
+
+At column grain the header names the table's FQN and the column's map key, the reason names the other catalog spelling, and the detail names this column's:
+
+```
+ERROR: Column identifier rejected: <FQN>.<map key>
+  Reason: case-collides-with-<other catalog spelling>
+  Detail: <this column's catalog spelling>
+  Resolution: Either rename one of the columns in the database, OR exclude the table via .dbprint.yaml selectors:
+    exclude:
+      - "<pattern that matches the table>"
+```
+
 Reason codes:
 
 - `contains-unsafe-character` — identifier contains a disallowed character
-- `leading-period` — identifier lowercases to a segment starting with `.`
+- `contains-period` — identifier lowercases to a segment containing `.`, the FQN separator
 - `case-collides-with-<other-FQN>` — two SQL identifiers produce the same lowercased path
 
-Producers MUST exit with code 1 (generic error / configuration issue) on identifier rejection. Not code 4 (connection error) — this is a config/scoping problem, not a DB-availability issue.
+Producers MUST exit with code 1 (generic error / configuration issue) on a table-grain identifier rejection. Not code 4 (connection error) — this is a config/scoping problem, not a DB-availability issue. A column-grain rejection fails its table like any table the producer could not profile.
 
 ---
 
@@ -224,7 +248,7 @@ dbprint applies **light normalization**: strip well-defined adapter noise to ena
 - Trailing footer (`-- PostgreSQL database dump complete`)
 - All session-control `SET` statements (`SET statement_timeout`, `SET lock_timeout`, `SET idle_in_transaction_session_timeout`, `SET client_encoding`, `SET standard_conforming_strings`, `SET check_function_bodies`, `SET xmloption`, `SET client_min_messages`, `SET row_security`, `SET search_path`)
 - `SELECT pg_catalog.set_config(...);` calls
-- Per-object banner comments (`-- Name: X; Type: Y; Schema: Z; Owner: -`) pg_dump emits ahead of every statement - the banner never carries information the statement immediately below it doesn't already state, and stripping it does not touch the statement itself, including `COMMENT ON` (see 2.1.4)
+- Per-object banner comments (`-- Name: X; Type: Y; Schema: Z; Owner: -`) pg_dump emits ahead of every statement — the banner never carries information the statement immediately below it doesn't already state, and stripping it does not touch the statement itself, including `COMMENT ON` (see 2.1.4)
 - `GRANT` / `REVOKE` statements (access-control, not schema)
 - `CREATE TRIGGER`, `CREATE RULE` (behavior, not schema-shape — out of scope for DDL)
 - `\restrict` / `\unrestrict` psql meta-commands — client directives, not schema, and their token is regenerated on every invocation, so keeping them would break the §2.1.6 diff-stability guarantee
@@ -299,23 +323,23 @@ The reference JSON Schema SHALL be at `spec/v1/statistics.schema.json`. The norm
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `format_version` | int | ALWAYS | `1` for v1 artifacts |
-| `table` | string | ALWAYS | Fully-qualified name as its adapter reports it: `schema.table` (PostgreSQL), `db.schema.table` (Snowflake), `db.table` (MySQL). The number of parts is the adapter's, not the format's, and selectors and directory paths follow it |
-| `type` | enum | ALWAYS | `table` \| `matview` \| `view`. A `view` file always carries `catalog_only` (§2.2.15) - no query is issued against a plain view. |
+| `table` | string | ALWAYS | Fully-qualified name as its adapter reports it: `db.schema.table` (PostgreSQL, Snowflake), `db.table` (MySQL). The number of parts is the adapter's, not the format's, and selectors and directory paths follow it |
+| `type` | enum | ALWAYS | `table` \| `matview` \| `view`. A `view` file always carries `catalog_only` (§2.2.15) — no query is issued against a plain view. |
 | `profiled_at` | string | ALWAYS | ISO 8601 with explicit UTC offset (`2026-05-17T22:48:01Z`). Producers MUST normalize to UTC; no local-time-with-offset strings. |
 | `catalog_only` | bool | OPTIONAL | Present and `true` only when no query was issued for this object at all; see §2.2.15 |
 | `row_count` | int ≥ 0 | CONDITIONAL | Total rows in the table, including nulls. Not affected by `scope`. REQUIRED unless `catalog_only` is present, in which case MUST NOT be emitted; see §2.2.15 |
 | `row_count_method` | enum | CONDITIONAL | `exact` (`COUNT(*)`) \| `approximate` (system-table estimate). REQUIRED unless `catalog_only` is present, in which case MUST NOT be emitted; see §2.2.15 |
 | `scope` | map | OPTIONAL | Present only when the statistics describe part of the table; see §2.2.8 |
-| `null_patterns` | map | CONDITIONAL | Which columns are null on the same rows. REQUIRED when any column reports a non-zero `null_count` - unless the file's own `unmeasured` list names it - and MUST NOT be emitted otherwise. See §2.2.10 |
-| `physical_layout` | map | OPTIONAL | The table's declared clustering/partitioning key. Absent means not clustered/partitioned, never "not checked" - unless the file's own `unmeasured` list names it, the one way a producer says the read did not answer - every producer MUST report on this, except that a `catalog_only` file's absence needs no further explanation: a producer MAY still emit the block there from catalog metadata alone. See §2.2.11, §2.2.15 |
+| `null_patterns` | map | CONDITIONAL | Which columns are null on the same rows. REQUIRED when any column reports a non-zero `null_count` — unless the file's own `unmeasured` list names it — and MUST NOT be emitted otherwise. See §2.2.10 |
+| `physical_layout` | map | OPTIONAL | The table's declared clustering/partitioning key. Absent means not clustered/partitioned, never "not checked" — unless the file's own `unmeasured` list names it, which is how a producer records that the read failed — every producer MUST report on this, except that a `catalog_only` file's absence needs no further explanation: a producer MAY still emit the block there from catalog metadata alone. See §2.2.11, §2.2.15 |
 | `grain` | map | OPTIONAL | What identifies a row: declared keys always, plus a bounded measured probe. A conforming producer MUST emit it, `keys` possibly empty, never silently omitted. See §2.2.12 |
 | `dependencies` | list | OPTIONAL | Which columns determine which, measured over the scanned rows. A conforming producer MUST emit it, possibly empty, never silently omitted, unless `catalog_only` is present or the file's own `unmeasured` list names it, in which cases it MUST NOT be emitted. See §2.2.13, §2.2.15 |
-| `timeline` | map | OPTIONAL | One column's activity, bucketed over time. Absent means no eligible anchor column exists, the file carries `scope`, `row_count` is `0`, or a producer's own configuration disabled it - all indistinguishable from the artifact alone. See §2.2.16 |
-| `depends_on` | list | CONDITIONAL | The objects a `view`/`matview`'s own definition reads directly, catalog-derived. ALWAYS present on a view or matview whose catalog answered, possibly empty; MUST NOT be emitted on a `table`. Absent on a view/matview means the producer could not ask. See §2.2.17 |
-| `unmeasured` | list | OPTIONAL | Names the blocks among `physical_layout`, `null_patterns` and `dependencies` this run attempted and could not obtain - the three whose absence is otherwise a positive claim (not clustered; no column has nulls; nothing determines anything). Each named block MUST be absent. `grain` is never named: it is REQUIRED, and `grain.search.exhausted` (§2.2.12) already says a measured search was incomplete. `depends_on` is never named either: its absence already means "the producer could not ask" (above). Omitted entirely when the run measured everything it owed. See §2.2.4's column-level twin |
+| `timeline` | map | OPTIONAL | One column's activity, bucketed over time. Absent means no eligible anchor column exists, the file carries `scope`, `row_count` is `0`, or a producer's own configuration disabled it — all indistinguishable from the artifact alone. See §2.2.16 |
+| `depends_on` | list | CONDITIONAL | The objects a `view`/`matview`'s own definition reads directly, catalog-derived. ALWAYS present on a view or matview whose catalog was read, possibly empty; MUST NOT be emitted on a `table`. Absent on a view/matview means the dependency read did not happen. See §2.2.17 |
+| `unmeasured` | list | OPTIONAL | Names the blocks among `physical_layout`, `null_patterns` and `dependencies` this run tried and failed to measure — the three whose absence is otherwise a positive claim (not clustered; no column has nulls; nothing determines anything). Each named block MUST be absent. `grain` is never named: it is REQUIRED, and `grain.search.exhausted` (§2.2.12) already says a measured search was incomplete. `depends_on` is never named either: its absence already means the dependency read did not happen (above). Omitted entirely when the run measured every block the file should carry. See §2.2.4's column-level twin |
 | `columns` | map | ALWAYS | Keyed by column name; values are per-column stats objects per §§2.2.2–2.2.4 |
 
-**The map key is always lowercase.** Producers MUST lowercase every column name for this key, on every adapter, regardless of the case the catalog reports it in — the same normalization §1.3 requires for path segments, applied here at column-name grain so detection (§4.4.3), `statistics.annotations.yaml` keys (§2.7.1) and this map itself agree on one spelling for a schema ported between engines. Where a column's catalog-reported spelling differs from its lowercased key, the producer MAY carry it forward as `physical_name` (§2.2.4) so a consumer can still address the column directly.
+**The map key is always lowercase.** Producers MUST lowercase every column name for this key, on every adapter, regardless of the case the catalog reports it in — the same normalization §1.3 requires for path segments, applied here at column-name grain so detection (§4.4.3), `statistics.annotations.yaml` keys (§2.7.1) and this map itself agree on one spelling for a schema ported between engines. Where a column's catalog-reported spelling differs from its lowercased key, the producer MAY carry it forward as `physical_name` (§2.2.4) so a consumer can still address the column directly. Two columns whose names lowercase to one key are refused, never merged (§1.5.2).
 
 #### 2.2.2 Universal per-column fields
 
@@ -329,10 +353,10 @@ Required on every column except `unsupported` (see §2.2.3):
 | `null_rate` | float [0, 1] | `null_count / rows_scanned`; `0` when `rows_scanned == 0`; floored/ceilinged at the two boundaries per §2.2.6 |
 | `cardinality` | int ≥ 0 | Distinct non-null values, under the collation the source compares them with — see below |
 | `cardinality_ratio` | float [0, 1] | `cardinality / rows_scanned`; `0` when `rows_scanned == 0`; floored at the lower boundary per §2.2.6 |
-| `cardinality_method` | enum | `exact` (`COUNT(DISTINCT)`) \| `approximate` (a measurement not obtained by counting - see below) |
+| `cardinality_method` | enum | `exact` (`COUNT(DISTINCT)`) \| `approximate` (a measurement not obtained by counting — see below) |
 | `classification` | enum | One of the 8 values per §3 |
 
-**`approximate` names more than one measurement.** It covers a live sketch computed over the scanned rows (`APPROX_COUNT_DISTINCT`, an HLL estimate this run's own read produced) and a stored planner statistic of unbounded staleness (a catalog's own last-`ANALYZE` estimate, taken at an unrelated time over the whole table rather than the scanned set). A consumer cannot tell which kind a given `approximate` is from this field alone - both name "not counted", not "counted this way". Producers MAY publish either under the same token; a producer publishing the catalog-statistic kind SHOULD re-probe a column exactly once its estimated ratio nears the §4.2 candidate-key threshold, so an estimate's own imprecision cannot cost a column its `candidate_key` verdict.
+**`approximate` names more than one measurement.** It covers a live sketch computed over the scanned rows (`APPROX_COUNT_DISTINCT`, an HLL estimate this run's own read produced) and a stored planner statistic of unbounded staleness (a catalog's own last-`ANALYZE` estimate, taken at an unrelated time over the whole table rather than the scanned set). A consumer cannot tell which kind a given `approximate` is from this field alone — both name "not counted", not "counted this way". Producers MAY publish either under the same token; a producer publishing the catalog-statistic kind SHOULD re-probe a column exactly once its estimated ratio nears the §4.2 candidate-key threshold, so an estimate's own imprecision cannot cost a column its `candidate_key` verdict.
 
 **Distinctness is collation-relative.** For a string-valued column, `cardinality`, the `values` list (§2.2.4) and `distribution` (§2.2.5) are computed under whatever collation the source compares that column's values with — the format states this rather than pinning one collation across engines, so the read a producer already issues is what the artifact describes. Two prints of one logical schema taken through different engines, or through the same engine under different column-level collations, can disagree on `cardinality` for a text column for this reason alone; the disagreement is explicable from the manifest's `default_collation` (§2.5) and a column's own `collation` (§2.2.4) when it overrides that default, never from the number by itself.
 
@@ -378,10 +402,10 @@ Cell legend: **R** = REQUIRED, **O** = OPTIONAL (emit if applicable), **—** = 
 | `percentiles` | — | — | — | — | — | R† | R† | — |
 | `mean` | — | — | — | — | — | — | R¶ | — |
 | `sum` | — | — | — | — | — | — | R¶ | — |
-| `zero_count` | — | — | — | — | — | — | R | — |
-| `negative_count` | — | — | — | — | — | — | R | — |
-| `empty_count` | — | — | — | — | — | — | — | R |
-| `quantized_count` (§2.2.4) | — | — | — | — | — | R※ | R | — |
+| `zero_count` | — | — | — | — | — | — | R¶ | — |
+| `negative_count` | — | — | — | — | — | — | R¶ | — |
+| `empty_count` | — | — | — | — | — | — | — | R¶ |
+| `quantized_count` (§2.2.4) | — | — | — | — | — | R¶※ | R¶ | — |
 | `length` (§2.2.4) | — | — | — | R¶‖ | R¶‖ | — | — | R¶ |
 | `normalized_cardinality` (§2.2.4) | — | — | — | O | O | — | — | O |
 | `freshness` | — | — | — | — | — | R | — | — |
@@ -389,17 +413,17 @@ Cell legend: **R** = REQUIRED, **O** = OPTIONAL (emit if applicable), **—** = 
 | `unmeasured` (§2.2.4) | O | O | O | O | O | O | O | O |
 | `sketch` (§2.2.14) | — | O | — | O | O | O | O | O |
 
-Producers MUST emit exactly the fields marked R, except where a field is named in the column's own `unmeasured` list (§2.2.4) - the one condition under which a required field is legitimately absent, and the only one a reader can tell apart from the structural causes §7.2 lists. They MAY emit O fields when applicable. They MUST NOT emit — fields. The `inferred` sub-object MUST be omitted entirely when it has no sub-fields. `inferred.candidate_key` is set whenever `cardinality_ratio` clears the SPEC 4.2 threshold, independent of classification - it is not required by any row, since a column's ratio may fall short of it regardless of type. `sketch` is O everywhere a join-key column's classification can land, per §2.2.14's own emission rule (edge participation, canonical type, redaction and scope), never per this matrix alone - a `categorical` or `numeric` column carries one only when §2.2.14's own conditions hold, the same way `redacted` is O here but gated by whether a rule actually matched. `normalized_cardinality` is O on the same three classifications for the identical reason, per its own §2.2.4 emission rule (join-key population, string-valued type) rather than this matrix alone.
+Producers MUST emit exactly the fields marked R, except where a field is named in the column's own `unmeasured` list (§2.2.4) — the one condition under which a required field is legitimately absent, and the only one a reader can tell apart from the structural causes §7.2 lists. They MAY emit O fields when applicable. They MUST NOT emit — fields. The `inferred` sub-object MUST be omitted entirely when it has no sub-fields. `inferred.candidate_key` is set whenever `cardinality_ratio` clears the SPEC 4.2 threshold, independent of classification — it is not required by any row, since a column's ratio may fall short of it regardless of type. `sketch` is O everywhere a join-key column's classification can land, per §2.2.14's own emission rule (edge participation, canonical type, redaction and scope), never per this matrix alone — a `categorical` or `numeric` column carries one only when §2.2.14's own conditions hold, the same way `redacted` is O here but gated by whether a rule actually matched. `normalized_cardinality` is O on the same three classifications for the identical reason, per its own §2.2.4 emission rule (join-key population, string-valued type) rather than this matrix alone.
 
 Every field this matrix marks anything but **R** can therefore be absent from a conforming column, usually for more than one reason. §7.2 lists what each absence can mean, and is derived from the rows above.
 
-† **Bounds under a dropped column.** `range`, its `span_days`, and `percentiles` are cell values, so a column declaring `redacted: drop` emits none of them: that primitive emits no literal at all, and a bound is nothing but a literal (§2.2.9). For every other column of these classifications the three cells are REQUIRED; for a dropped one they MUST NOT be emitted. `freshness` stays REQUIRED under every primitive, `drop` included: a derived value is a cell value whenever the derivation can be run backwards, and `max_age_days` can be - `range.max = profiled_at - max_age_days`, from any artifact carrying a `redacted` marker. §2.2.9 states the coarsening this requires rather than an omission.
+† **Bounds under a dropped column.** `range`, its `span_days`, and `percentiles` are cell values, so a column declaring `redacted: drop` emits none of them: that primitive emits no literal at all, and a bound is nothing but a literal (§2.2.9). For every other column of these classifications the three cells are REQUIRED; for a dropped one they MUST NOT be emitted. `freshness` stays REQUIRED under every primitive, `drop` included: a derived value is a cell value whenever the derivation can be run backwards, and `max_age_days` can be — `range.max = profiled_at - max_age_days`, from any artifact carrying a `redacted` marker. §2.2.9 states the coarsening this requires rather than an omission.
 
-‡ **A prose column publishes no value list.** A `text` column whose `inferred.looks_like` is `prose` (§4.1.1) MUST NOT emit `values`, `values_coverage` or `distribution`; every other `text` column MUST emit all three. The top entries of a free-text column describe nothing a consumer can act on, while the grouped scan that finds them is among the most expensive statements a producer issues — so this is a saving the format grants rather than an omission it tolerates, and a producer SHOULD skip the query rather than discard its result. `distribution` is covered because for this classification it is derived from the value list, and computing it another way would re-issue the scan the exemption exists to avoid.
+‡ **A prose column publishes no value list.** A `text` column whose `inferred.looks_like` is `prose` (§4.1.1) MUST NOT emit `values`, `values_coverage` or `distribution`; every other `text` column MUST emit all three. The top entries of a free-text column describe nothing a consumer can act on, while the grouped scan that finds them is among the most expensive statements a producer issues — so the format exempts the scan deliberately, and a producer SHOULD skip the query rather than discard its result. `distribution` is covered because for this classification it is derived from the value list, and computing it another way would re-issue the scan the exemption exists to avoid.
 
 This is the only cell conditional on a field of `inferred`, and it reaches `text` alone. `categorical` runs the same detection (§4.1.5) and can also report `prose`, but its cardinality is bounded by construction: the scan is cheap there, and the enumeration is what the classification is for. A column that is prose in one run and not the next therefore changes its emitted field set, which `diff` reports like any other change.
 
-¶ **An aggregate over a redacted column's one value is the cell it withholds.** `mean`, `sum` and `length` are aggregates, not cell values, and §2.2.9 leaves aggregates unaffected by a `redacted` marker — but where the scanned set holds at most one non-null value (`rows_scanned - null_count ≤ 1`) or holds one distinct value however many rows carry it (`cardinality = 1`), the aggregate equals (or is computed over) that one value, and publishing it inverts whichever primitive declared it withheld. An average over four hundred copies of a withheld number is that number, and a `length` whose `min`, `max` and `avg` agree is the withheld literal's own. A `numeric` column carrying any `redacted` marker over such a scanned set MUST NOT emit `mean` or `sum`; a `text`, `categorical` or `foreign_key_candidate` column in the same state MUST NOT emit `length`. Every other column of these classifications MUST emit the field(s) it otherwise carries, redacted or not.
+¶ **Withheld under redaction.** REQUIRED unless the column carries any `redacted` marker (§2.2.9), under which it MUST NOT be emitted. Each of these fields is computed from what the column's values are rather than how many rows share them, so published beside the per-value counts it solves for the literals the marker withholds; §2.2.9 states the rule these cells follow and the fields it reaches beyond this matrix's **R** rows.
 
 ‖ **`length` follows the value's type, not the classification, and needs a non-null value to describe.** `categorical` (priority 4) and `foreign_key_candidate` (priority 3) match before any type-based branch runs (§3.2), so either can carry a boolean, JSON, temporal, numeric, or string-valued column alike. `length` is REQUIRED on one of these two classifications only where the column's `sql_type` could hold a string value — not boolean, not JSON, not a temporal type, not a numeric type — by the same elimination `text`'s own fallback (priority 7) already applies, AND the scanned set holds at least one non-null value: an all-null column (§2.2.7, §3.3) reaches `categorical` at priority 4 regardless of type, leaving nothing for the aggregate to describe. A `categorical` column backed by `INTEGER` or `TIMESTAMP` MUST NOT emit `length`, and neither may an all-null one of any type; one backed by `VARCHAR`, `UUID`, or any type outside those four families, carrying at least one non-null row, MUST. `text` needs no footnote of its own here: priority 7 only matches after eliminating the same four families and the cardinality-0 fallthrough to `categorical`, so every `text` column already qualifies on both counts.
 
@@ -443,7 +467,7 @@ inferred:
   fk_candidate: { ... }           # reserved, not defined (see §4.3)
 ```
 
-`sampled` and `matched` are emitted together, and only beside `looks_like`: both MUST be omitted when `looks_like` is absent, even on a classification where a sample was drawn and cleared no pattern. Producers MUST NOT emit either field alongside `epoch_unit` or `sensitivity` alone - both axes may read the same draw, but the pair describes `looks_like`'s own verdict exclusively, per §4.1.3. `looks_like_candidate` and `looks_like_candidate_share` follow the identical pairing rule, in `looks_like`'s absence rather than its presence - see §4.1.3.
+`sampled` and `matched` are emitted together, and only beside `looks_like`: both MUST be omitted when `looks_like` is absent, even on a classification where a sample was drawn and cleared no pattern. Producers MUST NOT emit either field alongside `epoch_unit` or `sensitivity` alone — both axes may read the same draw, but the pair describes `looks_like`'s own verdict exclusively, per §4.1.3. `looks_like_candidate` and `looks_like_candidate_share` follow the identical pairing rule, in `looks_like`'s absence rather than its presence — see §4.1.3.
 
 **`values`** (boolean, categorical, foreign_key_candidate, numeric, temporal, text):
 
@@ -453,11 +477,13 @@ values:
   - { value: <scalar>, count: <int>, spelling_of: <scalar> }   # OPTIONAL; see below
 ```
 
-One ordered list describes every column that carries value data. Entries are ordered by `count` DESC, with ties broken by lexicographic order on the string form of `value` — deterministic across runs. Values MUST be strings, numbers, or booleans. NULL MUST NOT appear (NULL is tracked separately via `null_count`). On `numeric` and `temporal`, `value` is rendered exactly as `range`/`percentiles` render it (§2.2.4's domain-rendering rule below), and the list is drawn from the same top-N fetch `frequencies` (below) already issues — a producer MUST NOT issue a second statement to obtain it.
+One ordered list describes every column that carries value data. Entries are ordered by `count` DESC, with ties broken by ascending code-point order of the text of `value` as written in this file (the YAML scalar after unquoting, e.g. `0.0000001`, `09:00:00`, `true`) — never a driver's or language's own string conversion of the value — deterministic across runs. Values MUST be strings, numbers, or booleans. On a classification other than `numeric`, `temporal` or `boolean`, a value of a non-character SQL type (a network address, a range, an interval, a set) is the engine's own text rendering of it — the same text `length` and `empty_count` are measured over. NULL MUST NOT appear (NULL is tracked separately via `null_count`). On `numeric` and `temporal`, `value` is rendered exactly as `range`/`percentiles` render it (§2.2.4's domain-rendering rule below), and the list is drawn from the same top-N fetch `frequencies` (below) already issues — a producer MUST NOT issue a second statement to obtain it.
 
 **How much of the column the list describes is decided by cardinality, not by classification.** The bound is `enumeration_threshold` (config; default 50), or `top_n_values` (config; default 20) where that is larger. When the column's distinct count is at most the bound the list is exhaustive and carries every distinct non-null value; above it, the list carries the `top_n_values` most frequent entries. The two settings therefore divide one question between them: `enumeration_threshold` is what makes a domain closed (§3.1), so it is how far a closed domain is published, and `top_n_values` is how much of an open one is sampled. A producer MUST NOT decide this from the classification: a low-cardinality column is enumerated in full whether it is `boolean`, `categorical`, `foreign_key_candidate` or `text`.
 
-**An exhaustive list's entry count equals `cardinality`.** "Carries every distinct non-null value" means the number of entries IS the distinct count - a producer publishing `values_coverage: 1.0` with a list shorter or longer than `cardinality` has broken this obligation regardless of what its row-level counts sum to.
+**An exhaustive list's entry count equals `cardinality`.** "Carries every distinct non-null value" means the number of entries IS the distinct count — a producer publishing `values_coverage: 1.0` with a list shorter or longer than `cardinality` has broken this obligation regardless of what its row-level counts sum to.
+
+**A column of numeric SQL type lists numbers on every classification**, never their string spellings: a `categorical` `DECIMAL(4,1)` lists `-19.5` and `-20`, as a `numeric` one does (§2.2.6's exact-numeric cell rule).
 
 A list rather than a map, because YAML and JSON mappings are unordered by definition — an ordering rule on a mapping asks consumers to honor something their parsers may discard.
 
@@ -472,29 +498,24 @@ A list rather than a map, because YAML and JSON mappings are unordered by defini
 **`values_coverage`** (present alongside `values` on every classification that admits it except `numeric` and `temporal`, where the matrix forbids it — `frequencies.total` (below) already carries the listed counts' sum, and a second name for that number is the rederivation §2.2.4 elsewhere exists to avoid):
 
 - Float in [0, 1]
-- = sum of `values` counts / (rows_scanned - null_count)
+- = sum of `values` counts / (rows_scanned — null_count)
 - Exactly `1.0` when the list is exhaustive — carries every distinct non-null value the column has — regardless of what the raw division would give. A producer MUST NOT let rounding report `1.0` for a list it truncated, and MUST emit `1.0` for a column with no non-null rows. Under `scope` (§2.2.8), `1.0` states that the list is exhaustive **over the scanned set**, not over the whole table; the same column block's `rows_scanned` says what that set was, so a consumer reading `values_coverage` alongside it never mistakes scanned-set completeness for a table-wide guarantee
 
-**`values_coverage_method`** (enum, OPTIONAL; `measured` | `bounded`): whether the emitted `values_coverage` is the raw quotient (`measured`) or the clamp the rule above describes (`bounded`), because the value list and the population it is measured against were not read at the same instant - the same distinction §2.2.10's `coverage_method` draws, applied to this field.
+**`values_coverage_method`** (enum, OPTIONAL; `measured` | `bounded`): whether the emitted `values_coverage` is the raw quotient (`measured`) or the clamp the rule above describes (`bounded`), because the value list and the population it is measured against were not read at the same instant — the same distinction §2.2.10's `coverage_method` draws, applied to this field.
 
-Emitted only for an exhaustive list a producer's own truncation did not cut short; a truncated list is short by design, which is a different, already-explained condition this field does not cover. `measured` states the listed counts agreed with the non-null rows they were scanned against; `bounded` states a producer detected the two disagreeing - the listed counts exceeding the non-null rows, the phase A / phase B disagreement a live table taking writes between the two reads can produce. The detector is one-sided, catching only an overrun: a row deleted between the two reads shrinks the listed total below the scanned count instead, which reads as `measured` the same as a genuine same-read agreement would.
+Emitted only for an exhaustive list a producer's own truncation did not cut short; a truncated list is short by design, which is a different, already-explained condition this field does not cover. `measured` states the listed counts agreed with the non-null rows they were scanned against; `bounded` states a producer detected the two disagreeing — the listed counts exceeding the non-null rows, the phase A / phase B disagreement a live table taking writes between the two reads can produce. The detector is one-sided, catching only an overrun: a row deleted between the two reads shrinks the listed total below the scanned count instead, which reads as `measured` the same as a genuine same-read agreement would.
 
-**Day counts.** `range.span_days` and `freshness.max_age_days` are the only statistics a
-producer derives by arithmetic rather than by reading. Both are the count of **whole elapsed
-days** between two instants:
+**Day counts.** `range.span_days` and `freshness.max_age_days` are the only statistics a producer derives by arithmetic rather than by reading. Both are the count of **whole elapsed days** between two instants:
 
 ```
 day_count(earlier, later) = floor( (later - earlier) in seconds / 86400 )
 ```
 
-Producers MUST compute elapsed time, NOT the number of calendar-date boundaries crossed.
-The two differ in both directions and are not interchangeable: a span from 01:00 to 21:00
-elapses 20 hours and crosses no date boundary, while a span from 23:50 to 00:10 elapses 20
-minutes and crosses one. Counting boundaries would report `1` and `0` respectively; counting
-elapsed whole days reports `0` for both, which is what this rule requires.
+Producers MUST compute elapsed time, NOT the number of calendar-date boundaries crossed. The two differ in both directions and are not interchangeable: a span from 01:00 to 21:00 elapses 20 hours and crosses no date boundary, while a span from 23:50 to 00:10 elapses 20 minutes and crosses one. Counting boundaries would report `1` and `0` respectively; counting elapsed whole days reports `0` for both, which is what this rule requires.
 
-Flooring rather than rounding is what makes a sub-day span report `0` (§2.2.7) without a
-special case: any interval shorter than 24 hours has zero whole days in it.
+Flooring rather than rounding is what makes a sub-day span report `0` (§2.2.7) without a special case: any interval shorter than 24 hours has zero whole days in it.
+
+Elapsed time is exact, fractional seconds included. A producer MUST NOT truncate either instant to whole seconds, count second boundaries, or compute the count through floating point or rounded decimal division: `2024-01-01T00:00:00.5` to `2024-03-01T00:00:00.25` is `59` days, not `60`, and a `9999-12-31T23:59:59.999999` maximum is counted to the microsecond.
 
 **`range`**:
 
@@ -518,10 +539,12 @@ percentiles:
 
 Percentile values in `.dbprint.yaml` configuration MUST be representable as integer percentages (multiples of 0.01); fractional percentiles like 0.999 are REJECTED by config validation. Emitted values are rendered in the column's own domain, exactly as `range` is.
 
-**Percentiles MUST ascend with their keys** (non-decreasing, not strictly ascending — a single-valued column legitimately publishes the same value at every key), and, when `range` is present, **every percentile MUST lie within `[range.min, range.max]`**. Both bounds and every percentile come from one statement per column, so a producer cannot correctly emit a percentile outside its own range or out of order with its neighbors.
+**A temporal percentile is a value the column holds.** It is the nearest rank — of the column's `n` non-null values in ascending order, the one at position `CEIL(p × n)`, as `PERCENTILE_DISC` defines it — or, from a producer using an approximate construct, a value of the column near that rank. It is never interpolated between two instants: an instant carried through a floating-point number to interpolate can come back a microsecond or more from any value the column holds, in another time zone, or in a year the column does not reach.
+
+**Percentiles MUST ascend with their keys** (non-decreasing, not strictly ascending — a single-valued column legitimately publishes the same value at every key), and, when `range` is present, **every percentile MUST lie within `[range.min, range.max]`**. Both bounds and every percentile come from one statement per column, and a temporal percentile is itself a value of the column, so a producer cannot correctly emit a percentile outside its own range or out of order with its neighbors.
 
 
-**Domain rendering.** `range.min`, `range.max` and every `percentiles` entry are emitted **in the column's own domain** - the form a predicate against that column would use. For most temporal types that is an ISO 8601 string (`'2026-05-17T22:48:01Z'`, `'2026-05-17'`). For types that carry no date it is not:
+**Domain rendering.** `range.min`, `range.max` and every `percentiles` entry are emitted **in the column's own domain** — the form a predicate against that column would use. For most temporal types that is an ISO 8601 string (`'2026-05-17T22:48:01Z'`, `'2026-05-17'`). For types that carry no date it is not:
 
 | Column type | Emitted | A consumer then writes |
 |---|---|---|
@@ -538,11 +561,11 @@ mean: 42.5
 sum: 850000
 ```
 
-Two additional expressions on the same statement that already computes `range` and `percentiles` — no second scan. `mean` is a column's centre of mass; `sum` is the total the percentiles alone cannot recover, and the denominator behind every share a consumer computes from the column. Both are rounded per §2.2.6, and neither is domain-rendered: unlike `range`/`percentiles`, a numeric column's own domain already is a plain number.
+Two additional expressions on the same statement that already computes `range` and `percentiles` — no second scan. `mean` is the arithmetic mean of the column's values; `sum` is the total the percentiles alone cannot recover, and the denominator behind every share a consumer computes from the column. Both are rounded per §2.2.6, and neither is domain-rendered: unlike `range`/`percentiles`, a numeric column's own domain already is a plain number.
 
 `temporal` never carries either — a mean instant is definable and useless, and the dialects disagree on how to express one; `range` and `percentiles` already answer where a temporal column sits.
 
-**Aggregates, not cell values.** §2.2.9 leaves `mean` and `sum` unaffected by a `redacted` marker, except where the scanned set holds at most one non-null value or one distinct value — see the ¶ footnote above.
+**Withheld under redaction.** A column carrying a `redacted` marker emits neither field (§2.2.9, the ¶ footnote above).
 
 **`zero_count`, `negative_count`, `empty_count`** (`numeric`: the first two; `text`: the third):
 
@@ -552,9 +575,9 @@ negative_count: 12      # numeric only
 empty_count: 4000       # text only
 ```
 
-A fixed census of the values idiomatic writers use to encode absence without a NULL — `0`, a negative sentinel, the empty string. Each is an exact `COUNT` of scanned non-null rows equal to that value, bounded by `rows_scanned - null_count` (§2.2.3's conformance check), and asserts nothing about what the count means: a column that is 60% zero may be recording a real quantity, a coalesced absence, or both, and this field states the arithmetic fact, never the interpretation. `empty_count` counts the empty string exactly, as the column's own collation compares it (§2.2.2); a whitespace-only value is a different value and is not counted here.
+A fixed count of the values commonly used to encode absence without a NULL — `0`, a negative sentinel, the empty string. Each is an exact `COUNT` of scanned non-null rows equal to that value, bounded by `rows_scanned - null_count` (§2.2.3's conformance check), and asserts nothing about what the count means: a column that is 60% zero may be recording a real quantity, a coalesced absence, or both, and this field states the arithmetic fact, never the interpretation. `empty_count` counts the empty string exactly, as the column's own collation compares it (§2.2.2); a whitespace-only value is a different value and is not counted here.
 
-No second statement: each is an additional expression on the same per-column pass that already computes `null_count`. Redaction does not interact with any of the three — a count discloses no literal, the same reasoning §2.2.10 gives for a null pattern — so all three survive every `redacted` primitive unchanged.
+No second statement: each is an additional expression on the same per-column pass that already computes `null_count`. A column carrying a `redacted` marker emits none of the three: each count names how many rows hold one particular value, which solves for the literal beside the per-value counts (§2.2.9).
 
 **`quantized_count`** (`numeric`; `temporal` where the column's `sql_type` has a day to truncate to, per the ※ footnote above): the count of scanned non-null values equal to their own truncation — to an integer on `numeric`, to the day on `temporal`.
 
@@ -563,7 +586,7 @@ quantized_count: 382   # numeric: values with no fractional part
 quantized_count: 7     # temporal: values that are exactly midnight
 ```
 
-An exact `COUNT` of scanned non-null rows, bounded by `rows_scanned - null_count` (§2.2.3's conformance check), on the same per-column pass that already computes `null_count` — no second statement. It states the arithmetic fact and nothing about a float's binary representation or a number's intended unit: dollars, cents, and a percentage already multiplied by 100 all publish the same count if their values happen to be whole. Redaction does not interact with it — a count discloses no literal, the same reasoning §2.2.10 gives for a null pattern — so it survives every `redacted` primitive unchanged.
+An exact `COUNT` of scanned non-null rows, bounded by `rows_scanned - null_count` (§2.2.3's conformance check), on the same per-column pass that already computes `null_count` — no second statement. It states the arithmetic fact and nothing about a float's binary representation or a number's intended unit: dollars, cents, and a percentage already multiplied by 100 all publish the same count if their values happen to be whole. A column carrying a `redacted` marker emits none (§2.2.9): how many values sit on a day boundary is a fact about what the values are.
 
 **Truncation is evaluated in the value's own reading, never after a zone conversion.** The comparison uses the same reading a predicate against the column would — never the UTC-normalized rendering `range`/`percentiles` use for cross-adapter agreement (§2.2.4's domain-rendering rule) — so a value already local to its own zone is truncated in that zone, not shifted first:
 
@@ -584,7 +607,7 @@ length:
   p95: 512.0
 ```
 
-Character length, not byte length: a value's encoding does not change how many characters it holds, and characters are what a display width, a context budget, and a `SELECT` decision are all sized against. `min`, `max` and `avg` ride the same per-column statement every adapter already issues; `p95` is one more expression on it everywhere except MySQL, which reads it from a second statement over a ranked derived table — MySQL 8 defines no `PERCENTILE_CONT` aggregate and MariaDB 10.11 rejects the `WITHIN GROUP` form. Producers MUST satisfy `min <= avg <= max`.
+Character length, not byte length: a value's encoding does not change how many characters it holds, and characters are what a display width, a context budget, and a `SELECT` decision are all sized against. `min`, `max` and `avg` are computed in the same per-column statement every adapter already issues; `p95` is one more expression on it everywhere except MySQL, which reads it from a second statement over a ranked derived table — MySQL 8 defines no `PERCENTILE_CONT` aggregate and MariaDB 10.11 rejects the `WITHIN GROUP` form. Producers MUST satisfy `min <= avg <= max`.
 
 Producers MUST measure the column's own character-length function, never a byte length, so two producers reading one column agree:
 
@@ -601,7 +624,7 @@ Producers MUST measure the column's own character-length function, never a byte 
 
 An empty string measures `0` — a measurement, not an error (§2.2.7). A column with `null_rate: 1.0` emits no `length`, the same terms `range` follows.
 
-**Aggregates, not cell values.** §2.2.9 leaves `length` unaffected by a `redacted` marker, except where the scanned set holds at most one non-null value or one distinct value — see the ¶ footnote above.
+**Withheld under redaction.** A column carrying a `redacted` marker emits no `length`: its bounds are the withheld literals' own lengths (§2.2.9, the ¶ footnote above).
 
 **`normalized_cardinality`** (int ≥ 0, OPTIONAL; `categorical`, `foreign_key_candidate`, `text` when the column's `sql_type` could hold a string value, and only for the population §2.2.14 defines for `sketch` — a single-column FK edge, a declared single-column unique key, or `inferred.candidate_key` — minus that section's own cardinality-exhaustive widening bullet, which this field does not carry forward):
 
@@ -618,9 +641,11 @@ normalized_cardinality: 4102   # cardinality: 4118 - 16 values merge under foldi
 | Snowflake | `LOWER(TRIM(TO_VARCHAR(col)))` |
 | duckdb | `LOWER(TRIM(CAST(col AS VARCHAR)))` |
 
-Accent folding is deliberately excluded — it varies far more by engine than case does, and including it would make the field incomparable across adapters. `normalized_cardinality` MUST NOT exceed `cardinality`: folding can only merge two values into one, never split one into two (§6.3's conformance bound). It carries the column's own `cardinality_method` rather than one of its own: an `approximate` `cardinality` makes the comparison approximate on both sides.
+Accent folding is deliberately excluded — it varies far more by engine than case does, and including it would make the field incomparable across adapters. `normalized_cardinality` MUST NOT exceed `cardinality`: folding can only merge two values into one, never split one into two. It carries the column's own `cardinality_method` rather than one of its own: an `approximate` `cardinality` makes the comparison approximate on both sides.
 
-**Unlike `sketch`, both a scoped table and a redacted column stay eligible.** `normalized_cardinality` is computed over the same scanned set `cardinality` itself is (§2.2.8) — a scanned-set count like any other, present under `scope` on the same terms `cardinality` is, not withheld the way §2.2.14 withholds `sketch` there. Redaction does not interact with it either — a count of merges discloses no literal, the same reasoning §2.2.10 gives for a null pattern — so it survives every `redacted` primitive unchanged.
+**A violation is a warning, because the bound holds over one read and the two counts need not come from one.** The folding argument is about values, not about time: a table taking writes between the statement that measured `cardinality` and the statement that measured `normalized_cardinality` can leave the later count the larger, with no producer defect and nothing a producer reading a live table can do about it. §6.3 therefore reports the excess rather than gating on it, on the terms `stats.values-sum-mismatch` already sets for the same disagreement. A gap still counts the values that merge under folding, except that a negative one reflects read order.
+
+**Unlike `sketch`, a scoped table stays eligible.** `normalized_cardinality` is computed over the scanned set `cardinality` is itself defined against (§2.2.8) — a scanned-set count like any other, present under `scope` on the same terms `cardinality` is, not withheld the way §2.2.14 withholds `sketch` there. Where a producer copies a sampled draw, both counts read that one copy and they describe the same rows; where nothing is copied, they are two reads of the same table and the paragraph above governs. A column carrying a `redacted` marker emits none: how many spellings merge under case-folding is a fact about what the values are, not how many rows share them (§2.2.9).
 
 **`populated`** (map, OPTIONAL, every classification; requires `timeline` (§2.2.16) in the same file):
 
@@ -635,6 +660,8 @@ The window over which the data shows this column non-null, dated against `timeli
 **Omitted where it would restate a fact already on the file.** A fully-populated column (`null_count: 0`) has nothing to say the anchor's own `range` does not already say, and an all-null column (`null_rate: 1.0`) has no populated rows to date at all — a producer MUST NOT emit `populated` in either case.
 
 **MUST NOT be emitted without `timeline`.** The pair is readable only beside the anchor's name, which `timeline.column` publishes (§2.2.16); a file with no `timeline` block has nowhere for a reader to look that up, so `populated` MUST be absent from every column wherever `timeline` itself is — under `scope`, on an empty table, with no eligible anchor, or where a producer's own configuration disabled the block.
+
+**Both instants lie inside the anchor's own `range`, and a violation is a warning.** They are drawn from the anchor column, so no populated row can be dated outside the anchor's own bounds — over one read. The window and the bounds are measured by separate statements, and an anchor that advances between them leaves `to` past a `range.max` recorded earlier. §6.3 therefore reports the excursion rather than gating on it, on the terms `stats.values-sum-mismatch` sets for the same disagreement. Inserts cannot move `range.min`, so an excursion on `from` is the one worth reading closely — but the artifact does not record which statement ran first, and the check does not distinguish them.
 
 **Redaction follows the anchor, not the subject column.** The two instants are cell values of the anchor column (§2.2.9); a redacted column is never chosen as an anchor in the first place (§2.2.16), so this case cannot arise from a conforming producer. A redacted *subject* column still carries `populated` unaffected — the pair discloses only when the column had a value, never what that value was.
 
@@ -656,9 +683,9 @@ A fixed-size summary of the same top-N frequency fetch `distribution` (§2.2.5) 
 
 **`unrepresentable`** (temporal only, optional):
 
-A temporal column MAY carry `unrepresentable`: a list naming the emitted fields - `min`, `max`, and any emitted `percentiles` key - whose value lies outside the years `0001` through `9999` inclusive, proleptic Gregorian. The boundary is stated as this calendar range, not as any one library's or driver's limits, because two conforming producers reading the same column MUST mark the same fields regardless of the runtime they were written in.
+A temporal column MAY carry `unrepresentable`: a list naming the emitted fields — `min`, `max`, and any emitted `percentiles` key — whose value lies outside the years `0001` through `9999` inclusive, proleptic Gregorian. The boundary is stated as this calendar range, not as any one library's or driver's limits, because two conforming producers reading the same column MUST mark the same fields regardless of the runtime they were written in.
 
-The domain-rendering rule above already makes the text form correct for such a value - a database's own rendering of an instant beyond the standard calendar is exactly what belongs in the file. `unrepresentable` is what lets a consumer feeding that value to a typed parser degrade deliberately instead of crashing.
+The domain-rendering rule above already makes the text form correct for such a value — a database's own rendering of an instant beyond the standard calendar is exactly what belongs in the file. `unrepresentable` is what lets a consumer feeding that value to a typed parser degrade deliberately instead of crashing.
 
 ```yaml
 created_at:
@@ -676,15 +703,15 @@ created_at:
 
 Entries are ordered as the fields are emitted (`min`, `max`, then percentile keys in ascending order) and carry no duplicates. The key is omitted entirely when no emitted value qualifies.
 
-The marker names a field the format carries, not a claim about the value's correctness: a column whose maximum is year 52030 probably holds a mis-scaled epoch, and saying so is not this field's job - carrying the value and flagging that it will not parse is. A `redacted: drop` column emits no bounds at all (see the † footnote above), so no field can be listed and `unrepresentable` MUST be absent alongside them.
+The marker names a field the format carries, not a claim about the value's correctness: a column whose maximum is year 52030 probably holds a mis-scaled epoch, and this field does not say so — it carries the value and flags that it will not parse. A column carrying any `redacted` marker MUST NOT emit it: which withheld bound lies outside years 0001–9999 is a fact about what the literal is (§2.2.9).
 
 `unrepresentable` deliberately introduces no diff change kind of its own: it is derived from the same bound its own `statistic_changed` event already reports, so a value moving in or out of the representable range is already visible as a change to `range.min`, `range.max`, or the percentile in question.
 
 **`unmeasured`** (any classification, optional):
 
-A column MAY carry `unmeasured`: a list naming the fields the §2.2.3 matrix marks **R** for this column's classification that this run attempted and could not obtain. Every named field MUST be absent, and a field the matrix does not require for this classification MUST NOT be named - that absence is already structural, and §7.2 explains it without a marker.
+A column MAY carry `unmeasured`: a list naming the fields the §2.2.3 matrix marks **R** for this column's classification that this run attempted and could not obtain. Every named field MUST be absent, and a field the matrix does not require for this classification MUST NOT be named — that absence is already structural, and §7.2 explains it without a marker. Two optional fields are the one exception: on a classification §4.1.5 samples, a column whose sample draw failed names `inferred.looks_like` and `inferred.epoch_unit`, because their absence otherwise states that the draw found nothing (§4.1, §4.5). The verdict's evidence fields (`sampled`, `matched`, `looks_like_candidate`, `looks_like_candidate_share`) are not named; they describe that verdict and read as unmeasured with it.
 
-This is the one absence §7.2 cannot otherwise account for. Every cause it lists is a property of the column: the classification forbids the field, a redaction withheld it, the type has no day to truncate to. A query that was issued and did not answer is none of those, and without a word for it a producer must either omit the field - asserting whichever structural cause a reader infers - or publish a value it did not measure. Both are false statements about the data; this marker is what makes the true one expressible.
+This is the one absence §7.2 cannot otherwise account for. Every cause it lists is a property of the column: the classification forbids the field, a redaction withheld it, the type has no day to truncate to. A query that was issued and failed is none of those, and without a marker for it a producer must either omit the field — which states whichever structural cause a reader infers — or publish a value it did not measure. Both are false statements about the data; this marker lets a producer state the true one.
 
 ```yaml
 logged_at:
@@ -698,13 +725,13 @@ logged_at:
   unmeasured: [distribution, freshness, frequencies, percentiles, quantized_count, range, values]
 ```
 
-Entries are the field names as the matrix spells them, sorted, without duplicates. The key is omitted entirely when the run measured everything it owed - which is every column of a print whose reads all answered.
+Entries are the field names as the matrix spells them, sorted, without duplicates. The key is omitted entirely when the run measured every field the column should carry — which is every column of a print whose reads all succeeded.
 
-A named field is REQUIRED to be absent rather than merely permitted to be: emitting a value and declaring it unmeasured are contradictory claims, and a consumer that trusted either would be wrong half the time. §6.4 carries both violations as errors.
+A named field is REQUIRED to be absent rather than merely permitted to be: emitting a value and declaring it unmeasured are contradictory claims, and a consumer cannot tell which of the two is true. §6.4 carries both violations as errors.
 
 `unmeasured` deliberately introduces no diff change kind of its own, on `unrepresentable`'s own terms: a field either side names is not compared at all, so nothing about it can produce an event. A field that stops being unmeasured between two runs surfaces as the ordinary `statistic_changed` for the field itself, once both sides carry a value again.
 
-**Date-less temporal types.** A type carrying a time of day but no date - `TIME`, and `TIME WITH TIME ZONE` - has no instant to measure from. Producers MUST emit `range.span_days: 0` (every such value falls inside one day) and `freshness.max_age_days: 0`. Producers MUST NOT derive either quantity by arithmetic against the current timestamp; the operation is undefined for these types and the dialects fail differently, some silently.
+**Date-less temporal types.** A type carrying a time of day but no date — `TIME`, and `TIME WITH TIME ZONE` — has no instant to measure from. Producers MUST emit `range.span_days: 0` (every such value falls inside one day) and `freshness.max_age_days: 0`. Producers MUST NOT derive either quantity by arithmetic against the current timestamp; the operation is undefined for these types and the dialects fail differently, some silently.
 
 **`freshness`** (temporal only):
 
@@ -714,25 +741,11 @@ freshness:
   classification: live | stale | dormant
 ```
 
-`max_age_days` is clamped at `0`. A column whose newest value has not happened yet — a
-queue of future-dated work, an expiry timestamp, a sentinel birth date — would otherwise produce a
-negative age, which this field does not carry. Producers MUST emit `0` for such a column,
-and it therefore classifies `live`. This is the answer for a column where only some values
-are in the future and for one where all of them are: the rule is applied to the maximum, so
-the two cases are the same case.
+`max_age_days` is clamped at `0`. A column whose newest value has not happened yet — a queue of future-dated work, an expiry timestamp, a sentinel birth date — would otherwise produce a negative age, which this field does not carry. Producers MUST emit `0` for such a column, and it therefore classifies `live`. This is the answer for a column where only some values are in the future and for one where all of them are: the rule is applied to the maximum, so the two cases are the same case.
 
-The clamp is deliberately lossy. `freshness` answers "how stale is this data", and data that
-has not arrived yet is not stale, so `0` is the honest reading of that question — but it does
-not distinguish a column written a moment ago from one scheduled a century out. Consumers
-needing that distinction MUST read `range.max`, which always carries the true maximum.
+The clamp is deliberately lossy. `freshness` answers "how stale is this data", and data that has not arrived yet is not stale, so `0` is the honest reading of that question — but it does not distinguish a column written a moment ago from one scheduled a century out. Consumers needing that distinction MUST read `range.max`, which always carries the true maximum.
 
-**The day count is computed in UTC.** `profiled_at` is always UTC (§2.2.1). A zone-aware
-`range.max` is an absolute instant, so `day_count(range.max, profiled_at)` is unambiguous.
-A `timestamp without time zone` or MySQL `DATETIME` value carries no zone; producers MUST
-treat its rendered reading as UTC when computing `max_age_days`, the same assumption the
-value's own domain rendering makes. This can differ from the value's true civil age by the
-server's UTC offset - at most one day, and only when the newest value sits within that
-offset of midnight, where it can shift the `live`/`stale`/`dormant` bucket below.
+**The day count is computed in UTC.** `profiled_at` is always UTC (§2.2.1). A zone-aware `range.max` is an absolute instant, so `day_count(range.max, profiled_at)` is unambiguous. A `timestamp without time zone` or MySQL `DATETIME` value carries no zone; producers MUST treat its rendered reading as UTC when computing `max_age_days`, the same assumption the value's own domain rendering makes. This can differ from the value's true civil age by the server's UTC offset — at most one day, and only when the newest value sits within that offset of midnight, where it can shift the `live`/`stale`/`dormant` bucket below.
 
 Thresholds (hardcoded; not configurable):
 
@@ -748,30 +761,32 @@ Enum: `uniform` | `imbalanced` | `dominant_value` | `long_tail`.
 
 Producers MUST evaluate the rules in this priority order; first match wins:
 
-1. `dominant_value` — top value's count / (rows_scanned - null_count) ≥ 0.95
-2. `long_tail` — cardinality > the value-list bound (§2.2.4) AND sum of the listed counts / (rows_scanned - null_count) < 0.30
+1. `dominant_value` — top value's count / (rows_scanned — null_count) ≥ 0.95
+2. `long_tail` — cardinality > the value-list bound (§2.2.4) AND sum of the listed counts / (rows_scanned — null_count) < 0.30
 3. `imbalanced` — max-frequency / min-frequency > 2× (over non-null values)
 4. `uniform` — fallthrough (max/min ratio ≤ 2×)
 
 Where the `values` list is exhaustive (`values_coverage` of `1.0`), `long_tail` is undefined and producers MUST skip step 2: a complete enumeration has no tail beyond itself. Steps 3 and 4 read the true minimum frequency in that case, and the least frequent listed entry otherwise.
 
-A validator was not present at the scan and cannot see `rows_scanned` directly, so it checks steps 1 and 2 only where `values` is exhaustive, against the sum of the listed counts - which then equals `rows_scanned - null_count` exactly, since an exhaustive list already accounts for every non-null value the scan produced. A truncated list is not checked against this rule at all.
+A validator was not present at the scan and cannot see `rows_scanned` directly, so it checks steps 1 and 2 only where `values` is exhaustive, against the sum of the listed counts — which then equals `rows_scanned - null_count` exactly, since an exhaustive list already accounts for every non-null value the scan produced. A truncated list is not checked against this rule at all.
 
-`numeric` and `temporal` carry a `values` list (§2.2.4), but `values_coverage` is forbidden on both, so the check above, which fires only where the list is exhaustive, cannot reach them; `frequencies` (§2.2.4) exists to close that gap. Its four integers reproduce the same priority order over the scanned set (`non_null`) and `cardinality` the column already publishes: `top` decides step 1, `total` decides step 2's ratio, and the `top`-to-`bottom` spread decides steps 3 and 4. A validator reads the fetch's own exhaustiveness from `listed == cardinality`, when `cardinality_method` is `exact` - an approximate cardinality is not guaranteed to equal the fetch's own count of distinct groups, so a validator MUST NOT check `distribution` against `frequencies` on such a column.
+`numeric` and `temporal` carry a `values` list (§2.2.4), but `values_coverage` is forbidden on both, so the check above, which fires only where the list is exhaustive, cannot reach them; `frequencies` (§2.2.4) exists to close that gap. Its four integers reproduce the same priority order over the scanned set (`non_null`) and `cardinality` the column already publishes: `top` decides step 1, `total` decides step 2's ratio, and the `top`-to-`bottom` spread decides steps 3 and 4. A validator reads the fetch's own exhaustiveness from `listed == cardinality`, when `cardinality_method` is `exact` — an approximate cardinality is not guaranteed to equal the fetch's own count of distinct groups, so a validator MUST NOT check `distribution` against `frequencies` on such a column.
 
 #### 2.2.6 Numerical precision
 
 Numeric stats (range bounds, percentiles, `mean`, `sum`, ratios) MUST be rounded to **6 decimal places** before emission. This stabilizes git diffs across runs where adapter floating-point precision varies slightly, while leaving a value's magnitude intact — a maximum of `12345678.9` is emitted as it stands, not rewritten to a rounder number of the same size.
 
-**Rounding MUST NOT turn a nonzero measurement into zero.** Six decimal places annihilate any value below half of one of them, which is the opposite of leaving the magnitude intact: a column of measurements around `4e-07` would publish `range.min`, `range.max`, every percentile and `mean` as `0.0`, beside a `sum` that disagrees with all of them. Where rounding to six decimals would produce `0.0` from a value that is not zero, a producer MUST emit **six significant figures** instead. This is a floor on the rounding rule, not a second rule: any value large enough to survive six decimals is unaffected. It governs the measured fields named above — the two ratios are bounded by 1 and carry their own floor, stated below.
+**Rounding MUST NOT turn a nonzero measurement into zero.** Six decimal places round any value below half of one of them to zero, which does not leave the magnitude intact: a column of measurements around `4e-07` would publish `range.min`, `range.max`, every percentile and `mean` as `0.0`, beside a `sum` that disagrees with all of them. Where rounding to six decimals would produce `0.0` from a value that is not zero, a producer MUST emit **six significant figures** instead. This is a floor on the rounding rule, not a second rule: any value large enough to survive six decimals is unaffected. It governs the measured fields named above — the two ratios are bounded by 1 and carry their own floor, stated below.
 
 **A listed value is not among the rounded statistics.** The fields above are computed over a scan, and rounding them stabilizes a diff across runs. A `values` entry (§2.2.4) is a cell read from the table, and §2.2.7 forbids altering one except under a declared redaction — so it is emitted as measured, at whatever precision the column holds. Rounding them also merges two distinct values that agree to six decimals into one repeated literal, which contradicts what the list is.
 
+**An exact numeric cell is written exactly.** A value of an exact numeric type (`DECIMAL`, `NUMERIC`, `NUMBER`, `BIGNUMERIC` and their kin) that is integral is written as an integer literal (`-20`, `18446744073709551616`); any other is written positionally with every significant digit and no trailing zeros (`0.123456789012345678`), never with an exponent and never passed through binary floating point. A statistic whose input is exact — range bounds, `sum`, `mean`, percentiles, `length.avg` where the engine returns an exact value — is rounded as above in decimal arithmetic (half to even) and written exactly; one the engine itself computes in binary floating point stays a float. A reader decoding YAML floats as binary64 recovers a non-integral value past about 17 significant digits only approximately; the artifact text itself is exact.
+
 `null_rate` and `cardinality_ratio` (floats in [0,1]) follow the same rule.
 
-**Both ratios are recomputable and checked, with a floor and a ceiling.** `null_rate` MUST equal `null_count / rows_scanned` rounded per this rule, and `cardinality_ratio` MUST equal `cardinality / rows_scanned` rounded the same way - the same identities §2.2.2 states, with a conformance check behind them. Two exceptions to plain six-decimal rounding: a nonzero numerator (`null_count` or `cardinality`) MUST NOT round down to `0.0` - it emits `0.000001`, the smallest representable value at this precision, instead. `null_rate` additionally MUST NOT round up to `1.0` unless `null_count == rows_scanned` - a nonzero non-null count emits `0.999999` instead, because `null_rate: 1.0` is a defined sentinel (§2.2.7, §3.3) that imprecision must not manufacture; `cardinality_ratio` carries no such ceiling. `rows_scanned == 0` is the one case this floor does not touch: both ratios stay exactly `0` there, per §2.2.2, since the ratio is undefined rather than merely small. A rounding boundary the producer's own rule lands on - including the floor and the ceiling - is not a violation; a value that disagrees with the recomputed identity is.
+**Both ratios are recomputable and checked, with a floor and a ceiling.** `null_rate` MUST equal `null_count / rows_scanned` rounded per this rule, and `cardinality_ratio` MUST equal `cardinality / rows_scanned` rounded the same way — the same identities §2.2.2 states, with a conformance check behind them. Two exceptions to plain six-decimal rounding: a nonzero numerator (`null_count` or `cardinality`) MUST NOT round down to `0.0` — it emits `0.000001`, the smallest representable value at this precision, instead. `null_rate` additionally MUST NOT round up to `1.0` unless `null_count == rows_scanned` — a nonzero non-null count emits `0.999999` instead, because `null_rate: 1.0` is a defined sentinel (§2.2.7, §3.3) that rounding must not produce; `cardinality_ratio` carries no such ceiling. `rows_scanned == 0` is the one case this floor does not touch: both ratios stay exactly `0` there, per §2.2.2, since the ratio is undefined rather than merely small. A rounding boundary the producer's own rule lands on — including the floor and the ceiling — is not a violation; a value that disagrees with the recomputed identity is.
 
-A consumer recomputing either ratio by hand from `null_count` or `cardinality` and `rows_scanned` will not reproduce the floored or ceilinged value at the extremes - the published number and the raw division agree everywhere else, but diverge deliberately at the two boundaries this rule exists to avoid publishing.
+A consumer recomputing either ratio by hand from `null_count` or `cardinality` and `rows_scanned` will not reproduce the floored or ceilinged value at the extremes — the published number and the raw division agree everywhere else, but diverge deliberately at the two boundaries this rule exists to avoid publishing.
 
 Counts are exact integers — no rounding. `null_count`, `cardinality` and every `values` entry count are measured over the scanned set (§2.2.8); `row_count` is a separate, table-scale count and MUST NOT be read as measured over the same population.
 
@@ -783,13 +798,13 @@ Rendering notation is not a value change, so it does not conflict with §2.2.7's
 
 | Case | Resolution |
 |---|---|
-| **Empty table** (`row_count = 0`) | File emitted with `row_count: 0`. Per-column: `null_count: 0`, `null_rate: 0`, `cardinality: 0`, `cardinality_ratio: 0`. `classification` derived from `sql_type` via §3 priority; at `cardinality = 0` this resolves to `categorical` (or `foreign_key_candidate` / `boolean` by FK/type). The value fields are emitted EMPTY rather than omitted: `values: []` + `values_coverage: 1.0` - a column with nothing to list covers all of it - plus `distribution` for the classifications that require it. `unsupported` columns stay minimal (`cardinality: null`, no value fields). A `row_count: 0` carrying a non-zero `scope.rows_scanned` is NOT this case: §2.2.8 lets an estimate that undershot stand as the estimate it is, so that pair reads as inverted rather than as an empty table, and a consumer MUST read the two fields together before concluding a table holds nothing. |
+| **Empty table** (`row_count = 0`) | File emitted with `row_count: 0`. Per-column: `null_count: 0`, `null_rate: 0`, `cardinality: 0`, `cardinality_ratio: 0`. `classification` derived from `sql_type` via §3 priority; at `cardinality = 0` this resolves to `categorical` (or `foreign_key_candidate` / `boolean` by FK/type). The value fields are emitted EMPTY rather than omitted: `values: []` + `values_coverage: 1.0` — a column with nothing to list covers all of it — plus `distribution` for the classifications that require it. `unsupported` columns stay minimal (`cardinality: null`, no value fields). A `row_count: 0` carrying a non-zero `scope.rows_scanned` is NOT this case: §2.2.8 lets an estimate that undershot stand as the estimate it is, so that pair reads as inverted rather than as an empty table, and a consumer MUST read the two fields together before concluding a table holds nothing. |
 | **All-null column** (`cardinality = 0`, `null_rate = 1`) | Same empty-collection behavior as the empty table for that column. `classification` per §3.3. |
 | **Single-value column** (`cardinality = 1`) | Classification = `categorical`. `values: { sole_value: count }`. `distribution: dominant_value`. |
 | **Sub-day temporal span** | `range.span_days: 0` — a consequence of the day-count rule (§2.2.4), not an exception to it: an interval shorter than 24 hours contains zero whole days however it sits against the calendar. |
 | **Long string values in `values`** | Emitted as-is. No truncation. Producers MAY log warnings when total YAML size exceeds an adapter-defined threshold. Producers MUST NOT alter values **except under a declared redaction** (§2.2.9), which is the one sanctioned substitution and is always announced by the `redacted` marker. |
 | **Approximate vs exact methods** | Adapter chooses based on table size / cost. `row_count_method` and `cardinality_method` document the choice. |
-| **`values` ties at the cutoff boundary** | Lexicographic order on the string form of `value` decides — deterministic across runs. |
+| **`values` ties at the cutoff boundary** | Which of the tied values survive the cutoff is the producer's choice and MUST be deterministic across runs — a database orders them by its own collation and its own text of the value, which need not match this file's. The surviving entries are then ordered as §2.2.4 says, by ascending code-point order of the text of `value` as written in the file. |
 | **Empty scanned set** (`scope.rows_scanned = 0`, `row_count > 0`) | A filter that matched no rows. Per-column shape follows the empty-table row above, but `row_count` keeps the table's own count — the two cases are distinct and MUST NOT be collapsed. |
 
 The empty-collection shapes these rows produce read like omissions and are not; §7.4 states what each one can mean.
@@ -840,15 +855,15 @@ A producer MAY replace or omit cell values, and MUST declare it with a column-le
 | `drop` | No literal emitted; each entry keeps its `count` |
 | `hash` | A salted digest emitted in the literal's place |
 
-**Scope is cell values only.** `null_count`, `null_rate`, `cardinality`, `cardinality_ratio`, `cardinality_method`, the value counts, `values_coverage`, `distribution`, `mean` and `sum` MUST be unaffected. They describe the data without disclosing a row. This is cell-level privacy, not aggregation-level privacy, and a consumer may rely on every measurement in a redacted print being the true one.
+**A redacted column publishes its count profile, and nothing else computed from its values.** Every per-column statistic on a column carrying a `redacted` marker MUST be unchanged by any one-to-one renaming of the column's distinct non-null values within its SQL type. The count profile satisfies this: `null_count`, `null_rate`, `cardinality`, `cardinality_ratio`, `cardinality_method`, every `values` entry's `count`, `values_coverage`, `distribution`, `frequencies` and `populated`, and a consumer may rely on each being the true measurement. `mean`, `sum`, `length`, `zero_count`, `negative_count`, `empty_count`, `quantized_count`, `normalized_cardinality`, `unrepresentable` and `sketch` do not — each is computed from what the values are rather than how many rows share them — and a column carrying any marker MUST NOT emit them. Two groups are governed by their own paragraphs below instead: detection, and the derived day counts, which are coarsened.
 
-**Three aggregates are the exception, and it is narrow.** `mean`, `sum` and `length` (§2.2.4) are aggregates, not cell values — but where the scanned set holds at most one non-null value, or holds one distinct value however many rows carry it, each equals (or is computed over) that one value, and publishing it inverts whichever primitive declared the cell withheld. The condition is distinctness rather than size: an average over four hundred rows of one repeated value is that value, and a `sum` divides back to it. A `numeric` column carrying any `redacted` marker over such a scanned set MUST NOT emit `mean` or `sum`; a `text`, `categorical` or `foreign_key_candidate` column in the same state MUST NOT emit `length`. Above that threshold none inverts, and every field a column otherwise carries stays (§2.2.3's ¶ footnote).
+No threshold on a column's size makes such a statistic safe. With per-value counts published, `sum` is one equation over the withheld values and the predicate counts fix which of them are zero, negative or whole; a column of `0` and one other value divides back to that value, and a count-like column whose values grow rarer as they grow larger publishes the least `sum` its counts allow, which exactly one assignment of values reaches.
 
 **Bounds and percentiles are cell values too.** Under `mask` and `hash`, `range.min`, `range.max` and every `percentiles` entry carry the substituted form; under `drop` the `range` and `percentiles` fields are omitted, the one primitive where redacting a bound and omitting it coincide. A consumer MUST NOT order, compare, or perform arithmetic on a bound in a column carrying the marker — a masked maximum still looks like a maximum, and two hashed bounds sort by digest rather than by value, so `min` may sort above `max`.
 
-**A derived value is a cell value whenever the derivation can be run backwards.** `freshness.max_age_days` and `range.span_days` (§2.2.4) are computed by arithmetic rather than read from a cell, but arithmetic that inverts is not exempt on that account: `range.max = profiled_at - max_age_days`, and `profiled_at` is always present (§2.2.1), so an uncoarsened `max_age_days` recovers the maximum a `mask`/`hash`/`drop` marker declares withheld — to the day, from any artifact. `range.min = range.max - span_days` recovers the minimum the same way wherever `range` is still present (`mask`/`hash`; `drop` omits it already). A `temporal` column carrying any `redacted` marker MUST therefore emit both fields floored to the nearest 90 days: `coarsened = 90 * floor(value / 90)`. This holds under every primitive, `drop` included — `freshness` stays REQUIRED there (§2.2.3's matrix footnote), so the coarsening is the only thing standing between a fully dropped column and a birth date recovered to the day. `freshness.classification` is unaffected and still reads the true age: the bucket is coarse enough on its own (§2.2.4) that coarsening it too would only relabel a `dormant` column, not protect one.
+**A derived value is a cell value whenever the derivation can be run backwards.** `freshness.max_age_days` and `range.span_days` (§2.2.4) are computed by arithmetic rather than read from a cell, but arithmetic that inverts is not exempt on that account: `range.max = profiled_at - max_age_days`, and `profiled_at` is always present (§2.2.1), so an uncoarsened `max_age_days` recovers the maximum a `mask`/`hash`/`drop` marker declares withheld — to the day, from any artifact. `range.min = range.max - span_days` recovers the minimum the same way wherever `range` is still present (`mask`/`hash`; `drop` omits it already). A `temporal` column carrying any `redacted` marker MUST therefore emit both fields floored to the nearest 90 days: `coarsened = 90 * floor(value / 90)`. This holds under every primitive, `drop` included — `freshness` stays REQUIRED there (§2.2.3's matrix footnote), so without the coarsening a fully dropped column would still reveal a birth date to the day. `freshness.classification` is unaffected and still reads the true age: the bucket is coarse enough on its own (§2.2.4) that coarsening it too would only relabel a `dormant` column, not protect one.
 
-**The marker is mandatory wherever a redaction rule covers the column.** An artifact that substitutes values silently is worse than one that omits them, because a consumer cannot tell measurement from fabrication — the same principle the `scope` block (§2.2.8) rests on. The marker reports the cover, not what survived it: a covered column carries it even where it publishes no literal at all — a `text` column detected as prose (§2.2.3), or one naming `values` in its own `unmeasured` (§2.2.4) — so a reader can tell a withheld column from an ordinary one wherever both publish nothing, and so the rules that read the marker (§2.2.14) read a reliable signal. `json` and `unsupported` are outside it: their §2.2.3 row carries no cell value to withhold and forbids the marker itself. A `values` entry carrying no `value` in a column that declares no marker is an error.
+**The marker is mandatory wherever a redaction rule covers the column.** An artifact that substitutes values silently is worse than one that omits them, because a consumer cannot tell measurement from fabrication — the same principle the `scope` block (§2.2.8) rests on. The marker states that a rule covers the column, not what the column still publishes: a covered column carries it even where it publishes no literal at all — a `text` column detected as prose (§2.2.3), or one naming `values` in its own `unmeasured` (§2.2.4) — so a reader can tell a withheld column from an ordinary one wherever both publish nothing, and so the rules that read the marker (§2.2.14) read a reliable signal. `json` and `unsupported` are outside it: their §2.2.3 row carries no cell value to withhold and forbids the marker itself. A `values` entry carrying no `value` in a column that declares no marker is an error.
 
 **Detection is unaffected.** `looks_like` and `sensitivity` are computed over sampled values that are never persisted, so a hashed email column still reports `looks_like: email`. That is correct: the shape claim describes the column, not the emitted literals.
 
@@ -863,7 +878,7 @@ A file whose data carries nulls records which columns carry them together in a t
 ```yaml
 null_patterns:
   coverage: <float [0, 1]>            # ALWAYS; the listed counts over rows_scanned
-  coverage_method: measured | bounded # OPTIONAL; whether the census agreed with rows_scanned
+  coverage_method: measured | bounded # OPTIONAL; whether the pattern counts agreed with rows_scanned
   patterns:                           # ALWAYS; may be empty
     - columns: [<column name>, ...]   # ALWAYS; the columns null in these rows, empty for none
       count: <int ≥ 0>                # ALWAYS; rows carrying exactly this combination
@@ -879,13 +894,13 @@ null_patterns:
 
 **Entries are ordered by `count` descending, ties broken by ascending lexicographic order of the `columns` array** — the same shape §2.2.4 sets for `values`, and for the same reason: two runs over unchanged data MUST emit the same bytes. Which entries survive a producer's cap is a separate question from the order they are published in: at a `count` tie straddling the cap a producer MAY keep either, provided it keeps the same one on every run over unchanged data. §2.2.7 draws the same distinction for `values`.
 
-**`coverage` is the share of the scanned rows the listed entries account for**: the sum of their `count` values over `rows_scanned`, rounded per §2.2.6. A producer that caps how many entries it lists MUST publish the coverage that cap leaves. `1.0` asserts the census is complete, and then the listed counts MUST sum to `rows_scanned` exactly.
+**`coverage` is the share of the scanned rows the listed entries account for**: the sum of their `count` values over `rows_scanned`, rounded per §2.2.6. A producer that caps how many entries it lists MUST publish the coverage that cap leaves. `1.0` asserts the listed patterns are complete, and then the listed counts MUST sum to `rows_scanned` exactly.
 
 **The counts reconcile against each column's own `null_count`.** For any column, the sum of `count` over the entries naming it MUST NOT exceed that column's `null_count`, and MUST equal it exactly where `coverage` is `1.0`. This is the one arithmetic identity in the format that crosses from a table-level object to a per-column one, and it is what catches two figures that came from different reads of the same table.
 
-**`coverage_method`** (enum, OPTIONAL; `measured` | `bounded`): whether an untruncated census agreed with `rows_scanned` (`measured`) or a producer detected the two disagreeing (`bounded`), because the census and the row count it is measured against were not read at the same instant - the same distinction §2.2.4 draws for `values_coverage_method`, applied to this block. Emitted only for a census a producer's own cap did not cut short; a truncated census is short by design, which is a different, already-explained condition `coverage_method` does not cover. A sampled table whose statements each redraw an unmaterialized sample can show the identical symptom from a different cause - a working fix already exists for that one (a materialized draw removes it entirely, reading `measured`) - and `coverage_method` states the symptom it observed, not which of the two causes produced it.
+**`coverage_method`** (enum, OPTIONAL; `measured` | `bounded`): whether an untruncated list of patterns agreed with `rows_scanned` (`measured`) or a producer detected the two disagreeing (`bounded`), because the pattern counts and the row count they are measured against were not read at the same instant — the same distinction §2.2.4 draws for `values_coverage_method`, applied to this block. Emitted only for a list a producer's own cap did not cut short; a truncated list is short by design, which is a different, already-explained condition `coverage_method` does not cover. A sampled table whose statements each redraw an unmaterialized sample can show the identical symptom from a different cause — a working fix already exists for that one (a materialized draw removes it entirely, reading `measured`) — and `coverage_method` states the symptom it observed, not which of the two causes produced it.
 
-**Absence is a claim about the data, not about the producer.** The block MUST be omitted when no column in the file carries a null, and MUST be present when any does - unless the file's own `unmeasured` list names it (§2.2.1), which is how a producer whose census failed says so rather than asserting the table has none. Both cases are checkable against the `null_count` of every column in the same file, so an absent block with no marker never leaves a reader deciding between "no nulls" and "not measured".
+**Absence is a claim about the data, not about the producer.** The block MUST be omitted when no column in the file carries a null, and MUST be present when any does — unless the file's own `unmeasured` list names it (§2.2.1), which is how a producer whose pattern count failed records that rather than asserting the table has none. Both cases are checkable against the `null_count` of every column in the same file, so an absent block with no marker never leaves a reader deciding between "no nulls" and "not measured".
 
 **A pattern is a measurement, not a constraint.** That `b` was null on every scanned row where `a` was null is an observation over the rows that were read, not a rule the database enforces, and a consumer MUST NOT treat it as one — the same terms §2.3.8 sets for an inferred edge. Under a `scope` block it says less still: a combination occurring on few rows may not have been drawn at all, so the absence of a pattern is not evidence that the combination does not occur.
 
@@ -903,25 +918,25 @@ physical_layout:
       column: <string>                # OPTIONAL; the base column, when the expression resolves to one
 ```
 
-**`mechanism` names the mechanism, not a judgment.** `cluster` for Snowflake's clustering key, `partition` for Postgres declarative partitioning and MySQL `PARTITION BY`, `sort` for Redshift's `SORTKEY` - all three say the same thing to a consumer sizing a query (these columns prune, the rest do not), so one field carries them rather than forcing a consumer to know which dialects use which word. Redshift's `DISTKEY` fails that test - it decides which node a row lands on, a join-colocation fact rather than a pruning one - and is deliberately left unexpressed; a table declaring only a `DISTKEY` emits no `physical_layout` block at all.
+**`mechanism` names the mechanism, not a judgment.** `cluster` for Snowflake's clustering key, `partition` for Postgres declarative partitioning and MySQL `PARTITION BY`, `sort` for Redshift's `SORTKEY` — all three say the same thing to a consumer sizing a query (these columns prune, the rest do not), so one field carries them rather than forcing a consumer to know which dialects use which word. Redshift's `DISTKEY` fails that test — it decides which node a row lands on, a join-colocation fact rather than a pruning one — and is deliberately left unexpressed; a table declaring only a `DISTKEY` emits no `physical_layout` block at all.
 
-**`keys` is ordered, because the order is not decoration.** A multi-column key prunes far more on its first component than its last (`cluster by (vault_id, reading_id)` prunes almost entirely on `vault_id`), and the array's own order is that ranking - a producer MUST NOT reorder it.
+**`keys` is ordered, because the order is not decoration.** A multi-column key prunes far more on its first component than its last (`cluster by (vault_id, reading_id)` prunes almost entirely on `vault_id`), and the array's own order is that ranking — a producer MUST NOT reorder it.
 
-**`column` is what a predicate matches against; `expression` is what was declared.** `cluster by (logged_at::date)` yields the expression `logged_at::date` and the column `logged_at` - a consumer needs the column to match a `WHERE` clause against, and the expression to know what was actually declared rather than assume. `column` MUST be omitted when the expression resolves to no single column (a function call over more than one column, or one dbprint cannot parse); the expression alone is still recorded. When present, `column` MUST name a column present in this file's `columns` map, on the same precedent §2.2.10 sets for `null_patterns`.
+**`column` is what a predicate matches against; `expression` is what was declared.** `cluster by (logged_at::date)` yields the expression `logged_at::date` and the column `logged_at` — a consumer needs the column to match a `WHERE` clause against, and the expression to know what was actually declared rather than assume. `column` MUST be omitted when the expression resolves to no single column (a function call over more than one column, or one dbprint cannot parse); the expression alone is still recorded. When present, `column` MUST name a column present in this file's `columns` map, on the same precedent §2.2.10 sets for `null_patterns`.
 
-**The two surfaces agree, or the artifact is inconsistent.** Every column named as a `column` in `physical_layout.keys` MUST carry `physical_layout_key: true`, and every column carrying that marker MUST be named there - the table-level list and the per-column flag are two views of one fact, and a producer emitting one without the other has written a self-contradicting file.
+**The two surfaces agree, or the artifact is inconsistent.** Every column named as a `column` in `physical_layout.keys` MUST carry `physical_layout_key: true`, and every column carrying that marker MUST be named there — the table-level list and the per-column flag are two views of one fact, and a producer emitting one without the other has written a self-contradicting file.
 
-**Declared, never measured.** `physical_layout` states what the schema declares, never how well the table is actually clustered at any moment - Snowflake's automatic clustering can leave a declared key poorly maintained, and clustering depth is a measurement that costs a query and goes stale immediately. A producer MUST NOT publish a cost or pruning claim anywhere in this block; naming the key is a schema fact, asserting what it saves is not.
+**Declared, never measured.** `physical_layout` states what the schema declares, never how well the table is actually clustered at any moment — Snowflake's automatic clustering can leave a declared key poorly maintained, and clustering depth is a measurement that costs a query and goes stale immediately. A producer MUST NOT publish a cost or pruning claim anywhere in this block; naming the key is a schema fact, asserting what it saves is not.
 
 §7.3 sets this absence beside the others a reader has to interpret.
 
-**Absence means not clustered, never not checked.** Every producer MUST answer whether a table declares a physical layout key. An adapter that cannot express the concept for a given engine surface, or a table that genuinely declares none, both emit no `physical_layout` block - the two are indistinguishable from the artifact alone, which is the same absence-has-one-meaning discipline §2.2.10 applies to `null_patterns`. A producer whose read failed says so through the file's own `unmeasured` list (§2.2.1) instead, which is the one absence here that is not this claim.
+**Absence means not clustered, never not checked.** Every producer MUST answer whether a table declares a physical layout key. An adapter that cannot express the concept for a given engine surface, or a table that genuinely declares none, both emit no `physical_layout` block — the two are indistinguishable from the artifact alone, which is the same absence-has-one-meaning discipline §2.2.10 applies to `null_patterns`. A producer whose read failed says so through the file's own `unmeasured` list (§2.2.1) instead, which is the one absence here that is not this claim.
 
-**`physical_layout_key`** (bool, OPTIONAL, per column): `true` on every column named as a `column` in the table's own `physical_layout.keys`, omitted otherwise. A declared catalog fact, not a detection, so it sits beside `physical_name` rather than under `inferred`. Carries no order - a consumer wanting the pruning priority reads `physical_layout.keys` at the table level; this marker exists so the fact is visible where a reader is already looking, in the per-column statistics.
+**`physical_layout_key`** (bool, OPTIONAL, per column): `true` on every column named as a `column` in the table's own `physical_layout.keys`, omitted otherwise. A declared catalog fact, not a detection, so it sits beside `physical_name` rather than under `inferred`. Carries no order — a consumer wanting the pruning priority reads `physical_layout.keys` at the table level; this marker exists so the fact is visible where a reader is already looking, in the per-column statistics.
 
 #### 2.2.12 `grain` — what identifies a row
 
-`inferred.candidate_key` (§4.2) is single-column by construction. A table whose rows are identified by more than one column - `(vault_id, logged_at)`, `(taxon_id, trial_year)` - has no field to say so, and a consumer is left re-deriving the grain from a `GROUP BY` or, worse, assuming a column that merely looks like a key is one.
+`inferred.candidate_key` (§4.2) is single-column by construction. A table whose rows are identified by more than one column — `(vault_id, logged_at)`, `(taxon_id, trial_year)` — has no field to say so, and a consumer is left re-deriving the grain from a `GROUP BY` or, worse, assuming a column that merely looks like a key is one.
 
 ```yaml
 grain:
@@ -932,21 +947,21 @@ grain:
     exhausted: <bool>                  # ALWAYS once `search` is present
 ```
 
-**A conforming producer always emits the block.** Declared-key introspection is catalog metadata and costs nothing, so a producer MUST include `grain` on every table it emits, with `keys` an empty array rather than the block omitted when nothing declared and nothing measured applies - the block itself is the answer "nothing identifies a row here", not its absence.
+**A conforming producer always emits the block.** Declared-key introspection is catalog metadata and costs nothing, so a producer MUST include `grain` on every table it emits, with `keys` an empty array rather than the block omitted when nothing declared and nothing measured applies — the block itself is the answer "nothing identifies a row here", not its absence.
 
-**Every declared unique key is emitted, at every arity, in declaration order.** A table declaring a single-column PRIMARY KEY still gets a `grain` entry for it, even though `inferred.candidate_key` says the same thing on that column: the two are independent axes - one declared, one measured - and a consumer reading only `grain` gets the full answer without cross-checking `inferred` on every column.
+**Every declared unique key is emitted, at every arity, in declaration order.** A table declaring a single-column PRIMARY KEY still gets a `grain` entry for it, even though `inferred.candidate_key` says the same thing on that column: the two are independent axes — one declared, one measured — and a consumer reading only `grain` gets the full answer without cross-checking `inferred` on every column.
 
 **A `measured` entry is a probe result, never a constraint.** It states that the named columns were jointly unique over the rows read at `profiled_at`, on the same footing §2.2.10 gives a null pattern and §2.3.8 gives an inferred foreign key: an observation, not a guarantee the database enforces. A producer and a consumer MUST NOT call it a key.
 
-**The measured search is bounded, column-pairs only, and arithmetic-pruned before any statement is issued.** A producer MAY search for an undeclared two-column grain among columns carrying no null (`COUNT(DISTINCT a, b)` diverges on nulls across dialects, so the candidate space excludes them rather than special-case each one), restricted to pairs where `cardinality(a) * cardinality(b) >= row_count` - necessary, not sufficient, and free to compute from fields already on disk. A producer MUST cap how many candidate pairs it actually tests; a three-or-more-column grain is out of reach.
+**The measured search is bounded, column-pairs only, and arithmetic-pruned before any statement is issued.** A producer MAY search for an undeclared two-column grain among columns carrying no null (`COUNT(DISTINCT a, b)` diverges on nulls across dialects, so the candidate space excludes them rather than special-case each one), restricted to pairs where `cardinality(a) * cardinality(b) >= row_count` — necessary, not sufficient, and free to compute from fields already on disk. A producer MUST cap how many candidate pairs it actually tests; a three-or-more-column grain is out of reach.
 
-**`search.exhausted` distinguishes "nothing found" from "the search gave up".** `true` when the search tested every arithmetic-pruned candidate; `false` when a per-table cap cut the search short before it could. Both are measurements, and neither is the same bytes as `search` being absent entirely, which means the measured search never ran at all - because the file carries `scope`, `row_count` or `rows_scanned` is `0`, or some column already carries `inferred.candidate_key` with no `inferred.candidate_key_exception` (SPEC 4.2) and a pair search would answer a question that column's own exact measurement already settled. A column whose `candidate_key` carries an exception is a near-uniqueness ratio, not the answer a pair search gives, and suppresses nothing. A consumer reading an empty `keys` list MUST check `search` before concluding no grain exists: absent means nobody looked, `exhausted: false` means the look was incomplete, and only `exhausted: true` means the search itself found nothing.
+**`search.exhausted` distinguishes "nothing found" from "the search stopped early".** `true` when the search tested every arithmetic-pruned candidate; `false` when a per-table cap cut the search short before it could. Both are measurements, and neither is the same bytes as `search` being absent entirely, which means the measured search never ran at all — because the file carries `scope`, `row_count` or `rows_scanned` is `0`, or some column already carries `inferred.candidate_key` with no `inferred.candidate_key_exception` (SPEC 4.2) and a pair search would answer a question that column's own exact measurement already settled. A column whose `candidate_key` carries an exception is a near-uniqueness ratio, not the answer a pair search gives, and suppresses nothing. A consumer reading an empty `keys` list MUST check `search` before concluding no grain exists: absent means the search did not run, `exhausted: false` means it stopped before testing every candidate, and only `exhausted: true` means the search itself found nothing.
 
-**Never emitted under `scope`, and never on an empty table.** Uniqueness measured over a sample is not uniqueness (§2.2.8) and every combination is trivially unique on a table with no rows - a `measured` entry MUST NOT appear in either case, though `declared` entries are unaffected: they are a schema fact, not a measurement, and hold regardless of how much of the table was read.
+**Never emitted under `scope`, and never on an empty table.** Uniqueness measured over a sample is not uniqueness (§2.2.8) and every combination is trivially unique on a table with no rows — a `measured` entry MUST NOT appear in either case, though `declared` entries are unaffected: they are a schema fact, not a measurement, and hold regardless of how much of the table was read.
 
 §7.3 covers an absent block and §7.4 an empty `keys` list.
 
-**No per-column marker.** Unlike `physical_layout_key`, membership in a `grain` key is not restated on the column - `inferred.candidate_key` already carries the single-column case, and a multi-column one has no single column to mark without implying an ordering or a weight the combination does not have.
+**No per-column marker.** Unlike `physical_layout_key`, membership in a `grain` key is not restated on the column — `inferred.candidate_key` already carries the single-column case, and a multi-column one has no single column to mark without implying an ordering or a weight the combination does not have.
 
 #### 2.2.13 `dependencies` — which columns determine which
 
@@ -959,15 +974,15 @@ dependencies:                        # ALWAYS; may be empty
     strength: <float (0, 1]>         # ALWAYS
 ```
 
-**A conforming producer always emits the block**, `[]` for nothing found - the same "answered, not skipped" convention §2.2.12 sets for `grain`. The one exception is a run whose probe failed: it MUST omit the block and name it in the file's own `unmeasured` list (§2.2.1), since `[]` would state that nothing determines anything.
+**A conforming producer always emits the block**, `[]` for nothing found — the same "measured, not skipped" convention §2.2.12 sets for `grain`. The one exception is a run whose probe failed: it MUST omit the block and name it in the file's own `unmeasured` list (§2.2.1), since `[]` would state that nothing determines anything.
 
-**`strength` is `cardinality(determinant) / cardinality(determinant, dependent)`.** `1.0` when every determinant value pairs with exactly one dependent value (the exact case); each additional distinct pairing under one determinant value lowers it. Both operands are cardinalities already published elsewhere in this file, computed under the same collation (§2.2.2). This is a group-level measure - how many distinct pairings exist - not a row-weighted share of consistent rows; a table where one determinant value carries a thousand exceptions and one where it carries a single exception can report the same strength if the count of distinct wrong pairings matches.
+**`strength` is `cardinality(determinant) / cardinality(determinant, dependent)`.** `1.0` when every determinant value pairs with exactly one dependent value (the exact case); each additional distinct pairing under one determinant value lowers it. Both operands are cardinalities already published elsewhere in this file, computed under the same collation (§2.2.2). This is a group-level measure — how many distinct pairings exist — not a row-weighted share of consistent rows; a table where one determinant value carries a thousand exceptions and one where it carries a single exception can report the same strength if the count of distinct wrong pairings matches.
 
-**Only a pair clearing the 95% confidence bar §4.1.3 already sets is worth publishing.** A producer MUST NOT emit an entry below that threshold - two independent columns with any cardinality asymmetry between them will still show some fraction less than the threshold, and publishing every candidate a producer measured would flood the block with noise a consumer cannot act on.
+**Only a pair clearing the 95% confidence bar §4.1.3 already sets is worth publishing.** A producer MUST NOT emit an entry below that threshold — two independent columns with any cardinality asymmetry between them will still show some fraction less than the threshold, and publishing every candidate a producer measured would flood the block with noise a consumer cannot act on.
 
 **A determination is a measurement, not a constraint.** It states that the named columns paired this way over the rows read at `profiled_at`, on the same footing §2.2.10 gives a null pattern and §2.3.8 gives an inferred foreign key. A producer and a consumer MUST NOT call it a rule the database enforces.
 
-**Never emitted under `scope`, and never on an empty table.** A dependency measured over a sample is not a dependency (§2.2.8), and every combination is trivially functional on a table with no rows - `dependencies` MUST be empty in both cases. A consumer checking whether the search ran at all reads `scope` and `row_count`, the same signals §2.2.12 points a `grain` reader to, plus the file's own `unmeasured` list (§2.2.1) for the run whose probe failed outright.
+**Never emitted under `scope`, and never on an empty table.** A dependency measured over a sample is not a dependency (§2.2.8), and every combination is trivially functional on a table with no rows — `dependencies` MUST be empty in both cases. A consumer checking whether the search ran at all reads `scope` and `row_count`, the same signals §2.2.12 points a `grain` reader to, plus the file's own `unmeasured` list (§2.2.1) for the run whose probe failed outright.
 
 **Direction is not interchangeable.** `determinant` names the column whose value fixes the other; a pair may hold in one direction, both (a mutual dependency, published as two entries), or neither. Producers MUST NOT publish a pair in the direction cardinality rules out: `cardinality(determinant) >= cardinality(dependent)` is necessary for the direction to be possible at all, since a function's image has no more distinct values than its domain.
 
@@ -993,9 +1008,9 @@ sketch:
 |---|---|---|
 | integer | `smallint`, `integer`, `bigint`, `int`, `tinyint`, `mediumint` (any dialect spelling) | Decimal string, no leading zeros, ASCII `-` for negative, no `+` for positive (`42`, `-7`, `0`) |
 | exact decimal | `decimal`, `numeric`, `number` | SPEC §2.2.6's positional-decimal rendering, scale-preserving (trailing zeros within the column's own scale are kept: a `numeric(10,2)` value of `4` renders `4.00`) |
-| text | `varchar`, `text`, `char`, `character varying`, `character`, `string`, `uuid`, `fixedstring` | Raw UTF-8 bytes, unmodified. A native `uuid` column is cast to text first, which every supported adapter renders in lowercase dashed form (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) by default — the same form §4.1.1's `uuid` pattern matches — so no separate UUID rule exists. Inherits §2.2.2's collation dependence: two engines that disagree on a text column's distinct set (a case- or accent-sensitivity difference) produce different sketches for it whatever this encoding does; the format does not resolve that, only states it |
+| text | `varchar`, `text`, `char`, `character varying`, `character`, `string`, `uuid`, `fixedstring`, `tinytext`, `mediumtext`, `longtext` | Raw UTF-8 bytes, unmodified. A native `uuid` column is cast to text first, which every supported adapter renders in lowercase dashed form (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) by default — the same form §4.1.1's `uuid` pattern matches — so no separate UUID rule exists. Inherits §2.2.2's collation dependence: two engines that disagree on a text column's distinct set (a case- or accent-sensitivity difference) produce different sketches for it whatever this encoding does; the format does not resolve that, only states it |
 | boolean | `boolean`, `bool` | ASCII `true` or `false` |
-| temporal | `date`, `date32`, `time`, `timestamp`, `timestamp with time zone`, `timestamp without time zone`, `time with time zone`, `time without time zone`, `timestamp_ntz`, `timestamp_ltz`, `timestamp_tz`, `datetime`, `datetime64`, `year` | ISO 8601: `YYYY-MM-DD` for a date-only value; `YYYY-MM-DDTHH:MM:SS[.ffffff]` for a value with no timezone concept (nothing to normalize, so nothing to mark); `YYYY-MM-DDTHH:MM:SS[.ffffff]Z` for a timezone-aware value, normalized to UTC first. This binds every adapter the same way regardless of that adapter's own `range.min`/`range.max` rendering - §2.2.4 permits one adapter to omit `Z` there even on a timezone-aware type (a display choice), but the sketch cannot: two adapters hashing the same instant to different bytes breaks cross-adapter agreement |
+| temporal | `date`, `date32`, `time`, `timestamp`, `timestamp with time zone`, `timestamp without time zone`, `time with time zone`, `time without time zone`, `timestamp_ntz`, `timestamp_ltz`, `timestamp_tz`, `timestamp_ns`, `timestamp_ms`, `timestamp_s`, `datetime`, `datetime64`, `year` | ISO 8601: `YYYY-MM-DD` for a date-only value; `YYYY-MM-DDTHH:MM:SS[.ffffff]` for a value with no timezone concept (nothing to normalize, so nothing to mark); `YYYY-MM-DDTHH:MM:SS[.ffffff]Z` for a timezone-aware value, normalized to UTC first; `HH:MM:SS[.ffffff]` for a time of day, never a fabricated date, and the same normalized to UTC with a trailing `Z` for `time with time zone`; `YYYY` for a `year`. The fraction is all six digits or none. This binds every adapter the same way regardless of that adapter's own `range.min`/`range.max` rendering - §2.2.4 permits one adapter to omit `Z` there even on a timezone-aware type (a display choice), but the sketch cannot: two adapters hashing the same instant to different bytes breaks cross-adapter agreement |
 
 A floating-point type (`real`, `double precision`, `double`, `float`, `money`) has no canonical encoding and MUST NOT carry a sketch — equality-based set membership on a floating-point value is not stable across engines, and a join key of this type is not a case this field is built for. A type outside every row above — `json`/`jsonb`/`variant` and unsupported types among them — also has no canonical encoding and MUST NOT carry a sketch.
 
@@ -1009,6 +1024,7 @@ A floating-point type (`real`, `double precision`, `double`, `float`, `money`) h
 | text | `hello` | `13362634815750784402` |
 | boolean | `true` | `317521853213362953` |
 | temporal | `2026-05-17T22:48:01Z` | `11467405332662396900` |
+| temporal (time of day) | `00:00:37` | `10604805012337869669` |
 
 **Which columns carry one.** A producer MUST emit `sketch` on every column, in a table read unscoped, whose SQL type falls in the table above, is not redacted (see below), and that meets at least one of:
 
@@ -1029,7 +1045,7 @@ Composite keys sketch per member column — there is no joint sketch for a multi
 
 **Membership is answerable per sketch, not per field.** A sketch whose decoded `values` length is below `k` is exhaustive, so hashing a candidate value's canonical bytes and testing it against the retained set answers membership exactly — absence is proof, presence is certain up to a 64-bit collision. A decoded length of `k` or more is truncated, the same test the encoding rule above already draws that line with, and membership for a value the sketch does not itself hold is not answerable at all: only a value whose hash falls below the retained threshold is checkable from the sketch. A consumer wanting to test a value against a truncated sketch needs a Bloom filter, which this field is not. The candidate value is canonicalized per this section's encoding and matched on the same collation terms §2.2.2 gives the column — a case- or accent-folded miss reads as a real absence, not evidence either way. Membership is as of `profiled_at`, the same staleness every other statistic in this file carries; it is not a live check against the column.
 
-**Not a privacy leak on its own terms, but not nothing either.** §4.4's sensitivity detection and its redaction requirement above are the boundary; nothing else in this section changes what §4.4 already requires.
+**A sketch is not a privacy leak by itself, and it still discloses something:** a value's presence in an exhaustive sketch is testable, as above. §4.4's sensitivity detection and its redaction requirement above are the boundary; nothing else in this section changes what §4.4 already requires.
 
 #### 2.2.15 `catalog_only` — no query was issued
 
@@ -1041,15 +1057,15 @@ catalog_only: true       # OPTIONAL; present and true only when no query was iss
 
 **Presence states the fact; there is no false value.** Like `scope` (§2.2.8), the field exists to be present or absent, not to hold a boolean either way — a producer MUST NOT emit `catalog_only: false`. Absence is the ordinary case: a query was issued, exactly as every other field in this section already assumes.
 
-**Licenses the absence of `row_count` and `row_count_method`.** Both are REQUIRED unless `catalog_only` is present, in which case a producer MUST NOT emit either (§2.2.1) — an object nothing was queried for has no count to report, exact or estimated.
+**Permits the absence of `row_count` and `row_count_method`.** Both are REQUIRED unless `catalog_only` is present, in which case a producer MUST NOT emit either (§2.2.1) — an object nothing was queried for has no count to report, exact or estimated.
 
-**Also licenses the absence of `physical_layout` and `dependencies`.** Both are otherwise MUST-emit fields (§2.2.11, §2.2.13). `dependencies` requires a query to measure and MUST NOT be emitted under the marker, the same rule `row_count` follows. `physical_layout` is a declared schema fact rather than a measurement, so a producer MAY still emit it here from catalog metadata alone (§2.2.15's per-column allowance already treats `physical_layout_key` the same way) — only its absence needs the licence, never its presence.
+**Also permits the absence of `physical_layout` and `dependencies`.** Both are otherwise MUST-emit fields (§2.2.11, §2.2.13). `dependencies` requires a query to measure and MUST NOT be emitted under the marker, the same rule `row_count` follows. `physical_layout` is a declared schema fact rather than a measurement, so a producer MAY still emit it here from catalog metadata alone (§2.2.15's per-column allowance already treats `physical_layout_key` the same way) — only its absence needs the marker, never its presence.
 
-**`depends_on` is the opposite case: this is exactly where it is expected, not merely tolerated.** A plain `view` always carries `catalog_only`, and `depends_on` is catalog-derived on the same footing as `physical_layout` - never a query result, so `catalog_only` licenses nothing about it that the field's own §2.2.17 rule does not already state on its own terms. A `matview` file, which never carries `catalog_only`, follows the same §2.2.17 rule unmodified.
+**`depends_on` is the opposite case: this is exactly where it is expected, not merely tolerated.** A plain `view` always carries `catalog_only`, and `depends_on` is catalog-derived on the same footing as `physical_layout` — never a query result, so `catalog_only` permits nothing about it that the field's own §2.2.17 rule does not already state on its own terms. A `matview` file, which never carries `catalog_only`, follows the same §2.2.17 rule unmodified.
 
-**A column carries only what its catalog already knew.** `sql_type`, `nullable`, `classification`, `physical_name`, `collation` and `physical_layout_key` — schema and DDL facts, not measurements — are the only fields a column may carry while the file's `catalog_only` is present. Every other per-column field states something read from the object's rows; a producer MUST NOT emit any of them under the marker, `classification` itself still following the ordinary §3.2 priority order on every input available without a query — `sql_type` and a foreign key, declared or naming-inferred, both catalog-derived (§3.3).
+**A column carries only catalog facts.** `sql_type`, `nullable`, `classification`, `physical_name`, `collation` and `physical_layout_key` — schema and DDL facts, not measurements — are the only fields a column may carry while the file's `catalog_only` is present. Every other per-column field states something read from the object's rows; a producer MUST NOT emit any of them under the marker, `classification` itself still following the ordinary §3.2 priority order on every input available without a query — `sql_type` and a foreign key, declared or naming-inferred, both catalog-derived (§3.3).
 
-**Not a redaction and not a failure.** `catalog_only` states that no query was issued, never that one was attempted and came back withheld or errored — a masked value and an unattempted one are different gaps, and this marker closes only the second.
+**Not a redaction and not a failure.** `catalog_only` states that no query was issued, never that one was attempted and came back withheld or errored — a masked value and an unattempted one are different gaps, and this marker covers only the second.
 
 #### 2.2.16 `timeline` — one column's activity over time
 
@@ -1081,6 +1097,8 @@ A TIME-only or YEAR-only column never qualifies at either step, however low its 
 
 **`coverage` is the listed counts over `rows_scanned`**, the same scanned-set-relative convention `values_coverage` (§2.2.4) and `null_patterns.coverage` (§2.2.10) use. It reaches `1.0` only when every non-null anchor value landed in a listed bucket; a null anchor value counts toward `rows_scanned` but no bucket, which is the one way `coverage` falls short of `1.0` here.
 
+**The share is bounded, and `1.0` means exhaustive rather than merely rounding to it.** The bucket counts and `rows_scanned` are read by separate statements, so a table taking writes between them can leave the counts summing above the rows they are divided by. A producer MUST NOT publish a ratio above `1.0`: it emits the largest value below it that this precision can carry, exactly as §2.2.4 requires of a truncated `values_coverage`, and reserves `1.0` for a bucket total that genuinely equals `rows_scanned`. A validator recomputes `coverage` through that same bounded share, deriving exhaustiveness from the two counts rather than from the published field — so a `1.0` over a partial sum is still rejected — and reports the overrun itself as `stats.timeline-buckets-exceed-rows-scanned`, a warning, on the terms `stats.values-sum-mismatch` (§2.2.4) sets for the same disagreement — unconditionally, since `timeline` carries no `coverage_method` with which a producer could disclose it.
+
 **Never emitted under `scope`, and never on an empty table.** A bucketed count over a sample is not a timeline (§2.2.8), and there is nothing to bucket on a table with no rows — `timeline` MUST be absent in both cases, the same rule §2.2.12 and §2.2.13 already state for `grain` and `dependencies`.
 
 **No new privacy surface.** A bucket count discloses volume over time, never a literal value from the anchor column itself beyond its own rounded `start`; §4.4's markers neither apply to it nor alter it, the same terms §2.2.10 sets for a null pattern.
@@ -1089,26 +1107,26 @@ A TIME-only or YEAR-only column never qualifies at either step, however low its 
 
 #### 2.2.17 `depends_on` — what a view reads
 
-A warehouse built with a transformation tool routinely has more views than tables underneath them, and the layer an analyst queries is the interface, not the substrate `ddl.sql` alone describes. Which other objects a view or matview reads is already captured DDL text - `depends_on` publishes it as data instead, the same move §2.2.11 makes for a clustering key buried in `CREATE TABLE` syntax.
+A warehouse built with a transformation tool routinely has more views than tables underneath them, and the layer an analyst queries is the interface, not the substrate `ddl.sql` alone describes. Which other objects a view or matview reads is already captured DDL text — `depends_on` publishes it as data instead, the same move §2.2.11 makes for a clustering key buried in `CREATE TABLE` syntax.
 
 ```yaml
 depends_on:
   - <fully-qualified name>
 ```
 
-**Every `view`/`matview` carries the key, or explains why it does not.** The list comes from the catalog exclusively - `pg_depend`/`pg_rewrite` on PostgreSQL, `information_schema.VIEW_TABLE_USAGE` on MySQL 8, `ACCOUNT_USAGE.OBJECT_DEPENDENCIES` on Snowflake - never from parsing `ddl.sql`. A dependency list that is sometimes exact and sometimes a guess, with nothing in the artifact saying which, is the same encoding defect §2.3.8's naming-inference rule exists to avoid on `relationships.yaml`. A `table` MUST NOT carry this field under any circumstance; it names what a view reads, and a base table reads nothing.
+**Every `view`/`matview` carries the key, or explains why it does not.** The list comes from the catalog exclusively — `pg_depend`/`pg_rewrite` on PostgreSQL, `information_schema.VIEW_TABLE_USAGE` on MySQL 8, `ACCOUNT_USAGE.OBJECT_DEPENDENCIES` on Snowflake — never from parsing `ddl.sql`. A dependency list that is sometimes exact and sometimes a guess, with nothing in the artifact saying which, is the same encoding defect §2.3.8's naming-inference rule exists to avoid on `relationships.yaml`. A `table` MUST NOT carry this field under any circumstance; it names what a view reads, and a base table reads nothing.
 
-**Two encodings, so absence keeps one meaning.** `depends_on: []` states that the catalog answered and this object reads no other object in the print. The key **omitted entirely** states that the producer could not ask - no grant to the catalog table, no such catalog table on this engine version, or the read failed for any other reason. A producer MUST NOT collapse the two: emitting `[]` for an object the catalog never answered for spends the empty list's one meaning on every engine to cover one engine's gap.
+**Two encodings, so absence keeps one meaning.** `depends_on: []` states that the catalog was read and this object reads no other object in the print. The key **omitted entirely** states that the dependency read did not happen — no grant to the catalog table, no such catalog table on this engine version, or the read failed for any other reason. A producer MUST NOT collapse the two: emitting `[]` for an object whose catalog was never read would give `[]` two meanings on every engine to cover one engine's gap.
 
-**Direct dependencies only.** A view over a view names that view, never the view's own upstream sources - the same one-hop rule regardless of how many views a chain of `CREATE VIEW ... AS SELECT * FROM other_view` stacks. A consumer wanting the transitive set walks the graph itself, one `depends_on` list at a time; publishing both the direct and the transitive set under one name would be two different facts wearing one field.
+**Direct dependencies only.** A view over a view names that view, never the view's own upstream sources — the same one-hop rule regardless of how many views a chain of `CREATE VIEW ... AS SELECT * FROM other_view` stacks. A consumer wanting the transitive set walks the graph itself, one `depends_on` list at a time; publishing both the direct and the transitive set under one name would store two different facts under one field.
 
-**An out-of-scope dependency is named by its FQN like any other.** A view reading a table the connection's selectors exclude from the print still lists that table's fully-qualified name - the same footing §2.3.7's `External FK target` row already gives a `refers_to` entry whose `target_table` is not itself in the print. A consumer checks the manifest for whether the name resolves locally; its absence there means external, not that `depends_on` was wrong to list it.
+**An out-of-scope dependency is named by its FQN like any other.** A view reading a table the connection's selectors exclude from the print still lists that table's fully-qualified name — the same footing §2.3.7's `External FK target` row already gives a `refers_to` entry whose `target_table` is not itself in the print. A consumer checks the manifest for whether the name resolves locally; its absence there means external, not that `depends_on` was wrong to list it.
 
-**Object grain, not row grain - never confused with a foreign key.** `relationships.yaml` models a relation between rows at column grain; `depends_on` states that one object's definition reads another object at all, with no column, no cardinality, and no join implied. §2.3.5 states this explicitly as a pointer from the other direction.
+**Object grain, not row grain — never confused with a foreign key.** `relationships.yaml` models a relation between rows at column grain; `depends_on` states that one object's definition reads another object at all, with no column, no cardinality, and no join implied. §2.3.5 states this explicitly as a pointer from the other direction.
 
-**Catalog latency is a source's own limitation, not this field's.** Snowflake's `ACCOUNT_USAGE.OBJECT_DEPENDENCIES` lags up to three hours behind a freshly created view, which can return no rows for an object the catalog has not yet indexed and so publish `depends_on: []` where the true answer is non-empty. That is a stated limitation of the source, not a defect this field's own encoding needs a third state for - the two-encoding rule above stands regardless of which source answered it or how fresh that source's own answer is.
+**Catalog latency is a source's own limitation, not this field's.** Snowflake's `ACCOUNT_USAGE.OBJECT_DEPENDENCIES` lags up to three hours behind a freshly created view, which can return no rows for an object the catalog has not yet indexed and so publish `depends_on: []` where the true answer is non-empty. That is a stated limitation of the source, not a defect this field's own encoding needs a third state for — the two-encoding rule above stands regardless of which source was read or how current its data is.
 
-**A dependency the catalog cannot fully resolve is reported as the source gives it, never as a guessed name.** A broken or dropped dependency inside a view's definition is an edge case a catalog read may not resolve cleanly; a producer publishes whatever the source reports rather than inferring a name from context, and the entry's absence for one unresolvable object is not a claim that the view reads nothing - the same object-grain "could not ask" state above, applied to one dependency inside an otherwise-answered list.
+**A dependency the catalog cannot fully resolve is reported as the source gives it, never as a guessed name.** A broken or dropped dependency inside a view's definition is an edge case a catalog read may not resolve cleanly; a producer publishes whatever the source reports rather than inferring a name from context, and the entry's absence for one unresolvable object is not a claim that the view reads nothing — the same object-grain "dependency read did not happen" state above, applied to one dependency inside an otherwise complete list.
 
 §7.3 covers an absent block, §7.4 an empty `depends_on` list.
 
@@ -1118,9 +1136,9 @@ Two-section relationship graph: `refers_to` (outgoing FKs from this table) and `
 
 Inference exists because a warehouse routinely declares none — Snowflake does not enforce foreign keys and plenty of analytics schemas skip them — so a print of one would otherwise carry an empty graph. An inferred edge is a producer's claim about the schema, not a constraint the database will honour, and a consumer MUST NOT treat it as one.
 
-**What an inferred edge licenses.** A consumer MAY use it as a join candidate when writing a query — naming, declared-uniqueness and type evidence together are the best signal available in a schema that declares nothing — but MUST NOT treat the join as cardinality-guaranteed the way a declared FK is, and SHOULD prefer a declared edge over an inferred one wherever both describe the same relationship. This is the normative floor for a graph where every edge is inferred, which §2.3.8's eligibility rule makes common: a warehouse-wide absence of declared keys leaves nothing for a consumer to prefer, and the inferred graph is what there is to query against. A human MAY reject a specific inferred edge, readable from this table's own directory — see `relationships.annotations.yaml` (§2.7.2).
+**What an inferred edge permits.** A consumer MAY use it as a join candidate when writing a query — naming, declared-uniqueness and type evidence together are the best signal available in a schema that declares nothing — but MUST NOT treat the join as cardinality-guaranteed the way a declared FK is, and SHOULD prefer a declared edge over an inferred one wherever both describe the same relationship. This is the normative floor for a graph where every edge is inferred, which §2.3.8's eligibility rule makes common: a warehouse-wide absence of declared keys leaves nothing for a consumer to prefer, and the inferred graph is what there is to query against. A human MAY reject a specific inferred edge, readable from this table's own directory — see `relationships.annotations.yaml` (§2.7.2).
 
-**What a measured edge licenses, and what it does not.** A measured edge is stronger evidence than a name — it states that the referencing column's values were contained in the referenced column's values at `profiled_at`, over the sketches' answerable range, within §2.2.14's own margin — and a consumer MAY use it as a join candidate on the same footing an inferred edge already has: not cardinality-guaranteed, and a declared or inferred edge describing the same relationship SHOULD be preferred where one exists. It is not a stronger CLAIM about the schema than an inferred edge is; it is a stronger claim about the DATA at the instant of the read. §2.3.11 states the floors that must hold before a producer publishes one.
+**What a measured edge permits, and what it does not.** A measured edge is stronger evidence than a name — it states that the referencing column's values were contained in the referenced column's values at `profiled_at`, over the sketches' answerable range, within §2.2.14's own margin — and a consumer MAY use it as a join candidate on the same footing an inferred edge already has: not cardinality-guaranteed, and a declared or inferred edge describing the same relationship SHOULD be preferred where one exists. It is not a stronger CLAIM about the schema than an inferred edge is; it is a stronger claim about the DATA at the instant of the read. §2.3.11 states the floors that must hold before a producer publishes one.
 
 The reference JSON Schema SHALL be at `spec/v1/relationships.schema.json`.
 
@@ -1142,7 +1160,7 @@ The reference JSON Schema SHALL be at `spec/v1/relationships.schema.json`.
 | `column` | array of string | R | This table's column(s) participating in the FK; always array (length 1 for single-column FKs) |
 | `target_table` | string | R | FQN of the referenced table |
 | `target_column` | array of string | R | Referenced column(s); same length as `column` |
-| `on_delete` | enum | R (declared only) | `NO ACTION` \| `CASCADE` \| `SET NULL` \| `SET DEFAULT` \| `RESTRICT`. A guessed edge - inferred or measured - declared nothing to report here — see §2.3.8, §2.3.11 |
+| `on_delete` | enum | R (declared only) | `NO ACTION` \| `CASCADE` \| `SET NULL` \| `SET DEFAULT` \| `RESTRICT`. A guessed edge — inferred or measured — declared nothing to report here — see §2.3.8, §2.3.11 |
 | `on_update` | enum | R (declared only) | same enum |
 | `detection` | enum | R | `declared` — read from the catalog \| `inferred` — derived from column naming, see §2.3.8 \| `measured` — derived from value containment, see §2.3.11 |
 | `constraint_name` | string | O | Adapter-native; preserved in adapter case (Snowflake UPPERCASE typical, Postgres lowercase typical, MySQL adapter-dependent) |
@@ -1150,7 +1168,7 @@ The reference JSON Schema SHALL be at `spec/v1/relationships.schema.json`.
 
 #### 2.3.3 `referenced_by` entry schema (incoming FK: other → this)
 
-Mirror of `refers_to` with reversed perspective:
+Mirror of `refers_to` with reversed perspective. The two entries of one edge are addressed by referencer table, referencing columns, referenced table and referenced columns, each spelled from its own side. Every other field both entry schemas define (`detection`, `on_delete`, `on_update`, `constraint_name`, `observed`) MUST carry the same value on both sides, and a field absent on one side MUST be absent on the other. `path`/`target_path` are `refers_to`-only (§2.3.9) and are not mirrored.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
@@ -1182,7 +1200,7 @@ The following Postgres-specific FK attributes are NOT captured:
 
 Producers MUST NOT emit fields for these; they don't affect AI SQL-writing utility at this maturity level and are reserved for potential future additions.
 
-**A view's `depends_on` is a different relation, not a fourth omission here.** `statistics.yaml`'s `depends_on` (§2.2.17) states that one object's definition reads another object at all - object grain, no column, no cardinality, no join. `relationships.yaml` models foreign keys - row grain, between two named columns. Neither file's schema restates the other's fact, and a producer MUST NOT infer a `refers_to`/`referenced_by` entry from a `depends_on` entry or vice versa.
+**A view's `depends_on` is a different relation, not a fourth omission here.** `statistics.yaml`'s `depends_on` (§2.2.17) states that one object's definition reads another object at all — object grain, no column, no cardinality, no join. `relationships.yaml` models foreign keys — row grain, between two named columns. Neither file's schema restates the other's fact, and a producer MUST NOT infer a `refers_to`/`referenced_by` entry from a `depends_on` entry or vice versa.
 
 #### 2.3.6 Scope limits of `referenced_by`
 
@@ -1191,6 +1209,8 @@ Producers MUST NOT emit fields for these; they don't affect AI SQL-writing utili
 If a table outside the include selectors references this table, that incoming FK is NOT captured in `referenced_by`. Consumers SHOULD be aware of this limit when reasoning about a table's full incoming FK graph.
 
 §7.3 records this as an absence with no marker of its own; the manifest's `selectors` (§2.5) is what names the objects left out.
+
+Within the print, a `refers_to` entry whose `target_table` is in the manifest and declares a `relationships.yaml` MUST have its mirror in that file's `referenced_by`. A target outside the manifest is external (§2.3.7) and has none.
 
 #### 2.3.7 Edge cases
 
@@ -1213,7 +1233,7 @@ A producer MAY infer a foreign key that the catalog does not declare, and MUST m
 
 Inference is permitted only on evidence the producer can state. A conforming producer MUST require all of:
 
-- the column is named `<name>_id`, where `<name>` **or its regular plural** is the object name of an **eligible base table in the print's scope**, matched against the real table list. **Eligible** means the object can supply the declared-unique column the next bullet's selection rule requires. A view and a materialized view never can, and neither can a base table that declares no single-column PRIMARY KEY and no sole single-column UNIQUE constraint — the type check and the key check are the same test, checked two ways. A producer MUST NOT resolve a stem to an ineligible object. The exclusion is total rather than a preference — an ineligible object MUST NOT consume a name that an eligible one would otherwise answer to, nor make a stem ambiguous that would otherwise resolve. **Creating a view or a materialized view MUST NOT change any table's inferred edges**, since neither is ever eligible; a base table's own declared keys are a schema statement, and a change to them MAY retarget an edge that resolves outside its namespace, since an inference rule built on declared keys is meant to follow what they say. The exact stem is tried first, so a schema holding both `person` and `persons` resolves `person_id` to the one the column names. Only the mechanical English plural forms are permitted (`+s`, `+es` after a sibilant, `y` to `ies`); a producer MUST NOT stem, singularize, or consult a dictionary of irregulars, so `person_id` does not reach `people`;
+- the column is named `<name>_id`, where `<name>` **or its regular plural** is the object name of an **eligible base table in the print's scope**, matched against the real table list. **Eligible** means the object can supply the declared-unique column the next bullet's selection rule requires. A view and a materialized view never can, and neither can a base table that declares no single-column PRIMARY KEY and no sole single-column UNIQUE constraint — the type check and the key check are the same test, checked two ways. A producer MUST NOT resolve a stem to an ineligible object. The exclusion is total rather than a preference — an ineligible object MUST NOT take a name that would otherwise resolve to an eligible one, nor make a stem ambiguous that would otherwise resolve. **Creating a view or a materialized view MUST NOT change any table's inferred edges**, since neither is ever eligible; a base table's own declared keys are a schema statement, and a change to them MAY retarget an edge that resolves outside its namespace, since an inference rule built on declared keys is meant to follow what they say. The exact stem is tried first, so a schema holding both `person` and `persons` resolves `person_id` to the one the column names. Only the mechanical English plural forms are permitted (`+s`, `+es` after a sibilant, `y` to `ies`); a producer MUST NOT stem, singularize, or consult a dictionary of irregulars, so `person_id` does not reach `people`;
 - the candidate target column is **declared unique** on that table, by PRIMARY KEY or UNIQUE constraint. Measured uniqueness MUST NOT be substituted: it is a property of the data at one moment, and using it would make the same schema infer differently depending on when it was profiled;
 - the two column types are compatible;
 - no declared foreign key already covers the column.
@@ -1271,12 +1291,7 @@ Ordinary column-to-column edges are unaffected: `path` and `target_path` are abs
 
 #### 2.3.10 `observed` (per-edge measured cost)
 
-A `refers_to` or `referenced_by` entry MAY carry `observed`: what joining across this edge costs,
-computed from the two endpoints' own `statistics.yaml` — no additional query. The referencing
-("child") side always supplies the fanout numerator and the referenced ("parent") side always
-supplies the coverage denominator, regardless of which of the two files states the edge — a
-`referenced_by` entry's `observed` describes the same measurement its mirror `refers_to` entry
-does, from the referencer's own column.
+A `refers_to` or `referenced_by` entry MAY carry `observed`: what joining across this edge costs, computed from the two endpoints' own `statistics.yaml` — no additional query. The referencing ("child") side always supplies the fanout numerator and the referenced ("parent") side always supplies the coverage denominator, regardless of which of the two files states the edge — a `referenced_by` entry's `observed` describes the same measurement its mirror `refers_to` entry does, from the referencer's own column, and is identical to it field for field (§2.3.3).
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
@@ -1284,92 +1299,37 @@ does, from the referencer's own column.
 | `fanout_max` | number | O | The referencing column's own `values[0].count` (§2.2.4 orders by count descending) — the true worst-case group size, not the mean. Absent wherever `values` itself is (§7.2) |
 | `target_coverage` | number | R | The fraction of the parent's distinct values this edge actually reaches. Measured from both endpoints' `sketch` (§2.2.14) when both carry one and the measurement has evidence to report; cardinality-derived (child `cardinality` / parent `cardinality`) otherwise — the same field, silently upgraded to the sharper number when the sketches exist to support it, never a second field carrying the other formula |
 | `containment` | number | O | The fraction of the *child's* distinct values found in the parent's set, measured from both endpoints' `sketch` (§2.2.14) — the question `target_coverage` cannot answer, since a small `target_coverage` and a `containment` near 1 both hold whenever a few child values reach a much larger parent. Present only when both endpoints carry a `sketch` and the measurement has evidence to report; no cardinality-derived fallback exists for it |
-| `answerable_count` | integer | O | The count of the child's own retained hashes below the shared threshold both sketches can speak to (§2.2.14) — the denominator §2.2.14's `1/sqrt(answerable count)` margin is sized against, so a consumer computes that margin from the print alone. Present exactly where `containment` is; absent under the same fallback |
+| `answerable_count` | integer | O | The count of the child's own retained hashes below the shared threshold both sketches cover (§2.2.14) — the denominator §2.2.14's `1/sqrt(answerable count)` margin is sized against, so a consumer computes that margin from the print alone. Present exactly where `containment` is; absent under the same fallback |
 | `coherent` | bool | O | `false` when the child's cardinality exceeds the parent's — arithmetically impossible for a real containment. Present only when both sides measured `cardinality_method: exact` (§2.2.6); a scoped or sampled comparison cannot support the claim either way, so the field is omitted rather than guessed |
 | `scope_compatible` | bool | R | `false` whenever either endpoint carries a `scope` block (§2.2.8). Every other field in this table is absent whenever this is `false`; no ratio is ever published across a mismatched pair — and a scoped endpoint is a mismatch even where both sides carry the same `sample`, since two draws at one rate are still two draws and a value-identity comparison across them is not measurable. That is the position §2.2.14 already takes in withholding `sketch` from a scoped table; a consumer wanting these numbers profiles the two endpoints unscoped |
 
-**Absence of the whole block.** A composite edge (`column`/`target_column` longer than one) and an
-edge where either endpoint carries no `cardinality` — a plain view's catalog-only file (§2.2.15),
-or an object this run could not measure one for — carry no `observed` block at all; see §7.3.
+**Absence of the whole block.** A composite edge (`column`/`target_column` longer than one) and an edge where either endpoint carries no `cardinality` — a plain view's catalog-only file (§2.2.15), or an object this run could not measure one for — carry no `observed` block at all; see §7.3.
 
-**Sketch-measured fields and their error.** `containment` and a sketch-measured `target_coverage`
-are derived from the two endpoints' `sketch` (§2.2.14), and which computation applies depends on
-whether the child sketch is exhaustive.
+**Sketch-measured fields and their error.** `containment` and a sketch-measured `target_coverage` are derived from the two endpoints' `sketch` (§2.2.14), and which computation applies depends on whether the child sketch is exhaustive.
 
-An exhaustive child sketch (§2.2.14's decoded-length case) needs no scaling: `containment` is the
-match rate over the child's own *answerable subset* — the hashes falling below the parent's own
-retained threshold, the only region either sketch can speak to — measured directly against the
-parent's set. `target_coverage` then derives from that same ratio applied to the child's own
-`cardinality`. When the answerable subset is empty (every child hash sits above the parent's
-threshold), neither field is published from the sketches at all — `target_coverage` falls back to
-its cardinality-derived form, and `containment` is absent, the same fallback a missing sketch
-already causes.
+An exhaustive child sketch (§2.2.14's decoded-length case) needs no scaling: `containment` is the match rate over the child's own *answerable subset* — the hashes falling below the parent's own retained threshold, the only region both sketches cover — measured directly against the parent's set. `target_coverage` then derives from that same ratio applied to the child's own `cardinality`. When the answerable subset is empty (every child hash sits above the parent's threshold), neither field is published from the sketches at all — `target_coverage` falls back to its cardinality-derived form, and `containment` is absent, the same fallback a missing sketch already causes.
 
-**Exactness depends on the parent too, not only the child.** When the parent's sketch is also
-exhaustive, the answerable subset is the child's whole distinct set, and the match rate against
-it is exact — no error bound to state. When the parent's sketch is truncated, its own retained
-threshold covers only part of the hash space, so the answerable subset is a hash-uniform sample
-of the child rather than its whole set: the published value is the same measurement, but it
-carries §2.2.14's margin over that subset's own size, on the same footing as any other truncated
-comparison. `observed.answerable_count` publishes that subset's size, so a consumer computes the
-margin (§2.2.14) from the print alone rather than reading only that the value is not exact.
+**Exactness depends on the parent too, not only the child.** When the parent's sketch is also exhaustive, the answerable subset is the child's whole distinct set, and the match rate against it is exact — no error bound to state. When the parent's sketch is truncated, its own retained threshold covers only part of the hash space, so the answerable subset is a hash-uniform sample of the child rather than its whole set: the published value is the same measurement, but it carries §2.2.14's margin over that subset's own size, on the same footing as any other truncated comparison. `observed.answerable_count` publishes that subset's size, so a consumer computes the margin (§2.2.14) from the print alone rather than reading only that the value is not exact.
 
-A truncated child sketch instead goes through the standard bottom-k intersection estimator: the
-smaller of the two sketches' own retained thresholds bounds the hash range both can speak to, the
-observed match rate inside that range is scaled to the full hash space, and the result is divided
-by each side's own published `cardinality` (measured exactly, never re-estimated from the sketch).
-This estimate's error is roughly `1/sqrt(answerable count)` — the count of hashes genuinely below
-the shared threshold, which varies per edge and shrinks toward a much wider margin as that count
-falls, never the flat percentage a fixed `k` alone would suggest (§2.2.14). A value near 1 states
-that the sketches found no evidence against full containment or coverage within that margin, not a
-guarantee finer than the margin allows; a value of exactly 0 or 1 from a truncated sketch is still
-an estimate, on the same footing as an exhaustive child's own value against a truncated parent —
-both are `1.0`/`0.0` and neither is exact. Only both endpoints exhaustive produces the exact form.
-Neither field is ever computed from only one endpoint's sketch — the same fallback as an empty
-answerable subset applies.
+A truncated child sketch instead goes through the standard bottom-k intersection estimator: the smaller of the two sketches' own retained thresholds bounds the hash range both cover, the observed match rate inside that range is scaled to the full hash space, and the result is divided by each side's own published `cardinality` (measured exactly, never re-estimated from the sketch). This estimate's error is roughly `1/sqrt(answerable count)` — the count of hashes genuinely below the shared threshold, which varies per edge and shrinks toward a much wider margin as that count falls, never the flat percentage a fixed `k` alone would suggest (§2.2.14). A value near 1 states that the sketches found no evidence against full containment or coverage within that margin, not a guarantee finer than the margin allows; a value of exactly 0 or 1 from a truncated sketch is still an estimate, on the same footing as an exhaustive child's own value against a truncated parent — both are `1.0`/`0.0` and neither is exact. Only both endpoints exhaustive produces the exact form. Neither field is ever computed from only one endpoint's sketch — the same fallback as an empty answerable subset applies.
 
-**Not a cost claim.** `observed` states row-count ratios measured on the print; it never predicts
-query latency or execution-plan cost, the same boundary §2.2.11 draws for a clustering key.
+**Not a cost claim.** `observed` states row-count ratios measured on the print; it never predicts query latency or execution-plan cost, the same boundary §2.2.11 draws for a clustering key.
 
 #### 2.3.11 `detection: measured` — an edge proposed from value containment
 
-A producer MAY compare two columns' sketches (§2.2.14) across every table pair it profiled and
-propose an edge from what their value sets show, independent of either column's name. No query is
-issued for the comparison itself — both sketches are already on disk from §2.2.14's own pass.
+A producer MAY compare two columns' sketches (§2.2.14) across every table pair it profiled and propose an edge from what their value sets show, independent of either column's name. No query is issued for the comparison itself — both sketches are already on disk from §2.2.14's own pass.
 
 A pair is proposed only where all three hold:
 
-1. **The referencing ("child") column is a reference, not a category.** Its `cardinality` exceeds
-   `enumeration_threshold`, or it carries `inferred.candidate_key`. A column enumerable in full is
-   a lookup value, and a containment of `1.0` over a handful of values is as likely to be
-   coincidence as evidence.
-2. **The referenced ("parent") column is key-like.** It carries a single-column PRIMARY KEY, a
-   sole single-column UNIQUE, or `inferred.candidate_key` — the population §2.2.14 already
-   sketches for this reason.
-3. **The measurement can carry the claim.** Either both sketches are exhaustive and `containment`
-   (§2.3.10) is exactly `1.0`, which an exhaustive comparison makes exact with no margin at all; or
-   `answerable_count` is at least 400 and `containment` is at least `0.95`. 400 is where §2.3.10's
-   own `1/sqrt(answerable_count)` margin falls to `0.05` — the slack the `0.95` floor leaves.
+1. **The referencing ("child") column is a reference, not a category.** Its `cardinality` exceeds `enumeration_threshold`, or it carries `inferred.candidate_key`. A column enumerable in full is a lookup value, and a containment of `1.0` over a handful of values is as likely to be coincidence as evidence.
+2. **The referenced ("parent") column is key-like.** It carries a single-column PRIMARY KEY, a sole single-column UNIQUE, or `inferred.candidate_key` — the population §2.2.14 already sketches for this reason.
+3. **The measurement can carry the claim.** Either both sketches are exhaustive and `containment` (§2.3.10) is exactly `1.0`, which an exhaustive comparison makes exact with no margin at all; or `answerable_count` is at least 400 and `containment` is at least `0.95`. 400 is where §2.3.10's own `1/sqrt(answerable_count)` margin falls to `0.05` — the slack the `0.95` floor leaves.
 
-The direction is child-into-parent; the parent's own `cardinality` MUST be strictly the larger of
-the two. This is a tighter floor than `observed.coherent` (§2.3.10), which is `false` only where
-the child's cardinality *exceeds* the parent's: equal cardinalities are coherent, and would license
-the same pair in both directions, each end naming the other as parent. A producer MUST NOT publish a
-candidate that duplicates an edge the same file already carries as `declared` or `inferred` — the
-asserted edge keeps its own `detection` and the candidate is dropped, not published twice. Only
-columns whose canonical encoding kind matches (§2.2.14's type table) are ever compared; a column
-under a `scope` block carries no sketch (§2.2.14) and proposes and receives nothing, and neither
-does a redacted column, for the same reason.
+The direction is child-into-parent; the parent's own `cardinality` MUST be strictly the larger of the two. This is a tighter floor than `observed.coherent` (§2.3.10), which is `false` only where the child's cardinality *exceeds* the parent's: equal cardinalities are coherent, and would admit the same pair in both directions, each end naming the other as parent. A producer MUST NOT publish a candidate that duplicates an edge the same file already carries as `declared` or `inferred` — the asserted edge keeps its own `detection` and the candidate is dropped, not published twice. Only columns whose canonical encoding kind matches (§2.2.14's type table) are ever compared; a column under a `scope` block carries no sketch (§2.2.14) and proposes and receives nothing, and neither does a redacted column, for the same reason.
 
-`on_delete`, `on_update` and `constraint_name` are absent from a measured edge on the same terms
-§2.3.8 already sets for an inferred one — a producer publishes no referential action a database
-never declared.
+`on_delete`, `on_update` and `constraint_name` are absent from a measured edge on the same terms §2.3.8 already sets for an inferred one — a producer publishes no referential action a database never declared.
 
-**Never compared by `dbprint diff`.** The comparison depends on sketches a `diff` run never
-computes (§2.6.6), so a `detection: measured` entry on either side of that comparison is dropped
-before it runs; such an edge appearing or disappearing between two runs produces no
-`relationship_added`, `relationship_removed` or `relationship_modified` event, and a reader sees
-the change only in `relationships.yaml` itself.
+**Never compared by `dbprint diff`.** The comparison depends on sketches a `diff` run never computes (§2.6.6), so a `detection: measured` entry on either side of that comparison is dropped before it runs; such an edge appearing or disappearing between two runs produces no `relationship_added`, `relationship_removed` or `relationship_modified` event, and a reader sees the change only in `relationships.yaml` itself.
 
 ### 2.4 `description.md`
 
@@ -1377,11 +1337,11 @@ Free-form Markdown narrative authored by humans. The format imposes no structure
 
 This file is NOT versioned with a `format_version` header — it's Markdown.
 
-**Precedence against the measured layer.** On any question `statistics.yaml` answers, the measured layer wins — it describes the run that produced it, current as of that run, where `description.md` may not be. `description.md` is authoritative only on what a statistic cannot express: table grain, units, derivation, deliberate exclusions. This is a statement of scope, not of blame — prose written correctly can still describe a schema a later run changed underneath it, and the rule does not ask a consumer to distrust it on that account, only to prefer the statistic where the two disagree. A checkable claim belongs in `statistics.annotations.yaml` (§2.7.1) rather than here, where a consumer — human or automated — can verify it against the statistic it describes; nothing checks the prose in this file, so a claim placed here rots silently. Absence of `description.md` carries no meaning beyond "no narrative was written."
+**Precedence against the measured layer.** On any question `statistics.yaml` answers, use the measured statistic — it describes the run that produced it, current as of that run, where `description.md` may not be. `description.md` is authoritative only on what a statistic cannot express: table grain, units, derivation, deliberate exclusions. This rule is about which source is current, not about the prose's accuracy — prose written correctly can still describe a schema that a later run recorded as changed, and the rule does not ask a consumer to distrust it on that account, only to prefer the statistic where the two disagree. A checkable claim belongs in `statistics.annotations.yaml` (§2.7.1) rather than here, where a consumer — human or automated — can verify it against the statistic it describes; nothing checks the prose in this file, so a claim placed here can become false without any check reporting it. Absence of `description.md` carries no meaning beyond "no narrative was written."
 
 ### 2.5 `manifest.yaml`
 
-The index file at the connection root. Source of truth for which tables are present and what artifacts each has.
+The index file at the connection root. Source of truth for which tables are present and what artifacts each has, and which the last run could not profile.
 
 ```yaml
 format_version: 1
@@ -1395,11 +1355,17 @@ statistics_params:                        # the connection's resolved Statistics
   top_n_null_patterns: <int>
   looks_like_sample_size: <int>
   percentiles: [<int>, ...]
+profiling_params:                         # OPTIONAL; the connection's resolved profiling switches
+  infer_relationships: <bool>
+  sketch_all_columns: <bool>
+  compute_timeline: <bool>
+  materialize_sample: <bool>
 selectors:                                # the connection's own include/exclude, as configured
   include: [<glob>, ...]
   exclude: [<glob>, ...]
 redaction_rules_configured: <int>         # count of `redact` rules in force; 0 means none configured
 default_collation: <string>               # the connection's own name for its default comparison collation
+failed_tables: [<fqn>, ...]               # OPTIONAL; tables this run attempted and could not profile
 manifest_annotations: manifest.annotations.yaml   # present only if user-authored (§2.7.3)
 tables:
   <fqn>:
@@ -1418,11 +1384,18 @@ tables:
     max_age_days: <int ≥ 0>               # OPTIONAL; the freshness threshold this table was judged against
     statistics_params:                    # OPTIONAL; only the keys that differ from the connection default
       <key>: <value>
+    max_rows_scanned: <int ≥ 1>           # OPTIONAL; the row-count ceiling that governed this table
+    profiling_params:                     # OPTIONAL; only the switches that differ from the connection's
+      <key>: <bool>
 ```
+
+`failed_tables` names every table the writing run's scope matched and the target listed whose profiling failed, plus any such mark carried forward for a table outside this run's scope that the connection's own `selectors` still cover. The list is sorted and omitted when empty. An FQN may also be a key of `tables`; that entry is then an earlier run's, dated by its own `profiled_at`. A producer MUST NOT record a failure cause here, because a driver's message quotes cell values past every redaction rule; the cause belongs to the run's own output. A producer SHOULD re-attempt a named table on its next run regardless of `max_age_days`. A consumer MUST NOT read an FQN named here and absent from `tables` as absent from the database: the table exists and is unprofiled.
 
 `max_age_days` is the threshold the producer resolved for that table on the run that wrote the entry — the number the run itself used to decide whether the table needed re-reading. It is a whole number of days and MUST NOT be negative; `0` states that the table is re-read on every run, and no age can satisfy it. Consumers judging freshness SHOULD read it rather than re-deriving a threshold from their own configuration, which may have changed since the print was written, and which cannot express a threshold that depended on anything but the table's name. It is carried for every object the run resolved a threshold for, views included. An entry omits it where the run resolved none; consumers fall back to their own configuration for those entries alone, since a manifest may mix both.
 
-**Provenance: what produced the print, so it decodes itself.** Four top-level fields, all REQUIRED, carry the parameters that decide what every number underneath them means:
+`max_rows_scanned` is the row-count ceiling that governed the table on the run that wrote the entry, recorded as the ceiling itself rather than the fraction it resolved to: the fraction moves whenever the table's size estimate moves, the ceiling does not. It is recorded wherever a ceiling governed the table, including a table smaller than the ceiling that was therefore read whole, and omitted where none did — no ceiling in force, a `filter` that took precedence over it, or a plain view, which is never queried (§2.2.15).
+
+**Provenance: the parameters that produced the print, recorded in the print itself.** Four top-level fields, all REQUIRED, carry the parameters that decide what every number underneath them means:
 
 - **`statistics_params`** is the connection's resolved `StatisticsConfig` for this run — the parameters that decide how much of a column's domain a `values` list carries, which columns classify `categorical` versus fall through to a bounded scan, how much evidence a `looks_like` verdict rests on, and which percentile keys exist at all. Per-table rules can override any of these; a table whose resolved parameters differ from the connection default carries its own `statistics_params` block naming only the differing keys, per the same absence-means-default convention `scope` (§2.2.8) already uses. A table with no override carries no block.
 - **`selectors`** is the connection's own configured `include`/`exclude` glob set — the scope a regeneration of this print would cover. A CLI narrowing (`--include` intersects, `--exclude` unions) applies to one invocation and is NOT recorded: two glob lists have no glob intersection, so no pattern list can express the narrowed scope, and a reader who saw one could not tell it from a configuration. A run narrowed that way therefore scans fewer tables than this value implies, and the artifact does not say so. This is the same information `diff.yaml`'s `target.selectors` (§2.6.3) carries for a live comparison; the manifest is where a consumer asks "what was deliberately left out of this print" without needing to know the drift-detection protocol. The two MUST NOT disagree where both are present (§6.3).
@@ -1431,7 +1404,11 @@ tables:
 
 A manifest missing any of the four does not describe what produced it, and a validator MUST report it (§6.3).
 
-If the manifest disagrees with on-disk files (missing required artifact, orphaned file), consumers SHOULD treat the print as inconsistent.
+**`profiling_params`** records the connection's four profiling switches as resolved for the run — `infer_relationships`, `sketch_all_columns`, `compute_timeline` and `materialize_sample` — since each decides which blocks a table's files carry. A table whose recorded switches differ from the connection-level block (one carried forward from a run under other settings) carries its own `profiling_params` naming only the differing keys, under the same absence-means-default convention as `statistics_params`. The block is OPTIONAL; a manifest without it does not say which switches were in force.
+
+**Carried entries state what their table was measured under.** An entry the producer carries forward without re-reading its table keeps its `profiled_at`, `max_rows_scanned` and recorded switches, and its `statistics_params` and `profiling_params` overrides are restated against the new connection-level blocks, so the effective values still describe the files on disk.
+
+If the manifest disagrees with on-disk files (missing required artifact, orphaned file), consumers SHOULD treat the print as inconsistent. A producer that drops a table from `tables` removes the producer-written files it wrote for it and leaves user-authored files in place (§1.4).
 
 The reference JSON Schema SHALL be at `spec/v1/manifest.schema.json`.
 
@@ -1490,7 +1467,7 @@ Every counter naming an event kind is exact — the count of those events in the
 summary:
   tables_added: <int>
   tables_removed: <int>
-  tables_modified: <int>              # tables with ≥ 1 column/stat/row-count/rel/index/comment change
+  tables_modified: <int>              # tables with ≥ 1 event of any kind but table_added/table_removed (type, column, spelling, collation, stat, row-count, rel, index, comment, ...)
   columns_added: <int>
   columns_removed: <int>
   columns_type_changed: <int>
@@ -1504,10 +1481,11 @@ summary:
   unevaluated_tables: <int>           # objects the diff had no basis to compare
 ```
 
-**`unchanged_tables` counts a comparison, `unevaluated_tables` counts the absence of one.** An object the diff could not read produces no event, and counting that silence as "unchanged" publishes a definition as though it were a measurement. The populations that reach `unevaluated_tables`:
+**`unchanged_tables` counts a comparison, `unevaluated_tables` counts the absence of one.** An object the diff could not read produces no event, and counting an object that produced no event as "unchanged" publishes a definition as though it were a measurement. The populations that reach `unevaluated_tables`:
 
 - a **plain view**, whose `statistics.yaml` carries `catalog_only` (§2.2.15) rather than a measurement, and for which this format defines no DDL comparison, so its whole body can be rewritten with nothing to detect it;
-- a **carried-forward object** from a run that did not re-read it, whose current state is its own committed state and therefore equal to itself by construction.
+- a **carried-forward object** from a run that did not re-read it, whose current state is its own committed state and therefore equal to itself by construction;
+- an object the run listed and could not read, and with no committed print to compare against — named in the manifest's `failed_tables` (§2.5).
 
 A producer MUST decide this from whether it had a comparable artifact on both sides, never from `type`: a materialized view carries `statistics.yaml` and belongs in `unchanged_tables`. An object that produced at least one event is `tables_modified` whichever population it came from — something was compared, and it moved.
 
@@ -1521,7 +1499,7 @@ tables_modified + unchanged_tables + unevaluated_tables + tables_added == tables
 
 #### 2.6.5 `changes` array — common shape
 
-Each entry has a `kind` discriminator (one of the 19 kinds enumerated in §2.6.6, plus possible future additions). Consumers MUST tolerate unknown kinds. Order within `changes` is producer-defined but SHOULD be stable across runs (grouped by table, then by kind, then deterministic within kind).
+Each entry has a `kind` discriminator (one of the 22 kinds enumerated in §2.6.6, plus possible future additions). Consumers MUST tolerate unknown kinds. Order within `changes` is producer-defined but SHOULD be stable across runs (grouped by table, then by kind, then deterministic within kind).
 
 #### 2.6.6 Per-kind field schemas
 
@@ -1537,6 +1515,38 @@ Each entry has a `kind` discriminator (one of the 19 kinds enumerated in §2.6.6
 - kind: table_removed
   table: <FQN>
 ```
+
+##### `table_type_changed`
+```yaml
+- kind: table_type_changed
+  table: <FQN>
+  before: table | view | matview
+  after: table | view | matview
+```
+
+The object at one FQN is a different kind of object on the two sides — a table replaced by a view or a matview, or the reverse. Its FQN, relationships and annotations persist, so it is not reported as a removal and an addition. Compared only where both sides' manifest entries record a `type`; an entry without one compares as unknown.
+
+##### `column_physical_name_changed`
+```yaml
+- kind: column_physical_name_changed
+  table: <FQN>
+  column: <name>                      # the lowercase map key (§2.2.1)
+  before: <catalog spelling>
+  after: <catalog spelling>
+```
+
+A column's catalog spelling moved with its key unchanged — only a case-only rename can do that; any other rename changes the key and reports as `column_removed` + `column_added`. `before`/`after` are the effective spelling: `physical_name` where present, else the key itself (§7.2), never null. Compared on every column both sides carry, `catalog_only` included (§2.2.15).
+
+##### `column_collation_changed`
+```yaml
+- kind: column_collation_changed
+  table: <FQN>
+  column: <name>
+  before: <collation>
+  after: <collation>
+```
+
+The effective collation moved: `collation` where present, else that side's manifest `default_collation` (§2.2.2). Compared only on a column where at least one side carries an explicit `collation`, and skipped where either side's effective value cannot be resolved, so a move of the connection default alone reports nothing. Compared whatever gates the column's statistics, `catalog_only` included.
 
 ##### `column_added`
 ```yaml
@@ -1593,9 +1603,9 @@ Each entry has a `kind` discriminator (one of the 19 kinds enumerated in §2.6.6
   delta_pct: <float>                  # OMITTED when before == 0 (division by zero) or stat is non-numeric
 ```
 
-Valid `stat` dot-paths: any field path under a column's stats per §2.2. For `values`, `before` and `after` carry the **full list** (per-value granularity not implemented).
+Valid `stat` dot-paths: the measured fields under a column's stats per §2.2 — never `physical_name`, `collation` (their own kinds above) or `physical_layout_key` (it restates `physical_layout.keys`, reported by `physical_layout_changed`). For `values`, `before` and `after` carry the **full list** (per-value granularity not implemented).
 
-**A `redacted` marker withholds that column's cell values from the comparison.** Where either side carries the marker (§2.2.9), a producer MUST NOT emit a `statistic_changed` event for `values`, `range`, `percentiles`, `mean`, `sum` or `length` on that column. §2.2.9 states the same prohibition from the consumer's side, and a diff is a consumer of the print it reads. The marker is itself an ordinary `stat` path and still reports, which is what tells a reader why the rest of the column went quiet; the counts, ratios, `values_coverage`, `frequencies` and `distribution` keep comparing, since §2.2.9 leaves them unaffected. `mean`, `sum` and `length` are in the withheld set because the scanned-set threshold that exempts them there is `rows_scanned`, which a comparison does not read.
+**A `redacted` marker withholds that column's cell values from the comparison.** Where either side carries the marker (§2.2.9), a producer MUST NOT emit a `statistic_changed` event for `values`, `range`, `percentiles`, or any field §2.2.9 withholds from a marked column (`mean`, `sum`, `length`, `zero_count`, `negative_count`, `empty_count`, `quantized_count`, `normalized_cardinality`, `unrepresentable`, `sketch`) on that column. §2.2.9 states the same prohibition from the consumer's side, and a diff is a consumer of the print it reads; a side written by an unredacted run may still carry some of them, and comparing it would republish its numbers. The marker is itself an ordinary `stat` path and still reports, which is what tells a reader why the column's other statistics produce no events; the count profile — the counts, ratios, `values_coverage`, `frequencies` and `distribution` — keeps comparing, since §2.2.9 leaves it unaffected.
 
 ##### `table_row_count_changed`
 ```yaml
@@ -1618,7 +1628,7 @@ Table-grain, not column-grain — meaningful even when every column statistic in
   after:  { keys: [...], search: {...} }                                                                            # same shape
 ```
 
-Fires whenever `grain.keys` (as a set of `(columns, detection)` pairs) or `grain.search.exhausted` differs between baseline and target (§2.2.12). `before`/`after` carry the block's full shape, never a computed add/remove delta: a column combination whose `detection` changes (`declared` <-> `measured`) is neither added nor removed, and a delta would misreport it as a spurious removal paired with a spurious addition. `search` is OMITTED on a side exactly where §2.2.12 omits it from `statistics.yaml` - the measured probe never ran there. Table-grain, on the same footing as `table_row_count_changed`: a change here means the columns identifying a row moved, not that a value did.
+Fires whenever `grain.keys` (as a set of `(columns, detection)` pairs) or `grain.search.exhausted` differs between baseline and target (§2.2.12). `before`/`after` carry the block's full shape, never a computed add/remove delta: a column combination whose `detection` changes (`declared` <-> `measured`) is neither added nor removed, and a delta would misreport it as a spurious removal paired with a spurious addition. `search` is OMITTED on a side exactly where §2.2.12 omits it from `statistics.yaml` — the measured probe never ran there. Table-grain, on the same footing as `table_row_count_changed`: a change here means the columns identifying a row moved, not that a value did.
 
 ##### `physical_layout_changed`
 ```yaml
@@ -1628,7 +1638,7 @@ Fires whenever `grain.keys` (as a set of `(columns, detection)` pairs) or `grain
   after:  { ... } | null
 ```
 
-Fires whenever `physical_layout` differs between baseline and target (§2.2.11). `null` on a side states that side confirmed no clustering/partitioning key, never "not checked" - the same absence-has-one-meaning discipline §2.2.11 itself sets, and the reason an absent block compares as `null` rather than suppressing the comparison the way an absent `grain` does: §2.2.11 already treats every absent block as one fact regardless of cause, so the transition to a genuine key reads as a real gain rather than as an unevaluated pair. A side whose own `unmeasured` list names the block (§2.2.1) is the exception, and the comparison is suppressed rather than reported: that side confirmed nothing.
+Fires whenever `physical_layout` differs between baseline and target (§2.2.11). `null` on a side states that side confirmed no clustering/partitioning key, never "not checked" — the same absence-has-one-meaning discipline §2.2.11 itself sets, and the reason an absent block compares as `null` rather than suppressing the comparison the way an absent `grain` does: §2.2.11 already treats every absent block as one fact regardless of cause, so the transition to a genuine key reads as a real gain rather than as an unevaluated pair. A side whose own `unmeasured` list names the block (§2.2.1) is the exception, and the comparison is suppressed rather than reported: that side confirmed nothing.
 
 ##### `depends_on_changed`
 ```yaml
@@ -1638,7 +1648,7 @@ Fires whenever `physical_layout` differs between baseline and target (§2.2.11).
   after:  [<FQN>, ...]
 ```
 
-Fires whenever `depends_on` (§2.2.17) differs between baseline and target, on a view or matview whose catalog answered on both sides. Table-grain, on the same footing as `grain_changed` and `physical_layout_changed`: which objects a view's own definition reads is a declared fact, not data drift, so redefining `seedbank.germination_by_taxon_mv` to read `seedbank.germination_reading` instead of `seedbank.germination_trial` reports here even though neither table's own row counts moved. No event where either side never carries the field at all (§2.2.17's own two-encoding rule: the key omitted means the producer could not ask) - absent on both sides, as on every adapter that cannot resolve view dependencies at all, reads as nothing to compare, never as a removal.
+Fires whenever `depends_on` (§2.2.17) differs between baseline and target, on a view or matview whose catalog was read on both sides. Table-grain, on the same footing as `grain_changed` and `physical_layout_changed`: which objects a view's own definition reads is a declared fact, not data drift, so redefining `seedbank.germination_by_taxon_mv` to read `seedbank.germination_reading` instead of `seedbank.germination_trial` reports here even though neither table's own row counts moved. No event where either side never carries the field at all (§2.2.17's own two-encoding rule: the key omitted means the dependency read did not happen) — absent on both sides, as on every adapter that cannot resolve view dependencies at all, reads as nothing to compare, never as a removal.
 
 ##### `relationship_added`
 ```yaml
@@ -1764,16 +1774,21 @@ The CLI `--threshold FLOAT` flag overrides all per-stat thresholds for one run (
 | **`--force` on unchanged tables** | Zero `statistic_changed` events for those tables (file rewrite isn't a semantic change). |
 | **Empty diff** | `changes: []`, summary all-zero. File still emitted. |
 | **Scoped run with `--include`** | Only events for in-scope tables. Out-of-scope tables not reported. |
+| **An object changes type** (table <-> view/matview) | `table_type_changed`; the object counts in `tables_modified`, never as removed plus added. |
+| **Case-only column rename** | `column_physical_name_changed` with the effective spelling on each side; never `statistic_changed`. |
+| **Connection default collation moves** | No event on a column whose collation is implicit on both sides; every column the move affects carries an explicit `collation` on one side and reports through `column_collation_changed`. |
+| **Repartitioning** | `physical_layout_changed` only; `physical_layout_key` on each key column is not compared (§2.2.11). |
+| **Case-only table rename** | No event: the table's catalog spelling is recorded only in `ddl.sql`, which v1 does not parse. |
 | **`statistic_changed` with non-numeric stats** (`distribution`, `classification`, `values`) | `delta` and `delta_pct` OMITTED; only `before` and `after`. |
 | **`statistic_changed` with `before: 0`** | `delta_pct` OMITTED (division by zero); `delta` still present. |
 | **Comment removed** | `comment_changed` with `after: null`. |
 | **Comment added** (never existed in baseline) | `comment_changed` with `before: null`. |
-| **`grain` absent on either side** | No `grain_changed` event - absence on either side suppresses the comparison entirely, the same rule every other optional table-level field follows, rather than reporting every declared/measured key as newly added. |
+| **`grain` absent on either side** | No `grain_changed` event — absence on either side suppresses the comparison entirely, the same rule every other optional table-level field follows, rather than reporting every declared/measured key as newly added. |
 | **`physical_layout` absent on a side, or a table confirmed unclustered** | Both parse identically to "no layout" (§2.2.11's own absence-has-one-meaning rule); `physical_layout_changed` fires whenever a side's real state differs from the other's, including the transition from either kind of "no layout" to a genuine key. |
-| **A side whose `unmeasured` list names `physical_layout`** (§2.2.1) | No `physical_layout_changed` event - that side never read the block, so there is nothing to compare it against, the same absence-suppresses-the-comparison rule `grain` follows. |
-| **`depends_on` absent on either side** (a table, which never carries it; or a view/matview whose catalog could not answer, on an adapter that never resolves the field at all) | No `depends_on_changed` event - the same absence-suppresses-the-comparison rule `grain` follows, never a reported removal. |
+| **A side whose `unmeasured` list names `physical_layout`** (§2.2.1) | No `physical_layout_changed` event — that side never read the block, so there is nothing to compare it against, the same absence-suppresses-the-comparison rule `grain` follows. |
+| **`depends_on` absent on either side** (a table, which never carries it; or a view/matview whose catalog was not read, on an adapter that never resolves the field at all) | No `depends_on_changed` event — the same absence-suppresses-the-comparison rule `grain` follows, never a reported removal. |
 | **PK / UNIQUE indexes** | Out of scope for `index_*` events. Changes appear via `column_*` events or DDL drift. |
-| **Multi-connection auto run** | Each connection produces its own `prints/<conn>/diff.yaml`. No project-level aggregate. |
+| **Multi-connection auto run** | Each connection produces its own `prints/<connection>/diff.yaml`. No project-level aggregate. |
 
 ### 2.7 Human-authored annotation files
 
@@ -1827,13 +1842,13 @@ The reference JSON Schema SHALL be at `spec/v1/statistics_annotations.schema.jso
 
 #### 2.7.2 `relationships.annotations.yaml`
 
-Per-table human channel over `relationships.yaml`, in the **source** table's own directory - the side a consumer joins from.
+Per-table human channel over `relationships.yaml`, in the **source** table's own directory — the side a consumer joins from.
 
 ```yaml
 format_version: 1
 refers_to:
 - column: [taxon_id]
-  target_table: seedbank.taxon
+  target_table: arboretum.seedbank.taxon
   target_column: [taxon_id]
   verdict: rejected                # OPTIONAL - marks a producer-inferred edge wrong
   note: <markdown_string>          # OPTIONAL - free-form prose
@@ -1841,9 +1856,9 @@ refers_to:
     <stat>: <predicate>
 ```
 
-An entry addresses an edge by `column` / `target_table` / `target_column` - the same triplet `refers_to` (§2.3.2) carries, and REQUIRED here for the same reason: without it there is nothing to resolve against. Every other field is OPTIONAL, per §2.7's layering rule.
+An entry addresses an edge by `column` / `target_table` / `target_column` — the same triplet `refers_to` (§2.3.2) carries, and REQUIRED here for the same reason: without it there is nothing to resolve against. Every other field is OPTIONAL, per §2.7's layering rule.
 
-**An entry that resolves against an edge `relationships.yaml` emits annotates it.** `verdict: rejected` states that a human has determined the edge is wrong - typically an `inferred` one the naming rule (§2.3.8) resolved to a column that shares nothing but a name with the source. `note` carries the reasoning. A `verdict` MUST NOT address a `detection: declared` edge: a declared edge is read from the catalog, and an annotation may correct an inference or add knowledge a measurement cannot express, never contradict a measurement (§2.4's precedence rule). A conforming producer preserves this file byte-identical across regenerations and never writes to it, on the same terms as `statistics.annotations.yaml` (§2.7.1).
+**An entry that resolves against an edge `relationships.yaml` emits annotates it.** `verdict: rejected` states that a human has determined the edge is wrong — typically an `inferred` one the naming rule (§2.3.8) resolved to a column that shares nothing but a name with the source. `note` carries the reasoning. A `verdict` MUST NOT address a `detection: declared` edge: a declared edge is read from the catalog, and an annotation may correct an inference or add knowledge a measurement cannot express, never contradict a measurement (§2.4's precedence rule). A conforming producer preserves this file byte-identical across regenerations and never writes to it, on the same terms as `statistics.annotations.yaml` (§2.7.1).
 
 **An entry that resolves against nothing is a human-authored edge** the producer did not, and structurally could not, emit - §2.7's layering rule covers this file the same as any other. This is the channel a path-valued endpoint (§2.3.9) is authored through: a warehouse storing a join key inside a semi-structured column has no producer-emitted edge to annotate, so the entry is stated here directly, with `path` / `target_path` alongside `column` / `target_column`.
 
@@ -1851,42 +1866,26 @@ An entry addresses an edge by `column` / `target_table` / `target_column` - the 
 
 **A `verdict` addressing an edge absent from `relationships.yaml` is stale**: reported at warning severity, the same treatment `statistics.annotations.yaml` staleness gets (§2.7.1). An entry carrying no `verdict` needs no counterpart to resolve against, so a human-authored addition is never stale.
 
-**`claims` checks an edge's own `observed` block (§2.3.10) the same way `statistics.annotations.yaml`'s `claims` checks a column** (§2.7.1) — zero or more `<stat>: <predicate>` pairs in the [`ASSERTIONS.md`](../../ASSERTIONS.md) §2.1 predicate grammar, where `<stat>` is any of `observed.fanout_avg`, `observed.fanout_max`, `observed.target_coverage`, `observed.containment`, `observed.coherent`, `observed.scope_compatible`, `observed.answerable_count` — this document's own edge-claim vocabulary, distinct from ASSERTIONS.md §2.4's column vocabulary, which that document scopes to `.dbprint.yaml` assertions only. Consumers evaluate `claims` against the edge's own `refers_to` entry, offline. A claim naming an address `refers_to` carries no counterpart for at all has nothing to resolve against, the same as any stat absent from a real edge - unassertable, never a stale-edge finding of its own. A claim that contradicts the measurement, or cannot be evaluated (an unassertable stat, a malformed predicate, a composite or scope-incompatible edge carrying no `observed` block), is reported per §6.3 — advisory, per §2.4's precedence rule, exactly as a column claim is.
+**`claims` checks an edge's own `observed` block (§2.3.10) the same way `statistics.annotations.yaml`'s `claims` checks a column** (§2.7.1) — zero or more `<stat>: <predicate>` pairs in the [`ASSERTIONS.md`](../../ASSERTIONS.md) §2.1 predicate grammar, where `<stat>` is any of `observed.fanout_avg`, `observed.fanout_max`, `observed.target_coverage`, `observed.containment`, `observed.coherent`, `observed.scope_compatible`, `observed.answerable_count` — this document's own edge-claim vocabulary, distinct from ASSERTIONS.md §2.4's column vocabulary, which that document scopes to `.dbprint.yaml` assertions only. Consumers evaluate `claims` against the edge's own `refers_to` entry, offline. A claim naming an address `refers_to` carries no counterpart for at all has nothing to resolve against, the same as any stat absent from a real edge — unassertable, never a stale-edge finding of its own. A claim that contradicts the measurement, or cannot be evaluated (an unassertable stat, a malformed predicate, a composite or scope-incompatible edge carrying no `observed` block), is reported per §6.3 — advisory, per §2.4's precedence rule, exactly as a column claim is.
 
 The reference JSON Schema SHALL be at `spec/v1/relationships_annotations.schema.json`.
 
 #### 2.7.3 `manifest.annotations.yaml`
 
-Connection-grain human notes, at the connection root beside `manifest.yaml` — the home for a fact
-true of the whole warehouse rather than one table, which the per-table `description.md` (§2.4)
-has no place to carry without repeating it once per table.
+Connection-grain human notes, at the connection root beside `manifest.yaml` — the home for a fact true of the whole warehouse rather than one table, which the per-table `description.md` (§2.4) has no place to carry without repeating it once per table.
 
 ```yaml
 format_version: 1
 notes: <markdown_string>          # OPTIONAL - free-form prose
 ```
 
-`notes` is the only field. Free-form Markdown, on the same terms `description.md` gives table-grain
-narrative (§2.4) — the format imposes no structure on it, and nothing checks it against a
-measurement. An empty or absent `notes` key is legal; the file existing at all is what a consumer
-checks for, per the presence rule below.
+`notes` is the only field. Free-form Markdown, on the same terms `description.md` gives table-grain narrative (§2.4) — the format imposes no structure on it, and nothing checks it against a measurement. An empty or absent `notes` key is legal; the file existing at all is what a consumer checks for, per the presence rule below.
 
-**Optional, and its own presence is the signal.** Unlike `manifest.yaml`, `diff.yaml` and
-`reading.md` (§1.2), this file is OPTIONAL — most connections carry no warehouse-wide fact that
-does not already fit `description.md`. A producer that finds one at the connection root records it
-in `manifest.yaml`'s top-level `manifest_annotations` field (§2.5); absence of that field means no
-human authored one, on the same absence-means-unauthored terms `statistics_annotations` (§2.7.1)
-and `relationships_annotations` (§2.7.2) already carry at table grain.
+**Optional, and its own presence is the signal.** Unlike `manifest.yaml`, `diff.yaml` and `reading.md` (§1.2), this file is OPTIONAL — most connections carry no warehouse-wide fact that does not already fit `description.md`. A producer that finds one at the connection root records it in `manifest.yaml`'s top-level `manifest_annotations` field (§2.5); absence of that field means no human authored one, on the same absence-means-unauthored terms `statistics_annotations` (§2.7.1) and `relationships_annotations` (§2.7.2) already carry at table grain.
 
-**Producers MUST NOT write to it.** Once a user creates one, it is preserved across regenerations
-byte-identical, on the same terms `description.md` and every other file in this section already
-carry (§2.7's layering rule).
+**Producers MUST NOT write to it.** Once a user creates one, it is preserved across regenerations byte-identical, on the same terms `description.md` and every other file in this section already carry (§2.7's layering rule).
 
-**Distinct from the producer-authored consumer guide.** `reading.md` (§1.2.1) is generated,
-producer-written, and overwritten every run; `manifest.annotations.yaml` is human-written and never
-touched by a producer. The two sit at the same connection root and the suffix — `.annotations.` on
-one, none on the other — is what tells a reader which is which, the same distinction the naming
-rule above states for every file in this section.
+**Distinct from the producer-authored consumer guide.** `reading.md` (§1.2.1) is generated, producer-written, and overwritten every run; `manifest.annotations.yaml` is human-written and never touched by a producer. The two sit at the same connection root and the suffix — `.annotations.` on one, none on the other — is what tells a reader which is which, the same distinction the naming rule above states for every file in this section.
 
 The reference JSON Schema SHALL be at `spec/v1/manifest_annotations.schema.json`.
 
@@ -1911,7 +1910,7 @@ Every column has a single `classification` tag — the most useful one-word summ
 
 **Uniqueness is not a classification.** `inferred.candidate_key` (§4.2) is set whenever `cardinality_ratio` clears its own threshold, independent of which row above a column matches — a unique column is classified by type or foreign-key status like any other, and carries the flag alongside whatever fields that classification requires.
 
-**The boundary between `text` and `unsupported` is representability, not a type-name list.** A type a producer can print, compare and enumerate is summarisable — `INET`, `MACADDR`, `XML`, `INTERVAL`, a native network or interval type no rule above names — and MUST classify by measurement like any other type, falling to `text` when nothing more specific matches. A type that cannot be summarised at all — an opaque binary blob, an array, a composite record — is `unsupported`, and a producer states this by declining to measure a cardinality for it rather than by the engine matching a type name: `cardinality` absent is what the fallthrough at priority 8 below reads. A future type neither this document nor a producer's own adapter names lands on the right side by this rule, without a maintainer having to extend a membership list first.
+**The boundary between `text` and `unsupported` is representability, not a type-name list.** A type a producer can print, compare and enumerate is summarisable — `INET`, `MACADDR`, `INTERVAL`, a native network or interval type no rule above names — and MUST classify by measurement like any other type, falling to `text` when nothing more specific matches. To compare means the engine can test two values for equality, which counting distinct values requires; Postgres's `XML` and geometric types have no equality operator. A type that cannot be summarised at all — an opaque binary blob, an array, a composite record, a type the engine cannot compare — is `unsupported`, and a producer states this by declining to measure a cardinality for it rather than by the engine matching a type name: `cardinality` absent is what the fallthrough at priority 8 below reads. A future type neither this document nor a producer's own adapter names lands on the right side by this rule, without a maintainer having to extend a membership list first.
 
 ### 3.2 Priority order (first match wins)
 
@@ -1940,11 +1939,11 @@ When a column matches multiple defining rules, producers MUST walk the list top-
 
 **Generated / computed columns** (Postgres `GENERATED ALWAYS AS`, Snowflake virtual columns): classified normally per the rules above. dbprint captures generated-ness only via the DDL file (which records the `AS (...)` expression). There is no `generated: true` flag.
 
-**SQL types the producer cannot model** (binary, array, composite): in a queried file, the producer's adapter declines to measure a cardinality for these, and a column left unmeasured for this reason MUST be classified `unsupported` regardless of its type name (§3.1). The producer emits exactly the fields §2.2.3's matrix marks REQUIRED for `unsupported` - `sql_type`, `nullable`, `null_count`, `null_rate` and `classification`, plus `rows_scanned` when a scope block applies (§2.2.8) - and no other statistic. Consumers MUST handle `unsupported` gracefully — treat as opaque.
+**SQL types the producer cannot model** (binary, array, composite): in a queried file, the producer's adapter declines to measure a cardinality for these, and a column left unmeasured for this reason MUST be classified `unsupported` regardless of its type name (§3.1). The producer emits exactly the fields §2.2.3's matrix marks REQUIRED for `unsupported` — `sql_type`, `nullable`, `null_count`, `null_rate` and `classification`, plus `rows_scanned` when a scope block applies (§2.2.8) — and no other statistic. Consumers MUST handle `unsupported` gracefully — treat as opaque.
 
-**A type no rule above names, that the producer DID measure** (a native network, interval or XML type; any vendor type this document does not name): classifies `text` per priority 7, never `unsupported` — the fallthrough follows the measurement, not a second membership list neither side of a producer is obligated to keep in step. `inferred.looks_like` and `inferred.sensitivity` reach it exactly as they would any other `text` column.
+**A type no rule above names, that the producer DID measure** (a native network or interval type; any vendor type this document does not name): classifies `text` per priority 7, never `unsupported` — the fallthrough follows the measurement, not a second membership list neither side of a producer is obligated to keep in step. `inferred.looks_like` and `inferred.sensitivity` reach it exactly as they would any other `text` column.
 
-**A column of a file carrying `catalog_only`** (§2.2.15): `cardinality` is absent for a different reason than either row above - no query was issued for the object at all, not that this type resists summarising. Classification still follows the ordinary §3.2 priority order, from every input a catalog read supplies - `sql_type`, and a foreign key whether declared or naming-inferred (§2.3.8), since inference reads only column names, not the object's rows. The fallthrough differs from a queried file's, though: a binary, array or composite column still reaches `unsupported`, matched before either fallthrough runs, but an otherwise-unmatched type - `inet`, `interval`, `xml`, anything §3.1 does not name - lands on `text` here rather than `unsupported`, since nothing was attempted that could have failed to summarise it. `categorical` cannot occur under the marker; it needs a `cardinality` the marker forbids, so a low-cardinality column seen through a base table and again through a catalog-only view over it classifies differently in each.
+**A column of a file carrying `catalog_only`** (§2.2.15): `cardinality` is absent for a different reason than either row above — no query was issued for the object at all, not that this type resists summarising. Classification still follows the ordinary §3.2 priority order, from every input a catalog read supplies — `sql_type`, and a foreign key whether declared or naming-inferred (§2.3.8), since inference reads only column names, not the object's rows. The fallthrough differs from a queried file's, though: a binary, array or composite column still reaches `unsupported`, matched before either fallthrough runs, but an otherwise-unmatched type — `inet`, `interval`, `xml`, anything §3.1 does not name — lands on `text` here rather than `unsupported`, since nothing was attempted that could have failed to summarise it. `categorical` cannot occur under the marker; it needs a `cardinality` the marker forbids, so a low-cardinality column seen through a base table and again through a catalog-only view over it classifies differently in each.
 
 ### 3.4 Classification reserves
 
@@ -1978,34 +1977,34 @@ Every pattern in §4.1.1 is defined over a string. A sampled value that is not a
 | `uuid` | Case-insensitive regex `^[0-9a-f]{8}-[0-9a-f]{4}-[1-7][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`. Dashed canonical form; versions 1–7; RFC 4122 variant `[89ab]`. Braced (`{...}`), compact (no dashes), and URN (`urn:uuid:...`) forms NOT matched. |
 | `email` | Regex `^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$`. Conservative — catches typical emails; rejects garbage. Not a full RFC 5322 validator (no quoted local-parts, no comments, no IP literals). |
 | `url` | Regex `^https?://[^\s]+$`. Only `http://` / `https://` schemes matched. Other schemes (`ftp://`, `file://`, custom) NOT matched. |
-| `urn` | RFC 8141 shape, case-insensitive: `urn:`, then a 1-31 character namespace identifier (`[A-Za-z0-9][A-Za-z0-9-]*`), then `:`, then a non-empty, whitespace-free namespace-specific string. Ranked above `path`, which would otherwise claim `urn:example:weather/today` - one `/` is all `path` requires. Clears `uuid` by that pattern's own text excluding the URN form (`urn:uuid:...`), and clears `url` because that pattern is anchored on `https?://`. |
-| `ip` | A bare IPv4 or IPv6 address, parsed by the producer's standard library address type rather than a hand-written regex. Both families assign the same value, including an IPv4-mapped IPv6 address (`::ffff:192.0.2.1`) - a mixed column of both families reports `ip` at 100%, which two separate values could never clear the threshold at. **NOT matched**: a CIDR block (`10.0.0.0/8`), a `host:port` pair, a comma-separated forwarded-for chain, a bracketed form (`[2001:db8::1]`), a zone-qualified form (`fe80::1%eth0`), and an IPv4 octet carrying a leading zero (`010.1.1.1`) - each is transport decoration or an ambiguous rendering, not a bare address. |
-| `mac_address` | Six two-character hex octets joined by one consistent separator, colon or hyphen (`00:1b:63:84:45:e6`, `00-1B-63-84-45-E6`). **NOT matched**: a separatorless run (`001b638445e6`) - claimed by `hex` instead, which is the honest answer since nothing in the value says "address" without the grouping. Ranked above `phone`: a hyphenated all-digit MAC (`00-11-22-33-44-55`) is twelve digits with separators, indistinguishable from a national phone number by that pattern's own arithmetic. |
+| `urn` | RFC 8141 shape, case-insensitive: `urn:`, then a 1-31 character namespace identifier (`[A-Za-z0-9][A-Za-z0-9-]*`), then `:`, then a non-empty, whitespace-free namespace-specific string. Ranked above `path`, which would otherwise claim `urn:example:weather/today` — one `/` is all `path` requires. Clears `uuid` by that pattern's own text excluding the URN form (`urn:uuid:...`), and clears `url` because that pattern is anchored on `https?://`. |
+| `ip` | A bare IPv4 or IPv6 address, parsed by the producer's standard library address type rather than a hand-written regex. Both families assign the same value, including an IPv4-mapped IPv6 address (`::ffff:192.0.2.1`) — a mixed column of both families reports `ip` at 100%, which two separate values could never clear the threshold at. **NOT matched**: a CIDR block (`10.0.0.0/8`), a `host:port` pair, a comma-separated forwarded-for chain, a bracketed form (`[2001:db8::1]`), a zone-qualified form (`fe80::1%eth0`), and an IPv4 octet carrying a leading zero (`010.1.1.1`) — each is transport decoration or an ambiguous rendering, not a bare address. |
+| `mac_address` | Six two-character hex octets joined by one consistent separator, colon or hyphen (`00:1b:63:84:45:e6`, `00-1B-63-84-45-E6`). **NOT matched**: a separatorless run (`001b638445e6`) — claimed by `hex` instead, which is the honest answer since nothing in the value says "address" without the grouping. Ranked above `phone`: a hyphenated all-digit MAC (`00-11-22-33-44-55`) is twelve digits with separators, indistinguishable from a national phone number by that pattern's own arithmetic. |
 | `json` | `json.loads(value)` parses successfully AND the top-level result is a `dict` or `list` (not a primitive). Restricting to structured tops filters noise — bare primitives like `"42"` or `"true"` parse as JSON but are not what consumers want flagged. |
-| `hex` | Optional leading `#` (color codes), then 6 or more characters from `[0-9a-fA-F]`, with at least one letter (`a`-`f`) among them. The letter requirement excludes an even-length digit id from reading as `hex` instead of `numeric_string`, and a compact postal code (`postal_code` outranks `hex`) from losing its own pattern. **NOT matched**: fewer than 6 characters, or an all-digit run of any length - a 6-character code drawn from the closed hex alphabet is self-limiting the way `country_code` is, but a longer all-digit run is not, so the letter requirement is not optional. |
-| `jwt` | RFC 7515 compact serialization: three `.`-joined base64url segments, where the first non-empty and decodes to a JSON object carrying `alg`. The third (signature) segment MAY be empty - the `alg: none` unsecured form (RFC 7515 §3.1) - and is never decoded, since a signature is bytes and decoding it proves nothing. **NOT matched**: a five-segment compact JWE, and any other three-dot-segment token whose first part does not decode to a JOSE header - a purely lexical rule would claim any dotted opaque token, which is the kind of exclusion clause this axis's patterns are defined to avoid needing. |
-| `base64` | Length ≥ 16 AND character set is standard base64 (`A-Z`, `a-z`, `0-9`, `+`, `/`, padding `=`) OR URL-safe variant (`-`, `_` instead of `+`, `/`) AND at least one uppercase and one lowercase character AND decodes without error. Length floor avoids matching short numeric or hex strings; the case-mixture requirement is what separates a real encoded token from an ordinary lowercase word or an all-uppercase code, since base64 output is near-uniform over a case-split alphabet. **An unpadded URL-safe candidate is matched only when its own length is already a multiple of four** - padding a short remainder would admit any label whose length is not congruent to 1 mod 4, which is most of them. `hex` outranks `base64` - every digest length in circulation (32, 40, 64) is a multiple of four drawn from a subset of the base64 alphabet, so `base64` would otherwise claim every cryptographic hash. |
-| `latlon` | Two decimal numbers, comma-separated with optional following whitespace, each carrying a fractional part, the first in [-90, 90] and the second in [-180, 180]. A space-separated pair is NOT matched - the comma is the evidence, on `phone`'s own precedent that a separator is signal rather than noise. **A stated gap**: nothing in the values separates a coordinate pair from any two small decimals (`1.5,2.5` still matches), and no value test can. |
-| `iso8601_duration` | `P[nY][nM][nD][T[nH][nM][nS]]`, or the `PnW` week form, requiring at least one component - a bare `P` or `PT` is NOT matched. |
-| `iso8601_date` | `^\d{4}-\d{2}-\d{2}$`, gated by a calendar-validity check - `2024-02-31` is regex-shaped but NOT matched. **The basic form (`20240115`, no hyphens) is NOT matched** - the hyphens are the evidence that separates a date from any other eight-digit run, on the same precedent `phone`'s separator requirement uses. |
-| `iso8601_datetime` | `^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d{1,6})?)?(Z\|[+-]\d{2}:\d{2})?$`, same calendar-validity gate on the date portion. Seconds and the zone designator are both optional. **A single space is accepted alongside `T`** - not RFC 3339, but what `timestamp::text` renders in Postgres. **Lowercase `t`/`z` are NOT matched** - legal under RFC 3339, but no database engine emits them, so accepting them would cost a second regex for a form nothing produces. A column mixing dates and datetimes reports neither - `iso8601_date` and `iso8601_datetime` are different cast targets, and a column that genuinely mixes them has no single correct one to hand a consumer. |
+| `hex` | Optional leading `#` (color codes), then 6 or more characters from `[0-9a-fA-F]`, with at least one letter (`a`-`f`) among them. The letter requirement excludes an even-length digit id from reading as `hex` instead of `numeric_string`, and a compact postal code (`postal_code` outranks `hex`) from losing its own pattern. **NOT matched**: fewer than 6 characters, or an all-digit run of any length — a 6-character code drawn from the closed hex alphabet is self-limiting the way `country_code` is, but a longer all-digit run is not, so the letter requirement is not optional. |
+| `jwt` | RFC 7515 compact serialization: three `.`-joined base64url segments, where the first non-empty and decodes to a JSON object carrying `alg`. The third (signature) segment MAY be empty — the `alg: none` unsecured form (RFC 7515 §3.1) — and is never decoded, since a signature is bytes and decoding it proves nothing. **NOT matched**: a five-segment compact JWE, and any other three-dot-segment token whose first part does not decode to a JOSE header — a purely lexical rule would claim any dotted opaque token, which is the kind of exclusion clause this axis's patterns are defined to avoid needing. |
+| `base64` | Length ≥ 16 AND character set is standard base64 (`A-Z`, `a-z`, `0-9`, `+`, `/`, padding `=`) OR URL-safe variant (`-`, `_` instead of `+`, `/`) AND at least one uppercase and one lowercase character AND decodes without error. Length floor avoids matching short numeric or hex strings; the case-mixture requirement is what separates a real encoded token from an ordinary lowercase word or an all-uppercase code, since base64 output is near-uniform over a case-split alphabet. **An unpadded URL-safe candidate is matched only when its own length is already a multiple of four** — padding a short remainder would admit any label whose length is not congruent to 1 mod 4, which is most of them. `hex` outranks `base64` — every digest length in circulation (32, 40, 64) is a multiple of four drawn from a subset of the base64 alphabet, so `base64` would otherwise claim every cryptographic hash. |
+| `latlon` | Two decimal numbers, comma-separated with optional following whitespace, each carrying a fractional part, the first in [-90, 90] and the second in [-180, 180]. A space-separated pair is NOT matched — the comma is the evidence, on `phone`'s own precedent that a separator is signal rather than noise. **A stated gap**: nothing in the values separates a coordinate pair from any two small decimals (`1.5,2.5` still matches), and no value test can. |
+| `iso8601_duration` | `P[nY][nM][nD][T[nH][nM][nS]]`, or the `PnW` week form, requiring at least one component — a bare `P` or `PT` is NOT matched. |
+| `iso8601_date` | `^\d{4}-\d{2}-\d{2}$`, gated by a calendar-validity check — `2024-02-31` is regex-shaped but NOT matched. **The basic form (`20240115`, no hyphens) is NOT matched** — the hyphens are the evidence that separates a date from any other eight-digit run, on the same precedent `phone`'s separator requirement uses. |
+| `iso8601_datetime` | `^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d{1,6})?)?(Z\|[+-]\d{2}:\d{2})?$`, same calendar-validity gate on the date portion. Seconds and the zone designator are both optional. **A single space is accepted alongside `T`** — not RFC 3339, but what `timestamp::text` renders in Postgres. **Lowercase `t`/`z` are NOT matched** — legal under RFC 3339, but no database engine emits them, so accepting them would cost a second regex for a form nothing produces. A column mixing dates and datetimes reports neither — `iso8601_date` and `iso8601_datetime` are different cast targets, and a column that genuinely mixes them has no single correct one to hand a consumer. |
 | `numeric_string` | Regex `^-?\d+(\.\d+)?$`. Signed integer or decimal. No scientific notation, no thousand separators, no currency markers. |
-| `semver` | [Semantic Versioning 2.0.0](https://semver.org)'s own grammar: three dot-separated non-negative integers with no leading zeroes, an optional `-` prerelease of dot-separated alphanumeric identifiers, an optional `+` build metadata of the same. **Accepts an optional leading `v`** - a form semver.org's own grammar refuses, but that git tags and dependency manifests store constantly, and one that takes no column from any other pattern since it reports nothing today. A two-part version (`1.2`) is NOT matched and stays `numeric_string`; a three-part one already fails that pattern's single-dot grammar, so the two never compete for a column. |
-| `country_code` | Membership of the ISO 3166-1 **alpha-2** set, case-insensitive. A closed 249-entry list, so membership is the whole test. **Alpha-3 codes are NOT matched** - a second hand-maintained list is a second silent-error surface, and alpha-2 is overwhelmingly what databases store. The closed set is self-limiting in the useful direction: a column of US state abbreviations overlaps it by roughly a third and never reaches the threshold. **Two-letter ISO 639-1 language codes are a stated overlap, not a defect**: 110 of the 184 language codes are also alpha-2 country codes, and a column of them (`de`, `es`, `it`, `pt`) reports `country_code` - there is nothing in the values to tell the two apart, and a `language_code` pattern is refused for exactly that reason (undecidable against this one, not a maintenance concern). |
-| `currency_code` | Membership of the ISO 4217 **alpha** set, case-insensitive. A closed 178-entry list, snapshot dated 2026-01-01 and amended two to four times a year - a missing code (a newly minted currency) reads as a known staleness gap, not a bug. Includes precious-metal, fund and test codes (`XAU`, `XDR`, `XXX`) alongside national currencies; none is excluded. **Alpha-3 country codes are NOT matched by this door** - only `BTN`, `CHE`, `MKD` and `SLE` sit in both sets, four entries out of 249, so a column of alpha-3 codes never approaches the threshold. |
-| `postal_code` | Postal formats that identify themselves by carrying a letter: United Kingdom, Canadian and Dutch shapes. **All-digit formats are deliberately NOT matched** - a five-digit US ZIP is indistinguishable from `numeric_string` without a locale, and dbprint has no locale to consult. A column of US ZIPs therefore reports `numeric_string`, which is the honest answer from values alone. This is a stated gap, not an oversight. |
+| `semver` | [Semantic Versioning 2.0.0](https://semver.org)'s own grammar: three dot-separated non-negative integers with no leading zeroes, an optional `-` prerelease of dot-separated alphanumeric identifiers, an optional `+` build metadata of the same. **Accepts an optional leading `v`** — a form semver.org's own grammar refuses, but that git tags and dependency manifests store constantly, and one that takes no column from any other pattern since it reports nothing today. A two-part version (`1.2`) is NOT matched and stays `numeric_string`; a three-part one already fails that pattern's single-dot grammar, so the two never compete for a column. |
+| `country_code` | Membership of the ISO 3166-1 **alpha-2** set, case-insensitive. A closed 249-entry list, so membership is the whole test. **Alpha-3 codes are NOT matched** — a second hand-maintained list is a second silent-error surface, and alpha-2 is overwhelmingly what databases store. The closed set is self-limiting in the useful direction: a column of US state abbreviations overlaps it by roughly a third and never reaches the threshold. **Two-letter ISO 639-1 language codes are a stated overlap, not a defect**: 110 of the 184 language codes are also alpha-2 country codes, and a column of them (`de`, `es`, `it`, `pt`) reports `country_code` — there is nothing in the values to tell the two apart, and a `language_code` pattern is refused for exactly that reason (undecidable against this one, not a maintenance concern). |
+| `currency_code` | Membership of the ISO 4217 **alpha** set, case-insensitive. A closed 178-entry list, snapshot dated 2026-01-01 and amended two to four times a year — a missing code (a newly minted currency) reads as a known staleness gap, not a bug. Includes precious-metal, fund and test codes (`XAU`, `XDR`, `XXX`) alongside national currencies; none is excluded. **Alpha-3 country codes are NOT matched by this pattern** — only `BTN`, `CHE`, `MKD` and `SLE` sit in both sets, four entries out of 249, so a column of alpha-3 codes never approaches the threshold. |
+| `postal_code` | Postal formats that identify themselves by carrying a letter: United Kingdom, Canadian and Dutch shapes. **All-digit formats are deliberately NOT matched** — a five-digit US ZIP is indistinguishable from `numeric_string` without a locale, and dbprint has no locale to consult. A column of US ZIPs therefore reports `numeric_string`, which is the honest answer from values alone. This is a stated gap, not an oversight. |
 | `isbn` | The 13-digit ISBN form: prefix `978` or `979`, GS1 mod-10 check (weights 1 and 3 alternating from the right of the payload). The 10-digit form: nine digits plus a check character (`0`-`9` or `X`), weights 10 down to 1 from the left, sum divisible by 11. Hyphenated forms are stored constantly; hyphens and spaces are stripped before the check runs, the same precedent `card_number` set. Outranks `ean`: the 13-digit form is the `978`/`979` prefix subset of the 13-digit EAN and carries the identical check, so the subset is claimed first. Both outrank `card_number`, so a barcode column is not diluted by the tenth of it that also happens to be Luhn-valid. |
-| `ean` | GTIN forms of eight, twelve, thirteen or fourteen digits: a bare digit run of one of those four lengths, GS1 mod-10 valid. No prefix table - unlike `isbn`, a GTIN carries no reserved leading digits. **A value failing the check is NOT matched.** Collides with `card_number` by arithmetic alone (each check passes about one random digit run in ten of the other's length), and `ean` ranks above it for exactly that reason - see `card_number`'s own row for the reciprocal case. |
-| `vin` | Seventeen characters from the alphabet `A`-`Z` and `0`-`9`, excluding `I`, `O` and `Q`, with the check digit at position 9 computed per the federal VIN regulation (49 C.F.R. 565.15): each letter transliterates to a value (Table III), each position carries a weight (Table IV), and the weighted sum mod 11 MUST equal the check digit - a remainder of 10 renders as `X`. Ranked above `base64` defensively: a 17-character alphanumeric VIN clears that pattern's floor and alphabet, and escapes it today only because 17 is not a multiple of four - arithmetic luck, not a rule. |
-| `imei` | Exactly fifteen digits, Luhn-valid, first two digits (the Reporting Body Identifier) a member of the set GSMA has ever allocated to a device manufacturer - eighteen two-digit codes, six of them still active (GSMA's IMEI allocation guidelines, Annex A). **NOT matched** when the RBI is not in that set, even if the value is otherwise Luhn-valid at device length - the column falls through to `card_number` instead. **A stale RBI mislabels rather than misses**: neither `34` nor `37` (Amex's issuer prefixes) has ever been allocated as an RBI, which is what keeps the two patterns from colliding; a future allocation into either prefix would need this list updated. |
-| `card_number` | 13-19 digit PAN, spaces and hyphens optional, carrying a valid Luhn (mod-10) check digit. No IIN prefix table. **A value failing Luhn is NOT matched** - a column of order ids or account numbers sharing a card-length digit run scores far below the threshold (about 10% pass Luhn by chance) and reports no pattern. A system that Luhn-checks its own account numbers is indistinguishable from a real PAN from the values alone and will be claimed - a stated gap, no value test can separate it. `isbn`, `ean` and `imei` all outrank this pattern, resolving the checksummed-shape overlaps at the values that would otherwise be claimed here: a fifteen-digit Luhn-valid run reports `imei` when its Reporting Body Identifier is allocated and `card_number` otherwise - an Amex number (issuer prefix `34`/`37`) is never in that allocated set, so the two never collide in practice. |
+| `ean` | GTIN forms of eight, twelve, thirteen or fourteen digits: a bare digit run of one of those four lengths, GS1 mod-10 valid. No prefix table — unlike `isbn`, a GTIN carries no reserved leading digits. **A value failing the check is NOT matched.** Collides with `card_number` by arithmetic alone (each check passes about one random digit run in ten of the other's length), and `ean` ranks above it for exactly that reason — see `card_number`'s own row for the reciprocal case. |
+| `vin` | Seventeen characters from the alphabet `A`-`Z` and `0`-`9`, excluding `I`, `O` and `Q`, with the check digit at position 9 computed per the federal VIN regulation (49 C.F.R. 565.15): each letter transliterates to a value (Table III), each position carries a weight (Table IV), and the weighted sum mod 11 MUST equal the check digit — a remainder of 10 renders as `X`. Ranked above `base64` defensively: a 17-character alphanumeric VIN clears that pattern's floor and alphabet, and escapes it today only because 17 is not a multiple of four — arithmetic luck, not a rule. |
+| `imei` | Exactly fifteen digits, Luhn-valid, first two digits (the Reporting Body Identifier) a member of the set GSMA has ever allocated to a device manufacturer — eighteen two-digit codes, six of them still active (GSMA's IMEI allocation guidelines, Annex A). **NOT matched** when the RBI is not in that set, even if the value is otherwise Luhn-valid at device length — the column falls through to `card_number` instead. **A stale RBI mislabels rather than misses**: neither `34` nor `37` (Amex's issuer prefixes) has ever been allocated as an RBI, which is what keeps the two patterns from colliding; a future allocation into either prefix would need this list updated. |
+| `card_number` | 13-19 digit PAN, spaces and hyphens optional, carrying a valid Luhn (mod-10) check digit. No IIN prefix table. **A value failing Luhn is NOT matched** — a column of order ids or account numbers sharing a card-length digit run scores far below the threshold (about 10% pass Luhn by chance) and reports no pattern. A system that Luhn-checks its own account numbers is indistinguishable from a real PAN from the values alone and will be claimed — a stated gap, no value test can separate it. `isbn`, `ean` and `imei` all outrank this pattern, resolving the checksummed-shape overlaps at the values that would otherwise be claimed here: a fifteen-digit Luhn-valid run reports `imei` when its Reporting Body Identifier is allocated and `card_number` otherwise — an Amex number (issuer prefix `34`/`37`) is never in that allocated set, so the two never collide in practice. |
 | `iban` | ISO 7064 mod-97-10: two-letter country code, two check digits, up to 30 further alphanumeric characters, total length 15-34, spaces optional. The first four characters move to the end, each letter substitutes for its position value plus 9 (`A`=10 .. `Z`=35), and the resulting integer mod 97 MUST equal 1. |
 | `bic` | ISO 9362: six letters (institution + country code) then two alphanumerics (location), with an optional three-character branch code (8 or 11 characters total). Positions 5-6 MUST be a valid ISO 3166-1 alpha-2 country code, from the same set `country_code` uses. |
-| `phone` | E.164 (`+` then 8-15 digits, separators optional), OR a national form carrying at least one separator (space, hyphen, or parenthesis) with 10-15 digits once separators are removed. **A bare digit run is NOT matched** - a phone number and an account id are indistinguishable digit runs, and the separator is the only evidence that tells them apart. **The dot is NOT a recognized separator** - `555.123.4567` is also every version string and every multi-part decimal. The two digit floors exclude a US SSN (9 digits) and an ISO date stored as text (8 digits) arithmetically rather than by a special case. A 15-digit separator-bearing run that also passes Luhn is claimed by `card_number` instead, which outranks `phone`; one that does not remains `phone`. |
-| `timezone` | Exact, case-sensitive membership of the producer's `zoneinfo.available_timezones()` set - a stdlib call, not a hand-maintained literal. Covers `Area/Location` names (`Europe/London`), multi-level names (`America/Indiana/Knox`) and short aliases (`UTC`, `GMT`, `EST`) uniformly, including a column mixing all three forms. **Lowercased names are NOT matched** (`europe/london`) - IANA zone names are case-sensitive, and lowercasing would trade a closed set for a fuzzy one on this axis's precision bias (§4.4). **A stated host-variance gap**: the set reflects whatever tzdata the runtime resolves, so two producers on different hosts can disagree on rarely-used aliases; this does not break any reproducibility promise this specification makes, and it is smaller than the run-to-run variance §4.1.2's random sampling already licenses. |
+| `phone` | E.164 (`+` then 8-15 digits, separators optional), OR a national form carrying at least one separator (space, hyphen, or parenthesis) with 10-15 digits once separators are removed. **A bare digit run is NOT matched** — a phone number and an account id are indistinguishable digit runs, and the separator is the only evidence that tells them apart. **The dot is NOT a recognized separator** — `555.123.4567` is also every version string and every multi-part decimal. The two digit floors exclude a US SSN (9 digits) and an ISO date stored as text (8 digits) arithmetically rather than by a special case. A 15-digit separator-bearing run that also passes Luhn is claimed by `card_number` instead, which outranks `phone`; one that does not remains `phone`. |
+| `timezone` | Exact, case-sensitive membership of the producer's `zoneinfo.available_timezones()` set — a stdlib call, not a hand-maintained literal. Covers `Area/Location` names (`Europe/London`), multi-level names (`America/Indiana/Knox`) and short aliases (`UTC`, `GMT`, `EST`) uniformly, including a column mixing all three forms. **Lowercased names are NOT matched** (`europe/london`) — IANA zone names are case-sensitive, and lowercasing would trade a closed set for a fuzzy one on this axis's precision bias (§4.4). **A stated host-variance gap**: the set reflects whatever tzdata the runtime resolves, so two producers on different hosts can disagree on rarely-used aliases; this does not break any reproducibility promise this specification makes, and it is smaller than the run-to-run variance §4.1.2's random sampling already permits. |
 | `content_type` | A registered RFC 6838 top-level type (`application`, `audio`, `example`, `font`, `image`, `message`, `model`, `multipart`, `text`, `video`, or an `x-` experimental type), a slash, a restricted-name subtype, and optional `; parameters`. Case-insensitive. The top-level type is the closed registry rather than a free token, because any two-segment path (`a/image.png`) satisfies the free-token grammar and the two patterns would stop being distinguishable. |
 | `path` | A POSIX filesystem path: at least one `/` separator with a non-empty segment before it, no whitespace in any segment, and no URI scheme. Absolute and relative forms both match. **Windows forms are NOT matched** — a drive letter or a backslash separator is reserved, so a column of `C:\...` values reports no pattern rather than a wrong one. **A network block is NOT matched** — CIDR notation (`10.0.0.0/8`) satisfies the same shape (a segment, a slash, a segment), so a value that also parses as a network address reports no pattern rather than `path`. |
-| `filename` | A bare name with an extension and no separator: `^[^/\\\s]+\.[A-Za-z][A-Za-z0-9]{0,9}$`. The extension MUST begin with a letter, which is what keeps an IPv4 address and a decimal number from reading as filenames. `semver` outranks it, so a prerelease or build form (`1.0.0-alpha.beta`) reports that pattern instead. **A stated gap: a hostname (`example.com`) is not separable from a filename by value alone, and no list rescues it.** Neither carries a path separator, both end in an alphabetic label, and a TLD-length or TLD-membership rule fails on its own evidence - `.zip`, `.mov`, `.sh`, `.py` and `.md` are all delegated top-level domains and all common file extensions, so `archive.zip` and `example.zip` stay indistinguishable whichever list is consulted. Consumers reading `filename` on a column of domains have the honest answer available from the values themselves. |
+| `filename` | A bare name with an extension and no separator: `^[^/\\\s]+\.[A-Za-z][A-Za-z0-9]{0,9}$`. The extension MUST begin with a letter, which is what keeps an IPv4 address and a decimal number from reading as filenames. `semver` outranks it, so a prerelease or build form (`1.0.0-alpha.beta`) reports that pattern instead. **A stated gap: a hostname (`example.com`) is not separable from a filename by value alone, and no list resolves it.** Neither carries a path separator, both end in an alphabetic label, and a TLD-length or TLD-membership rule fails on its own evidence — `.zip`, `.mov`, `.sh`, `.py` and `.md` are all delegated top-level domains and all common file extensions, so `archive.zip` and `example.zip` stay indistinguishable whichever list is consulted. Consumers reading `filename` on a column of domains have the honest answer available from the values themselves. |
 | `prose` | Free-running text: at least 5 whitespace-separated tokens, at least one common function word, and matching none of the structural patterns above. The function-word list is English; prose in other languages is not detected, and its absence is not an assertion that a column is structured. |
 
 #### 4.1.2 Sampling strategy
@@ -2014,13 +2013,13 @@ Producers MUST sample up to `looks_like_sample_size` (default 1000) DISTINCT non
 
 If the column's distinct count is less than the sample size, producers MUST sample all distinct non-null values.
 
-The sample size comes from the configuration in force for the table being profiled - `statistics.looks_like_sample_size` in `.dbprint.yaml`, which a producer MAY let a project set per connection, per table, or both. A producer that resolves it per table MUST use the value resolved for the table it is sampling.
+The sample size comes from the configuration in force for the table being profiled — `statistics.looks_like_sample_size` in `.dbprint.yaml`, which a producer MAY let a project set per connection, per table, or both. A producer that resolves it per table MUST use the value resolved for the table it is sampling.
 
 Adapter implementations choose how to obtain the sample efficiently (Snowflake `SAMPLE`, Postgres `TABLESAMPLE`, MySQL `WHERE RAND() < x`); the spec requires only that the sample is a uniformly random selection of distinct non-null values.
 
 A producer MAY approximate the distinct-value draw above a row-count threshold of its own choosing, trading the guarantee above for bounded query cost: drawing a uniformly random sample of rows first (Snowflake `SAMPLE`, Postgres `TABLESAMPLE`, MySQL `ORDER BY RAND()`) and taking the distinct values among them, rather than scanning the full distinct set to draw from directly. A full distinct-first random draw costs more as the column's distinct-value count grows, independent of row count, which a row-level sample bounds by construction. The approximation reintroduces exactly the bias the first paragraph's random-selection requirement exists to avoid: a value appearing in more rows is more likely to survive the row-level draw, so the sample over-represents common values in proportion to their frequency. Below the threshold, the full distinct set is read and drawn from directly, satisfying the requirement above without approximation.
 
-A producer that samples an eligible column MUST publish the verdict it reached. There is no permission to decline detection on cost grounds: an absent `inferred.looks_like` on a classification §4.1.5 names states only that no pattern reached the threshold, never that the column went unmeasured.
+A producer that samples an eligible column MUST publish the verdict it reached. There is no permission to decline detection on cost grounds: an absent `inferred.looks_like` on a classification §4.1.5 names states only that no pattern reached the threshold, never that the column went unmeasured. A draw that failed is not a verdict: the column names `inferred.looks_like` in its own `unmeasured` list (§2.2.4).
 
 #### 4.1.3 Match threshold
 
@@ -2034,7 +2033,7 @@ No minimum sample size applies. Below twenty sampled values the threshold is una
 
 `sampled` and `matched` describe `looks_like` alone, never `epoch_unit` or `sensitivity` even where those axes read the same draw (§4.1.5, §4.4.4) — each pattern matches a different subset of one sample, so one count could not describe more than one verdict without becoming ambiguous about which. A consumer reading a small `sampled` on `epoch_unit` or `sensitivity` is reading nothing, since the pair is never emitted for them.
 
-**A sample that clears no pattern MAY still have come close to one.** Where no pattern reaches the 95% threshold, producers emit `inferred.looks_like_candidate` (the highest-scoring pattern, ties broken by the §4.1.4 priority order) and `inferred.looks_like_candidate_share` (that pattern's share of the sample) whenever the share is at least **50%** — a producer constant, never configuration, so two prints stay comparable on it. Below 50% the column's dominant character is not the pattern, and producers MUST omit both fields rather than publish a share too small to be informative. The pair rides the same per-pattern tally the verdict test already computed; no pattern's own matching rule, the §4.1.4 priority order, or the 95% verdict threshold changes on this account.
+**A sample that clears no pattern MAY still have come close to one.** Where no pattern reaches the 95% threshold, producers emit `inferred.looks_like_candidate` (the highest-scoring pattern, ties broken by the §4.1.4 priority order) and `inferred.looks_like_candidate_share` (that pattern's share of the sample) whenever the share is at least **50%** — a producer constant, never configuration, so two prints stay comparable on it. Below 50% the column's dominant character is not the pattern, and producers MUST omit both fields rather than publish a share too small to be informative. The pair is read from the same per-pattern tally the verdict test already computed; no pattern's own matching rule, the §4.1.4 priority order, or the 95% verdict threshold changes on this account.
 
 `looks_like_candidate` and `looks_like_candidate_share` are emitted together, and only in `looks_like`'s absence: the near-miss and the verdict are mutually exclusive, and a column MUST NOT carry both. A share at or above 95% is a contradiction — it would have cleared the verdict threshold and been `looks_like` instead — and producers MUST NOT publish one there.
 
@@ -2077,7 +2076,7 @@ When a sampled value matches multiple patterns, producers MUST walk this list to
 
 A column-level `looks_like` value is the pattern assigned to ≥ 95% of sampled values when each value is evaluated under this priority order.
 
-Seventeen orderings in this list are load-bearing and a producer MUST NOT reorder them - `iso8601_date` and `iso8601_datetime` are not among them: nothing ranked above them claims their shape, and nothing between them and `numeric_string` claims what they decline, so their placement is a family grouping rather than a conflict resolution. `currency_code` is not among them either: no pattern above it can claim a three-letter alphabetic token, so its rank is free rather than a conflict resolution. Neither is `jwt` nor `vin`: nothing above `base64` claims a dotted token or a 17-character alphanumeric run today, so both ranks above it are defensive rather than a conflict resolution - they stay robust against a future widening of the base64 alphabet, at no cost to any pattern that exists now.
+Seventeen orderings in this list resolve a conflict between patterns, and a producer MUST NOT reorder them — `iso8601_date` and `iso8601_datetime` are not among them: nothing ranked above them claims their shape, and nothing between them and `numeric_string` claims what they decline, so their placement is a family grouping rather than a conflict resolution. `currency_code` is not among them either: no pattern above it can claim a three-letter alphabetic token, so its rank is free rather than a conflict resolution. Neither is `jwt` nor `vin`: nothing above `base64` claims a dotted token or a 17-character alphanumeric run today, so both ranks above it are defensive rather than a conflict resolution — they stay robust against a future widening of the base64 alphabet, at no cost to any pattern that exists now.
 
 - `url` outranks `path` and `filename`, so a link never reports as either.
 - `content_type` outranks `path`, so `image/png` is not read as a two-segment path.
@@ -2143,7 +2142,7 @@ Reserved; not defined. Cross-table overlap-based foreign key detection — compa
 
 `looks_like` answers "what shape is this value" and is tuned for **precision**: a wrong shape hint makes an agent write a wrong query. `sensitivity` answers a different question — "does this column hold data that must not leave the database" — whose errors are asymmetric in the opposite direction. Over-flagging costs one over-masked column. Under-flagging leaks a customer's name, home address, or a live credential into a git repository.
 
-Most categories on this axis are personal data in the ordinary sense - a name, an address, a date of birth. One is not: `credential` (§4.4.1) flags a secret whose disclosure is a security incident rather than a privacy one. The axis is named for what it gates, not for a single legal or ethical framing; SPEC 4.4.2 already forecloses reading it as a compliance claim, and that forecloses reading it as a privacy-only claim too.
+Most categories on this axis are personal data in the ordinary sense — a name, an address, a date of birth. One is not: `credential` (§4.4.1) flags a secret whose disclosure is a security incident rather than a privacy one. The axis is named for what it gates, not for a single legal or ethical framing; SPEC 4.4.2 already forecloses reading it as a compliance claim, and that forecloses reading it as a privacy-only claim too.
 
 The two are therefore separate fields with separate error budgets, and they are **not alternatives**: an email column carries `looks_like: email` and `sensitivity: contact` at the same time. A consumer gating redaction reads one field rather than maintaining its own shape-to-sensitivity mapping.
 
@@ -2155,36 +2154,36 @@ The two are therefore separate fields with separate error budgets, and they are 
 | `postal_address` | A street address or a line of one |
 | `geolocation` | A coordinate, a coordinate pair, or a geohash |
 | `date_of_birth` | A person's date of birth |
-| `national_id` | A number a government issued to identify a person - a social security, tax, or passport number |
-| `financial_account` | A bank or card account - an IBAN, a bank account number, a card number, a card security code |
-| `credential` | A secret - a password hash, an API key, a session token, a private key |
-| `health` | Clinical data - a diagnosis, a blood type, a medication, an allergy, a disability |
-| `demographic` | An attribute widely treated as needing extra care - ethnicity, religion, sexual orientation, gender identity, political or union affiliation |
-| `employment` | A person's compensation - salary, wage, bonus, commission |
+| `national_id` | A number a government issued to identify a person — a social security, tax, or passport number |
+| `financial_account` | A bank or card account — an IBAN, a bank account number, a card number, a card security code |
+| `credential` | A secret — a password hash, an API key, a session token, a private key |
+| `health` | Clinical data — a diagnosis, a blood type, a medication, an allergy, a disability |
+| `demographic` | An attribute widely treated as needing extra care — ethnicity, religion, sexual orientation, gender identity, political or union affiliation |
+| `employment` | A person's compensation — salary, wage, bonus, commission |
 | `contact` | A means of contacting a person — email, telephone |
-| `online_identifier` | A network address, device or session identifier that ties activity to a person - an IP address, a MAC address, a device or advertising identifier, a session or cookie identifier |
+| `online_identifier` | A network address, device or session identifier that ties activity to a person — an IP address, a MAC address, a device or advertising identifier, a session or cookie identifier |
 
-**`health` and `demographic` are separate categories, not one merged value.** `RedactRule.covers()` targets by `sensitivity` value, so the vocabulary is the granularity of the redaction control - a merged value would force both or neither, where a project may legitimately need diagnoses withheld while ethnicity stays readable for equity reporting, or the reverse. Both are name evidence only; a `diagnosis_notes` `text` column reporting `looks_like: prose` still carries `health` even though its prose exemption (§2.2.3's second footnote) means it publishes no `values` list to withhold - the flag is not conditional on there being something to redact. `condition`, `treatment`, `procedure`/`procedure_code`, `test_result` and `status` are deliberately excluded from `health` - each is a rules engine's predicate, an experiment arm, a stored procedure, a CI run, or an ordinary status column at least as often as a patient's. Bare `gender`/`sex`, `nationality`/`country` (join keys, §4.4.1's `postal_address` row) and `marital_status`/`language` are deliberately excluded from `demographic` - each is the breakdown an analytics print is most often written to support, so a false positive there costs the most.
+**`health` and `demographic` are separate categories, not one merged value.** `RedactRule.covers()` targets by `sensitivity` value, so the vocabulary is the granularity of the redaction control — a merged value would force both or neither, where a project may legitimately need diagnoses withheld while ethnicity stays readable for equity reporting, or the reverse. Both are name evidence only; a `diagnosis_notes` `text` column reporting `looks_like: prose` still carries `health` even though its prose exemption (§2.2.3's second footnote) means it publishes no `values` list to withhold — the flag is not conditional on there being something to redact. `condition`, `treatment`, `procedure`/`procedure_code`, `test_result` and `status` are deliberately excluded from `health` — each is a rules engine's predicate, an experiment arm, a stored procedure, a CI run, or an ordinary status column at least as often as a patient's. Bare `gender`/`sex`, `nationality`/`country` (join keys, §4.4.1's `postal_address` row) and `marital_status`/`language` are deliberately excluded from `demographic` — each is the breakdown an analytics print is most often written to support, so a false positive there costs the most.
 
-**`geolocation` does not re-open §3.4's reserved `geographic` classification.** That reserve is a *classification*, which replaces a column's whole emitted field set; a `latitude` column flagged `geolocation` keeps its `numeric` classification, its `range` and its percentiles - `sensitivity` is additive and displaces nothing, so the reasoning that keeps `geographic` reserved does not reach this axis. Two evidence paths: a `latitude`/`longitude` pair in separate `numeric` columns is name evidence only (no sample is drawn for `numeric` - §4.4.3 below), and a coordinate pair stored in one `text` column reads `looks_like: latlon` (§4.1.1), independent of the column's name. `city`, `region`, `postcode` and `zip` are deliberately excluded: a `redact` rule on this value would silently empty the single most-read categorical enumeration in a schema, and a postcode is `postal_address`'s question, not this one's.
+**`geolocation` does not re-open §3.4's reserved `geographic` classification.** That reserve is a *classification*, which replaces a column's whole emitted field set; a `latitude` column flagged `geolocation` keeps its `numeric` classification, its `range` and its percentiles — `sensitivity` is additive and displaces nothing, so the reasoning that keeps `geographic` reserved does not reach this axis. Two evidence paths: a `latitude`/`longitude` pair in separate `numeric` columns is name evidence only (no sample is drawn for `numeric` - §4.4.3 below), and a coordinate pair stored in one `text` column reads `looks_like: latlon` (§4.1.1), independent of the column's name. `city`, `region`, `postcode` and `zip` are deliberately excluded: a `redact` rule on this value would silently empty the single most-read categorical enumeration in a schema, and a postcode is `postal_address`'s question, not this one's.
 
-**`date_of_birth` is name evidence only, and deliberately excludes `age`.** No sample is drawn for a `temporal` column (§4.1.5 names only `categorical`/`text`/`foreign_key_candidate`), so the column name is the whole test - unambiguous tokens (`date_of_birth`, `dob`, `birth_date`, ...) need no value agreement, the same treatment `first_name` gets. An `age` column is `numeric`, publishes a coarser range (ages, not dates), and the word means cache, account, or file age at least as often as a person's - it does not join this category. **`redacted: drop` does not remove `freshness`**: `max_age_days` is derived by arithmetic rather than read from a cell (§2.2.3's matrix footnote), so a fully dropped `date_of_birth` column still publishes it - coarsened to the nearest 90 days rather than to the day (§2.2.9), which is what keeps the youngest person's birth date from being recoverable through the one field `drop` cannot remove.
+**`date_of_birth` is name evidence only, and deliberately excludes `age`.** No sample is drawn for a `temporal` column (§4.1.5 names only `categorical`/`text`/`foreign_key_candidate`), so the column name is the whole test — unambiguous tokens (`date_of_birth`, `dob`, `birth_date`, ...) need no value agreement, the same treatment `first_name` gets. An `age` column is `numeric`, publishes a coarser range (ages, not dates), and the word means cache, account, or file age at least as often as a person's — it does not join this category. **`redacted: drop` does not remove `freshness`**: `max_age_days` is derived by arithmetic rather than read from a cell (§2.2.3's matrix footnote), so a fully dropped `date_of_birth` column still publishes it — coarsened to the nearest 90 days rather than to the day (§2.2.9), which is what keeps the youngest person's birth date from being recoverable through the one field `drop` cannot remove.
 
-**`national_id` carries no `looks_like` value.** A dashed US SSN (`123-45-6789`) is a hyphenated all-digit string, locale-bound, and indistinguishable from a ZIP+4 or an internal reference code by value alone - the same reasoning that keeps `postal_code` off all-digit formats (§4.1.1). Its check is corroboration for this axis only (§4.4.4), never a shape published to `looks_like`.
+**`national_id` carries no `looks_like` value.** A dashed US SSN (`123-45-6789`) is a hyphenated all-digit string, locale-bound, and indistinguishable from a ZIP+4 or an internal reference code by value alone — the same reasoning that keeps `postal_code` off all-digit formats (§4.1.1). Its check is corroboration for this axis only (§4.4.4), never a shape published to `looks_like`.
 
-**`financial_account` is the one category whose value corroboration is a checksum rather than a heuristic.** A column reporting `looks_like: iban` or `looks_like: card_number` (§4.1.1) carries `financial_account` whatever its name is - a mod-97 or a Luhn check under the value, the same shape-corroboration §4.4.3 already gives `contact` for `email`/`phone`. Institution identifiers (`bic`, a SWIFT code, a UK sort code, a US routing number) are refused rather than unconsidered: they identify a bank, not the account itself, and flagging a public institution code would redact data nobody needed redacted.
+**`financial_account` is the one category whose value corroboration is a checksum rather than a heuristic.** A column reporting `looks_like: iban` or `looks_like: card_number` (§4.1.1) carries `financial_account` whatever its name is — a mod-97 or a Luhn check under the value, the same shape-corroboration §4.4.3 already gives `contact` for `email`/`phone`. Institution identifiers (`bic`, a SWIFT code, a UK sort code, a US routing number) are refused rather than unconsidered: they identify a bank, not the account itself, and flagging a public institution code would redact data nobody needed redacted.
 
-**`credential` is the one category not defined by personal data, and its leak shape depends on the column's classification.** A `password_hash` column that is unique per row classifies `text` (SPEC 4.2 - uniqueness does not withhold the value list), so its top-N hashes publish exactly like any other `text` column's, live values and all. A small `api_key` table classifies `categorical` and its `values` list is exhaustive. Both deserve the category, and both carry live literals a `redact` rule is needed to withhold - a reader cannot tell which risk applies without reading the matrix. Strong tokens (`password`, `password_hash`, `api_key`, `secret_key`, `access_token`, `refresh_token`, `session_token`, `private_key`, `client_secret`) need no value agreement. Weak tokens (`key`, `token`, `secret`, `hash` - ordinary names: a settings table's `key`, a cache `key`, a content `hash`) are corroborated by shape: `looks_like: jwt` flags unconditionally, independent of the name, the same mechanism §4.4.3 already gives `contact`; `looks_like: hex` corroborates only a weak name, since an unconditional `hex` flag would wrongly catch a checksum column. A detected `sensitivity: credential` never gains a `redacted` marker on a column that carries no `values`, `range` or `percentiles` to withhold (§2.2.9's marker rule) - a credential stored in a `json` column stays unmarked even under a matching `redact` rule, which is the rule doing nothing rather than failing.
+**`credential` is the one category not defined by personal data, and its leak shape depends on the column's classification.** A `password_hash` column that is unique per row classifies `text` (SPEC 4.2 — uniqueness does not withhold the value list), so its top-N hashes publish exactly like any other `text` column's, live values and all. A small `api_key` table classifies `categorical` and its `values` list is exhaustive. Both deserve the category, and both carry live literals a `redact` rule is needed to withhold — a reader cannot tell which risk applies without reading the matrix. Strong tokens (`password`, `password_hash`, `api_key`, `secret_key`, `access_token`, `refresh_token`, `session_token`, `private_key`, `client_secret`) need no value agreement. Weak tokens (`key`, `token`, `secret`, `hash` — ordinary names: a settings table's `key`, a cache `key`, a content `hash`) are corroborated by shape: `looks_like: jwt` flags unconditionally, independent of the name, the same mechanism §4.4.3 already gives `contact`; `looks_like: hex` corroborates only a weak name, since an unconditional `hex` flag would wrongly catch a checksum column. A detected `sensitivity: credential` never gains a `redacted` marker on a column that carries no `values`, `range` or `percentiles` to withhold (§2.2.9's marker rule) — a credential stored in a `json` column stays unmarked even under a matching `redact` rule, which is the rule doing nothing rather than failing.
 
-**`employment` is name evidence only, and its reach is deliberately narrow.** No sample is drawn for a `numeric` column, so the name is the only evidence, the same constraint `geolocation` and `date_of_birth` share. Only `drop` protects a flagged column: `mask` and `hash` leave `range` and `percentiles` in place with a substituted scalar (§2.2.9), so `redact: [{sensitivity: [employment], with: drop}]` is the one rule that removes a salary's bounds. `performance_rating`, `termination_reason`, `manager_notes`, `job_title` and `department` are deliberately excluded - each is an ordinary column an HR dashboard groups by, and a false positive there would silently empty an analytic column a print exists to describe (§4.4.2).
+**`employment` is name evidence only, and its reach is deliberately narrow.** No sample is drawn for a `numeric` column, so the name is the only evidence, the same constraint `geolocation` and `date_of_birth` share. Only `drop` protects a flagged column: `mask` and `hash` leave `range` and `percentiles` in place with a substituted scalar (§2.2.9), so `redact: [{sensitivity: [employment], with: drop}]` is the one rule that removes a salary's bounds. `performance_rating`, `termination_reason`, `manager_notes`, `job_title` and `department` are deliberately excluded — each is an ordinary column an HR dashboard groups by, and a false positive there would silently empty an analytic column a print exists to describe (§4.4.2).
 
-**`online_identifier` reads `looks_like: ip` and `looks_like: mac_address`, and is checked last.** The chain is most-specific-first (§4.4.3): an email address is an online identifier in the broad sense too, so `online_identifier` is checked after `contact` to keep such a column reporting `contact`. A server's IP and a client's IP are the same shape, and dbprint cannot tell them apart from a column name alone - a false positive on an infrastructure inventory is the accepted cost (§4.4.2). `user_id`, `customer_id`, `account_id` and every other internal key are refused rather than unconsidered: they identify a person as surely as a cookie does, and flagging them would put a redaction rule over every foreign key in the database. `session_token` is deliberately excluded here even though it identifies a session - a live session token is a bearer credential first, and `sensitivity: credential` is where it is reached, so the two vocabularies do not claim the same token. `username` joins neither this category nor `personal_name`: a handle identifies an account rather than a device, and nothing separates a real name from a pseudonym in one. Whether the column is unique or repeats on an event log, it classifies `text` and its top-N most frequent handles ship - a stated residue, not a gap this category is meant to close. **A native `INET` or `MACADDR` column is reachable in every cardinality band.** §3.2's `categorical` check is type-agnostic and runs before any type-based branch, so a low-cardinality native column classifies normally and stays reachable by name evidence; a unique one reaches `text` the same way any other high-cardinality measured column does (SPEC 4.2). A column at moderate, non-identifying cardinality with no declared FK matches no named type-based branch either, and classifies `text` rather than `unsupported`: the producer measured a cardinality for it, and the fallthrough follows what was measured (§3.2) - so `inferred.sensitivity` reaches it there like any other `text` column, with no gap left to state.
+**`online_identifier` reads `looks_like: ip` and `looks_like: mac_address`, and is checked last.** The chain is most-specific-first (§4.4.3): an email address is an online identifier in the broad sense too, so `online_identifier` is checked after `contact` to keep such a column reporting `contact`. A server's IP and a client's IP are the same shape, and dbprint cannot tell them apart from a column name alone — a false positive on an infrastructure inventory is the accepted cost (§4.4.2). `user_id`, `customer_id`, `account_id` and every other internal key are refused rather than unconsidered: they identify a person as surely as a cookie does, and flagging them would put a redaction rule over every foreign key in the database. `session_token` is deliberately excluded here even though it identifies a session — a live session token is a bearer credential first, and `sensitivity: credential` is where it is reached, so the two vocabularies do not claim the same token. `username` joins neither this category nor `personal_name`: a handle identifies an account rather than a device, and nothing separates a real name from a pseudonym in one. Whether the column is unique or repeats on an event log, it classifies `text` and its top-N most frequent handles ship — a stated residue, not a gap this category is meant to close. **A native `INET` or `MACADDR` column is reachable in every cardinality band.** §3.2's `categorical` check is type-agnostic and runs before any type-based branch, so a low-cardinality native column classifies normally and stays reachable by name evidence; a unique one reaches `text` the same way any other high-cardinality measured column does (SPEC 4.2). A column at moderate, non-identifying cardinality with no declared FK matches no named type-based branch either, and classifies `text` rather than `unsupported`: the producer measured a cardinality for it, and the fallthrough follows what was measured (§3.2) — so `inferred.sensitivity` reaches it there like any other `text` column, with no gap left to state.
 
 #### 4.4.2 Recall bias is normative
 
 Producers SHOULD resolve ambiguity toward flagging. A consumer MUST NOT read `sensitivity` as a precise claim, and MUST NOT read its absence as an assertion that a column is safe: **absence means "not detected", never "safe to publish"**. The field exists to gate redaction and to direct a human's attention; it does not make a producer a compliance tool, and nothing in this specification claims completeness for it. §7.2 carries this rule alongside every other absence a reader has to interpret.
 
-**A column that names its own category and publishes it anyway is a conformance warning, not silence.** `privacy.unredacted-sensitive` (§6.3) fires when a column carries `inferred.sensitivity` and publishes at least one of `values`, `range`, `percentiles` with no `redacted` primitive covering it. The code is a warning and never moves the conformance verdict or an exit code - the axis inherits its recall bias, so the warning fires on every false positive `sensitivity` produces, and silencing a real one costs redacting a column a reader wanted to see.
+**A column that names its own category and publishes it anyway is a conformance warning, not silence.** `privacy.unredacted-sensitive` (§6.3) fires when a column carries `inferred.sensitivity` and publishes at least one of `values`, `range`, `percentiles` with no `redacted` primitive covering it. The code is a warning and never moves the conformance verdict or an exit code — the axis inherits its recall bias, so the warning fires on every false positive `sensitivity` produces, and silencing a real one costs redacting a column a reader wanted to see.
 
 #### 4.4.3 Evidence
 
@@ -2196,15 +2195,15 @@ Producers MUST NOT ship a dictionary of given names for this purpose. Such a lis
 
 **On `numeric` and `temporal`, values cannot corroborate, because none are drawn.** §4.1.5 samples only `categorical`/`text`/`foreign_key_candidate`, so a `numeric` or `temporal` column reaches this axis on the column name alone or not at all — the corroboration this section otherwise describes is unavailable there, not merely unexercised. This is why `date_of_birth`, `geolocation` and `employment` (§4.4.1) carry no weak, value-agreement tier: there is no sample to agree with, so every token in those vocabularies is treated as unambiguous by construction.
 
-`contact`, `financial_account`, `online_identifier`, `geolocation` and `credential` additionally read `looks_like` (§4.1): a column whose values match a contact-shaped pattern (`email`, `phone`) carries `sensitivity: contact`, one whose values match `iban` or `card_number` carries `sensitivity: financial_account`, one whose values match `ip` or `mac_address` carries `sensitivity: online_identifier`, one whose values match `latlon` carries `sensitivity: geolocation`, and one whose values match `jwt` carries `sensitivity: credential` - each whatever the column's name is, independent of and in addition to the name evidence above. `personal_name` and `postal_address` are not defined over `looks_like` - their evidence is the column name and, where the name is ambiguous, its values, per the corroboration rule above.
+`contact`, `financial_account`, `online_identifier`, `geolocation` and `credential` additionally read `looks_like` (§4.1): a column whose values match a contact-shaped pattern (`email`, `phone`) carries `sensitivity: contact`, one whose values match `iban` or `card_number` carries `sensitivity: financial_account`, one whose values match `ip` or `mac_address` carries `sensitivity: online_identifier`, one whose values match `latlon` carries `sensitivity: geolocation`, and one whose values match `jwt` carries `sensitivity: credential` — each whatever the column's name is, independent of and in addition to the name evidence above. `personal_name` and `postal_address` are not defined over `looks_like` — their evidence is the column name and, where the name is ambiguous, its values, per the corroboration rule above.
 
 #### 4.4.4 Thresholds
 
 The 95% threshold §4.1.3 defines for `looks_like` is a precision instrument and does NOT apply here. Each detector states its own, and they need not agree with one another. A producer SHOULD document the thresholds it uses.
 
-`date_of_birth`, `health`, `demographic`, `online_identifier`, `geolocation` and `employment` use no corroboration threshold: every token in each vocabulary means what the category names and nothing else, so there is nothing for a sample to corroborate - the same economy §4.4.3 already states for `personal_name`'s strong tier.
+`date_of_birth`, `health`, `demographic`, `online_identifier`, `geolocation` and `employment` use no corroboration threshold: every token in each vocabulary means what the category names and nothing else, so there is nothing for a sample to corroborate — the same economy §4.4.3 already states for `personal_name`'s strong tier.
 
-`credential`'s weak tier (`key`, `token`, `secret`, `hash`) carries no threshold of its own either: the corroborator is the column's own `looks_like` verdict (`jwt` or `hex`), which has already cleared `looks_like`'s 95% threshold (§4.1.3) before this detector runs - the same economy this section already states for `financial_account`'s generic names. Re-deriving a second per-value share over the same sample would apply two thresholds to one measurement for no gain.
+`credential`'s weak tier (`key`, `token`, `secret`, `hash`) carries no threshold of its own either: the corroborator is the column's own `looks_like` verdict (`jwt` or `hex`), which has already cleared `looks_like`'s 95% threshold (§4.1.3) before this detector runs — the same economy this section already states for `financial_account`'s generic names. Re-deriving a second per-value share over the same sample would apply two thresholds to one measurement for no gain.
 
 `national_id`'s weak tier (a generic column name such as `id_number`) requires at least 50% of sampled values to match a dashed US SSN shape (area, group and serial ranges the SSA never issues excluded) before the category is reported. **This is a single-locale corroborator, stated as a gap rather than left to be rediscovered**: a UK National Insurance Number, a dashed Canadian SIN, or any other country's identifier grammar will not corroborate a generic column name, and a per-country table of such grammars is the hand-maintained literal §4.1.1 already declines to carry for `postal_code`. A column name unambiguous on its own (`ssn`, `passport_number`, ...) needs no value agreement at all, the same treatment §4.4.3 already gives `personal_name`.
 
@@ -2229,18 +2228,18 @@ An integer column can be a quantity or an instant: a `BIGINT` of Unix epoch seco
 | `seconds` | `1e9` .. `2e9` inclusive | 2001-09-09T01:46:40Z .. 2033-05-18T03:33:20Z |
 | `milliseconds` | `1e12` .. `2e12` inclusive | the identical 32-year span, scaled by 1000 |
 
-The test is a plausibility check over a 32-year calendar window, not a proof: an ordinary large integer can fall inside it by chance, and this specification does not claim otherwise. Microsecond (`1e15`..`2e15`) and nanosecond (`1e18`..`2e18`) epochs are a stated gap - out of scope for v1, in the register §4.1.1 uses for `postal_code`'s all-digit gap, not an oversight.
+The test is a plausibility check over a 32-year calendar window, not a proof: an ordinary large integer can fall inside it by chance, and this specification does not claim otherwise. Microsecond (`1e15`..`2e15`) and nanosecond (`1e18`..`2e18`) epochs are a stated gap — out of scope for v1, in the register §4.1.1 uses for `postal_code`'s all-digit gap, not an oversight.
 
 #### 4.5.2 Two evidence rules under one field
 
-Each states its own threshold, the shape §4.4.4 already licenses for the `sensitivity` detectors - the two need not agree with one another, and a column reached by one is never reached by the other:
+Each states its own threshold, the shape §4.4.4 already permits for the `sensitivity` detectors — the two need not agree with one another, and a column reached by one is never reached by the other:
 
-- **Bounds rule**, for `numeric` columns: `range.min` and `range.max` are both integral and fall inside the same window. No sample, no threshold - the test is over the two required bounds and it is unanimous or it is nothing. Requiring BOTH bounds inside the window is what excludes most ordinary large integers without further evidence: a count, an amount or a byte size almost always has a minimum orders of magnitude below its maximum, while an epoch column's does not. An id sequence seeded near `1e9` is the one shape whose minimum is large by construction, and it is a named, accepted false positive rather than an excluded case.
+- **Bounds rule**, for `numeric` columns: `range.min` and `range.max` are both integral and fall inside the same window. No sample, no threshold — the test is over the two required bounds and it is unanimous or it is nothing. Requiring BOTH bounds inside the window is what excludes most ordinary large integers without further evidence: a count, an amount or a byte size almost always has a minimum orders of magnitude below its maximum, while an epoch column's does not. An id sequence seeded near `1e9` is the one shape whose minimum is large by construction, and it is a named, accepted false positive rather than an excluded case.
 - **Per-value rule**, for the three classifications §4.1.5 samples (`categorical`, `text`, `foreign_key_candidate`): at least 95% of sampled values stringify to an integer inside the same window, reusing `looks_like`'s own match threshold (§4.1.3) rather than a second number nothing argues for.
 
 The two rules never compete for the same column: `numeric` is never sampled (§4.1.5 names the other three classifications only, and no `range` is required on any of them - §2.2.3's matrix marks it `-`), so a column reached by the bounds rule has no per-value verdict to disagree with, and vice versa.
 
-`epoch_unit` MUST NOT be derived any other way. It is not a `looks_like` value: §4.1.3's per-value assignment is normative there, and a bounds test over two aggregates has no per-sampled-value verdict to make - subsuming `numeric_string` on every epoch-shaped digit run would also need the kind of exclusion clause §4.1's patterns are defined to avoid needing. It is not a note inside `range` either: `range` is a bounds object shared with `temporal`, unreachable for the sampled epoch columns (`categorical`, `text`, `foreign_key_candidate`), none of which emit `range` at all, and it disappears under `redacted: drop` - exactly the column where the marker is worth the most (§4.5.3).
+`epoch_unit` MUST NOT be derived any other way. It is not a `looks_like` value: §4.1.3's per-value assignment is normative there, and a bounds test over two aggregates has no per-sampled-value verdict to make — subsuming `numeric_string` on every epoch-shaped digit run would also need the kind of exclusion clause §4.1's patterns are defined to avoid needing. It is not a note inside `range` either: `range` is a bounds object shared with `temporal`, unreachable for the sampled epoch columns (`categorical`, `text`, `foreign_key_candidate`), none of which emit `range` at all, and it disappears under `redacted: drop` — exactly the column where the marker is worth the most (§4.5.3).
 
 #### 4.5.3 Interaction with redaction
 
@@ -2326,9 +2325,9 @@ Grouped by concern. `E` = error, `W` = warning.
 | `layout.missing-manifest` | E | Connection root missing `manifest.yaml` |
 | `layout.missing-reading-guide` | E | Connection root missing `reading.md` (§1.2) |
 | `layout.missing-diff` | E | Connection root missing `diff.yaml` though `manifest.yaml` records a table (§1.2) |
-| `layout.invalid-path-segment` | E | Path segment fails the §1.5.1 allowlist regex |
+| `layout.invalid-path-segment` | E | Directory segment fails the §1.5.1 allowlist regex (artifact file names are not segments) |
 | `layout.unknown-file` | W | File inside per-table dir not in the canonical artifact list (extensibility tolerance) |
-| `layout.unexpected-directory-level` | E | Extra directory between connection root and per-table dir (depth mismatch per adapter hierarchy) |
+| `layout.unexpected-directory-level` | E | A producer-written artifact (`ddl.sql`, `statistics.yaml`, `relationships.yaml`) in a directory no `manifest.tables[*].path` declares |
 
 #### YAML / schema validity (§§2.2–2.6)
 
@@ -2357,8 +2356,9 @@ Grouped by concern. `E` = error, `W` = warning.
 | Code | Sev | Trigger |
 |---|---|---|
 | `manifest.missing-artifact` | E | Manifest entry references file that doesn't exist on disk |
-| `manifest.orphaned-artifact` | W | File on disk not listed in any manifest entry (could be in-progress write; not strictly a violation) |
+| `manifest.orphaned-artifact` | W | File on disk not listed in any manifest entry (could be in-progress write; not strictly a violation). The only finding for a user-authored file in a directory no manifest entry declares |
 | `manifest.table-fqn-mismatch` | E | Manifest's `table` FQN doesn't match the `table` field in the referenced statistics.yaml / relationships.yaml |
+| `manifest.path-fqn-mismatch` | E | A manifest key's segments differ from its entry's `path` segments (§1.3) |
 | `manifest.selectors-mismatch-diff` | E | `selectors` disagrees with `diff.yaml`'s `target.selectors` when both are present (§2.5, §2.6.3) |
 | `manifest.columns-count-mismatch` | E | A table entry's `columns` count disagrees with the size of its `statistics.yaml` `columns` map (§2.5) |
 
@@ -2370,18 +2370,18 @@ Grouped by concern. `E` = error, `W` = warning.
 | `stats.forbidden-field-for-classification` | E | Column has a field marked — in the §2.2.3 matrix |
 | `stats.cardinality-exceeds-row-count` | E | `cardinality > row_count` (invariant violation) |
 | `stats.null-count-exceeds-row-count` | E | `null_count > row_count` (invariant violation) |
-| `stats.nullable-contradicts-null-count` | E | `nullable: false` alongside a nonzero `null_count` - `nullable` is a DDL fact (§2.2.2), never a data measurement, so it cannot disagree with a NULL the column's own scan found |
+| `stats.nullable-contradicts-null-count` | E | `nullable: false` alongside a nonzero `null_count` — `nullable` is a DDL fact (§2.2.2), never a data measurement, so it cannot disagree with a NULL the column's own scan found |
 | `stats.degenerate-count-exceeds-row-count` | E | `zero_count`, `negative_count`, `empty_count` or `quantized_count` exceeds the non-null scanned count (invariant violation) |
 | `stats.null-rate-mismatch` | E | `null_rate` disagrees with `null_count / rows_scanned`, rounded per §2.2.6 |
 | `stats.cardinality-ratio-mismatch` | E | `cardinality_ratio` disagrees with `cardinality / rows_scanned`, rounded per §2.2.6 |
-| `stats.values-sum-mismatch` | W | An exhaustive `values` list (`values_coverage` of `1.0`) whose counts do not sum to `rows_scanned - null_count`, OR a truncated list whose counts exceed it. WARNING because phase A and phase B are measured in separate statements against a table taking writes - on a live database the two counts can disagree by design, not by producer defect |
+| `stats.values-sum-mismatch` | W | An exhaustive `values` list (`values_coverage` of `1.0`) whose counts do not sum to `rows_scanned - null_count`, OR a truncated list whose counts exceed it. WARNING because phase A and phase B are measured in separate statements against a table taking writes — on a live database the two counts can disagree by design, not by producer defect |
 | `stats.values-coverage-mismatch` | W | `values_coverage` disagrees with the listed counts over `rows_scanned - null_count`. WARNING for the same cross-phase reason as `stats.values-sum-mismatch`: the two ratios share the same `listed`/`non_null` pair, and a drift small enough to still disagree at six decimals is the same drift, not a distinct producer defect |
-| `stats.values-list-short-of-cardinality` | E | An exhaustive `values` list (`values_coverage` of `1.0`, `values_coverage_method` absent or `measured`) carries fewer entries than `cardinality`, `cardinality_method: exact` (§2.2.4). ERROR because `values_coverage` and `cardinality` are both required exact fields whenever this fires - a live table taking writes between the two phases can widen `cardinality` past a list that was already complete when it was read, which is the phase A / phase B disagreement `stats.values-sum-mismatch`'s neighbors tolerate at warning; this code's own severity is unchanged. `values_coverage_method: bounded` reports `stats.values-list-short-of-cardinality-bounded` instead - see below |
+| `stats.values-list-short-of-cardinality` | E | An exhaustive `values` list (`values_coverage` of `1.0`, `values_coverage_method` absent or `measured`) carries fewer entries than `cardinality`, `cardinality_method: exact` (§2.2.4). ERROR because `values_coverage` and `cardinality` are both required exact fields whenever this fires — a live table taking writes between the two phases can widen `cardinality` past a list that was already complete when it was read, which is the phase A / phase B disagreement `stats.values-sum-mismatch`'s neighbors tolerate at warning; this code's own severity is unchanged. `values_coverage_method: bounded` reports `stats.values-list-short-of-cardinality-bounded` instead — see below |
 | `stats.values-list-short-of-cardinality-bounded` | W | The same disagreement as `stats.values-list-short-of-cardinality`, where `values_coverage_method: bounded` (§2.2.4) already discloses that `values_coverage` is a clamp, not a measurement read at the same instant as `cardinality`. WARNING because the producer has already named the cause this error exists to catch |
 | `stats.values-list-exceeds-cardinality` | W | An exhaustive `values` list carries more entries than `cardinality`, `cardinality_method: exact`. WARNING for the same cross-phase reason as `stats.values-sum-mismatch` |
-| `stats.values-not-ordered` | E | `values` entries are not ordered by `count` DESC with a lexicographic tie-break (§2.2.4) |
-| `stats.spelling-of-target-unlisted` | E | A `values` entry's `spelling_of` names a value the same list does not carry as a canonical member - an entry with no `spelling_of` of its own (§2.2.4) |
-| `stats.spelling-of-key-mismatch` | E | A `values` entry's `value` and its `spelling_of` do not fold to one key - trimmed and case-folded, the key `normalized_cardinality` is measured with - so the group was formed under a key §2.2.4 forbids |
+| `stats.values-not-ordered` | E | `values` entries are not ordered by `count` DESC with a tie-break on the published text of `value` (§2.2.4) |
+| `stats.spelling-of-target-unlisted` | E | A `values` entry's `spelling_of` names a value the same list does not carry as a canonical member — an entry with no `spelling_of` of its own (§2.2.4) |
+| `stats.spelling-of-key-mismatch` | E | A `values` entry's `value` and its `spelling_of` do not fold to one key — trimmed and case-folded, the key `normalized_cardinality` is measured with — so the group was formed under a key §2.2.4 forbids |
 | `stats.distribution-mismatch` | W | When verifiable from an exhaustive `values` list, distribution value doesn't match §2.2.5 rules. WARNING because heuristic-prone for truncated lists and exact-match boundaries. |
 | `stats.distribution-contradicts-frequencies` | E | On a `numeric`/`temporal` column with `cardinality_method: exact`, `distribution` disagrees with the verdict recomputed from `frequencies` (§2.2.5). ERROR because the two come from the same fetch and are exact arithmetic, not a heuristic over a possibly-truncated list |
 | `stats.scope-not-a-mapping` | E | `scope` is present but is not a mapping (§2.2.8) |
@@ -2390,34 +2390,34 @@ Grouped by concern. `E` = error, `W` = warning.
 | `stats.scope-sample-out-of-range` | E | `scope.sample` outside the interval (0, 1] |
 | `stats.scope-sample-and-filter` | E | `scope` carries both `sample` and `filter` — a table is narrowed one way or the other (§2.2.8) |
 | `stats.scope-asserts-nothing` | W | `scope` covers the whole table and records neither `sample` nor `filter`; omit it |
-| `stats.excess-precision` | E | A numeric statistic carries more than 6 decimal places (§2.2.6) |
+| `stats.excess-precision` | E | A numeric statistic is not the value §2.2.6's rounding rule emits for it: more than six decimals, or — for a measured field, where six decimals would round a nonzero value to zero — more than six significant figures (§2.2.6) |
 | `stats.redacted-without-marker` | E | A `values` entry carries no `value` but the column declares no `redacted` primitive (§2.2.9) |
 | `stats.unrepresentable-names-unemitted-field` | E | `unrepresentable` names a field (`min`, `max`, or a `percentiles` key) the column did not emit (§2.2.4) |
-| `stats.unmeasured-names-emitted-field` | E | `unmeasured` names a field the same column also emits - a measurement and its own absence cannot both be claimed (§2.2.4) |
-| `stats.unmeasured-names-unrequired-field` | E | `unmeasured` names a field the §2.2.3 matrix does not mark **R** for this column's classification; that absence is structural and needs no marker (§2.2.4) |
+| `stats.unmeasured-names-emitted-field` | E | `unmeasured` names a field the same column also emits — a measurement and its own absence cannot both be claimed (§2.2.4) |
+| `stats.unmeasured-names-unrequired-field` | E | `unmeasured` names a field the §2.2.3 matrix does not mark **R** for this column's classification; that absence is structural and needs no marker (§2.2.4). `inferred.looks_like` and `inferred.epoch_unit` on a classification §4.1.5 samples are the exception |
 | `stats.unmeasured-names-emitted-block` | E | the file's `unmeasured` list names a table-level block the same file also emits (§2.2.1) |
 | `stats.unrepresentable-empty` | E | `unrepresentable` is present as an empty list; the key MUST be omitted instead (§2.2.4) |
 | `stats.span-days-mismatch` | E | `range.span_days` disagrees with `day_count(range.min, range.max)` (§2.2.4). Skipped when either bound is redacted (`mask`/`hash`), named in `unrepresentable`, or not a parseable ISO date/instant |
-| `stats.percentiles-not-ordered` | E | `percentiles` do not ascend with their keys (§2.2.4). Compares parsed values, not key spelling; a value that cannot be read back (unrepresentable, unparseable) is skipped rather than failing the column |
-| `stats.percentile-outside-range` | E | A percentile lies outside `[range.min, range.max]` (§2.2.4). `range` and `percentiles` are read by one statement per column, so this does not carry the cross-phase tolerance `stats.values-sum-mismatch` does. Skipped when the column carries any `redacted` marker |
+| `stats.percentiles-not-ordered` | E | `percentiles` do not ascend with their keys (§2.2.4). Compares parsed values, not key spelling; a temporal value that does not parse as an instant (unrepresentable) compares by its leading year, and two values of one year that cannot both be parsed are not compared |
+| `stats.percentile-outside-range` | E | A percentile lies outside `[range.min, range.max]` (§2.2.4). `range` and `percentiles` are read by one statement per column, so this does not carry the cross-phase tolerance `stats.values-sum-mismatch` does. A temporal value that does not parse as an instant compares by its leading year, so a year-10000 percentile against a year-9999 maximum is reported. Skipped when the column carries any `redacted` marker |
 | `stats.mean-outside-range` | E | `mean` lies outside `[range.min, range.max]` (§2.2.4). An average outside its own bounds is impossible over any nonempty column, so it reports a producer that lost the magnitude of one of the three |
 | `stats.length-order-violated` | E | `length.min`, `length.avg` and `length.max` disagree with `min <= avg <= max` (§2.2.4) |
-| `stats.normalized-cardinality-exceeds-cardinality` | E | `normalized_cardinality` exceeds `cardinality`; folding case and trimming whitespace cannot increase distinctness (§2.2.4). Not checked when `cardinality_method` is `approximate` - the comparison is approximate on both sides there |
+| `stats.normalized-cardinality-exceeds-cardinality` | W | `normalized_cardinality` exceeds `cardinality`; folding case and trimming whitespace cannot increase distinctness (§2.2.4). Not checked when `cardinality_method` is `approximate` — the comparison is approximate on both sides there. WARNING because the two counts are measured in separate statements against a table taking writes — on a live database the later count can legitimately be the larger, not by producer defect |
 | `stats.max-age-days-mismatch` | E | `freshness.max_age_days` disagrees with `max(0, day_count(range.max, profiled_at))` (§2.2.4). Skipped when the column carries any `redacted` marker, `max` is named in `unrepresentable`, or `range.max` is not a parseable instant |
 | `stats.uncoarsened-redacted-day-count` | E | A `temporal` column carrying a `redacted` marker emits `freshness.max_age_days` or `range.span_days` not floored to a multiple of 90 (§2.2.9) |
-| `stats.candidate-key-mismatch` | E | `inferred.candidate_key` disagrees with whether `cardinality_ratio` clears the SPEC 4.2 threshold - present where it should be absent, or the reverse. Independent of classification |
+| `stats.candidate-key-mismatch` | E | `inferred.candidate_key` disagrees with whether `cardinality_ratio` clears the SPEC 4.2 threshold — present where it should be absent, or the reverse. Independent of classification |
 | `stats.candidate-key-exception-mismatch` | E | `inferred.candidate_key_exception` disagrees with the value recomputed from `cardinality`, `cardinality_ratio`, `cardinality_method` and `null_count` (§4.2) |
 | `stats.looks-like-candidate-with-verdict` | E | `inferred.looks_like_candidate` is present alongside `inferred.looks_like`; the near-miss and the verdict are mutually exclusive (§4.1.3) |
-| `stats.looks-like-candidate-at-verdict-threshold` | E | `inferred.looks_like_candidate_share` is at or above the 95% verdict threshold - a share that high would have been `inferred.looks_like` instead (§4.1.3) |
-| `stats.population-marker-mismatch` | E | A column's `rows_scanned` disagrees with what the file's `scope` requires - absent or wrong when scoped, present when not (§2.2.8) |
+| `stats.looks-like-candidate-at-verdict-threshold` | E | `inferred.looks_like_candidate_share` is at or above the 95% verdict threshold — a share that high would have been `inferred.looks_like` instead (§4.1.3) |
+| `stats.population-marker-mismatch` | E | A column's `rows_scanned` disagrees with what the file's `scope` requires — absent or wrong when scoped, present when not (§2.2.8) |
 | `stats.null-patterns-absent-with-nulls` | E | `null_patterns` is omitted although some column reports a non-zero `null_count` and the file's own `unmeasured` list does not name it, or present although no column reports one (§2.2.10) |
 | `stats.null-patterns-unknown-column` | E | A `null_patterns` entry names a column absent from the file's `columns` map (§2.2.10) |
-| `stats.null-patterns-sum-exceeds-rows-scanned` | E | The `null_patterns` counts sum to more rows than were scanned (§2.2.10), `coverage_method` absent or `measured`. `coverage_method: bounded` reports `stats.null-patterns-sum-exceeds-rows-scanned-bounded` instead - see below |
-| `stats.null-patterns-sum-exceeds-rows-scanned-bounded` | W | The same disagreement as `stats.null-patterns-sum-exceeds-rows-scanned`, where `coverage_method: bounded` (§2.2.10) already discloses that the census and `rows_scanned` were not read at the same instant. WARNING because the producer has already named the cause this error exists to catch |
+| `stats.null-patterns-sum-exceeds-rows-scanned` | E | The `null_patterns` counts sum to more rows than were scanned (§2.2.10), `coverage_method` absent or `measured`. `coverage_method: bounded` reports `stats.null-patterns-sum-exceeds-rows-scanned-bounded` instead — see below |
+| `stats.null-patterns-sum-exceeds-rows-scanned-bounded` | W | The same disagreement as `stats.null-patterns-sum-exceeds-rows-scanned`, where `coverage_method: bounded` (§2.2.10) already discloses that the pattern counts and `rows_scanned` were not read at the same instant. WARNING because the producer has already named the cause this error exists to catch |
 | `stats.null-patterns-coverage-mismatch` | E | `null_patterns.coverage` disagrees with the listed counts over `rows_scanned` (§2.2.10) |
 | `stats.null-patterns-not-ordered` | E | `null_patterns.patterns` is not ordered by `count` descending, ties by ascending `columns` (§2.2.10) |
 | `stats.null-patterns-duplicate-combination` | E | The same combination of columns appears in more than one `null_patterns` entry (§2.2.10) |
-| `stats.null-patterns-reconciliation-mismatch` | E | The `null_patterns` counts naming a column exceed its `null_count`, or fall short of it at `coverage: 1.0` (§2.2.10), `coverage_method` absent or `measured`. `coverage_method: bounded` reports `stats.null-patterns-reconciliation-mismatch-bounded` instead - see below |
+| `stats.null-patterns-reconciliation-mismatch` | E | The `null_patterns` counts naming a column exceed its `null_count`, or fall short of it at `coverage: 1.0` (§2.2.10), `coverage_method` absent or `measured`. `coverage_method: bounded` reports `stats.null-patterns-reconciliation-mismatch-bounded` instead — see below |
 | `stats.null-patterns-reconciliation-mismatch-bounded` | W | The same disagreement as `stats.null-patterns-reconciliation-mismatch`, where `coverage_method: bounded` (§2.2.10) already discloses the cause. WARNING for the same reason |
 | `stats.physical-name-matches-key` | W | `physical_name` is present and equals the column's own map key; the field asserts nothing and MUST be omitted (§2.2.4) |
 | `stats.physical-layout-unknown-column` | E | `physical_layout.keys` names a `column` absent from the file's `columns` map (§2.2.11) |
@@ -2425,37 +2425,38 @@ Grouped by concern. `E` = error, `W` = warning.
 | `stats.physical-layout-key-missing-marker` | E | `physical_layout.keys` names a `column` that does not carry `physical_layout_key: true` (§2.2.11) |
 | `stats.grain-unknown-column` | E | A `grain.keys` entry names a column absent from the file's `columns` map (§2.2.12) |
 | `stats.grain-duplicate-key` | E | The same column combination appears in more than one `grain.keys` entry (§2.2.12) |
-| `stats.grain-measured-under-scope` | E | `grain.keys` carries a `detection: measured` entry on a file that also carries `scope` - uniqueness over a sample is not uniqueness (§2.2.12) |
-| `stats.grain-measured-on-empty-table` | E | `grain.keys` carries a `detection: measured` entry on a table with `row_count: 0` - every combination is trivially unique there (§2.2.12) |
+| `stats.grain-measured-under-scope` | E | `grain.keys` carries a `detection: measured` entry on a file that also carries `scope` — uniqueness over a sample is not uniqueness (§2.2.12) |
+| `stats.grain-measured-on-empty-table` | E | `grain.keys` carries a `detection: measured` entry on a table with `row_count: 0` — every combination is trivially unique there (§2.2.12) |
 | `stats.dependencies-unknown-column` | E | A `dependencies` entry names a `determinant` or `dependent` absent from the file's `columns` map (§2.2.13) |
 | `stats.dependencies-self-referential` | E | A `dependencies` entry's `determinant` and `dependent` name the same column (§2.2.13) |
 | `stats.dependencies-strength-out-of-range` | E | A `dependencies` entry's `strength` is not in `(0, 1]` (§2.2.13) |
-| `stats.dependencies-direction-impossible` | E | A `dependencies` entry's `determinant` has lower `cardinality` than its `dependent` - a function's image cannot exceed its domain, so that direction cannot hold (§2.2.13) |
-| `stats.dependencies-measured-under-scope` | E | `dependencies` is non-empty on a file that also carries `scope` - a dependency measured over a sample is not a dependency (§2.2.13) |
-| `stats.dependencies-measured-on-empty-table` | E | `dependencies` is non-empty on a table with `row_count: 0` - every combination is trivially functional there (§2.2.13) |
+| `stats.dependencies-direction-impossible` | E | A `dependencies` entry's `determinant` has lower `cardinality` than its `dependent` — a function's image cannot exceed its domain, so that direction cannot hold (§2.2.13) |
+| `stats.dependencies-measured-under-scope` | E | `dependencies` is non-empty on a file that also carries `scope` — a dependency measured over a sample is not a dependency (§2.2.13) |
+| `stats.dependencies-measured-on-empty-table` | E | `dependencies` is non-empty on a table with `row_count: 0` — every combination is trivially functional there (§2.2.13) |
 | `stats.timeline-unknown-column` | E | `timeline.column` names a column absent from the file's `columns` map (§2.2.16) |
 | `stats.timeline-anchor-not-temporal` | E | `timeline.column` names a column whose `classification` is not `temporal` (§2.2.16) |
-| `stats.timeline-anchor-redacted` | E | `timeline.column` names a column carrying a `redacted` marker - the anchor rule MUST NOT choose a redacted column (§2.2.16) |
-| `stats.timeline-under-scope` | E | `timeline` is present on a file that also carries `scope` - a bucketed count over a sample is not a timeline (§2.2.16) |
-| `stats.timeline-on-empty-table` | E | `timeline` is present on a table with `row_count: 0` - there is nothing to bucket (§2.2.16) |
+| `stats.timeline-anchor-redacted` | E | `timeline.column` names a column carrying a `redacted` marker — the anchor rule MUST NOT choose a redacted column (§2.2.16) |
+| `stats.timeline-under-scope` | E | `timeline` is present on a file that also carries `scope` — a bucketed count over a sample is not a timeline (§2.2.16) |
+| `stats.timeline-on-empty-table` | E | `timeline` is present on a table with `row_count: 0` — there is nothing to bucket (§2.2.16) |
 | `stats.timeline-buckets-unordered` | E | `timeline.buckets` is not ascending by `start` (§2.2.16) |
-| `stats.timeline-coverage-mismatch` | E | `timeline.coverage` disagrees with the listed bucket counts over `rows_scanned` (§2.2.16) |
-| `stats.populated-without-timeline` | E | A column carries `populated` on a file with no `timeline` block - there is nowhere to read the anchor its instants are dated against (§2.2.4, §2.2.16) |
-| `stats.populated-out-of-anchor-range` | E | `populated.from` or `populated.to` falls outside the anchor column's own measured `range` (§2.2.4) |
+| `stats.timeline-coverage-mismatch` | E | `timeline.coverage` disagrees with the listed bucket counts over `rows_scanned`, recomputed through the same bounded share the producer writes it with (§2.2.16) |
+| `stats.timeline-buckets-exceed-rows-scanned` | W | The listed bucket counts sum above `rows_scanned` (§2.2.16). WARNING because the buckets and the row count are measured in separate statements against a table taking writes — on a live database the two can disagree by design, not by producer defect |
+| `stats.populated-without-timeline` | E | A column carries `populated` on a file with no `timeline` block — there is nowhere to read the anchor its instants are dated against (§2.2.4, §2.2.16) |
+| `stats.populated-out-of-anchor-range` | W | `populated.from` or `populated.to` falls outside the anchor column's own measured `range` (§2.2.4). WARNING because the window and the anchor's bounds are measured in separate statements against a table taking writes — an anchor advancing between them carries `to` past a bound recorded earlier, not by producer defect |
 | `stats.sketch-unknown-method` | E | `sketch.method` is not a value this MAJOR defines (§2.2.14) |
 | `stats.sketch-invalid-encoding` | E | `sketch.values` is not valid base64 of a length that is a multiple of 8 bytes (§2.2.14) |
 | `stats.sketch-oversized` | E | A decoded `sketch.values` carries more entries than `method`'s own k (§2.2.14) |
 | `stats.sketch-not-ascending` | E | A decoded `sketch.values` is not sorted ascending (§2.2.14) |
-| `stats.sketch-on-redacted-column` | E | A column declaring a `redacted` primitive carries a `sketch` - the digests enumerate the cell values that primitive withheld (§2.2.14) |
-| `stats.measurement-under-catalog-only` | E | A column carries a field beyond `sql_type`, `nullable`, `classification`, `physical_name`, `collation`, `physical_layout_key` on a file that also carries `catalog_only` - a measurement published where none was queried (§2.2.15) |
-| `stats.depends-on-on-table` | E | `depends_on` is present but `type` is `table` - the field names what a view/matview reads and MUST NOT appear on a plain table (§2.2.17) |
+| `stats.sketch-on-redacted-column` | E | A column declaring a `redacted` primitive carries a `sketch` — the digests enumerate the cell values that primitive withheld (§2.2.14) |
+| `stats.measurement-under-catalog-only` | E | A column carries a field beyond `sql_type`, `nullable`, `classification`, `physical_name`, `collation`, `physical_layout_key` on a file that also carries `catalog_only` — a measurement published where none was queried (§2.2.15) |
+| `stats.depends-on-on-table` | E | `depends_on` is present but `type` is `table` — the field names what a view/matview reads and MUST NOT appear on a plain table (§2.2.17) |
 
 #### Privacy (§4.4)
 
 | Code | Sev | Trigger |
 |---|---|---|
 | `privacy.unredacted-sensitive` | W | Column carries `inferred.sensitivity` and publishes at least one of `values`, `range`, `percentiles`, with no `redacted` primitive covering it (§4.4.2) |
-| `privacy.redacted-value-compared` | E | `diff.yaml` carries a `statistic_changed` event for `values`, `range`, `percentiles`, `mean`, `sum` or `length` on a column whose `statistics.yaml` declares a `redacted` marker (§2.6.6). ERROR, not WARNING: the marker is a producer's own declaration, so no inference is being second-guessed |
+| `privacy.redacted-value-compared` | E | `diff.yaml` carries a `statistic_changed` event for `values`, `range`, `percentiles` or any field §2.2.9 withholds from a marked column, on a column whose `statistics.yaml` declares a `redacted` marker (§2.6.6). ERROR, not WARNING: the marker is a producer's own declaration, so no inference is being second-guessed |
 
 #### Relationships invariants (§2.3)
 
@@ -2463,13 +2464,15 @@ Grouped by concern. `E` = error, `W` = warning.
 |---|---|---|
 | `relationships.column-array-length-mismatch` | E | `column` and `target_column` (in refers_to) or `column` and `referencer_column` (in referenced_by) have different array lengths |
 | `relationships.broken-reciprocity` | E | A `referenced_by` entry points to a source table that's in the manifest BUT lacks the matching `refers_to` entry |
-| `relationships.ineligible-target-is-referenced` | E | `eligible_target: false` but `referenced_by` carries an `inferred` entry - naming inference cannot resolve an edge to an ineligible object (§2.3.8). A `declared` entry there is unaffected; a composite key inference never reaches can still be a real FK target |
-| `relationships.path-on-composite-endpoint` | E | `path` (or `target_path`) is present but its partner array (`column` or `target_column`) names more than one column (§2.3.9) - a path endpoint is representable only on a single-column endpoint |
+| `relationships.unmirrored-refers-to` | E | A `refers_to` entry's `target_table` is in the manifest and declares a `relationships.yaml`, but that file's `referenced_by` has no entry naming this table as `referencer_table`, this `column` as `referencer_column` and this `target_column` as `column` (§2.3.6). The reverse of `relationships.broken-reciprocity`; a target outside the manifest, or one declaring no `relationships.yaml`, is not checked |
+| `relationships.mirror-mismatch` | E | A `refers_to` entry and its `referenced_by` mirror address the same edge but differ on a field both entry schemas define other than the address (`detection`, `on_delete`, `on_update`, `constraint_name`, `observed`), including a field present on one side only (§2.3.3, §2.3.10). Where several entries share one address, both sides must carry the same set |
+| `relationships.ineligible-target-is-referenced` | E | `eligible_target: false` but `referenced_by` carries an `inferred` entry — naming inference cannot resolve an edge to an ineligible object (§2.3.8). A `declared` entry there is unaffected; a composite key inference never reaches can still be a real FK target |
+| `relationships.path-on-composite-endpoint` | E | `path` (or `target_path`) is present but its partner array (`column` or `target_column`) names more than one column (§2.3.9) — a path endpoint is representable only on a single-column endpoint |
 | `relationships.observed-fanout-mismatch` | E | `observed.fanout_avg` disagrees with the referencing column's own `row_count / cardinality`, rounded per §2.2.6 (§2.3.10) |
 | `relationships.observed-coverage-mismatch` | E | `observed.target_coverage` disagrees with the two endpoints' own `cardinality / cardinality`, rounded per §2.2.6 (§2.3.10) |
 | `relationships.observed-coherent-mismatch` | E | `observed.coherent` disagrees with whether the referencing column's `cardinality` exceeds the referenced column's (§2.3.10) |
 | `relationships.observed-containment-mismatch` | E | `observed.containment` disagrees with the bottom-k intersection estimate recomputed from the two endpoints' own `sketch` (§2.3.10, §2.2.14) |
-| `relationships.observed-containment-forbidden` | E | `observed.containment` is published where the two endpoints' sketches carry no evidence to support it - the answerable subset between them is empty (§2.3.10) |
+| `relationships.observed-containment-forbidden` | E | `observed.containment` is published where the two endpoints' sketches carry no evidence to support it — the answerable subset between them is empty (§2.3.10) |
 | `relationships.observed-answerable-count-mismatch` | E | `observed.answerable_count` disagrees with the count of the referencing column's own retained hashes below the shared threshold (§2.3.10, §2.2.14), including when the answerable subset is empty and no count should be published at all |
 
 #### Diff invariants (§2.6)
@@ -2486,6 +2489,10 @@ Grouped by concern. `E` = error, `W` = warning.
 | `diff.grain-changed-no-change` | E | `grain_changed` event's `before` and `after` are identical (§2.6.6) |
 | `diff.physical-layout-changed-no-change` | E | `physical_layout_changed` event's `before` and `after` are identical (§2.6.6) |
 | `diff.depends-on-changed-no-change` | E | `depends_on_changed` event's `before` and `after` are identical (§2.6.6) |
+| `diff.table-type-changed-no-change` | E | `table_type_changed` event's `before` and `after` are identical (§2.6.6) |
+| `diff.column-physical-name-changed-no-change` | E | `column_physical_name_changed` event's `before` and `after` are identical (§2.6.6) |
+| `diff.column-collation-changed-no-change` | E | `column_collation_changed` event's `before` and `after` are identical (§2.6.6) |
+| `diff.statistic-changed-not-a-measurement` | E | A `statistic_changed` event's `stat` names a field that is not a measured statistic — a catalog fact with its own kind (`physical_name`, `collation`), a restatement (`physical_layout_key`), or a field drift never compares (§2.6.6) |
 
 #### DDL (§2.1)
 
@@ -2500,18 +2507,18 @@ Grouped by concern. `E` = error, `W` = warning.
 |---|---|---|
 | `annotations.unknown-column` | W | A key in `statistics.annotations.yaml`'s `columns` map names a column not present in the table's `statistics.yaml` (stale key; not fatal) |
 | `annotations.grain-unknown-column` | W | A `grain.keys[]` entry in `statistics.annotations.yaml` names a column not present in the table's `statistics.yaml` `columns` map (§2.7.1; stale key, not fatal) |
-| `annotations.claim-contradicts-statistic` | W | A `claims` predicate (§2.7.1) evaluates against the column's own `statistics.yaml` and fails. WARNING - the axis is advisory (§2.4); a contradicted claim is never a gating defect |
+| `annotations.claim-contradicts-statistic` | W | A `claims` predicate (§2.7.1) evaluates against the column's own `statistics.yaml` and fails. WARNING — the axis is advisory (§2.4); a contradicted claim is never a gating defect |
 | `annotations.claim-unassertable` | W | A `claims` predicate cannot be evaluated: the stat is not in the assertion DSL's vocabulary, the predicate is malformed, the stat is not emitted for the column's classification, or the column is redacted |
 | `annotations.unknown-edge` | W | A `verdict` in `relationships.annotations.yaml` addresses an edge absent from the table's own `relationships.yaml` `refers_to` (§2.7.2; stale, not fatal) |
-| `annotations.verdict-on-declared-edge` | W | A `verdict` addresses an edge whose matching `refers_to` entry carries `detection: declared` (§2.7.2) - an annotation may correct an inference, never contradict a measurement (§2.4) |
-| `annotations.unknown-value` | W | A `values` entry in `statistics.annotations.yaml` names a value the column's own **exhaustive** `values` list does not have (§2.7.1; stale, not fatal - a truncated list is not checked) |
-| `annotations.value-note-unassertable` | W | A `values` entry addresses a column carrying a `redacted` marker (§2.2.9) - there is no literal to check the note against |
+| `annotations.verdict-on-declared-edge` | W | A `verdict` addresses an edge whose matching `refers_to` entry carries `detection: declared` (§2.7.2) — an annotation may correct an inference, never contradict a measurement (§2.4) |
+| `annotations.unknown-value` | W | A `values` entry in `statistics.annotations.yaml` names a value the column's own **exhaustive** `values` list does not have (§2.7.1; stale, not fatal — a truncated list is not checked) |
+| `annotations.value-note-unassertable` | W | A `values` entry addresses a column carrying a `redacted` marker (§2.2.9) — there is no literal to check the note against |
 
 ### 6.4 Catalog totals
 
-- **138 codes** across 10 groups
-- **110 error** codes (gate conformance)
-- **28 warning** codes (recoverable anomalies)
+- **146 codes** across 10 groups
+- **115 error** codes (gate conformance)
+- **31 warning** codes (recoverable anomalies)
 
 The catalog MAY grow in MINOR releases (additive only). Existing codes' semantics MUST NOT change.
 
@@ -2561,13 +2568,13 @@ conforms = len(errors) == 0
 
 A consumer meets an absence far more often than it meets a value, and the rules governing what one means are stated where each field is defined — across §2.2, §2.3, §3 and §4, all written from the producer's side. This section collects them from the reader's.
 
-**Normative where it restates a MUST, informative where it collects.** No rule originates here; every row cites the section that governs it, and that section wins on any disagreement.
+**Normative where it restates a MUST, informative where it collects.** No rule originates here; every row cites the section that governs it, and that section governs on any disagreement.
 
-### 7.1 The two absences that are not absences
+### 7.1 Partial reads and failed reads
 
 **A statistic measured over part of the table is present, not missing.** Under a `scope` block (§2.2.8) every count in the file is a count over `rows_scanned` rather than over `row_count`, so a number an order of magnitude below what a reader expects is a narrower population, not a partial artifact. The file says which: `scope.rows_scanned` at the head, echoed on every column. A consumer MUST read the two together before concluding anything about a small number.
 
-**A producer failure is representable, and only where a producer said so.** `unmeasured` (§2.2.4 per column, §2.2.1 per file) names the fields and blocks a run attempted and could not obtain, so that cause is distinguishable from every structural cause in the tables below - but only on an artifact that carries the marker. Where it is absent, a measurement that failed and a measurement the rules forbade are still the same bytes, and the cause columns below are what a reader has.
+**A producer failure is representable, and only where a producer said so.** `unmeasured` (§2.2.4 per column, §2.2.1 per file) names the fields and blocks a run tried and failed to measure, and the manifest's `failed_tables` (§2.5) names a whole table it tried and failed to profile, so that cause is distinguishable from every structural cause in the tables below — but only on an artifact that carries the marker. Where it is absent, a measurement that failed and a measurement the rules forbade are still the same bytes, and the cause columns below are what a reader has.
 
 ### 7.2 Absent per-column fields
 
@@ -2577,37 +2584,37 @@ Every field the §2.2.3 matrix marks anything but **R** on at least one classifi
 
 | Absent field | Candidate causes | Distinguishable by |
 |---|---|---|
-| `cardinality`, `cardinality_ratio`, `cardinality_method` | The producer declined to measure a cardinality, which is what makes a column `unsupported` in a queried file (§3.1) - or the file carries `catalog_only` (§2.2.15), absent from every column regardless of classification | `classification`, then the file's own `catalog_only` marker |
-| `values` | Forbidden for this classification - `json` and `unsupported` only (§2.2.3) - or the column is `text` reporting `looks_like: prose`, exempted from the grouped scan (§2.2.3 ‡) | `classification`, then `inferred.looks_like` |
-| `values_coverage` | Forbidden for this classification - `json`, `unsupported`, `numeric` and `temporal`, the last two despite `values` itself being required there (§2.2.3) - or the column is `text` reporting `looks_like: prose` (§2.2.3 ‡) | `classification`, then `inferred.looks_like` |
+| `cardinality`, `cardinality_ratio`, `cardinality_method` | The producer declined to measure a cardinality, which is what makes a column `unsupported` in a queried file (§3.1) — or the file carries `catalog_only` (§2.2.15), absent from every column regardless of classification | `classification`, then the file's own `catalog_only` marker |
+| `values` | Forbidden for this classification — `json` and `unsupported` only (§2.2.3) — or the column is `text` reporting `looks_like: prose`, exempted from the grouped scan (§2.2.3 ‡) | `classification`, then `inferred.looks_like` |
+| `values_coverage` | Forbidden for this classification — `json`, `unsupported`, `numeric` and `temporal`, the last two despite `values` itself being required there (§2.2.3) — or the column is `text` reporting `looks_like: prose` (§2.2.3 ‡) | `classification`, then `inferred.looks_like` |
 | `values_coverage_method` | `values_coverage` is itself absent (§2.2.4) — or the list is truncated, a condition this field does not cover (its sibling `null_patterns.coverage_method`, §2.2.10, excludes truncation the same way) | `values`/`values_coverage`; `values_coverage` itself against `1.0`, for the second cause |
 | `distribution` | The same two causes as `values`, which it is derived from wherever a value list exists | `classification`, then `inferred.looks_like` |
 | `frequencies` | Forbidden outside `numeric` and `temporal` (§2.2.3) | `classification` |
 | `range`, `range.span_days`, `percentiles` | Forbidden for this classification (§2.2.3) — or withheld, since `redacted: drop` emits no literal and a bound is nothing but a literal (§2.2.3 †) | `classification`, then `redacted` |
-| `mean`, `sum` | Forbidden outside `numeric` (§2.2.3) — or withheld, since a redacted column's scanned set held at most one non-null value, or one distinct value, and the aggregate would republish it (§2.2.3 ¶) | `classification`, then `redacted` with `cardinality`, and `null_count` against `rows_scanned` |
-| `zero_count`, `negative_count` | Forbidden outside `numeric` (§2.2.3) | `classification` |
-| `empty_count` | Forbidden outside `text` (§2.2.3) | `classification` |
-| `quantized_count` | Forbidden outside `numeric` and `temporal` (§2.2.3) - or the column is `temporal` and its `sql_type` has no day to truncate to: `DATE`/`DATE32` (already their own truncation), `TIME`/`TIME WITH TIME ZONE`, or MySQL's `YEAR` (§2.2.3 ※) | `classification`, then `sql_type` for the second cause |
-| `length` | Forbidden outside `text`, `categorical` and `foreign_key_candidate` (§2.2.3) - or the column is `categorical`/`foreign_key_candidate` and either its `sql_type` carries no string value or the column is all-null (§2.2.3 ‖) - or withheld, since a redacted column's scanned set held at most one non-null value, or one distinct value, and the aggregate would republish it (§2.2.3 ¶) | `classification`, then `sql_type` and `null_rate` for the second cause, `redacted` with `cardinality` and `null_count` against `rows_scanned` for the third |
-| `normalized_cardinality` | Forbidden outside `text`, `categorical` and `foreign_key_candidate` (§2.2.3) - the column's `sql_type` carries no string value (§2.2.4) - or it is not a member of the join-key population §2.2.4 restricts this field to (edge, declared single-column unique key, `inferred.candidate_key`) | `classification`, then `sql_type`, then `relationships.yaml`'s `refers_to`/`referenced_by`, this table's own declared unique keys, and `inferred.candidate_key` |
+| `mean`, `sum` | Forbidden outside `numeric` (§2.2.3) — or withheld, since the column carries a `redacted` marker (§2.2.3 ¶, §2.2.9) | `classification`, then `redacted` |
+| `zero_count`, `negative_count` | Forbidden outside `numeric` (§2.2.3) — or withheld, since the column carries a `redacted` marker (§2.2.3 ¶) | `classification`, then `redacted` |
+| `empty_count` | Forbidden outside `text` (§2.2.3) — or withheld, since the column carries a `redacted` marker (§2.2.3 ¶) | `classification`, then `redacted` |
+| `quantized_count` | Forbidden outside `numeric` and `temporal` (§2.2.3) — or the column is `temporal` and its `sql_type` has no day to truncate to: `DATE`/`DATE32` (already their own truncation), `TIME`/`TIME WITH TIME ZONE`, or MySQL's `YEAR` (§2.2.3 ※) — or withheld, since the column carries a `redacted` marker (§2.2.3 ¶) | `classification`, then `sql_type` for the second cause, `redacted` for the third |
+| `length` | Forbidden outside `text`, `categorical` and `foreign_key_candidate` (§2.2.3) — or the column is `categorical`/`foreign_key_candidate` and either its `sql_type` carries no string value or the column is all-null (§2.2.3 ‖) — or withheld, since the column carries a `redacted` marker (§2.2.3 ¶) | `classification`, then `sql_type` and `null_rate` for the second cause, `redacted` for the third |
+| `normalized_cardinality` | Forbidden outside `text`, `categorical` and `foreign_key_candidate` (§2.2.3) — the column's `sql_type` carries no string value (§2.2.4) — or it is not a member of the join-key population §2.2.4 restricts this field to (edge, declared single-column unique key, `inferred.candidate_key`) — or withheld, since the column carries a `redacted` marker (§2.2.9) | `classification`, then `sql_type`, then `relationships.yaml`'s `refers_to`/`referenced_by`, this table's own declared unique keys, and `inferred.candidate_key`, then `redacted` |
 | `freshness` | Forbidden outside `temporal` (§2.2.3). Never withheld: it survives every redaction primitive, coarsened rather than omitted (§2.2.9) | `classification` |
-| `unmeasured` | Every field this column owed, it measured - the ordinary case (§2.2.4) | Nothing to distinguish: the marker has exactly one absent meaning |
-| `unrepresentable` | No emitted bound lies outside years 0001–9999 — or the column emitted no bound the marker could name (§2.2.4) | `range` and `percentiles`; absent bounds leave nothing to mark |
+| `unmeasured` | The run measured every field this column should carry — the ordinary case (§2.2.4) | Nothing to distinguish: the marker has exactly one absent meaning |
+| `unrepresentable` | No emitted bound lies outside years 0001–9999 — or the column emitted no bound the marker could name (§2.2.4) — or withheld, since the column carries a `redacted` marker (§2.2.9) | `range` and `percentiles`; absent bounds leave nothing to mark; then `redacted` |
 | `rows_scanned` | The file carries no `scope`, so `row_count` is the population of every count in it (§2.2.8) | the file's own `scope` block; the two agree or the artifact is inconsistent |
 | `physical_name` | The catalog's own spelling is the map key already (§2.2.4) | nothing further — the absence is the statement |
 | `collation` | The column sets no explicit collation, or sets one identical to the connection default (§2.2.4) | not distinguishable, and the answer is the same either way: `default_collation` (§2.5) |
 | `physical_layout_key` | The column is not named in this file's `physical_layout.keys` (§2.2.11) | that list; the two surfaces agree or the file contradicts itself |
-| `populated` | `null_count` is `0` (fully populated - `range` already says this) or the column is all-null - or the file carries `scope`, an empty table, or no eligible anchor, all of which also leave `timeline` absent, which `populated` MUST NOT be published without (§2.2.4, §2.2.16) | `null_count` against `rows_scanned`; `timeline`'s own presence for the second cause |
-| `inferred.looks_like` | Detection ran and no pattern reached the threshold (§4.1.3) — or never runs on this classification (§4.1.5) — or the winning pattern was `numeric_string` and the column's own SQL type is already numeric (§4.1.5) | `classification`, then `sql_type` for the third cause |
+| `populated` | `null_count` is `0` (fully populated — `range` already says this) or the column is all-null — or the file carries `scope`, an empty table, or no eligible anchor, all of which also leave `timeline` absent, which `populated` MUST NOT be published without (§2.2.4, §2.2.16) | `null_count` against `rows_scanned`; `timeline`'s own presence for the second cause |
+| `inferred.looks_like` | Detection ran and no pattern reached the threshold (§4.1.3) — or never runs on this classification (§4.1.5) — or the winning pattern was `numeric_string` and the column's own SQL type is already numeric (§4.1.5) — or the sample draw failed and the column names it `unmeasured` (§2.2.4) | `classification`, then `sql_type` for the third cause, the column's `unmeasured` for the fourth |
 | `inferred.sampled`, `inferred.matched` | `looks_like` is absent; the pair describes that verdict alone and is emitted only beside it (§2.2.4, §4.1.3) | `inferred.looks_like` |
-| `inferred.looks_like_candidate`, `inferred.looks_like_candidate_share` | `looks_like` is present, since the two are mutually exclusive - or no pattern's share reached the 50% floor - or detection never ran on this classification (§4.1.5), or was withheld as `numeric_string` on a numeric SQL type (§4.1.5) (§2.2.4, §4.1.3) | `inferred.looks_like`, then `sql_type` for the last cause |
+| `inferred.looks_like_candidate`, `inferred.looks_like_candidate_share` | `looks_like` is present, since the two are mutually exclusive — or no pattern's share reached the 50% floor — or detection never ran on this classification (§4.1.5), or was withheld as `numeric_string` on a numeric SQL type (§4.1.5) (§2.2.4, §4.1.3) | `inferred.looks_like`, then `sql_type` for the last cause |
 | `inferred.sensitivity` | Nothing was detected. Never that the column is safe to publish (§4.4.2) | not distinguishable, and not intended to be |
-| `inferred.epoch_unit` | Neither bounds nor sampled values fell inside one window (§4.5.1) — or no evidence rule reaches this classification (§4.5.2) | `classification` |
+| `inferred.epoch_unit` | Neither bounds nor sampled values fell inside one window (§4.5.1) — or no evidence rule reaches this classification (§4.5.2) — or the sample draw failed and the column names it `unmeasured` (§2.2.4) | `classification`, then the column's `unmeasured` |
 | `inferred.candidate_key` | `cardinality_ratio` does not clear the §4.2 threshold | `cardinality_ratio`; recomputable, and a validator recomputes it |
 | `inferred.candidate_key_exception` | `cardinality_ratio` is exactly `1.0`, or `candidate_key` is itself absent (§4.2) | `cardinality_ratio` and `inferred.candidate_key` |
 | `inferred.fk_candidate` | Reserved; a v1 producer MUST NOT emit it (§4.3) | nothing — it is absent from every v1 artifact |
 | `redacted` | No `redact` rule matched this column, or the connection configures none (§2.2.9) | `redaction_rules_configured` in the manifest (§2.5) |
-| `sketch` | The column is not a join-key participant on either side of an edge in this table's own `relationships.yaml`; its type has no canonical encoding (§2.2.14); it carries a `redacted` marker; or its file carries a top-level `scope` block | `relationships.yaml`'s `refers_to`/`referenced_by`, `sql_type`, `redacted`, and the file's own `scope` - all four, since any one of them alone can explain the absence |
+| `sketch` | The column is not a join-key participant on either side of an edge in this table's own `relationships.yaml`; its type has no canonical encoding (§2.2.14); it carries a `redacted` marker; or its file carries a top-level `scope` block | `relationships.yaml`'s `refers_to`/`referenced_by`, `sql_type`, `redacted`, and the file's own `scope` — all four, since any one of them alone can explain the absence |
 
 ### 7.3 Absent blocks and files
 
@@ -2618,21 +2625,22 @@ Shapes above column grain, which the §2.2.3 matrix does not reach.
 | Absent shape | Candidate causes | Distinguishable by |
 |---|---|---|
 | `catalog_only` | The producer issued a query for this object, the ordinary case (§2.2.15) | nothing further — the absence is the statement |
-| `row_count`, `row_count_method` | The file carries `catalog_only` (§2.2.15) - no query was issued to obtain either | the file's own `catalog_only` marker |
+| `row_count`, `row_count_method` | The file carries `catalog_only` (§2.2.15) — no query was issued to obtain either | the file's own `catalog_only` marker |
 | `scope` | The producer read every row. The absence is an assertion, not a gap (§2.2.8) | nothing further — the absence is the statement |
-| `null_patterns` | No column in the file carries a null, or the census failed and the file names it `unmeasured` (§2.2.10, §2.2.1) | every column's `null_count` and the file's own `unmeasured` list; the block MUST be present when any count is non-zero and the marker does not name it |
-| `null_patterns.coverage_method` | The census was truncated by the producer's own cap, a different condition the field does not cover (§2.2.10) | `patterns`'s own length against the cap |
+| `null_patterns` | No column in the file carries a null, or the pattern count failed and the file names it `unmeasured` (§2.2.10, §2.2.1) | every column's `null_count` and the file's own `unmeasured` list; the block MUST be present when any count is non-zero and the marker does not name it |
+| `null_patterns.coverage_method` | The pattern list was truncated by the producer's own cap, a different condition the field does not cover (§2.2.10) | `patterns`'s own length against the cap |
 | `physical_layout` | The table declares no clustering or partitioning key, the adapter cannot express the concept for this engine, or the file carries `catalog_only` (§2.2.15), whose absence here needs no further explanation. Never "not checked" unless the file names it `unmeasured` (§2.2.11) | the file's own `catalog_only` and `unmeasured` markers rule in the third and fourth causes; the first two remain not distinguishable from each other |
-| `grain` | A conforming producer always emits the block, `keys` empty rather than the block omitted (§2.2.12) - its absence is a producer that did not | nothing further - a conforming producer never leaves it absent |
-| `grain.search` | The measured probe never ran: the file carries `scope`, the file carries `catalog_only` (§2.2.15), a count is zero, or a column already carries `inferred.candidate_key` (§2.2.12) | the file's own `catalog_only` marker for the second cause - `row_count` does not exist to read under it; otherwise `scope`, `row_count`, and every column's `inferred.candidate_key` distinguish the rest |
+| `grain` | A conforming producer always emits the block, `keys` empty rather than the block omitted (§2.2.12) — its absence is a producer that did not | nothing further — a conforming producer never leaves it absent |
+| `grain.search` | The measured probe never ran: the file carries `scope`, the file carries `catalog_only` (§2.2.15), a count is zero, or a column already carries `inferred.candidate_key` (§2.2.12) | the file's own `catalog_only` marker for the second cause — `row_count` does not exist to read under it; otherwise `scope`, `row_count`, and every column's `inferred.candidate_key` distinguish the rest |
 | `dependencies` | The file carries `catalog_only` (§2.2.15), which forbids the block outright, or the probe failed and the file names it `unmeasured` (§2.2.1). A conforming, queried producer always emits the block otherwise | the file's own `catalog_only` and `unmeasured` markers |
-| `unmeasured` (the file's own) | Every block this run owed, it measured - the ordinary case (§2.2.1) | Nothing to distinguish: the marker has exactly one absent meaning |
+| `unmeasured` (the file's own) | The run measured every block this file should carry — the ordinary case (§2.2.1) | Nothing to distinguish: the marker has exactly one absent meaning |
 | `timeline` | No temporal, non-redacted, calendar-typed column exists on the table; the file carries `scope`; `row_count` is `0`; or a producer's own configuration disabled it (§2.2.16) | `scope` and `row_count` rule in two causes directly; the rest are not distinguishable from the artifact alone, the same limit §2.2.11 accepts for `physical_layout`'s own first two causes |
-| `depends_on` | The object is a `table`, which never carries the field - or the object is a `view`/`matview` whose catalog could not be asked: no grant, no such catalog table on this engine version, or the read failed (§2.2.17) | `type` rules in the first cause directly; the second is not distinguishable from the artifact alone |
+| `depends_on` | The object is a `table`, which never carries the field — or the object is a `view`/`matview` whose dependency read did not happen: no grant, no such catalog table on this engine version, or the read failed (§2.2.17) | `type` rules in the first cause directly; the second is not distinguishable from the artifact alone |
 | `eligible_target` | The producer never ran the declared-keys pre-pass (§2.3.1, §2.3.7) | nothing further — and its absence is what makes `referenced_by: []` ambiguous |
 | an entry in `referenced_by` | The referencing table lies outside the print's selectors, so the two-pass resolution never saw it (§2.3.6) | the manifest's `selectors` (§2.5), which names what was left out |
+| a table absent from `tables` | The table lies outside the connection's `selectors`; the target did not list it at the last run; a CLI-narrowed run never reached it (the concession §2.5 makes); or the last run attempted it and could not profile it | the manifest's `selectors` for the first, `failed_tables` for the last; the middle two are not distinguishable from the print alone |
 | `observed` on a `refers_to`/`referenced_by` entry | The edge is composite, or either endpoint carries no `cardinality` this run could measure (§2.3.10) | the entry's own `column`/`target_column` array length; the endpoint's own `cardinality` |
-| `statistics.yaml` | A conforming producer emits one for every object, a plain view's carrying `catalog_only` (§2.2.15) - its absence is a producer that did not | nothing further - a conforming producer never leaves it absent |
+| `statistics.yaml` | A conforming producer emits one for every object, a plain view's carrying `catalog_only` (§2.2.15) — its absence is a producer that did not | nothing further — a conforming producer never leaves it absent |
 | `relationships.yaml` | The object is a plain view, for which the file is optional (§1.4) | the manifest's `artifacts` for that table |
 | `description.md`, `statistics.annotations.yaml`, `relationships.annotations.yaml` | No human wrote one. Producers never author them (§2.4, §2.7) | nothing — absence carries no meaning beyond "unwritten" |
 
@@ -2645,10 +2653,10 @@ The format emits some collections empty rather than omitting them, and an empty 
 | `values: []` | The column has no non-null rows, or the table has none at all (§2.2.7). `values_coverage` is `1.0` in both cases — a list with nothing to carry covers all of it | `row_count`, `null_rate`, and `scope.rows_scanned`: an empty scanned set (§2.2.7) is a third case and keeps the table's own `row_count` |
 | `referenced_by: []` | Nothing references the object and something could have; or nothing could, because it supplies no declared-unique column (§2.3.8); or the pre-pass never ran | `eligible_target`: `true`, `false`, and absent are the three answers (§2.3.7) |
 | `refers_to: []` | The object declares no outgoing foreign key and the naming rule resolved no inferred edge (§2.3.8) — or the producer ran no inference at all | `eligible_target`'s absence says inference never ran (§2.3.7). Where it is present, the two remaining causes are not distinguishable |
-| `grain.keys: []` | Nothing declared identifies a row, and the measured probe either found nothing, was cut short, or never ran (§2.2.12) | `grain.search`: absent means nobody looked, `exhausted: false` means the look was incomplete, `exhausted: true` means it found nothing |
-| `dependencies: []` | No candidate pair cleared the 95% threshold, or the search never ran at all - the file carries `scope`, or `row_count` is `0` (§2.2.13) | `scope` and `row_count`: both absent/nonzero means the search ran and found nothing; either present means it never ran |
-| `timeline.buckets: []` | The chosen anchor column has no non-null value over the scanned rows - every row that could carry one is null there (§2.2.16) | the anchor's own `null_rate` on `timeline.column`: `1.0` confirms it, since the anchor rule would not have chosen it otherwise unless every remaining candidate was equally null |
-| `depends_on: []` | The catalog answered and this view/matview reads no other object in the print - a view over a literal or a constant expression, for instance (§2.2.17) | nothing further - the catalog answered, and this is what it found |
+| `grain.keys: []` | Nothing declared identifies a row, and the measured probe either found nothing, was cut short, or never ran (§2.2.12) | `grain.search`: absent means the search did not run, `exhausted: false` means it stopped before testing every candidate, `exhausted: true` means it found nothing |
+| `dependencies: []` | No candidate pair cleared the 95% threshold, or the search never ran at all — the file carries `scope`, or `row_count` is `0` (§2.2.13) | `scope` and `row_count`: both absent/nonzero means the search ran and found nothing; either present means it never ran |
+| `timeline.buckets: []` | The chosen anchor column has no non-null value over the scanned rows — every row that could carry one is null there (§2.2.16) | the anchor's own `null_rate` on `timeline.column`: `1.0` confirms it, since the anchor rule would not have chosen it otherwise unless every remaining candidate was equally null |
+| `depends_on: []` | The catalog was read and this view/matview reads no other object in the print — a view over a literal or a constant expression, for instance (§2.2.17) | nothing further — the catalog was read, and this is the result |
 
 ---
 

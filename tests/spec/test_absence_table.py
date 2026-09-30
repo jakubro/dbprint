@@ -98,7 +98,7 @@ def test_producer_failure_is_stated_as_representable_only_through_the_marker() -
     A reader who missed that would take every absence below for a property of the data.
     """
 
-    preamble = _section("### 7.1 The two absences", "### 7.2")
+    preamble = _section("### 7.1 Partial reads and failed reads", "### 7.2")
 
     assert "`unmeasured`" in preamble
     assert "only on an artifact that carries the marker" in preamble

@@ -9,21 +9,26 @@ from __future__ import annotations
 from typing import Any
 
 from dbprint.conformance.issue import Issue
-from . import issue as codes
-from .parser import AssertionSet, TablePredicates
-from .predicate import (
+from dbprint.spec.absence import read_column_field, read_table_block
+from dbprint.spec.predicate import (
     MalformedPredicate,
     Outcome,
+    inapplicable_reason,
     is_assertable_stat,
     is_value_bearing_stat,
+    with_evidence,
 )
-from .predicate import evaluate as eval_predicate
-from .predicate import (
+from dbprint.spec.predicate import evaluate as eval_predicate
+from dbprint.spec.predicate import (
     parse as parse_predicate,
 )
-from .predicate import (
+from dbprint.spec.predicate import (
     resolve as resolve_stat,
 )
+from dbprint.spec.redaction import is_redacted
+from dbprint.spec.scope import ScanScope, scope_of
+from . import issue as codes
+from .parser import AssertionSet, TablePredicates
 
 
 SPEC_REF = "ASSERTIONS.md §2"
@@ -68,9 +73,22 @@ def _evaluate_table(
     issues: list[Issue] = []
 
     if predicates.row_count is not None:
-        outcome = _check_predicate("row_count", predicates.row_count, table_stats.get("row_count"))
+        row_count = read_table_block(table_stats, "row_count")
 
-        if not outcome.passed:
+        if not row_count.known:
+            issues.append(
+                Issue(
+                    path=_row_count_path(connection_name, predicates.fqn),
+                    code=codes.INAPPLICABLE_STAT,
+                    severity="warning",
+                    detail=f"row_count is {row_count.state}: {row_count.cause}",
+                    spec_ref="ASSERTIONS.md §2.6",
+                ),
+            )
+
+        elif not (
+            outcome := _check_predicate("row_count", predicates.row_count, row_count.value)
+        ).passed:
             issues.append(
                 Issue(
                     path=_row_count_path(connection_name, predicates.fqn),
@@ -82,6 +100,7 @@ def _evaluate_table(
             )
 
     columns_stats = table_stats.get("columns") or {}
+    scope = scope_of(table_stats)
 
     for col_name, col_preds in predicates.columns.items():
         col_stats = columns_stats.get(col_name)
@@ -107,6 +126,7 @@ def _evaluate_table(
                     stat,
                     raw,
                     col_stats,
+                    scope,
                 ),
             )
 
@@ -120,11 +140,14 @@ def _check_column_predicate(
     stat: str,
     raw: Any,
     col_stats: dict[str, Any],
+    scope: ScanScope | None = None,
 ) -> list[Issue]:
     """Evaluate one column predicate; emit at most one Issue."""
 
     # A redacted column's artifact holds placeholders, not real values (SPEC 2.2.9).
-    if is_value_bearing_stat(stat) and col_stats.get("redacted") is not None:
+    if is_value_bearing_stat(stat) and is_redacted(col_stats):
+        marker = read_column_field(col_stats, "redacted").value
+
         return [
             Issue(
                 path=_column_path(connection_name, fqn, column, stat),
@@ -132,7 +155,7 @@ def _check_column_predicate(
                 severity="warning",
                 detail=(
                     f"{stat!r} cannot be evaluated: this column is redacted "
-                    f"({col_stats['redacted']}), so its emitted values are not its real ones"
+                    f"({marker}), so its emitted values are not its real ones"
                 ),
                 spec_ref="§2.2.9",
             ),
@@ -162,15 +185,16 @@ def _check_column_predicate(
             ),
         ]
 
-    ref = resolve_stat(col_stats, stat)
+    ref = resolve_stat(col_stats, stat, scope)
+    inapplicable = inapplicable_reason(col_stats, column, stat, predicate, ref)
 
-    if not ref.found:
+    if inapplicable is not None:
         return [
             Issue(
                 path=_column_path(connection_name, fqn, column, stat),
                 code=codes.INAPPLICABLE_STAT,
                 severity="warning",
-                detail=f"stat {stat!r} not emitted for column {column!r}",
+                detail=inapplicable,
                 spec_ref="ASSERTIONS.md §2.6",
             ),
         ]
@@ -185,17 +209,18 @@ def _check_column_predicate(
             path=_column_path(connection_name, fqn, column, stat),
             code=_code_for(stat, outcome),
             severity="error",
-            detail=outcome.detail,
+            detail=with_evidence(col_stats, stat, outcome.detail),
             spec_ref=SPEC_REF,
         ),
     ]
 
 
 def _check_predicate(stat: str, raw: Any, actual: Any) -> Outcome:
-    predicate = parse_predicate(stat, raw)
+    predicate = parse_predicate(stat, raw)  # pragma: no mutate - row_count parses by shape alone
 
     if isinstance(predicate, MalformedPredicate):
-        return Outcome(passed=False, detail=predicate.reason, malformed=True)
+        # passed=None reads as falsy as False wherever an Outcome is judged
+        return Outcome(passed=False, detail=predicate.reason, malformed=True)  # pragma: no mutate
 
     return eval_predicate(predicate, actual)
 

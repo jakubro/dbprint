@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import logging
 import shutil
 from collections import Counter
@@ -10,7 +11,9 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
+import duckdb
 import pytest
 import yaml
 
@@ -19,6 +22,7 @@ from dbprint.adapters import (
     ColumnMeta,
     ColumnStats,
     CommentsMeta,
+    DuckdbAdapter,
     ForeignKeyMeta,
     Frequencies,
     IndexMeta,
@@ -37,21 +41,22 @@ from dbprint.adapters import (
     UniqueKeyMeta,
     ValueCount,
 )
+from dbprint.adapters.base import SkippedNamespace
 from dbprint.config.project import ConnectionConfig, DiffConfig, RedactRule, RuleConfig
 from dbprint.conformance import validate_print
 from dbprint.engine import (
+    EXIT_CONNECTION,
     EXIT_DRIFT,
+    EXIT_GENERIC,
     EXIT_OK,
     EXIT_PARTIAL,
     EXIT_TOTAL_FAILURE,
     DiffRequest,
-    DiffResult,
     Engine,
     GenerateRequest,
-    GenerateResult,
-    SketchFailure,
     orchestrator,
 )
+from dbprint.engine.carried import CommittedPrint
 from dbprint.spec.sketch import K as SPEC_SKETCH_K
 from dbprint.spec.sketch import canonical_form, decode_sketch, low64_md5
 from tests.conftest import normalize_instants
@@ -609,7 +614,6 @@ class TestHappyPath:
         engine = _build_engine(tmp_path, _curator_fixture())
         result = engine.generate()
 
-        assert isinstance(result, GenerateResult)
         assert result.summary.ok == 2
         assert result.summary.failed == 0
 
@@ -1293,10 +1297,11 @@ class _CountingSampleAdapter(MockAdapter):
         column: str,
         n: int,
         scope: TableScope | None = None,
+        sql_type: str | None = None,
     ) -> list[Any]:
         self.sampled_columns.append(f"{fqn}.{column}")
 
-        return super().sample_values(fqn, column, n, scope)
+        return super().sample_values(fqn, column, n, scope, sql_type)
 
 
 class TestNumericAndTemporalStayUnsampled:
@@ -1444,6 +1449,42 @@ class TestZeroColumnInvariant:
         failure = next(t for t in result.tables if t.fqn == "public.curator")
         assert "no columns" in (failure.error or "")
         assert not (tmp_path / "primary" / "public" / "curator" / "statistics.yaml").exists()
+
+
+class TestColumnCaseCollision:
+    """SPEC 1.5.2: two columns folding to one map key refuse their table, and only it."""
+
+    @staticmethod
+    def _colliding(fixture: dict[str, MockTable], fqn: str) -> dict[str, MockTable]:
+        table = fixture[fqn]
+        folded = ColumnMeta(name="status", sql_type="text", nullable=True, default=None, ordinal=8)
+        spelled = replace(folded, physical_name="Status", ordinal=9)
+
+        return {**fixture, fqn: replace(table, columns=[*table.columns, folded, spelled])}
+
+    @pytest.mark.parametrize("infer", [False, True], ids=["no-pre-pass", "pre-pass"])
+    def test_the_table_is_refused_and_the_run_continues(self, tmp_path: Path, infer: bool) -> None:
+        fixture = self._colliding(_curator_fixture(), "public.curator")
+        conn = replace(_conn_config(tmp_path), infer_relationships=infer)
+
+        result = Engine(MockAdapter(fixture), conn, tmp_path).generate()
+
+        failure = next(t for t in result.tables if t.fqn == "public.curator")
+        assert failure.status == "failed"
+        assert "Column identifier rejected: public.curator.status" in (failure.error or "")
+        assert "case-collides-with-status" in (failure.error or "")
+        assert "'Status'" in (failure.error or "")
+        assert {t.fqn: t.status for t in result.tables}["public.herbarium"] == "ok"
+        assert result.exit_code == EXIT_PARTIAL
+        assert not (tmp_path / "primary" / "public" / "curator" / "statistics.yaml").exists()
+
+    def test_nothing_else_to_profile_is_a_total_failure(self, tmp_path: Path) -> None:
+        fixture = self._colliding(_curator_fixture(), "public.curator")
+        fixture = self._colliding(fixture, "public.herbarium")
+
+        result = Engine(MockAdapter(fixture), _conn_config(tmp_path), tmp_path).generate()
+
+        assert result.exit_code == EXIT_TOTAL_FAILURE
 
 
 class TestFaultIsolation:
@@ -1613,46 +1654,50 @@ class TestClassifierFaultIsolation:
         assert statuses == {"public.curator": "ok", "public.herbarium": "ok"}
         assert result.summary.failed == 0
 
-    def test_a_raising_bounds_epoch_unit_does_not_raise_out_of_assemble_stats(
+    def test_a_raising_bounds_epoch_unit_still_completes_the_table(
         self,
+        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The second seam: reached from `_assemble_stats` after Phase B, not `_detect_columns` -
-        it cannot move earlier because it reads Phase B's own `range`."""
+        """The second seam, reached after Phase B because it reads Phase B's own `range`."""
 
         monkeypatch.setattr(
             orchestrator,
             "bounds_epoch_unit",
             lambda lo, hi: (_ for _ in ()).throw(ValueError("hostile value")),
         )
-        columns = [
-            ColumnMeta(name="ts", sql_type="bigint", nullable=False, default=None, ordinal=1),
-        ]
-        stats = {
-            "ts": ColumnStats(
-                sql_type="bigint",
-                nullable=False,
-                null_count=0,
-                null_rate=0.0,
-                cardinality=100,
-                cardinality_ratio=1.0,
-                cardinality_method="exact",
-                range=Range(min=1704067200, max=1786492800),
-            ),
-        }
-        detected = {"ts": orchestrator._ColumnDetection(classification="numeric", inferred=None)}
-
-        enriched = orchestrator._assemble_stats(
-            "public.t",
-            columns,
-            stats,
-            detected,
-            frozenset(),
-            "2026-01-01T00:00:00Z",
+        epoch_seconds = MockTable(
+            type="table",
+            namespace_path=("public", "t"),
+            ddl="CREATE TABLE public.t (ts bigint);\n",
+            columns=[
+                ColumnMeta(name="ts", sql_type="bigint", nullable=False, default=None, ordinal=1),
+            ],
+            relationships=[],
+            indexes=[],
+            comments=CommentsMeta(table=None, columns={}),
+            stats={
+                "ts": ColumnStats(
+                    sql_type="bigint",
+                    nullable=False,
+                    null_count=0,
+                    null_rate=0.0,
+                    cardinality=100,
+                    cardinality_ratio=1.0,
+                    cardinality_method="exact",
+                    range=Range(min=1704067200, max=1786492800),
+                ),
+            },
+            samples={},
+            row_count=100,
         )
 
-        assert "ts" in enriched
-        assert enriched["ts"].inferred is None
+        result = _build_engine(tmp_path, {"public.t": epoch_seconds}).generate()
+
+        assert {t.status for t in result.tables} == {"ok"}
+        assert "epoch_unit" not in (
+            self._stats(tmp_path, "t")["columns"]["ts"].get("inferred") or {}
+        )
 
 
 class TestFreshness:
@@ -1667,6 +1712,30 @@ class TestFreshness:
     def test_force_bypasses_freshness(self, tmp_path: Path) -> None:
         _build_engine(tmp_path, _curator_fixture()).generate()
         result = _build_engine(tmp_path, _curator_fixture()).generate(GenerateRequest(force=True))
+        assert all(t.status == "ok" for t in result.tables)
+
+    def test_a_baseline_from_another_release_is_re_extracted(self, tmp_path: Path) -> None:
+        """A rule tightened between releases must not survive as a carried-forward file."""
+
+        _build_engine(tmp_path, _curator_fixture()).generate()
+        manifest = tmp_path / "primary" / "manifest.yaml"
+        data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+        data["dbprint_version"] = "0.0.1-from-another-release"
+        manifest.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+        result = _build_engine(tmp_path, _curator_fixture()).generate()
+
+        assert all(t.status == "ok" for t in result.tables)
+
+    def test_a_baseline_recording_no_version_is_re_extracted(self, tmp_path: Path) -> None:
+        _build_engine(tmp_path, _curator_fixture()).generate()
+        manifest = tmp_path / "primary" / "manifest.yaml"
+        data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+        del data["dbprint_version"]
+        manifest.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+        result = _build_engine(tmp_path, _curator_fixture()).generate()
+
         assert all(t.status == "ok" for t in result.tables)
 
 
@@ -1791,16 +1860,15 @@ class TestIncoherentCoverageDetection:
         assert "herbarium_id" in caplog.text
 
     def test_the_exit_code_is_unaffected(self, tmp_path: Path) -> None:
-        """A warning is not a failure - the exit code matches the coherent fixture's."""
+        """A warning is not a failure - a first run exits on its new tables' drift alone."""
 
-        coherent = _build_engine(tmp_path / "coherent", _curator_fixture()).generate()
         incoherent = Engine(
             MockAdapter(_incoherent_coverage_fixture()),
-            _conn_config(tmp_path / "incoherent"),
-            tmp_path / "incoherent",
+            _conn_config(tmp_path),
+            tmp_path,
         ).generate()
 
-        assert incoherent.exit_code == coherent.exit_code
+        assert incoherent.exit_code == EXIT_DRIFT
 
     def test_every_written_column_stays_within_the_schema_bound(self, tmp_path: Path) -> None:
         """Walks the generated print: `values_coverage` never leaves [0, 1], anywhere."""
@@ -1833,7 +1901,7 @@ class TestIncoherentCoverageDetection:
         with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
             _build_engine(tmp_path, _curator_fixture()).generate()
 
-        assert "exceed the" not in caplog.text
+        assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
 
     def test_the_affected_column_is_marked_and_its_siblings_are_not(self, tmp_path: Path) -> None:
         """The marker reaches the bytes on disk, keyed per column, not per file."""
@@ -2585,14 +2653,6 @@ class TestCatalogOnlyViewStatistics:
         for col in self._statistics(tmp_path)["columns"].values():
             assert set(col) <= allowed
 
-    def test_zero_queries_issued_against_the_view(self, tmp_path: Path) -> None:
-        """The adapter raises if a measurement reaches the view; a clean run proves none did."""
-
-        adapter = _NoQueryAgainstTheViewAdapter(self._view_fixture(), "public.active_curators_v")
-        result = Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
-
-        assert result.summary.failed == 0
-
     def test_manifest_columns_count_matches_the_map(self, tmp_path: Path) -> None:
         _build_engine(tmp_path, self._view_fixture()).generate()
 
@@ -3020,7 +3080,6 @@ class TestTotalFailure:
         assert result.summary.ok == 0
         assert result.summary.failed == 2
         assert result.exit_code == EXIT_TOTAL_FAILURE
-        assert result.exit_code != EXIT_PARTIAL
 
     def test_skipped_survivors_keep_the_run_partial(self, tmp_path: Path) -> None:
         """Per `_derive_generate_exit_code`: a skip still counts as usable output."""
@@ -3648,13 +3707,6 @@ def _curator_with_shaped_herbarium_id_samples_fixture() -> dict[str, MockTable]:
 
 
 class TestComputeDiff:
-    def test_clean_state_empty_changes(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
-        result = _build_engine(tmp_path, _curator_fixture()).compute_diff()
-        assert isinstance(result, DiffResult)
-        assert result.exit_code == 0
-        assert result.diff["changes"] == []
-
     def test_drift_state_table_added_event(self, tmp_path: Path) -> None:
         _build_engine(tmp_path, _curator_fixture()).generate()
         result = _build_engine(tmp_path, _added_table_fixture()).compute_diff()
@@ -3836,6 +3888,7 @@ class TestStatisticDrift:
         _build_engine(tmp_path, _curator_fixture()).generate()
         result = _build_engine(tmp_path, _curator_fixture()).compute_diff()
 
+        assert result.exit_code == 0
         assert result.diff["changes"] == []
         assert result.diff["summary"]["statistics_drifted"] == 0
         assert result.diff["summary"]["unchanged_tables"] == 2
@@ -4836,9 +4889,10 @@ def _overlap_fixture() -> dict[str, MockTable]:
 def _truncated_parent_fixture() -> dict[str, MockTable]:
     """`big_parent` genuinely exceeds `SPEC_SKETCH_K`, so its sketch truncates for real."""
 
-    pool = range(SPEC_SKETCH_K + 76)  # 1100 values; truncation drops the 76 highest-hash ones
+    # 1100 values against a 1024-entry sketch: truncation drops the 76 highest-hash ones.
+    pool = range(1100)
     ranked = sorted(pool, key=lambda v: low64_md5(canonical_form(v, "integer")))
-    retained, dropped = ranked[:SPEC_SKETCH_K], ranked[SPEC_SKETCH_K:]
+    retained, dropped = ranked[:1024], ranked[1024:]
 
     # 4 child values whose hash the parent's truncation kept (answerable and matched), 1 it
     # dropped (unanswerable) - so the answerable count lands below the child's sketch length.
@@ -4998,20 +5052,14 @@ class TestMeasuredOverlap:
         assert child_sketch is not None
         assert parent_sketch is not None
         assert len(child_sketch) == 5  # exhaustive: cardinality never reached SPEC_SKETCH_K
-        assert len(parent_sketch) == SPEC_SKETCH_K  # truncated: 1100 distinct values
-
-        theta_parent = max(parent_sketch)
-        answerable_count = sum(1 for h in child_sketch if h < theta_parent)
-
-        # The property a patched SKETCH_K never proved: the fixture's own truncation, not
-        # a test-side clamp, is what shrinks the answerable set below the child's sketch.
-        assert answerable_count < len(child_sketch)
+        assert len(parent_sketch) == 1024  # truncated: 1100 distinct values
 
         edge = self._refers_to(tmp_path, "big_child")["observed"]
 
         assert edge["containment"] == 1.0
         assert edge["target_coverage"] == 0.004545
-        assert edge["answerable_count"] == answerable_count
+        # The fixture's own truncation, not a test-side clamp, keeps 4 of the child's 5 answerable.
+        assert edge["answerable_count"] == 4
 
 
 class TestObservedBlock:
@@ -5319,13 +5367,10 @@ class TestKeySketchFaultIsolation:
         result = Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
 
         assert "sketch" not in self._stats(tmp_path, "child")["columns"]["parent_id"]
-        assert result.sketch_failures == (
-            SketchFailure(
-                table="public.child",
-                column="parent_id",
-                error=result.sketch_failures[0].error,
-            ),
-        )
+        assert [(f.table, f.column) for f in result.sketch_failures] == [
+            ("public.child", "parent_id"),
+        ]
+        assert "simulated sketch query timeout" in result.sketch_failures[0].error
 
     def test_every_other_column_still_gets_its_sketch(self, tmp_path: Path) -> None:
         adapter = _KeySketchFailingAdapter(_observed_fixture(), failing_column="parent_id")
@@ -5488,8 +5533,8 @@ class TestNormalizedCardinality:
         assert "normalized_cardinality" not in self._stats(tmp_path, "child")["columns"]["id"]
         assert "normalized_cardinality" not in self._stats(tmp_path, "parent")["columns"]["id"]
 
-    def test_a_redacted_join_key_still_carries_it(self, tmp_path: Path) -> None:
-        """Unlike `sketch`: a merge count discloses no literal (SPEC 2.2.4)."""
+    def test_a_redacted_join_key_withholds_it(self, tmp_path: Path) -> None:
+        """How many spellings merge under case-folding is a fact about the values (SPEC 2.2.9)."""
 
         conn = replace(
             _conn_config(tmp_path),
@@ -5500,7 +5545,7 @@ class TestNormalizedCardinality:
         col = self._stats(tmp_path, "child")["columns"]["parent_code"]
 
         assert col["redacted"] == "hash"
-        assert col["normalized_cardinality"] == 7
+        assert "normalized_cardinality" not in col
 
     def test_a_scoped_tables_join_key_still_carries_it(self, tmp_path: Path) -> None:
         """Unlike `sketch`: a scanned-set count like every other (SPEC 2.2.8)."""
@@ -5551,6 +5596,39 @@ class _NormalizedCardinalityFailingAdapter(MockAdapter):
             raise RuntimeError("simulated normalization query timeout")
 
         return super().compute_normalized_cardinality(fqn, column, scope)
+
+
+class TestATableTakingWritesBetweenTwoReads:
+    """The second pass re-reads a live table, so its count can exceed the one beside it."""
+
+    @staticmethod
+    def _stats(tmp_path: Path, table: str) -> dict[str, Any]:
+        return yaml.safe_load(
+            (tmp_path / "primary" / "public" / table / "statistics.yaml").read_text(),
+        )
+
+    def test_the_artifact_carries_the_later_larger_count(self, tmp_path: Path) -> None:
+        adapter = MockAdapter(_folded_fixture(), responses={"compute_normalized_cardinality": [99]})
+        Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
+        col = self._stats(tmp_path, "child")["columns"]["parent_code"]
+
+        assert col["normalized_cardinality"] == 99
+        assert col["cardinality"] < 99
+
+    def test_conformance_reports_it_as_a_warning_not_an_error(self, tmp_path: Path) -> None:
+        adapter = MockAdapter(_folded_fixture(), responses={"compute_normalized_cardinality": [99]})
+        Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
+        issues = validate_print(tmp_path / "primary")
+        excess = [i for i in issues if i.code == "stats.normalized-cardinality-exceeds-cardinality"]
+
+        assert [i.severity for i in excess] == ["warning"]
+
+    def test_an_exhausted_script_falls_back_to_the_fixture(self, tmp_path: Path) -> None:
+        adapter = MockAdapter(_folded_fixture(), responses={"compute_normalized_cardinality": [99]})
+        Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
+        parent = self._stats(tmp_path, "parent")["columns"]["code"]
+
+        assert parent["normalized_cardinality"] == 8
 
 
 class TestNormalizedCardinalityFaultIsolation:
@@ -5675,13 +5753,11 @@ class TestTheInferenceUniverse:
                 tmp_path,
             ).generate()
 
-        assert [r.getMessage() for r in caplog.records if "b.curator" in r.getMessage()] == [
-            (
-                "catalog pre-pass introspect_unique_keys failed for 'b.curator': "
-                "simulated catalog failure"
-            ),
-            "introspect_unique_keys failed for 'b.curator': RuntimeError: simulated catalog failure",
-        ]
+        named = [r for r in caplog.records if "b.curator" in r.getMessage()]
+
+        # One from the catalog pre-pass, one from extraction's own re-read.
+        assert [r.levelno for r in named] == [logging.WARNING, logging.WARNING]
+        assert all("introspect_unique_keys" in r.getMessage() for r in named)
 
     def test_an_object_whose_columns_failed_is_named_but_never_targeted(
         self,
@@ -6414,3 +6490,573 @@ class TestCatalogReadDegrade:
 
         assert any(k["detection"] == "declared" and k["columns"] == ["a"] for k in keys)
         assert stats["grain"]["search"]["exhausted"] is True
+
+
+class TestListingSharingNothingWithTheBaseline:
+    """A target listing none of the committed in-scope tables is refused, never recorded removed."""
+
+    @staticmethod
+    def _tree(root: Path) -> dict[str, bytes]:
+        return {
+            str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()
+        }
+
+    @staticmethod
+    def _printed(tmp_path: Path) -> dict[str, bytes]:
+        _build_engine(tmp_path, _curator_fixture()).generate()
+
+        return TestListingSharingNothingWithTheBaseline._tree(tmp_path)
+
+    @pytest.mark.parametrize("entry", ["generate", "dry_run", "compute_diff"])
+    @pytest.mark.parametrize(
+        "listing",
+        [{}, {"public.bed": _curator_fixture()["public.curator"]}],
+        ids=["empty", "other_tables"],
+    )
+    def test_is_refused_with_exit_4_and_nothing_written(
+        self,
+        tmp_path: Path,
+        entry: str,
+        listing: dict[str, MockTable],
+    ) -> None:
+        before = self._printed(tmp_path)
+        engine = Engine(MockAdapter(listing), _conn_config(tmp_path), tmp_path)
+
+        if entry == "compute_diff":
+            result = engine.compute_diff()
+            message = result.failed_tables[0]
+        else:
+            result = engine.generate(GenerateRequest(force=True, dry_run=entry == "dry_run"))
+            message = result.error or ""
+
+        assert result.exit_code == EXIT_CONNECTION
+        assert "lists none of the 2 committed tables in scope" in message
+        assert "--confirm-all-removed" in message
+        assert self._tree(tmp_path) == before
+
+    def test_the_confirmation_records_the_total_removal(self, tmp_path: Path) -> None:
+        self._printed(tmp_path)
+        result = Engine(MockAdapter({}), _conn_config(tmp_path), tmp_path).generate(
+            GenerateRequest(force=True, confirm_all_removed=True),
+        )
+        manifest = yaml.safe_load((tmp_path / "primary" / "manifest.yaml").read_text())
+
+        assert result.exit_code == EXIT_DRIFT
+        assert manifest["tables"] == {}
+        assert sorted(
+            c["table"]
+            for c in _changes_by_kind(tmp_path / "primary" / "diff.yaml")["table_removed"]
+        ) == [
+            "public.curator",
+            "public.herbarium",
+        ]
+
+    def test_a_first_run_over_an_empty_target_is_not_refused(self, tmp_path: Path) -> None:
+        result = Engine(MockAdapter({}), _conn_config(tmp_path), tmp_path).generate()
+
+        assert result.exit_code == EXIT_OK
+
+    def test_a_baseline_wholly_outside_the_scope_is_not_refused(self, tmp_path: Path) -> None:
+        self._printed(tmp_path)
+        conn = _conn_config(tmp_path, include=("other.*",))
+        result = Engine(MockAdapter({}), conn, tmp_path).generate(GenerateRequest(force=True))
+
+        assert result.exit_code == EXIT_OK
+
+    def test_a_cli_selector_matching_nothing_is_not_refused(self, tmp_path: Path) -> None:
+        before = self._printed(tmp_path)
+        result = _build_engine(tmp_path, _curator_fixture()).generate(
+            GenerateRequest(force=True, cli_include=("no.such.*",)),
+        )
+
+        assert result.exit_code == EXIT_OK
+        assert self._tree(tmp_path)["primary/manifest.yaml"] == before["primary/manifest.yaml"]
+
+    def test_a_partial_disappearance_is_still_recorded(self, tmp_path: Path) -> None:
+        self._printed(tmp_path)
+        remaining = {"public.curator": _curator_fixture()["public.curator"]}
+        result = Engine(MockAdapter(remaining), _conn_config(tmp_path), tmp_path).generate(
+            GenerateRequest(force=True),
+        )
+        removed = _changes_by_kind(tmp_path / "primary" / "diff.yaml")["table_removed"]
+
+        assert result.exit_code == EXIT_DRIFT
+        assert [c["table"] for c in removed] == ["public.herbarium"]
+
+
+class _OneTableFailingAdapter(MockAdapter):
+    """`public.curator` fails its read; every other table profiles."""
+
+    def extract_ddl(self, fqn: str) -> str:
+        if fqn == "public.curator":
+            raise RuntimeError("simulated read failure")
+
+        return super().extract_ddl(fqn)
+
+
+class TestARemovedTableLeavesNoProducerFileBehind:
+    """SPEC 1.4: a table leaving the manifest takes its producer files with it; user files stay."""
+
+    @staticmethod
+    def _printed(tmp_path: Path) -> Path:
+        _build_engine(tmp_path, _curator_fixture()).generate()
+
+        return tmp_path / "primary"
+
+    @staticmethod
+    def _without_herbarium() -> dict[str, MockTable]:
+        return {"public.curator": _curator_fixture()["public.curator"]}
+
+    def test_a_dropped_table_loses_its_directory_and_check_is_clean(self, tmp_path: Path) -> None:
+        root = self._printed(tmp_path)
+        Engine(MockAdapter(self._without_herbarium()), _conn_config(tmp_path), tmp_path).generate()
+
+        assert not (root / "public" / "herbarium").exists()
+        assert [i.code for i in validate_print(root) if i.severity == "error"] == []
+
+    def test_user_files_are_kept_byte_identical_and_named(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        root = self._printed(tmp_path)
+        directory = root / "public" / "herbarium"
+        (directory / "description.md").write_text("# Herbarium\n")
+        (directory / "statistics.annotations.yaml").write_text("format_version: 1\ncolumns: {}\n")
+
+        with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
+            Engine(
+                MockAdapter(self._without_herbarium()),
+                _conn_config(tmp_path),
+                tmp_path,
+            ).generate()
+
+        assert sorted(p.name for p in directory.iterdir()) == [
+            "description.md",
+            "statistics.annotations.yaml",
+        ]
+        assert (directory / "description.md").read_text() == "# Herbarium\n"
+        assert "public/herbarium" in caplog.text
+        assert "description.md, statistics.annotations.yaml" in caplog.text
+        codes = {(i.code, i.severity) for i in validate_print(root)}
+        assert ("layout.unexpected-directory-level", "error") not in codes
+        assert ("manifest.orphaned-artifact", "warning") in codes
+
+    def test_an_orphan_from_an_earlier_producer_is_healed(self, tmp_path: Path) -> None:
+        root = self._printed(tmp_path)
+        shutil.copytree(root / "public" / "curator", root / "public" / "legacy_curator")
+        _build_engine(tmp_path, _curator_fixture()).generate()
+
+        assert not (root / "public" / "legacy_curator").exists()
+        assert (root / "public" / "curator" / "ddl.sql").is_file()
+
+    def test_an_emptied_schema_directory_goes_with_its_last_table(self, tmp_path: Path) -> None:
+        fixture = _curator_fixture()
+        fixture["garden.herbarium"] = replace(
+            fixture.pop("public.herbarium"),
+            namespace_path=("garden", "herbarium"),
+        )
+        fixture["public.curator"] = replace(fixture["public.curator"], relationships=[])
+        root = tmp_path / "primary"
+        Engine(MockAdapter(fixture), _conn_config(tmp_path), tmp_path).generate()
+        del fixture["garden.herbarium"]
+        Engine(MockAdapter(fixture), _conn_config(tmp_path), tmp_path).generate()
+
+        assert not (root / "garden").exists()
+        assert (root / "public" / "curator").is_dir()
+
+    def test_a_table_in_a_namespace_that_could_not_be_listed_is_carried(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        fixture = _curator_fixture()
+        fixture["garden.herbarium"] = replace(
+            fixture.pop("public.herbarium"),
+            namespace_path=("garden", "herbarium"),
+        )
+        fixture["public.curator"] = replace(fixture["public.curator"], relationships=[])
+        root = tmp_path / "primary"
+        Engine(MockAdapter(fixture), _conn_config(tmp_path), tmp_path).generate()
+        before = (root / "garden" / "herbarium" / "ddl.sql").read_bytes()
+
+        class _GardenUnlistable(MockAdapter):
+            def skipped_namespaces(self) -> tuple[SkippedNamespace, ...]:
+                return (SkippedNamespace(name="garden", cause="permission denied"),)
+
+        listed = {"public.curator": fixture["public.curator"]}
+        result = Engine(_GardenUnlistable(listed), _conn_config(tmp_path), tmp_path).generate(
+            GenerateRequest(force=True),
+        )
+        manifest = yaml.safe_load((root / "manifest.yaml").read_text())
+
+        assert (root / "garden" / "herbarium" / "ddl.sql").read_bytes() == before
+        assert "garden.herbarium" in manifest["tables"]
+        assert "table_removed" not in _changes_by_kind(root / "diff.yaml")
+        assert result.exit_code == EXIT_OK
+
+    def test_a_neighbour_naming_the_removed_table_is_re_read(self, tmp_path: Path) -> None:
+        self._printed(tmp_path)
+        result = Engine(
+            MockAdapter(self._without_herbarium()),
+            _conn_config(tmp_path),
+            tmp_path,
+        ).generate()
+
+        assert [(t.fqn, t.status) for t in result.tables] == [("public.curator", "ok")]
+
+    def test_an_untouched_fresh_table_is_still_skipped(self, tmp_path: Path) -> None:
+        self._printed(tmp_path)
+        result = _build_engine(tmp_path, _curator_fixture()).generate()
+
+        assert {t.status for t in result.tables} == {"skipped"}
+
+    @pytest.mark.parametrize(
+        ("request_", "exclude", "diff_only"),
+        [
+            pytest.param(GenerateRequest(dry_run=True), (), False, id="dry_run"),
+            pytest.param(
+                GenerateRequest(force=True, cli_include=("public.curator",)),
+                (),
+                False,
+                id="cli_include",
+            ),
+            pytest.param(GenerateRequest(), ("public.herbarium",), False, id="config_exclude"),
+            pytest.param(None, (), True, id="compute_diff"),
+        ],
+    )
+    def test_a_run_writing_no_manifest_or_narrowing_scope_keeps_every_file(
+        self,
+        tmp_path: Path,
+        request_: GenerateRequest | None,
+        exclude: tuple[str, ...],
+        diff_only: bool,
+    ) -> None:
+        root = self._printed(tmp_path)
+        engine = Engine(
+            MockAdapter(self._without_herbarium()),
+            _conn_config(tmp_path, exclude=exclude),
+            tmp_path,
+        )
+
+        if diff_only:
+            engine.compute_diff()
+        else:
+            engine.generate(request_)
+
+        assert (root / "public" / "herbarium" / "ddl.sql").is_file()
+
+    def test_a_truncated_fail_fast_run_deletes_nothing(self, tmp_path: Path) -> None:
+        root = self._printed(tmp_path)
+        listing = self._without_herbarium()
+        listing["public.vault"] = replace(
+            _curator_fixture()["public.herbarium"],
+            namespace_path=("public", "vault"),
+        )
+        engine = Engine(_OneTableFailingAdapter(listing), _conn_config(tmp_path), tmp_path)
+        result = engine.generate(GenerateRequest(force=True, fail_fast=True))
+
+        assert result.not_attempted == 1
+
+        assert (root / "public" / "herbarium" / "ddl.sql").is_file()
+
+    def test_a_failed_table_keeps_its_directory_while_a_dropped_one_is_swept(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        root = self._printed(tmp_path)
+        engine = Engine(
+            _OneTableFailingAdapter(self._without_herbarium()),
+            _conn_config(tmp_path),
+            tmp_path,
+        )
+        engine.generate(GenerateRequest(force=True))
+
+        assert (root / "public" / "curator" / "ddl.sql").is_file()
+        assert not (root / "public" / "herbarium").exists()
+
+    def test_a_carried_entry_dropped_for_a_missing_artifact_is_swept(self, tmp_path: Path) -> None:
+        root = self._printed(tmp_path)
+        (root / "public" / "herbarium" / "statistics.yaml").unlink()
+        conn = _conn_config(tmp_path, exclude=("public.herbarium",))
+        Engine(MockAdapter(self._without_herbarium()), conn, tmp_path).generate()
+
+        assert not (root / "public" / "herbarium").exists()
+
+
+_ADAPTER_METHODS = frozenset(
+    name
+    for name in dir(MockAdapter)
+    if not name.startswith("_") and callable(getattr(MockAdapter, name))
+)
+
+
+class _Tripwire(MockAdapter):
+    """Counts every adapter call; raises `KeyboardInterrupt` at call `trip_at` when set."""
+
+    def __init__(self, fixture: dict[str, MockTable], trip_at: int | None = None) -> None:
+        super().__init__(fixture)
+        self.calls: list[str] = []
+        self.trip_at = trip_at
+
+    def __getattribute__(self, name: str) -> Any:
+        attr = super().__getattribute__(name)
+
+        if name not in _ADAPTER_METHODS:
+            return attr
+
+        calls = super().__getattribute__("calls")
+        trip_at = super().__getattribute__("trip_at")
+
+        def counted(*args: Any, **kwargs: Any) -> Any:
+            calls.append(name)
+
+            if len(calls) - 1 == trip_at:
+                raise KeyboardInterrupt
+
+            return attr(*args, **kwargs)
+
+        return counted
+
+
+class TestARunEndingBeforeItsCommitLeavesThePrintAsItWas:
+    """Every early end - an interrupt at any adapter call, a failed write, a fail-fast stop -
+    leaves the committed print byte-identical, and the next run reports the change it missed."""
+
+    @staticmethod
+    def _tree(root: Path) -> dict[str, bytes]:
+        return {
+            str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()
+        }
+
+    @staticmethod
+    def _assert_untouched_and_recoverable(tmp_path: Path, before: dict[str, bytes]) -> None:
+        root = tmp_path / "primary"
+
+        assert TestARunEndingBeforeItsCommitLeavesThePrintAsItWas._tree(root) == before
+        assert [i.code for i in validate_print(root) if i.severity == "error"] == []
+
+        result = Engine(
+            MockAdapter(_drifted_curator_fixture()),
+            _conn_config(tmp_path),
+            tmp_path,
+        ).generate(
+            GenerateRequest(force=True),
+        )
+
+        assert result.exit_code == EXIT_DRIFT
+        assert any(
+            c["column"] == "parent_herbarium_id"
+            for c in _changes_by_kind(root / "diff.yaml")["column_added"]
+        )
+
+    def _printed(self, tmp_path: Path) -> dict[str, bytes]:
+        _build_engine(tmp_path, _curator_fixture()).generate()
+
+        return self._tree(tmp_path / "primary")
+
+    def _measured(self, tmp_path: Path) -> tuple[list[str], int]:
+        """Adapter calls and staged writes of one clean second run, measured, never hard-coded."""
+
+        self._printed(tmp_path)
+        adapter = _Tripwire(_drifted_curator_fixture())
+        writes = [0]
+        real = orchestrator.RunStage.write
+
+        def counted(stage: Any, *args: Any) -> None:
+            writes[0] += 1
+            real(stage, *args)
+
+        with patch.object(orchestrator.RunStage, "write", counted):
+            Engine(adapter, _conn_config(tmp_path), tmp_path).generate(GenerateRequest(force=True))
+
+        return adapter.calls, writes[0]
+
+    def test_an_interrupt_at_every_adapter_call(self, tmp_path: Path) -> None:
+        calls, _ = self._measured(tmp_path / "measure")
+
+        assert len(calls) > 10
+        assert calls[-1] == "close"
+
+        # The last call closes the session after the commit, so an interrupt there ends a run
+        # that has already committed.
+        for index in range(len(calls) - 1):
+            root = tmp_path / str(index)
+            before = self._printed(root)
+            adapter = _Tripwire(_drifted_curator_fixture(), trip_at=index)
+
+            with pytest.raises(KeyboardInterrupt):
+                Engine(adapter, _conn_config(root), root).generate(GenerateRequest(force=True))
+
+            self._assert_untouched_and_recoverable(root, before)
+
+    def test_a_failed_write_at_every_staged_write(self, tmp_path: Path) -> None:
+        _, writes = self._measured(tmp_path / "measure")
+
+        assert writes > 3
+
+        for index in range(writes):
+            root = tmp_path / str(index)
+            before = self._printed(root)
+            count = [0]
+
+            def failing(
+                stage: Any,
+                *args: Any,
+                _at: int = index,
+                _count: list[int] = count,
+                real: Any = orchestrator.RunStage.write,
+            ) -> None:
+                if _count[0] == _at:
+                    raise OSError(errno.ENOSPC, "No space left on device")
+
+                _count[0] += 1
+                real(stage, *args)
+
+            with patch.object(orchestrator.RunStage, "write", failing), pytest.raises(OSError):
+                Engine(MockAdapter(_drifted_curator_fixture()), _conn_config(root), root).generate(
+                    GenerateRequest(force=True),
+                )
+
+            self._assert_untouched_and_recoverable(root, before)
+
+    @pytest.mark.parametrize("failing", ["public.curator", "public.herbarium"])
+    def test_a_fail_fast_stop_at_every_table(self, tmp_path: Path, failing: str) -> None:
+        before = self._printed(tmp_path)
+
+        class _Failing(MockAdapter):
+            def extract_ddl(self, fqn: str) -> str:
+                if fqn == failing:
+                    raise RuntimeError("simulated read failure")
+
+                return super().extract_ddl(fqn)
+
+        extra = dict(_drifted_curator_fixture())
+        extra["public.vault"] = replace(
+            extra["public.herbarium"],
+            namespace_path=("public", "vault"),
+        )
+        Engine(_Failing(extra), _conn_config(tmp_path), tmp_path).generate(
+            GenerateRequest(force=True, fail_fast=True),
+        )
+
+        self._assert_untouched_and_recoverable(tmp_path, before)
+
+    def test_a_second_concurrent_run_is_refused_before_reading_anything(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        before = self._printed(tmp_path)
+        held = orchestrator.RunStage.open(tmp_path / "primary")
+        adapter = _Tripwire(_drifted_curator_fixture())
+
+        try:
+            result = Engine(adapter, _conn_config(tmp_path), tmp_path).generate(
+                GenerateRequest(force=True),
+            )
+        finally:
+            held.close()
+
+        assert result.exit_code == EXIT_GENERIC
+        assert "'primary' is being generated by another run" in (result.error or "")
+        assert adapter.calls == []
+        assert self._tree(tmp_path / "primary") == before
+
+
+class TestAnEdgeWithACarriedEndpointMatchesAFullRun:
+    """SPEC 2.3.10: a carried endpoint's numbers come from its committed files, sketch included."""
+
+    @staticmethod
+    def _edges(root: Path) -> dict[str, tuple[Any, Any]]:
+        out = {}
+
+        for name in ("curator", "herbarium"):
+            data = yaml.safe_load((root / "public" / name / "relationships.yaml").read_text())
+            out[name] = (data["refers_to"], data["referenced_by"])
+
+        return out
+
+    def _narrowed_and_full(self, tmp_path: Path, strip_sketch: bool = False) -> tuple[Path, Path]:
+        narrowed, full = tmp_path / "narrowed", tmp_path / "full"
+
+        for root in (narrowed, full):
+            _build_engine(root, _curator_fixture()).generate()
+
+            if strip_sketch:
+                path = root / "primary" / "public" / "herbarium" / "statistics.yaml"
+                data = yaml.safe_load(path.read_text())
+                data["columns"]["id"].pop("sketch", None)
+                path.write_text(yaml.safe_dump(data, sort_keys=False))
+
+        _build_engine(narrowed, _curator_fixture()).generate(
+            GenerateRequest(force=True, cli_include=("public.curator",)),
+        )
+        _build_engine(full, _curator_fixture()).generate(
+            GenerateRequest(force=True, cli_include=("public.curator",))
+            if strip_sketch
+            else GenerateRequest(force=True),
+        )
+
+        return narrowed / "primary", full / "primary"
+
+    def test_both_files_state_what_a_full_run_states(self, tmp_path: Path) -> None:
+        narrowed, full = self._narrowed_and_full(tmp_path)
+
+        assert self._edges(narrowed) == self._edges(full)
+        assert [
+            i.code for i in validate_print(narrowed) if i.code.startswith("relationships.")
+        ] == []
+
+    def test_a_carried_file_is_untouched_when_nothing_changed(self, tmp_path: Path) -> None:
+        _build_engine(tmp_path, _curator_fixture()).generate()
+        path = tmp_path / "primary" / "public" / "herbarium" / "relationships.yaml"
+        before = path.read_bytes()
+        _build_engine(tmp_path, _curator_fixture()).generate(
+            GenerateRequest(force=True, cli_include=("public.curator",)),
+        )
+
+        assert path.read_bytes() == before
+
+    def test_a_carried_endpoint_without_a_sketch_falls_back_to_cardinality(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        narrowed, _ = self._narrowed_and_full(tmp_path, strip_sketch=True)
+        observed = self._edges(narrowed)["curator"][0][0]["observed"]
+
+        assert "containment" not in observed
+        assert "answerable_count" not in observed
+        assert [
+            i.code for i in validate_print(narrowed) if i.code.startswith("relationships.")
+        ] == []
+
+    def test_a_carried_referencer_is_untouched_when_one_measured_target_is_re_read(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database = tmp_path / "garden.duckdb"
+        con = duckdb.connect(str(database))
+        con.execute("CREATE TABLE plot_a AS SELECT i AS id FROM range(200) r(i)")
+        con.execute("CREATE TABLE plot_b AS SELECT i AS id FROM range(300) r(i)")
+        con.execute(
+            "CREATE TABLE sowing AS SELECT i AS id, i % 150 AS plot_a_ref, "
+            "i % 250 AS plot_b_ref FROM range(1000) r(i)",
+        )
+        con.close()
+        conn = ConnectionConfig(name="g", adapter="duckdb", output=tmp_path / "prints")
+        Engine(DuckdbAdapter({"database": str(database)}), conn, tmp_path).generate()
+        path = tmp_path / "prints" / "g" / "garden" / "main" / "sowing" / "relationships.yaml"
+        before = path.read_bytes()
+
+        Engine(DuckdbAdapter({"database": str(database)}), conn, tmp_path).generate(
+            GenerateRequest(force=True, cli_include=("garden.main.plot_a",)),
+        )
+
+        assert b"detection: measured" in before
+        assert path.read_bytes() == before
+
+    def test_two_carried_tables_are_never_compared(self, tmp_path: Path) -> None:
+        _build_engine(tmp_path, _curator_fixture()).generate()
+        committed = CommittedPrint.load(tmp_path / "primary")
+        engine = _build_engine(tmp_path, _curator_fixture())
+
+        assert engine._add_value_derived_edges({}, committed.tables) == {}

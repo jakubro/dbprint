@@ -480,12 +480,23 @@
         "count"
       ],
       "properties": {
-        "value": {},
+        "value": {
+          "type": [
+            "string",
+            "number",
+            "boolean"
+          ]
+        },
         "count": {
           "type": "integer",
           "minimum": 0
         },
         "spelling_of": {
+          "type": [
+            "string",
+            "number",
+            "boolean"
+          ],
           "description": "The listed value this entry is another spelling of; absent on the canonical member and on every ungrouped value. See SPEC.md section 2.2.4."
         }
       }
@@ -814,7 +825,7 @@
       },
       "allOf": [
         {
-          "$ref": "#/$defs/NoSketchWhenRedacted"
+          "$ref": "#/$defs/NothingWithheldWhenRedacted"
         }
       ],
       "oneOf": [
@@ -1551,11 +1562,22 @@
           "cardinality_method",
           "distribution",
           "frequencies",
-          "values",
-          "zero_count",
-          "negative_count",
-          "quantized_count"
-        ]
+          "values"
+        ],
+        "if": {
+          "not": {
+            "required": [
+              "redacted"
+            ]
+          }
+        },
+        "then": {
+          "required": [
+            "zero_count",
+            "negative_count",
+            "quantized_count"
+          ]
+        }
       },
       "allOf": [
         {
@@ -1720,9 +1742,20 @@
         "required": [
           "cardinality",
           "cardinality_ratio",
-          "cardinality_method",
-          "empty_count"
-        ]
+          "cardinality_method"
+        ],
+        "if": {
+          "not": {
+            "required": [
+              "redacted"
+            ]
+          }
+        },
+        "then": {
+          "required": [
+            "empty_count"
+          ]
+        }
       },
       "allOf": [
         {
@@ -2132,8 +2165,8 @@
         "hash"
       ]
     },
-    "NoSketchWhenRedacted": {
-      "description": "A column declaring any redacted primitive carries no sketch: the digests are of the very cell values the primitive withheld. See SPEC.md section 2.2.14.",
+    "NothingWithheldWhenRedacted": {
+      "description": "A column declaring any redacted primitive publishes its count profile and nothing else computed from its values. See SPEC.md section 2.2.9.",
       "if": {
         "type": "object",
         "required": [
@@ -2142,8 +2175,57 @@
       },
       "then": {
         "not": {
-          "required": [
-            "sketch"
+          "anyOf": [
+            {
+              "required": [
+                "mean"
+              ]
+            },
+            {
+              "required": [
+                "sum"
+              ]
+            },
+            {
+              "required": [
+                "length"
+              ]
+            },
+            {
+              "required": [
+                "zero_count"
+              ]
+            },
+            {
+              "required": [
+                "negative_count"
+              ]
+            },
+            {
+              "required": [
+                "empty_count"
+              ]
+            },
+            {
+              "required": [
+                "quantized_count"
+              ]
+            },
+            {
+              "required": [
+                "normalized_cardinality"
+              ]
+            },
+            {
+              "required": [
+                "unrepresentable"
+              ]
+            },
+            {
+              "required": [
+                "sketch"
+              ]
+            }
           ]
         }
       }

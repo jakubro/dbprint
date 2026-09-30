@@ -7,11 +7,12 @@ the adapter test suites, so none of the three can silently disagree on a sketch'
 from __future__ import annotations
 
 import base64
+import datetime as dt
 import hashlib
 from collections.abc import Sequence
 from typing import Literal
 
-from .classification import base_type
+from .classification import base_type, is_boolean_type
 
 
 SketchKind = Literal["integer", "decimal", "text", "boolean", "temporal"]
@@ -39,6 +40,8 @@ _INTEGER_TYPES = (
     "uint128",
     "uint256",
     "hugeint",
+    "uhugeint",
+    "bignum",
     "ubigint",
     "uinteger",
     "usmallint",
@@ -56,6 +59,9 @@ _TEXT_TYPES = (
     "string",
     "uuid",
     "fixedstring",
+    "tinytext",
+    "mediumtext",
+    "longtext",
 )
 _BOOLEAN_TYPES = ("boolean", "bool")
 _TEMPORAL_TYPES = (
@@ -70,6 +76,9 @@ _TEMPORAL_TYPES = (
     "timestamp_ntz",
     "timestamp_ltz",
     "timestamp_tz",
+    "timestamp_ns",
+    "timestamp_ms",
+    "timestamp_s",
     "datetime",
     "datetime64",
     "year",
@@ -92,6 +101,9 @@ def sketch_kind(sql_type: str) -> SketchKind | None:
     type outside the five SPEC 2.2.14 rows return None and are never sketched.
     """
 
+    if is_boolean_type(sql_type):
+        return "boolean"
+
     return _KIND_BY_TYPE.get(base_type(sql_type))
 
 
@@ -113,6 +125,9 @@ def canonical_form(value: object, kind: SketchKind) -> str:
 
 
 def _canonical_temporal(value: object) -> str:
+    if isinstance(value, dt.time) and value.tzinfo is not None:
+        value = dt.datetime.combine(dt.date(2000, 1, 1), value).astimezone(dt.UTC).timetz()
+
     isoformat = getattr(value, "isoformat", None)
     iso = isoformat() if callable(isoformat) else str(value)
 

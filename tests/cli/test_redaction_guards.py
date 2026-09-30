@@ -378,14 +378,14 @@ def _accession_fixture() -> dict[str, MockTable]:
 class _CollectorAdapter(MockAdapter):
     REQUIRED_KEYS = ("host", "port", "database", "user", "password")
 
-    def __init__(self, _credentials: dict[str, str]) -> None:
+    def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
         super().__init__(_collector_fixture())
 
 
 class _AccessionAdapter(MockAdapter):
     REQUIRED_KEYS = ("host", "port", "database", "user", "password")
 
-    def __init__(self, _credentials: dict[str, str]) -> None:
+    def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
         super().__init__(_accession_fixture())
 
 
@@ -691,13 +691,42 @@ class TestARedactedColumnRefusesEveryValueBearingPredicate:
         assert "assertion.redacted-stat" in codes
         assert "assertion.unknown-stat" not in codes
 
-    @pytest.mark.parametrize("stat", ["freshness.classification", "looks_like", "candidate_key"])
-    def test_a_measurement_on_a_redacted_column_is_still_evaluated(self, stat: str) -> None:
+    @pytest.mark.parametrize("command", [["check"], ["check", "--online"]])
+    @pytest.mark.parametrize(
+        "predicate",
+        ["freshness.classification: live", "looks_like: email", "candidate_key: false"],
+    )
+    def test_a_measurement_on_a_redacted_column_is_still_evaluated(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        command: list[str],
+        predicate: str,
+    ) -> None:
         """SPEC 2.2.9 leaves these untouched, so the refusal must not swallow them."""
 
-        from dbprint.assertions.predicate import is_value_bearing_stat
+        assertions = (
+            "    assertions:\n"
+            "      tables:\n"
+            "        seedbank.accession:\n"
+            "          columns:\n"
+            "            received_at:\n"
+            f"              {predicate}\n"
+        )
+        config = _project(MASK_RULE, assertions)
+        _credentials(monkeypatch)
+        _seed_baseline(tmp_path, monkeypatch, config, adapter=_AccessionAdapter)
+        result = _run(
+            tmp_path,
+            monkeypatch,
+            *command,
+            "--format",
+            "json",
+            config=config,
+            adapter=_AccessionAdapter,
+        )
 
-        assert not is_value_bearing_stat(stat)
+        assert "assertion.redacted-stat" not in _issue_codes(result.stdout)
 
     @pytest.mark.parametrize("command", [["check"], ["check", "--online"]])
     def test_an_unredacted_column_is_evaluated_normally(
@@ -817,6 +846,7 @@ class TestTheRefusalIsNameable:
     ) -> None:
         result = self._refused(tmp_path, monkeypatch, "check", "--online")
 
+        assert result.exit_code == EXIT_GENERIC
         assert "did not run" in result.stdout
         assert "redaction_salt" in result.stdout
 
@@ -830,12 +860,3 @@ class TestTheRefusalIsNameable:
         result = self._refused(tmp_path, monkeypatch, "check", "--online")
 
         assert "schema drift" not in result.stdout
-
-    def test_the_exit_code_is_unmoved(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        result = self._refused(tmp_path, monkeypatch, "check", "--online")
-
-        assert result.exit_code == EXIT_GENERIC

@@ -10,15 +10,16 @@ import rich_click as click
 import yaml
 from rich.console import Console
 
-from dbprint.engine import EXIT_GENERIC, EXIT_OK
+from dbprint.engine import EXIT_GENERIC, EXIT_OK, thresholds
 from dbprint.engine.baseline import (
     declared_artifacts,
+    failed_tables,
     manifest_shape_error,
     table_directory,
     walkable_tables,
 )
 from dbprint.engine.freshness import evaluate
-from .. import thresholds
+from dbprint.spec import artifact_yaml
 from ..options import project_option, resolve_project
 from ..rendering import resolve_render_mode
 from ..rendering.errors import emit_error
@@ -28,7 +29,7 @@ from ..resolution import ConnectionResolutionError, resolve
 
 
 @click.command(name="list")
-@click.argument("conn", required=False)
+@click.argument("connection", required=False)
 @project_option
 @click.option(
     "--format",
@@ -46,21 +47,21 @@ from ..resolution import ConnectionResolutionError, resolve
 @click.pass_context
 def list_command(
     ctx: click.Context,
-    conn: str | None,
+    connection: str | None,
     project: str | None,
     fmt: str,
     tui: bool | None,
 ) -> None:
     """Summarise committed prints offline (no database connection).
 
-    Reads `prints/<conn>/manifest.yaml` and reports connection metadata, the
+    Reads `prints/<connection>/manifest.yaml` and reports connection metadata, the
     table count, freshness buckets (live / stale / dormant) relative to
     each table's own `max_age_days`, and how many tables carry a user-authored
     `description.md`. Never connects to the database.
 
     **Arguments:**
 
-    - `CONN`: connection to summarize; resolved from `.dbprint.yaml` when
+    - `CONNECTION`: connection to summarize; resolved from `.dbprint.yaml` when
       omitted (the `auto: true` set, or the sole connection).
 
     **Exit codes:**
@@ -80,7 +81,7 @@ def list_command(
     project_config = resolve_project(project)
 
     try:
-        connections = resolve(project_config, conn)
+        connections = resolve(project_config, connection)
     except ConnectionResolutionError as exc:
         click.echo(str(exc), err=True)
         ctx.exit(EXIT_GENERIC)
@@ -108,7 +109,7 @@ def list_command(
             continue
 
         try:
-            parsed = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+            parsed = artifact_yaml.load(manifest_path.read_text(encoding="utf-8"))
         except yaml.YAMLError as exc:
             _drop(
                 conn_config.name,
@@ -208,6 +209,7 @@ def _summarize_connection(
         "stale": stale,
         "dormant": dormant,
         "described": described,
+        "failed_tables": list(failed_tables(manifest)),
     }
 
 

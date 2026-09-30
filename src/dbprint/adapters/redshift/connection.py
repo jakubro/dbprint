@@ -12,8 +12,12 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from .. import trace_context
+from ..dialect import Dialect
 from ..errors import QueryFailed
 
+
+# redshift_connector defaults to pyformat, same as psycopg2; the adapter does not override it.
+DIALECT = Dialect(vendor="redshift", paramstyle="pyformat", quote_char='"', addressed_parts=2)
 
 _LOG = logging.getLogger(__name__)
 
@@ -28,19 +32,25 @@ class ConnectionParams:
 
     host: str
     port: int
-    database: str
     user: str
     password: str
+    database: str | None = None
+    statement_timeout: int | None = None
 
     @classmethod
-    def from_credentials(cls, creds: dict[str, str]) -> ConnectionParams:
+    def from_credentials(
+        cls,
+        creds: dict[str, str],
+        statement_timeout: int | None = None,
+    ) -> ConnectionParams:
         try:
             return cls(
                 host=creds["host"],
                 port=int(creds.get("port", 5439)),
-                database=creds["database"],
+                database=creds.get("database"),
                 user=creds["user"],
                 password=creds["password"],
+                statement_timeout=statement_timeout,
             )
         except KeyError as exc:
             raise RedshiftConnectionError(
@@ -76,6 +86,11 @@ class Connection:
         self.params = params
         self._factory = cursor_factory or _default_cursor_factory
         self._cursor: Cursor | None = None
+
+    def sibling(self) -> Connection:
+        """An unopened connection with the same parameters and cursor factory."""
+
+        return Connection(self.params, self._factory)
 
     def open(self) -> None:
         try:
@@ -119,7 +134,7 @@ def exec_query(cursor: Cursor, sql: str, params: Any = None) -> Cursor:
         else:
             cursor.execute(sql, params)
     except Exception as exc:
-        failure = QueryFailed(exc, sql, params)
+        failure = QueryFailed(exc, sql, params, timed_out=_is_timeout(exc))
         trace_context.log_failure(_LOG, started, failure)
 
         raise failure from exc
@@ -150,5 +165,16 @@ def _default_cursor_factory(params: ConnectionParams) -> Any:
         password=params.password,
     )
     conn.autocommit = True
+    cursor = conn.cursor()
 
-    return conn.cursor()
+    if params.statement_timeout is not None:
+        cursor.execute(f"SET statement_timeout TO {params.statement_timeout * 1000}")
+
+    return cursor
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    # redshift_connector's first argument is the server's ErrorResponse field map.
+    fields = exc.args[0] if exc.args else None
+
+    return isinstance(fields, dict) and fields.get("C") == "57014"

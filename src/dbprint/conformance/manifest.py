@@ -6,6 +6,7 @@ from pathlib import Path
 
 import yaml
 
+from dbprint.spec.fqn import split as split_fqn
 from .issue import Issue
 from .layout import CANONICAL_ARTIFACTS, declared_artifacts, walkable_tables
 from .progress import TableSink
@@ -65,6 +66,17 @@ def check(
 
         tbl_path_str = tbl_entry.get("path", "")
         tbl_dir = print_root / tbl_path_str
+
+        if tbl_path_str and split_fqn(tbl_fqn) != tuple(tbl_path_str.split("/")):
+            issues.append(
+                Issue(
+                    f"manifest.yaml::tables.{tbl_fqn}.path",
+                    "manifest.path-fqn-mismatch",
+                    "error",
+                    f"Manifest key {tbl_fqn!r} names another table than its path {tbl_path_str!r}.",
+                    "§1.3",
+                ),
+            )
         artifacts = declared_artifacts(tbl_entry)
         declared_files[tbl_dir.resolve()] = {
             _ARTIFACT_FILENAMES[key] for key in artifacts if key in _ARTIFACT_FILENAMES

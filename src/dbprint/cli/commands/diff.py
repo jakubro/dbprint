@@ -44,14 +44,14 @@ from ..run_log import close_run_log, log_run_header, log_run_summary, open_run_l
 
 
 @click.command(name="diff")
-@click.argument("conn", required=False)
+@click.argument("connection", required=False)
 @project_option
 @click.option(
     "--include",
     "include_patterns",
     multiple=True,
     help="Narrow scope to tables also matching PATTERN (intersects config include); "
-    "repeatable. e.g. `--include 'public.*'`",
+    "repeatable. e.g. `--include '*.public.*'`",
 )
 @click.option(
     "--exclude",
@@ -97,7 +97,7 @@ from ..run_log import close_run_log, log_run_header, log_run_summary, open_run_l
 @click.pass_context
 def diff_command(
     ctx: click.Context,
-    conn: str | None,
+    connection: str | None,
     project: str | None,
     include_patterns: tuple[str, ...],
     exclude_patterns: tuple[str, ...],
@@ -122,14 +122,15 @@ def diff_command(
 
     **Arguments:**
 
-    - `CONN`: connection to compare; resolved from `.dbprint.yaml` when omitted
+    - `CONNECTION`: connection to compare; resolved from `.dbprint.yaml` when omitted
       (the `auto: true` set, or the sole connection).
 
     **Exit codes:**
 
     - `0`: ran (differences are not failures)
     - `1`: no baseline or invalid connection
-    - `4`: connection
+    - `4`: connection (also when the target lists none of the committed tables in scope -
+      `generate --confirm-all-removed` records a real total removal)
     - `5`: partial extraction
 
     **Examples:**
@@ -143,7 +144,7 @@ def diff_command(
     project_config = resolve_project(project)
 
     try:
-        connections = resolve(project_config, conn)
+        connections = resolve(project_config, connection)
     except ConnectionResolutionError as exc:
         click.echo(str(exc), err=True)
         ctx.exit(EXIT_GENERIC)

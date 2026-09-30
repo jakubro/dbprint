@@ -23,9 +23,20 @@
     "adapter": {"type": "string", "minLength": 1},
     "dbprint_version": {"type": "string", "minLength": 1},
     "statistics_params": {"$ref": "#/$defs/StatisticsParams"},
+    "profiling_params": {"$ref": "#/$defs/ProfilingParams"},
     "selectors": {"$ref": "#/$defs/Selectors"},
     "redaction_rules_configured": {"type": "integer", "minimum": 0},
     "default_collation": {"type": "string", "minLength": 1},
+    "failed_tables": {
+      "description": "Tables the writing run attempted and could not profile, sorted; omitted when empty. See SPEC.md section 2.5.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    },
     "manifest_annotations": {"const": "manifest.annotations.yaml"},
     "tables": {
       "type": "object",
@@ -50,6 +61,15 @@
         }
       }
     },
+    "ProfilingParams": {
+      "type": "object",
+      "properties": {
+        "infer_relationships": {"type": "boolean"},
+        "sketch_all_columns": {"type": "boolean"},
+        "compute_timeline": {"type": "boolean"},
+        "materialize_sample": {"type": "boolean"}
+      }
+    },
     "Selectors": {
       "type": "object",
       "required": ["include", "exclude"],
@@ -69,7 +89,9 @@
         "columns": {"type": "integer", "minimum": 0},
         "profiled_at": {"$ref": "#/$defs/UtcIso8601"},
         "max_age_days": {"type": "integer", "minimum": 0},
-        "statistics_params": {"$ref": "#/$defs/StatisticsParams"}
+        "statistics_params": {"$ref": "#/$defs/StatisticsParams"},
+        "max_rows_scanned": {"type": "integer", "minimum": 1},
+        "profiling_params": {"$ref": "#/$defs/ProfilingParams"}
       }
     },
     "Artifacts": {

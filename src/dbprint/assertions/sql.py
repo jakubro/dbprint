@@ -10,6 +10,7 @@ from decimal import Decimal
 from typing import Any, Protocol
 
 from dbprint.conformance.issue import Issue
+from dbprint.spec.value_text import spell_number
 from . import issue as codes
 from .parser import AssertionSet, QueryAssertion
 
@@ -180,6 +181,9 @@ def _spell_count(value: Any) -> str:
     """The scale a driver carried is not part of the count, so an integral decimal sheds it."""
 
     if isinstance(value, Decimal) and value == value.to_integral_value():
-        return str(int(value))
+        return spell_number(int(value))
+
+    if isinstance(value, int | float | Decimal) and not isinstance(value, bool):
+        return spell_number(value)
 
     return str(value)

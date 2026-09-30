@@ -83,7 +83,7 @@ def _to_dict(result: CheckResult) -> dict[str, Any]:
         "issues": [_issue_to_dict(i) for i in result.issues],
         "stale_entries": [
             {
-                "fqn": s.fqn,
+                "table": s.fqn,
                 "age_days": s.age_days if s.age_days != float("inf") else None,
                 "max_age_days": s.max_age_days,
             }

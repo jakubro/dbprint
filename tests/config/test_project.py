@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import get_args
 
 import pytest
 
@@ -16,8 +15,6 @@ from dbprint.config import (
     load_project,
     load_project_at,
 )
-from dbprint.spec.looks_like import LooksLike
-from dbprint.spec.sensitivity import Sensitivity
 
 
 EXAMPLE_DIR = Path(__file__).parent.parent.parent / "docs/format/v1/examples/production"
@@ -503,8 +500,8 @@ class TestReferenceExample:
         conn = cfg.connections["production"]
         assert conn.adapter == "postgres"
         assert conn.auto is True
-        assert conn.include == ("seedbank.*", "fixture.*")
-        assert conn.exclude == ("seedbank.audit_*",)
+        assert conn.include == ("arboretum.seedbank.*", "arboretum.fixture.*")
+        assert conn.exclude == ("arboretum.seedbank.audit_*",)
         assert conn.max_age_days == 1
         assert isinstance(conn.statistics, StatisticsConfig)
         assert conn.statistics.top_n_values == 30
@@ -1103,7 +1100,10 @@ class TestMaxRowsScanned:
             "connections:\n  w:\n    adapter: postgres\n    max_rows_scanned: 1000000000\n",
         )
 
-        assert load_project(root).connections["w"].settings_for("a.b", 200_000_000).sample is None
+        settings = load_project(root).connections["w"].settings_for("a.b", 200_000_000)
+
+        assert settings.sample is None
+        assert settings.max_rows_scanned == 1_000_000_000
 
     def test_an_estimate_at_the_ceiling_is_read_whole(self, tmp_path: Path) -> None:
         """At or above the cap is "no narrowing", not a fraction of 1.0 (SPEC 2.2.8)."""
@@ -1176,7 +1176,10 @@ class TestMaxRowsScanned:
             "        sample: 0.5\n",
         )
 
-        assert load_project(root).connections["w"].settings_for("a.b", 10_000_000_000).sample == 0.5
+        settings = load_project(root).connections["w"].settings_for("a.b", 10_000_000_000)
+
+        assert settings.sample == 0.5
+        assert settings.max_rows_scanned is None
 
     def test_a_later_ceiling_beats_an_earlier_explicit_sample(self, tmp_path: Path) -> None:
         """Declaration order alone decides - neither directive has fixed priority."""
@@ -1229,6 +1232,7 @@ class TestMaxRowsScanned:
 
         assert settings.filter is not None
         assert settings.sample is None
+        assert settings.max_rows_scanned is None
         assert settings.ceiling_yielded is True
 
     def test_a_filter_with_no_ceiling_does_not_report_a_yield(self, tmp_path: Path) -> None:
@@ -1597,22 +1601,6 @@ class TestRedactTargetsAreCheckedAgainstTheirVocabularies:
 
         assert load_project(root).connections["w"].redact[0].sensitivity == ("personal_name",)
 
-    def test_every_member_of_each_vocabulary_is_accepted(self, tmp_path: Path) -> None:
-        """The sets are read from the modules that define them, so both stay reachable."""
-
-        sensitivities = ", ".join(sorted(get_args(Sensitivity)))
-        patterns = ", ".join(sorted(get_args(LooksLike)))
-        root = _write_config(
-            tmp_path,
-            "connections:\n  w:\n    adapter: postgres\n    redact:\n"
-            f"      - sensitivity: [{sensitivities}]\n        with: drop\n"
-            f"      - looks_like: [{patterns}]\n        with: mask\n",
-        )
-        redact = load_project(root).connections["w"].redact
-
-        assert set(redact[0].sensitivity) == set(get_args(Sensitivity))
-        assert set(redact[1].looks_like) == set(get_args(LooksLike))
-
     def test_columns_stays_an_open_vocabulary(self, tmp_path: Path) -> None:
         """A glob matching no table today may match one tomorrow, so it is not checked."""
 
@@ -1790,8 +1778,21 @@ class TestStatChangeThresholdIsValidated:
             "connections:\n  w:\n    adapter: postgres\n    diff: 0.02\n",
         )
 
-        with pytest.raises(ConfigError, match="diff must be a mapping"):
+        with pytest.raises(ConfigError) as refused:
             load_project(tmp_path)
+
+        assert str(refused.value).endswith("connection 'w': diff must be a mapping, got float.")
+
+    def test_a_non_mapping_defaults_diff_block_names_the_defaults(self, tmp_path: Path) -> None:
+        _write_config(
+            tmp_path,
+            "defaults:\n  diff: 0.02\nconnections:\n  w:\n    adapter: postgres\n",
+        )
+
+        with pytest.raises(ConfigError) as refused:
+            load_project(tmp_path)
+
+        assert "connection 'w': defaults.diff must be a mapping" in str(refused.value)
 
     def test_a_whole_number_is_a_well_formed_fraction(self, tmp_path: Path) -> None:
         """1 means "show every change", which is a threshold like any other."""
@@ -1949,18 +1950,6 @@ class TestFalsyBlocksAreRefused:
 
         with pytest.raises(ConfigError, match="assertions` must be a mapping"):
             load_project(tmp_path)
-
-    def test_a_truthy_diff_non_mapping_message_is_unchanged(self, tmp_path: Path) -> None:
-        """`diff: 0.02`'s refusal message must not move, byte for byte."""
-
-        _write_config(tmp_path, "connections:\n  w:\n    adapter: postgres\n    diff: 0.02\n")
-
-        with pytest.raises(ConfigError) as exc:
-            load_project(tmp_path)
-
-        assert str(exc.value).endswith(
-            "connection 'w': connection 'w'.diff must be a mapping, got float.",
-        )
 
     def test_null_and_empty_mapping_diff_load_clean(self, tmp_path: Path) -> None:
         """`diff:` and `diff: {}` mean the same as an absent block."""

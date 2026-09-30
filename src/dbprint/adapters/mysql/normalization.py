@@ -6,8 +6,9 @@ from __future__ import annotations
 
 from . import stats
 from .connection import Cursor, exec_query
-from .identity import Identity
 from ..base import TableScope
+from ..identifiers import Identity
+from ..sql_layout import indented
 
 
 def compute_normalized_cardinality(
@@ -18,13 +19,20 @@ def compute_normalized_cardinality(
 ) -> int:
     """The distinct count of `column` once trimmed and case-folded (SPEC 2.2.4)."""
 
-    cn = stats._quote_ident(column)
+    cn = stats._qualified(column)
     normalized = f"LOWER(TRIM(CAST({cn} AS CHAR)))"
     source = stats._source(identity.quoted(), scope, stats._seed(identity))
 
     row = exec_query(
         cursor,
-        f"SELECT COUNT(DISTINCT {normalized}) AS n FROM {source} WHERE {cn} IS NOT NULL",
+        f"""
+        SELECT
+          COUNT(DISTINCT {normalized}) AS n
+        FROM
+          {indented(source, 10)}
+        WHERE
+          {cn} IS NOT NULL
+        """,
     ).fetchone()
 
     return int(row[0]) if row and row[0] is not None else 0

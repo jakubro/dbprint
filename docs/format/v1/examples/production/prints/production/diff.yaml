@@ -6,16 +6,16 @@ baseline:
   source: committed_prints
   path: prints/production
   generated_at: '2026-05-17T22:48:01Z'
-  dbprint_version: 0.8.0
+  dbprint_version: 0.9.0
 target:
   source: live_database
   scanned_at: '2026-05-17T22:48:01Z'
   selectors:
     include:
-    - seedbank.*
-    - fixture.*
+    - arboretum.seedbank.*
+    - arboretum.fixture.*
     exclude:
-    - seedbank.audit_*
+    - arboretum.seedbank.audit_*
   tables_scanned: 10
 summary:
   tables_added: 0
@@ -34,7 +34,7 @@ summary:
   unevaluated_tables: 1
 changes:
 - kind: column_added
-  table: seedbank.accession
+  table: arboretum.seedbank.accession
   column: storage_temperature_c
   sql_type: numeric(4,1)
   nullable: true

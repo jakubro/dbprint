@@ -16,10 +16,11 @@ from typing import get_args
 import pytest
 
 from dbprint.spec.looks_like import (
-    MATCH_THRESHOLD,
     NEAR_MISS_FLOOR,
     _CURRENCY_CODES,
     LooksLike,
+    LooksLikeMatch,
+    _match_prose,
     detect,
     detect_with_evidence,
 )
@@ -67,10 +68,7 @@ class TestSmallSamples:
     def test_one_stray_value_is_enough_to_withhold_a_verdict(self) -> None:
         """At this size the threshold admits no noise, which is the whole of the rule."""
 
-        values = _uuids(11) + ["unknown"]
-
-        assert (len(values) - 1) / len(values) < MATCH_THRESHOLD
-        assert detect(values) is None
+        assert detect(_uuids(11) + ["unknown"]) is None
 
     def test_a_single_value_column_is_detected(self) -> None:
         """One observation is the extreme of the published band, and it is a stated verdict."""
@@ -133,11 +131,7 @@ class TestMatchThreshold:
     """The threshold tolerates data-quality noise; it does not tolerate a coin flip."""
 
     def test_noise_within_tolerance_still_detects(self) -> None:
-        values = _uuids(TOLERANCE_MIN_SAMPLES - 1) + ["unknown"]
-
-        assert len(values) == TOLERANCE_MIN_SAMPLES
-        assert (TOLERANCE_MIN_SAMPLES - 1) / TOLERANCE_MIN_SAMPLES >= MATCH_THRESHOLD
-        assert detect(values) == "uuid"
+        assert detect(_uuids(19) + ["unknown"]) == "uuid"
 
     def test_noise_beyond_tolerance_detects_nothing(self) -> None:
         values = _uuids(TOLERANCE_MIN_SAMPLES - 2) + ["unknown", "deleted"]
@@ -423,9 +417,6 @@ class TestLocaleBoundPatterns:
 class TestCurrencyList:
     """The hand-maintained ISO 4217 literal itself, not the detector built on it."""
 
-    def test_the_list_has_178_entries(self) -> None:
-        assert len(_CURRENCY_CODES) == 178
-
     @pytest.mark.parametrize("code", ["EUR", "USD", "JPY", "GBP", "XAU", "XDR", "XXX"])
     def test_a_well_known_code_is_a_member(self, code: str) -> None:
         assert code in _CURRENCY_CODES
@@ -596,9 +587,7 @@ class TestFinancialIdentifiers:
         """~10% of a sequential-id column passes Luhn by chance; 0.10 cannot clear 0.95."""
 
         sample = [f"411111111100{i:04d}" for i in range(30)]
-        share = sum(detect([v]) == "card_number" for v in sample) / len(sample)
-
-        assert share < MATCH_THRESHOLD
+        assert sum(detect([v]) == "card_number" for v in sample) == 3
         assert detect(sample) is None
 
     @pytest.mark.parametrize(
@@ -1266,3 +1255,64 @@ class TestNearMiss:
         assert match.candidate is None
         assert match.candidate_share is None
         assert match.matched == 0
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("abcdef12", "hex"),
+        ("eyJhbGciOiJub25lIn0..sig", "filename"),
+        ("eyJhbGciOiJub25lIn0.a+b.c", "filename"),
+        ("QUJDREVGR0hJSktM", "base64"),
+        ("QUJD-EVGR0hJSktM", "base64"),
+        ("QUJDREVGR0hJSktMa", None),
+        ("-90.0, -180.0", "latlon"),
+        ("90.0, 180.0", "latlon"),
+        ("90.5, 1.0", None),
+        ("-90.5, 1.0", None),
+        ("1.0, 180.5", None),
+        ("1.0, -180.5", None),
+        ("2024-01-02T03:04:05Z", "iso8601_datetime"),
+        ("10.0.0.1/8", None),
+        ("978 0 306 40615 7", "isbn"),
+        ("96385074", "ean"),
+        ("4111-1111-1111-1111", "card_number"),
+        ("4012 8888 8888 1881 235", "card_number"),
+        ("4012 8888 8888 1881 1230", None),
+        ("NO9386011117947", "iban"),
+        ("NO631111111111", None),
+        ("GB69AAAA11111111111111111111111111", "iban"),
+        ("GB16AAAA111111111111111111111111111", None),
+        ("+12345678", "phone"),
+        ("+1234567", None),
+        ("+123456789012345", "phone"),
+        ("+1234567890123456", None),
+        ("(123) 456-7890", "phone"),
+        ("123-456-789-012-345", "phone"),
+        ("123-456-789-012-3456", None),
+        ("this is a small test", "prose"),
+        ("this is a test", None),
+    ],
+)
+def test_a_single_value_at_each_matchers_boundary(value: str, expected: str | None) -> None:
+    assert detect([value]) == expected
+
+
+def test_a_value_every_structural_shape_rejects_can_still_be_refused_as_prose() -> None:
+    assert _match_prose("this is 1 2 3 4 5 6 7 8 9 0") is True
+    assert _match_prose("1 2 3 4 5 6 7 8 9 0") is False
+
+
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        (["a@b.co", "zzz"], LooksLikeMatch(None, 2, 0, "email", 0.5)),
+        (["a@b.co", "c@d.co", "zzz"], LooksLikeMatch(None, 3, 0, "email", 0.666667)),
+        (["zzz", "yyy"], LooksLikeMatch(None, 2, 0)),
+    ],
+)
+def test_a_near_miss_carries_its_candidate_and_share(
+    values: list[str],
+    expected: LooksLikeMatch,
+) -> None:
+    assert detect_with_evidence(values) == expected

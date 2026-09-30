@@ -10,6 +10,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from dbprint.spec.fqn import split as split_fqn
+
 
 _TESTS_ROOT = Path(__file__).parent
 
@@ -35,7 +37,7 @@ def _mismatches_in_file(path: Path) -> list[str]:
             return
 
         namespace_path = _namespace_path_literal(call)
-        if namespace_path is None or namespace_path == tuple(fqn.split(".")):
+        if namespace_path is None or namespace_path == split_fqn(fqn):
             return
         mismatches.append(
             f"{path}:{call.lineno}: {fqn!r} keyed but namespace_path={namespace_path!r}",

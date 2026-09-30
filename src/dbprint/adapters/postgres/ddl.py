@@ -18,8 +18,8 @@ from .connection import (
     ConnectionParams,
     PostgresConnectionError,
 )
-from .identity import Identity
 from .. import trace_context
+from ..identifiers import Identity
 
 
 _LOG = logging.getLogger(__name__)
@@ -72,7 +72,7 @@ def extract_ddl(params: ConnectionParams, identity: Identity) -> str:
 
     if not raw.strip():
         raise PostgresConnectionError(
-            f"pg_dump produced no output for {identity.dotted()!r}; "
+            f"pg_dump produced no output for {identity.fqn!r}; "
             "the table may not exist or be inaccessible.",
         )
 
@@ -103,15 +103,19 @@ def _run_pg_dump(params: ConnectionParams, identity: Identity) -> str:
     The `--table` pattern quotes each segment: pg_dump folds an unquoted one and matches nothing.
     """
 
-    env = {**os.environ, **params.env_for_pg_dump()}
+    env = {**os.environ, **params.env_for_pg_dump(identity.parts[0])}
     argv = [
         PG_DUMP_BIN,
         "--schema-only",
         "--no-owner",
         "--no-privileges",
         f"--table={identity.quoted()}",
-        params.database,
+        identity.parts[0],
     ]
+
+    # pg_dump zeroes its own session's statement_timeout; its one bounded wait is the table lock.
+    if params.statement_timeout is not None:
+        argv.insert(-1, f"--lock-wait-timeout={params.statement_timeout * 1000}")
     started = time.monotonic()
 
     try:
@@ -127,14 +131,14 @@ def _run_pg_dump(params: ConnectionParams, identity: Identity) -> str:
         _trace_pg_dump(started, argv, failed=True)
 
         raise PostgresConnectionError(
-            f"pg_dump failed for {identity.dotted()!r}: exit {exc.returncode}; "
+            f"pg_dump failed for {identity.fqn!r}: exit {exc.returncode}; "
             f"stderr: {exc.stderr.strip()}",
         ) from exc
     except subprocess.TimeoutExpired as exc:
         _trace_pg_dump(started, argv, failed=True)
 
         raise PostgresConnectionError(
-            f"pg_dump timed out after {PG_DUMP_TIMEOUT_SECONDS}s for {identity.dotted()!r}",
+            f"pg_dump timed out after {PG_DUMP_TIMEOUT_SECONDS}s for {identity.fqn!r}",
         ) from exc
 
     _trace_pg_dump(started, argv, failed=False)

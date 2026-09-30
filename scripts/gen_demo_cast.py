@@ -35,7 +35,7 @@ HOME_DIR = DEMO_ROOT / "user-home"
 
 DATABASE = "seedbank"
 CONNECTION = "primary"
-# The scaffold's own default include is `public.*`, so seeding there is what lets the recording
+# The scaffold's own default include is `*.public.*`, so seeding there is what lets the recording
 # run `init` and `generate` back to back with nothing edited in between.
 SCHEMA = "public"
 
@@ -225,7 +225,7 @@ def _session(credentials: dict[str, str]) -> list[tuple[str, list[tuple[float, s
 
     # DDL first, statistics second - the recording's closing frame, held longest by a looping
     # player, is the Cardinality table rather than the schema any other tool already shows.
-    table = f"{SCHEMA}.taxon"
+    table = f"{DATABASE}.{SCHEMA}.taxon"
 
     return [
         ("dbprint init", _run_cli(["init"])),

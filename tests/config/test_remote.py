@@ -239,21 +239,20 @@ class TestMaterialize:
 
         assert default != named
 
-    def test_reuses_within_the_ttl_without_a_git_call(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        bare, _work = _bare_repo(tmp_path)
+    def test_reuses_within_the_ttl_without_a_fetch(self, tmp_path: Path) -> None:
+        bare, work = _bare_repo(tmp_path)
         address = RemoteAddress(remote=str(bare))
         materialize(address)
+        _push_update(
+            work,
+            bare,
+            "prints/primary/manifest.yaml",
+            "format_version: 1\ntables: {marker: {}}\n",
+        )
 
-        def _fail(_args: list[str]) -> None:
-            raise AssertionError("git ran again inside the cache TTL")
+        local = materialize(address)
 
-        monkeypatch.setattr(remote_module, "_run_git", _fail)
-
-        materialize(address)  # must not raise
+        assert "marker" not in (local / "prints" / "primary" / "manifest.yaml").read_text()
 
     def test_refreshes_once_the_ttl_has_elapsed(
         self,
@@ -394,28 +393,22 @@ class TestMaterialize:
 
         assert "180 minutes ago" in reported[0], reported
 
-    def test_a_failed_refresh_records_the_attempt(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
+    def test_a_failed_refresh_records_the_attempt(self, tmp_path: Path) -> None:
         """The stamp bounds attempts, not successes - otherwise every later run retries."""
 
         bare, _work = _bare_repo(tmp_path)
         address = RemoteAddress(remote=str(bare))
-        materialize(address)
+        local = materialize(address)
         shutil.rmtree(bare)
-        monkeypatch.setattr(remote_module, "CACHE_TTL_SECONDS", 0)
+        aged = time.time() - 60 * 60
+        os.utime(local / remote_module._STAMP_FILENAME, (aged, aged))
         materialize(address, on_degraded=lambda _message: None)
+        reported: list[str] = []
 
-        monkeypatch.setattr(remote_module, "CACHE_TTL_SECONDS", 15 * 60)
+        local = materialize(address, on_degraded=reported.append)
 
-        def _fail(_args: list[str]) -> None:
-            raise AssertionError("git ran again inside the TTL after a failed refresh")
-
-        monkeypatch.setattr(remote_module, "_run_git", _fail)
-
-        assert (materialize(address) / ".dbprint.yaml").is_file()
+        assert reported == []
+        assert (local / ".dbprint.yaml").is_file()
 
     def test_a_full_sha_ref_is_checked_out(self, tmp_path: Path) -> None:
         """What a forge's permalink carries; `clone --branch` cannot take it."""
@@ -469,20 +462,14 @@ class TestMaterialize:
         bare, work = _bare_repo(tmp_path)
         address = RemoteAddress(remote=str(bare), ref=_head_sha(work))
         materialize(address)
+        shutil.rmtree(bare)
         monkeypatch.setattr(remote_module, "CACHE_TTL_SECONDS", 0)
+        reported: list[str] = []
 
-        calls: list[list[str]] = []
-        real_run_git = remote_module._run_git
+        local = materialize(address, on_degraded=reported.append)
 
-        def _record(args: list[str]) -> str:
-            calls.append(args)
-
-            return real_run_git(args)
-
-        monkeypatch.setattr(remote_module, "_run_git", _record)
-        materialize(address)
-
-        assert not any("fetch" in args for args in calls), calls
+        assert reported == []
+        assert (local / ".dbprint.yaml").is_file()
 
     def test_an_unresolvable_ref_names_the_ref(self, tmp_path: Path) -> None:
         bare, _work = _bare_repo(tmp_path)
