@@ -338,7 +338,7 @@ class TestNonBreaking:
 
 class TestPrettyDatetime:
     def test_date_only(self) -> None:
-        assert _pretty_datetime("2026-05-17") == "May 17, 2026"
+        assert _pretty_datetime("2026-03-09") == "Mar 09, 2026"
 
     def test_unrepresentable_extreme_date_passes_through(self) -> None:
         assert _pretty_datetime("52030-01-01T00:00:00") == "52030-01-01T00:00:00"

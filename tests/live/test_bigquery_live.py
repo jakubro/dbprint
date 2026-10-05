@@ -9,12 +9,10 @@ from pathlib import Path
 
 import pytest
 import yaml
-from click.testing import CliRunner
 
 from dbprint.adapters import BigqueryAdapter
-from dbprint.cli.main import main
-from dbprint.conformance import validate_print
 from dbprint.spec.sketch import low64_md5
+from tests.live import _harness as harness
 
 
 # Every variable `_live_creds` reads without a default, so exporting what the skip reason names
@@ -49,29 +47,8 @@ def _apply_fixtures(creds: dict[str, str]) -> None:
 
     job_config = bigquery.QueryJobConfig(default_dataset=f"{creds['project']}.{creds['dataset']}")
 
-    for path in ("schema.bigquery.sql", "data.bigquery.sql"):
-        for statement in _split_sql((_FIXTURE_DIR / path).read_text()):
-            client.query(statement, job_config=job_config).result()
-
-
-def _write_project(project_dir: Path) -> None:
-    project_dir.mkdir(parents=True, exist_ok=True)
-    (project_dir / ".dbprint.yaml").write_text(
-        f"""\
-defaults:
-  max_age_days: 7
-  statistics:
-    enumeration_threshold: 50
-    top_n_values: 20
-    percentiles: [1, 25, 50, 75, 99]
-
-connections:
-  {CONN_NAME}:
-    adapter: bigquery
-    auto: true
-    output: prints
-""",
-    )
+    for statement in harness.fixture_statements(_FIXTURE_DIR, "bigquery"):
+        client.query(statement, job_config=job_config).result()
 
 
 def _credential_env(creds: dict[str, str]) -> dict[str, str]:
@@ -89,26 +66,17 @@ def test_bigquery_live_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     creds = _live_creds()
     _apply_fixtures(creds)
 
-    project_dir = tmp_path / "project"
-    _write_project(project_dir)
-    monkeypatch.chdir(project_dir)
-
-    for key, value in _credential_env(creds).items():
-        monkeypatch.setenv(key, value)
-
-    result = CliRunner().invoke(main, ["generate", "--no-tui"])
-    assert result.exit_code in (0, 3), (
-        f"generate failed (exit={result.exit_code}):\n{result.output}"
+    print_dir = harness.generate(
+        tmp_path,
+        monkeypatch,
+        CONN_NAME,
+        "bigquery",
+        _credential_env(creds),
     )
 
-    print_dir = project_dir / "prints" / CONN_NAME
     assert (print_dir / "manifest.yaml").is_file()
 
-    issues = validate_print(print_dir)
-    errors = [i for i in issues if i.severity == "error"]
-    assert errors == [], "Conformance violations:\n" + "\n".join(
-        f"  {e.code} at {e.path}: {e.detail}" for e in errors
-    )
+    harness.assert_conformant(print_dir)
 
     manifest = yaml.safe_load((print_dir / "manifest.yaml").read_text())
     dataset = creds["dataset"]
@@ -155,7 +123,7 @@ def test_key_sketch_matches_the_spec_test_vectors_on_a_real_project(
     client.query(f"CREATE SCHEMA IF NOT EXISTS `{creds['project']}`.`{creds['dataset']}`").result()
 
     table = f"{creds['project']}.{creds['dataset']}.dbprint_sketch_vectors"
-    values = ["42", "-7", "4.00", "hello", "true", "2026-05-17T22:48:01Z"]
+    values = ["42", "-7", "4.00", "hello", "true", "2026-03-09T14:27:36Z"]
     client.query(f"CREATE OR REPLACE TABLE `{table}` (v STRING)").result()
     rows = ", ".join(f"('{v}')" for v in values)
     client.query(f"INSERT INTO `{table}` (v) VALUES {rows}").result()
@@ -351,9 +319,3 @@ def test_looks_like_sampling_is_reproducible_across_two_runs(tmp_path: Path) -> 
 
     assert first
     assert first == second
-
-
-def _split_sql(text: str) -> list[str]:
-    lines = [ln for ln in text.splitlines() if not ln.strip().startswith("--")]
-
-    return [stmt.strip() for stmt in "\n".join(lines).split(";") if stmt.strip()]

@@ -10,6 +10,7 @@ from dbprint.spec.absence import (
     emits,
     read_column_field,
     read_table_block,
+    sample_verdicts,
     verdict_withheld,
 )
 
@@ -106,6 +107,14 @@ def test_a_catalog_only_file_has_no_row_count_to_read() -> None:
     got = read_table_block({"catalog_only": True, "columns": {}}, "row_count")
 
     assert got.state is Absence.NOT_APPLICABLE
+
+
+def test_a_queried_view_reads_like_a_queried_table() -> None:
+    view = {"type": "view", "row_count": 4, "row_count_method": "exact", "columns": {}}
+
+    assert read_table_block(view, "row_count").state is Absence.PRESENT
+    assert read_table_block(view, "catalog_only").state is Absence.OMITTED
+    assert read_table_block(view, "physical_layout").state is Absence.OMITTED
 
 
 def test_a_lost_table_block_is_unmeasured() -> None:
@@ -301,3 +310,18 @@ def test_emits_answers_whether_the_column_carries_the_key() -> None:
     assert emits(column, "inferred.looks_like")
     assert not emits(column, "inferred.sensitivity")
     assert not emits(column, "range.min")
+
+
+@pytest.mark.parametrize(
+    ("classification", "expected"),
+    [
+        ("text", {"inferred.looks_like", "inferred.epoch_unit"}),
+        ("binary", {"inferred.looks_like"}),
+        ("numeric", set()),
+    ],
+)
+def test_a_failed_draw_owes_only_the_verdicts_its_classification_allows(
+    classification: str,
+    expected: set[str],
+) -> None:
+    assert sample_verdicts(classification) == expected

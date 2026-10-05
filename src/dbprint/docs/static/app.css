@@ -160,6 +160,10 @@ body.chart-fs-open { overflow: hidden; }
 .skyline-numeric { color: #e0a030; }
 .skyline-temporal { color: #9b6bce; }
 .skyline-text { color: #4bb8a8; }
+.skyline-binary { color: #c8676b; }
+.skyline-composite { color: #b07cc6; }
+.skyline-spatial { color: #5c9a4f; }
+.skyline-vector { color: #5a7fc4; }
 .skyline-unsupported { color: #8888; }
 
 /* Card preview - must follow .skyline: equal specificity, so source order decides. */
@@ -172,6 +176,10 @@ body.chart-fs-open { overflow: hidden; }
 .skyline-mini .skyline-numeric { color: #d9c398; }
 .skyline-mini .skyline-temporal { color: #b8a8c9; }
 .skyline-mini .skyline-text { color: #a3c9c2; }
+.skyline-mini .skyline-binary { color: #d4a5a7; }
+.skyline-mini .skyline-composite { color: #cdb2d9; }
+.skyline-mini .skyline-spatial { color: #a8c4a0; }
+.skyline-mini .skyline-vector { color: #a3b5d9; }
 .skyline-mini .skyline-unsupported { color: #999; }
 
 .skyline-legend { display: flex; flex-direction: column; gap: .3rem; font-size: .75rem; flex-shrink: 0; padding-top: .5rem; white-space: nowrap; }

@@ -12,10 +12,10 @@ import hashlib
 from collections.abc import Sequence
 from typing import Literal
 
-from .classification import base_type, is_boolean_type
+from .classification import base_type, is_binary_type, is_boolean_type
 
 
-SketchKind = Literal["integer", "decimal", "text", "boolean", "temporal"]
+SketchKind = Literal["integer", "decimal", "text", "boolean", "temporal", "binary"]
 
 METHOD = "kmv_md5_lo64"
 K = 1024
@@ -98,16 +98,19 @@ def sketch_kind(sql_type: str) -> SketchKind | None:
 
     Shares `classification.base_type`'s dialect normalization, so MySQL's `bigint unsigned`
     and Postgres's plain `bigint` resolve to the same kind. Floating-point types and every
-    type outside the five SPEC 2.2.14 rows return None and are never sketched.
+    type outside the six SPEC 2.2.14 rows return None and are never sketched.
     """
 
     if is_boolean_type(sql_type):
         return "boolean"
 
+    if is_binary_type(sql_type):
+        return "binary"
+
     return _KIND_BY_TYPE.get(base_type(sql_type))
 
 
-def canonical_form(value: object, kind: SketchKind) -> str:
+def canonical_form(value: object, kind: SketchKind) -> str | bytes:
     """SPEC 2.2.14's canonical byte string for one Python value under `kind`.
 
     The Python-side mirror of each adapter's SQL canonical-cast expression, used only where no
@@ -121,7 +124,22 @@ def canonical_form(value: object, kind: SketchKind) -> str:
     if kind == "temporal":
         return _canonical_temporal(value)
 
+    if kind == "binary":
+        return _canonical_binary(value)
+
     return str(value)
+
+
+def _canonical_binary(value: object) -> bytes:
+    """The value's own bytes; a `str` is the hex spelling a print publishes (SPEC 2.2.4)."""
+
+    if isinstance(value, str):
+        return bytes.fromhex(value)
+
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value)
+
+    raise TypeError(f"not a binary value: {value!r}")
 
 
 def _canonical_temporal(value: object) -> str:
@@ -137,14 +155,15 @@ def _canonical_temporal(value: object) -> str:
     return iso
 
 
-def low64_md5(canonical: str) -> int:
+def low64_md5(canonical: str | bytes) -> int:
     """The low 64 bits of `canonical`'s MD5 digest, read big-endian, unsigned.
 
     Unkeyed and deterministic - no salt, no seed. Every adapter's in-database hash expression
     MUST reproduce this exact value for the same canonical bytes (SPEC 2.2.14's test vectors).
     """
 
-    digest = hashlib.md5(canonical.encode("utf-8")).digest()
+    raw = canonical if isinstance(canonical, bytes) else canonical.encode("utf-8")
+    digest = hashlib.md5(raw).digest()
 
     return int.from_bytes(digest[8:], "big")
 

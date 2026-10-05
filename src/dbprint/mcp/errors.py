@@ -56,6 +56,17 @@ def unknown_column(column: str, table: str, columns: list[str]) -> McpError:
     )
 
 
+def unknown_part(part: str, column: str, table: str, parts: list[str]) -> McpError:
+    """The requested part is not among those the column lists; the paths it has are listed."""
+
+    known = ", ".join(parts) if parts else "none - the column lists no parts"
+
+    return McpError(
+        -32602,
+        f"part {part!r} not found in column {column!r} of table {table!r}. Parts: {known}.",
+    )
+
+
 def unknown_connection(connection: str, configured: list[str]) -> McpError:
     """The requested connection is not configured in .dbprint.yaml."""
 
@@ -198,6 +209,62 @@ def invalid_minimum_argument(field: str, value: object, minimum: int) -> McpErro
     """An argument's value is below its tool's own advertised `inputSchema` minimum."""
 
     return McpError(-32602, f"{field} {value!r} must be an integer >= {minimum}.")
+
+
+def malformed_cursor(cursor: str) -> McpError:
+    """The caller passed a cursor no reply issued."""
+
+    return McpError(
+        -32602,
+        f"cursor {cursor!r} is not one this server issued. Pass back a reply's `next_cursor` "
+        "unchanged, or call again without `cursor` for the first page.",
+    )
+
+
+def foreign_cursor(tool: str) -> McpError:
+    """The cursor was issued by another tool, or by this tool under other arguments."""
+
+    return McpError(
+        -32602,
+        f"this cursor was not issued by {tool} with these arguments. Repeat the call that "
+        "returned it with the same arguments, or call again without `cursor`.",
+    )
+
+
+def stale_cursor(tool: str) -> McpError:
+    """A file the cursor's reply read has changed on disk since the cursor was issued."""
+
+    return McpError(
+        -32602,
+        f"the print changed on disk since this cursor was issued, so {tool} cannot resume "
+        "where it left off. Call again without `cursor` to start over.",
+    )
+
+
+def page_out_of_range(uri: str, pages: int) -> McpError:
+    """The URI asks for a page the resource does not have."""
+
+    return McpError(-32602, f"{uri!r} names no page of this resource: pages run 1 to {pages}.")
+
+
+def missing_page_version(uri: str) -> McpError:
+    """A page past the first was asked for without the version page 1 reported."""
+
+    return McpError(
+        -32602,
+        f"{uri!r} asks for a page past the first without `version`. Pass the `version` the "
+        "first page's `_meta` reported, as `?page=<n>&version=<v>`.",
+    )
+
+
+def stale_page_version(uri: str) -> McpError:
+    """The file behind the resource changed after the caller's version was read."""
+
+    return McpError(
+        -32602,
+        f"{uri!r}: the file changed on disk since that version was read. Read page 1 again "
+        "for its current version.",
+    )
 
 
 def unknown_section(document: str, section: str, available: list[str]) -> McpError:

@@ -64,6 +64,10 @@ Both path segments are lowercased for the FQN; columns keep their catalog spelli
 - **`depends_on`** — always absent on every view. `view_table_usage` does not exist, `view_definition` needs ownership the profiling role does not have, and lineage stays silent for a view nothing has queried yet.
 - **A schema's own declared default collation** — `default_collation` reports the session value or `UTF8_BINARY`; no catalog surface publishes what a schema itself declares, and the value governs DML rather than comparison semantics.
 
+## Foreign tables
+
+A `FOREIGN` table, federated by query or by catalog, is listed with `external: true` (SPEC 2.2.20) and, unless a `read_rows` rule opts it in, described from the catalog alone. Opted in, every statement goes to the remote database, with only the predicates it can translate pushed down. An `EXTERNAL` table, a streaming table and a shallow clone are ordinary tables: an external table's files sit in your own cloud storage and cost what a managed table's do. On the fallback path nothing is marked external.
+
 ## Row count and cost
 
 `DESCRIBE TABLE EXTENDED ... AS JSON` reads `statistics.num_rows`; any failure returns `None` rather than falling back to `COUNT(*)` — a silent full scan being judged worse than an absent estimate. Every statement here runs on the connection's SQL warehouse, so the cost is warehouse compute time rather than bytes billed. DDL comes from `SHOW CREATE TABLE`, and is not a byte-exact round trip: Databricks filters table properties out of its own output.
@@ -72,9 +76,23 @@ Both path segments are lowercased for the FQN; columns keep their catalog spelli
 
 A temporal percentile is read from the column's non-null values sorted in one statement (`ARRAY_SORT(COLLECT_LIST(col))`) and rendered through the same expression as `range`. Collecting the values gathers them onto one node for that statement; on a large table with no `sample` or `filter` rule, that is the statement's memory ceiling.
 
+## `interval`
+
+An ANSI `INTERVAL` column (`INTERVAL YEAR TO MONTH`, `INTERVAL DAY TO SECOND` and the rest, the type a timestamp subtraction yields) lists its values as Databricks's `CAST(... AS STRING)` literal (`INTERVAL '1-4' YEAR TO MONTH`), the text `length` is measured over. The legacy calendar `interval`, which Spark cannot order, is published `unsupported`.
+
 ## `variant`
 
 A `variant` column is counted and compared by its string form (`CAST(... AS STRING)`), since Spark refuses a `variant` in grouping, ordering and distinct counts.
+
+## Column types
+
+| Type | Profiled as | What to know |
+|---|---|---|
+| `array<T>` | `composite` | — |
+| `struct<...>` | `composite` | A field name declared twice in one struct is not profiled |
+| `map<K,V>` | `composite` | No whole-map `cardinality` is published |
+| `variant` | `json` | `types` keys are the head of what `schema_of_variant` returns |
+| `GEOMETRY`, `GEOGRAPHY` | `spatial` | Needs Databricks Runtime 17.1 or later |
 
 ## Namespaces
 

@@ -10,6 +10,10 @@ from .connection import DIALECT, Cursor, exec_query
 from ..identifiers import Identity, quote
 
 
+# GET_DDL names an event table's kind on its own; `TABLE` covers tables, external and hybrid ones.
+_GET_DDL_TYPES = {"EVENT TABLE": "EVENT_TABLE"}
+
+
 def extract_ddl(cursor: Cursor, identity: Identity) -> str:
     """Return native-dialect DDL for the object, post-normalization."""
 
@@ -31,7 +35,8 @@ def extract_ddl(cursor: Cursor, identity: Identity) -> str:
     if type_row is None:
         raise ValueError(f"no DDL available for {identity.fqn!r}; not found in catalog")
 
-    object_type = "VIEW" if "VIEW" in str(type_row[0]).upper() else "TABLE"
+    table_type = str(type_row[0]).upper()
+    object_type = _GET_DDL_TYPES.get(table_type, "VIEW" if "VIEW" in table_type else "TABLE")
 
     # GET_DDL takes single-quoted constant arguments, so the name is inlined, not bound - and
     # quoted inside the string, since Snowflake upper-cases every unquoted part of it.

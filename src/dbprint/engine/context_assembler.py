@@ -14,6 +14,7 @@ from typing import Any, Literal
 import yaml
 
 from dbprint.spec.absence import block_value, column_value
+from dbprint.spec.parts import display, parent, parse
 from dbprint.spec.scope import (
     ScanScope,
     coverage_statement,
@@ -35,6 +36,7 @@ from .baseline import (
     unprofiled_message,
     walkable_tables,
 )
+from .relationship_graph import edge_detection
 from .token_budget import Section, make_section, select, truncation_marker
 from .yaml_dumper import spell_inline, spell_value
 
@@ -162,6 +164,64 @@ def assemble_payloads(
     return PayloadResult(payloads=payloads, tables_included=included, truncated=truncated)
 
 
+def ranked_sections(
+    manifest: dict[str, Any],
+    print_root: Path,
+    table: str,
+    options: AssemblyOptions,
+    read: ArtifactReader = read_artifact,
+) -> list[tuple[str, str]]:
+    """One table's Markdown sections, none dropped, in the order a budget would keep them."""
+
+    a = _load_table_artifacts(manifest, print_root, table, read)
+    adapter = manifest.get("adapter")
+    adapter = adapter if isinstance(adapter, str) and adapter else None
+
+    if options.purpose == "query":
+        sections = _query_sections(a, options, adapter)
+    else:
+        params = manifest.get("statistics_params") or {}
+        sections = _profile_sections(a, options, params, adapter)
+
+    return [(s.name, s.text) for s in sections]
+
+
+def structured_sections(
+    manifest: dict[str, Any],
+    print_root: Path,
+    table: str,
+    options: AssemblyOptions,
+    read: ArtifactReader = read_artifact,
+) -> tuple[dict[str, Any], list[tuple[str, Any]]]:
+    """One table's structured identity fields and its sections, none dropped, in budget order."""
+
+    return _structured_parts(_load_table_artifacts(manifest, print_root, table, read), options)
+
+
+def fk_target_map(relationships: dict[str, Any] | None) -> dict[str, str]:
+    """Map source column -> '<target>.<column> (<detection>)' for every `refers_to` entry.
+
+    Detection rides the label (SPEC 2.3: a guess is no constraint), so every surface words it alike.
+    """
+
+    out: dict[str, str] = {}
+
+    for entry in (relationships or {}).get("refers_to") or []:
+        cols = entry.get("column") or []
+        tgt_cols = entry.get("target_column") or []
+        tgt_table = entry.get("target_table") or ""
+        detection = edge_detection(entry)
+
+        if len(cols) == 1 and len(tgt_cols) == 1:
+            out[cols[0]] = f"{tgt_table}.{tgt_cols[0]} ({detection})"
+        elif cols:
+            joined_src = ",".join(cols)
+            joined_tgt = ",".join(tgt_cols) if tgt_cols else "?"
+            out[joined_src] = f"{tgt_table}.({joined_tgt}) ({detection})"
+
+    return out
+
+
 def _assemble_markdown(
     artifacts: list[TableArtifacts],
     options: AssemblyOptions,
@@ -269,6 +329,24 @@ def _render_table_markdown(
     if options.purpose == "query":
         return _render_query_markdown(a, options, budget, adapter)
 
+    selection = select(_profile_sections(a, options, connection_statistics_params, adapter), budget)
+    text = "\n\n".join(s.text for s in selection.included)
+    marker = truncation_marker(selection)
+
+    # A budget too tight for even the header omits every section, so the marker is the whole
+    # return, never blank - a caller must see why, not a silent empty success.
+    if marker:
+        text = f"{text}\n\n{marker}" if text else marker
+
+    return text, selection.truncated, bool(selection.included)
+
+
+def _profile_sections(
+    a: TableArtifacts,
+    options: AssemblyOptions,
+    connection_statistics_params: dict[str, Any],
+    adapter: str | None,
+) -> list[Section]:
     include_qualifiers = options.include_stats and bool(a.statistics)
     sections: list[Section] = []
     sections.append(
@@ -314,16 +392,11 @@ def _render_table_markdown(
     if options.include_relationships and a.relationships:
         sections.append(make_section("relationships", _markdown_relationships(a)))
 
-    selection = select(sections, budget)
-    text = "\n\n".join(s.text for s in selection.included)
-    marker = truncation_marker(selection)
+    # Offered last, so a wide document's parts are what a tight budget drops first.
+    if options.include_stats and a.statistics and (parts := _markdown_parts(a, options)):
+        sections.append(make_section("parts", parts))
 
-    # A budget too tight for even the header omits every section, so the marker is the whole
-    # return, never blank - a caller must see why, not a silent empty success.
-    if marker:
-        text = f"{text}\n\n{marker}" if text else marker
-
-    return text, selection.truncated, bool(selection.included)
+    return sections
 
 
 def _render_query_markdown(
@@ -337,6 +410,25 @@ def _render_query_markdown(
     Sections render in reading order and drop in `_QUERY_SECTION_PRIORITY` order.
     """
 
+    offered = _query_sections(a, options, adapter)
+    selection = select(offered, budget)
+    included = {s.name for s in selection.included}
+    text = "\n\n".join(s.text for s in _in_reading_order(offered) if s.name in included)
+    marker = truncation_marker(selection)
+
+    if marker:
+        text = f"{text}\n\n{marker}" if text else marker
+
+    return text, selection.truncated, bool(selection.included)
+
+
+def _query_sections(
+    a: TableArtifacts,
+    options: AssemblyOptions,
+    adapter: str | None,
+) -> list[Section]:
+    """The `query` sections in the order a budget keeps them: the header, then by priority."""
+
     rendered = (
         ("header", _query_markdown_header(a, adapter)),
         ("ddl", _markdown_ddl(a) if options.include_ddl else ""),
@@ -347,16 +439,14 @@ def _render_query_markdown(
     sections = {
         name: make_section(name, text, pinned=name == "header") for name, text in rendered if text
     }
-    offered = [sections[n] for n in ("header", *_QUERY_SECTION_PRIORITY) if n in sections]
-    selection = select(offered, budget)
-    included = {s.name for s in selection.included}
-    text = "\n\n".join(sections[name].text for name, _ in rendered if name in included)
-    marker = truncation_marker(selection)
 
-    if marker:
-        text = f"{text}\n\n{marker}" if text else marker
+    return [sections[n] for n in ("header", *_QUERY_SECTION_PRIORITY) if n in sections]
 
-    return text, selection.truncated, bool(selection.included)
+
+def _in_reading_order(sections: list[Section]) -> list[Section]:
+    order = ("header", "ddl", "joins", "dictionary", "values")
+
+    return sorted(sections, key=lambda s: order.index(s.name))
 
 
 def _query_markdown_header(a: TableArtifacts, adapter: str | None) -> str:
@@ -367,6 +457,12 @@ def _query_markdown_header(a: TableArtifacts, adapter: str | None) -> str:
 
     if scope is not None:
         lines.append(scope_line(scope))
+
+    if external := external_line(a.statistics or {}):
+        lines.append(external)
+
+    if merging := _merging_summary(a.statistics or {}):
+        lines.append(merging)
 
     return "\n".join(lines)
 
@@ -388,7 +484,7 @@ def _markdown_joins(a: TableArtifacts) -> str:
     for entry in refers_to:
         target = f"{entry.get('target_table', '?')}.{_join_columns(entry.get('target_column'))}"
         lines.append(
-            f"- {_join_columns(entry.get('column'))} -> {target} ({_edge_detection(entry)})",
+            f"- {_join_columns(entry.get('column'))} -> {target} ({edge_detection(entry)})",
         )
         lines.extend(_rejection_line(rejected.get(_edge_key(entry))))
 
@@ -397,7 +493,7 @@ def _markdown_joins(a: TableArtifacts) -> str:
             f"{entry.get('referencer_table', '?')}.{_join_columns(entry.get('referencer_column'))}"
         )
         lines.append(
-            f"- {_join_columns(entry.get('column'))} <- {source} ({_edge_detection(entry)})",
+            f"- {_join_columns(entry.get('column'))} <- {source} ({edge_detection(entry)})",
         )
 
     return "\n".join(lines)
@@ -416,7 +512,7 @@ def _edges(a: TableArtifacts) -> tuple[list[dict[str, Any]], list[dict[str, Any]
 
         return sorted(
             listed,
-            key=lambda e: _DETECTION_RANK.get(_edge_detection(e), len(_DETECTION_RANK)),
+            key=lambda e: _DETECTION_RANK.get(edge_detection(e), len(_DETECTION_RANK)),
         )
 
     return ranked(relationships.get("refers_to")), ranked(relationships.get("referenced_by"))
@@ -692,6 +788,8 @@ def _markdown_header(
     statistics = a.statistics or {}
     qualifiers = (
         _scope_summary(statistics),
+        external_line(statistics),
+        _merging_summary(statistics),
         _grain_summary(statistics, a.annotated_grain),
         _timeline_summary(statistics),
         _depends_on_summary(statistics),
@@ -703,6 +801,52 @@ def _markdown_header(
     lines.extend(line for line in qualifiers if line)
 
     return "\n".join(lines)
+
+
+def external_line(statistics: dict[str, Any]) -> str:
+    """The line an object whose rows live in another system earns (SPEC 2.2.20)."""
+
+    if block_value(statistics, "external") is not True:
+        return ""
+
+    read = (
+        "not queried by dbprint"
+        if block_value(statistics, "catalog_only") is True
+        else "statistics were read through it"
+    )
+
+    return (
+        f"External: rows live outside this database - {read}; "
+        "every query against it reads the other system"
+    )
+
+
+def _merging_summary(statistics: dict[str, Any]) -> str:
+    """The one line a merging engine earns (SPEC 2.2.19): which rows the counts are, and FINAL."""
+
+    block = block_value(statistics, "merging")
+
+    if not isinstance(block, dict):
+        return ""
+
+    key = ", ".join(k.get("expression", "") for k in block.get("key") or [])
+    head = f"Merging: {block.get('engine')} on ({key})"
+
+    if block.get("rows") == "merged":
+        return f"{head} - statistics were read with FINAL; queries without FINAL see more rows"
+
+    if block.get("one_row_per_key"):
+        grouped = f", or GROUP BY {key}," if key else ""
+
+        return (
+            f"{head} - rows counted here may repeat a key until merged; "
+            f"query with FINAL{grouped} for one row per key"
+        )
+
+    return (
+        f"{head} - rows counted here include state and cancel rows not yet collapsed; "
+        "query with FINAL for the collapsed rows"
+    )
 
 
 def _statistics_params_override_summary(
@@ -1054,7 +1198,7 @@ def _markdown_cardinality_table(a: TableArtifacts, statistics_params: dict[str, 
     columns = a.statistics.get("columns") or {}
     row_count = block_value(a.statistics, "row_count")
     scope = scope_of(a.statistics)
-    fk_targets = _build_fk_target_map(a.relationships or {})
+    fk_targets = fk_target_map(a.relationships)
 
     lines = [
         "## Cardinality & key columns",
@@ -1079,6 +1223,80 @@ def _markdown_cardinality_table(a: TableArtifacts, statistics_params: dict[str, 
         )
 
     return "\n".join(lines)
+
+
+def _markdown_parts(a: TableArtifacts, options: AssemblyOptions) -> str:
+    """Each column's parts (SPEC 2.2.18), one row per part labelled `<column><path>`."""
+
+    del options
+    assert a.statistics is not None
+    columns = a.statistics.get("columns") or {}
+    row_count = block_value(a.statistics, "row_count")
+    scope = scope_of(a.statistics)
+    rows = []
+
+    for name in _ordered_column_names(columns):
+        col = columns[name]
+        parts = column_value(col, "parts")
+
+        if not isinstance(parts, dict):
+            continue
+
+        scanned = rows_scanned(col, scope) or row_count
+        column_non_null = (
+            scanned - (column_value(col, "null_count") or 0) if isinstance(scanned, int) else None
+        )
+
+        for path, block in parts.items():
+            if not isinstance(block, dict):
+                continue
+
+            notes = notes_synthesis.synthesize(block, None, statistics_params={}, scope=None)
+            share = _presence(path, block, parts, column_non_null)
+
+            if share is not None:
+                notes += f", present in {spell_percent(share)}"
+
+            cardinality = _format_cardinality_cell(block, None)
+            rows.append(
+                f"| {_escape_cell(display(name, path))} | {_escape_cell(cardinality)} "
+                f"| {_escape_cell(notes)} |",
+            )
+
+    if not rows:
+        return ""
+
+    return "\n".join(
+        ["## Column parts", "", "| Part | Cardinality | Notes |", "|---|---|---|", *rows],
+    )
+
+
+def _presence(
+    path: str,
+    block: dict[str, Any],
+    parts: dict[str, Any],
+    column_non_null: int | None,
+) -> float | None:
+    """A member's share of the parent instances that hold it; None on any other step."""
+
+    if parse(path)[-1].kind != "member":
+        return None
+
+    up = parent(path)
+    holder = parts.get(up) if up is not None else None
+    population = (
+        column_non_null
+        if up is None
+        else (column_value(holder, "occurrences") or 0) - (column_value(holder, "null_count") or 0)
+        if isinstance(holder, dict)
+        else None
+    )
+    occurrences = column_value(block, "occurrences")
+
+    if not population or not isinstance(occurrences, int):
+        return None
+
+    return occurrences / population
 
 
 def _markdown_unmeasured(a: TableArtifacts) -> str:
@@ -1168,7 +1386,7 @@ def _markdown_relationships(a: TableArtifacts) -> str:
         cols = ", ".join(entry.get("column", []))
         tgt_table = entry.get("target_table", "?")
         tgt_cols = ", ".join(entry.get("target_column", []))
-        detection = _edge_detection(entry)
+        detection = edge_detection(entry)
         # Absent on an inferred edge (SPEC 2.3.8) - never invent a referential action.
         on_delete = entry.get("on_delete")
         suffix = f", on_delete={on_delete}" if on_delete is not None else ""
@@ -1179,7 +1397,7 @@ def _markdown_relationships(a: TableArtifacts) -> str:
     for entry in referenced_by:
         ref_table = entry.get("referencer_table", "?")
         ref_cols = ", ".join(entry.get("referencer_column", []))
-        detection = _edge_detection(entry)
+        detection = edge_detection(entry)
         on_delete = entry.get("on_delete")
         suffix = f", on_delete={on_delete}" if on_delete is not None else ""
         lines.append(f"- <- {ref_table}.{ref_cols} ({detection}{suffix})")
@@ -1279,14 +1497,6 @@ def _rejection_line(entry: dict[str, Any] | None) -> list[str]:
     return [f"  **[REJECTED by human annotation{suffix}]**"]
 
 
-def _edge_detection(entry: dict[str, Any]) -> str:
-    """The weaker reading of an absent `detection`, which SPEC 2.3.2 marks REQUIRED and gives no
-    default: `inferred` never overstates the edge (SPEC 2.3 forbids reading a guess as declared).
-    """
-
-    return entry.get("detection") or "inferred"
-
-
 def _format_cardinality_cell(
     col: dict[str, Any],
     row_count: int | None,
@@ -1330,8 +1540,12 @@ _COLUMN_ORDER_PRIORITY = {
     "numeric": 3,
     "boolean": 4,
     "text": 5,
-    "json": 6,
-    "unsupported": 7,
+    "binary": 6,
+    "composite": 7,
+    "spatial": 8,
+    "vector": 9,
+    "json": 10,
+    "unsupported": 11,
 }
 
 
@@ -1341,36 +1555,11 @@ def _ordered_column_names(columns: dict[str, Any]) -> list[str]:
     def key(name_col: tuple[str, dict[str, Any]]) -> tuple[int, int]:
         name, col = name_col
         classification = col.get("classification", "unsupported")
-        priority = _COLUMN_ORDER_PRIORITY.get(classification, 8)
+        priority = _COLUMN_ORDER_PRIORITY.get(classification, len(_COLUMN_ORDER_PRIORITY))
 
         return priority, list(columns.keys()).index(name)
 
     return [n for n, _ in sorted(columns.items(), key=key)]
-
-
-def _build_fk_target_map(relationships: dict[str, Any]) -> dict[str, str]:
-    """Map source column -> '<target>.<column> (<detection>)' for every `refers_to` entry.
-
-    The Notes cell renders this verbatim, so the detection qualifier is baked in here
-    (SPEC 2.3: a consumer MUST NOT treat an inferred edge as a constraint).
-    """
-
-    out: dict[str, str] = {}
-
-    for entry in relationships.get("refers_to") or []:
-        cols = entry.get("column") or []
-        tgt_cols = entry.get("target_column") or []
-        tgt_table = entry.get("target_table") or ""
-        detection = _edge_detection(entry)
-
-        if len(cols) == 1 and len(tgt_cols) == 1:
-            out[cols[0]] = f"{tgt_table}.{tgt_cols[0]} ({detection})"
-        elif cols:
-            joined_src = ",".join(cols)
-            joined_tgt = ",".join(tgt_cols) if tgt_cols else "?"
-            out[joined_src] = f"{tgt_table}.({joined_tgt}) ({detection})"
-
-    return out
 
 
 def _load_artifact(
@@ -1580,6 +1769,15 @@ def _budgeted_structured_payload(
 ) -> dict[str, Any]:
     """One table's structured payload under a budget; the identity fields never drop."""
 
+    header, candidates = _structured_parts(a, options)
+
+    return _payload_from(header, candidates, budget)
+
+
+def _structured_parts(
+    a: TableArtifacts,
+    options: AssemblyOptions,
+) -> tuple[dict[str, Any], list[tuple[str, Any]]]:
     header: dict[str, Any] = {"table": a.fqn, "type": a.table_type, "columns_count": a.column_count}
 
     if a.row_count is not None:
@@ -1600,7 +1798,7 @@ def _budgeted_structured_payload(
     header.update(reply_scope(scope_of(a.statistics)))
 
     if options.purpose == "query":
-        return _payload_from(header, _query_candidates(a, options), budget)
+        return header, _query_candidates(a, options)
 
     if options.include_ddl:
         candidates.append(("ddl", a.ddl))
@@ -1623,7 +1821,7 @@ def _budgeted_structured_payload(
     if options.include_relationships and a.relationship_annotations:
         candidates.append(("relationship_annotations", a.relationship_annotations))
 
-    return _payload_from(header, candidates, budget)
+    return header, candidates
 
 
 def _payload_from(
@@ -1719,7 +1917,7 @@ def _edge_fields(entry: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]
     """The named keys of an edge as the artifact spells them, plus its detection."""
 
     edge = {key: entry[key] for key in keys if key in entry}
-    edge["detection"] = _edge_detection(entry)
+    edge["detection"] = edge_detection(entry)
 
     return edge
 

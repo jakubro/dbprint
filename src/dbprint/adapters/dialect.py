@@ -28,21 +28,37 @@ PLACEHOLDERS: dict[Paramstyle, str] = {"pyformat": "%s", "qmark": "?"}
 
 @dataclass(frozen=True)
 class Dialect:
-    """The SQL dialect one adapter's emitted statements must conform to.
+    """The SQL dialect one adapter's statements conform to, and how it spells them.
 
-    `addressed_parts` is how many trailing identifier parts a statement names - None for all.
+    None means every identifier part for `addressed_parts`, and already-text values for `text_type`.
     """
 
     vendor: Vendor
     paramstyle: Paramstyle
     quote_char: Literal['"', "`"]
     addressed_parts: int | None = None
+    row_count: str = "COUNT(1)"
+    count_fn: str = "COUNT"
+    distinct_count: str = "COUNT(DISTINCT {})"
+    text_type: str | None = "VARCHAR"
+    order_by_alias: bool = False
+    group_by_ordinal: bool = True
+    concat_null_flags: bool = False
+    pair_distinct: str = "COUNT(DISTINCT ({a}, {b}))"
+    seed_hash: str = "MD5({seed} || CAST({value} AS VARCHAR))"
 
     @property
     def placeholder(self) -> str:
         """The bind marker this adapter's driver expects."""
 
         return PLACEHOLDERS[self.paramstyle]
+
+    def text_order(self, rendered: str) -> str:
+        """The key a top-N list breaks count ties on: the text of `rendered`, or its alias."""
+
+        target = "rendered" if self.order_by_alias else rendered
+
+        return target if self.text_type is None else f"CAST({target} AS {self.text_type})"
 
 
 # Fragment -> vendors that accept it; matched case-insensitively against whitespace-collapsed text.
@@ -134,8 +150,9 @@ VENDOR_SUPPORT: dict[str, frozenset[Vendor]] = {
     # Databricks counts a `struct(...)` composite directly.
     "to_json_string(": frozenset({"bigquery"}),
     "struct(": frozenset({"bigquery", "databricks"}),
-    # BigQuery's hex-digest rendering for the key sketch, paired with `md5(` above.
-    "to_hex(": frozenset({"bigquery"}),
+    # BigQuery's hex-digest rendering for the key sketch, and Redshift's hex spelling of a
+    # VARBYTE value (SPEC 2.2.4).
+    "to_hex(": frozenset({"bigquery", "redshift"}),
     # MySQL lacks WITHIN GROUP and these functions (mysql/stats.py).
     "within group": frozenset({"postgres", "snowflake", "duckdb", "redshift"}),
     "percentile_cont(": frozenset({"postgres", "snowflake", "duckdb", "redshift"}),

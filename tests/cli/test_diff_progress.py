@@ -13,9 +13,10 @@ import yaml
 from click.testing import CliRunner
 from rich.console import Console
 
-from dbprint.adapters import ColumnMeta, ColumnStats, CommentsMeta, Inferred, MockAdapter, MockTable
+from dbprint.adapters import Inferred, MockAdapter, MockTable
 from dbprint.cli.main import main
 from dbprint.cli.rendering.progress import LiveProgressRenderer
+from tests._prints import SHAPE_PROBE_COLUMNS, exact_stats, mock_table, unmeasured_stats
 
 
 PROJECT_TWO_CONNECTIONS_YAML = """\
@@ -39,108 +40,17 @@ def _fixture() -> dict[str, MockTable]:
     """`fixture.shape_probe` - the print's real 5-column table; only `probe_id` matters."""
 
     return {
-        "fixture.shape_probe": MockTable(
-            type="table",
-            namespace_path=("fixture", "shape_probe"),
-            ddl=(
-                "CREATE TABLE fixture.shape_probe (\n"
-                "    probe_id integer NOT NULL,\n"
-                "    logger_ipv4 character varying(45) NOT NULL,\n"
-                "    json_text text NOT NULL,\n"
-                "    payload_bytes bytea,\n"
-                "    tag_list text[] NOT NULL\n"
-                ");\n\n"
-                "ALTER TABLE ONLY fixture.shape_probe\n"
-                "    ADD CONSTRAINT shape_probe_pkey PRIMARY KEY (probe_id);\n"
-            ),
-            columns=[
-                ColumnMeta(
-                    name="probe_id",
-                    sql_type="integer",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-                ColumnMeta(
-                    name="logger_ipv4",
-                    sql_type="character varying(45)",
-                    nullable=False,
-                    default=None,
-                    ordinal=2,
-                ),
-                ColumnMeta(
-                    name="json_text",
-                    sql_type="text",
-                    nullable=False,
-                    default=None,
-                    ordinal=3,
-                ),
-                ColumnMeta(
-                    name="payload_bytes",
-                    sql_type="bytea",
-                    nullable=True,
-                    default=None,
-                    ordinal=4,
-                ),
-                ColumnMeta(
-                    name="tag_list",
-                    sql_type="text[]",
-                    nullable=False,
-                    default=None,
-                    ordinal=5,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
-                "probe_id": ColumnStats(
-                    sql_type="integer",
-                    nullable=False,
-                    null_count=0,
-                    null_rate=0.0,
-                    cardinality=3,
-                    cardinality_ratio=1.0,
-                    cardinality_method="exact",
-                    inferred=Inferred(candidate_key=True),
-                ),
-                "logger_ipv4": ColumnStats(
-                    sql_type="character varying(45)",
-                    nullable=False,
-                    null_count=0,
-                    null_rate=0.0,
-                    cardinality=1,
-                    cardinality_ratio=0.333333,
-                    cardinality_method="exact",
-                ),
-                "json_text": ColumnStats(
-                    sql_type="text",
-                    nullable=False,
-                    null_count=0,
-                    null_rate=0.0,
-                    cardinality=3,
-                    cardinality_ratio=1.0,
-                    cardinality_method="exact",
-                ),
-                "payload_bytes": ColumnStats(
-                    sql_type="bytea",
-                    nullable=True,
-                    null_count=0,
-                    null_rate=0.0,
-                    cardinality=None,
-                    cardinality_ratio=None,
-                    cardinality_method=None,
-                ),
-                "tag_list": ColumnStats(
-                    sql_type="text[]",
-                    nullable=False,
-                    null_count=0,
-                    null_rate=0.0,
-                    cardinality=None,
-                    cardinality_ratio=None,
-                    cardinality_method=None,
-                ),
+        "fixture.shape_probe": mock_table(
+            "fixture.shape_probe",
+            SHAPE_PROBE_COLUMNS,
+            {
+                "probe_id": exact_stats("integer", 3, 1.0, inferred=Inferred(candidate_key=True)),
+                "logger_ipv4": exact_stats("character varying(45)", 1, 0.333333),
+                "json_text": exact_stats("text", 3, 1.0),
+                "payload_bytes": unmeasured_stats("bytea", nullable=True),
+                "tag_list": unmeasured_stats("text[]"),
             },
+            primary_key=("probe_id",),
             samples={"probe_id": [1, 2, 3]},
             row_count=3,
         ),

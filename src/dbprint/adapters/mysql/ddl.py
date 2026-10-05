@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 
 from .connection import Cursor, exec_query
+from ..credentials import mask_mysql_ddl
 from ..identifiers import Identity
 
 
@@ -31,9 +32,9 @@ def extract_ddl(cursor: Cursor, identity: Identity) -> str:
 
 
 def normalize(raw: str) -> str:
-    """Strip the AUTO_INCREMENT counter + trailing whitespace; ensure terminal newline."""
+    """Strip the AUTO_INCREMENT counter + trailing whitespace, mask a remote table's credential."""
 
-    without_counter = _AUTO_INCREMENT_COUNTER_RE.sub("", raw)
+    without_counter = mask_mysql_ddl(_AUTO_INCREMENT_COUNTER_RE.sub("", raw))
     lines = [line.rstrip() for line in without_counter.splitlines()]
     text = "\n".join(lines).strip("\n")
 

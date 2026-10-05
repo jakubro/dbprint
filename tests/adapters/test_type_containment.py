@@ -176,7 +176,7 @@ def test_every_adapter_runs_both_phases_through_the_drivers(vendor: str) -> None
 
     assert phase_a, vendor
     assert all(any(k.arg == "declines" for k in call.keywords) for call in phase_a), vendor
-    assert _calls(tree, "run_phase_b"), vendor
+    assert _calls(tree, "run_phase_b") or _calls(tree, "measure_columns"), vendor
 
 
 def test_a_money_and_a_json_column_are_measured_through_their_comparable_forms(

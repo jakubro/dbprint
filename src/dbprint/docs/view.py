@@ -15,8 +15,11 @@ import inflect
 
 from dbprint.engine import notes_synthesis
 from dbprint.engine.baseline import unmeasured_block_message
+from dbprint.engine.context_assembler import external_line, fk_target_map
+from dbprint.engine.relationship_graph import edge_detection
 from dbprint.engine.yaml_dumper import spell_value
 from dbprint.spec.absence import Absence, block_value, column_value, read_table_block
+from dbprint.spec.parts import display
 from dbprint.spec.scope import (
     SCANNED_CLAUSE,
     ScanScope,
@@ -38,6 +41,10 @@ _BUCKET_LABELS: dict[str, str] = {
     "numeric": "Numeric",
     "temporal": "Temporal",
     "text": "Text",
+    "binary": "Binary",
+    "composite": "Composite",
+    "spatial": "Spatial",
+    "vector": "Vector",
     "unsupported": "Other",
 }
 # No "identifier" bucket: SPEC 3.1 has no such classification.
@@ -49,6 +56,10 @@ _CLASS_BUCKETS: dict[str, str] = {
     "temporal": "temporal",
     "text": "text",
     "json": "text",
+    "binary": "binary",
+    "composite": "composite",
+    "spatial": "spatial",
+    "vector": "vector",
     "unsupported": "unsupported",
 }
 _BUCKET_ORDER: tuple[str, ...] = (
@@ -57,6 +68,10 @@ _BUCKET_ORDER: tuple[str, ...] = (
     "numeric",
     "temporal",
     "text",
+    "binary",
+    "composite",
+    "spatial",
+    "vector",
     "unsupported",
 )
 
@@ -174,10 +189,12 @@ def build_table_view(
         "missing_artifacts_notice": missing_artifacts_notice(artifacts.missing),
         "corrupted_artifacts_notice": corrupted_artifacts_notice(artifacts.corrupted),
         "catalog_only_notice": catalog_only_notice(statistics),
+        "external_notice": external_line(statistics or {}) or None,
         "row_count": row_count_view(artifacts.entry, statistics),
         "grain": grain_view(statistics, artifacts.statistics_annotations) if statistics else None,
         "null_patterns": null_patterns,
         "physical_layout": physical_layout_view(statistics) if statistics else None,
+        "merging": merging_view(statistics) if statistics else None,
         "dependencies": dependencies_view(statistics) if statistics else [],
         "unmeasured": unmeasured_view(statistics) if statistics else {},
         "timeline": timeline_view(statistics) if statistics else None,
@@ -372,6 +389,24 @@ def physical_layout_view(statistics: dict[str, Any]) -> dict[str, Any] | None:
 
     # Not "keys": Jinja resolves `.keys` to the dict's bound method before trying item access.
     return {"mechanism": block.get("mechanism"), "key_list": keys}
+
+
+def merging_view(statistics: dict[str, Any]) -> dict[str, Any] | None:
+    """The merging engine and sorting key (SPEC 2.2.19) - which rows the counts on this page are."""
+
+    block = block_value(statistics, "merging")
+
+    if not isinstance(block, dict):
+        return None
+
+    keys = [k for k in (block.get("key") or []) if isinstance(k, dict)]
+
+    return {
+        "engine": block.get("engine"),
+        "key_list": keys,
+        "one_row_per_key": block.get("one_row_per_key"),
+        "rows": block.get("rows"),
+    }
 
 
 def dependencies_view(statistics: dict[str, Any]) -> list[dict[str, Any]]:
@@ -818,6 +853,7 @@ def column_view(
         "value_list": values_view(col, scope),
         "range": range_view(col, scope),
         "sketch_available": sketch_available(col),
+        "parts": parts_view(name, col),
         "annotation_note": linkify(note_md, targets),
         "annotation_claims": sorted(claims.items()) if isinstance(claims, dict) else [],
         "annotation_values": [
@@ -828,29 +864,23 @@ def column_view(
     }
 
 
-def fk_target_map(relationships: dict[str, Any] | None) -> dict[str, str]:
-    """Map source column -> '<target>.<column> (<detection>)' for every `refers_to` entry.
+def parts_view(name: str, col: dict[str, Any]) -> list[dict[str, Any]]:
+    """One entry per part a column lists (SPEC 2.2.18), labelled as a reader shows it."""
 
-    `detection` always rides the label (SPEC 2.3: a consumer MUST NOT treat a guess as a
-    constraint), defaulting to `inferred` when the field is absent.
-    """
+    parts = column_value(col, "parts")
 
-    out: dict[str, str] = {}
+    if not isinstance(parts, dict):
+        return []
 
-    for entry in (relationships or {}).get("refers_to") or []:
-        cols = entry.get("column") or []
-        tgt_cols = entry.get("target_column") or []
-        tgt_table = entry.get("target_table") or ""
-        detection = _edge_detection(entry)
-
-        if len(cols) == 1 and len(tgt_cols) == 1:
-            out[cols[0]] = f"{tgt_table}.{tgt_cols[0]} ({detection})"
-        elif cols:
-            joined_src = ",".join(cols)
-            joined_tgt = ",".join(tgt_cols) if tgt_cols else "?"
-            out[joined_src] = f"{tgt_table}.({joined_tgt}) ({detection})"
-
-    return out
+    return [
+        {
+            "label": display(name, path),
+            "classification": column_value(block, "classification") or "unsupported",
+            "notes": notes_synthesis.synthesize(block, None, hints_only=False),
+        }
+        for path, block in parts.items()
+        if isinstance(block, dict)
+    ]
 
 
 def relationship_rows(
@@ -876,7 +906,7 @@ def relationship_rows(
                 "column": entry.get("column") or [],
                 "target_table": entry.get("target_table"),
                 "target_column": entry.get("target_column") or [],
-                "detection": _edge_detection(entry),
+                "detection": edge_detection(entry),
                 "on_delete": entry.get("on_delete"),
                 "constraint_name": entry.get("constraint_name"),
                 "path": entry.get("path"),
@@ -896,7 +926,7 @@ def relationship_rows(
                 "column": entry.get("column") or [],
                 "referencer_table": entry.get("referencer_table"),
                 "referencer_column": entry.get("referencer_column") or [],
-                "detection": _edge_detection(entry),
+                "detection": edge_detection(entry),
                 "on_delete": entry.get("on_delete"),
                 "constraint_name": entry.get("constraint_name"),
                 "observed": _observed_view(entry),
@@ -967,12 +997,6 @@ def _plural_variants(name: str) -> list[str]:
     plural = _INFLECT.plural_noun(name)
 
     return [plural] if plural and plural != name else []
-
-
-def _edge_detection(entry: dict[str, Any]) -> str:
-    """The weaker reading of an absent `detection`, which SPEC 2.3.2 requires but never defaults."""
-
-    return entry.get("detection") or "inferred"
 
 
 def _rejected_edges(

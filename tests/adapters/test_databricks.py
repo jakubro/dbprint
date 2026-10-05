@@ -9,10 +9,14 @@ from __future__ import annotations
 import json
 
 import pytest
+import yaml
 
 from dbprint.adapters import DatabricksAdapter, StatisticsConfig
 from dbprint.adapters.databricks.introspect import UnmappedTableType
 from dbprint.adapters.identifiers import table_meta
+from dbprint.config import ConnectionConfig, DiffConfig
+from dbprint.conformance import validate_print
+from dbprint.engine import Engine
 from dbprint.spec.sketch import low64_md5
 from tests.adapters.conftest import RecordedResponseCursor
 
@@ -334,6 +338,21 @@ class TestUnmappedTableType:
             "t_7": "table",
         }
 
+    def test_only_a_foreign_table_is_marked_external(self) -> None:
+        kinds = ["MANAGED", "EXTERNAL", "FOREIGN", "STREAMING_TABLE", "EXTERNAL_SHALLOW_CLONE"]
+        responses = {"tables": [("garden", f"t_{i}", t) for i, t in enumerate(kinds)]}
+        adapter = _uc_adapter(responses)
+
+        try:
+            marks = {
+                t.fqn.split(".")[-1]: t.external
+                for t in adapter.list_tables(include=["*"], exclude=[])
+            }
+        finally:
+            adapter.close()
+
+        assert marks == {"t_0": False, "t_1": False, "t_2": True, "t_3": False, "t_4": False}
+
 
 class TestUnityCatalogColumns:
     """`data_type` is only the simple type name and `full_data_type` carries precision/scale;
@@ -439,3 +458,119 @@ class TestCompositeForeignKeyPairing:
 
         assert len(edges) == 1, "a target key read from the session catalog vanishes"
         assert edges[0].target_table == "arboretum.seedbank.collector"
+
+
+class TestPercentilesFromAnArrayCell:
+    """The connector returns an ARRAY cell as a numpy array, whose truth value is undefined."""
+
+    def test_every_configured_percentile_is_read(self) -> None:
+        import numpy as np
+
+        from dbprint.adapters.base import ColumnMeta
+        from dbprint.adapters.databricks import stats as databricks_stats
+
+        row = (1, 9, 5.0, 45, np.array([1.0, 3.0, 5.0, 7.0, 9.0]))
+        col = ColumnMeta(name="n", sql_type="int", nullable=False, default=None, ordinal=1)
+
+        _, percentiles, *_ = databricks_stats._fetch_numeric_block(
+            _ArrayCellCursor(row),
+            "`garden`.`seedbank`.`t` src",
+            col,
+            9,
+            StatisticsConfig(),
+        )
+
+        assert percentiles == {"p01": 1, "p25": 3, "p50": 5, "p75": 7, "p99": 9}
+
+
+class _ArrayCellCursor:
+    def __init__(self, row: tuple[object, ...]) -> None:
+        self._row = row
+
+    def execute(self, sql: str, params: object = None) -> _ArrayCellCursor:
+        return self
+
+    def fetchone(self) -> tuple[object, ...]:
+        return self._row
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        return []
+
+    def close(self) -> None:
+        return None
+
+
+class TestAnsiIntervalsAreMeasuredAsText:
+    """SPEC 3.1: an orderable interval classifies by measurement, the legacy one stays declined."""
+
+    def _generate(self, cursor, tmp_path, table: str) -> dict:
+        conn_config = ConnectionConfig(
+            name="primary",
+            adapter="databricks",
+            auto=True,
+            output=tmp_path,
+            include=(f"*.{table}",),
+            exclude=(),
+            max_age_days=7,
+            statistics=StatisticsConfig(),
+            diff=DiffConfig(),
+        )
+        Engine(_databricks_adapter(cursor), conn_config, tmp_path).generate()
+        errors = [i for i in validate_print(tmp_path / "primary") if i.severity == "error"]
+        (written,) = (tmp_path / "primary").rglob("statistics.yaml")
+
+        assert errors == [], errors
+
+        return yaml.safe_load(written.read_text())["columns"]
+
+    def test_a_low_cardinality_year_month_term_is_categorical_with_literal_values(
+        self,
+        databricks_test_schema,
+        tmp_path,
+        caplog,
+    ) -> None:
+        databricks_test_schema.execute(
+            "CREATE TABLE plan_term USING PARQUET AS SELECT * FROM VALUES "
+            "(INTERVAL '1-4' YEAR TO MONTH), (INTERVAL '1-4' YEAR TO MONTH), "
+            "(INTERVAL '2-0' YEAR TO MONTH), (INTERVAL '0-6' YEAR TO MONTH) t(term)",
+        )
+
+        term = self._generate(databricks_test_schema, tmp_path, "plan_term")["term"]
+
+        assert "not recognised" not in caplog.text
+
+        assert term["classification"] == "categorical"
+        assert term["values"] == [
+            {"value": "INTERVAL '1-4' YEAR TO MONTH", "count": 2},
+            {"value": "INTERVAL '0-6' YEAR TO MONTH", "count": 1},
+            {"value": "INTERVAL '2-0' YEAR TO MONTH", "count": 1},
+        ]
+        assert term["values_coverage"] == 1.0
+
+        for entry in term["values"]:
+            (row,) = databricks_test_schema.execute(
+                "SELECT COUNT(1) FROM plan_term pln "
+                f"WHERE pln.term = CAST('{entry['value'].replace(chr(39), chr(39) * 2)}' "
+                "AS INTERVAL YEAR TO MONTH)",
+            ).fetchall()
+
+            assert row[0] == entry["count"]
+
+    def test_a_unique_duration_is_text_and_a_candidate_key(
+        self,
+        databricks_test_schema,
+        tmp_path,
+    ) -> None:
+        databricks_test_schema.execute(
+            "CREATE TABLE session_span USING PARQUET AS SELECT "
+            "TIMESTAMP'2024-01-01 00:00:00' + make_dt_interval(0, 0, id, 0) "
+            "- TIMESTAMP'2024-01-01 00:00:00' AS duration FROM range(60)",
+        )
+
+        duration = self._generate(databricks_test_schema, tmp_path, "session_span")["duration"]
+
+        assert duration["sql_type"] == "interval day to second"
+        assert duration["classification"] == "text"
+        assert duration["inferred"]["candidate_key"] is True
+        assert duration["cardinality"] == 60
+        assert "range" not in duration

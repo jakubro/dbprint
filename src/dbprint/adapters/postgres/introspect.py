@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, cast
 from dbprint.config.selectors import expand
 from dbprint.spec.fqn import join as join_fqn
 from .connection import exec_query
+from .. import pg_catalog
 from ..base import (
     ColumnMeta,
     CommentsMeta,
@@ -38,6 +39,7 @@ _RELKIND_TO_TYPE: dict[str, TableType] = {
     "p": "table",  # partitioned table
     "v": "view",
     "m": "matview",
+    "f": "table",
 }
 
 _FK_ACTIONS = {
@@ -73,7 +75,7 @@ def list_databases(conn: psycopg.Connection) -> tuple[str, ...]:
 
 
 def relations(conn: psycopg.Connection, database: str) -> list[_Candidate]:
-    """Tables/views/matviews in the user schemas of `database`, read on its own session."""
+    """Tables/views/matviews/foreign tables in the user schemas of `database`, on its own session."""
 
     rows = exec_query(
         conn,
@@ -86,7 +88,7 @@ def relations(conn: psycopg.Connection, database: str) -> list[_Candidate]:
           pg_class cls
           JOIN pg_namespace nsp ON nsp.oid = cls.relnamespace
         WHERE
-          cls.relkind IN ('r', 'p', 'v', 'm')
+          cls.relkind IN ('r', 'p', 'v', 'm', 'f')
           AND NOT cls.relispartition
           AND nsp.nspname NOT IN ('pg_catalog', 'information_schema')
           AND nsp.nspname NOT LIKE 'pg_toast%'
@@ -97,7 +99,14 @@ def relations(conn: psycopg.Connection, database: str) -> list[_Candidate]:
     ).fetchall()
 
     return [
-        (table_meta((database, schema, name), _RELKIND_TO_TYPE[kind]), (database, schema, name))
+        (
+            table_meta(
+                (database, schema, name),
+                _RELKIND_TO_TYPE[kind],
+                external=kind == "f",
+            ),
+            (database, schema, name),
+        )
         for schema, name, kind in rows
     ]
 
@@ -192,9 +201,23 @@ def composite_columns(conn: psycopg.Connection, identity: Identity) -> frozenset
 
     return frozenset(
         fold(name)
-        for name, (_, typtype, _) in _resolved_bases(conn, identity).items()
+        for name, (_, typtype, _, _) in _resolved_bases(conn, identity).items()
         if typtype == "c"
     )
+
+
+def is_hstore(sql_type: str) -> bool:
+    """Whether `sql_type` names the `hstore` extension's type, in whichever schema it lives."""
+
+    return _HSTORE_RE.fullmatch(sql_type) is not None
+
+
+def vector_schema(sql_type: str) -> str:
+    """The `schema.` prefix a pgvector type spelling carries, empty when it is on the search path."""
+
+    match = _VECTOR_SCHEMA_RE.fullmatch(sql_type)
+
+    return match.group(1) if match else ""
 
 
 def default_collation(conn: psycopg.Connection) -> str:
@@ -220,33 +243,7 @@ def relationships(conn: psycopg.Connection, identity: Identity) -> list[ForeignK
 
     rows = exec_query(
         conn,
-        """
-        SELECT
-          con.conname AS constraint_name,
-          con.conkey AS src_attnums,
-          con.confkey AS dst_attnums,
-          tnp.nspname AS dst_schema,
-          tcl.relname AS dst_table,
-          con.confdeltype AS on_delete,
-          con.confupdtype AS on_update,
-          con.conrelid AS src_relid,
-          con.confrelid AS dst_relid
-
-        FROM
-          pg_constraint con
-          JOIN pg_class scl ON scl.oid = con.conrelid
-          JOIN pg_namespace snp ON snp.oid = scl.relnamespace
-          JOIN pg_class tcl ON tcl.oid = con.confrelid
-          JOIN pg_namespace tnp ON tnp.oid = tcl.relnamespace
-
-        WHERE
-          con.contype = 'f'
-          AND snp.nspname = %s
-          AND scl.relname = %s
-
-        ORDER BY
-          con.conname
-        """,
+        pg_catalog.FOREIGN_KEYS,
         identity.addressed,
     ).fetchall()
 
@@ -649,13 +646,22 @@ def _attnums_to_names(conn: psycopg.Connection, relid: int, attnums: list[int]) 
 # The built-in name classification reads for each user-definable family; a composite is declined.
 _PSEUDO_TYPES = {"e": "anyenum", "r": "anyrange", "m": "anymultirange", "c": "record"}
 
+_HSTORE_RE = re.compile(r'(?:(?:"[^"]+"|[^."]+)\.)?"?hstore"?')
+_QUALIFIED_VECTOR_RE = re.compile(r'(?:"[^"]+"|[^."]+)\."?(vector|halfvec|sparsevec)"?(\(\d+\))?')
+_VECTOR_SCHEMA_RE = re.compile(
+    r'((?:"[^"]+"|[^."]+)\.)"?(?:vector|halfvec|sparsevec)"?(?:\(\d+\))?',
+)
+
+# The native geometric category (`point`, `polygon`, ...): not OGC geometries, so never `spatial`.
+_GEOMETRIC = "geometric"
+
 
 def _resolved_bases(
     conn: psycopg.Connection,
     identity: Identity,
-) -> dict[str, tuple[str, str, bool]]:
-    """Per physical column name: its ultimate base type, that type's `typtype`, and whether a
-    domain chain led there.
+) -> dict[str, tuple[str, str, str, bool]]:
+    """Per physical column name: its ultimate base type, that type's `typtype` and `typcategory`,
+    and whether a domain chain led there.
     """
 
     rows = exec_query(
@@ -698,6 +704,7 @@ def _resolved_bases(
           chn.name,
           pg_catalog.FORMAT_TYPE(chn.oid, chn.typmod),
           typ.typtype::TEXT,
+          typ.typcategory::TEXT,
           chn.depth > 0
         FROM
           chain chn
@@ -708,11 +715,24 @@ def _resolved_bases(
         identity.addressed,
     ).fetchall()
 
-    return {name: (base, typtype, via_domain) for name, base, typtype, via_domain in rows}
+    return {
+        name: (base, typtype, category, via_domain)
+        for name, base, typtype, category, via_domain in rows
+    }
 
 
-def _classify_as(base: str, typtype: str, via_domain: bool) -> str | None:
+def _classify_as(base: str, typtype: str, category: str, via_domain: bool) -> str | None:
     if typtype in _PSEUDO_TYPES:
         return _PSEUDO_TYPES[typtype]
+
+    if category == "G":
+        return _GEOMETRIC
+
+    if is_hstore(base):
+        return "hstore"
+
+    # `FORMAT_TYPE` qualifies a pgvector type whose schema is off the search path.
+    if (vector := _QUALIFIED_VECTOR_RE.fullmatch(base)) is not None:
+        return vector.group(1) + (vector.group(2) or "")
 
     return base if via_domain else None

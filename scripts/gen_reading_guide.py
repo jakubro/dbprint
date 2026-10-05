@@ -111,6 +111,36 @@ _VOCABULARY = (
         ),
     ),
     (
+        "composite",
+        (
+            "An array, record or map the producer looked inside: no value list of its own, but a "
+            "`parts` map keyed by path (`[*]`, `.sku`, `[keys]`), each part a column-shaped block "
+            "over its own `occurrences`. `parts_found` above the number listed means the rest were "
+            "cut or withheld; `size` is how many parts each value holds (SPEC 2.2.18)."
+        ),
+    ),
+    (
+        "spatial",
+        (
+            "Geometries, described but never counted or listed: no `cardinality`, no `values`. "
+            "`geometry` gives the kinds, reference systems (`srids`) and coordinate dimensions "
+            "with their counts, plus the empty and invalid counts; `extent` is the X/Y bounding "
+            "box in the engine's own axis order, rounded outward. Every spatial column carries "
+            "`inferred.sensitivity: geolocation`, and a `redacted` marker withholds `extent` "
+            "alone (SPEC 2.2.4, 2.2.9)."
+        ),
+    ),
+    (
+        "vector",
+        (
+            "Embeddings, never counted or listed: no `cardinality`, no `values`, no `redacted` "
+            "marker. `dimension` is the element count a query embedding must match (`min < max` "
+            "means the column mixes dimensions), `norm` the Euclidean norm bounds of the non-zero "
+            "vectors (both near 1: unit-normalized, so inner product ranks as cosine), and "
+            "`zero_count` the zero vectors cosine distance is undefined on (SPEC 2.2.4)."
+        ),
+    ),
+    (
         "foreign_key_candidate",
         (
             "Carries a foreign key on this column, the referencing side — not the target. "
@@ -150,6 +180,16 @@ _VOCABULARY = (
         ),
     ),
     (
+        "binary",
+        (
+            "Bytes, counted but never listed: `cardinality`, `inferred.candidate_key`, a "
+            "`length` in bytes and `empty_count` (zero-length values), no `values`. A binary "
+            "foreign key or a low-cardinality binary column lists its values as lowercase hex "
+            "with no prefix (`0aff`), the spelling every engine's binary literal accepts "
+            "(SPEC 2.2.4)."
+        ),
+    ),
+    (
         "text",
         (
             "The value list may be exhaustive or a frequent-value sample, the same rule as "
@@ -185,6 +225,23 @@ def _check_vocabulary_anchors(matrix: dict[str, dict[str, str]]) -> None:
         "unsupported now measures cardinality",
     )
     _require(matrix["unsupported"]["values"] == _NOT_EMITTED, "unsupported now emits values")
+    _require(matrix["binary"]["values"] == _NOT_EMITTED, "binary now emits a values list")
+    _require("R" in matrix["binary"]["length"], "binary no longer requires length")
+    _require(matrix["spatial"]["values"] == _NOT_EMITTED, "spatial now emits a values list")
+    _require(
+        matrix["spatial"]["cardinality"] == _NOT_EMITTED,
+        "spatial now measures cardinality",
+    )
+    _require(
+        matrix["spatial"]["geometry"] == _ALWAYS_REQUIRED,
+        "spatial no longer requires geometry",
+    )
+    _require(matrix["composite"]["parts"] == _ALWAYS_REQUIRED, "composite no longer requires parts")
+    _require(matrix["vector"]["values"] == _NOT_EMITTED, "vector now emits a values list")
+    _require(
+        matrix["vector"]["zero_count"] == _ALWAYS_REQUIRED,
+        "vector no longer requires zero_count",
+    )
     _require(
         matrix["categorical"]["values_coverage"] == _ALWAYS_REQUIRED,
         "categorical no longer requires values_coverage",
@@ -325,6 +382,11 @@ _TRAPS = (
         "carries the schema facts a catalog already knew and no `row_count` and no per-column "
         "measurement at all (SPEC 2.2.15). A statistic missing there was never requested — "
         "read it as neither zero nor a value withheld."
+    ),
+    (
+        "**An `external` object's rows live in another system.** Every query against it reads "
+        "that system, whatever its statistics say (SPEC 2.2.20). Beside `catalog_only` nothing "
+        "was read through it; without it the statistics describe rows fetched from the other side."
     ),
     (
         "**`grain.search.exhausted: false` does not rule out a key.** It means a per-table "
@@ -525,6 +587,13 @@ _READING_STRATEGY_PARAGRAPHS = (
         "a predicate matches against, `expression` what was actually declared. Absence means the "
         "table declares none of the three, never that the block was not read — unless the file's own "
         "`unmeasured` list names the block (SPEC 2.2.11, 2.2.1)."
+    ),
+    (
+        "A `merging` block means the table's ClickHouse engine combines rows sharing its sorting "
+        "`key` only when it merges parts, so `row_count`, `cardinality` and `grain` count the "
+        "stored rows, which may repeat a key: query with `FINAL` (or `GROUP BY` the key, where "
+        "`one_row_per_key` is true) for the logical rows. `rows: merged` says the statistics "
+        "themselves were read with `FINAL` (SPEC 2.2.19)."
     ),
     (
         "A column carrying a `redacted` marker (`mask`, `drop`, `hash`) publishes only its "

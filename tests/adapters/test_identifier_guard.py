@@ -64,6 +64,7 @@ def test_no_adapter_module_folds_quotes_or_splits_a_name_by_hand() -> None:
 
 _KEYWORD_FOLDS = {
     ("bigquery/introspect.py", "list_tables"): "a table-type keyword",
+    ("credentials.py", "masked"): "a table-option keyword",
     ("bigquery/introspect.py", "columns"): "an IS_NULLABLE keyword",
     ("bigquery/introspect.py", "physical_layout"): "an is-partitioning keyword",
     ("bigquery/introspect.py", "_layout_key"): "an is-hidden keyword",
@@ -73,6 +74,9 @@ _KEYWORD_FOLDS = {
     ("duckdb/connection.py", "from_credentials"): "a read-only credential flag",
     ("mysql/introspect.py", "relationships"): "a referential-action keyword",
     ("mysql/introspect.py", "indexes"): "an index-type keyword",
+    ("mysql/introspect.py", "comments"): "a storage-engine keyword",
+    ("mysql/connection.py", "open"): "a server-flavour keyword",
+    ("mysql/introspect.py", "list_tables"): "a storage-engine keyword",
     ("redshift/adapter.py", "_databases"): "matches a configured name to the stored spelling",
     ("redshift/introspect.py", "list_tables"): "a table-type keyword",
     ("redshift/introspect.py", "_nullable"): "an is-nullable keyword",

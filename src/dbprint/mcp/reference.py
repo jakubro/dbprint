@@ -69,7 +69,7 @@ def heading_tree(document: ReferenceDocument) -> str:
 
 
 def section(document: ReferenceDocument, number: str) -> str | None:
-    """The heading numbered `number`, plus everything up to the next heading at or above its level.
+    """The heading numbered `number` and its own body, then a list of its direct subsections.
 
     `number` is bare (`"6.1"`) or a verbatim `spec_ref` citation; `None` when no heading has it.
     """
@@ -98,10 +98,25 @@ def section_of(text: str, number: str) -> str | None:
 
     cleaned = _CITATION_PREFIX_RE.sub("", number).strip()
     lines = text.splitlines()
+    headings = _parse_headings(text)
 
-    for h in _parse_headings(text):
-        if h.number == cleaned:
-            return "\n".join(lines[h.start : h.end]).rstrip() + "\n"
+    for index, h in enumerate(headings):
+        if h.number != cleaned:
+            continue
+
+        inside = [c for c in headings[index + 1 :] if c.start < h.end]
+        direct = [c for c in inside if not any(o.start < c.start < o.end for o in inside)]
+        # An unnumbered heading cannot be asked for by number, so its text stays in the parent's.
+        children = [c for c in direct if c.number is not None]
+        end = children[0].start if children else h.end
+        body = "\n".join(lines[h.start : end]).rstrip() + "\n"
+
+        if not children:
+            return body
+
+        listed = "\n".join(f"- {c.title}" for c in children)
+
+        return f"{body}\nSubsections, each read by its own number:\n\n{listed}\n"
 
     return None
 

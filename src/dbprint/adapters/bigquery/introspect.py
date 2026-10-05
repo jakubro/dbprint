@@ -34,6 +34,9 @@ if TYPE_CHECKING:
 
 _TABLE_TYPE_MAP: dict[str, TableType] = {
     "BASE TABLE": "table",
+    "CLONE": "table",
+    "EXTERNAL": "table",
+    "SNAPSHOT": "table",
     "VIEW": "view",
     "MATERIALIZED VIEW": "matview",
 }
@@ -76,7 +79,8 @@ def list_tables(
     ddl_by_fqn: dict[str, str] = {}
 
     for dataset, name, table_type, ddl in rows:
-        canonical_type = _TABLE_TYPE_MAP.get(str(table_type).upper())
+        kind = str(table_type).upper()
+        canonical_type = _TABLE_TYPE_MAP.get(kind)
 
         if canonical_type is None:
             continue
@@ -85,7 +89,13 @@ def list_tables(
 
         if name.startswith(_SCRATCH_PREFIX):
             continue
-        meta = table_meta((dataset, name), canonical_type)
+
+        meta = table_meta(
+            (dataset, name),
+            canonical_type,
+            external=kind == "EXTERNAL",
+            opt_in_only=kind == "SNAPSHOT",
+        )
         candidates.append((meta, (dataset, name)))
 
         if ddl:

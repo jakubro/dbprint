@@ -267,6 +267,14 @@ def _names_output(column: exp.Column, ctes: set[str], dialect: str) -> bool:
     if column.name in aliases and column.find_ancestor(exp.Order, exp.Group, exp.Having):
         return True
 
+    # BigQuery's `UNNEST(x) AS e` names each element `e`, a value with no table to qualify it.
+    if column.name in {name for u in select.find_all(exp.Unnest) for name in u.alias_column_names}:
+        return True
+
+    # Redshift's PartiQL names what it navigates: `UNPIVOT x AS v AT k` and `FROM t, t.x AS e`.
+    if dialect == "redshift" and column.name in _partiql_names(select):
+        return True
+
     # ClickHouse names an expression anywhere in the statement and reads it back by that name.
     if dialect == "clickhouse" and column.name in {a.alias for a in select.find_all(exp.Alias)}:
         return True
@@ -274,6 +282,20 @@ def _names_output(column: exp.Column, ctes: set[str], dialect: str) -> bool:
     sources = [t.name for t in select.find_all(exp.Table) if t.find_ancestor(exp.Select) is select]
 
     return bool(sources) and all(name in ctes for name in sources)
+
+
+def _partiql_names(select: exp.Select) -> set[str]:
+    unpivoted = {
+        name
+        for at in select.find_all(exp.AtIndex)
+        for name in (at.this.alias, at.expression.name)
+        if isinstance(at.this, exp.Alias)
+    }
+    tables = list(select.find_all(exp.Table))
+    aliases = {t.alias for t in tables if t.alias}
+    navigated = {t.alias for t in tables if t.alias and t.text("db") in aliases}
+
+    return unpivoted | navigated
 
 
 def _counting_violations(tree: exp.Expression) -> Iterator[str]:
@@ -366,6 +388,14 @@ def _is_one_liner(text: str, tree: exp.Expression) -> bool:
     )
 
 
+def _is_distinct_from(tokens: list[Token], index: int) -> bool:
+    return (
+        tokens[index].token_type is TokenType.FROM
+        and index > 0
+        and tokens[index - 1].token_type is TokenType.DISTINCT
+    )
+
+
 def _long_lines(text: str, first_line: int) -> list[str]:
     return [
         f"line {number}: {len(line)} characters, over {_MAX_LINE}"
@@ -393,7 +423,7 @@ def _clause_breaks(tokens: list[Token]) -> list[str]:
         elif not level.query:
             if kind is TokenType.COMMA:
                 level.commas.append(index)
-        elif kind in _CLAUSES:
+        elif kind in _CLAUSES and not _is_distinct_from(tokens, index):
             level.in_select_list = kind is TokenType.SELECT
 
             if kind is not TokenType.LIMIT:

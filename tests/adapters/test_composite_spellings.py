@@ -70,7 +70,7 @@ def test_a_nested_composite_is_declined_and_its_sibling_profiles(
 
     declined = {name for name, stats in phase_a.stats.items() if not stats.supported}
 
-    assert declined == {c.name for c in columns} - {"plot"}
+    assert declined == {c.name for c in columns} - {"plot", "spot"}
     assert phase_a.stats["plot"].cardinality == 2
 
 
@@ -98,8 +98,8 @@ def test_emails_inside_a_nested_struct_never_reach_the_print(tmp_path: Path) -> 
     path = next((tmp_path / "prints" / "garden").rglob("statistics.yaml"))
     columns = yaml.safe_load(path.read_text())["columns"]
 
-    assert columns["field_notes"]["classification"] == "unsupported"
-    assert "values" not in columns["field_notes"]
+    assert columns["field_notes"]["classification"] == "composite"
+    assert columns["field_notes"]["parts"][".email"]["redacted"] == "drop"
     assert columns["plot"]["classification"] != "unsupported"
     assert "@example.invalid" not in path.read_text()
     assert [

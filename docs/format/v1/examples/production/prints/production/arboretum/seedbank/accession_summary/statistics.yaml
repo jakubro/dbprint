@@ -1,7 +1,7 @@
 format_version: 1
 table: arboretum.seedbank.accession_summary
 type: view
-profiled_at: '2026-05-17T22:48:01Z'
+profiled_at: '2026-03-09T14:27:36Z'
 catalog_only: true
 grain:
   keys: []

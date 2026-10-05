@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from dbprint.adapters.base import ColumnMeta, ForeignKeyMeta, TableType, UniqueKeyMeta
+from dbprint.spec.classification import base_type
 from dbprint.spec.fqn import join as join_fqn
 from dbprint.spec.fqn import split as split_fqn
 from dbprint.spec.sketch import (
@@ -334,16 +335,12 @@ def _types_compatible(source: ColumnMeta, target: TableInventory, target_column:
     if other is None:
         return False
 
-    left, right = _base_type(source.sql_type), _base_type(other.sql_type)
+    left, right = base_type(source.sql_type), base_type(other.sql_type)
 
     if left == right:
         return True
 
     return left in _INTEGER_TYPES and right in _INTEGER_TYPES
-
-
-def _base_type(sql_type: str) -> str:
-    return sql_type.lower().split("(", 1)[0].strip()
 
 
 _INTEGER_TYPES = frozenset(

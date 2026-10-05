@@ -13,7 +13,7 @@ It demonstrates the key constructs of the format spec at [`../SPEC.md`](../SPEC.
 Two schemas:
 
 - **`seedbank`** — a seed bank and herbarium accession registry: taxa, field collectors, cold-storage vaults, accessions, germination trials, specimen images.
-- **`fixture`** — one table, `shape_probe`, that carries the few format shapes the seed-bank domain has no honest column for (a raw device IPv4, JSON held as plain text). Its name says what it is.
+- **`fixture`** — one table, `shape_probe`, that carries the few format shapes the seed-bank domain has no honest column for (a raw device IPv4, JSON held as plain text, a probe's deployed position, a reading embedding). Its name says what it is.
 
 ## What's demonstrated
 
@@ -28,11 +28,11 @@ Two schemas:
 | `arboretum.seedbank.vault` | table | The composite primary key (`vault_id`, `shelf_code`) that `accession` references compositely; two `time`-typed columns |
 | `arboretum.seedbank.accession` | table | The busiest table: `jsonb`, a composite FK, `foreign_key_candidate` on four columns, `statistics.annotations.yaml` on six columns, a path-valued relationship endpoint authored over `traits` |
 | `arboretum.seedbank.germination_trial` | table | The deliberately inferred FK — `collector_id` names a `collector` row with no declared constraint; a value-grain note on `medium`'s `control` entry |
-| `arboretum.seedbank.specimen_image` | table | `path`, `filename`, `content_type`, `base64` — every file-shaped `looks_like` pattern |
+| `arboretum.seedbank.specimen_image` | table | `path`, `filename`, `content_type`, `base64` — every file-shaped `looks_like` pattern — and a `binary` thumbnail detected as `png` |
 | `arboretum.seedbank.storage_reading` | table | The only empty table (`row_count: 0`), the only declared `physical_layout` — a `partition` mechanism on `reading_date` — and the only object whose `grain` is declared rather than searched |
 | `arboretum.seedbank.accession_summary` | plain view | The only `catalog_only` object: column names and types with no measurement behind them (SPEC §2.2.15), and an empty `grain.keys`. It originates two inferred edges; one is annotated `verdict: rejected` |
 | `arboretum.seedbank.germination_by_taxon_mv` | materialized view | Profiled like a table, and the object the per-table freshness override applies to; also originates an inferred edge, independent of the view's |
-| `arboretum.fixture.shape_probe` | table | `ip`, `json`-as-text, `bytea`, and an array — the one table with **both** `refers_to` and `referenced_by` empty (SPEC §2.3.7's "no FKs at all") |
+| `arboretum.fixture.shape_probe` | table | `ip`, `json`-as-text, `bytea`, a PostGIS `geometry`, a pgvector `vector`, a native `box`, and an array — the one table with **both** `refers_to` and `referenced_by` empty (SPEC §2.3.7's "no FKs at all") |
 
 **Per-table freshness** (SPEC §2.5): a `rules` entry gives `germination_by_taxon_mv` a threshold of 30 days where the connection sets 1; its manifest entry records the 30 it resolved to, every other object records the connection's 1.
 
@@ -40,7 +40,7 @@ Two schemas:
 
 **`statistics.annotations.yaml` at column and value grain** (SPEC §2.7.1): present on `accession` (six columns), `accession_summary` (two), `germination_trial` (one), `taxon` (three), `vault` (three) and `germination_by_taxon_mv` (two), absent elsewhere, seeded the same way as `description.md` and for the same reason. `accession_summary` is the case the format's stale-key check does not run for a plain view: it has no `statistics.yaml`, so its annotated columns are the only column names this print has for it at all. `germination_by_taxon_mv` is the opposite case: a matview does carry `statistics.yaml`, so its annotated columns are checked against real column names the same way a table's are. `germination_trial.medium` carries a value-grain note instead of a column-grain one: `control` is a real, exhaustively-published domain member, and the note records that it denotes a no-medium control group rather than a growth medium — a distinction no statistic alone can draw.
 
-**`relationships.annotations.yaml` at edge grain** (SPEC §2.7.2): present on `accession` and `accession_summary`. `accession_summary` carries a second inferred edge beyond the one above, `germination_trial_id` → `germination_trial.trial_id` — the naming rule resolves it on the column's name alone, the annotation marks it `verdict: rejected`; `dbprint context` renders the correction next to the producer's own inference rather than hiding either. `accession` carries a path-valued endpoint (SPEC §2.3.9) with no producer counterpart: `traits` occasionally nests a `reclassified_taxon_id` key, and the annotation states the edge that key implies, directly into `taxon.taxon_id`, since a producer never infers into a JSON payload.
+**`relationships.annotations.yaml` at edge grain** (SPEC §2.7.2): present on `accession` and `accession_summary`. `accession_summary` carries a second inferred edge beyond the one above, `germination_trial_id` → `germination_trial.trial_id` — the naming rule resolves it on the column's name alone, the annotation marks it `verdict: rejected`; `dbprint context` renders the correction next to the producer's own inference rather than hiding either. `accession` carries a path-valued endpoint (SPEC §2.3.9) with no producer counterpart: `traits` occasionally nests a `reclassified_taxon_id` key, and the annotation states the edge that key implies, directly into `taxon.taxon_id`: the producer publishes that key as the part `.reclassified_taxon_id`, about one non-null row in twenty-nine, but never infers an edge from a part.
 
 **Redaction, on five columns, by three mechanisms** (SPEC §2.2.9): the project-wide `redact: [{sensitivity: [contact], with: mask}]` default catches `collector.email`, `.phone` and `.institution_email` — the first two through the strong `contact` name tokens §4.4 recognises, the third through its detected `looks_like: email` shape alone, since `institution_email` is not itself one of those names. Two connection-level rules add the other two primitives, each keyed on a column glob rather than a category — the escape hatch CONFIG.md describes for a column detection misses: `collector.institution` (`hash`) and `collector.street_address` (`drop`). See the Redaction section below for what each substitution actually looks like.
 
@@ -52,20 +52,24 @@ The same drift also sets a column comment, and no `comment_changed` event appear
 
 ## Coverage matrix
 
-All eight column classifications appear:
+All twelve column classifications appear:
 
 | Classification | Where |
 |---|---|
 | `foreign_key_candidate` | `accession.taxon_id`, `.collector_id`, `.vault_id`, `.shelf_code`; `accession_summary.accession_id`, `.germination_trial_id`; `germination_by_taxon_mv.taxon_id`; `germination_trial.accession_id`, `.collector_id`; `specimen_image.accession_id`; `storage_reading.vault_id`, `.shelf_code`; `taxon.parent_taxon_id` |
-| `categorical` | `fixture.shape_probe.probe_id`, `.logger_ipv4`, `.json_text`; `accession.provenance_country`, `.storage_temperature_c`; `collector.institution`, `.institution_email`, `.street_address`, `.postal_code`, `.country_code`; `germination_by_taxon_mv.trial_year`; `germination_trial.medium`; `specimen_image.content_type`; `storage_reading.reading_id`, `.reading_date`, `.temperature_c`; `taxon.rank`; `vault.vault_id`, `.shelf_code`, `.site_name`, `.target_temperature_c`, `.opens_at`, `.closes_at` |
+| `categorical` | `fixture.shape_probe.probe_id`, `.logger_ipv4`, `.json_text`, `.payload_bytes` (`bytea`, its values spelled as lowercase hex); `accession.provenance_country`, `.storage_temperature_c`; `collector.institution`, `.institution_email`, `.street_address`, `.postal_code`, `.country_code`; `germination_by_taxon_mv.trial_year`; `germination_trial.medium`; `specimen_image.content_type`; `storage_reading.reading_id`, `.reading_date`, `.temperature_c`; `taxon.rank`; `vault.vault_id`, `.shelf_code`, `.site_name`, `.target_temperature_c`, `.opens_at`, `.closes_at` |
 | `boolean` | `taxon.is_endangered` |
-| `json` | `accession.traits` |
+| `json` | `accession.traits` (descended: `types`, `[keys]` and one part per key) |
 | `temporal` | `accession.collected_on`, `.received_at`; `accession_summary.collected_on`; `collector.hired_on`; `germination_trial.started_on`, `.observed_at`; `specimen_image.captured_at`; `taxon.created_at` |
 | `numeric` | `accession.accession_id`, `.viability_pct`, `.seed_count`; `accession_summary.viability_pct`; `germination_by_taxon_mv.total_sown`, `.total_germinated`; `germination_trial.trial_id`, `.sown_count`, `.germinated_count`; `specimen_image.image_id`, `.byte_size`; `taxon.taxon_id` |
+| `binary` | `specimen_image.thumbnail` (`bytea`) |
+| `spatial` | `fixture.shape_probe.deployed_at` (PostGIS `geometry`: points, five boxes and one empty polygon, every one with `srid: 4326`) |
+| `vector` | `fixture.shape_probe.reading_embedding` (pgvector `vector(3)`: raw, un-normalized readings and two zero vectors) |
 | `text` | `accession.accession_code`, `.sheet_number`, `.catalogue_url`, `.field_notes`; `accession_summary.accession_code`, `.scientific_name`, `.vernacular_name`, `.collector_name`; `collector.collector_id`, `.full_name`, `.email`, `.phone`; `specimen_image.storage_path`, `.file_name`, `.thumbnail_b64`; `taxon.scientific_name`, `.vernacular_name`, `.description` |
-| `unsupported` | `fixture.shape_probe.payload_bytes` (`bytea`), `.tag_list` (`text[]`) |
+| `composite` | `fixture.shape_probe.tag_list` (`text[]`, descended through its element part `[*]`, which lists the tags) |
+| `unsupported` | `fixture.shape_probe.calibration_box` (Postgres's native `box`, which has no equality operator) |
 
-Uniqueness is not one of the eight: `inferred.candidate_key` (SPEC §4.2) rides whichever classification a column's type and cardinality already earned it, so `accession.accession_id` (unique, `numeric`) and `collector.collector_id` (unique, `text`) both carry the flag alongside their type's own full field set rather than losing it to a ninth classification.
+Uniqueness is not one of the twelve: `inferred.candidate_key` (SPEC §4.2) rides whichever classification a column's type and cardinality already earned it, so `accession.accession_id` (unique, `numeric`) and `collector.collector_id` (unique, `text`) both carry the flag alongside their type's own full field set rather than losing it to a thirteenth classification.
 
 `vault.opens_at`/`.closes_at` are `TIME`-typed columns worth calling out on their own: SPEC §3.2's priority order checks `cardinality <= enumeration_threshold` before it checks for a temporal type, and with only two distinct opening times across 48 shelves, both columns classify `categorical` rather than `temporal` — a real instance of a temporal-typed column losing to a lower-priority rule on cardinality alone, not a misconfiguration.
 
@@ -96,6 +100,7 @@ Value lists appear in all three shapes:
 | `phone` | `collector.phone` |
 | `json` | `fixture.shape_probe.json_text` — JSON held as `text`, distinct from `accession.traits`, which is `jsonb` and classifies `json` directly |
 | `base64` | `specimen_image.thumbnail_b64` |
+| `png` | `specimen_image.thumbnail` — read from each value's leading bytes |
 | `numeric_string` | `accession.sheet_number` and every surrogate-key column whose values happen to render as digits (`accession_id`, `image_id`, `probe_id`, ...) |
 | `filename` | `specimen_image.file_name` |
 | `prose` | `taxon.description`, `accession.field_notes` |
@@ -103,7 +108,7 @@ Value lists appear in all three shapes:
 
 `collector.postal_code` is UK-formatted by construction: SPEC's `postal_code` detector recognises the UK, Canadian and Netherlands shapes only (`spec/looks_like.py`), so a US five-digit ZIP or any other locale would not fire it — the fixture's addresses stay UK-shaped for exactly this reason, not because the domain is set in the UK.
 
-Four of the twelve `sensitivity` categories appear: `personal_name` (`collector.full_name`), `postal_address` (`collector.street_address`), `contact` (`collector.email`, `.phone`, `.institution_email`), and `online_identifier` (`fixture.shape_probe.logger_ipv4`, from its own `looks_like: ip` shape — the column name carries no online-identifier token) — `geolocation`, `date_of_birth`, `national_id`, `financial_account`, `credential`, `health`, `demographic` and `employment` have no honest column in this domain and are demonstrated in `vocabulary/` instead. The three contact-adjacent columns reach `sensitivity: contact` by two different routes: `email` and `phone` are both in the name list §4.4 recognises, so their shape adds no further evidence than their name already gave; `institution_email` is not, so the category comes from the detected `looks_like: email` shape alone.
+Five of the twelve `sensitivity` categories appear: `personal_name` (`collector.full_name`), `postal_address` (`collector.street_address`), `contact` (`collector.email`, `.phone`, `.institution_email`), `online_identifier` (`fixture.shape_probe.logger_ipv4`, from its own `looks_like: ip` shape — the column name carries no online-identifier token), and `geolocation` (`fixture.shape_probe.deployed_at`, by its spatial type alone; it is left unredacted, so its `extent` is published and `dbprint check` warns) — `date_of_birth`, `national_id`, `financial_account`, `credential`, `health`, `demographic` and `employment` have no honest column in this domain and are demonstrated in `vocabulary/` instead. The three contact-adjacent columns reach `sensitivity: contact` by two different routes: `email` and `phone` are both in the name list §4.4 recognises, so their shape adds no further evidence than their name already gave; `institution_email` is not, so the category comes from the detected `looks_like: email` shape alone.
 
 `accession.traits` and `fixture.shape_probe.json_text` both carry JSON, and neither carries a `looks_like` alongside its classification: SPEC §2.2.3's field matrix forbids `inferred.looks_like` on `json`-classified columns outright (the JSON claim is what the `classification` field itself already says), which is exactly why `json_text` is stored as `text` rather than `jsonb` — a `jsonb` column can never demonstrate the `looks_like: json` pattern, only a text column holding JSON-shaped strings can.
 
@@ -112,7 +117,7 @@ Four of the twelve `sensitivity` categories appear: `personal_name` (`collector.
 - **A self-referential FK**: `taxon.parent_taxon_id` → `taxon.taxon_id`, `ON DELETE SET NULL`. A three-level hierarchy (`family` → `genus` → `species`) built from one column; SPEC §2.3.7's shape is exact — `target_table` equals the top-level `table`, and both `refers_to` and `referenced_by` carry an entry for it.
 - **A composite FK**: `accession.(vault_id, shelf_code)` → `vault.(vault_id, shelf_code)`, single entry, both `column` and `target_column` arrays of length two, position-paired (SPEC §2.3.4). `vault`'s own `referenced_by` carries the reciprocal two-column entry.
 - **Four inferred edges** (SPEC §2.3.8), each a different shape: `germination_trial.collector_id` → `collector.collector_id` is the deliberate one — the column is named `collector_id`, `collector` is in scope and declares a single-column primary key, and no FK constraint covers it, so the naming rule derives the edge with no help from a view or matview. `accession_summary.accession_id` → `accession.accession_id` and `germination_by_taxon_mv.taxon_id` → `taxon.taxon_id` originate from a plain view and a materialized view respectively — neither object type can declare a constraint, so both edges exist only because the naming rule runs over their columns too (SPEC §2.3.7). The fourth, `accession_summary.germination_trial_id` → `germination_trial.trial_id`, is the naming rule reaching a column that names a code rather than a key, and it is the one edge in this print carrying a `relationships.annotations.yaml` `verdict: rejected` (SPEC §2.7.2); the other three are left unannotated because they are correct. All four carry `detection: inferred`, no `on_delete`/`on_update` beyond `NO ACTION`, and no `constraint_name`.
-- **A path-valued endpoint** (SPEC §2.3.9), authored rather than measured: `accession.traits` is `jsonb` with no fixed key set, and its `relationships.annotations.yaml` states that the `reclassified_taxon_id` key it sometimes carries addresses `taxon.taxon_id` — an edge no producer inference reaches, since a producer never looks inside a JSON payload.
+- **A path-valued endpoint** (SPEC §2.3.9), authored rather than measured: `accession.traits` is `jsonb` with no fixed key set, and its `relationships.annotations.yaml` states that the `reclassified_taxon_id` key it sometimes carries addresses `taxon.taxon_id` — an edge no producer inference reaches: the key is published as a part with its own counts (SPEC §2.2.18), but no edge ever ends at or starts from a part.
 - **Empty `refers_to`**: `collector`, `vault` — neither references anything in scope.
 - **Both empty**: `fixture.shape_probe` — no declared or inferable FK in either direction, SPEC §2.3.7's "no FKs at all" case, on a real table rather than an authored one.
 

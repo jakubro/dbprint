@@ -1,7 +1,7 @@
 format_version: 1
 table: arboretum.seedbank.taxon
 type: table
-profiled_at: '2026-05-17T22:48:01Z'
+profiled_at: '2026-03-09T14:27:36Z'
 row_count: 300
 row_count_method: exact
 null_patterns:
@@ -751,7 +751,7 @@ columns:
       p99: '2022-10-30T00:00:00Z'
     quantized_count: 300
     freshness:
-      max_age_days: 1254
+      max_age_days: 1185
       classification: dormant
     sketch:
       method: kmv_md5_lo64

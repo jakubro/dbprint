@@ -85,18 +85,29 @@ COLUMN_FIELDS: frozenset[str] = frozenset(
         "inferred.fk_candidate",
         "redacted",
         "sketch",
+        "geometry",
+        "extent",
+        "dimension",
+        "norm",
+        "parts",
+        "parts_found",
+        "size",
+        "occurrences",
+        "types",
     },
 )
 
 TABLE_BLOCKS: frozenset[str] = frozenset(
     {
         "catalog_only",
+        "external",
         "row_count",
         "row_count_method",
         "scope",
         "null_patterns",
         "null_patterns.coverage_method",
         "physical_layout",
+        "merging",
         "grain",
         "grain.search",
         "dependencies",
@@ -106,10 +117,20 @@ TABLE_BLOCKS: frozenset[str] = frozenset(
     },
 )
 
-SAMPLED_CLASSIFICATIONS = frozenset({"categorical", "text", "foreign_key_candidate"})
+SAMPLED_CLASSIFICATIONS = frozenset({"categorical", "text", "foreign_key_candidate", "binary"})
 
 # The optional fields a failed sample draw names unmeasured on those classifications (SPEC 2.2.4).
 SAMPLE_VERDICTS = frozenset({"inferred.looks_like", "inferred.epoch_unit"})
+
+
+def sample_verdicts(classification: str | None) -> frozenset[str]:
+    """The sample verdicts a failed draw leaves owed on `classification`: none it forbids."""
+
+    if classification not in SAMPLED_CLASSIFICATIONS:
+        return frozenset()
+
+    return SAMPLE_VERDICTS - _FORBIDDEN_NESTED.get(classification, frozenset())
+
 
 _LOOKS_LIKE_FIELDS = frozenset(
     {
@@ -140,6 +161,25 @@ _FORBIDDEN_NESTED: dict[str, frozenset[str]] = {
     "categorical": frozenset({"inferred.fk_candidate", "range.span_days"}),
     "temporal": _LOOKS_LIKE_FIELDS | {"inferred.epoch_unit", "inferred.fk_candidate"},
     "numeric": _LOOKS_LIKE_FIELDS | {"inferred.fk_candidate", "range.span_days"},
+    "composite": _LOOKS_LIKE_FIELDS
+    | {"inferred.epoch_unit", "inferred.fk_candidate", "range.span_days"},
+    "spatial": _LOOKS_LIKE_FIELDS
+    | {
+        "inferred.candidate_key",
+        "inferred.candidate_key_exception",
+        "inferred.epoch_unit",
+        "inferred.fk_candidate",
+        "range.span_days",
+    },
+    "vector": _LOOKS_LIKE_FIELDS
+    | {
+        "inferred.candidate_key",
+        "inferred.candidate_key_exception",
+        "inferred.epoch_unit",
+        "inferred.fk_candidate",
+        "range.span_days",
+    },
+    "binary": frozenset({"inferred.epoch_unit", "inferred.fk_candidate", "range.span_days"}),
     "text": frozenset({"inferred.fk_candidate", "range.span_days"}),
 }
 
@@ -297,6 +337,14 @@ def _implied(column: Mapping[str, Any], head: str) -> FieldReading:
 
         return FieldReading(Absence.NOT_APPLICABLE, None, "detection does not run here", "§4.1.5")
 
+    if head == "types":
+        return FieldReading(
+            Absence.NOT_APPLICABLE,
+            None,
+            "catalog-only, or the engine names no per-value type",
+            "§7.2",
+        )
+
     if head in _STATED_BY_ABSENCE:
         value, cause, spec_ref = _STATED_BY_ABSENCE[head]
 
@@ -309,6 +357,9 @@ def _implied_block(statistics: Mapping[str, Any], head: str) -> FieldReading:
     if head == "catalog_only":
         return FieldReading(Absence.OMITTED, False, "the object was queried", "§2.2.15")
 
+    if head == "external":
+        return FieldReading(Absence.OMITTED, False, "the rows are stored locally", "§2.2.20")
+
     if head == "scope":
         return FieldReading(Absence.OMITTED, None, "every row was read", "§2.2.8")
 
@@ -317,6 +368,9 @@ def _implied_block(statistics: Mapping[str, Any], head: str) -> FieldReading:
 
     if head == "physical_layout":
         return FieldReading(Absence.OMITTED, None, "the table declares no layout", "§2.2.11")
+
+    if head == "merging":
+        return FieldReading(Absence.OMITTED, None, "no merging engine", "§2.2.19")
 
     if head == "unmeasured":
         return FieldReading(

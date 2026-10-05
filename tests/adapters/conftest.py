@@ -16,6 +16,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, LiteralString, cast
 
@@ -378,6 +379,43 @@ def _adapter_factory_for(request: pytest.FixtureRequest, kind: str) -> Callable[
     raise ValueError(f"unknown adapter kind: {kind!r}")
 
 
+class StubCursor:
+    """A DB-API cursor over canned rows that keeps each statement it is handed, whitespace-collapsed.
+
+    `error`, when given, is raised by every `execute` once the statement is kept.
+    """
+
+    def __init__(
+        self,
+        rows: list[tuple[Any, ...]] | None = None,
+        *,
+        rowcount: int = 3,
+        error: Exception | None = None,
+    ) -> None:
+        self._rows = rows or []
+        self.rowcount = rowcount
+        self._error = error
+        self.statements: list[str] = []
+
+    def execute(self, sql: str, params: Any = None) -> StubCursor:
+        del params
+        self.statements.append(" ".join(sql.split()))
+
+        if self._error is not None:
+            raise self._error
+
+        return self
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return self._rows
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        return self._rows[0] if self._rows else None
+
+    def close(self) -> None:
+        return None
+
+
 # Per-test in-memory duckdb seeded with the contract-test schema.
 
 
@@ -393,12 +431,15 @@ class SnowflakeDialectShim:
         self,
         con: duckdb.DuckDBPyConnection,
         cluster_by: dict[str, str] | None = None,
+        table_types: dict[str, str] | None = None,
     ) -> None:
         self._con = con
         self._rows: list[tuple[Any, ...]] | None = None
         # duckdb has no clustering concept, so a test injects `cluster_by` here rather than
         # reading it off the catalog. Keyed lowercase to match what `physical_layout` compares.
         self._cluster_by = {name.lower(): value for name, value in (cluster_by or {}).items()}
+        # duckdb reports only BASE TABLE and VIEW; a test names the Snowflake kind a table reports.
+        self._table_types = {name.lower(): kind for name, kind in (table_types or {}).items()}
 
     def execute(self, sql: str, params: Any = None) -> SnowflakeDialectShim:
         # duckdb's own INFORMATION_SCHEMA spans every attached catalog, so an unqualified read
@@ -439,7 +480,16 @@ class SnowflakeDialectShim:
         else:
             self._con.execute(_to_duckdb(sql), params)
 
+        if self._table_types and "information_schema.tables" in flat and "table_type" in flat:
+            self._rows = self._retyped(self._con.fetchall(), params)
+
         return self
+
+    def _retyped(self, rows: list[tuple[Any, ...]], params: Any) -> list[tuple[Any, ...]]:
+        if len(rows) == 1 and len(rows[0]) == 1 and params:
+            return [(self._table_types.get(str(params[-1]).lower(), rows[0][0]),)]
+
+        return [(*row[:-1], self._table_types.get(str(row[2]).lower(), row[-1])) for row in rows]
 
     def fetchall(self) -> list[Any]:
         return self._rows if self._rows is not None else self._con.fetchall()
@@ -688,6 +738,8 @@ _TO_VARCHAR_BARE_RE = re.compile(r"TO_VARCHAR\((\w+\.\"(?:[^\"]|\"\")+\")\)", re
 # The sketch's low-64-bit hash (SPEC 2.2.14) - a fixed 16-X hex format model over MD5.
 _TO_NUMBER_HEX_RE = re.compile(r"TO_NUMBER\((.+?), 'X{16}'\)", re.IGNORECASE)
 _MATERIALIZED_RE = re.compile(r'"[^"]+"\."[^"]+"\.("dbprint_sample_[0-9a-f]+")')
+# A binary value's lowercase hex spelling (SPEC 2.2.4); Snowflake's 0 picks lowercase digits.
+_HEX_ENCODE_RE = re.compile(r"HEX_ENCODE\((.+?), 0\)", re.IGNORECASE)
 # `probe_grain` (SPEC 2.2.12) emits exactly two quoted columns per expression.
 _COUNT_DISTINCT_MULTI_RE = re.compile(
     r'COUNT\(DISTINCT (\w+\."(?:[^"]|"")+"), (\w+\."(?:[^"]|"")+")\)',
@@ -750,7 +802,10 @@ def _rewrite_temporal_render(sql: str) -> str:
 def _rewrite_sketch_hash(sql: str) -> str:
     """SPEC 2.2.14's `TO_NUMBER(hex, 'XXXX...')` -> duckdb's `0x`-prefixed cast."""
 
-    return _TO_NUMBER_HEX_RE.sub(r"(('0x' || \1))::UBIGINT", sql)
+    return _HEX_ENCODE_RE.sub(
+        r"LOWER(HEX(\1))",
+        _TO_NUMBER_HEX_RE.sub(r"(('0x' || \1))::UBIGINT", sql),
+    )
 
 
 def _rewrite_sample(sql: str) -> str:
@@ -1443,6 +1498,8 @@ _REDSHIFT_STRTOL_RE = re.compile(
     re.IGNORECASE,
 )
 _REDSHIFT_APPROX_DISC_RE = re.compile(r"APPROXIMATE\s+PERCENTILE_DISC\(", re.IGNORECASE)
+# Redshift's `TO_HEX` takes VARBYTE; Postgres spells a bytea's hex text `ENCODE(x, 'hex')`.
+_REDSHIFT_TO_HEX_RE = re.compile(r"LOWER\(TO_HEX\((.+?)\)\)", re.IGNORECASE)
 # Postgres has no DATEDIFF function at all; `date - date` is its own native equivalent for the
 # one call shape this adapter emits (both arguments always MIN/MAX of the same column).
 _REDSHIFT_DATEDIFF_DAY_RE = re.compile(
@@ -1468,6 +1525,7 @@ def _to_postgres(sql: str) -> str:
 
     # `APPROXIMATE` has no Postgres equivalent - there PERCENTILE_DISC is the ordinary form.
     rewritten = _REDSHIFT_APPROX_DISC_RE.sub("PERCENTILE_DISC(", rewritten)
+    rewritten = _REDSHIFT_TO_HEX_RE.sub(r"ENCODE(\1, 'hex')", rewritten)
 
     rewritten = _REDSHIFT_DATEDIFF_MICROSECOND_RE.sub(
         r"(EXTRACT(EPOCH FROM (MAX(\2) - MIN(\1))) * 1000000)::bigint",
@@ -1475,6 +1533,17 @@ def _to_postgres(sql: str) -> str:
     )
 
     return _REDSHIFT_DATEDIFF_DAY_RE.sub(r"(MAX(\2) - MIN(\1))", rewritten)
+
+
+@dataclass(frozen=True)
+class ExternalTableSeam:
+    """One Spectrum table a `RedshiftDialectShim` reports: (name, external_type, is_nullable,
+    part_key) per column, the `SHOW EXTERNAL TABLE` text, and its `tabletype`.
+    """
+
+    columns: tuple[tuple[str, str, str, int], ...]
+    ddl: str
+    tabletype: str = "TABLE"
 
 
 class RedshiftDialectShim:
@@ -1488,6 +1557,7 @@ class RedshiftDialectShim:
         sortkey_by_table: dict[str, tuple[tuple[str, int], ...]] | None = None,
         late_binding_views: frozenset[str] | None = None,
         database: str | None = None,
+        external_tables: dict[str, ExternalTableSeam] | None = None,
     ) -> None:
         self._conn = conn
         # The Redshift database this Postgres one stands in for; unset, the first one the adapter
@@ -1501,12 +1571,22 @@ class RedshiftDialectShim:
         # Postgres has no late-binding view concept - a test names one here, and
         # `_view_dependencies` rewrites its rows into the unresolved shape one would produce.
         self.late_binding_views = late_binding_views or frozenset()
+        # Postgres has no Spectrum: a test declares `schema.table` external here, answered from
+        # the `SVV_EXTERNAL_*` reads and `SHOW EXTERNAL TABLE`, and hidden from the local listing.
+        self.external_tables = external_tables or {}
 
     def execute(self, sql: str, params: Any = None) -> RedshiftDialectShim:
         flat = " ".join(sql.lower().split())
         self._rows = None
 
-        if flat.startswith(("show table ", "show view ")):
+        if flat.startswith("show external table "):
+            schema, table = re.findall(r'"([^"]+)"', sql)
+            self._rows = [(self.external_tables[f"{schema}.{table}"].ddl,)]
+        elif "svv_external_tables" in flat:
+            self._rows = self._svv_external_tables(params)
+        elif "svv_external_columns" in flat:
+            self._rows = self._svv_external_columns(params, layout="part_key > 0" in flat)
+        elif flat.startswith(("show table ", "show view ")):
             self._rows = self._show_table(sql)
         elif "svv_redshift_databases" in flat:
             self._rows = [(self.database,)] if self.database is not None else []
@@ -1603,7 +1683,38 @@ class RedshiftDialectShim:
             """,
         ).fetchall()
 
-        return [(database, *row) for row in rows]
+        return [
+            (database, *row) for row in rows if f"{row[0]}.{row[1]}" not in self.external_tables
+        ]
+
+    def _svv_external_tables(self, params: Any) -> list[tuple[Any, ...]]:
+        """Rows a real cluster's `tabletype` filter keeps: `TABLE` or blank, never a view."""
+
+        database = self.database if self.database is not None else params[0]
+
+        if database not in params:
+            return []
+
+        return [
+            (database, *name.split("."))
+            for name, seam in sorted(self.external_tables.items())
+            if seam.tabletype.strip() in ("TABLE", "")
+        ]
+
+    def _svv_external_columns(self, params: Any, *, layout: bool) -> list[tuple[Any, ...]]:
+        schema, table = params
+        seam = self.external_tables.get(f"{schema}.{table}")
+        columns = seam.columns if seam is not None else ()
+
+        if layout:
+            return [
+                (name,) for name, _, _, part_key in sorted(columns, key=lambda c: c[3]) if part_key
+            ]
+
+        return [
+            (name, i + 1, external_type, nullable)
+            for i, (name, external_type, nullable, _) in enumerate(columns)
+        ]
 
     def _svv_columns(self, params: Any) -> list[tuple[Any, ...]]:
         schema, table = params
@@ -2486,15 +2597,15 @@ REFERENCE_FIXTURE: dict[str, MockTable] = {
                 cardinality_method="exact",
                 range=Range(
                     min="2020-01-01T00:00:00Z",
-                    max="2026-05-17T22:48:00Z",
-                    span_days=2328,
+                    max="2026-03-09T14:27:36Z",
+                    span_days=2259,
                 ),
                 percentiles={
                     "p01": "2020-03-15T10:11:12Z",
                     "p25": "2022-06-04T08:00:00Z",
                     "p50": "2024-01-15T12:00:00Z",
                     "p75": "2025-08-22T18:30:00Z",
-                    "p99": "2026-05-10T11:22:33Z",
+                    "p99": "2026-03-02T11:22:33Z",
                 },
                 distribution="uniform",
                 values=(

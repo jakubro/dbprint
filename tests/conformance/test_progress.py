@@ -91,6 +91,7 @@ def test_findings_count_attributes_each_issue_to_its_table(print_dir: Path) -> N
 
     findings = {t.fqn: t.findings for t in ticks if t.pass_index == 10}
     assert {fqn: n for fqn, n in findings.items() if n} == {
+        "arboretum.fixture.shape_probe": 1,
         "arboretum.seedbank.collector": 2,
         "arboretum.seedbank.taxon": 1,
         "arboretum.seedbank.vault": 1,

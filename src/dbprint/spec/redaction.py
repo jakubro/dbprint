@@ -23,6 +23,7 @@ RedactionRole = Literal[
     "coarsened",
     "detection",
     "structural",
+    "shape",
 ]
 
 # Every property of the statistics schema's `Column`, keyed to what a `redacted` marker does to it.
@@ -51,6 +52,15 @@ FIELD_ROLES: Mapping[str, RedactionRole] = MappingProxyType(
         "normalized_cardinality": "withheld",
         "unrepresentable": "withheld",
         "sketch": "withheld",
+        "extent": "withheld",
+        "dimension": "withheld",
+        "norm": "withheld",
+        "geometry": "shape",
+        "parts_found": "count_profile",
+        "size": "count_profile",
+        "types": "count_profile",
+        "occurrences": "count_profile",
+        "parts": "structural",
         "freshness": "coarsened",
         "inferred": "detection",
         "sql_type": "structural",

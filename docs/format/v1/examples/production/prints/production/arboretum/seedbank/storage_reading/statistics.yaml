@@ -1,7 +1,7 @@
 format_version: 1
 table: arboretum.seedbank.storage_reading
 type: table
-profiled_at: '2026-05-17T22:48:01Z'
+profiled_at: '2026-03-09T14:27:36Z'
 row_count: 0
 row_count_method: exact
 physical_layout:

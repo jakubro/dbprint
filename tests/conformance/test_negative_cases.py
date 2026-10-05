@@ -535,6 +535,53 @@ def test_stats_length_order_violated(print_dir: Path) -> None:
     assert "stats.length-order-violated" in _codes(validate_print(print_dir))
 
 
+def test_stats_geometry_count_mismatch(print_dir: Path) -> None:
+    target = print_dir / "arboretum/fixture/shape_probe/statistics.yaml"
+    data = _load_yaml_file(target)
+    data["columns"]["deployed_at"]["geometry"]["kinds"][0]["count"] += 1
+    _write_yaml_file(target, data)
+    assert "stats.geometry-count-mismatch" in _codes(validate_print(print_dir))
+
+
+def test_stats_extent_inverted(print_dir: Path) -> None:
+    target = print_dir / "arboretum/fixture/shape_probe/statistics.yaml"
+    data = _load_yaml_file(target)
+    extent = data["columns"]["deployed_at"]["extent"]
+    extent["min_x"], extent["max_x"] = extent["max_x"], extent["min_x"]
+    _write_yaml_file(target, data)
+    assert "stats.extent-inverted" in _codes(validate_print(print_dir))
+
+
+def test_stats_vector_bounds_inverted(print_dir: Path) -> None:
+    target = print_dir / "arboretum/fixture/shape_probe/statistics.yaml"
+    data = _load_yaml_file(target)
+    norm = data["columns"]["reading_embedding"]["norm"]
+    norm["min"], norm["max"] = norm["max"], norm["min"]
+    _write_yaml_file(target, data)
+    assert "stats.vector-bounds-inverted" in _codes(validate_print(print_dir))
+
+
+def test_stats_types_sum_mismatch(print_dir: Path) -> None:
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
+    data = _load_yaml_file(target)
+    data["columns"]["traits"]["types"]["object"] += 1
+    _write_yaml_file(target, data)
+    assert "stats.types-sum-mismatch" in _codes(validate_print(print_dir))
+
+
+def test_stats_types_sum_mismatch_on_a_part(print_dir: Path) -> None:
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
+    data = _load_yaml_file(target)
+    data["columns"]["traits"]["parts"][".habitat"]["classification"] = "json"
+    data["columns"]["traits"]["parts"][".habitat"]["types"] = {"string": 1}
+
+    for field in ("values", "values_coverage", "values_coverage_method", "distribution", "length"):
+        del data["columns"]["traits"]["parts"][".habitat"][field]
+
+    _write_yaml_file(target, data)
+    assert "stats.types-sum-mismatch" in _codes(validate_print(print_dir))
+
+
 def test_stats_values_sum_mismatch(print_dir: Path) -> None:
     """Warning, not error - phase A and phase B are measured seconds apart on a live table."""
 
@@ -2028,6 +2075,30 @@ def test_privacy_redacted_value_compared(print_dir: Path) -> None:
     assert "privacy.redacted-value-compared" in _codes(validate_print(print_dir))
 
 
+def test_privacy_redacted_value_compared_on_a_part(print_dir: Path) -> None:
+    stats_path = print_dir / "arboretum/seedbank/accession/statistics.yaml"
+    stats = _load_yaml_file(stats_path)
+    stats["columns"]["traits"]["parts"][".habitat"]["redacted"] = "mask"
+    _write_yaml_file(stats_path, stats)
+
+    target = print_dir / "diff.yaml"
+    data = _load_yaml_file(target)
+    data["changes"].append(
+        {
+            "kind": "statistic_changed",
+            "table": "arboretum.seedbank.accession",
+            "column": "traits",
+            "part": ".habitat",
+            "stat": "values",
+            "before": [{"value": "coastal scrub", "count": 1}],
+            "after": [{"value": "[redacted]", "count": 1}],
+        },
+    )
+    _write_yaml_file(target, data)
+
+    assert "privacy.redacted-value-compared" in _codes(validate_print(print_dir))
+
+
 def test_a_count_on_a_redacted_column_is_not_reported(print_dir: Path) -> None:
     """The control: SPEC 2.2.9 leaves every measurement comparable, only the literals withheld."""
 
@@ -2103,6 +2174,17 @@ def test_diff_grain_changed_no_change(print_dir: Path) -> None:
     _write_yaml_file(target, data)
     codes = _codes(validate_print(print_dir))
     assert "diff.grain-changed-no-change" in codes
+
+
+def test_diff_merging_changed_no_change(print_dir: Path) -> None:
+    target = print_dir / "diff.yaml"
+    data = _load_yaml_file(target)
+    block = {"engine": "ReplacingMergeTree", "key": [], "one_row_per_key": True, "rows": "stored"}
+    data["changes"].append(
+        {"kind": "merging_changed", "table": "a", "before": block, "after": block},
+    )
+    _write_yaml_file(target, data)
+    assert "diff.merging-changed-no-change" in _codes(validate_print(print_dir))
 
 
 def test_diff_physical_layout_changed_no_change(print_dir: Path) -> None:
@@ -3405,6 +3487,15 @@ def test_a_refers_to_into_a_table_outside_the_print_needs_no_mirror(print_dir: P
         ),
         (
             {
+                "kind": "external_changed",
+                "table": "arboretum.seedbank.taxon",
+                "before": True,
+                "after": True,
+            },
+            "diff.external-changed-no-change",
+        ),
+        (
+            {
                 "kind": "column_physical_name_changed",
                 "table": "arboretum.seedbank.taxon",
                 "column": "rank",
@@ -3435,7 +3526,7 @@ def test_a_refers_to_into_a_table_outside_the_print_needs_no_mirror(print_dir: P
             "diff.statistic-changed-not-a-measurement",
         ),
     ],
-    ids=["type", "physical_name", "collation", "not_a_measurement"],
+    ids=["type", "external", "physical_name", "collation", "not_a_measurement"],
 )
 def test_a_diff_event_the_families_forbid(
     print_dir: Path,

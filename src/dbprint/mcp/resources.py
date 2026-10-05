@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
+from urllib.parse import parse_qs
 
 import yaml
 
@@ -19,7 +21,7 @@ from dbprint.engine.baseline import (
 )
 from dbprint.engine.reading_guide import READING_GUIDE_FILENAME
 from dbprint.spec.fqn import join as join_fqn
-from . import errors
+from . import errors, paging
 from .reference import ReferenceDocument, read_document
 from .state import ServedConnections
 
@@ -138,10 +140,44 @@ class ResourceEntry:
 
 @dataclass(frozen=True)
 class ReadResult:
-    """One read from disk; carries the bytes/text and mimeType."""
+    """One page of a resource: its text, mimeType, and where it sits among the file's pages."""
 
     content: str
     mime_type: str
+    page: int = 1
+    pages: int = 1
+    version: str = ""
+
+    def meta(self) -> dict[str, Any]:
+        """The `_meta` every read carries (MCP.md 3.4)."""
+
+        return {"page": self.page, "pages": self.pages, "version": self.version}
+
+
+@dataclass(frozen=True)
+class ListPage:
+    """One page of `resources/list`, and the cursor to the next when one exists."""
+
+    entries: list[ResourceEntry]
+    next_cursor: str | None
+
+
+TEMPLATES: tuple[tuple[str, str, str], ...] = (
+    ("dbprint:///reference/{document}{?page,version}", "reference document", _REFERENCE_MIME),
+    *(
+        (
+            f"dbprint://{{connection}}/{kind}{{?page,version}}",
+            f"connection {kind}",
+            _KIND_MIME[kind],
+        )
+        for kind in ("manifest", "diff", "reading", "manifest_annotations")
+    ),
+    *(
+        (f"dbprint://{{connection}}/{{table}}/{kind}{{?page,version}}", f"table {kind}", mime)
+        for kind, mime in _KIND_MIME.items()
+        if kind in _KIND_FILE
+    ),
+)
 
 
 def parse_uri(uri: str) -> ResourceRef | ReferenceRef:
@@ -180,6 +216,31 @@ def parse_uri(uri: str) -> ResourceRef | ReferenceRef:
     raise errors.malformed_uri(uri)
 
 
+def list_page(state: ServedConnections, cursor: str | None) -> ListPage:
+    """The `resources/list` page `cursor` points at, under MCP.md 4.8's bound and cursor rules."""
+
+    entries = enumerate_for(state)
+    manifests = tuple(conn.output / conn.name / "manifest.yaml" for conn in state.served.values())
+    call = paging.Call("resources/list", {}, manifests)
+
+    def render(units: Any, first: bool, next_cursor: str | None) -> dict[str, Any]:
+        del first
+        reply: dict[str, Any] = {"resources": [_listed(paging.entry(u)[1]) for u in units]}
+
+        if next_cursor is not None:
+            reply["nextCursor"] = next_cursor
+
+        return reply
+
+    reply = paging.page(call, list(enumerate(entries)), render, cursor)
+    by_uri = {entry.uri: entry for entry in entries}
+
+    return ListPage(
+        entries=[by_uri[item["uri"]] for item in reply["resources"]],
+        next_cursor=reply.get("nextCursor"),
+    )
+
+
 def enumerate_for(state: ServedConnections) -> list[ResourceEntry]:
     """Deterministic resource list across every served connection, ordered per MCP.md 3.3.
 
@@ -206,12 +267,38 @@ def enumerate_for(state: ServedConnections) -> list[ResourceEntry]:
 
 
 def read(state: ServedConnections, uri: str) -> ReadResult:
-    """Resolve `uri` to a connection + path, or a server-global reference document."""
+    """The page of a resource `uri` names; the bare URI is page 1 (MCP.md 3.4)."""
 
+    bare, page, version = _page_query(uri)
+    whole = _read_whole(state, bare)
+    pages = paging.line_pages(whole.content, width=paging.escaped_width)
+
+    if not (page.isascii() and page.isdecimal()) or not 1 <= int(page) <= len(pages):
+        raise errors.page_out_of_range(uri, len(pages))
+
+    if version is None and int(page) > 1:
+        raise errors.missing_page_version(uri)
+
+    if version is not None and version != whole.version:
+        raise errors.stale_page_version(uri)
+
+    return ReadResult(
+        content=pages[int(page) - 1],
+        mime_type=whole.mime_type,
+        page=int(page),
+        pages=len(pages),
+        version=whole.version,
+    )
+
+
+def _read_whole(state: ServedConnections, uri: str) -> ReadResult:
     ref = parse_uri(uri)
 
     if isinstance(ref, ReferenceRef):
-        return ReadResult(content=read_document(ref.document), mime_type=_REFERENCE_MIME)
+        text = read_document(ref.document)
+        version = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+        return ReadResult(content=text, mime_type=_REFERENCE_MIME, version=version)
 
     if ref.connection not in state.served:
         configured = state.configured or frozenset(state.served)
@@ -299,6 +386,32 @@ def read(state: ServedConnections, uri: str) -> ReadResult:
         raise errors.manifest_references_missing_file(file_name, str(file_path))
 
     return _read_text(file_path, _KIND_MIME[ref.kind], state.files.read)
+
+
+def _page_query(uri: str) -> tuple[str, str, str | None]:
+    bare, _, query = uri.partition("?")
+
+    if not query:
+        return bare, "1", None
+
+    try:
+        fields = parse_qs(query, keep_blank_values=True, strict_parsing=True)
+    except ValueError as exc:
+        raise errors.malformed_uri(uri) from exc
+
+    if set(fields) - {"page", "version"} or any(len(v) > 1 for v in fields.values()):
+        raise errors.malformed_uri(uri)
+
+    return bare, fields.get("page", ["1"])[0], fields.get("version", [None])[0]
+
+
+def _listed(entry: ResourceEntry) -> dict[str, Any]:
+    return {
+        "uri": entry.uri,
+        "name": entry.name,
+        "description": entry.description,
+        "mimeType": entry.mime_type,
+    }
 
 
 def _enumerate_connection(conn: ConnectionConfig, read: ArtifactReader) -> list[ResourceEntry]:
@@ -397,7 +510,7 @@ def _read_text(path: Path, mime_type: str, read: ArtifactReader) -> ReadResult:
     if not path.is_file():
         raise errors.manifest_references_missing_file(path.name, str(path))
 
-    text = path.read_text(encoding="utf-8")
+    text, version = _read_unchanged(path)
 
     # A YAML artifact is served verbatim either way - this is a parseability check, not a
     # transform - but MCP.md 3 requires a parse failure to surface as -32603.
@@ -407,7 +520,19 @@ def _read_text(path: Path, mime_type: str, read: ArtifactReader) -> ReadResult:
         except yaml.YAMLError as exc:
             raise errors.yaml_parse_error(str(path), str(exc)) from exc
 
-    return ReadResult(content=text, mime_type=mime_type)
+    return ReadResult(content=text, mime_type=mime_type, version=version)
+
+
+def _read_unchanged(path: Path) -> tuple[str, str]:
+    # The version must name the text it is served with, so a rewrite during the read retries.
+    for _ in range(2):
+        before = paging.files_digest([path])
+        text = path.read_text(encoding="utf-8")
+
+        if paging.files_digest([path]) == before:
+            return text, before
+
+    raise errors.stale_page_version(str(path))
 
 
 def _load_manifest_or_none(print_root: Path, read: ArtifactReader) -> dict | None:

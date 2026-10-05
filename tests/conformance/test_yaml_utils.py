@@ -15,22 +15,22 @@ def _load(tmp_path: Path, text: str) -> object:
 
 
 def test_a_utc_instant_reads_as_an_iso_string_ending_in_z(tmp_path: Path) -> None:
-    assert _load(tmp_path, "at: 2026-05-17T22:48:01Z\n") == {"at": "2026-05-17T22:48:01Z"}
+    assert _load(tmp_path, "at: 2026-03-09T14:27:36Z\n") == {"at": "2026-03-09T14:27:36Z"}
 
 
 def test_an_offset_instant_keeps_its_offset(tmp_path: Path) -> None:
-    assert _load(tmp_path, "at: 2026-05-17T22:48:01+02:00\n") == {"at": "2026-05-17T22:48:01+02:00"}
+    assert _load(tmp_path, "at: 2026-03-09T14:27:36+02:00\n") == {"at": "2026-03-09T14:27:36+02:00"}
 
 
 def test_a_date_reads_as_an_iso_string(tmp_path: Path) -> None:
-    assert _load(tmp_path, "day: 2026-05-17\n") == {"day": "2026-05-17"}
+    assert _load(tmp_path, "day: 2026-03-09\n") == {"day": "2026-03-09"}
 
 
 def test_instants_nested_in_lists_and_maps_are_read_the_same_way(tmp_path: Path) -> None:
-    text = "rows:\n- day: 2026-05-17\n  at: [2026-05-17T00:00:00Z]\n"
+    text = "rows:\n- day: 2026-03-09\n  at: [2026-03-09T00:00:00Z]\n"
 
     assert _load(tmp_path, text) == {
-        "rows": [{"day": "2026-05-17", "at": ["2026-05-17T00:00:00Z"]}],
+        "rows": [{"day": "2026-03-09", "at": ["2026-03-09T00:00:00Z"]}],
     }
 
 

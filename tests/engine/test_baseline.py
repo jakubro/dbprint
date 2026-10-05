@@ -137,23 +137,7 @@ class TestColumnHydration:
         assert cols["email"].default is None
 
     def test_missing_statistics_yaml_leaves_columns_none(self, tmp_path: Path) -> None:
-        prints = tmp_path / "primary"
-        (prints / "public" / "curator").mkdir(parents=True)
-        manifest = {
-            "format_version": 1,
-            "tables": {
-                "public.curator": {
-                    "type": "table",
-                    "path": "public/curator",
-                    "artifacts": {"statistics": "statistics.yaml"},
-                    "columns": 0,
-                    "profiled_at": "2026-06-08T00:00:00Z",
-                },
-            },
-        }
-        (prints / "manifest.yaml").write_text(yaml.safe_dump(manifest))
-
-        states = _states(prints)
+        states = _states(_print_without_statistics(tmp_path))
 
         assert states is not None
         assert states["public.curator"].columns is None
@@ -179,23 +163,7 @@ class TestRowCountHydration:
         assert state.row_count_method == "exact"
 
     def test_missing_statistics_yaml_leaves_row_count_none(self, tmp_path: Path) -> None:
-        prints = tmp_path / "primary"
-        (prints / "public" / "curator").mkdir(parents=True)
-        manifest = {
-            "format_version": 1,
-            "tables": {
-                "public.curator": {
-                    "type": "table",
-                    "path": "public/curator",
-                    "artifacts": {"statistics": "statistics.yaml"},
-                    "columns": 0,
-                    "profiled_at": "2026-06-08T00:00:00Z",
-                },
-            },
-        }
-        (prints / "manifest.yaml").write_text(yaml.safe_dump(manifest))
-
-        states = _states(prints)
+        states = _states(_print_without_statistics(tmp_path))
 
         assert states is not None
         assert states["public.curator"].row_count is None
@@ -240,23 +208,7 @@ class TestScopedHydration:
     def test_missing_statistics_yaml_leaves_scoped_false(self, tmp_path: Path) -> None:
         """A baseline predating `scope` reads as unscoped, not as a stop-comparing signal."""
 
-        prints = tmp_path / "primary"
-        (prints / "public" / "curator").mkdir(parents=True)
-        manifest = {
-            "format_version": 1,
-            "tables": {
-                "public.curator": {
-                    "type": "table",
-                    "path": "public/curator",
-                    "artifacts": {"statistics": "statistics.yaml"},
-                    "columns": 0,
-                    "profiled_at": "2026-06-08T00:00:00Z",
-                },
-            },
-        }
-        (prints / "manifest.yaml").write_text(yaml.safe_dump(manifest))
-
-        states = _states(prints)
+        states = _states(_print_without_statistics(tmp_path))
 
         assert states is not None
         assert states["public.curator"].scoped is False
@@ -577,3 +529,23 @@ class TestAnEntryTheReaderCannotFollow:
         assert states is not None
         assert set(states) == {"public.curator"}
         assert states["public.curator"].columns is not None
+
+
+def _print_without_statistics(tmp_path: Path) -> Path:
+    prints = tmp_path / "primary"
+    (prints / "public" / "curator").mkdir(parents=True)
+    manifest = {
+        "format_version": 1,
+        "tables": {
+            "public.curator": {
+                "type": "table",
+                "path": "public/curator",
+                "artifacts": {"statistics": "statistics.yaml"},
+                "columns": 0,
+                "profiled_at": "2026-06-08T00:00:00Z",
+            },
+        },
+    }
+    (prints / "manifest.yaml").write_text(yaml.safe_dump(manifest))
+
+    return prints

@@ -17,6 +17,8 @@ import pytest
 import yaml
 
 from dbprint.adapters import DuckdbAdapter, StatisticsConfig
+from dbprint.adapters import base as adapter_base
+from dbprint.adapters import statements as adapter_statements
 from dbprint.cli.adapter_registry import ADAPTERS
 from dbprint.config.project import ConnectionConfig
 from dbprint.engine import Engine, GenerateRequest
@@ -31,11 +33,15 @@ _VENDORS_WITH_STATS = sorted(
     if importlib.util.find_spec(f"dbprint.adapters.{name}.stats") is not None
 )
 
-# Postgres reads `pg_stats.n_distinct`, an estimate the catalog stores as a float.
-_FLOAT_ALLOWLIST = {("postgres", "_approximate_cardinality")}
+# Catalog estimates, never cells: Postgres's `pg_stats.n_distinct` and a scaled row estimate.
+_FLOAT_ALLOWLIST = {("postgres", "_approximate_cardinality"), ("shared", "scoped_estimate")}
 
 _CELL_RULES = frozenset({"measured_value", "round_statistic"})
-_TEXT_BOUNDS = frozenset({"probe_timeline", "compute_populated_windows"})
+_TEXT_BOUNDS = frozenset(
+    {"probe_timeline", "compute_populated_windows", "timeline", "windows_from_row"},
+)
+# The shared statement readers apply `measured_text` themselves, so delegating to one is ruled.
+_SHARED_TEXT_READERS = frozenset({"timeline", "populated_windows", "windows_from_row"})
 
 _ROWS = 60
 _ID_BASE = 2**64
@@ -51,8 +57,8 @@ def test_every_adapter_publishes_cells_through_the_shared_rule(vendor: str) -> N
     assert not hasattr(module, "_measured_value")
     assert not hasattr(module, "_iso_or_value")
     assert not hasattr(module, "_round_numeric")
-    assert module.measured_value is rounding.measured_value
-    assert module.round_statistic is rounding.round_statistic
+    assert getattr(module, "measured_value", rounding.measured_value) is rounding.measured_value
+    assert getattr(module, "round_statistic", rounding.round_statistic) is rounding.round_statistic
     assert (
         module.render_text
         is importlib.import_module(
@@ -60,6 +66,19 @@ def test_every_adapter_publishes_cells_through_the_shared_rule(vendor: str) -> N
         ).render_text
     )
     assert _cell_violations(tree, vendor) == []
+
+
+@pytest.mark.parametrize("module", [adapter_base, adapter_statements], ids=["base", "statements"])
+def test_the_shared_assembly_publishes_cells_through_the_shared_rule(module: Any) -> None:
+    """Module-level functions only: the `Adapter` declarations share names with statement builders."""
+
+    tree = ast.parse(Path(module.__file__ or "").read_text(encoding="utf-8"))
+    functions = ast.Module(
+        body=[node for node in tree.body if isinstance(node, ast.FunctionDef)],
+        type_ignores=[],
+    )
+
+    assert _cell_violations(functions, "shared") == []
 
 
 def test_the_structural_guard_flags_what_it_exists_to_catch() -> None:
@@ -366,7 +385,9 @@ def _cell_violations(tree: ast.AST, vendor: str) -> list[tuple[int, str]]:
             and not _is_ruled(node.value.value)
         ]
 
-        if function.name in _TEXT_BOUNDS and "measured_text" not in _callees(function):
+        readers = {"measured_text", *_SHARED_TEXT_READERS} - {function.name}
+
+        if function.name in _TEXT_BOUNDS and not readers & _callees(function):
             out.append((function.lineno, f"unmeasured text bound in {function.name}"))
 
         if function.name == "_fetch_value_list" and _selects_native_rendered(function):

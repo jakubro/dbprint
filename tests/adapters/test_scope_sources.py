@@ -15,6 +15,7 @@ from dbprint.adapters.mysql.stats import _source as mysql_source
 from dbprint.adapters.postgres.stats import _source as postgres_source
 from dbprint.adapters.snowflake import DIALECT as SNOWFLAKE_DIALECT
 from dbprint.adapters.snowflake.stats import _source as snowflake_source
+from dbprint.adapters.statements import scoped_estimate
 
 
 def _snowflake(scope: TableScope | None, seed: int | None = None) -> str:
@@ -96,26 +97,18 @@ class TestTheTwoNarrowingsAreExclusive:
 class TestLooksLikePathEstimate:
     """The path decision reads the scoped size, not the table's."""
 
-    @staticmethod
-    def _scoped_estimate(module: str, scope: TableScope | None) -> float:
-        import importlib
-
-        mod = importlib.import_module(f"dbprint.adapters.{module}.looks_like")
-
-        return mod._scoped_estimate(1_000_000, scope)
-
-    @pytest.mark.parametrize("module", ["snowflake", "postgres", "mysql", "duckdb"])
-    def test_a_sample_scales_the_estimate(self, module: str) -> None:
+    def test_a_sample_scales_the_estimate(self) -> None:
         """A fraction is arithmetic, so a sampled read can reach the cheap path."""
 
-        assert self._scoped_estimate(module, TableScope(sample=0.001)) == 1_000.0
+        assert scoped_estimate(1_000_000, TableScope(sample=0.001)) == 1_000.0
 
-    @pytest.mark.parametrize("module", ["snowflake", "postgres", "mysql", "duckdb"])
-    def test_a_filter_leaves_the_estimate_alone(self, module: str) -> None:
+    def test_a_filter_leaves_the_estimate_alone(self) -> None:
         """Nothing here estimates selectivity, so a predicate cannot shrink the figure."""
 
-        assert self._scoped_estimate(module, TableScope(filter="a > 1")) == 1_000_000.0
+        assert scoped_estimate(1_000_000, TableScope(filter="a > 1")) == 1_000_000.0
 
-    @pytest.mark.parametrize("module", ["snowflake", "postgres", "mysql", "duckdb"])
-    def test_an_unscoped_read_keeps_the_whole_table(self, module: str) -> None:
-        assert self._scoped_estimate(module, None) == 1_000_000.0
+    def test_an_unscoped_read_keeps_the_whole_table(self) -> None:
+        assert scoped_estimate(1_000_000, None) == 1_000_000.0
+
+    def test_no_catalog_estimate_routes_to_the_direct_read(self) -> None:
+        assert scoped_estimate(None, TableScope(sample=0.5)) < 0

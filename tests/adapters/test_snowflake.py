@@ -19,13 +19,16 @@ from dbprint.adapters.errors import QueryFailed
 from dbprint.adapters.identifiers import IdentifierRejected, Identity, UnknownTable
 from dbprint.adapters.snowflake import DIALECT
 from dbprint.adapters.snowflake import connection as connection_module
+from dbprint.adapters.snowflake import introspect as snowflake_introspect
 from dbprint.adapters.snowflake.connection import (
     ConnectionParams,
     SnowflakeConnectionError,
     _default_cursor_factory,
     _load_private_key,
 )
-from tests.adapters.conftest import SnowflakeDialectShim
+from dbprint.config.project import ConnectionConfig, DiffConfig, RuleConfig, StatisticsConfig
+from dbprint.engine import Engine
+from tests.adapters.conftest import SnowflakeDialectShim, StubCursor
 
 
 CREDS: dict[str, str] = {
@@ -208,42 +211,6 @@ class TestKeyPairAuth:
             _load_private_key(str(tmp_path / "absent.pem"), None)
 
 
-class _StubCursor:
-    """Stub cursor whose `execute` succeeds and reports a fixed rowcount."""
-
-    def __init__(self, rowcount: int = 3) -> None:
-        self.rowcount = rowcount
-
-    def execute(self, sql: str, params: Any = None) -> None:
-        del sql, params
-
-    def fetchall(self) -> list[Any]:
-        return []
-
-    def fetchone(self) -> Any:
-        return None
-
-    def close(self) -> None:
-        pass
-
-
-class _RaisingCursor:
-    """Stub cursor whose `execute` always raises - proves the seam wraps the failure."""
-
-    def execute(self, sql: str, params: Any = None) -> None:
-        del sql, params
-        raise RuntimeError("boom")
-
-    def fetchall(self) -> list[Any]:
-        return []
-
-    def fetchone(self) -> Any:
-        return None
-
-    def close(self) -> None:
-        pass
-
-
 class TestStatementTrace:
     """exec_query's own DEBUG record - statement, params, elapsed, rows."""
 
@@ -252,7 +219,7 @@ class TestStatementTrace:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         with caplog.at_level(logging.DEBUG, logger="dbprint.adapters.snowflake.connection"):
-            connection_module.exec_query(_StubCursor(3), "SELECT ?", ("x",))
+            connection_module.exec_query(StubCursor(rowcount=3), "SELECT ?", ("x",))
 
         assert "SELECT ?" in caplog.text
         assert "rows=3" in caplog.text
@@ -265,7 +232,7 @@ class TestStatementTrace:
             caplog.at_level(logging.DEBUG, logger="dbprint.adapters.snowflake.connection"),
             pytest.raises(QueryFailed),
         ):
-            connection_module.exec_query(_RaisingCursor(), "SELECT 1")
+            connection_module.exec_query(StubCursor(error=RuntimeError("boom")), "SELECT 1")
 
         assert "statement failed" in caplog.text
 
@@ -392,8 +359,12 @@ class TestViewHandling:
 class _RecordingShim(SnowflakeDialectShim):
     """Dialect shim that also records every statement the adapter emits."""
 
-    def __init__(self, con: duckdb.DuckDBPyConnection) -> None:
-        super().__init__(con)
+    def __init__(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        table_types: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(con, table_types=table_types)
         self.statements: list[str] = []
 
     def execute(self, sql: str, params: object = None) -> _RecordingShim:
@@ -745,25 +716,6 @@ class TestImportedKeys:
         assert adapter.introspect_relationships("memory.seedbank.solo") == []
 
 
-class _RowsCursor:
-    """Cursor returning fixed enumeration rows, for catalog shapes duckdb cannot host."""
-
-    def __init__(self, rows: list[tuple[object, ...]]) -> None:
-        self._rows = rows
-
-    def execute(self, sql: str, params: object = None) -> _RowsCursor:
-        return self
-
-    def fetchall(self) -> list[tuple[object, ...]]:
-        return self._rows
-
-    def fetchone(self) -> object:
-        return self._rows[0] if self._rows else None
-
-    def close(self) -> None:
-        return None
-
-
 class TestPhysicalIdentifierCase:
     """Snowflake reports identifiers uppercase; statements must address that form.
 
@@ -902,7 +854,7 @@ class TestPhysicalIdentifierCase:
             ("MEMORY", "SEEDBANK", "Curator", "BASE TABLE"),
             ("MEMORY", "SEEDBANK", "CURATOR", "BASE TABLE"),
         ]
-        adapter = SnowflakeAdapter(CREDS, cursor_factory=lambda _: _RowsCursor(rows))
+        adapter = SnowflakeAdapter(CREDS, cursor_factory=lambda _: StubCursor(rows))
         adapter.connect()
 
         with pytest.raises(IdentifierRejected, match="case-collides-with"):
@@ -1538,3 +1490,102 @@ class TestPhaseAIsIssuedInBatches:
         assert counts.row_count == 1
         assert {name for name, stats in base.items() if stats.cardinality is None} == set()
         assert sorted(base) == sorted(c.name for c in columns)
+
+
+class TestTableKinds:
+    """Each `table_type` Snowflake reports is listed, skipped or retyped on purpose (SPEC 2.5)."""
+
+    def _adapter(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        table_types: dict[str, str],
+    ) -> tuple[SnowflakeAdapter, _RecordingShim]:
+        con.execute("CREATE SCHEMA seedbank")
+        con.execute("CREATE TABLE seedbank.curation_event (id INTEGER)")
+        con.execute("CREATE TABLE seedbank.field_log (id INTEGER)")
+        shim = _RecordingShim(con, table_types)
+        adapter = SnowflakeAdapter(CREDS, cursor_factory=lambda _: shim)
+        adapter.connect()
+
+        return adapter, shim
+
+    def test_an_event_table_is_listed_as_a_table(
+        self,
+        fresh_duckdb: duckdb.DuckDBPyConnection,
+    ) -> None:
+        adapter, _shim = self._adapter(fresh_duckdb, {"field_log": "EVENT TABLE"})
+        listed = {m.fqn: m.type for m in adapter.list_tables(include=["*"], exclude=[])}
+
+        assert listed["memory.seedbank.field_log"] == "table"
+        assert listed["memory.seedbank.curation_event"] == "table"
+
+    def test_an_external_table_is_a_table_marked_external(
+        self,
+        fresh_duckdb: duckdb.DuckDBPyConnection,
+    ) -> None:
+        adapter, _shim = self._adapter(fresh_duckdb, {"field_log": "EXTERNAL TABLE"})
+        listed = {m.fqn: m for m in adapter.list_tables(include=["*"], exclude=[])}
+
+        assert listed["memory.seedbank.field_log"].type == "table"
+        assert listed["memory.seedbank.field_log"].external is True
+        assert listed["memory.seedbank.curation_event"].external is False
+
+    def test_an_event_table_asks_get_ddl_for_its_own_kind(
+        self,
+        fresh_duckdb: duckdb.DuckDBPyConnection,
+    ) -> None:
+        adapter, shim = self._adapter(fresh_duckdb, {"field_log": "EVENT TABLE"})
+        adapter.list_tables(include=["*"], exclude=[])
+
+        ddl = adapter.extract_ddl("memory.seedbank.field_log")
+        adapter.extract_ddl("memory.seedbank.curation_event")
+        sent = [s for s in shim.statements if "GET_DDL(" in s]
+
+        assert "CREATE TABLE" in ddl
+        assert sent[0].startswith("SELECT GET_DDL('EVENT_TABLE', ")
+        assert sent[1].startswith("SELECT GET_DDL('TABLE', ")
+
+    def test_a_temporary_table_is_skipped_by_name_not_by_omission(self) -> None:
+        assert "TEMPORARY TABLE" in snowflake_introspect._UNLISTED_TABLE_TYPES
+        assert "TEMPORARY TABLE" not in snowflake_introspect._TABLE_TYPE_MAP
+
+    def test_a_temporary_table_is_not_listed(
+        self,
+        fresh_duckdb: duckdb.DuckDBPyConnection,
+    ) -> None:
+        adapter, _shim = self._adapter(fresh_duckdb, {"field_log": "TEMPORARY TABLE"})
+        listed = {m.fqn for m in adapter.list_tables(include=["*"], exclude=[])}
+
+        assert listed == {"memory.seedbank.curation_event"}
+
+    def test_a_sampled_run_lists_no_sample_copy(
+        self,
+        fresh_duckdb: duckdb.DuckDBPyConnection,
+        tmp_path: Path,
+    ) -> None:
+        fresh_duckdb.execute("CREATE SCHEMA seedbank")
+        fresh_duckdb.execute(
+            "CREATE TABLE seedbank.field_log AS SELECT range AS id FROM range(200)",
+        )
+        adapter = SnowflakeAdapter(
+            CREDS,
+            cursor_factory=lambda _: SnowflakeDialectShim(fresh_duckdb),
+        )
+        adapter.connect()
+        config = ConnectionConfig(
+            name="primary",
+            adapter="snowflake",
+            output=tmp_path,
+            rules=(RuleConfig(include=("*.field_log",), sample=0.5),),
+            statistics=StatisticsConfig(),
+            diff=DiffConfig(),
+        )
+
+        try:
+            Engine(adapter, config, tmp_path).generate()
+        finally:
+            adapter.close()
+
+        manifest = yaml.safe_load((tmp_path / "primary" / "manifest.yaml").read_text())
+
+        assert list(manifest["tables"]) == ["memory.seedbank.field_log"]

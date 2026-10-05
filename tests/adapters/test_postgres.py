@@ -8,7 +8,7 @@ against canned pg_dump output, no DB needed.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
@@ -23,7 +23,7 @@ from dbprint.adapters.identifiers import Identity, UnknownTable
 from dbprint.adapters.postgres import DIALECT, PostgresAdapter, PostgresConnectionError, introspect
 from dbprint.adapters.postgres.connection import ConnectionParams, exec_query
 from dbprint.adapters.postgres.ddl import extract_ddl, normalize
-from dbprint.adapters.postgres.stats import classify_distribution
+from dbprint.spec.distribution import classify as classify_distribution
 
 
 # Lazy-driver (missing [postgres] extra) unit test (no DB).
@@ -1059,9 +1059,11 @@ class TestEdgeCases:
                 frozenset(),
             )
 
-            # bytea -> unsupported: cardinality/method must be None (SPEC 2.2.3)
-            assert stats["blob"].cardinality is None
-            assert stats["blob"].cardinality_method is None
+            # bytea -> measured: counted, byte length, no value list (SPEC 2.2.3)
+            assert stats["blob"].cardinality == 200
+            assert stats["blob"].length is not None
+            assert (stats["blob"].length.min, stats["blob"].length.max) == (2, 2)
+            assert stats["blob"].values is None
 
             # jsonb -> json pre-classification: stats present, no value list
             assert stats["payload"].values is None
@@ -2422,47 +2424,14 @@ class TestOutOfRangeTemporal:
         self,
         postgres_test_db: dict[str, str],
     ) -> None:
-        import psycopg
-
-        from dbprint.adapters.base import ColumnMeta
         from dbprint.adapters.postgres import stats as pg_stats
-        from dbprint.config import StatisticsConfig
 
         self._seed(postgres_test_db, [])
-        config = StatisticsConfig()
-        col = ColumnMeta(
-            name="taken_at",
-            sql_type="timestamp with time zone",
-            nullable=True,
-            default=None,
-            ordinal=1,
+        utc_rng, shifted_rng = _taken_at_in_two_zones(
+            postgres_test_db,
+            pg_stats._fetch_temporal_block,
+            60,
         )
-
-        with psycopg.connect(
-            host=postgres_test_db["host"],
-            port=int(postgres_test_db["port"]),
-            dbname=postgres_test_db["database"],
-            user=postgres_test_db["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
-            conn.execute("SET TimeZone = 'UTC'")
-            utc_rng, *_ = pg_stats._fetch_temporal_block(
-                conn,
-                pg_stats._source(f"{postgres_test_db['database']}.public.viability_check", None),
-                col,
-                60,
-                config,
-            )
-
-            conn.execute("SET TimeZone = 'America/New_York'")
-            shifted_rng, *_ = pg_stats._fetch_temporal_block(
-                conn,
-                pg_stats._source(f"{postgres_test_db['database']}.public.viability_check", None),
-                col,
-                60,
-                config,
-            )
 
         assert shifted_rng.min == utc_rng.min
         assert shifted_rng.max == utc_rng.max
@@ -2473,47 +2442,14 @@ class TestOutOfRangeTemporal:
     ) -> None:
         """A low-cardinality timestamptz's `values` must agree with `range` on the frame."""
 
-        import psycopg
-
-        from dbprint.adapters.base import ColumnMeta
         from dbprint.adapters.postgres import stats as pg_stats
-        from dbprint.config import StatisticsConfig
 
         self._seed(postgres_test_db, [])
-        config = StatisticsConfig()
-        col = ColumnMeta(
-            name="taken_at",
-            sql_type="timestamp with time zone",
-            nullable=True,
-            default=None,
-            ordinal=1,
+        utc_values, shifted_values = _taken_at_in_two_zones(
+            postgres_test_db,
+            pg_stats._fetch_value_list,
+            240,
         )
-
-        with psycopg.connect(
-            host=postgres_test_db["host"],
-            port=int(postgres_test_db["port"]),
-            dbname=postgres_test_db["database"],
-            user=postgres_test_db["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
-            conn.execute("SET TimeZone = 'UTC'")
-            utc_values, *_ = pg_stats._fetch_value_list(
-                conn,
-                pg_stats._source(f"{postgres_test_db['database']}.public.viability_check", None),
-                col,
-                240,
-                config,
-            )
-
-            conn.execute("SET TimeZone = 'America/New_York'")
-            shifted_values, *_ = pg_stats._fetch_value_list(
-                conn,
-                pg_stats._source(f"{postgres_test_db['database']}.public.viability_check", None),
-                col,
-                240,
-                config,
-            )
 
         assert shifted_values == utc_values
         assert all(entry.value.endswith("Z") for entry in utc_values)
@@ -2587,3 +2523,40 @@ class TestClassifyDistributionSkipsIncoherentRatios:
         counts = [96, 1]
 
         assert classify_distribution(counts, 100, exhaustive=True) == "dominant_value"
+
+
+def _taken_at_in_two_zones(
+    creds: dict[str, str],
+    fetch: Callable[..., Any],
+    limit: int,
+) -> tuple[Any, Any]:
+    import psycopg
+
+    from dbprint.adapters.base import ColumnMeta
+    from dbprint.adapters.postgres import stats as pg_stats
+    from dbprint.config import StatisticsConfig
+
+    col = ColumnMeta(
+        name="taken_at",
+        sql_type="timestamp with time zone",
+        nullable=True,
+        default=None,
+        ordinal=1,
+    )
+    source = pg_stats._source(f"{creds['database']}.public.viability_check", None)
+    read = []
+
+    with psycopg.connect(
+        host=creds["host"],
+        port=int(creds["port"]),
+        dbname=creds["database"],
+        user=creds["user"],
+        password="",
+        autocommit=True,
+    ) as conn:
+        for zone in ("UTC", "America/New_York"):
+            conn.execute(f"SET TimeZone = '{zone}'")
+            first, *_ = fetch(conn, source, col, limit, StatisticsConfig())
+            read.append(first)
+
+    return read[0], read[1]

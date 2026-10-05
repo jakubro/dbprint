@@ -116,31 +116,7 @@ class TestAdaptersAgreeOnHowTheyMeasured:
         self,
         all_sql_adapters: dict[str, Adapter],
     ) -> None:
-        from dbprint.adapters.clickhouse import stats as clickhouse_stats
-        from dbprint.adapters.postgres import stats as postgres_stats
-
-        methods = {}
-
-        for vendor, adapter in all_sql_adapters.items():
-            table = next(t for t in adapter.list_tables(include=["*.viability_check"], exclude=[]))
-            columns = adapter.introspect_columns(table.fqn)
-
-            with (
-                patch.object(snowflake_stats, "APPROXIMATE_THRESHOLD", 10),
-                patch.object(postgres_stats, "APPROXIMATE_THRESHOLD", 10),
-                patch.object(clickhouse_stats, "APPROXIMATE_THRESHOLD", 10),
-            ):
-                stats = adapter.compute_statistics(
-                    table.fqn,
-                    columns,
-                    StatisticsConfig(),
-                    frozenset(),
-                    None,
-                    TableScope(filter="score < 10"),
-                )[1]
-
-            methods[vendor] = stats["rank"].cardinality_method
-            adapter.close()
+        methods = _cardinality_methods(all_sql_adapters, TableScope(filter="score < 10"))
 
         narrowed = {v: m for v, m in methods.items() if v != "bigquery"}
         assert set(narrowed.values()) == {"exact"}, f"adapters disagree: {narrowed}"
@@ -156,31 +132,42 @@ class TestMysqlNeverEstimates:
         self,
         all_sql_adapters: dict[str, Adapter],
     ) -> None:
-        from dbprint.adapters.clickhouse import stats as clickhouse_stats
-        from dbprint.adapters.postgres import stats as postgres_stats
-
-        methods = {}
-
-        for vendor, adapter in all_sql_adapters.items():
-            table = next(t for t in adapter.list_tables(include=["*.viability_check"], exclude=[]))
-            columns = adapter.introspect_columns(table.fqn)
-
-            with (
-                patch.object(snowflake_stats, "APPROXIMATE_THRESHOLD", 10),
-                patch.object(postgres_stats, "APPROXIMATE_THRESHOLD", 10),
-                patch.object(clickhouse_stats, "APPROXIMATE_THRESHOLD", 10),
-            ):
-                stats = adapter.compute_statistics(
-                    table.fqn,
-                    columns,
-                    StatisticsConfig(),
-                    frozenset(),
-                )[1]
-
-            methods[vendor] = stats["rank"].cardinality_method
-            adapter.close()
+        methods = _cardinality_methods(all_sql_adapters, None)
 
         assert methods["postgres"] == "approximate", methods
         assert methods["snowflake"] == "approximate", methods
         assert methods["clickhouse"] == "approximate", methods
         assert methods["mysql"] == "exact", methods
+
+
+def _cardinality_methods(
+    adapters: dict[str, Adapter],
+    scope: TableScope | None,
+) -> dict[str, str | None]:
+    from dbprint.adapters.clickhouse import stats as clickhouse_stats
+    from dbprint.adapters.postgres import stats as postgres_stats
+
+    methods = {}
+
+    for vendor, adapter in adapters.items():
+        table = next(t for t in adapter.list_tables(include=["*.viability_check"], exclude=[]))
+        columns = adapter.introspect_columns(table.fqn)
+
+        with (
+            patch.object(snowflake_stats, "APPROXIMATE_THRESHOLD", 10),
+            patch.object(postgres_stats, "APPROXIMATE_THRESHOLD", 10),
+            patch.object(clickhouse_stats, "APPROXIMATE_THRESHOLD", 10),
+        ):
+            stats = adapter.compute_statistics(
+                table.fqn,
+                columns,
+                StatisticsConfig(),
+                frozenset(),
+                None,
+                scope,
+            )[1]
+
+        methods[vendor] = stats["rank"].cardinality_method
+        adapter.close()
+
+    return methods

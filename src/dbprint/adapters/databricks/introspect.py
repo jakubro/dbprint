@@ -43,7 +43,8 @@ class UnmappedTableType(RuntimeError):
 
 
 # The eight documented `information_schema.tables.table_type` values - bare "TABLE" is not among
-# them. Streaming, foreign and shallow-clone tables all behave as tables; only a view differs.
+# them. Streaming, foreign and shallow-clone tables are all tables; a foreign one is also marked
+# external, its rows answered by another system.
 _TABLE_TYPE_MAP: dict[str, TableType] = {
     "MANAGED": "table",
     "EXTERNAL": "table",
@@ -206,7 +207,8 @@ def _uc_list_candidates(cursor: Cursor, catalog: str) -> list[_Candidate]:
             )
 
         physical = (catalog, schema, name)
-        out.append((table_meta(physical, canonical_type), physical))
+        external = str(table_type).upper() == "FOREIGN"
+        out.append((table_meta(physical, canonical_type, external=external), physical))
 
     return out
 

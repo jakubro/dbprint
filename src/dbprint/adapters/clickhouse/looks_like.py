@@ -4,19 +4,17 @@ and degrades to a direct scan, needing no cross-statement coherence to refuse ov
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any
 
 from . import introspect, stats
-from .connection import Cursor, exec_query
+from .connection import DIALECT, Cursor, exec_query
 from .rendering import render_operand, render_text
-from ..base import TableScope, seed_from_fqn
+from .. import statements
+from ..base import TableScope, is_string_like
 from ..errors import QueryFailed
 from ..identifiers import Identity
-from ..sql_layout import derived, indented
-
-
-SMALL_TABLE_FACTOR = 10  # row_count < n * factor -> direct DISTINCT path
-SAMPLE_RATE_MULTIPLIER = 10  # over-sample to compensate for the DISTINCT filter
+from ..sql_layout import derived
 
 
 def sample_distinct(
@@ -27,22 +25,23 @@ def sample_distinct(
     scope: TableScope | None = None,
     sql_type: str | None = None,
 ) -> list[Any]:
-    """Return up to n distinct non-null sampled values for the column."""
+    """Return up to n distinct non-null sampled values for the column.
+
+    A narrowed read never draws - `SAMPLE` binds to the bare table - so no predicate can starve it.
+    """
 
     cn = identity.source_column(column)
     source = stats._source(identity, scope)
-    seed = seed_from_fqn(identity.fqn, 2**31)
+    seed = statements.table_seed(identity)
+    narrows = scope is not None and scope.narrows
 
-    if scope is None or not scope.narrows:
-        estimate = introspect.estimate_row_count(cursor, identity)
-
-        if estimate >= n * SMALL_TABLE_FACTOR:
-            oversampled = _try_oversample(cursor, source, cn, n, seed, sql_type)
-
-            if oversampled is not None:
-                return oversampled
-
-    return _distinct(cursor, source, cn, n, seed, sql_type)
+    return statements.sample_distinct(
+        scope,
+        n,
+        -1.0 if narrows else introspect.estimate_row_count(cursor, identity),
+        direct=lambda: _distinct(cursor, source, cn, n, seed, sql_type),
+        draw=lambda: _try_oversample(cursor, source, cn, n, seed, sql_type),
+    )
 
 
 def _try_oversample(
@@ -60,7 +59,7 @@ def _try_oversample(
         SELECT
           {cn} AS v
         FROM
-          {quoted_table} SAMPLE {int(n * SAMPLE_RATE_MULTIPLIER)}
+          {quoted_table} SAMPLE {int(n * statements.SAMPLE_RATE_MULTIPLIER)}
         WHERE
           {cn} IS NOT NULL
         """,
@@ -81,36 +80,20 @@ def _distinct(
     seed: int,
     sql_type: str | None,
 ) -> list[Any]:
-    """Up to n distinct non-null values of the column from one source expression, ordered by a
-    hash of the seed and the value (SPEC 4.1.2) - a fixed, reproducible permutation.
-    """
-
     selected = (
         render_text(quoted_col, sql_type)
-        if sql_type is not None and stats._is_string_like(sql_type)
+        if sql_type is not None and is_string_like(sql_type, stats._is_unsupported)
         else render_operand(quoted_col, sql_type)
         if sql_type is not None
         else quoted_col
     )
-    rows = exec_query(
-        cursor,
-        f"""
-        SELECT
-          drw.v
-        FROM
-          (
-            SELECT DISTINCT
-              {indented(selected, 14)} AS v
-            FROM
-              {indented(source, 14)}
-            WHERE
-              {quoted_col} IS NOT NULL
-          ) drw
-        ORDER BY
-          halfMD5(concat(%s, toString(drw.v)))
-        LIMIT %s
-        """,
-        (str(seed), n),
-    ).fetchall()
 
-    return [r[0] for r in rows]
+    return statements.distinct_values(
+        partial(exec_query, cursor),
+        DIALECT,
+        source,
+        quoted_col,
+        selected,
+        n,
+        seed,
+    )

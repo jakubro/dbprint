@@ -51,6 +51,9 @@
     "catalog_only": {
       "const": true
     },
+    "external": {
+      "const": true
+    },
     "scope": {
       "type": "object",
       "additionalProperties": false,
@@ -108,6 +111,9 @@
     },
     "physical_layout": {
       "$ref": "#/$defs/PhysicalLayout"
+    },
+    "merging": {
+      "$ref": "#/$defs/Merging"
     },
     "grain": {
       "$ref": "#/$defs/Grain"
@@ -231,6 +237,38 @@
         "column": {
           "type": "string",
           "minLength": 1
+        }
+      }
+    },
+    "Merging": {
+      "type": "object",
+      "description": "SPEC 2.2.19: a merging engine combines rows sharing `key` only when it merges parts.",
+      "additionalProperties": false,
+      "required": [
+        "engine",
+        "key",
+        "one_row_per_key",
+        "rows"
+      ],
+      "properties": {
+        "engine": {
+          "type": "string",
+          "minLength": 1
+        },
+        "key": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PhysicalLayoutKey"
+          }
+        },
+        "one_row_per_key": {
+          "type": "boolean"
+        },
+        "rows": {
+          "enum": [
+            "stored",
+            "merged"
+          ]
         }
       }
     },
@@ -410,10 +448,14 @@
       "enum": [
         "boolean",
         "json",
+        "composite",
+        "spatial",
+        "vector",
         "foreign_key_candidate",
         "categorical",
         "temporal",
         "numeric",
+        "binary",
         "text",
         "unsupported"
       ]
@@ -451,7 +493,13 @@
         "numeric_string",
         "semver",
         "filename",
-        "prose"
+        "prose",
+        "png",
+        "jpeg",
+        "gif",
+        "pdf",
+        "gzip",
+        "zip"
       ]
     },
     "Distribution": {
@@ -562,6 +610,170 @@
           "type": "number",
           "minimum": 0
         }
+      }
+    },
+    "Geometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "SPEC 2.2.4: a spatial column's kinds, reference systems, coordinate dimensions, empty and invalid counts.",
+      "required": [
+        "kinds",
+        "dimensions",
+        "empty_count"
+      ],
+      "properties": {
+        "kinds": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "count"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "minLength": 1
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          }
+        },
+        "srids": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "srid",
+              "count"
+            ],
+            "properties": {
+              "srid": {
+                "type": [
+                  "integer",
+                  "string"
+                ]
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          }
+        },
+        "dimensions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "dimensions",
+              "count"
+            ],
+            "properties": {
+              "dimensions": {
+                "enum": [
+                  "xy",
+                  "xyz",
+                  "xym",
+                  "xyzm"
+                ]
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          }
+        },
+        "empty_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "invalid_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "Extent": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "SPEC 2.2.4: the X/Y box over a spatial column's non-empty values, rounded outward.",
+      "required": [
+        "min_x",
+        "min_y",
+        "max_x",
+        "max_y"
+      ],
+      "properties": {
+        "min_x": {
+          "type": "number"
+        },
+        "min_y": {
+          "type": "number"
+        },
+        "max_x": {
+          "type": "number"
+        },
+        "max_y": {
+          "type": "number"
+        }
+      }
+    },
+    "Dimension": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "SPEC 2.2.4: the fewest and most elements among a vector column's non-null values.",
+      "required": [
+        "min",
+        "max"
+      ],
+      "properties": {
+        "min": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "Norm": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "SPEC 2.2.4: the smallest and largest Euclidean norm among a vector column's non-zero values.",
+      "required": [
+        "min",
+        "max"
+      ],
+      "properties": {
+        "min": {
+          "type": "number",
+          "minimum": 0
+        },
+        "max": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "Types": {
+      "type": "object",
+      "description": "SPEC 2.2.4: how many values hold each engine type name; a count, never a literal.",
+      "minProperties": 1,
+      "propertyNames": {
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
       }
     },
     "Percentiles": {
@@ -821,6 +1033,39 @@
         },
         "sketch": {
           "$ref": "#/$defs/Sketch"
+        },
+        "geometry": {
+          "$ref": "#/$defs/Geometry"
+        },
+        "extent": {
+          "$ref": "#/$defs/Extent"
+        },
+        "dimension": {
+          "$ref": "#/$defs/Dimension"
+        },
+        "norm": {
+          "$ref": "#/$defs/Norm"
+        },
+        "parts": {
+          "type": "object",
+          "description": "SPEC 2.2.18: the profiled parts of this column, keyed by canonical path relative to it.",
+          "additionalProperties": {
+            "$ref": "#/$defs/Part"
+          }
+        },
+        "parts_found": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "size": {
+          "$ref": "#/$defs/Length"
+        },
+        "types": {
+          "$ref": "#/$defs/Types"
+        },
+        "occurrences": {
+          "type": "integer",
+          "minimum": 0
         }
       },
       "allOf": [
@@ -836,6 +1081,15 @@
           "$ref": "#/$defs/JsonRules"
         },
         {
+          "$ref": "#/$defs/CompositeRules"
+        },
+        {
+          "$ref": "#/$defs/SpatialRules"
+        },
+        {
+          "$ref": "#/$defs/VectorRules"
+        },
+        {
           "$ref": "#/$defs/ForeignKeyCandidateRules"
         },
         {
@@ -848,10 +1102,278 @@
           "$ref": "#/$defs/NumericRules"
         },
         {
+          "$ref": "#/$defs/BinaryRules"
+        },
+        {
           "$ref": "#/$defs/TextRules"
         },
         {
           "$ref": "#/$defs/UnsupportedRules"
+        }
+      ]
+    },
+    "Part": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "SPEC 2.2.18: one part's block - the column block for its classification, over its occurrences, less the column-only fields.",
+      "required": [
+        "classification",
+        "sql_type",
+        "null_count",
+        "null_rate",
+        "occurrences"
+      ],
+      "properties": {
+        "sql_type": {
+          "type": "string"
+        },
+        "nullable": {
+          "type": "boolean"
+        },
+        "null_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "null_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "cardinality": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cardinality_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "cardinality_method": {
+          "$ref": "#/$defs/Method"
+        },
+        "classification": {
+          "$ref": "#/$defs/Classification"
+        },
+        "physical_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "collation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "physical_layout_key": {
+          "const": true
+        },
+        "rows_scanned": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "populated": {
+          "$ref": "#/$defs/Populated"
+        },
+        "inferred": {
+          "$ref": "#/$defs/Inferred"
+        },
+        "values": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ValueEntry"
+          }
+        },
+        "values_coverage": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "values_coverage_method": {
+          "$ref": "#/$defs/ValuesCoverageMethod"
+        },
+        "distribution": {
+          "$ref": "#/$defs/Distribution"
+        },
+        "frequencies": {
+          "$ref": "#/$defs/Frequencies"
+        },
+        "range": {
+          "$ref": "#/$defs/Range"
+        },
+        "percentiles": {
+          "$ref": "#/$defs/Percentiles"
+        },
+        "mean": {
+          "type": "number"
+        },
+        "sum": {
+          "type": "number"
+        },
+        "zero_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "negative_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "empty_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "quantized_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "length": {
+          "$ref": "#/$defs/Length"
+        },
+        "normalized_cardinality": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "freshness": {
+          "$ref": "#/$defs/Freshness"
+        },
+        "unrepresentable": {
+          "$ref": "#/$defs/Unrepresentable"
+        },
+        "unmeasured": {
+          "$ref": "#/$defs/Unmeasured"
+        },
+        "redacted": {
+          "$ref": "#/$defs/Redaction"
+        },
+        "sketch": {
+          "$ref": "#/$defs/Sketch"
+        },
+        "geometry": {
+          "$ref": "#/$defs/Geometry"
+        },
+        "extent": {
+          "$ref": "#/$defs/Extent"
+        },
+        "dimension": {
+          "$ref": "#/$defs/Dimension"
+        },
+        "norm": {
+          "$ref": "#/$defs/Norm"
+        },
+        "parts": {
+          "type": "object",
+          "description": "SPEC 2.2.18: the profiled parts of this column, keyed by canonical path relative to it.",
+          "additionalProperties": {
+            "$ref": "#/$defs/Part"
+          }
+        },
+        "parts_found": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "size": {
+          "$ref": "#/$defs/Length"
+        },
+        "types": {
+          "$ref": "#/$defs/Types"
+        },
+        "occurrences": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "allOf": [
+        {
+          "$ref": "#/$defs/NothingWithheldWhenRedacted"
+        },
+        {
+          "not": {
+            "required": [
+              "nullable"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "physical_name"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "collation"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "physical_layout_key"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "rows_scanned"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "populated"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "sketch"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "normalized_cardinality"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parts"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parts_found"
+            ]
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "candidate_key"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "candidate_key_exception"
+                ]
+              }
+            }
+          }
         }
       ]
     },
@@ -983,6 +1505,69 @@
           "not": {
             "required": [
               "quantized_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "geometry"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "extent"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "dimension"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "norm"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parts"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parts_found"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "size"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "occurrences"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "types"
             ]
           }
         }
@@ -1151,6 +1736,924 @@
               "quantized_count"
             ]
           }
+        },
+        {
+          "not": {
+            "required": [
+              "geometry"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "extent"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "dimension"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "norm"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "occurrences"
+            ]
+          }
+        }
+      ]
+    },
+    "CompositeRules": {
+      "properties": {
+        "classification": {
+          "const": "composite"
+        }
+      },
+      "required": [
+        "classification",
+        "sql_type",
+        "nullable",
+        "null_count",
+        "null_rate",
+        "parts",
+        "parts_found"
+      ],
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "occurrences"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "values"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "values_coverage"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "values_coverage_method"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "distribution"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "frequencies"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "range"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "percentiles"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "mean"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "sum"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "negative_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "quantized_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "length"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "normalized_cardinality"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "freshness"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "redacted"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "unrepresentable"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "sketch"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "geometry"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "extent"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "dimension"
+            ]
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "looks_like"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "sampled"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "matched"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "looks_like_candidate"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "looks_like_candidate_share"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "fk_candidate"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "epoch_unit"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "types"
+            ]
+          }
+        }
+      ]
+    },
+    "SpatialRules": {
+      "properties": {
+        "classification": {
+          "const": "spatial"
+        }
+      },
+      "required": [
+        "classification",
+        "sql_type",
+        "nullable",
+        "null_count",
+        "null_rate"
+      ],
+      "if": {
+        "not": {
+          "required": [
+            "unmeasured"
+          ]
+        }
+      },
+      "then": {
+        "required": [
+          "geometry"
+        ]
+      },
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "cardinality"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "cardinality_ratio"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "cardinality_method"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "values"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "values_coverage"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "values_coverage_method"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "distribution"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "frequencies"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "range"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "percentiles"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "mean"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "sum"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "zero_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "negative_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "empty_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "quantized_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "length"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "normalized_cardinality"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "freshness"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "unrepresentable"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "sketch"
+            ]
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "looks_like"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "sampled"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "matched"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "looks_like_candidate"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "looks_like_candidate_share"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "fk_candidate"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "epoch_unit"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "candidate_key"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "candidate_key_exception"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "dimension"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "norm"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parts"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parts_found"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "size"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "occurrences"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "types"
+            ]
+          }
+        }
+      ]
+    },
+    "VectorRules": {
+      "properties": {
+        "classification": {
+          "const": "vector"
+        }
+      },
+      "required": [
+        "classification",
+        "sql_type",
+        "nullable",
+        "null_count",
+        "null_rate"
+      ],
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "geometry"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "extent"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "redacted"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "cardinality"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "cardinality_ratio"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "cardinality_method"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "values"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "values_coverage"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "values_coverage_method"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "distribution"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "frequencies"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "range"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "percentiles"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "mean"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "sum"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "negative_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "empty_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "quantized_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "length"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "normalized_cardinality"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "freshness"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "unrepresentable"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "sketch"
+            ]
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "looks_like"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "sampled"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "matched"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "looks_like_candidate"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "looks_like_candidate_share"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "fk_candidate"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "epoch_unit"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "candidate_key"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "candidate_key_exception"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parts"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parts_found"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "size"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "occurrences"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "types"
+            ]
+          }
         }
       ]
     },
@@ -1259,6 +2762,69 @@
           "not": {
             "required": [
               "quantized_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "geometry"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "extent"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "dimension"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "norm"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parts"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parts_found"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "size"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "occurrences"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "types"
             ]
           }
         }
@@ -1380,6 +2946,69 @@
           "not": {
             "required": [
               "quantized_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "geometry"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "extent"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "dimension"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "norm"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parts"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parts_found"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "size"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "occurrences"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "types"
             ]
           }
         }
@@ -1532,6 +3161,69 @@
               "empty_count"
             ]
           }
+        },
+        {
+          "not": {
+            "required": [
+              "geometry"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "extent"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "dimension"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "norm"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parts"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parts_found"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "size"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "occurrences"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "types"
+            ]
+          }
         }
       ]
     },
@@ -1645,6 +3337,69 @@
               "empty_count"
             ]
           }
+        },
+        {
+          "not": {
+            "required": [
+              "geometry"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "extent"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "dimension"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "norm"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parts"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parts_found"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "size"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "occurrences"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "types"
+            ]
+          }
         }
       ]
     },
@@ -1717,6 +3472,239 @@
           ]
         }
       }
+    },
+    "BinaryRules": {
+      "properties": {
+        "classification": {
+          "const": "binary"
+        }
+      },
+      "required": [
+        "classification",
+        "sql_type",
+        "nullable",
+        "null_count",
+        "null_rate"
+      ],
+      "if": {
+        "not": {
+          "required": [
+            "unmeasured"
+          ]
+        }
+      },
+      "then": {
+        "required": [
+          "cardinality",
+          "cardinality_ratio",
+          "cardinality_method"
+        ],
+        "if": {
+          "not": {
+            "required": [
+              "redacted"
+            ]
+          }
+        },
+        "then": {
+          "required": [
+            "empty_count",
+            "length"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "values"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "values_coverage"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "values_coverage_method"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "distribution"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "frequencies"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "range"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "percentiles"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "mean"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "sum"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "zero_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "negative_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "quantized_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "normalized_cardinality"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "freshness"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "unrepresentable"
+            ]
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "fk_candidate"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "inferred": {
+              "not": {
+                "required": [
+                  "epoch_unit"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "geometry"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "extent"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "dimension"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "norm"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parts"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parts_found"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "size"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "occurrences"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "types"
+            ]
+          }
+        }
+      ]
     },
     "TextRules": {
       "properties": {
@@ -1839,6 +3827,69 @@
           "not": {
             "required": [
               "quantized_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "geometry"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "extent"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "dimension"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "norm"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parts"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parts_found"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "size"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "occurrences"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "types"
             ]
           }
         }
@@ -2016,6 +4067,69 @@
           "not": {
             "required": [
               "quantized_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "geometry"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "extent"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "dimension"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "norm"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parts"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "parts_found"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "size"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "occurrences"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "types"
             ]
           }
         }
@@ -2225,6 +4339,21 @@
               "required": [
                 "sketch"
               ]
+            },
+            {
+              "required": [
+                "extent"
+              ]
+            },
+            {
+              "required": [
+                "dimension"
+              ]
+            },
+            {
+              "required": [
+                "norm"
+              ]
             }
           ]
         }
@@ -2239,7 +4368,7 @@
       }
     },
     "TableUnmeasured": {
-      "description": "SPEC 2.2.1: the table-level twin, restricted to the three blocks whose absence is otherwise a positive claim. `grain` is excluded (required, and `search.exhausted` already carries the partial case) and so is `depends_on` (its absence already means the producer could not ask).",
+      "description": "SPEC 2.2.1: the table-level twin, restricted to the blocks whose absence is otherwise a positive claim. `grain` is excluded (required, and `search.exhausted` already carries the partial case) and so is `depends_on` (its absence already means the producer could not ask).",
       "type": "array",
       "uniqueItems": true,
       "minItems": 1,
@@ -2248,7 +4377,8 @@
         "enum": [
           "physical_layout",
           "null_patterns",
-          "dependencies"
+          "dependencies",
+          "merging"
         ]
       }
     },

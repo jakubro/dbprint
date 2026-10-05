@@ -15,10 +15,6 @@ from click.testing import CliRunner
 from rich.console import Console
 
 from dbprint.adapters import (
-    ColumnMeta,
-    ColumnStats,
-    CommentsMeta,
-    Inferred,
     MockAdapter,
     MockTable,
     trace_context,
@@ -35,6 +31,7 @@ from dbprint.cli.rendering.progress import (
 from dbprint.engine import DiffSummary, GenerateResult, ProgressEvent, SummaryCounts, TableResult
 from dbprint.engine.orchestrator import _ProgressEmitter
 from dbprint.engine.result import ProgressPhase, ProgressStatus
+from tests._prints import uuid_id_table
 
 
 _BAR_RE = re.compile(r"(?P<label>.+?)  \[[#-]*\]  (?P<index>\d+)/(?P<total>\d+)  ")
@@ -220,40 +217,8 @@ class TestStreamingRenderer:
         buf = StringIO()
 
         with StreamingProgressRenderer(buf) as r:
-            r.on_event(ProgressEvent(connection="acme", phase="inventory", status="start", total=3))
-            r.on_event(
-                ProgressEvent(
-                    connection="acme",
-                    phase="inventory",
-                    status="start",
-                    index=1,
-                    total=3,
-                    fqn="seedbank.a",
-                ),
-            )
-            r.on_event(
-                ProgressEvent(
-                    connection="acme",
-                    phase="inventory",
-                    status="start",
-                    index=2,
-                    total=3,
-                    fqn="seedbank.b",
-                ),
-            )
-            # seedbank closes here - its schema differs from fieldwork's, one object late.
-            r.on_event(
-                ProgressEvent(
-                    connection="acme",
-                    phase="inventory",
-                    status="start",
-                    index=3,
-                    total=3,
-                    fqn="fieldwork.c",
-                ),
-            )
-            # fieldwork closes only on the phase's own "done".
-            r.on_event(ProgressEvent(connection="acme", phase="inventory", status="done", total=3))
+            for event in _two_schema_inventory():
+                r.on_event(event)
 
         lines = buf.getvalue().splitlines()
         schema_lines = [line for line in lines if "\tinventory\tschema\t" in line]
@@ -443,44 +408,8 @@ class TestLiveRenderer:
         console = Console(file=buf, force_terminal=True, width=80, color_system=None)
 
         with LiveProgressRenderer(console) as r:
-            r.on_event(
-                ProgressEvent(connection="acme", phase="inventory", status="start", total=3),
-            )
-            r.on_event(
-                ProgressEvent(
-                    connection="acme",
-                    phase="inventory",
-                    status="start",
-                    index=1,
-                    total=3,
-                    fqn="seedbank.a",
-                ),
-            )
-            r.on_event(
-                ProgressEvent(
-                    connection="acme",
-                    phase="inventory",
-                    status="start",
-                    index=2,
-                    total=3,
-                    fqn="seedbank.b",
-                ),
-            )
-            # seedbank closes here - two objects seen before fieldwork's first tick.
-            r.on_event(
-                ProgressEvent(
-                    connection="acme",
-                    phase="inventory",
-                    status="start",
-                    index=3,
-                    total=3,
-                    fqn="fieldwork.c",
-                ),
-            )
-            # fieldwork closes only on the phase's own "done" - never one tick behind.
-            r.on_event(
-                ProgressEvent(connection="acme", phase="inventory", status="done", total=3),
-            )
+            for event in _two_schema_inventory():
+                r.on_event(event)
 
         out = buf.getvalue()
 
@@ -1299,34 +1228,18 @@ class _MockPostgresAdapter(MockAdapter):
         super().__init__(_two_table_fixture())
 
 
+class _StatisticsFailAdapter(MockAdapter):
+    REQUIRED_KEYS = ("host", "port", "database", "user", "password")
+
+    def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
+        super().__init__({"public.a": uuid_id_table("public.a")})
+
+    def compute_column_statistics(self, fqn: str, *args: object, **kwargs: object):
+        raise RuntimeError("boom")
+
+
 def _two_table_fixture() -> dict[str, MockTable]:
-    return {"public.a": _table("public", "a"), "public.b": _table("public", "b")}
-
-
-def _table(schema: str, name: str) -> MockTable:
-    return MockTable(
-        type="table",
-        namespace_path=(schema, name),
-        ddl=f"CREATE TABLE {schema}.{name} (id uuid PRIMARY KEY);\n",
-        columns=[ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1)],
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={
-            "id": ColumnStats(
-                sql_type="uuid",
-                nullable=False,
-                null_count=0,
-                null_rate=0.0,
-                cardinality=10,
-                cardinality_ratio=1.0,
-                cardinality_method="exact",
-                inferred=Inferred(candidate_key=True),
-            ),
-        },
-        samples={"id": [f"00000000-0000-7000-8000-{i:012d}" for i in range(10)]},
-        row_count=10,
-    )
+    return {"public.a": uuid_id_table("public.a"), "public.b": uuid_id_table("public.b")}
 
 
 def _credential_env() -> dict[str, str]:
@@ -1462,20 +1375,11 @@ class TestPipedStreamingThroughCli:
         for k, v in _credential_env().items():
             monkeypatch.setenv(k, v)
 
-        class _BrokenAdapter(MockAdapter):
-            REQUIRED_KEYS = ("host", "port", "database", "user", "password")
-
-            def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
-                super().__init__({"public.a": _table("public", "a")})
-
-            def compute_column_statistics(self, fqn: str, *args: object, **kwargs: object):
-                raise RuntimeError("boom")
-
         runner = CliRunner()
 
         with patch.dict(
             "dbprint.cli.adapter_registry.ADAPTERS",
-            {"postgres": _BrokenAdapter},
+            {"postgres": _StatisticsFailAdapter},
             clear=True,
         ):
             result = runner.invoke(main, ["generate", "--no-tui"])
@@ -1547,18 +1451,9 @@ class TestQuiet:
         for k, v in _credential_env().items():
             monkeypatch.setenv(k, v)
 
-        class _BrokenAdapter(MockAdapter):
-            REQUIRED_KEYS = ("host", "port", "database", "user", "password")
-
-            def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
-                super().__init__({"public.a": _table("public", "a")})
-
-            def compute_column_statistics(self, fqn: str, *args: object, **kwargs: object):
-                raise RuntimeError("boom")
-
         with patch.dict(
             "dbprint.cli.adapter_registry.ADAPTERS",
-            {"postgres": _BrokenAdapter},
+            {"postgres": _StatisticsFailAdapter},
             clear=True,
         ):
             result = CliRunner().invoke(main, ["generate", "--no-tui", "--quiet"])
@@ -1708,3 +1603,28 @@ def _eta(renderer: LiveProgressRenderer) -> float | None:
     hours, minutes, seconds = (int(part) for part in shown.split(":"))
 
     return hours * 3600 + minutes * 60 + seconds
+
+
+def _two_schema_inventory() -> list[ProgressEvent]:
+    """Inventory ticks for `seedbank.a`, `seedbank.b` then `fieldwork.c`.
+
+    `seedbank` closes on `fieldwork`'s first tick, one object late; `fieldwork` closes on "done".
+    """
+
+    ticks = [
+        ProgressEvent(
+            connection="acme",
+            phase="inventory",
+            status="start",
+            index=i,
+            total=3,
+            fqn=fqn,
+        )
+        for i, fqn in enumerate(("seedbank.a", "seedbank.b", "fieldwork.c"), start=1)
+    ]
+
+    return [
+        ProgressEvent(connection="acme", phase="inventory", status="start", total=3),
+        *ticks,
+        ProgressEvent(connection="acme", phase="inventory", status="done", total=3),
+    ]

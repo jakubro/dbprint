@@ -13,6 +13,7 @@ import yaml
 
 import dbprint.adapters as adapters_package
 from dbprint.adapters import DuckdbAdapter
+from dbprint.adapters import base as base_module
 from dbprint.adapters.databricks import introspect as databricks_introspect
 from dbprint.adapters.duckdb import stats as duckdb_stats
 from dbprint.adapters.errors import QueryFailed
@@ -139,7 +140,7 @@ def test_an_unmeasured_timeline_anchor_costs_the_timeline_not_the_table(
         "TIMESTAMP '2024-01-01' + INTERVAL (i) DAY AS sown_at FROM range(500) r(i)",
     )
     con.close()
-    real = duckdb_stats._phase_b
+    real = base_module.assemble_column_stats
 
     def failing(*args: Any, **kwargs: Any) -> Any:
         if any(getattr(a, "name", None) == "sown_at" for a in args):
@@ -147,7 +148,7 @@ def test_an_unmeasured_timeline_anchor_costs_the_timeline_not_the_table(
 
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(duckdb_stats, "_phase_b", failing)
+    monkeypatch.setattr(base_module, "assemble_column_stats", failing)
     conn = ConnectionConfig(name="g", adapter="duckdb", output=tmp_path / "prints")
 
     result = Engine(DuckdbAdapter({"database": str(database)}), conn, tmp_path).generate()
@@ -169,7 +170,7 @@ def test_a_column_phase_b_could_not_measure_keeps_what_phase_a_read(
         "ELSE 'bed ' || (i % 40) END AS label FROM range(500) r(i)",
     )
     con.close()
-    real = duckdb_stats._phase_b
+    real = base_module.assemble_column_stats
 
     def failing(*args: Any, **kwargs: Any) -> Any:
         if any(getattr(a, "name", None) == "label" for a in args):
@@ -177,7 +178,7 @@ def test_a_column_phase_b_could_not_measure_keeps_what_phase_a_read(
 
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(duckdb_stats, "_phase_b", failing)
+    monkeypatch.setattr(base_module, "assemble_column_stats", failing)
     conn = ConnectionConfig(name="g", adapter="duckdb", output=tmp_path / "prints")
 
     Engine(DuckdbAdapter({"database": str(database)}), conn, tmp_path).generate()
@@ -201,7 +202,7 @@ def test_a_degraded_column_never_names_a_field_it_never_owed(
         "FROM range(400) r(i)",
     )
     con.close()
-    real = duckdb_stats._phase_b
+    real = base_module.assemble_column_stats
 
     def failing(*args: Any, **kwargs: Any) -> Any:
         if any(getattr(a, "name", None) in {"viability_pct", "field_notes"} for a in args):
@@ -209,7 +210,7 @@ def test_a_degraded_column_never_names_a_field_it_never_owed(
 
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(duckdb_stats, "_phase_b", failing)
+    monkeypatch.setattr(base_module, "assemble_column_stats", failing)
     conn = ConnectionConfig(
         name="g",
         adapter="duckdb",

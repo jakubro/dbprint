@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from . import stats
 from .connection import exec_query
+from .. import statements
 from ..base import TableScope
 from ..identifiers import Identity
 from ..sql_layout import indented
@@ -27,7 +28,7 @@ def compute_normalized_cardinality(
 
     cn = identity.source_column(column)
     normalized = f"LOWER(TRIM({cn}::VARCHAR))"
-    source = stats._source(identity.quoted(), scope, stats._seed(identity))
+    source = stats._source(identity.quoted(), scope, statements.table_seed(identity))
 
     row = exec_query(
         cursor,

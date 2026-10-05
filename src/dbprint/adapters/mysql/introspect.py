@@ -23,13 +23,21 @@ from ..base import (
     TableType,
     UniqueKeyMeta,
 )
+from ..credentials import mask_secrets
 from ..identifiers import Identity, column_meta, enforce_table_identifiers, fold, table_meta
 
 
 _TABLE_TYPE_MAP: dict[str, TableType] = {
     "BASE TABLE": "table",
+    "SYSTEM VERSIONED": "table",
     "VIEW": "view",
 }
+
+# Reported kinds deliberately left out: a sequence holds one row of generator state, not data.
+_UNLISTED_TABLE_TYPES = frozenset({"SEQUENCE"})
+
+# Engines whose rows another server or source holds; MariaDB's FederatedX registers as FEDERATED.
+_REMOTE_ENGINES = frozenset({"FEDERATED", "CONNECT", "SPIDER"})
 
 _FK_ACTIONS: dict[str, FkAction] = {
     "NO ACTION": "NO ACTION",
@@ -49,8 +57,11 @@ def list_tables(
     database: str | None,
     include: list[str],
     exclude: list[str],
-) -> list[_Candidate]:
-    """Enumerate tables/views in `database`, or in every database the account can read."""
+) -> tuple[list[_Candidate], frozenset[str]]:
+    """Enumerate tables/views in `database`, or in every database the account can read.
+
+    Beside them, the FQNs of system-versioned tables, whose `table_rows` counts history rows too.
+    """
 
     where, params = _schema_predicate("tbl.table_schema", database)
     rows = exec_query(
@@ -59,7 +70,8 @@ def list_tables(
         SELECT
           tbl.table_schema,
           tbl.table_name,
-          tbl.table_type
+          tbl.table_type,
+          tbl.engine
         FROM
           information_schema.tables tbl
         WHERE
@@ -71,11 +83,12 @@ def list_tables(
     ).fetchall()
 
     candidates: list[_Candidate] = []
+    versioned: set[str] = set()
 
-    for schema, name, table_type in rows:
+    for schema, name, table_type, engine in rows:
         schema_lower = fold(schema)
 
-        if schema_lower in _SYSTEM_SCHEMAS:
+        if schema_lower in _SYSTEM_SCHEMAS or table_type in _UNLISTED_TABLE_TYPES:
             continue
 
         canonical_type = _TABLE_TYPE_MAP.get(table_type)
@@ -83,7 +96,12 @@ def list_tables(
         if canonical_type is None:
             continue
 
-        candidates.append((table_meta((schema, name), canonical_type), (schema, name)))
+        external = engine is not None and str(engine).upper() in _REMOTE_ENGINES
+        meta = table_meta((schema, name), canonical_type, external=external)
+        candidates.append((meta, (schema, name)))
+
+        if table_type == "SYSTEM VERSIONED":
+            versioned.add(meta.fqn)
 
     in_scope = set(
         expand(
@@ -95,7 +113,7 @@ def list_tables(
     selected = [entry for entry in candidates if entry[0].fqn in in_scope]
     enforce_table_identifiers(selected)
 
-    return selected
+    return selected, frozenset(versioned & in_scope)
 
 
 def columns(cursor: Cursor, identity: Identity) -> list[ColumnMeta]:
@@ -278,7 +296,8 @@ def comments(cursor: Cursor, identity: Identity) -> CommentsMeta:
         cursor,
         """
         SELECT
-          tbl.table_comment
+          tbl.table_comment,
+          tbl.engine
         FROM
           information_schema.tables tbl
         WHERE
@@ -288,6 +307,10 @@ def comments(cursor: Cursor, identity: Identity) -> CommentsMeta:
         identity.parts,
     ).fetchone()
     table_comment = table_row[0] if table_row and table_row[0] else None
+
+    # A Spider table's comment is its connection string (SPEC 2.1.3).
+    if table_comment and str(table_row[1] or "").upper() == "SPIDER":
+        table_comment = mask_secrets(table_comment)
 
     col_rows = exec_query(
         cursor,

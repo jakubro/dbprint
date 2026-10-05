@@ -6,10 +6,10 @@ and golden-testable. Run via `just demo`, which needs a local `postgres` as `jus
 
 from __future__ import annotations
 
-import importlib.util
 import io
 import json
 import os
+import runpy
 import secrets
 import shutil
 import time
@@ -18,7 +18,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, LiteralString, cast
+from types import SimpleNamespace
+from typing import Any, cast
 
 import yaml
 from rich.live import Live
@@ -67,7 +68,7 @@ _ENVIRONMENT_KEYS = (
 
 # Every stamped and compared instant collapses here, so a regenerated cast carries the same
 # `profiled_at` and the same freshness verdict however long after the last run it is made.
-FROZEN_NOW = datetime(2026, 5, 17, 22, 48, 1, tzinfo=UTC)
+FROZEN_NOW = datetime(2026, 3, 9, 14, 27, 36, tzinfo=UTC)
 
 SCHEMA_SQL = """
 CREATE TABLE taxon (
@@ -123,6 +124,10 @@ SELECT g,
        CASE WHEN g % 7 = 0 THEN 'field-collected' ELSE NULL END
 FROM generate_series(1, 2500) g;
 """
+
+
+# `scripts/` is not a package, so the shared helpers load by path.
+support = SimpleNamespace(**runpy.run_path(str(Path(__file__).with_name("example_support.py"))))
 
 
 class FrozenDatetime(datetime):
@@ -337,8 +342,8 @@ def _prepare_workspace(credentials: dict[str, str]) -> None:
 
     PROJECT_DIR.mkdir(parents=True)
     HOME_DIR.mkdir(parents=True)
-    _apply_sql(credentials, SCHEMA_SQL)
-    _apply_sql(credentials, SEED_SQL)
+    support.apply_sql(credentials, SCHEMA_SQL)
+    support.apply_sql(credentials, SEED_SQL)
 
 
 @contextmanager
@@ -427,65 +432,14 @@ def _patched_environment(credentials: dict[str, str] | None, clock: SteppedClock
             module.datetime = original
 
 
-def _create_database(credentials: dict[str, str]) -> None:
-    """Create the demo database on the throwaway cluster."""
-
-    import psycopg
-    from psycopg import sql
-
-    admin = _dsn({**credentials, "database": "postgres"})
-    name = sql.Identifier(credentials["database"])
-
-    with psycopg.connect(admin, autocommit=True) as conn:
-        conn.execute(sql.SQL("DROP DATABASE IF EXISTS {}").format(name))
-        conn.execute(sql.SQL("CREATE DATABASE {}").format(name))
-
-
-def _dsn(credentials: dict[str, str]) -> str:
-    """libpq connection string for one credentials dict."""
-
-    return (
-        f"host={credentials['host']} port={credentials['port']} "
-        f"dbname={credentials['database']} user={credentials['user']} "
-        f"password={credentials['password']}"
-    )
-
-
-def _apply_sql(credentials: dict[str, str], statements: str) -> None:
-    """Run one SQL script against the throwaway database."""
-
-    import psycopg
-
-    with psycopg.connect(_dsn(credentials), autocommit=True) as conn:
-        # SQL is a constant in this file; cast for psycopg's LiteralString overload.
-        conn.execute(cast(LiteralString, statements))
-
-
-def _load_module(name: str, directory: Path) -> Any:
-    """Import a sibling script by path; `scripts/` carries no `__init__.py`."""
-
-    spec = importlib.util.spec_from_file_location(name, directory / f"{name}.py")
-
-    if spec is None or spec.loader is None:
-        raise SystemExit(f"could not load {name} from {directory}")
-
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    return module
-
-
 def _main() -> int:
     """Provision a throwaway cluster, regenerate the committed cast, report."""
 
-    # Loaded by path: `scripts/` is not a package, so a plain import would not resolve for `ty`.
-    sibling = _load_module("gen_reference_example", Path(__file__).resolve().parent)
-
-    bin_dir = sibling._discover_postgres_bin_dir()
+    bin_dir = support.discover_postgres_bin_dir()
     data_dir = Path("/var/lib/postgresql/dbprint-demo-" + secrets.token_hex(4))
-    port = sibling._free_port()
+    port = support.free_port()
 
-    sibling._start_cluster(bin_dir, data_dir, port)
+    support.start_cluster(bin_dir, data_dir, port)
 
     try:
         credentials = {
@@ -495,10 +449,10 @@ def _main() -> int:
             "user": "postgres",
             "password": "postgres",
         }
-        _create_database(credentials)
+        support.create_database(credentials)
         text = build_cast(credentials)
     finally:
-        sibling._stop_cluster(bin_dir, data_dir)
+        support.stop_cluster(bin_dir, data_dir)
 
     CAST_PATH.parent.mkdir(parents=True, exist_ok=True)
     CAST_PATH.write_text(text, encoding="utf-8")

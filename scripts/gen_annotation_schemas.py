@@ -22,7 +22,7 @@ RELATIONSHIPS_ANNOTATIONS_PATH = SPEC_DIR / "relationships_annotations.schema.js
 
 # Metadata/identity fields naming the FILE, not an addressable entry within it.
 STATISTICS_IDENTITY_FIELDS = frozenset(
-    {"format_version", "table", "type", "profiled_at", "catalog_only"},
+    {"format_version", "table", "type", "profiled_at", "catalog_only", "external"},
 )
 RELATIONSHIPS_IDENTITY_FIELDS = frozenset({"format_version", "table", "profiled_at"})
 
@@ -41,6 +41,7 @@ STATISTICS_DEFERRED = {
     "timeline": "identity is a single chosen anchor column, not a keyed collection - no "
     "measured demand yet",
     "physical_layout": "identity is a clustering/partition expression, not a column name",
+    "merging": "a declared engine fact, one per table, not a keyed collection",
     "depends_on": "a bare list of FQN strings, not a keyed collection - no measured demand yet",
     "columns": "address-by-map-key (keyed-map shape), not address-by-identity-tuple",
     "unmeasured": "a producer's record of what its own run could not obtain - a human has "

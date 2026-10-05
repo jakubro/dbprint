@@ -13,7 +13,6 @@ from types import ModuleType
 from typing import Any
 
 import duckdb
-import psycopg
 import pytest
 import yaml
 
@@ -26,12 +25,14 @@ from dbprint.adapters import (
     MockAdapter,
     PostgresAdapter,
 )
+from dbprint.adapters.base import pre_classify
 from dbprint.cli.adapter_registry import ADAPTERS
 from dbprint.config import StatisticsConfig
 from dbprint.config.project import ConnectionConfig
 from dbprint.conformance import validate_print
 from dbprint.engine import Engine
 from dbprint.spec.classification import base_type
+from tests.adapters.test_arrays import _psql
 from tests.engine.test_orchestrator import _conn_config, _curator_fixture
 
 
@@ -60,7 +61,13 @@ def test_a_catalogued_spelling_classifies_as_its_family(
 ) -> None:
     stats = _stats_module(ADAPTERS[vendor])
     column = ColumnMeta(name="c", sql_type=spelling, nullable=True, default=None, ordinal=1)
-    adapter_side = stats._pre_classify(column, _MEASURED_CARDINALITY, StatisticsConfig(), False)
+    adapter_side = pre_classify(
+        column,
+        _MEASURED_CARDINALITY,
+        StatisticsConfig(),
+        False,
+        supported=not stats._is_unsupported(column.classified_type),
+    )
 
     assert adapter_side == expected
     assert _bare(ADAPTERS[vendor]).recognises_type(spelling)
@@ -385,14 +392,3 @@ def _stats_module(adapter_cls: type[Adapter]) -> ModuleType:
 
 def _bare(adapter_cls: type[Adapter]) -> Adapter:
     return adapter_cls.__new__(adapter_cls)
-
-
-def _psql(creds: dict[str, str]) -> psycopg.Connection:
-    return psycopg.connect(
-        host=creds["host"],
-        port=int(creds["port"]),
-        dbname=creds["database"],
-        user=creds["user"],
-        password="",
-        autocommit=True,
-    )

@@ -158,6 +158,25 @@ class TestTheRuleRefuses:
 
         assert [e.target_table for e in edges] == ["public.curator"]
 
+    @pytest.mark.parametrize(
+        ("child_type", "parent_type"),
+        [
+            ("SimpleAggregateFunction(any, UInt64)", "UInt64"),
+            ("Nullable(UInt64)", "UInt64"),
+            ("bigint unsigned", "bigint"),
+        ],
+    )
+    def test_a_wrapped_or_qualified_type_matches_the_type_it_holds(
+        self,
+        child_type: str,
+        parent_type: str,
+    ) -> None:
+        curator = _table("public.curator", [_col("id", parent_type)], primary="id")
+        entry = _table("public.entry", [_col("curator_id", child_type)])
+        edges = infer_foreign_keys(entry, _inventory(entry, curator), [])
+
+        assert [e.target_table for e in edges] == ["public.curator"]
+
     def test_a_column_without_the_suffix_infers_nothing(self) -> None:
         specimen_loan = _table("public.specimen_loan", [_col("curator")])
 

@@ -13,13 +13,13 @@ import yaml
 from dbprint.engine import AssemblyOptions, assemble_context, assemble_structured_context
 from dbprint.engine.context_assembler import (
     TableArtifacts,
-    _build_fk_target_map,
     _escape_cell,
     _markdown_catalog_only_columns,
     _markdown_null_patterns,
     _markdown_relationships,
     _render_table_markdown,
     _stripped_statistics,
+    fk_target_map,
 )
 
 
@@ -1123,7 +1123,7 @@ class TestFkTargetMap:
             ],
         }
 
-        assert _build_fk_target_map(relationships) == {
+        assert fk_target_map(relationships) == {
             "herbarium_id": "public.herbarium.id (declared)",
         }
 
@@ -1139,9 +1139,35 @@ class TestFkTargetMap:
             ],
         }
 
-        assert _build_fk_target_map(relationships) == {
+        assert fk_target_map(relationships) == {
             "herbarium_id": "public.herbarium.id (inferred)",
         }
+
+    def test_missing_detection_defaults_to_inferred(self) -> None:
+        relationships = {
+            "refers_to": [
+                {"column": ["cultivar_id"], "target_table": "t", "target_column": ["id"]},
+            ],
+        }
+
+        assert fk_target_map(relationships)["cultivar_id"] == "t.id (inferred)"
+
+    def test_composite_edge_joins_columns(self) -> None:
+        relationships = {
+            "refers_to": [
+                {
+                    "column": ["a", "b"],
+                    "target_table": "t",
+                    "target_column": ["x", "y"],
+                    "detection": "declared",
+                },
+            ],
+        }
+
+        assert fk_target_map(relationships)["a,b"] == "t.(x,y) (declared)"
+
+    def test_absent_relationships_map_to_nothing(self) -> None:
+        assert fk_target_map(None) == {}
 
 
 INFERRED_EDGE_RELATIONSHIPS: dict[str, object] = {

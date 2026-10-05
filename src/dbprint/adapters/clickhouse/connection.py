@@ -6,18 +6,29 @@ from __future__ import annotations
 
 import importlib
 import logging
-import time
-from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any, Protocol
+from types import MappingProxyType
+from typing import Any
 
-from .. import trace_context
+from .. import driver
 from ..dialect import Dialect
-from ..errors import QueryFailed
+from ..driver import Cursor, FactoryConnection, ServerParams
 
 
 # clickhouse-connect's DB-API defaults to pyformat (%s); the adapter does not override it.
-DIALECT = Dialect(vendor="clickhouse", paramstyle="pyformat", quote_char="`")
+DIALECT = Dialect(
+    vendor="clickhouse",
+    paramstyle="pyformat",
+    quote_char="`",
+    row_count="count()",
+    count_fn="count",
+    distinct_count="uniqExact({})",
+    text_type=None,
+    order_by_alias=True,
+    group_by_ordinal=False,
+    concat_null_flags=True,
+    pair_distinct="uniqExact(tuple({a}, {b}))",
+    seed_hash="halfMD5(concat({seed}, toString({value})))",
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -26,124 +37,33 @@ class ClickhouseConnectionError(RuntimeError):
     """Raised when the adapter cannot open a working ClickHouse session."""
 
 
-@dataclass(frozen=True)
-class ConnectionParams:
+class ConnectionParams(ServerParams):
     """Resolved ClickHouse credentials passed to the adapter."""
 
-    host: str
-    port: int
-    user: str
-    password: str
-    database: str | None = None
-    statement_timeout: int | None = None
-
-    @classmethod
-    def from_credentials(
-        cls,
-        creds: dict[str, str],
-        statement_timeout: int | None = None,
-    ) -> ConnectionParams:
-        try:
-            return cls(
-                host=creds["host"],
-                port=int(creds.get("port", 8123)),
-                database=creds.get("database"),
-                user=creds.get("user", "default"),
-                password=creds.get("password", ""),
-                statement_timeout=statement_timeout,
-            )
-        except KeyError as exc:
-            raise ClickhouseConnectionError(
-                f"missing required credential key: {exc.args[0]!r}",
-            ) from exc
-        except ValueError as exc:
-            raise ClickhouseConnectionError(f"invalid port {creds.get('port')!r}: {exc}") from exc
+    error = ClickhouseConnectionError
+    defaults = MappingProxyType({"port": "8123", "user": "default", "password": ""})
 
 
-class Cursor(Protocol):
-    """DB-API-compatible cursor surface used by the adapter."""
+class Connection(FactoryConnection):
+    """A ClickHouse session opened by a cursor factory."""
 
-    def execute(self, sql: str, params: Any = ...) -> Any: ...
+    error = ClickhouseConnectionError
+    vendor = "ClickHouse"
 
-    def fetchall(self) -> list[Any]: ...
+    def _default_factory(self, params: ConnectionParams) -> Any:
+        return _default_cursor_factory(params)
 
-    def fetchone(self) -> Any: ...
+    def _open_failure(self, exc: Exception) -> str:
+        where = f"{self.params.host}:{self.params.port}"
+        where += f"/{self.params.database}" if self.params.database is not None else ""
 
-    def close(self) -> None: ...
-
-
-CursorFactory = Callable[[ConnectionParams], Any]
-
-
-class Connection:
-    """Wraps a cursor-factory output with open/close lifecycle hooks."""
-
-    def __init__(
-        self,
-        params: ConnectionParams,
-        cursor_factory: CursorFactory | None = None,
-    ) -> None:
-        self.params = params
-        self._factory = cursor_factory or _default_cursor_factory
-        self._cursor: Cursor | None = None
-
-    def sibling(self) -> Connection:
-        """An unopened connection with the same parameters and cursor factory."""
-
-        return Connection(self.params, self._factory)
-
-    def open(self) -> None:
-        try:
-            self._cursor = self._factory(self.params)
-        except ClickhouseConnectionError:
-            raise
-        except Exception as exc:
-            where = f"{self.params.host}:{self.params.port}"
-            where += f"/{self.params.database}" if self.params.database is not None else ""
-
-            raise ClickhouseConnectionError(
-                f"could not connect to ClickHouse at {where} as {self.params.user!r}: {exc}",
-            ) from exc
-
-    def close(self) -> None:
-        if self._cursor is not None:
-            try:
-                self._cursor.close()
-            except Exception:  # noqa: BLE001, S110 - close-time failure is uninteresting
-                pass
-
-            self._cursor = None
-
-    def is_open(self) -> bool:
-        return self._cursor is not None
-
-    @property
-    def cursor(self) -> Cursor:
-        if self._cursor is None:
-            raise ClickhouseConnectionError("connection is not open; call connect() first")
-
-        return self._cursor
+        return f"could not connect to ClickHouse at {where} as {self.params.user!r}: {exc}"
 
 
 def exec_query(cursor: Cursor, sql: str, params: Any = None) -> Cursor:
     """Run a query and return the cursor; DEBUG-traces the text and params as a pair."""
 
-    started = time.monotonic()
-
-    try:
-        if params is None:
-            cursor.execute(sql)
-        else:
-            cursor.execute(sql, params)
-    except Exception as exc:
-        failure = QueryFailed(exc, sql, params, timed_out=_is_timeout(exc))
-        trace_context.log_failure(_LOG, started, failure)
-
-        raise failure from exc
-
-    trace_context.log_success(_LOG, started, sql, params, getattr(cursor, "rowcount", None))
-
-    return cursor
+    return driver.execute(_LOG, _is_timeout, cursor, sql, params)
 
 
 def _default_cursor_factory(params: ConnectionParams) -> Any:

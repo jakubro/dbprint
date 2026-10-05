@@ -1,7 +1,7 @@
 format_version: 1
 table: vocabulary.public.shapes
 type: table
-profiled_at: '2026-05-17T22:48:01Z'
+profiled_at: '2026-03-09T14:27:36Z'
 row_count: 40
 row_count_method: exact
 grain:
@@ -142,6 +142,36 @@ dependencies:
 - determinant: annual_salary
   dependent: pan
   strength: 1.0
+- determinant: pan
+  dependent: jpeg_bytes
+  strength: 1.0
+- determinant: jpeg_bytes
+  dependent: pan
+  strength: 1.0
+- determinant: pan
+  dependent: gif_bytes
+  strength: 1.0
+- determinant: gif_bytes
+  dependent: pan
+  strength: 1.0
+- determinant: pan
+  dependent: pdf_bytes
+  strength: 1.0
+- determinant: pdf_bytes
+  dependent: pan
+  strength: 1.0
+- determinant: pan
+  dependent: gzip_bytes
+  strength: 1.0
+- determinant: gzip_bytes
+  dependent: pan
+  strength: 1.0
+- determinant: pan
+  dependent: zip_bytes
+  strength: 1.0
+- determinant: zip_bytes
+  dependent: pan
+  strength: 1.0
 - determinant: iban_value
   dependent: bic_value
   strength: 1.0
@@ -268,6 +298,36 @@ dependencies:
 - determinant: annual_salary
   dependent: iban_value
   strength: 1.0
+- determinant: iban_value
+  dependent: jpeg_bytes
+  strength: 1.0
+- determinant: jpeg_bytes
+  dependent: iban_value
+  strength: 1.0
+- determinant: iban_value
+  dependent: gif_bytes
+  strength: 1.0
+- determinant: gif_bytes
+  dependent: iban_value
+  strength: 1.0
+- determinant: iban_value
+  dependent: pdf_bytes
+  strength: 1.0
+- determinant: pdf_bytes
+  dependent: iban_value
+  strength: 1.0
+- determinant: iban_value
+  dependent: gzip_bytes
+  strength: 1.0
+- determinant: gzip_bytes
+  dependent: iban_value
+  strength: 1.0
+- determinant: iban_value
+  dependent: zip_bytes
+  strength: 1.0
+- determinant: zip_bytes
+  dependent: iban_value
+  strength: 1.0
 - determinant: bic_value
   dependent: digest
   strength: 1.0
@@ -388,6 +448,36 @@ dependencies:
 - determinant: annual_salary
   dependent: bic_value
   strength: 1.0
+- determinant: bic_value
+  dependent: jpeg_bytes
+  strength: 1.0
+- determinant: jpeg_bytes
+  dependent: bic_value
+  strength: 1.0
+- determinant: bic_value
+  dependent: gif_bytes
+  strength: 1.0
+- determinant: gif_bytes
+  dependent: bic_value
+  strength: 1.0
+- determinant: bic_value
+  dependent: pdf_bytes
+  strength: 1.0
+- determinant: pdf_bytes
+  dependent: bic_value
+  strength: 1.0
+- determinant: bic_value
+  dependent: gzip_bytes
+  strength: 1.0
+- determinant: gzip_bytes
+  dependent: bic_value
+  strength: 1.0
+- determinant: bic_value
+  dependent: zip_bytes
+  strength: 1.0
+- determinant: zip_bytes
+  dependent: bic_value
+  strength: 1.0
 - determinant: digest
   dependent: mac_address
   strength: 1.0
@@ -502,6 +592,36 @@ dependencies:
 - determinant: annual_salary
   dependent: digest
   strength: 1.0
+- determinant: digest
+  dependent: jpeg_bytes
+  strength: 1.0
+- determinant: jpeg_bytes
+  dependent: digest
+  strength: 1.0
+- determinant: digest
+  dependent: gif_bytes
+  strength: 1.0
+- determinant: gif_bytes
+  dependent: digest
+  strength: 1.0
+- determinant: digest
+  dependent: pdf_bytes
+  strength: 1.0
+- determinant: pdf_bytes
+  dependent: digest
+  strength: 1.0
+- determinant: digest
+  dependent: gzip_bytes
+  strength: 1.0
+- determinant: gzip_bytes
+  dependent: digest
+  strength: 1.0
+- determinant: digest
+  dependent: zip_bytes
+  strength: 1.0
+- determinant: zip_bytes
+  dependent: digest
+  strength: 1.0
 - determinant: mac_address
   dependent: coordinates
   strength: 1.0
@@ -610,6 +730,36 @@ dependencies:
 - determinant: annual_salary
   dependent: mac_address
   strength: 1.0
+- determinant: mac_address
+  dependent: jpeg_bytes
+  strength: 1.0
+- determinant: jpeg_bytes
+  dependent: mac_address
+  strength: 1.0
+- determinant: mac_address
+  dependent: gif_bytes
+  strength: 1.0
+- determinant: gif_bytes
+  dependent: mac_address
+  strength: 1.0
+- determinant: mac_address
+  dependent: pdf_bytes
+  strength: 1.0
+- determinant: pdf_bytes
+  dependent: mac_address
+  strength: 1.0
+- determinant: mac_address
+  dependent: gzip_bytes
+  strength: 1.0
+- determinant: gzip_bytes
+  dependent: mac_address
+  strength: 1.0
+- determinant: mac_address
+  dependent: zip_bytes
+  strength: 1.0
+- determinant: zip_bytes
+  dependent: mac_address
+  strength: 1.0
 - determinant: coordinates
   dependent: resource_urn
   strength: 1.0
@@ -712,6 +862,36 @@ dependencies:
 - determinant: annual_salary
   dependent: coordinates
   strength: 1.0
+- determinant: coordinates
+  dependent: jpeg_bytes
+  strength: 1.0
+- determinant: jpeg_bytes
+  dependent: coordinates
+  strength: 1.0
+- determinant: coordinates
+  dependent: gif_bytes
+  strength: 1.0
+- determinant: gif_bytes
+  dependent: coordinates
+  strength: 1.0
+- determinant: coordinates
+  dependent: pdf_bytes
+  strength: 1.0
+- determinant: pdf_bytes
+  dependent: coordinates
+  strength: 1.0
+- determinant: coordinates
+  dependent: gzip_bytes
+  strength: 1.0
+- determinant: gzip_bytes
+  dependent: coordinates
+  strength: 1.0
+- determinant: coordinates
+  dependent: zip_bytes
+  strength: 1.0
+- determinant: zip_bytes
+  dependent: coordinates
+  strength: 1.0
 - determinant: resource_urn
   dependent: duration
   strength: 1.0
@@ -729,186 +909,6 @@ dependencies:
   strength: 1.0
 - determinant: currency
   dependent: resource_urn
-  strength: 1.0
-- determinant: resource_urn
-  dependent: bearer_token
-  strength: 1.0
-- determinant: bearer_token
-  dependent: resource_urn
-  strength: 1.0
-- determinant: resource_urn
-  dependent: package_version
-  strength: 1.0
-- determinant: package_version
-  dependent: resource_urn
-  strength: 1.0
-- determinant: resource_urn
-  dependent: book_code
-  strength: 1.0
-- determinant: book_code
-  dependent: resource_urn
-  strength: 1.0
-- determinant: resource_urn
-  dependent: barcode
-  strength: 1.0
-- determinant: barcode
-  dependent: resource_urn
-  strength: 1.0
-- determinant: resource_urn
-  dependent: vehicle_id
-  strength: 1.0
-- determinant: vehicle_id
-  dependent: resource_urn
-  strength: 1.0
-- determinant: resource_urn
-  dependent: device_id
-  strength: 1.0
-- determinant: device_id
-  dependent: resource_urn
-  strength: 1.0
-- determinant: resource_urn
-  dependent: event_timestamp
-  strength: 1.0
-- determinant: event_timestamp
-  dependent: resource_urn
-  strength: 1.0
-- determinant: resource_urn
-  dependent: logged_at
-  strength: 1.0
-- determinant: logged_at
-  dependent: resource_urn
-  strength: 1.0
-- determinant: resource_urn
-  dependent: tax_id
-  strength: 1.0
-- determinant: tax_id
-  dependent: resource_urn
-  strength: 1.0
-- determinant: resource_urn
-  dependent: date_of_birth
-  strength: 1.0
-- determinant: date_of_birth
-  dependent: resource_urn
-  strength: 1.0
-- determinant: resource_urn
-  dependent: blood_type
-  strength: 1.0
-- determinant: blood_type
-  dependent: resource_urn
-  strength: 1.0
-- determinant: resource_urn
-  dependent: ethnicity
-  strength: 1.0
-- determinant: ethnicity
-  dependent: resource_urn
-  strength: 1.0
-- determinant: resource_urn
-  dependent: annual_salary
-  strength: 1.0
-- determinant: annual_salary
-  dependent: resource_urn
-  strength: 1.0
-- determinant: duration
-  dependent: tz_name
-  strength: 1.0
-- determinant: tz_name
-  dependent: duration
-  strength: 1.0
-- determinant: duration
-  dependent: currency
-  strength: 1.0
-- determinant: currency
-  dependent: duration
-  strength: 1.0
-- determinant: duration
-  dependent: bearer_token
-  strength: 1.0
-- determinant: bearer_token
-  dependent: duration
-  strength: 1.0
-- determinant: duration
-  dependent: package_version
-  strength: 1.0
-- determinant: package_version
-  dependent: duration
-  strength: 1.0
-- determinant: duration
-  dependent: book_code
-  strength: 1.0
-- determinant: book_code
-  dependent: duration
-  strength: 1.0
-- determinant: duration
-  dependent: barcode
-  strength: 1.0
-- determinant: barcode
-  dependent: duration
-  strength: 1.0
-- determinant: duration
-  dependent: vehicle_id
-  strength: 1.0
-- determinant: vehicle_id
-  dependent: duration
-  strength: 1.0
-- determinant: duration
-  dependent: device_id
-  strength: 1.0
-- determinant: device_id
-  dependent: duration
-  strength: 1.0
-- determinant: duration
-  dependent: event_timestamp
-  strength: 1.0
-- determinant: event_timestamp
-  dependent: duration
-  strength: 1.0
-- determinant: duration
-  dependent: logged_at
-  strength: 1.0
-- determinant: logged_at
-  dependent: duration
-  strength: 1.0
-- determinant: duration
-  dependent: tax_id
-  strength: 1.0
-- determinant: tax_id
-  dependent: duration
-  strength: 1.0
-- determinant: duration
-  dependent: date_of_birth
-  strength: 1.0
-- determinant: date_of_birth
-  dependent: duration
-  strength: 1.0
-- determinant: duration
-  dependent: blood_type
-  strength: 1.0
-- determinant: blood_type
-  dependent: duration
-  strength: 1.0
-- determinant: duration
-  dependent: ethnicity
-  strength: 1.0
-- determinant: ethnicity
-  dependent: duration
-  strength: 1.0
-- determinant: duration
-  dependent: annual_salary
-  strength: 1.0
-- determinant: annual_salary
-  dependent: duration
-  strength: 1.0
-- determinant: tz_name
-  dependent: currency
-  strength: 1.0
-- determinant: currency
-  dependent: tz_name
-  strength: 1.0
-- determinant: tz_name
-  dependent: bearer_token
-  strength: 1.0
-- determinant: bearer_token
-  dependent: tz_name
   strength: 1.0
 columns:
   row_id:
@@ -1725,3 +1725,158 @@ columns:
     sketch:
       method: kmv_md5_lo64
       values: Bc3Q0FdiBB/DfoSyQ8LIN+QJbjcQM0mW
+  jpeg_bytes:
+    sql_type: bytea
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.075
+    cardinality_method: exact
+    inferred:
+      looks_like: jpeg
+      sampled: 3
+      matched: 3
+    values:
+    - value: ffd8ffe001
+      count: 14
+    - value: ffd8ffe000
+      count: 13
+    - value: ffd8ffe002
+      count: 13
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    length:
+      min: 5
+      max: 5
+      avg: 5.0
+      p95: 5.0
+    sketch:
+      method: kmv_md5_lo64
+      values: O4ibpAkto4uVDuUaoFpCFMqaTaVF/XgN
+  gif_bytes:
+    sql_type: bytea
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.075
+    cardinality_method: exact
+    inferred:
+      looks_like: gif
+      sampled: 3
+      matched: 3
+    values:
+    - value: '47494638396101'
+      count: 14
+    - value: '47494638396100'
+      count: 13
+    - value: '47494638396102'
+      count: 13
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    length:
+      min: 7
+      max: 7
+      avg: 7.0
+      p95: 7.0
+    sketch:
+      method: kmv_md5_lo64
+      values: GFbKzWwNUughCJU1tRYyU2R+nJUj+gNO
+  pdf_bytes:
+    sql_type: bytea
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.075
+    cardinality_method: exact
+    inferred:
+      looks_like: pdf
+      sampled: 3
+      matched: 3
+    values:
+    - value: 255044462d01
+      count: 14
+    - value: 255044462d00
+      count: 13
+    - value: 255044462d02
+      count: 13
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    length:
+      min: 6
+      max: 6
+      avg: 6.0
+      p95: 6.0
+    sketch:
+      method: kmv_md5_lo64
+      values: FGmnA5QcRVY/tbtY1N+uVNlZaBABRuaA
+  gzip_bytes:
+    sql_type: bytea
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.075
+    cardinality_method: exact
+    inferred:
+      looks_like: gzip
+      sampled: 3
+      matched: 3
+    values:
+    - value: 1f8b0801
+      count: 14
+    - value: 1f8b0800
+      count: 13
+    - value: 1f8b0802
+      count: 13
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    length:
+      min: 4
+      max: 4
+      avg: 4.0
+      p95: 4.0
+    sketch:
+      method: kmv_md5_lo64
+      values: BOxijCBdjwXO6YRzeKtaF/aXzf7Lp/Dl
+  zip_bytes:
+    sql_type: bytea
+    nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: categorical
+    cardinality: 3
+    cardinality_ratio: 0.075
+    cardinality_method: exact
+    inferred:
+      looks_like: zip
+      sampled: 3
+      matched: 3
+    values:
+    - value: 504b030401
+      count: 14
+    - value: 504b030400
+      count: 13
+    - value: 504b030402
+      count: 13
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    length:
+      min: 5
+      max: 5
+      avg: 5.0
+      p95: 5.0
+    sketch:
+      method: kmv_md5_lo64
+      values: Vz0KJWt8OJVi2eEdK+HpkHrQ3i5JqUk4

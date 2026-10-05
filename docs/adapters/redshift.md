@@ -27,6 +27,8 @@ GRANT SELECT ON svv_table_info TO dbprint_ro;
 | `SELECT` | `svv_table_info` | the row-count estimate every size-gated rule reads |
 | `TEMP` (via `PUBLIC`) | the database | the sampled-table copy — every user already holds this through `PUBLIC` membership; it is not `CREATE ON SCHEMA` |
 | — | `svv_redshift_tables`, `svv_redshift_columns`, `stv_mv_info` | need nothing beyond connecting — they self-filter to the caller's own objects |
+| `USAGE` | each external schema | listing its external tables through `svv_external_tables` and `svv_external_columns`, and `SHOW EXTERNAL TABLE` |
+| `SELECT` | each external table a `read_rows` rule opts in | statistics read through Spectrum or the federated source |
 
 ### Read this one: `svv_table_info` is superuser-only by default
 
@@ -59,6 +61,12 @@ seeded into agreement across statements. Set materialize_sample: true for this c
 or narrow with a filter instead of a sample fraction.
 ```
 
+## External tables
+
+A Spectrum or federated external table is listed with `external: true` (SPEC 2.2.20); an external view or Iceberg materialized view is not listed. Unless a `read_rows` rule opts it in, it is described from the catalog alone, its partition columns published as `physical_layout` — the filter that lets Spectrum skip files. No row estimate exists for it.
+
+Opted in, it is read through Spectrum, which bills the bytes every statement scans. Redshift has no `TABLESAMPLE`, so a `sample` still scans every file once, and `min_rows` and `max_rows_scanned` rules do not apply to it.
+
 ## Identifiers
 
 Both path segments are lowercased for the FQN, and the rule check refuses two objects whose physical spellings differ only by case with `case-collides-with-<other>`. A mixed-case **column** keeps its own spelling in `physical_name`, and every statement addresses it by that spelling. Two columns differing only by case — creatable under `enable_case_sensitive_identifier` — refuse their table at column grain (SPEC 1.5.2).
@@ -75,6 +83,13 @@ Both path segments are lowercased for the FQN, and the rule check refuses two ob
 ## Listed values
 
 An `INTERVAL` column lists its values as Redshift's own `::varchar` text, the text `length` is measured over.
+
+## Column types
+
+| Type | Profiled as | What to know |
+|---|---|---|
+| `SUPER` | `json` | Attribute names read case-insensitively unless the cluster sets `enable_case_sensitive_super_attribute`, so `userId` and `userid` may read as one part; `types` keys are what `JSON_TYPEOF` returns |
+| `GEOMETRY`, `GEOGRAPHY` | `spatial` | — |
 
 ## Namespaces
 

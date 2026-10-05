@@ -23,6 +23,10 @@
   <div class="notice">{{ catalog_only_notice }}</div>
 {% endif %}
 
+{% if external_notice %}
+  <div class="notice">{{ external_notice }}</div>
+{% endif %}
+
 <div class="cards">
   <div class="card">
     <div class="label">metadata</div>
@@ -235,6 +239,26 @@
       </div>
       <ol>
         {% for k in physical_layout.key_list %}
+          <li><code>{{ k.expression }}</code>{% if k.column %} ({{ k.column }}){% endif %}</li>
+        {% endfor %}
+      </ol>
+    </div>
+  {% endif %}
+
+  {% if merging %}
+    <div class="hedge-block">
+      <h2>Merged by {{ merging.engine }}</h2>
+      <div class="hedge">
+        {% if merging.rows == 'merged' %}
+          Read with FINAL: the counts here are the merged rows, and a query without FINAL sees more.
+        {% elif merging.one_row_per_key %}
+          The counts here are the stored rows, which may repeat a key until merged; query with FINAL for one row per key.
+        {% else %}
+          The counts here include state and cancel rows not yet collapsed; query with FINAL for the collapsed rows.
+        {% endif %}
+      </div>
+      <ol>
+        {% for k in merging.key_list %}
           <li><code>{{ k.expression }}</code>{% if k.column %} ({{ k.column }}){% endif %}</li>
         {% endfor %}
       </ol>
@@ -476,6 +500,9 @@
                   length {{ col.length.min|number }}-{{ col.length.max|number }} &middot; avg {{ col.length.avg|number }} &middot; p95 {{ col.length.p95|number }}
                 </div>
               {% endif %}
+              {% for p in col.parts %}
+                <div class="muted"><code>{{ p.label }}</code> &middot; {{ p.classification }} &middot; {{ p.notes }}</div>
+              {% endfor %}
             </td>
             <td>
               {{ col.notes }}

@@ -32,6 +32,40 @@ REQUIRED_FIELDS: dict[str, frozenset[str]] = {
             "classification",
         },
     ),
+    "composite": frozenset(
+        {
+            "sql_type",
+            "nullable",
+            "null_count",
+            "null_rate",
+            "classification",
+            "parts",
+            "parts_found",
+        },
+    ),
+    "spatial": frozenset(
+        {
+            "sql_type",
+            "nullable",
+            "null_count",
+            "null_rate",
+            "classification",
+            "geometry",
+            "extent",
+        },
+    ),
+    "vector": frozenset(
+        {
+            "sql_type",
+            "nullable",
+            "null_count",
+            "null_rate",
+            "classification",
+            "dimension",
+            "norm",
+            "zero_count",
+        },
+    ),
     "foreign_key_candidate": frozenset(
         {
             "sql_type",
@@ -103,6 +137,20 @@ REQUIRED_FIELDS: dict[str, frozenset[str]] = {
             "distribution",
             "frequencies",
             "values",
+        },
+    ),
+    "binary": frozenset(
+        {
+            "sql_type",
+            "nullable",
+            "null_count",
+            "null_rate",
+            "cardinality",
+            "cardinality_ratio",
+            "cardinality_method",
+            "classification",
+            "empty_count",
+            "length",
         },
     ),
     "text": frozenset(
@@ -128,6 +176,15 @@ REQUIRED_FIELDS: dict[str, frozenset[str]] = {
 FORBIDDEN_FIELDS: dict[str, frozenset[str]] = {
     "boolean": frozenset(
         {
+            "types",
+            "geometry",
+            "extent",
+            "dimension",
+            "norm",
+            "parts",
+            "parts_found",
+            "size",
+            "occurrences",
             "distribution",
             "range",
             "percentiles",
@@ -146,6 +203,11 @@ FORBIDDEN_FIELDS: dict[str, frozenset[str]] = {
     ),
     "json": frozenset(
         {
+            "geometry",
+            "extent",
+            "dimension",
+            "norm",
+            "occurrences",
             "values",
             "values_coverage",
             "values_coverage_method",
@@ -167,8 +229,107 @@ FORBIDDEN_FIELDS: dict[str, frozenset[str]] = {
             "sketch",
         },
     ),
+    "composite": frozenset(
+        {
+            "types",
+            "occurrences",
+            "values",
+            "values_coverage",
+            "values_coverage_method",
+            "distribution",
+            "frequencies",
+            "range",
+            "percentiles",
+            "mean",
+            "sum",
+            "negative_count",
+            "quantized_count",
+            "length",
+            "normalized_cardinality",
+            "freshness",
+            "redacted",
+            "unrepresentable",
+            "sketch",
+            "geometry",
+            "extent",
+            "dimension",
+        },
+    ),
+    "spatial": frozenset(
+        {
+            "types",
+            "dimension",
+            "norm",
+            "parts",
+            "parts_found",
+            "size",
+            "occurrences",
+            "cardinality",
+            "cardinality_ratio",
+            "cardinality_method",
+            "values",
+            "values_coverage",
+            "values_coverage_method",
+            "distribution",
+            "range",
+            "percentiles",
+            "mean",
+            "sum",
+            "zero_count",
+            "negative_count",
+            "empty_count",
+            "quantized_count",
+            "length",
+            "normalized_cardinality",
+            "freshness",
+            "unrepresentable",
+            "frequencies",
+            "sketch",
+        },
+    ),
+    "vector": frozenset(
+        {
+            "types",
+            "parts",
+            "parts_found",
+            "size",
+            "occurrences",
+            "geometry",
+            "extent",
+            "cardinality",
+            "cardinality_ratio",
+            "cardinality_method",
+            "values",
+            "values_coverage",
+            "values_coverage_method",
+            "distribution",
+            "range",
+            "percentiles",
+            "mean",
+            "sum",
+            "negative_count",
+            "empty_count",
+            "quantized_count",
+            "length",
+            "normalized_cardinality",
+            "freshness",
+            "redacted",
+            "unrepresentable",
+            "frequencies",
+            "sketch",
+        },
+    ),
     "foreign_key_candidate": frozenset(
         {
+            "types",
+            "geometry",
+            "extent",
+            "dimension",
+            "norm",
+            "parts",
+            "parts_found",
+            "size",
+            "occurrences",
             "range",
             "percentiles",
             "mean",
@@ -184,6 +345,15 @@ FORBIDDEN_FIELDS: dict[str, frozenset[str]] = {
     ),
     "categorical": frozenset(
         {
+            "types",
+            "geometry",
+            "extent",
+            "dimension",
+            "norm",
+            "parts",
+            "parts_found",
+            "size",
+            "occurrences",
             "range",
             "percentiles",
             "mean",
@@ -199,6 +369,15 @@ FORBIDDEN_FIELDS: dict[str, frozenset[str]] = {
     ),
     "temporal": frozenset(
         {
+            "types",
+            "geometry",
+            "extent",
+            "dimension",
+            "norm",
+            "parts",
+            "parts_found",
+            "size",
+            "occurrences",
             "values_coverage",
             "values_coverage_method",
             "mean",
@@ -212,6 +391,15 @@ FORBIDDEN_FIELDS: dict[str, frozenset[str]] = {
     ),
     "numeric": frozenset(
         {
+            "types",
+            "geometry",
+            "extent",
+            "dimension",
+            "norm",
+            "parts",
+            "parts_found",
+            "size",
+            "occurrences",
             "values_coverage",
             "values_coverage_method",
             "freshness",
@@ -221,8 +409,45 @@ FORBIDDEN_FIELDS: dict[str, frozenset[str]] = {
             "normalized_cardinality",
         },
     ),
+    "binary": frozenset(
+        {
+            "types",
+            "geometry",
+            "extent",
+            "dimension",
+            "norm",
+            "parts",
+            "parts_found",
+            "size",
+            "occurrences",
+            "values",
+            "values_coverage",
+            "values_coverage_method",
+            "distribution",
+            "range",
+            "percentiles",
+            "mean",
+            "sum",
+            "zero_count",
+            "negative_count",
+            "quantized_count",
+            "normalized_cardinality",
+            "freshness",
+            "unrepresentable",
+            "frequencies",
+        },
+    ),
     "text": frozenset(
         {
+            "types",
+            "geometry",
+            "extent",
+            "dimension",
+            "norm",
+            "parts",
+            "parts_found",
+            "size",
+            "occurrences",
             "range",
             "percentiles",
             "mean",
@@ -237,6 +462,15 @@ FORBIDDEN_FIELDS: dict[str, frozenset[str]] = {
     ),
     "unsupported": frozenset(
         {
+            "types",
+            "geometry",
+            "extent",
+            "dimension",
+            "norm",
+            "parts",
+            "parts_found",
+            "size",
+            "occurrences",
             "cardinality",
             "cardinality_ratio",
             "cardinality_method",
@@ -263,3 +497,35 @@ FORBIDDEN_FIELDS: dict[str, frozenset[str]] = {
         },
     ),
 }
+
+# SPEC 2.2.18: a part has no catalog entry, join-key role or row population of its own.
+PART_FORBIDDEN_FIELDS: frozenset[str] = frozenset(
+    {
+        "nullable",
+        "physical_name",
+        "collation",
+        "physical_layout_key",
+        "rows_scanned",
+        "populated",
+        "sketch",
+        "normalized_cardinality",
+        "parts",
+        "parts_found",
+    },
+)
+
+
+def part_required_fields(classification: str) -> frozenset[str]:
+    """The fields a part of `classification` MUST carry: its column row, less the part delta."""
+
+    return (REQUIRED_FIELDS.get(classification, frozenset()) - PART_FORBIDDEN_FIELDS) | {
+        "occurrences",
+    }
+
+
+def part_forbidden_fields(classification: str) -> frozenset[str]:
+    """The fields a part of `classification` MUST NOT carry: its column row plus the part delta."""
+
+    return (FORBIDDEN_FIELDS.get(classification, frozenset()) - {"occurrences"}) | (
+        PART_FORBIDDEN_FIELDS
+    )

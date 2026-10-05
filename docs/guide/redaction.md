@@ -68,6 +68,8 @@ So a connection can change what a project-wide rule applies to a column — `mas
 
 **A detected category with no rule covering it is reported, not silenced.** `dbprint check` raises `privacy.unredacted-sensitive` — a warning — for a column that names its own `inferred.sensitivity` and still publishes a cell value nothing withheld. The check reads the committed print, so writing the rule and regenerating is what clears it. [Gating CI](ci.md) covers how warnings surface, which is not the same as how errors do.
 
+**A rule on a document or map column withholds its key names.** The column itself carries no marker; the rule marks its parts, and while the key-set part `[keys]` is redacted no part whose path spells a key is published, so the key names stay in the database with the values.
+
 **A rule reaches every table it covers on the next `generate`.** A table whose print no longer matches the rules is re-read however recently it was profiled. A run that does not re-read such a table — one outside its `--include`/`--exclude`, one that failed, one `--fail-fast` never reached — fails that table instead, naming the columns, and leaves its files as they are; `dbprint check` reports each such column as `privacy.redaction-not-applied`, an error, until a run re-reads it.
 
 ## What a redacted column still publishes

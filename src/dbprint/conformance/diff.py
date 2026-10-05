@@ -86,10 +86,14 @@ def check(data: Any, path: str) -> list[Issue]:
             issues.extend(_check_grain_changed(change, where))
         elif kind == "physical_layout_changed":
             issues.extend(_check_physical_layout_changed(change, where))
+        elif kind == "merging_changed":
+            issues.extend(_check_merging_changed(change, where))
         elif kind == "depends_on_changed":
             issues.extend(_check_depends_on_changed(change, where))
         elif kind == "table_type_changed":
             issues.extend(_check_table_type_changed(change, where))
+        elif kind == "external_changed":
+            issues.extend(_check_external_changed(change, where))
         elif kind == "column_physical_name_changed":
             issues.extend(_check_physical_name_changed(change, where))
         elif kind == "column_collation_changed":
@@ -128,7 +132,7 @@ def check_redacted_values(
         if not isinstance(stat, str) or stat.split(".")[0] not in _VALUE_BEARING_STATS:
             continue
 
-        if (change.get("table"), change.get("column")) not in marked:
+        if (change.get("table"), change.get("column"), change.get("part")) not in marked:
             continue
 
         issues.append(
@@ -145,10 +149,15 @@ def check_redacted_values(
     return issues
 
 
-def _redacted_columns(print_root: Path, manifest_data: dict) -> set[tuple[str, str]]:
-    """Every `(table, column)` whose committed statistics carry a `redacted` marker."""
+def _redacted_columns(
+    print_root: Path,
+    manifest_data: dict,
+) -> set[tuple[str, str, str | None]]:
+    """Every `(table, column, part)` whose committed statistics carry a `redacted` marker; `part`
+    is None for the column itself (SPEC 2.2.18).
+    """
 
-    marked: set[tuple[str, str]] = set()
+    marked: set[tuple[str, str, str | None]] = set()
 
     for tbl_fqn, tbl_entry in walkable_tables(manifest_data).items():
         artifacts = declared_artifacts(tbl_entry)
@@ -170,8 +179,17 @@ def _redacted_columns(print_root: Path, manifest_data: dict) -> set[tuple[str, s
             continue
 
         for name, column in (stats.get("columns") or {}).items():
-            if isinstance(column, dict) and column.get("redacted") is not None:
-                marked.add((tbl_fqn, name))
+            if not isinstance(column, dict):
+                continue
+
+            if column.get("redacted") is not None:
+                marked.add((tbl_fqn, name, None))
+
+            marked |= {
+                (tbl_fqn, name, path)
+                for path, part in (column.get("parts") or {}).items()
+                if isinstance(part, dict) and part.get("redacted") is not None
+            }
 
     return marked
 
@@ -381,6 +399,21 @@ def _check_table_type_changed(change: dict, where: str) -> list[Issue]:
     ]
 
 
+def _check_external_changed(change: dict, where: str) -> list[Issue]:
+    if change.get("before") != change.get("after"):
+        return []
+
+    return [
+        Issue(
+            where,
+            "diff.external-changed-no-change",
+            "error",
+            "external_changed event's before and after are identical.",
+            "§2.6.6",
+        ),
+    ]
+
+
 def _check_physical_name_changed(change: dict, where: str) -> list[Issue]:
     if change.get("before") != change.get("after"):
         return []
@@ -436,6 +469,21 @@ def _check_physical_layout_changed(change: dict, where: str) -> list[Issue]:
             "diff.physical-layout-changed-no-change",
             "error",
             "physical_layout_changed event's before and after are identical.",
+            "§2.6.6",
+        ),
+    ]
+
+
+def _check_merging_changed(change: dict, where: str) -> list[Issue]:
+    if change.get("before") != change.get("after"):
+        return []
+
+    return [
+        Issue(
+            where,
+            "diff.merging-changed-no-change",
+            "error",
+            "merging_changed event's before and after are identical.",
             "§2.6.6",
         ),
     ]

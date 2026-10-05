@@ -9,17 +9,23 @@ from __future__ import annotations
 
 import importlib
 import logging
-import time
-from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any
 
-from .. import trace_context
+from .. import driver
 from ..dialect import Dialect
-from ..errors import QueryFailed
+from ..driver import Cursor, ServerParams
 
 
 # mysql-connector-python defaults to pyformat; the adapter does not override it.
-DIALECT = Dialect(vendor="mysql", paramstyle="pyformat", quote_char="`")
+DIALECT = Dialect(
+    vendor="mysql",
+    paramstyle="pyformat",
+    quote_char="`",
+    text_type="CHAR",
+    concat_null_flags=True,
+    pair_distinct="COUNT(DISTINCT {a}, {b})",
+    seed_hash="MD5(CONCAT({seed}, CAST({value} AS CHAR)))",
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -33,48 +39,10 @@ class MysqlConnectionError(RuntimeError):
     """Raised when the adapter cannot establish a working MySQL session."""
 
 
-@dataclass(frozen=True)
-class ConnectionParams:
+class ConnectionParams(ServerParams):
     """Resolved MySQL credentials passed to the adapter."""
 
-    host: str
-    port: int
-    user: str
-    password: str
-    database: str | None = None
-    statement_timeout: int | None = None
-
-    @classmethod
-    def from_credentials(
-        cls,
-        creds: dict[str, str],
-        statement_timeout: int | None = None,
-    ) -> ConnectionParams:
-        try:
-            return cls(
-                host=creds["host"],
-                port=int(creds["port"]),
-                database=creds.get("database"),
-                user=creds["user"],
-                password=creds["password"],
-                statement_timeout=statement_timeout,
-            )
-        except KeyError as exc:
-            raise MysqlConnectionError(f"missing required credential key: {exc.args[0]!r}") from exc
-        except ValueError as exc:
-            raise MysqlConnectionError(f"invalid port {creds.get('port')!r}: {exc}") from exc
-
-
-class Cursor(Protocol):
-    """DB-API-compatible cursor surface used by the adapter."""
-
-    def execute(self, sql: str, params: Any = ...) -> Any: ...
-
-    def fetchall(self) -> list[Any]: ...
-
-    def fetchone(self) -> Any: ...
-
-    def close(self) -> None: ...
+    error = MysqlConnectionError
 
 
 class Connection:
@@ -84,6 +52,7 @@ class Connection:
         self.params = params
         self._conn: Any | None = None
         self._cursor: Cursor | None = None
+        self.mariadb = False
 
     def sibling(self) -> Connection:
         """An unopened connection with the same parameters."""
@@ -113,6 +82,7 @@ class Connection:
             ) from exc
 
         self._cursor = self._conn.cursor(buffered=True)
+        self.mariadb = "mariadb" in str(self._conn.server_info).lower()
 
         if self.params.statement_timeout is not None:
             try:
@@ -151,22 +121,7 @@ class Connection:
 def exec_query(cursor: Cursor, sql: str, params: Any = None) -> Cursor:
     """Run a query and return the cursor; DEBUG-traces the text and params as a pair."""
 
-    started = time.monotonic()
-
-    try:
-        if params is None:
-            cursor.execute(sql)
-        else:
-            cursor.execute(sql, params)
-    except Exception as exc:
-        failure = QueryFailed(exc, sql, params, timed_out=_is_timeout(exc))
-        trace_context.log_failure(_LOG, started, failure)
-
-        raise failure from exc
-
-    trace_context.log_success(_LOG, started, sql, params, getattr(cursor, "rowcount", None))
-
-    return cursor
+    return driver.execute(_LOG, _is_timeout, cursor, sql, params)
 
 
 def _import_connector() -> Any:

@@ -30,6 +30,7 @@ from dbprint.config import ConnectionConfig
 from dbprint.conformance.statistics import check
 from dbprint.engine import Engine
 from dbprint.engine.context_assembler import AssemblyOptions, assemble
+from tests._prints import VAULT_COLUMNS, exact_stats, mock_table
 
 
 ACCESSION_NULL_PATTERNS = NullPatterns(
@@ -373,55 +374,13 @@ def _vault_fixture() -> dict[str, MockTable]:
     """seedbank.vault: every column is declared NOT NULL, so no census applies at all."""
 
     return {
-        "seedbank.vault": MockTable(
-            type="table",
-            namespace_path=("seedbank", "vault"),
-            ddl=(
-                "CREATE TABLE seedbank.vault (\n"
-                "    vault_id integer NOT NULL,\n"
-                "    shelf_code character varying(8) NOT NULL\n"
-                ");\n"
-            ),
-            columns=[
-                ColumnMeta(
-                    name="vault_id",
-                    sql_type="integer",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-                ColumnMeta(
-                    name="shelf_code",
-                    sql_type="character varying(8)",
-                    nullable=False,
-                    default=None,
-                    ordinal=2,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
-                "vault_id": ColumnStats(
-                    sql_type="integer",
-                    nullable=False,
-                    null_count=0,
-                    null_rate=0.0,
-                    cardinality=8,
-                    cardinality_ratio=0.166667,
-                    cardinality_method="exact",
-                ),
-                "shelf_code": ColumnStats(
-                    sql_type="character varying(8)",
-                    nullable=False,
-                    null_count=0,
-                    null_rate=0.0,
-                    cardinality=6,
-                    cardinality_ratio=0.125,
-                    cardinality_method="exact",
-                ),
+        "seedbank.vault": mock_table(
+            "seedbank.vault",
+            VAULT_COLUMNS[:2],
+            {
+                "vault_id": exact_stats("integer", 8, 0.166667),
+                "shelf_code": exact_stats("character varying(8)", 6, 0.125),
             },
-            samples={},
             null_patterns=None,
             row_count=48,
         ),

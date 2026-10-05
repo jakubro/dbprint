@@ -1,7 +1,7 @@
 format_version: 1
 table: arboretum.seedbank.accession
 type: table
-profiled_at: '2026-05-17T22:48:01Z'
+profiled_at: '2026-03-09T14:27:36Z'
 row_count: 2500
 row_count_method: exact
 null_patterns:
@@ -829,6 +829,247 @@ columns:
     populated:
       from: '2018-01-02'
       to: '2024-11-05'
+    types:
+      object: 2353
+    parts:
+      '[keys]':
+        sql_type: text
+        null_count: 0
+        null_rate: 0.0
+        classification: categorical
+        occurrences: 4787
+        cardinality: 3
+        cardinality_ratio: 0.000627
+        cardinality_method: exact
+        values:
+        - value: habitat
+          count: 2353
+        - value: moisture_pct
+          count: 2353
+        - value: reclassified_taxon_id
+          count: 81
+        values_coverage: 1.0
+        values_coverage_method: measured
+        distribution: imbalanced
+        length:
+          min: 7
+          max: 21
+          avg: 9.69459
+          p95: 12.0
+      .habitat:
+        sql_type: string
+        null_count: 0
+        null_rate: 0.0
+        classification: categorical
+        occurrences: 2353
+        cardinality: 5
+        cardinality_ratio: 0.002125
+        cardinality_method: exact
+        values:
+        - value: coastal scrub
+          count: 471
+        - value: lowland grassland
+          count: 471
+        - value: riparian corridor
+          count: 471
+        - value: arid steppe
+          count: 470
+        - value: montane forest
+          count: 470
+        values_coverage: 1.0
+        values_coverage_method: measured
+        distribution: uniform
+        length:
+          min: 11
+          max: 17
+          avg: 14.401615
+          p95: 17.0
+      .moisture_pct:
+        sql_type: number
+        null_count: 0
+        null_rate: 0.0
+        classification: numeric
+        occurrences: 2353
+        cardinality: 80
+        cardinality_ratio: 0.033999
+        cardinality_method: exact
+        values:
+        - value: 17
+          count: 31
+        - value: 22
+          count: 31
+        - value: 10
+          count: 30
+        - value: 11
+          count: 30
+        - value: 12
+          count: 30
+        - value: 13
+          count: 30
+        - value: 14
+          count: 30
+        - value: 15
+          count: 30
+        - value: 16
+          count: 30
+        - value: 18
+          count: 30
+        - value: 19
+          count: 30
+        - value: 20
+          count: 30
+        - value: 21
+          count: 30
+        - value: 23
+          count: 30
+        - value: 24
+          count: 30
+        - value: 25
+          count: 30
+        - value: 26
+          count: 30
+        - value: 27
+          count: 30
+        - value: 28
+          count: 30
+        - value: 29
+          count: 30
+        - value: 30
+          count: 30
+        - value: 34
+          count: 30
+        - value: 39
+          count: 30
+        - value: 46
+          count: 30
+        - value: 51
+          count: 30
+        - value: 56
+          count: 30
+        - value: 63
+          count: 30
+        - value: 68
+          count: 30
+        - value: 73
+          count: 30
+        - value: 80
+          count: 30
+        distribution: uniform
+        frequencies:
+          top: 31
+          bottom: 30
+          listed: 30
+          total: 902
+        range:
+          min: 10
+          max: 89
+        percentiles:
+          p01: 10.0
+          p25: 29.0
+          p50: 49.0
+          p75: 69.0
+          p99: 89.0
+        mean: 49.253719
+        sum: 115894
+        zero_count: 0
+        negative_count: 0
+        quantized_count: 2353
+      .reclassified_taxon_id:
+        sql_type: number
+        null_count: 0
+        null_rate: 0.0
+        classification: numeric
+        occurrences: 81
+        cardinality: 81
+        cardinality_ratio: 1.0
+        cardinality_method: exact
+        values:
+        - value: 100
+          count: 1
+        - value: 101
+          count: 1
+        - value: 102
+          count: 1
+        - value: 110
+          count: 1
+        - value: 111
+          count: 1
+        - value: 112
+          count: 1
+        - value: 120
+          count: 1
+        - value: 121
+          count: 1
+        - value: 129
+          count: 1
+        - value: 13
+          count: 1
+        - value: 131
+          count: 1
+        - value: 139
+          count: 1
+        - value: 14
+          count: 1
+        - value: 140
+          count: 1
+        - value: 141
+          count: 1
+        - value: 149
+          count: 1
+        - value: 15
+          count: 1
+        - value: 150
+          count: 1
+        - value: 158
+          count: 1
+        - value: 159
+          count: 1
+        - value: 160
+          count: 1
+        - value: 168
+          count: 1
+        - value: 169
+          count: 1
+        - value: 170
+          count: 1
+        - value: 178
+          count: 1
+        - value: 179
+          count: 1
+        - value: 180
+          count: 1
+        - value: 187
+          count: 1
+        - value: 188
+          count: 1
+        - value: 189
+          count: 1
+        distribution: uniform
+        frequencies:
+          top: 1
+          bottom: 1
+          listed: 30
+          total: 30
+        range:
+          min: 4
+          max: 296
+        percentiles:
+          p01: 4.8
+          p25: 82.0
+          p50: 159.0
+          p75: 227.0
+          p99: 295.2
+        mean: 154.62963
+        sum: 12525
+        zero_count: 0
+        negative_count: 0
+        quantized_count: 81
+    parts_found: 4
+    size:
+      min: 2
+      max: 3
+      avg: 2.034424
+      p95: 2
   field_notes:
     sql_type: text
     nullable: false
@@ -1125,7 +1366,7 @@ columns:
       p75: '2023-02-19'
       p99: '2024-10-11'
     freshness:
-      max_age_days: 558
+      max_age_days: 489
       classification: dormant
     sketch:
       method: kmv_md5_lo64
@@ -1218,7 +1459,7 @@ columns:
       p99: '2024-10-25T00:00:00Z'
     quantized_count: 2500
     freshness:
-      max_age_days: 535
+      max_age_days: 466
       classification: dormant
   storage_temperature_c:
     sql_type: numeric(4,1)

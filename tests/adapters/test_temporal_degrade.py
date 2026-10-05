@@ -1,7 +1,6 @@
 """What a failed temporal block costs a column, and that every adapter says so (SPEC 2.2.4).
 
-The degrade is copied per adapter, so one adapter dropping the marker is what this catches. An
-AST sweep reads that every handler names its loss; only running one reads what it named.
+An AST sweep reads that every handler names its loss; only running one reads what it named.
 """
 
 from __future__ import annotations
@@ -28,11 +27,28 @@ _ADAPTERS_WITH_STATS = sorted(
 )
 
 
-def _stats_source(adapter: str) -> pathlib.Path:
-    spec = importlib.util.find_spec(f"dbprint.adapters.{adapter}.stats")
+_SWEPT = [
+    "dbprint.adapters.base",
+    *(f"dbprint.adapters.{name}.stats" for name in _ADAPTERS_WITH_STATS),
+]
+
+
+def _source(module: str) -> pathlib.Path:
+    spec = importlib.util.find_spec(module)
     assert spec is not None and spec.origin is not None
 
     return pathlib.Path(spec.origin)
+
+
+def _rebuilt(tree: ast.Module) -> list[tuple[ast.ExceptHandler, ast.Call]]:
+    return [
+        (handler, last.value)
+        for handler in ast.walk(tree)
+        if isinstance(handler, ast.ExceptHandler)
+        for last in [handler.body[-1]]
+        if isinstance(last, ast.Return) and isinstance(last.value, ast.Call)
+        if isinstance(last.value.func, ast.Name) and last.value.func.id.endswith("replace")
+    ]
 
 
 class TestTheSharedLossList:
@@ -65,38 +81,32 @@ class TestTheSharedLossList:
         assert list(names) == sorted(set(names))
 
 
-@pytest.mark.parametrize("adapter", _ADAPTERS_WITH_STATS)
-def test_no_degrade_returns_a_column_without_naming_what_it_lost(adapter: str) -> None:
+def test_the_shared_assembly_has_a_degrade_path() -> None:
+    assert _rebuilt(ast.parse(_source("dbprint.adapters.base").read_text(encoding="utf-8")))
+
+
+@pytest.mark.parametrize("module", _SWEPT)
+def test_no_degrade_returns_a_column_without_naming_what_it_lost(module: str) -> None:
     """Every `except` handler that hands back a rebuilt `ColumnStats` must set `unmeasured`.
 
     `return stats` untouched ships a column missing fields SPEC 2.2.3 marks REQUIRED.
     """
 
-    tree = ast.parse(_stats_source(adapter).read_text(encoding="utf-8"))
-    rebuilt = [
-        (handler, last.value)
-        for handler in ast.walk(tree)
-        if isinstance(handler, ast.ExceptHandler)
-        for last in [handler.body[-1]]
-        if isinstance(last, ast.Return) and isinstance(last.value, ast.Call)
-        if isinstance(last.value.func, ast.Name) and last.value.func.id.endswith("replace")
-    ]
+    path = _source(module)
 
-    assert rebuilt, f"{adapter} has no statistics degrade path at all"
-
-    for handler, call in rebuilt:
+    for handler, call in _rebuilt(ast.parse(path.read_text(encoding="utf-8"))):
         keywords = {kw.arg for kw in call.keywords}
 
         assert "unmeasured" in keywords, (
-            f"{adapter}/stats.py:{handler.lineno} degrades without naming the loss"
+            f"{path.name}:{handler.lineno} degrades without naming the loss"
         )
 
 
-@pytest.mark.parametrize("adapter", _ADAPTERS_WITH_STATS)
-def test_no_degrade_hands_back_the_untouched_stats_object(adapter: str) -> None:
+@pytest.mark.parametrize("module", _SWEPT)
+def test_no_degrade_hands_back_the_untouched_stats_object(module: str) -> None:
     """A bare `return stats` is a silent loss: the column ships short with nothing saying so."""
 
-    tree = ast.parse(_stats_source(adapter).read_text(encoding="utf-8"))
+    tree = ast.parse(_source(module).read_text(encoding="utf-8"))
     bare = [
         handler.lineno
         for handler in ast.walk(tree)
@@ -106,7 +116,7 @@ def test_no_degrade_hands_back_the_untouched_stats_object(adapter: str) -> None:
         if isinstance(last.value, ast.Name) and last.value.id == "stats"
     ]
 
-    assert bare == [], f"{adapter}/stats.py degrades silently at line(s) {bare}"
+    assert bare == [], f"{module} degrades silently at line(s) {bare}"
 
 
 # The statement each handler guards. `_approximate_distribution_via_top_n` wraps only the top-N,

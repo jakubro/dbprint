@@ -10,17 +10,21 @@ import importlib
 import logging
 import shutil
 import subprocess
-import time
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, LiteralString, cast
 
-from .. import trace_context
+from .. import driver
 from ..dialect import Dialect
-from ..errors import QueryFailed
+from ..driver import ServerParams
 
 
 # psycopg3 defaults to pyformat and the adapter does not override it.
-DIALECT = Dialect(vendor="postgres", paramstyle="pyformat", quote_char='"', addressed_parts=2)
+DIALECT = Dialect(
+    vendor="postgres",
+    paramstyle="pyformat",
+    quote_char='"',
+    addressed_parts=2,
+    text_type="TEXT",
+)
 
 if TYPE_CHECKING:
     import psycopg
@@ -37,38 +41,10 @@ class PostgresConnectionError(RuntimeError):
     """Raised when the adapter cannot establish a working Postgres session."""
 
 
-@dataclass(frozen=True)
-class ConnectionParams:
+class ConnectionParams(ServerParams):
     """Resolved Postgres credentials passed to the adapter."""
 
-    host: str
-    port: int
-    user: str
-    password: str
-    database: str | None = None
-    statement_timeout: int | None = None
-
-    @classmethod
-    def from_credentials(
-        cls,
-        creds: dict[str, str],
-        statement_timeout: int | None = None,
-    ) -> ConnectionParams:
-        try:
-            return cls(
-                host=creds["host"],
-                port=int(creds["port"]),
-                database=creds.get("database"),
-                user=creds["user"],
-                password=creds["password"],
-                statement_timeout=statement_timeout,
-            )
-        except KeyError as exc:
-            raise PostgresConnectionError(
-                f"missing required credential key: {exc.args[0]!r}",
-            ) from exc
-        except ValueError as exc:
-            raise PostgresConnectionError(f"invalid port {creds.get('port')!r}: {exc}") from exc
+    error = PostgresConnectionError
 
     def env_for_pg_dump(self, database: str) -> dict[str, str]:
         """libpq env vars consumed by a pg_dump of one relation in `database`."""
@@ -136,19 +112,13 @@ def exec_query(conn: psycopg.Connection, query: str, params: Any = None) -> psyc
     Traces the statement at DEBUG: text and parameters as a pair, never merged.
     """
 
-    started = time.monotonic()
-
-    try:
-        cursor = conn.execute(cast(LiteralString, query), params)
-    except Exception as exc:
-        failure = QueryFailed(exc, query, params, timed_out=_is_timeout(exc))
-        trace_context.log_failure(_LOG, started, failure)
-
-        raise failure from exc
-
-    trace_context.log_success(_LOG, started, query, params, getattr(cursor, "rowcount", None))
-
-    return cursor
+    return driver.traced(
+        _LOG,
+        _is_timeout,
+        lambda: conn.execute(cast(LiteralString, query), params),
+        query,
+        params,
+    )
 
 
 def ensure_pg_dump_available() -> None:

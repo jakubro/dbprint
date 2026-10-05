@@ -7,14 +7,12 @@ from __future__ import annotations
 import importlib
 import logging
 import threading
-import time
-from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any
 
-from .. import trace_context
+from .. import driver
 from ..dialect import Dialect
-from ..errors import QueryFailed
+from ..driver import Cursor, FactoryConnection
 
 
 # The Python duckdb driver binds parameters positionally with `?`, like sqlite3.
@@ -53,90 +51,28 @@ class ConnectionParams:
         return cls(database=database, read_only=read_only, statement_timeout=statement_timeout)
 
 
-class Cursor(Protocol):
-    """DB-API-compatible cursor surface used by the adapter."""
+class Connection(FactoryConnection):
+    """A duckdb session opened by a cursor factory."""
 
-    def execute(self, sql: str, params: Any = ...) -> Any: ...
+    error = DuckdbConnectionError
+    vendor = "duckdb"
 
-    def fetchall(self) -> list[Any]: ...
+    def _default_factory(self, params: ConnectionParams) -> Any:
+        return _default_cursor_factory(params)
 
-    def fetchone(self) -> Any: ...
+    def _open_failure(self, exc: Exception) -> str:
+        return f"could not open duckdb database {self.params.database!r}: {exc}"
 
-    def close(self) -> None: ...
-
-
-CursorFactory = Callable[[ConnectionParams], Any]
-
-
-class Connection:
-    """Wraps a cursor-factory output with open/close lifecycle hooks."""
-
-    def __init__(
-        self,
-        params: ConnectionParams,
-        cursor_factory: CursorFactory | None = None,
-    ) -> None:
-        self.params = params
-        self._factory = cursor_factory or _default_cursor_factory
-        self._cursor: Cursor | None = None
-
-    def sibling(self) -> Connection:
-        """An unopened connection with the same parameters and cursor factory."""
-
-        return Connection(self.params, self._factory)
-
-    def open(self) -> None:
-        try:
-            cursor = self._factory(self.params)
-        except DuckdbConnectionError:
-            raise
-        except Exception as exc:
-            raise DuckdbConnectionError(
-                f"could not open duckdb database {self.params.database!r}: {exc}",
-            ) from exc
-
+    def _opened(self, cursor: Any) -> Any:
         limit = self.params.statement_timeout
-        self._cursor = cursor if limit is None else _TimedCursor(cursor, limit)
 
-    def close(self) -> None:
-        if self._cursor is not None:
-            try:
-                self._cursor.close()
-            except Exception:  # noqa: BLE001, S110 - best-effort; the resource may already be dead
-                pass
-
-            self._cursor = None
-
-    def is_open(self) -> bool:
-        return self._cursor is not None
-
-    @property
-    def cursor(self) -> Cursor:
-        if self._cursor is None:
-            raise DuckdbConnectionError("connection is not open; call connect() first")
-
-        return self._cursor
+        return cursor if limit is None else _TimedCursor(cursor, limit)
 
 
 def exec_query(cursor: Cursor, sql: str, params: Any = None) -> Cursor:
     """Run a query and return the cursor; DEBUG-traces the text and params as a pair."""
 
-    started = time.monotonic()
-
-    try:
-        if params is None:
-            cursor.execute(sql)
-        else:
-            cursor.execute(sql, params)
-    except Exception as exc:
-        failure = QueryFailed(exc, sql, params, timed_out=_is_timeout(exc))
-        trace_context.log_failure(_LOG, started, failure)
-
-        raise failure from exc
-
-    trace_context.log_success(_LOG, started, sql, params, getattr(cursor, "rowcount", None))
-
-    return cursor
+    return driver.execute(_LOG, _is_timeout, cursor, sql, params)
 
 
 def _default_cursor_factory(params: ConnectionParams) -> Any:

@@ -1,7 +1,7 @@
 format_version: 1
 table: arboretum.seedbank.germination_trial
 type: table
-profiled_at: '2026-05-17T22:48:01Z'
+profiled_at: '2026-03-09T14:27:36Z'
 row_count: 900
 row_count_method: exact
 grain:
@@ -642,7 +642,7 @@ columns:
       p75: '2021-11-06'
       p99: '2022-06-10'
     freshness:
-      max_age_days: 1428
+      max_age_days: 1359
       classification: dormant
     sketch:
       method: kmv_md5_lo64
@@ -735,7 +735,7 @@ columns:
       p99: '2022-07-03T00:00:00Z'
     quantized_count: 900
     freshness:
-      max_age_days: 1396
+      max_age_days: 1327
       classification: dormant
     sketch:
       method: kmv_md5_lo64

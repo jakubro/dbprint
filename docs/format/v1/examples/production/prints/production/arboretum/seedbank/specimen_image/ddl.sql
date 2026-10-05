@@ -5,6 +5,7 @@ CREATE TABLE seedbank.specimen_image (
     file_name character varying(80) NOT NULL,
     content_type character varying(60) NOT NULL,
     thumbnail_b64 text NOT NULL,
+    thumbnail bytea NOT NULL,
     byte_size bigint NOT NULL,
     captured_at timestamp(0) with time zone NOT NULL
 );

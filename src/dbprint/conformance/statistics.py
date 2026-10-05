@@ -8,12 +8,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, TypeGuard
 
-from dbprint.spec.absence import SAMPLED_CLASSIFICATIONS, SAMPLE_VERDICTS, emits
+from dbprint.spec import parts as part_paths
+from dbprint.spec.absence import emits, sample_verdicts
 from dbprint.spec.classification import (
     compute_candidate_key_exception,
     compute_cardinality_ratio,
     compute_null_rate,
     has_day_resolution,
+    is_binary_type,
     is_candidate_key,
     is_string_like_type,
 )
@@ -33,6 +35,7 @@ from dbprint.spec.sketch import K as SKETCH_K
 from dbprint.spec.sketch import decode_sketch
 from dbprint.spec.statistics_matrix import FORBIDDEN_FIELDS as _FORBIDDEN_BY_CLASSIFICATION
 from dbprint.spec.statistics_matrix import REQUIRED_FIELDS as _REQUIRED_BY_CLASSIFICATION
+from dbprint.spec.statistics_matrix import part_forbidden_fields, part_required_fields
 from dbprint.spec.temporal_age import day_count, parse_instant
 from dbprint.spec.temporal_range import LeadingYear, leading_year
 from dbprint.spec.value_text import scalar_text, value_order_key
@@ -83,8 +86,38 @@ _FORBIDDEN_INFERRED_BY_CLASSIFICATION: dict[str, set[str]] = {
         "looks_like_candidate_share",
         "fk_candidate",
     },
+    "spatial": {
+        "looks_like",
+        "sampled",
+        "matched",
+        "looks_like_candidate",
+        "looks_like_candidate_share",
+        "fk_candidate",
+        "epoch_unit",
+        "candidate_key",
+        "candidate_key_exception",
+    },
+    "vector": {
+        "looks_like",
+        "sampled",
+        "matched",
+        "looks_like_candidate",
+        "looks_like_candidate_share",
+        "fk_candidate",
+        "epoch_unit",
+        "candidate_key",
+        "candidate_key_exception",
+    },
+    "binary": {"fk_candidate", "epoch_unit"},
     "text": {"fk_candidate"},
 }
+
+
+# SPEC 2.2.18: an array's floating-point elements pool every position, so they list no values.
+_POOLED_FLOAT_FIELDS = frozenset({"values", "frequencies", "distribution"})
+
+# SPEC 2.2.18: a part has no join-key role, so it carries neither uniqueness verdict.
+_PART_FORBIDDEN_INFERRED = frozenset({"candidate_key", "candidate_key_exception"})
 
 
 @dataclass(frozen=True)
@@ -115,7 +148,7 @@ def _string_valued_sql_type(col: dict) -> bool:
 
     sql_type = col.get("sql_type")
 
-    return isinstance(sql_type, str) and is_string_like_type(sql_type)
+    return isinstance(sql_type, str) and (is_string_like_type(sql_type) or is_binary_type(sql_type))
 
 
 def _no_day_resolution(col: dict) -> bool:
@@ -141,6 +174,34 @@ def _no_non_null_rows(col: dict, rows_scanned: int) -> bool:
     return rows_scanned - null_count <= 0
 
 
+def _no_bounded_value(col: dict, rows_scanned: int) -> bool:
+    null_count = col.get("null_count")
+    geometry = col.get("geometry")
+    empty = geometry.get("empty_count") if isinstance(geometry, dict) else None
+
+    if not isinstance(null_count, int):
+        return False
+
+    non_null = rows_scanned - null_count
+
+    return non_null <= 0 or (isinstance(empty, int) and empty >= non_null)
+
+
+def _no_nonzero_vector(col: dict, rows_scanned: int) -> bool:
+    zero_count = col.get("zero_count")
+
+    if _no_non_null_rows(col, rows_scanned):
+        return True
+
+    null_count = col.get("null_count")
+
+    return (
+        isinstance(null_count, int)
+        and isinstance(zero_count, int)
+        and zero_count >= rows_scanned - null_count
+    )
+
+
 _CONDITIONAL_CELLS: tuple[_ConditionalCell, ...] = (
     # `drop` emits no literal, so the bound fields are absent, not placeholders (SPEC 2.2.9).
     # `freshness` is unaffected: `max_age_days` is derived, not a value read from a cell.
@@ -163,7 +224,16 @@ _CONDITIONAL_CELLS: tuple[_ConditionalCell, ...] = (
     # `sketch` keeps its own code, `stats.sketch-on-redacted-column`.
     _ConditionalCell(
         classifications=frozenset(
-            {"boolean", "categorical", "foreign_key_candidate", "text", "numeric", "temporal"},
+            {
+                "boolean",
+                "categorical",
+                "foreign_key_candidate",
+                "text",
+                "numeric",
+                "temporal",
+                "binary",
+                "spatial",
+            },
         ),
         fields=WITHHELD_UNDER_REDACTION - {"sketch"},
         reason=(
@@ -173,14 +243,35 @@ _CONDITIONAL_CELLS: tuple[_ConditionalCell, ...] = (
         spec_ref="§2.2.9",
         holds=lambda col, rows_scanned: is_redacted(col),
     ),
+    _ConditionalCell(
+        classifications=frozenset({"spatial"}),
+        fields=frozenset({"extent"}),
+        reason="the column holds no non-empty value for a bounding box to describe",
+        spec_ref="§2.2.3",
+        holds=lambda col, rows_scanned: _no_bounded_value(col, rows_scanned),
+    ),
+    _ConditionalCell(
+        classifications=frozenset({"vector"}),
+        fields=frozenset({"dimension"}),
+        reason="the scanned set holds no non-null vector to count the elements of",
+        spec_ref="§2.2.3",
+        holds=lambda col, rows_scanned: _no_non_null_rows(col, rows_scanned),
+    ),
+    _ConditionalCell(
+        classifications=frozenset({"vector"}),
+        fields=frozenset({"norm"}),
+        reason="the scanned set holds no non-zero vector to take the norm of",
+        spec_ref="§2.2.3",
+        holds=lambda col, rows_scanned: _no_nonzero_vector(col, rows_scanned),
+    ),
     # `length` follows the value's type, not the classification - `categorical` and
     # `foreign_key_candidate` match before any type-based branch runs (SPEC 3.2).
     _ConditionalCell(
         classifications=frozenset({"categorical", "foreign_key_candidate"}),
         fields=frozenset({"length"}),
         reason=(
-            "the column's sql_type does not carry a string value, or the scanned set holds "
-            "no non-null value for the aggregate to describe"
+            "the column's sql_type carries neither a string value nor bytes, or the scanned set "
+            "holds no non-null value for the aggregate to describe"
         ),
         spec_ref="§2.2.3",
         holds=lambda col, rows_scanned: (
@@ -229,6 +320,7 @@ def check(data: Any, path: str, tbl_fqn: str) -> list[Issue]:
 
     issues.extend(_check_null_patterns(data, path, columns, rows_scanned))
     issues.extend(_check_physical_layout(data, path, columns))
+    issues.extend(_check_merging(data, path, columns))
     issues.extend(_check_grain(data, path, columns, row_count, scoped))
     issues.extend(_check_dependencies(data, path, columns, row_count, scoped))
     issues.extend(_check_timeline(data, path, columns, row_count, scoped, rows_scanned))
@@ -240,38 +332,163 @@ def check(data: Any, path: str, tbl_fqn: str) -> list[Issue]:
             continue
 
         col_path = f"{path}::columns.{col_name}"
-        classification = col.get("classification")
+        issues.extend(
+            _check_column(
+                col,
+                col_path,
+                col_name,
+                rows_scanned,
+                scoped=scoped,
+                profiled_at=profiled_at,
+                catalog_only=catalog_only,
+            ),
+        )
+        issues.extend(_check_parts(col, col_path, profiled_at))
 
-        # Both read the SPEC 2.2.3 matrix, so both need a classification it has a row for. An
-        # unknown one warns (SPEC 5); `catalog_only` (SPEC 2.2.15) replaces the matrix entirely.
-        if classification in _REQUIRED_BY_CLASSIFICATION and not catalog_only:
-            issues.extend(_check_matrix(col, col_path, classification, rows_scanned))
-            issues.extend(_check_unmeasured(col, col_path, classification, rows_scanned))
+    return issues
 
-        issues.extend(_check_count_invariants(col, col_path, rows_scanned))
+
+_POOLED_FLOAT_CELL = _ConditionalCell(
+    classifications=frozenset({"numeric"}),
+    fields=_POOLED_FLOAT_FIELDS,
+    reason="the part is an array's floating-point elements, which pool every position",
+    spec_ref="§2.2.18",
+    holds=lambda col, rows_scanned: True,
+)
+
+
+def _check_column(
+    col: dict,
+    col_path: str,
+    col_name: str,
+    rows_scanned: int,
+    *,
+    scoped: bool,
+    profiled_at: Any,
+    catalog_only: bool,
+    part: bool = False,
+) -> list[Issue]:
+    """Every per-column check; a part reads `occurrences` as its population (SPEC 2.2.18)."""
+
+    issues: list[Issue] = []
+    classification = col.get("classification")
+
+    # Both read the SPEC 2.2.3 matrix, so both need a classification it has a row for. An
+    # unknown one warns (SPEC 5); `catalog_only` (SPEC 2.2.15) replaces the matrix entirely.
+    if classification in _REQUIRED_BY_CLASSIFICATION and not catalog_only:
+        issues.extend(
+            _check_matrix(
+                col,
+                col_path,
+                classification,
+                rows_scanned,
+                part=col_name if part else None,
+            ),
+        )
+        issues.extend(_check_unmeasured(col, col_path, classification, rows_scanned, part=part))
+
+    issues.extend(_check_count_invariants(col, col_path, rows_scanned))
+
+    if not part:
         issues.extend(_check_candidate_key(col, col_path, rows_scanned))
         issues.extend(
             _check_population_marker(col, col_path, scoped=scoped, rows_scanned=rows_scanned),
         )
-        issues.extend(_check_value_order(col, col_path))
-        issues.extend(_check_spelling_groups(col, col_path))
-        issues.extend(_check_redaction_marker(col, col_path))
-        issues.extend(_check_unredacted_sensitive(col, col_path))
-        issues.extend(_check_distribution(col, col_path))
-        issues.extend(_check_frequencies_distribution(col, col_path, rows_scanned))
-        issues.extend(_check_precision(col, col_path))
-        issues.extend(_check_unrepresentable(col, col_path))
-        issues.extend(_check_span_days(col, col_path))
-        issues.extend(_check_percentiles_order(col, col_path))
-        issues.extend(_check_percentiles_containment(col, col_path))
-        issues.extend(_check_mean_containment(col, col_path))
-        issues.extend(_check_length_order(col, col_path))
-        issues.extend(_check_normalized_cardinality_order(col, col_path))
-        issues.extend(_check_looks_like_candidate(col, col_path))
-        issues.extend(_check_max_age_days_mismatch(col, col_path, profiled_at))
-        issues.extend(_check_redacted_day_counts(col, col_path))
+
+    issues.extend(_check_value_order(col, col_path))
+    issues.extend(_check_spelling_groups(col, col_path))
+    issues.extend(_check_redaction_marker(col, col_path))
+    issues.extend(_check_geometry(col, col_path, rows_scanned))
+    issues.extend(_check_vector_bounds(col, col_path))
+    issues.extend(_check_types_sum(col, col_path, rows_scanned))
+    issues.extend(_check_unredacted_sensitive(col, col_path))
+    issues.extend(_check_distribution(col, col_path))
+    issues.extend(_check_frequencies_distribution(col, col_path, rows_scanned))
+    issues.extend(_check_precision(col, col_path))
+    issues.extend(_check_unrepresentable(col, col_path))
+    issues.extend(_check_span_days(col, col_path))
+    issues.extend(_check_percentiles_order(col, col_path))
+    issues.extend(_check_percentiles_containment(col, col_path))
+    issues.extend(_check_mean_containment(col, col_path))
+    issues.extend(_check_length_order(col, col_path))
+    issues.extend(_check_normalized_cardinality_order(col, col_path))
+    issues.extend(_check_looks_like_candidate(col, col_path))
+    issues.extend(_check_max_age_days_mismatch(col, col_path, profiled_at))
+    issues.extend(_check_redacted_day_counts(col, col_path))
+
+    if not part:
         issues.extend(_check_physical_name(col, col_path, col_name))
         issues.extend(_check_sketch(col, col_path))
+
+    return issues
+
+
+def _check_parts(col: dict, col_path: str, profiled_at: Any) -> list[Issue]:
+    """SPEC 2.2.18: canonical paths, every parent listed, `parts_found` at least the list."""
+
+    parts = col.get("parts")
+
+    if not isinstance(parts, dict):
+        return []
+
+    issues: list[Issue] = []
+    found = col.get("parts_found")
+
+    if isinstance(found, int) and found < len(parts):
+        issues.append(
+            Issue(
+                col_path,
+                "stats.parts-found-below-listed",
+                "error",
+                f"parts_found={found} is below the {len(parts)} parts listed.",
+                "§2.2.18",
+            ),
+        )
+
+    for part_path, block in parts.items():
+        block_path = f"{col_path}.parts[{part_path}]"
+
+        if not isinstance(part_path, str) or not part_paths.is_canonical(part_path):
+            issues.append(
+                Issue(
+                    block_path,
+                    "stats.part-path-not-canonical",
+                    "error",
+                    f"{part_path!r} is not a part path in its one canonical spelling.",
+                    "§2.2.18",
+                ),
+            )
+
+            continue
+
+        up = part_paths.parent(part_path)
+
+        if up is not None and up not in parts:
+            issues.append(
+                Issue(
+                    block_path,
+                    "stats.part-parent-unlisted",
+                    "error",
+                    f"the part {up!r} that {part_path!r} sits inside is not listed.",
+                    "§2.2.18",
+                ),
+            )
+
+        occurrences = block.get("occurrences") if isinstance(block, dict) else None
+
+        if isinstance(block, dict) and isinstance(occurrences, int):
+            issues.extend(
+                _check_column(
+                    block,
+                    block_path,
+                    part_path,
+                    occurrences,
+                    scoped=False,
+                    profiled_at=profiled_at,
+                    catalog_only=False,
+                    part=True,
+                ),
+            )
 
     return issues
 
@@ -353,6 +570,30 @@ def _check_depends_on(data: dict, path: str) -> list[Issue]:
             "depends_on is present but type is 'table'; the field names what a "
             "view/matview reads and MUST NOT appear on a plain table.",
             "§2.2.17",
+        ),
+    ]
+
+
+def _check_merging(data: dict, path: str, columns: dict) -> list[Issue]:
+    """SPEC 2.2.19: a sorting-key entry's `column` names a column in `columns`."""
+
+    block = data.get("merging")
+
+    if not isinstance(block, dict):
+        return []
+
+    named = {k["column"] for k in block.get("key") or [] if isinstance(k, dict) and "column" in k}
+
+    if not (unknown := sorted(str(name) for name in named if name not in columns)):
+        return []
+
+    return [
+        Issue(
+            path,
+            "stats.merging-unknown-column",
+            "error",
+            f"merging.key names column(s) {unknown} not present in `columns`.",
+            "§2.2.19",
         ),
     ]
 
@@ -1192,9 +1433,16 @@ def _check_catalog_only_columns(
     return issues
 
 
-def _check_matrix(col: dict, col_path: str, classification: str, rows_scanned: int) -> list[Issue]:
+def _check_matrix(
+    col: dict,
+    col_path: str,
+    classification: str,
+    rows_scanned: int,
+    *,
+    part: str | None = None,
+) -> list[Issue]:
     issues: list[Issue] = []
-    required, forbidden, exceptions = _matrix_cells(col, classification, rows_scanned)
+    required, forbidden, exceptions = _matrix_cells(col, classification, rows_scanned, part=part)
 
     for field in required:
         if field not in col:
@@ -1222,9 +1470,16 @@ def _check_matrix(col: dict, col_path: str, classification: str, rows_scanned: i
                 ),
             )
 
-    issues.extend(_check_inferred_matrix(col, col_path, classification))
+    issues.extend(_check_inferred_matrix(col, col_path, classification, part=part is not None))
 
     return issues
+
+
+def _required_fields(classification: str, *, part: bool) -> frozenset[str]:
+    if part:
+        return part_required_fields(classification)
+
+    return _REQUIRED_BY_CLASSIFICATION[classification]
 
 
 def unmeasured_of(col: dict) -> frozenset[str]:
@@ -1242,15 +1497,28 @@ def _matrix_cells(
     col: dict,
     classification: str,
     rows_scanned: int,
+    *,
+    part: str | None = None,
 ) -> tuple[set[str], set[str], dict[str, _ConditionalCell]]:
     """The required and forbidden field sets for one column, exceptions applied.
 
     Each moved field carries the exception that moved it, so a rejection names the condition.
     """
 
-    required = set(_REQUIRED_BY_CLASSIFICATION[classification])
-    forbidden = set(_FORBIDDEN_BY_CLASSIFICATION[classification])
+    required = set(_required_fields(classification, part=part is not None))
+    forbidden = set(
+        part_forbidden_fields(classification)
+        if part is not None
+        else _FORBIDDEN_BY_CLASSIFICATION[classification],
+    )
     exceptions: dict[str, _ConditionalCell] = {}
+
+    sql_type = col.get("sql_type")
+
+    if part is not None and part_paths.pools_floats(part, classification, str(sql_type)):
+        required -= _POOLED_FLOAT_FIELDS
+        forbidden |= _POOLED_FLOAT_FIELDS
+        exceptions.update(dict.fromkeys(_POOLED_FLOAT_FIELDS, _POOLED_FLOAT_CELL))
 
     for cell in _CONDITIONAL_CELLS:
         if classification not in cell.classifications or not cell.holds(col, rows_scanned):
@@ -1267,7 +1535,13 @@ def _matrix_cells(
     return required, forbidden, exceptions
 
 
-def _check_inferred_matrix(col: dict, col_path: str, classification: str) -> list[Issue]:
+def _check_inferred_matrix(
+    col: dict,
+    col_path: str,
+    classification: str,
+    *,
+    part: bool = False,
+) -> list[Issue]:
     """Check the `inferred.*` forbidden rows of the matrix, which a flat key test cannot reach -
     same code as the flat rows, with the dotted name in the detail; none is ever REQUIRED.
     """
@@ -1285,7 +1559,10 @@ def _check_inferred_matrix(col: dict, col_path: str, classification: str) -> lis
             f"Column with classification={classification!r} MUST NOT emit field 'inferred.{name}'.",
             "§2.2.3",
         )
-        for name in sorted(_FORBIDDEN_INFERRED_BY_CLASSIFICATION.get(classification, set()))
+        for name in sorted(
+            _FORBIDDEN_INFERRED_BY_CLASSIFICATION.get(classification, set())
+            | (_PART_FORBIDDEN_INFERRED if part else set()),
+        )
         if name in inferred
     ]
 
@@ -1687,6 +1964,8 @@ def _check_unmeasured(
     col_path: str,
     classification: str,
     rows_scanned: int,
+    *,
+    part: bool = False,
 ) -> list[Issue]:
     """SPEC 2.2.4: a named field must be absent, and must be one the matrix required - otherwise
     the marker either contradicts a measurement or absorbs the structural absences SPEC 7.2 covers.
@@ -1700,14 +1979,13 @@ def _check_unmeasured(
     issues: list[Issue] = []
     # Against the UNEXEMPTED matrix: `_matrix_cells` has already moved these out of `required`,
     # so asking it here would report every name as unrequired.
-    required = set(_REQUIRED_BY_CLASSIFICATION[classification])
+    required = set(_required_fields(classification, part=part))
 
     for cell in _CONDITIONAL_CELLS:
         if classification in cell.classifications and cell.holds(col, rows_scanned):
             required -= cell.fields
 
-    if classification in SAMPLED_CLASSIFICATIONS:
-        required |= SAMPLE_VERDICTS
+    required |= sample_verdicts(classification)
 
     for field in sorted(named):
         if emits(col, field):
@@ -1890,11 +2168,117 @@ def _check_redaction_marker(col: dict, col_path: str) -> list[Issue]:
     return []
 
 
+def _check_geometry(col: dict, col_path: str, rows_scanned: int) -> list[Issue]:
+    """SPEC 2.2.4: each `geometry` list partitions the non-null values; an `extent` is a box."""
+
+    issues: list[Issue] = []
+    geometry = col.get("geometry")
+    null_count = col.get("null_count")
+
+    if isinstance(geometry, dict) and isinstance(null_count, int):
+        non_null = rows_scanned - null_count
+        mismatched = [
+            name
+            for name in ("kinds", "srids", "dimensions")
+            if isinstance(geometry.get(name), list)
+            and sum(e.get("count", 0) for e in geometry[name] if isinstance(e, dict)) != non_null
+        ]
+        mismatched += [
+            name
+            for name in ("empty_count", "invalid_count")
+            if isinstance(geometry.get(name), int) and geometry[name] > non_null
+        ]
+
+        if mismatched:
+            issues.append(
+                Issue(
+                    col_path,
+                    "stats.geometry-count-mismatch",
+                    "error",
+                    f"geometry {', '.join(mismatched)} disagree with the {non_null} non-null "
+                    f"value(s) scanned.",
+                    "§2.2.4",
+                ),
+            )
+
+    extent = col.get("extent")
+
+    if isinstance(extent, dict) and any(
+        isinstance(extent.get(lo), (int, float))
+        and isinstance(extent.get(hi), (int, float))
+        and extent[lo] > extent[hi]
+        for lo, hi in (("min_x", "max_x"), ("min_y", "max_y"))
+    ):
+        issues.append(
+            Issue(
+                col_path,
+                "stats.extent-inverted",
+                "error",
+                f"extent has a minimum above its maximum: {extent!r}.",
+                "§2.2.4",
+            ),
+        )
+
+    return issues
+
+
+def _check_vector_bounds(col: dict, col_path: str) -> list[Issue]:
+    """SPEC 2.2.4: `dimension` and `norm` each name a minimum no greater than their maximum."""
+
+    inverted = [
+        name
+        for name in ("dimension", "norm")
+        if isinstance(bounds := col.get(name), dict)
+        and isinstance(bounds.get("min"), (int, float))
+        and isinstance(bounds.get("max"), (int, float))
+        and bounds["min"] > bounds["max"]
+    ]
+
+    if not inverted:
+        return []
+
+    return [
+        Issue(
+            col_path,
+            "stats.vector-bounds-inverted",
+            "error",
+            f"{', '.join(inverted)} has a minimum above its maximum.",
+            "§2.2.4",
+        ),
+    ]
+
+
+def _check_types_sum(col: dict, col_path: str, rows_scanned: int) -> list[Issue]:
+    """SPEC 2.2.4: `types` counts every non-null value of its population exactly once."""
+
+    types = col.get("types")
+    null_count = col.get("null_count")
+
+    if not isinstance(types, dict) or not isinstance(null_count, int):
+        return []
+
+    counted = sum(n for n in types.values() if isinstance(n, int))
+
+    if counted == rows_scanned - null_count:
+        return []
+
+    return [
+        Issue(
+            col_path,
+            "stats.types-sum-mismatch",
+            "error",
+            f"types sums to {counted}, but the population less null_count is "
+            f"{rows_scanned - null_count}.",
+            "§2.2.4",
+        ),
+    ]
+
+
 def _check_unredacted_sensitive(col: dict, col_path: str) -> list[Issue]:
     """SPEC 4.4.2/2.2.9: a detected `sensitivity` publishing a cell value with no marker warns.
 
-    Publication is the same three-field test (`values`/`range`/`percentiles`) the producer's
-    marker rule uses (`orchestrator._emitted_extras`). `warning` only: the axis is
+    Publication is the same four-field test (`values`/`range`/`percentiles`/`extent`) the
+    producer's marker rule uses (`orchestrator._emitted_extras`). `warning` only: the axis is
     recall-biased (SPEC 4.4.2), so a false positive MUST NOT move the verdict or exit code.
     """
 
@@ -1904,7 +2288,7 @@ def _check_unredacted_sensitive(col: dict, col_path: str) -> list[Issue]:
     if not isinstance(sensitivity, str) or col.get("redacted") is not None:
         return []
 
-    published = [field for field in ("values", "range", "percentiles") if field in col]
+    published = [field for field in ("values", "range", "percentiles", "extent") if field in col]
 
     if not published:
         return []

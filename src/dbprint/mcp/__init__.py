@@ -8,6 +8,7 @@ from .resources import (
     ResourceEntry,
     ResourceRef,
     enumerate_for,
+    list_page,
     parse_uri,
     read,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "build_state",
     "dispatch",
     "enumerate_for",
+    "list_page",
     "parse_uri",
     "read",
     "serve_http",

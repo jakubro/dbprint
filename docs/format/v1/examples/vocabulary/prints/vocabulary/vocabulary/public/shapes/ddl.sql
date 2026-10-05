@@ -22,7 +22,12 @@ CREATE TABLE public.shapes (
     date_of_birth character varying(10) NOT NULL,
     blood_type character varying(3) NOT NULL,
     ethnicity character varying(24) NOT NULL,
-    annual_salary character varying(10) NOT NULL
+    annual_salary character varying(10) NOT NULL,
+    jpeg_bytes bytea NOT NULL,
+    gif_bytes bytea NOT NULL,
+    pdf_bytes bytea NOT NULL,
+    gzip_bytes bytea NOT NULL,
+    zip_bytes bytea NOT NULL
 );
 
 ALTER TABLE ONLY public.shapes

@@ -24,7 +24,9 @@ DATA_CHANGE_KIND = "statistic_changed"
 ROW_COUNT_CHANGE_KIND = "table_row_count_changed"
 GRAIN_CHANGE_KIND = "grain_changed"
 PHYSICAL_LAYOUT_CHANGE_KIND = "physical_layout_changed"
+MERGING_CHANGE_KIND = "merging_changed"
 DEPENDS_ON_CHANGE_KIND = "depends_on_changed"
+EXTERNAL_CHANGE_KIND = "external_changed"
 
 TYPE_CHANGE_KIND = "table_type_changed"
 PHYSICAL_NAME_CHANGE_KIND = "column_physical_name_changed"
@@ -85,8 +87,12 @@ class TableState:
     # This side's statistics.yaml carries `catalog_only` (SPEC 2.2.15): no query was
     # issued at all, so it has no measurement to compare against the other side's.
     catalog_only: bool = False
+    # None where this side contributed no statistics; an absent `external` hydrates as False.
+    external: bool | None = None
     grain: TableGrainState | None = None
     physical_layout: PhysicalLayoutState | None = None
+    # None where this side contributed no block; `{}` is a side whose engine combines no rows.
+    merging: dict[str, Any] | None = None
     # The FQNs a view/matview reads (SPEC 2.2.17); None on a table or where the catalog could not
     # answer - absent on both sides reads as "nothing to compare", never as a removal.
     depends_on: tuple[str, ...] | None = None
@@ -284,7 +290,7 @@ _PRESENCE_GATED_STATS = frozenset({"normalized_cardinality"})
 
 # Kept by the projection and skipped per comparison: a marker, not a measurement (SPEC 2.2.4), but
 # one `_diff_one_column_stats` must still read off both sides to know what not to compare.
-_MARKER_STATS = frozenset({"unmeasured"})
+_MARKER_STATS = frozenset({"unmeasured", "parts"})
 
 
 def comparable_columns(columns: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -342,6 +348,15 @@ def grain_from_block(data: Any) -> TableGrainState | None:
 
 # The confirmed-unclustered sentinel: a real, comparable value, never Python None.
 _NO_PHYSICAL_LAYOUT = PhysicalLayoutState(mechanism="", keys=())
+
+
+def merging_from_block(data: Any) -> dict[str, Any]:
+    """Parse a `merging` block (SPEC 2.2.19) into its diff-comparable form.
+
+    Absence means "no merging engine", so it parses to the empty form a plain table carries.
+    """
+
+    return dict(data) if isinstance(data, dict) else {}
 
 
 def physical_layout_from_block(data: Any) -> PhysicalLayoutState:
@@ -424,6 +439,30 @@ def _diff_table(fqn: str, before: TableState, after: TableState) -> list[dict[st
 
         if layout_change is not None:
             out.append(layout_change)
+
+    if before.merging is not None and after.merging is not None and before.merging != after.merging:
+        out.append(
+            {
+                "kind": MERGING_CHANGE_KIND,
+                "table": fqn,
+                "before": before.merging or None,
+                "after": after.merging or None,
+            },
+        )
+
+    if (
+        before.external is not None
+        and after.external is not None
+        and before.external != after.external
+    ):
+        out.append(
+            {
+                "kind": EXTERNAL_CHANGE_KIND,
+                "table": fqn,
+                "before": before.external,
+                "after": after.external,
+            },
+        )
 
     if before.depends_on is not None and after.depends_on is not None:
         depends_on_change = _diff_depends_on(fqn, before.depends_on, after.depends_on)
@@ -845,8 +884,54 @@ def _diff_statistics(
         b = before_stats.get(col, {})
         a = after_stats.get(col, {})
         out.extend(_diff_one_column_stats(fqn, col, b, a, scoped=scoped))
+        out.extend(_diff_parts(fqn, col, b, a, scoped=scoped))
 
     return out
+
+
+def _diff_parts(
+    fqn: str,
+    col: str,
+    before: dict[str, Any],
+    after: dict[str, Any],
+    *,
+    scoped: bool,
+) -> list[dict[str, Any]]:
+    """Each part both sides list, compared as its own block (SPEC 2.6.6).
+
+    A part only one side lists is never reported: under `max_parts` a path leaving the kept set
+    is not a removal, and `parts_found` moving is what reports a real change in the count.
+    """
+
+    before_parts = column_value(before, "parts")
+    after_parts = column_value(after, "parts")
+
+    if not isinstance(before_parts, dict) or not isinstance(after_parts, dict):
+        return []
+
+    out: list[dict[str, Any]] = []
+
+    for path in sorted(set(before_parts) & set(after_parts)):
+        b, a = before_parts[path], after_parts[path]
+
+        if isinstance(b, dict) and isinstance(a, dict):
+            out.extend(
+                _diff_one_column_stats(
+                    fqn,
+                    col,
+                    _projected_part(b),
+                    _projected_part(a),
+                    scoped=scoped,
+                    part=path,
+                ),
+            )
+
+    return out
+
+
+def _projected_part(block: dict[str, Any]) -> dict[str, Any]:
+    # A part's type is a statistic of its column, not a column of the table (SPEC 2.6.6).
+    return {key: value for key, value in block.items() if key == "sql_type" or _projected(key)}
 
 
 # Dropped per column, not in the projection: only when a side counts approximately.
@@ -869,6 +954,7 @@ _POPULATION_ABSOLUTE_STATS = frozenset(
         # A distinct-value count under folding (SPEC 2.2.4), so it scales with the scanned set
         # exactly as `cardinality` beside it does.
         "normalized_cardinality",
+        "occurrences",
     },
 )
 
@@ -896,6 +982,7 @@ def _diff_one_column_stats(
     after: dict[str, Any],
     *,
     scoped: bool,
+    part: str | None = None,
 ) -> list[dict[str, Any]]:
     # A missing `cardinality_method` reads as exact, so a baseline predating the field keeps
     # comparing instead of silently stopping.
@@ -915,7 +1002,9 @@ def _diff_one_column_stats(
     for path in sorted(paths):
         head = path.split(".")[0]
 
-        if path in _MARKER_STATS or not _is_data(path):
+        if path in _MARKER_STATS or not (
+            _is_data(path) or (part is not None and path == "sql_type")
+        ):
             continue
 
         if head in unmeasured or _unmeasured(before, path) or _unmeasured(after, path):
@@ -939,14 +1028,12 @@ def _diff_one_column_stats(
         if _same_reading(b, a):
             continue
 
-        event: dict[str, Any] = {
-            "kind": DATA_CHANGE_KIND,
-            "table": fqn,
-            "column": col,
-            "stat": path,
-            "before": b,
-            "after": a,
-        }
+        event: dict[str, Any] = {"kind": DATA_CHANGE_KIND, "table": fqn, "column": col}
+
+        if part is not None:
+            event["part"] = part
+
+        event.update({"stat": path, "before": b, "after": a})
 
         if _is_numeric_stat(path) and isinstance(b, (int, float)) and isinstance(a, (int, float)):
             event["delta"] = a - b

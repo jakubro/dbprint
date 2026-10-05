@@ -113,7 +113,7 @@ def test_postgres_end_to_end(
     assert curator_stats["columns"]["email"]["classification"] == "text"
     assert curator_stats["columns"]["email"]["inferred"]["looks_like"] == "email"
     assert curator_stats["columns"]["is_active"]["classification"] == "boolean"
-    assert curator_stats["columns"]["field_photo"]["classification"] == "unsupported"
+    assert curator_stats["columns"]["field_photo"]["classification"] == "binary"
     assert curator_stats["columns"]["traits"]["classification"] == "json"
 
     fieldwork_rel = yaml.safe_load(

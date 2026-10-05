@@ -464,6 +464,7 @@ INSERT INTO seedbank.specimen_image (
   file_name,
   content_type,
   thumbnail_b64,
+  thumbnail,
   byte_size,
   captured_at
 )
@@ -474,13 +475,23 @@ SELECT
   'img_' || LPAD(gen.k::TEXT, 6, '0') || '.jpg',
   (ARRAY['image/jpeg', 'image/png', 'image/tiff'])[1 + (gen.k % 3)],
   ENCODE(('specimen-photo-' || gen.k::TEXT)::BYTEA, 'base64'),
+  DECODE('89504e470d0a1a0a0000000d49484452' || LPAD(TO_HEX(gen.k), 8, '0'), 'hex'),
   40000 + ((gen.k * 137) % 900000),
   TIMESTAMP WITH TIME ZONE '2020-01-01 00:00:00+00' + (gen.k % 1800) * INTERVAL '1 day'
       + (gen.k % 24) * INTERVAL '1 hour'
 FROM
   GENERATE_SERIES(1, 700) gen (k);
 
-INSERT INTO fixture.shape_probe (probe_id, logger_ipv4, json_text, payload_bytes, tag_list)
+INSERT INTO fixture.shape_probe (
+  probe_id,
+  logger_ipv4,
+  json_text,
+  payload_bytes,
+  tag_list,
+  deployed_at,
+  reading_embedding,
+  calibration_box
+)
 SELECT
   gen.p,
   (ARRAY[
@@ -499,7 +510,25 @@ SELECT
   '{"reading": ' || (10 + (gen.p % 90))::TEXT || '.' || LPAD((gen.p % 100)::TEXT, 2, '0')
       || ', "unit": "C", "ok": true}',
   DECODE('deadbeef' || LPAD(TO_HEX(gen.p), 4, '0'), 'hex'),
-  ARRAY['probe', 'sensor-' || (gen.p % 5)::TEXT]
+  ARRAY['probe', 'sensor-' || (gen.p % 5)::TEXT],
+  CASE
+    WHEN gen.p % 10 = 0 THEN NULL
+    WHEN gen.p = 7 THEN ST_GEOMFROMTEXT('POLYGON EMPTY', 4326)
+    WHEN gen.p % 9 = 0 THEN ST_MAKEENVELOPE(
+      16.6 + gen.p * 0.001,
+      49.2,
+      16.6 + gen.p * 0.001 + 0.0005,
+      49.2005,
+      4326
+    )
+    ELSE ST_SETSRID(ST_MAKEPOINT(16.6 + gen.p * 0.001, 49.2 + (gen.p % 7) * 0.001), 4326)
+  END,
+  CASE
+    WHEN gen.p % 10 = 5 THEN NULL
+    WHEN gen.p IN (3, 13) THEN ARRAY[0, 0, 0]::REAL[]::VECTOR(3)
+    ELSE ARRAY[1, gen.p % 7, gen.p % 5]::REAL[]::VECTOR(3)
+  END,
+  BOX(POINT(0, 0), POINT(gen.p, gen.p % 9))
 FROM
   GENERATE_SERIES(1, 50) gen (p);
 

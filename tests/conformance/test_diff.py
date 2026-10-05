@@ -302,8 +302,10 @@ class TestEachEventKindCarriesWhatItsKindRequires:
         [
             ("grain_changed", "diff.grain-changed-no-change"),
             ("physical_layout_changed", "diff.physical-layout-changed-no-change"),
+            ("merging_changed", "diff.merging-changed-no-change"),
             ("depends_on_changed", "diff.depends-on-changed-no-change"),
             ("table_type_changed", "diff.table-type-changed-no-change"),
+            ("external_changed", "diff.external-changed-no-change"),
             ("column_physical_name_changed", "diff.column-physical-name-changed-no-change"),
             ("column_collation_changed", "diff.column-collation-changed-no-change"),
         ],
@@ -318,8 +320,10 @@ class TestEachEventKindCarriesWhatItsKindRequires:
         [
             "grain_changed",
             "physical_layout_changed",
+            "merging_changed",
             "depends_on_changed",
             "table_type_changed",
+            "external_changed",
             "column_physical_name_changed",
             "column_collation_changed",
         ],

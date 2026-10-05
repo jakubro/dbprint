@@ -20,6 +20,8 @@ from dbprint.spec.classification import (
     is_recognised_type,
     is_string_like_type,
     is_temporal_type,
+    map_types,
+    record_members,
 )
 
 
@@ -151,10 +153,10 @@ def test_an_unmeasured_column_of_an_unnamed_type_is_unsupported() -> None:
 
 
 def test_a_genuinely_unsupported_type_stays_unsupported_even_if_measured() -> None:
-    """`bytea` is on the format's own list; a stray cardinality does not rescue it."""
+    """`map` is on the format's own list; a stray cardinality does not rescue it."""
 
     result = classify(
-        "bytea",
+        "map(varchar, integer)",
         cardinality=1000,
         has_declared_fk=False,
         enumeration_threshold=_THRESHOLD,
@@ -175,11 +177,11 @@ def test_an_unqueried_column_of_an_unnamed_type_is_text() -> None:
     assert result == "text"
 
 
-def test_an_unqueried_binary_column_still_reaches_unsupported() -> None:
-    """The genuinely unsupported set - binary, array, composite - is matched first either way."""
+def test_an_unqueried_composite_column_still_reaches_unsupported() -> None:
+    """The genuinely unsupported set - array, composite - is matched first either way."""
 
     result = classify(
-        "bytea",
+        "struct(a integer)",
         cardinality=None,
         has_declared_fk=False,
         enumeration_threshold=_THRESHOLD,
@@ -443,3 +445,116 @@ class TestTypeFamilies:
     )
     def test_an_array_suffix_is_read_at_depth_zero(self, sql_type: str, array: bool) -> None:
         assert is_array_type(sql_type) is array
+
+
+@pytest.mark.parametrize(
+    ("sql_type", "cardinality", "has_declared_fk", "expected"),
+    [
+        ("bytea", 1000, False, "binary"),
+        ("BINARY(16)", 1000, True, "foreign_key_candidate"),
+        ("longblob", 3, False, "categorical"),
+        ("VARBYTE(64)", None, False, "binary"),
+    ],
+)
+def test_a_binary_type_is_measured_and_lands_on_its_own_branch(
+    sql_type: str,
+    cardinality: int | None,
+    has_declared_fk: bool,
+    expected: str,
+) -> None:
+    result = classify(
+        sql_type,
+        cardinality=cardinality,
+        has_declared_fk=has_declared_fk,
+        enumeration_threshold=_THRESHOLD,
+        catalog_only=cardinality is None,
+    )
+
+    assert result == expected
+
+
+def test_a_binary_type_is_not_string_like() -> None:
+    assert not is_string_like_type("bytea")
+
+
+@pytest.mark.parametrize(
+    ("sql_type", "expected"),
+    [
+        ("SimpleAggregateFunction(sum, UInt64)", "uint64"),
+        ("SimpleAggregateFunction(anyLast, LowCardinality(Nullable(String)))", "string"),
+        ("SimpleAggregateFunction(max, DateTime64(3, 'UTC'))", "datetime64"),
+        ("SimpleAggregateFunction(sumMap, Array(UInt8), Array(UInt64))", "array"),
+        ("SimpleAggregateFunction(sum)", "simpleaggregatefunction"),
+        ("AggregateFunction(uniq, UInt64)", "aggregatefunction"),
+    ],
+)
+def test_a_simple_aggregate_function_reads_as_the_type_it_stores(
+    sql_type: str,
+    expected: str,
+) -> None:
+    assert base_type(sql_type) == expected
+
+
+@pytest.mark.parametrize(
+    ("sql_type", "nullable"),
+    [
+        ("SimpleAggregateFunction(anyLast, Nullable(String))", True),
+        ("SimpleAggregateFunction(anyLast, LowCardinality(Nullable(String)))", True),
+        ("SimpleAggregateFunction(anyLast, String)", False),
+        ("AggregateFunction(anyLast, Nullable(String))", False),
+    ],
+)
+def test_nullability_follows_the_stored_type_not_an_aggregate_state(
+    sql_type: str,
+    nullable: bool,
+) -> None:
+    assert is_nullable_type(sql_type) is nullable
+
+
+@pytest.mark.parametrize(
+    ("sql_type", "expected"),
+    [
+        (
+            'STRUCT(a VARCHAR, "b c" STRUCT(d INTEGER, e DECIMAL(9, 2)))',
+            ("struct", [("a", "VARCHAR"), ("b c", "STRUCT(d INTEGER, e DECIMAL(9, 2))")]),
+        ),
+        ("UNION(n INTEGER, s VARCHAR)", ("union", [("n", "INTEGER"), ("s", "VARCHAR")])),
+        ("STRUCT<a STRING, b ARRAY<INT64>>", ("struct", [("a", "STRING"), ("b", "ARRAY<INT64>")])),
+        (
+            "struct<a:string,b:map<string,int>>",
+            ("struct", [("a", "string"), ("b", "map<string,int>")]),
+        ),
+        ("Nullable(Tuple(a String, b UInt8))", ("struct", [("a", "String"), ("b", "UInt8")])),
+        ("Tuple(String, Array(UInt8))", ("struct", [("1", "String"), ("2", "Array(UInt8)")])),
+        (
+            "Variant(String, Array(UInt64))",
+            ("union", [("String", "String"), ("Array(UInt64)", "Array(UInt64)")]),
+        ),
+        ("STRUCT(a INTEGER)[]", None),
+        ("VARCHAR", None),
+    ],
+)
+def test_a_declared_record_names_its_members_in_its_own_spelling(
+    sql_type: str,
+    expected: tuple[str, list[tuple[str, str]]] | None,
+) -> None:
+    assert record_members(sql_type) == expected
+
+
+@pytest.mark.parametrize(
+    ("sql_type", "expected"),
+    [
+        ("MAP(VARCHAR, MAP(VARCHAR, INTEGER))", ("VARCHAR", "MAP(VARCHAR, INTEGER)")),
+        ("map<string,array<int>>", ("string", "array<int>")),
+        ("Map(String, Tuple(a UInt8, b String))", ("String", "Tuple(a UInt8, b String)")),
+        ("map(VARCHAR(16777216), NUMBER(38,0))", ("VARCHAR(16777216)", "NUMBER(38,0)")),
+        ("MAP(VARCHAR, INTEGER)[]", None),
+        ("MAP", None),
+        ("hstore", None),
+    ],
+)
+def test_a_declared_map_names_its_key_and_value_types(
+    sql_type: str,
+    expected: tuple[str, str] | None,
+) -> None:
+    assert map_types(sql_type) == expected

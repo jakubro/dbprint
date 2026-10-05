@@ -41,6 +41,7 @@ def _write_manifest(
         "type": "table",
         "path": fqn.replace(".", "/"),
         "artifacts": {"ddl": "ddl.sql", "statistics": "statistics.yaml"},
+        "row_count": 10,
         "columns": 3,
         "profiled_at": profiled_at,
     }
@@ -630,6 +631,7 @@ def _write_typed_manifest(tmp_path: Path, entries: dict[str, str]) -> None:
                 "type": table_type,
                 "path": fqn.replace(".", "/"),
                 "artifacts": {"ddl": "ddl.sql", "statistics": "statistics.yaml"},
+                **({} if table_type == "view" else {"row_count": 10}),
                 "columns": 3,
                 "profiled_at": stamp,
             }

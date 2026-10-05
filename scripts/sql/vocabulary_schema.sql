@@ -8,7 +8,8 @@
 -- and five columns demonstrating the sensitivity: national_id,
 -- sensitivity: date_of_birth, sensitivity: health, sensitivity:
 -- demographic and sensitivity: employment categories, which the seed-bank
--- domain has no honest column for either.
+-- domain has no honest column for either - and five byte columns, one per
+-- binary content kind the production example's PNG thumbnail leaves out.
 
 CREATE TABLE public.shapes (
     row_id INTEGER NOT NULL,
@@ -34,7 +35,12 @@ CREATE TABLE public.shapes (
     date_of_birth CHARACTER VARYING(10) NOT NULL,
     blood_type CHARACTER VARYING(3) NOT NULL,
     ethnicity CHARACTER VARYING(24) NOT NULL,
-    annual_salary CHARACTER VARYING(10) NOT NULL
+    annual_salary CHARACTER VARYING(10) NOT NULL,
+    jpeg_bytes BYTEA NOT NULL,
+    gif_bytes BYTEA NOT NULL,
+    pdf_bytes BYTEA NOT NULL,
+    gzip_bytes BYTEA NOT NULL,
+    zip_bytes BYTEA NOT NULL
 );
 
 ALTER TABLE ONLY public.shapes

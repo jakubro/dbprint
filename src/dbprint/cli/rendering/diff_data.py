@@ -70,7 +70,9 @@ def render_human_text(diff_dict: dict[str, Any], options: DiffRenderOptions) -> 
     _emit_section(buf, "Modified (row count)", _row_count_lines_by_table(changes))
     _emit_section(buf, "Modified (grain)", _grain_lines_by_table(changes))
     _emit_section(buf, "Modified (physical layout)", _physical_layout_lines_by_table(changes))
+    _emit_section(buf, "Modified (merging engine)", _merging_lines_by_table(changes))
     _emit_section(buf, "Modified (depends_on)", _depends_on_lines_by_table(changes))
+    _emit_section(buf, "Modified (external)", _external_lines_by_table(changes))
     statistics_by_table, elided = _statistics_lines_by_table(changes, options)
     _emit_section(buf, "Modified (statistics)", statistics_by_table)
 
@@ -358,6 +360,30 @@ def _format_physical_layout_side(block: dict[str, Any] | None) -> str:
     return f"{mechanism} ({exprs})"
 
 
+def _merging_lines_by_table(changes: list[dict[str, Any]]) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+
+    for ev in changes:
+        if ev.get("kind") != "merging_changed":
+            continue
+
+        fqn = ev.get("table") or ""
+        before = _format_merging_side(ev.get("before"))
+        after = _format_merging_side(ev.get("after"))
+        out.setdefault(fqn, []).append(f"~ merging: {before} -> {after}")
+
+    return out
+
+
+def _format_merging_side(block: dict[str, Any] | None) -> str:
+    if block is None:
+        return "none"
+
+    exprs = ", ".join(k.get("expression", "") for k in block.get("key") or [])
+
+    return f"{block.get('engine', '')} ({exprs}) rows {block.get('rows', '')}"
+
+
 def _depends_on_lines_by_table(changes: list[dict[str, Any]]) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
 
@@ -376,6 +402,21 @@ def _format_depends_on_event(ev: dict[str, Any]) -> str:
     after = ", ".join(ev.get("after") or []) or "none"
 
     return f"~ depends_on: {before} -> {after}"
+
+
+def _external_lines_by_table(changes: list[dict[str, Any]]) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+
+    for ev in changes:
+        if ev.get("kind") != "external_changed":
+            continue
+
+        fqn = ev.get("table") or ""
+        before = "external" if ev.get("before") else "local"
+        after = "external" if ev.get("after") else "local"
+        out.setdefault(fqn, []).append(f"~ rows: {before} -> {after}")
+
+    return out
 
 
 def _statistics_lines_by_table(

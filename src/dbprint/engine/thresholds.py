@@ -73,8 +73,13 @@ def resolve(conn: ConnectionConfig, manifest: dict[str, Any] | None) -> OfflineT
             refused[fqn] = str(exc)
             continue
 
-        # A plain view is never queried, so no size condition can have governed it.
-        if entry_type != "view" and conn.min_rows_conditions_name(fqn):
+        # No size condition governs a view, or an unqueried object - the entry with no `row_count`.
+        if (
+            entry_type != "view"
+            and isinstance(entry, dict)
+            and entry.get("row_count") is not None
+            and conn.min_rows_conditions_name(fqn)
+        ):
             size_gated.append(fqn)
 
     return OfflineThresholds(

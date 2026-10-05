@@ -19,7 +19,8 @@
 -- for a date_of_birth column name, standard ABO/Rh blood-type codes for a
 -- health column, abstract placeholder group labels (never a real ethnicity,
 -- religion or other protected-category name) for a demographic column, and
--- invented salary figures for an employment column.
+-- invented salary figures for an employment column, and byte strings that
+-- are a file signature followed by one invented byte.
 
 INSERT INTO public.shapes (
   row_id,
@@ -45,7 +46,12 @@ INSERT INTO public.shapes (
   date_of_birth,
   blood_type,
   ethnicity,
-  annual_salary
+  annual_salary,
+  jpeg_bytes,
+  gif_bytes,
+  pdf_bytes,
+  gzip_bytes,
+  zip_bytes
 )
 SELECT
   gen.i,
@@ -88,6 +94,11 @@ SELECT
   (ARRAY['1975-03-14', '1990-11-02', '2001-07-23'])[1 + (gen.i % 3)],
   (ARRAY['A+', 'O-', 'B+'])[1 + (gen.i % 3)],
   (ARRAY['Group A', 'Group B', 'Group C'])[1 + (gen.i % 3)],
-  (ARRAY['52000', '68500', '81250'])[1 + (gen.i % 3)]
+  (ARRAY['52000', '68500', '81250'])[1 + (gen.i % 3)],
+  DECODE('ffd8ffe0' || LPAD(TO_HEX(gen.i % 3), 2, '0'), 'hex'),
+  DECODE('474946383961' || LPAD(TO_HEX(gen.i % 3), 2, '0'), 'hex'),
+  DECODE('255044462d' || LPAD(TO_HEX(gen.i % 3), 2, '0'), 'hex'),
+  DECODE('1f8b08' || LPAD(TO_HEX(gen.i % 3), 2, '0'), 'hex'),
+  DECODE('504b0304' || LPAD(TO_HEX(gen.i % 3), 2, '0'), 'hex')
 FROM
   GENERATE_SERIES(1, 40) gen (i);

@@ -16,10 +16,11 @@ import yaml
 
 from dbprint import __version__ as DBPRINT_VERSION
 from dbprint.adapters.base import TableMeta
-from dbprint.config import ConnectionConfig, TableSettings
+from dbprint.config import ConnectionConfig, StatisticsConfig, TableSettings
 from dbprint.spec import artifact_yaml
-from dbprint.spec.absence import Absence, read_table_block
+from dbprint.spec.absence import Absence, block_value, column_value, read_table_block
 from dbprint.spec.fqn import split as split_fqn
+from dbprint.spec.parts import display
 from . import diff as diff_module
 from .baseline import (
     declared_artifacts,
@@ -28,9 +29,10 @@ from .baseline import (
     missing_artifacts,
     walkable_tables,
 )
+from .catalog_only import described_without_query
 from .freshness import age_days, parse_profiled_at
 from .manifest_builder import ManifestTableEntry, profiling_params_dict, statistics_params_dict
-from .relationship_graph import IncomingFk
+from .relationship_graph import IncomingFk, edge_detection
 from .result import TableResult
 
 
@@ -49,7 +51,7 @@ Disposition = Literal[
 
 # Classifications whose SPEC 2.2.3 row carries no cell value and forbids the `redacted`
 # marker itself, so a rule covering such a column resolves to no primitive.
-_NO_CELL_VALUE_CLASSIFICATIONS = frozenset({"json", "unsupported"})
+_NO_CELL_VALUE_CLASSIFICATIONS = frozenset({"json", "composite", "vector", "unsupported"})
 
 
 @dataclass(frozen=True)
@@ -303,6 +305,8 @@ def freshness(
     *,
     generated_at: str,
     conn: ConnectionConfig,
+    external: bool = False,
+    opt_in_only: bool = False,
 ) -> FreshnessVerdict:
     """Whether the committed print of a listed table still stands for this run.
 
@@ -333,6 +337,21 @@ def freshness(
             fresh=False,
             reason=f"{age:.1f} days old, max_age_days {settings.max_age_days}",
         )
+
+    committed_marker = block_value(table.statistics or {}, "catalog_only") is True
+    expected_marker = described_without_query(
+        table.entry.get("type"),
+        read_rows=settings.read_rows,
+        has_columns=bool(table.columns),
+        external=external,
+        opt_in_only=opt_in_only,
+    )
+
+    if committed_marker != expected_marker:
+        return FreshnessVerdict(fresh=False, reason="catalog_only changed since it was profiled")
+
+    if (block_value(table.statistics or {}, "external") is True) != external:
+        return FreshnessVerdict(fresh=False, reason="external changed since it was profiled")
 
     changed = _changed_settings(table, settings, conn)
 
@@ -390,6 +409,24 @@ def resolved_redaction(
     return conn.redaction_for(qualified, sensitivity, looks_like)
 
 
+def resolved_part_redaction(
+    conn: ConnectionConfig,
+    qualified: str,
+    classification: str | None,
+    column_inferred: tuple[str | None, str | None],
+    part_inferred: tuple[str | None, str | None],
+) -> str | None:
+    """The primitive one part is published under: through its column or its own detections.
+
+    Each pair is `(sensitivity, looks_like)`; a part with no cell value resolves none.
+    """
+
+    if classification in _NO_CELL_VALUE_CLASSIFICATIONS:
+        return None
+
+    return conn.redaction_for_part(qualified, *column_inferred, *part_inferred)
+
+
 def redaction_mismatches(
     table: CommittedTable,
     conn: ConnectionConfig,
@@ -400,9 +437,13 @@ def redaction_mismatches(
     """
 
     out: list[RedactionMismatch] = []
+    catalog_only = table.state is not None and table.state.catalog_only
 
     for name, column in table.columns.items():
-        measured = isinstance(column.cardinality, int) and not isinstance(column.cardinality, bool)
+        # A spatial column publishes no cardinality (SPEC 2.2.3) and is measured all the same.
+        measured = (
+            isinstance(column.cardinality, int) and not isinstance(column.cardinality, bool)
+        ) or (column.classification == "spatial" and not catalog_only)
         expected = (
             resolved_redaction(
                 conn,
@@ -418,7 +459,51 @@ def redaction_mismatches(
         if expected != column.redacted:
             out.append(RedactionMismatch(column=name, recorded=column.redacted, expected=expected))
 
+        out.extend(_part_mismatches(conn, f"{table.fqn}.{name}", name, column))
+
     return tuple(out)
+
+
+def _part_mismatches(
+    conn: ConnectionConfig,
+    qualified: str,
+    name: str,
+    column: CommittedColumn,
+) -> list[RedactionMismatch]:
+    parts = column_value(column.stats, "parts")
+
+    if not isinstance(parts, dict):
+        return []
+
+    out: list[RedactionMismatch] = []
+
+    for path, block in parts.items():
+        if not isinstance(block, dict):
+            continue
+
+        recorded = column_value(block, "redacted")
+        cardinality = column_value(block, "cardinality")
+        expected = (
+            resolved_part_redaction(
+                conn,
+                qualified,
+                column_value(block, "classification"),
+                (column.sensitivity, column.looks_like),
+                (
+                    column_value(block, "inferred.sensitivity"),
+                    column_value(block, "inferred.looks_like"),
+                ),
+            )
+            if isinstance(cardinality, int) and not isinstance(cardinality, bool)
+            else None
+        )
+
+        if expected != recorded:
+            out.append(
+                RedactionMismatch(column=display(name, path), recorded=recorded, expected=expected),
+            )
+
+    return out
 
 
 _LISTED_REASON: dict[str | None, CarryReason] = {"skipped": "fresh", "failed": "failed"}
@@ -490,13 +575,21 @@ def _changed_settings(
 ) -> str:
     recorded = table.recorded
     scope = recorded.scope if isinstance(recorded.scope, dict) else {}
-    catalog_only = table.entry.get("type") == "view"
-    ceiling = None if catalog_only else settings.max_rows_scanned
+    catalog_only = block_value(table.statistics or {}, "catalog_only") is True
+    # A view has no row-count estimate, so no ceiling governed it whether or not it was read.
+    ceiling = (
+        None if catalog_only or table.entry.get("type") == "view" else settings.max_rows_scanned
+    )
     current_params = statistics_params_dict(settings.statistics)
+    # A key a print predates reads as its default, so adding one re-profiles nothing.
+    recorded_params = {
+        **statistics_params_dict(StatisticsConfig()),
+        **recorded.statistics_params,
+    }
     changed_params = sorted(
         key
-        for key in current_params.keys() | recorded.statistics_params.keys()
-        if current_params.get(key) != recorded.statistics_params.get(key)
+        for key in current_params.keys() | recorded_params.keys()
+        if current_params.get(key) != recorded_params.get(key)
     )
 
     if changed_params:
@@ -620,7 +713,7 @@ def _incoming(relationships: Mapping[str, Any] | None) -> tuple[IncomingFk, ...]
                     # defaulted to a real action or to the stronger claim `declared`.
                     on_delete=entry.get("on_delete"),
                     on_update=entry.get("on_update"),
-                    detection=entry.get("detection") or "inferred",
+                    detection=edge_detection(entry),
                     constraint_name=entry.get("constraint_name"),
                 ),
             )
@@ -644,7 +737,7 @@ def _refers_to_states(relationships: Mapping[str, Any]) -> list[diff_module.FkSt
                     # defaulted to a real action or to the stronger claim `declared`.
                     on_delete=entry.get("on_delete"),
                     on_update=entry.get("on_update"),
-                    detection=entry.get("detection") or "inferred",
+                    detection=edge_detection(entry),
                 ),
             )
         except (KeyError, TypeError):
@@ -660,6 +753,7 @@ def _hydrate_statistics(state: diff_module.TableState, data: Mapping[str, Any]) 
     state.row_count_method = row_count_method if isinstance(row_count_method, str) else None
     state.scoped = isinstance(data.get("scope"), dict)
     state.catalog_only = data.get("catalog_only") is True
+    state.external = data.get("external") is True
     state.grain = diff_module.grain_from_block(data.get("grain"))
     # SPEC 2.2.1: a block the baseline names unmeasured contributes nothing to compare - hydrating
     # it would resurrect the "confirmed unclustered" sentinel and invent drift against a real read.
@@ -667,6 +761,9 @@ def _hydrate_statistics(state: diff_module.TableState, data: Mapping[str, Any]) 
         state.physical_layout = diff_module.physical_layout_from_block(
             data.get("physical_layout"),
         )
+
+    if read_table_block(data, "merging").state is not Absence.UNMEASURED:
+        state.merging = diff_module.merging_from_block(block_value(data, "merging"))
     depends_on = data.get("depends_on")
     state.depends_on = tuple(depends_on) if isinstance(depends_on, list) else None
 

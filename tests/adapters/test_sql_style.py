@@ -151,6 +151,7 @@ class TestTheLayoutCheckFlagsWhatItExistsToCatch:
             "SELECT\n  EXTRACT(YEAR FROM src.a),\n  COUNT(1) OVER (\n    PARTITION BY src.b ORDER BY src.a\n  )\nFROM\n  s.t src",
             "SELECT\n  CASE WHEN src.a IS NULL THEN 0 ELSE 1 END AS flag,\n  src.b\nFROM\n  s.t src",
             "SELECT\n  ARRAY['a', 'b'] AS tags,\n  src.b\nFROM\n  s.t src",
+            "SELECT\n  src.a\nFROM\n  s.t src\nWHERE\n  src.b IS DISTINCT FROM NULL",
             "SELECT\n  CASE\n    WHEN src.a < 0 THEN 'neg'\n    WHEN src.a > 0 THEN 'pos'\n    ELSE 'zero'\n  END AS sign\nFROM\n  s.t src",
             "SELECT\n  cls.relname\nFROM\n  pg_class cls\n  JOIN pg_namespace nsp ON nsp.oid = cls.relnamespace",
             "SELECT\n  COALESCE(\n    src.a,\n    0\n  ) AS a\nFROM\n  s.t src",

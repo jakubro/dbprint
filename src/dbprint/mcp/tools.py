@@ -5,6 +5,7 @@ from __future__ import annotations
 import fnmatch
 import importlib.resources
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,8 +19,8 @@ from dbprint.config import ConnectionConfig
 from dbprint.engine import (
     AssemblyOptions,
     Purpose,
-    assemble_context,
-    assemble_structured_context,
+    context_sections,
+    structured_context_sections,
     thresholds,
     value_resolution,
 )
@@ -34,24 +35,32 @@ from dbprint.engine.freshness import age_days, evaluate
 from dbprint.spec.absence import Absence, column_value, read_column_field
 from dbprint.spec.classification import Classification
 from dbprint.spec.looks_like import LooksLike
+from dbprint.spec.parts import display
 from dbprint.spec.redaction import Primitive as RedactionPrimitive
 from dbprint.spec.scope import ScanScope, list_is_complete, reply_scope, rows_scanned, scope_of
 from dbprint.spec.sensitivity import Sensitivity
-from . import errors, reference
+from . import errors, paging, reference
 from .reference import ReferenceDocument
 from .state import ServedConnections
 
 
-# Reply caps count items, not bytes; each tool's own argument raises its own cap.
-SEARCH_MATCH_CAP = 200
-TABLE_LISTING_CAP = 500
-MANIFEST_TABLE_CAP = 500
-DIFF_CHANGE_CAP = 500
-CONTEXT_BUDGET_TOKENS = 8000
+_CURSOR_PROPERTY: dict[str, Any] = {
+    "type": "string",
+    "minLength": 1,
+    "description": "`next_cursor` from this call's previous page; omit for the first page",
+}
 
 # The three relationship events carry `source_table`/`target_table` where every other event
 # carries `table`; a filter reading one field alone drops them silently (engine/diff.py).
 _DIFF_TABLE_FIELDS = ("table", "source_table", "target_table")
+
+_MANIFEST_FILTERED_KEYS = frozenset({"tables", "failed_tables"})
+
+_SEARCHED_KINDS = ("statistics", "statistics_annotations")
+
+_PER_COLUMN_SECTIONS = frozenset({"annotations", "values", "dictionary"})
+
+_RESOLUTION_LISTS = ("spellings", "candidates", "domain")
 
 _DIFF_KINDS: list[str] = json.loads(
     importlib.resources.files("dbprint.spec.v1").joinpath("diff.schema.json").read_text("utf-8"),
@@ -89,10 +98,10 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
             "default `purpose: profile` to describe the data - statistics such as null "
             "rates, cardinality and ranges, relationships, the description and notes. "
             "Use search_columns or list_tables first when the table is not yet known, "
-            "and resolve_value to check how one phrase is spelled in one column. A "
-            "budgeted call may omit whole sections to fit and never returns empty on "
-            "success - a truncation marker names what was dropped or, for json/yaml, a "
-            "`_corrupted` field names any declared artifact that failed to parse."
+            "and resolve_value to check how one phrase is spelled in one column. Paged, "
+            "nothing dropped: md and yaml end every page but the last with a "
+            "`next_cursor` line, json carries it as a key; for json/yaml a `_corrupted` "
+            "field names any declared artifact that failed to parse."
         ),
         input_schema={
             "type": "object",
@@ -162,17 +171,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                     "default": True,
                     "description": "Include statistics.annotations.yaml notes and claims, when authored",
                 },
-                "budget_tokens": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": (
-                        "Soft cap in tokens, defaulting to 8000. Sections drop whole, never "
-                        "truncated mid-section: the table's identity is charged first, then "
-                        "each section in priority order is measured against what is left, and "
-                        "one that does not fit is skipped while later, smaller ones may still "
-                        "be included"
-                    ),
-                },
+                "cursor": _CURSOR_PROPERTY,
             },
             "required": ["table"],
         },
@@ -189,8 +188,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
             "is judged against. A table whose threshold cannot be resolved carries "
             "`threshold_error` instead of a verdict. To find columns rather than tables, "
             "use search_columns; for the raw manifest index, get_manifest. "
-            "Capped at 500 entries; narrow with `pattern` to reach past the cap, and a capped "
-            "reply carries `truncated: true` with the `total` it was cut from."
+            "Paged: every reply carries the `total` matched, and `next_cursor` while more remain."
         ),
         input_schema={
             "type": "object",
@@ -219,6 +217,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                         "strings, unchanged"
                     ),
                 },
+                "cursor": _CURSOR_PROPERTY,
             },
         },
     ),
@@ -238,13 +237,12 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
             "identically to one from ten thousand otherwise. A match carries "
             "sensitivity/redacted/candidate_key (and candidate_key_exception where the "
             "ratio falls short of 1.0) whenever the column does, so filtering on any of "
-            "them returns the matched category, not just a bare column name. `limit` caps "
-            "the result and defaults to 200; a capped reply carries `truncated: true` with "
-            "the `total` it was cut from, and an explicit larger `limit` is honoured. A "
+            "them returns the matched category, not just a bare column name. Paged: every "
+            "reply carries the `total` matched, and `next_cursor` while more remain. A "
             "result carries `unreadable_tables` only when a table's own statistics or "
-            "annotations failed to parse: a statistics failure drops that table's "
-            "columns from `matches` entirely; an annotations-only failure still "
-            "returns them, without the annotation."
+            "annotations failed to parse, on its first page: a statistics failure drops "
+            "that table's columns from `matches` entirely; an annotations-only failure "
+            "still returns them, without the annotation."
         ),
         input_schema={
             "type": "object",
@@ -254,8 +252,8 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                     "type": "string",
                     "minLength": 1,
                     "description": (
-                        "fnmatch glob over column names; optional - omit to filter by "
-                        "the other predicates alone"
+                        "fnmatch glob over column names, and over a part as `<column><path>` "
+                        "(`items[*].sku`); optional - omit to filter by the other predicates alone"
                     ),
                 },
                 "classification": {
@@ -306,11 +304,6 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                         "match found through per-value notes carries them as `value_notes`"
                     ),
                 },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Cap on returned matches; a capped response carries `truncated: true`",
-                },
                 "connection": {
                     "type": "string",
                     "description": (
@@ -318,6 +311,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                         "default connection"
                     ),
                 },
+                "cursor": _CURSOR_PROPERTY,
             },
         },
     ),
@@ -338,7 +332,8 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
             "column. An exhaustive list of at most fifty values rides along whole as "
             "`domain`, so a small vocabulary needs one call; on a table read in part, "
             "`exhaustive` is false, the reply carries the table's `scope` and "
-            "`row_count`, and `domain` is the scanned rows' whole domain."
+            "`row_count`, and `domain` is the scanned rows' whole domain. Paged: every "
+            "page repeats the scalar keys; the answer list comes before `domain`."
         ),
         input_schema={
             "type": "object",
@@ -354,6 +349,14 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                     "minLength": 1,
                     "description": "Column name as the print spells it",
                 },
+                "part": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "A part of the column, by its path as the print keys it (`.status`, "
+                        "`[*]`); omit it to resolve against the column itself"
+                    ),
+                },
                 "text": {
                     "type": "string",
                     "minLength": 1,
@@ -366,6 +369,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                         "default connection"
                     ),
                 },
+                "cursor": _CURSOR_PROPERTY,
             },
             "required": ["table", "column", "text"],
         },
@@ -378,10 +382,9 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
             "Use it for a manifest field no other tool projects; for table names, row "
             "counts and staleness, list_tables with `detail: true` is shorter and "
             "already judges each table's freshness. "
-            "The `tables` map is capped at 500 entries and every other key of "
-            "the document is returned whole, `failed_tables` filtered by `pattern` like `tables`; "
-            "narrow with `pattern` to reach past the cap, and "
-            "a capped reply carries `truncated: true` with the `total` it was cut from."
+            "The `tables` map is paged in FQN order with `total` and `next_cursor`; every "
+            "other key of the document rides the first page whole, `failed_tables` "
+            "filtered by `pattern` like `tables`."
         ),
         input_schema={
             "type": "object",
@@ -402,6 +405,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                         "`list_tables` takes; filters that map and `failed_tables` only"
                     ),
                 },
+                "cursor": _CURSOR_PROPERTY,
             },
         },
     ),
@@ -413,9 +417,9 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
             "`changes` list names each one - tables and columns added, removed or "
             "retyped, relationships changed, statistics that drifted. A statistic with "
             "no drift event did not change between the two runs; a table "
-            "counted in `unevaluated_tables` was not compared. The `changes` list is capped at 500 events and every other key "
-            "of the document is returned whole; narrow with `table` or `kind` to reach past the "
-            "cap, and a capped reply carries `truncated: true` with the `total` it was cut from. "
+            "counted in `unevaluated_tables` was not compared. The `changes` list is paged in "
+            "file order with `total` and `next_cursor`; every other key of the document rides "
+            "the first page whole. "
             "A table's current state, rather than what changed, is get_table_context's answer."
         ),
         input_schema={
@@ -442,6 +446,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                     "enum": _DIFF_KINDS,
                     "description": "Keep only changes of this kind",
                 },
+                "cursor": _CURSOR_PROPERTY,
             },
         },
     ),
@@ -450,8 +455,9 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
         description=(
             "Look up the dbprint format specification or the assertion DSL "
             "specification by section number: what a print's field means, or what a "
-            "finding's spec_ref (e.g. '§2.2.4') refers to. Omit section for the "
-            "heading tree instead of the whole document. Depends on no connection or "
+            "finding's spec_ref (e.g. '§2.2.4') refers to. A section returns its own "
+            "text and lists its direct subsections, each read by its own number; omit "
+            "section for the heading tree. Paged like get_table_context's md. Depends on no connection or "
             "print; what one print's tables hold is get_table_context's and list_tables' answer."
         ),
         input_schema={
@@ -473,11 +479,36 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                         "contents."
                     ),
                 },
+                "cursor": _CURSOR_PROPERTY,
             },
             "required": ["document"],
         },
     ),
 )
+
+
+def list_page(cursor: str | None) -> tuple[list[ToolDef], str | None]:
+    """The `tools/list` page `cursor` points at, and the cursor to the next when one exists."""
+
+    def render(units: Sequence[Any], first: bool, next_cursor: str | None) -> dict[str, Any]:
+        del first
+        reply: dict[str, Any] = {
+            "tools": [
+                {"name": d.name, "description": d.description, "inputSchema": d.input_schema}
+                for _, d in (paging.entry(unit) for unit in units)
+            ],
+        }
+
+        if next_cursor is not None:
+            reply["nextCursor"] = next_cursor
+
+        return reply
+
+    call = paging.Call("tools/list", {}, ())
+    reply = paging.page(call, list(enumerate(TOOL_DEFINITIONS)), render, cursor)
+    by_name = {definition.name: definition for definition in TOOL_DEFINITIONS}
+
+    return [by_name[tool["name"]] for tool in reply["tools"]], reply.get("nextCursor")
 
 
 def dispatch(
@@ -561,9 +592,6 @@ def _argument_fault(definition: ToolDef, error: ValidationError) -> str:
     if error.validator == "enum":
         return f"{key} {error.instance!r} must be one of {schema['enum']}."
 
-    if error.validator == "minimum":
-        return f"{key} {error.instance!r} must be an integer >= {schema['minimum']}."
-
     if error.validator == "minLength":
         return f"{key} {error.instance!r} must be a non-empty string."
 
@@ -583,9 +611,7 @@ def _tool_get_table_context(
         raise _absent_table(table, conn.name, manifest)
 
     fmt = arguments.get("format", "md")
-    budget = arguments.get("budget_tokens", CONTEXT_BUDGET_TOKENS)
     purpose = cast(Purpose, arguments.get("purpose", "profile"))
-
     options = AssemblyOptions(
         format=fmt,
         purpose=purpose,
@@ -594,40 +620,86 @@ def _tool_get_table_context(
         include_annotations=bool(arguments.get("include_annotations", True)),
         include_stats=bool(arguments.get("include_stats", True)),
         include_relationships=bool(arguments.get("include_relationships", True)),
-        budget=budget,
     )
+    print_root = _print_root(conn)
+    table_dir = table_directory(print_root, table, entry)
+    files = (
+        print_root / "manifest.yaml",
+        *(table_dir / name for name in declared_artifacts(entry).values()),
+    )
+    call = paging.Call("get_table_context", arguments, files)
 
     # MCP.md 4.1: json returns the structured object, yaml that object as text, md markdown.
     # `_missing`/`_corrupted` are the assembler's own - carried in the payload or header,
     # never recomputed here: one computation, one answer on every format.
-    if options.format == "json":
-        return assemble_structured_context(
-            manifest=manifest,
-            print_root=_print_root(conn),
-            table=table,
-            options=options,
-            read=state.files.read,
+    if options.format == "md":
+        sections = context_sections(manifest, print_root, table, options, read=state.files.read)
+
+        return paging.text_page(
+            call,
+            [text for _, text in sections],
+            arguments.get("cursor"),
+            _markdown_marker,
         )
 
-    if options.format == "yaml":
-        structured = assemble_structured_context(
-            manifest=manifest,
-            print_root=_print_root(conn),
-            table=table,
-            options=options,
-            read=state.files.read,
-        )
-
-        return yaml.safe_dump(structured, sort_keys=False, default_flow_style=False)
-
-    return assemble_context(
-        manifest=manifest,
-        print_root=_print_root(conn),
-        tables=[table],
-        options=options,
-        connection_name=conn.name,
+    header, candidates = structured_context_sections(
+        manifest,
+        print_root,
+        table,
+        options,
         read=state.files.read,
-    ).text
+    )
+
+    def render(units: Sequence[Any], first: bool, next_cursor: str | None) -> dict[str, Any] | str:
+        del first
+        head, rest = _split_head(units)
+        reply = _nested(rest, head)
+
+        if options.format == "yaml":
+            text = yaml.safe_dump(reply, sort_keys=False, default_flow_style=False)
+
+            return text if next_cursor is None else f"{text}# next_cursor: {next_cursor}\n"
+
+        if next_cursor is not None:
+            reply["next_cursor"] = next_cursor
+
+        return reply
+
+    return _page(call, _context_units(candidates), render, arguments, head=header)
+
+
+def _context_units(candidates: list[tuple[str, Any]]) -> list[tuple[tuple[str, ...], Any]]:
+    units: list[tuple[tuple[str, ...], Any]] = []
+
+    for name, value in candidates:
+        if name == "statistics" and isinstance(value.get("columns"), dict) and value["columns"]:
+            units.append(((name,), {k: v for k, v in value.items() if k != "columns"}))
+            units.extend(((name, "columns", col), v) for col, v in value["columns"].items())
+        elif name in _PER_COLUMN_SECTIONS and isinstance(value, dict) and value:
+            units.extend(((name, col), v) for col, v in value.items())
+        else:
+            units.append(((name,), value))
+
+    return units
+
+
+def _nested(units: Sequence[Any], reply: dict[str, Any]) -> dict[str, Any]:
+    for path, value in (paging.entry(unit) for unit in units):
+        target = reply
+
+        for key in path[:-1]:
+            target = target.setdefault(key, {})
+
+        if isinstance(value, dict) and isinstance(target.get(path[-1]), dict):
+            target[path[-1]].update(value)
+        else:
+            target[path[-1]] = dict(value) if isinstance(value, dict) else value
+
+    return reply
+
+
+def _markdown_marker(cursor: str) -> str:
+    return f"\n<!-- next_cursor: {cursor} -->"
 
 
 def _tool_list_tables(state: ServedConnections, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -638,33 +710,43 @@ def _tool_list_tables(state: ServedConnections, arguments: dict[str, Any]) -> di
     entries = manifest.get("tables") or {}
     # fnmatch.fnmatchcase never raises for a string pattern - no parse error to catch.
     matched = sorted(fqn for fqn in entries if fnmatch.fnmatchcase(fqn, pattern))
-    kept = matched[:TABLE_LISTING_CAP]
-
-    reply: dict[str, Any] = {}
+    failed = [fqn for fqn in failed_tables(manifest) if fnmatch.fnmatchcase(fqn, pattern)]
+    items: list[tuple[str, Any]] = [(fqn, fqn) for fqn in matched]
+    size_gated: frozenset[str] = frozenset()
 
     if detail:
-        verdicts, size_gated = _freshness(conn, manifest)
-        reply["tables"] = [
-            {
-                "table": fqn,
-                "type": entries[fqn].get("type"),
-                "row_count": entries[fqn].get("row_count"),
-                "columns": entries[fqn].get("columns"),
-                "profiled_at": entries[fqn].get("profiled_at"),
-                **verdicts[fqn],
-            }
-            for fqn in kept
+        verdicts, gated = _freshness(conn, manifest)
+        size_gated = frozenset(gated)
+        items = [
+            (
+                fqn,
+                {
+                    "table": fqn,
+                    "type": entries[fqn].get("type"),
+                    "row_count": entries[fqn].get("row_count"),
+                    "columns": entries[fqn].get("columns"),
+                    "profiled_at": entries[fqn].get("profiled_at"),
+                    **verdicts[fqn],
+                },
+            )
+            for fqn in matched
         ]
 
-        if gated := [fqn for fqn in size_gated if fqn in kept]:
-            reply["warnings"] = [thresholds.size_gate_warning(conn.name, gated)]
-    else:
-        reply["tables"] = list(kept)
+    def render(units: Sequence[Any], first: bool, next_cursor: str | None) -> dict[str, Any]:
+        del first
+        reply, rest = _split_head(units)
+        rows = [paging.entry(unit) for unit in rest]
+        reply["tables"] = [value for _, value in rows]
 
-    if failed := [fqn for fqn in failed_tables(manifest) if fnmatch.fnmatchcase(fqn, pattern)]:
-        reply["failed_tables"] = failed
+        if gated_here := [fqn for fqn, _ in rows if fqn in size_gated]:
+            reply["warnings"] = [thresholds.size_gate_warning(conn.name, gated_here)]
 
-    return _capped(reply, kept=len(kept), total=len(matched))
+        return _paged(reply, total=len(matched), next_cursor=next_cursor)
+
+    call = paging.Call("list_tables", arguments, (_print_root(conn) / "manifest.yaml",))
+    head = {"failed_tables": failed} if failed else {}
+
+    return _page(call, items, render, arguments, head=head)
 
 
 def _freshness(
@@ -843,20 +925,18 @@ def _tool_search_columns(state: ServedConnections, arguments: dict[str, Any]) ->
     pattern = arguments.get("pattern")
     text = arguments.get("text")
     filters = _column_filters(arguments)
-    limit = arguments.get("limit", SEARCH_MATCH_CAP)
     conn = state.resolve(arguments.get("connection"))
     manifest = _load_manifest(state, conn) or {}
     print_root = _print_root(conn)
+    files = [print_root / "manifest.yaml"]
 
     matches: list[dict[str, Any]] = []
     unreadable: list[str] = []
-    total = 0
 
-    # Every declared table is loaded regardless of the cap, so corruption past it is still
-    # named (MCP.md 4.3) - only match COLLECTION stops once `limit` is reached.
     for fqn, entry in sorted(walkable_tables(manifest).items()):
         artifacts = declared_artifacts(entry)
         table_dir = table_directory(print_root, fqn, entry)
+        files += [table_dir / artifacts[kind] for kind in _SEARCHED_KINDS if kind in artifacts]
         statistics, stats_error = _load_statistics(state, table_dir, artifacts)
         stats_columns = _columns_of(statistics)
         scope = scope_of(statistics)
@@ -878,38 +958,76 @@ def _tool_search_columns(state: ServedConnections, arguments: dict[str, Any]) ->
             column_names = set(annotation_columns)
 
         for col_name in sorted(column_names):
-            if pattern is not None and not fnmatch.fnmatchcase(col_name, pattern):
-                continue
-
             col = stats_columns.get(col_name) or {}
-
-            if not _column_matches(col, filters):
-                continue
-
             annotation = annotation_columns.get(col_name) or {}
-            value_notes = _matching_value_notes(annotation, text) if text is not None else []
+            matches += [
+                _search_match(fqn, entry, col_name, col, annotation, scope) | extra
+                for extra in _column_hit(col_name, col, annotation, pattern, text, filters)
+            ]
+            matches += [
+                _search_match(fqn, entry, col_name, block, {}, None)
+                | {"part": path, "occurrences": column_value(block, "occurrences")}
+                for path, block in _parts_of(col).items()
+                if _part_hit(display(col_name, path), block, pattern, text, filters)
+            ]
 
-            if text is not None and not (
-                value_notes or _names_or_notes(col_name, annotation, text)
-            ):
-                continue
+    def render(units: Sequence[Any], first: bool, next_cursor: str | None) -> dict[str, Any]:
+        del first
+        reply, rest = _split_head(units)
+        reply["matches"] = [paging.entry(unit)[1] for unit in rest]
 
-            total += 1
+        return _paged(reply, total=len(matches), next_cursor=next_cursor)
 
-            if len(matches) < limit:
-                match = _search_match(fqn, entry, col_name, col, annotation, scope)
+    call = paging.Call("search_columns", arguments, tuple(files))
+    head = {"unreadable_tables": sorted(unreadable)} if unreadable else {}
 
-                if value_notes:
-                    match["value_notes"] = value_notes
+    return _page(call, list(enumerate(matches)), render, arguments, head=head)
 
-                matches.append(match)
 
-    result = _capped({"matches": matches}, kept=len(matches), total=total)
+def _column_hit(
+    col_name: str,
+    col: dict[str, Any],
+    annotation: dict[str, Any],
+    pattern: str | None,
+    text: str | None,
+    filters: _ColumnFilters,
+) -> list[dict[str, Any]]:
+    """The extra fields one matching column's entry carries, as a one-item list; empty on a miss."""
 
-    if unreadable:
-        result["unreadable_tables"] = sorted(unreadable)
+    if pattern is not None and not fnmatch.fnmatchcase(col_name, pattern):
+        return []
 
-    return result
+    if not _column_matches(col, filters):
+        return []
+
+    value_notes = _matching_value_notes(annotation, text) if text is not None else []
+
+    if text is not None and not (value_notes or _names_or_notes(col_name, annotation, text)):
+        return []
+
+    return [{"value_notes": value_notes} if value_notes else {}]
+
+
+def _part_hit(
+    label: str,
+    block: dict[str, Any],
+    pattern: str | None,
+    text: str | None,
+    filters: _ColumnFilters,
+) -> bool:
+    if pattern is not None and not fnmatch.fnmatchcase(label, pattern):
+        return False
+
+    return _column_matches(block, filters) and (text is None or text.casefold() in label.casefold())
+
+
+def _parts_of(col: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    parts = column_value(col, "parts")
+
+    if not isinstance(parts, dict):
+        return {}
+
+    return {path: block for path, block in parts.items() if isinstance(block, dict)}
 
 
 def _names_or_notes(col_name: str, annotation: dict[str, Any], text: str) -> bool:
@@ -952,8 +1070,10 @@ def _tool_resolve_value(state: ServedConnections, arguments: dict[str, Any]) -> 
     artifacts = declared_artifacts(entry)
     table_dir = table_directory(_print_root(conn), table, entry)
 
+    files = (_print_root(conn) / "manifest.yaml",)
+
     if "statistics" not in artifacts:
-        return {
+        reply = {
             "table": table,
             "column": column,
             "text": text,
@@ -965,6 +1085,8 @@ def _tool_resolve_value(state: ServedConnections, arguments: dict[str, Any]) -> 
                 unavailable_reason=f"table {table!r} declares no statistics artifact",
             ),
         }
+
+        return _paged_resolution(paging.Call("resolve_value", arguments, files), reply, arguments)
 
     stats_path = table_dir / artifacts["statistics"]
 
@@ -989,10 +1111,21 @@ def _tool_resolve_value(state: ServedConnections, arguments: dict[str, Any]) -> 
         raise errors.unknown_column(column, table, sorted(stats_columns))
 
     col = stats_columns[column] or {}
+    part = arguments.get("part")
+    scope = scope_of(statistics)
+
+    if part is not None:
+        parts = _parts_of(col)
+
+        if part not in parts:
+            raise errors.unknown_part(part, column, table, sorted(parts))
+
+        # A part counts over its own occurrences, never the table's scanned rows (SPEC 2.2.18).
+        col, scope = parts[part], None
+
     values = read_column_field(col, "values")
     entries = values.value if isinstance(values.value, list) else []
     redaction = column_value(col, "redacted")
-    scope = scope_of(statistics)
     reason = None
 
     if values.state is Absence.UNMEASURED:
@@ -1014,7 +1147,35 @@ def _tool_resolve_value(state: ServedConnections, arguments: dict[str, Any]) -> 
         unavailable_reason=reason,
     )
 
-    return {"table": table, "column": column, "text": text, **resolution}
+    target = {"table": table, "column": column} | ({"part": part} if part is not None else {})
+    files += tuple(table_dir / artifacts[kind] for kind in _SEARCHED_KINDS if kind in artifacts)
+    call = paging.Call("resolve_value", arguments, files)
+
+    return _paged_resolution(call, {**target, "text": text, **resolution}, arguments)
+
+
+def _paged_resolution(
+    call: paging.Call,
+    reply: dict[str, Any],
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    lists = [key for key in _RESOLUTION_LISTS if isinstance(reply.get(key), list)]
+    scalars = {key: value for key, value in reply.items() if key not in lists}
+    items = [((key, index), entry) for key in lists for index, entry in enumerate(reply[key])]
+
+    def render(units: Sequence[Any], first: bool, next_cursor: str | None) -> dict[str, Any]:
+        page = dict(scalars)
+        entries = [paging.entry(unit) for unit in units]
+
+        for key in lists:
+            listed = [value for (owner, _), value in entries if owner == key]
+
+            if listed or (first and not reply[key]):
+                page[key] = listed
+
+        return _paged(page, total=len(items), next_cursor=next_cursor)
+
+    return _page(call, items, render, arguments)
 
 
 def _column_value_notes(annotation: Any) -> dict[str, str]:
@@ -1047,23 +1208,29 @@ def _tool_get_manifest(state: ServedConnections, arguments: dict[str, Any]) -> d
 
     pattern = arguments.get("pattern")
     tables = manifest.get("tables") or {}
-    matched = {
-        fqn: entry
-        for fqn, entry in tables.items()
+    matched = [
+        (fqn, tables[fqn])
+        for fqn in sorted(tables)
         if pattern is None or fnmatch.fnmatchcase(fqn, pattern)
-    }
-    kept = dict(list(matched.items())[:MANIFEST_TABLE_CAP])
-    reply = {**manifest, "tables": kept}
-    reply.pop("failed_tables", None)
-
-    if failed := [
+    ]
+    header = {key: value for key, value in manifest.items() if key not in _MANIFEST_FILTERED_KEYS}
+    failed = [
         fqn
         for fqn in failed_tables(manifest)
         if pattern is None or fnmatch.fnmatchcase(fqn, pattern)
-    ]:
-        reply["failed_tables"] = failed
+    ]
 
-    return _capped(reply, kept=len(kept), total=len(matched))
+    def render(units: Sequence[Any], first: bool, next_cursor: str | None) -> dict[str, Any]:
+        del first
+        reply, rest = _split_head(units)
+        reply["tables"] = dict(paging.entry(unit) for unit in rest)
+
+        return _paged(reply, total=len(matched), next_cursor=next_cursor)
+
+    call = paging.Call("get_manifest", arguments, (_print_root(conn) / "manifest.yaml",))
+    head = {**header, **({"failed_tables": failed} if failed else {})}
+
+    return _page(call, matched, render, arguments, head=head)
 
 
 def _tool_get_diff(state: ServedConnections, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1083,9 +1250,18 @@ def _tool_get_diff(state: ServedConnections, arguments: dict[str, Any]) -> dict[
 
     changes = [c for c in (data.get("changes") or []) if isinstance(c, dict)]
     matched = [c for c in changes if _change_matches(c, arguments)]
-    kept = matched[:DIFF_CHANGE_CAP]
+    header = {key: value for key, value in data.items() if key != "changes"}
 
-    return _capped({**data, "changes": kept}, kept=len(kept), total=len(matched))
+    def render(units: Sequence[Any], first: bool, next_cursor: str | None) -> dict[str, Any]:
+        del first
+        reply, rest = _split_head(units)
+        reply["changes"] = [paging.entry(unit)[1] for unit in rest]
+
+        return _paged(reply, total=len(matched), next_cursor=next_cursor)
+
+    call = paging.Call("get_diff", arguments, (diff_path,))
+
+    return _page(call, list(enumerate(matched)), render, arguments, head=header)
 
 
 def _change_matches(change: dict[str, Any], arguments: dict[str, Any]) -> bool:
@@ -1108,32 +1284,64 @@ def _tool_get_reference(arguments: dict[str, Any]) -> str:
 
     document_ = cast(ReferenceDocument, arguments["document"])
     section_number = arguments.get("section")
+    call = paging.Call("get_reference", arguments, ())
 
     if section_number is None:
-        return reference.heading_tree(document_)
+        text = reference.heading_tree(document_)
+    else:
+        result = reference.section(document_, section_number)
 
-    result = reference.section(document_, section_number)
+        if result is None:
+            raise errors.unknown_section(
+                document_,
+                section_number,
+                reference.section_numbers(document_),
+            )
 
-    if result is None:
-        raise errors.unknown_section(
-            document_,
-            section_number,
-            reference.section_numbers(document_),
-        )
+        text = result
 
-    return result
+    return paging.text_page(call, [text], arguments.get("cursor"), _markdown_marker)
 
 
 # Helpers.
 
 
-def _capped(payload: dict[str, Any], *, kept: int, total: int) -> dict[str, Any]:
-    """Mark a reply the cap cut, with the total it was cut from."""
+def _page(
+    call: paging.Call,
+    items: list[tuple[Any, Any]],
+    render: paging.Render,
+    arguments: dict[str, Any],
+    *,
+    head: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    keyed = [(_Head(key), value) for key, value in (head or {}).items()]
+    units = paging.split_oversize([*keyed, *items], render, call.cursor(0))
 
-    if kept >= total:
-        return payload
+    return paging.page(call, units, render, arguments.get("cursor"))
 
-    return {**payload, "truncated": True, "total": total}
+
+def _split_head(units: Sequence[Any]) -> tuple[dict[str, Any], list[Any]]:
+    head: dict[str, Any] = {}
+    rest: list[Any] = []
+
+    for unit in units:
+        key, value = paging.entry(unit)
+
+        if isinstance(key, _Head):
+            head[key.name] = value
+        else:
+            rest.append(unit)
+
+    return head, rest
+
+
+def _paged(reply: dict[str, Any], *, total: int, next_cursor: str | None) -> dict[str, Any]:
+    reply["total"] = total
+
+    if next_cursor is not None:
+        reply["next_cursor"] = next_cursor
+
+    return reply
 
 
 def _print_root(conn: ConnectionConfig) -> Path:
@@ -1234,3 +1442,8 @@ def _absent_table(
         return errors.unprofiled_table(table)
 
     return errors.unknown_table(table, connection)
+
+
+@dataclass(frozen=True)
+class _Head:
+    name: str

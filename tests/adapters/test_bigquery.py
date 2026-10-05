@@ -11,6 +11,7 @@ from dbprint.adapters.bigquery import DIALECT, introspect
 from dbprint.adapters.errors import QueryFailed
 from dbprint.adapters.identifiers import IdentifierRejected, Identity
 from dbprint.spec.sketch import low64_md5
+from tests.adapters.conftest import StubCursor
 
 
 _PROJECT = "dbprint-test"
@@ -155,61 +156,6 @@ class TestScratchTableExclusion:
         assert "dbprint_sample_deadbeef00000000" not in names
 
 
-class _RowsCursor:
-    """Cursor returning fixed enumeration rows, for a catalog shape the emulator cannot host -
-    its own sqlite3 backing store keys a table name case-insensitively (measured).
-    """
-
-    def __init__(self, rows: list[tuple[object, ...]]) -> None:
-        self._rows = rows
-
-    def execute(self, sql: str, params: object = None) -> _RowsCursor:
-        return self
-
-    def fetchall(self) -> list[tuple[object, ...]]:
-        return self._rows
-
-    def fetchone(self) -> object:
-        return self._rows[0] if self._rows else None
-
-    def close(self) -> None:
-        return None
-
-
-class _RecordingCursor:
-    """Cursor returning one canned row and keeping every statement it was handed."""
-
-    def __init__(self, rows: list[tuple[object, ...]]) -> None:
-        self._rows = rows
-        self.statements: list[str] = []
-
-    def execute(self, sql: str, params: object = None) -> _RecordingCursor:
-        del params
-        self.statements.append(" ".join(sql.split()))
-
-        return self
-
-    def fetchall(self) -> list[tuple[object, ...]]:
-        return self._rows
-
-    def fetchone(self) -> object:
-        return self._rows[0] if self._rows else None
-
-    def close(self) -> None:
-        return None
-
-
-class _RefusingCursor(_RecordingCursor):
-    """Cursor that refuses every statement, as a principal without the role would."""
-
-    def execute(self, sql: str, params: object = None) -> _RecordingCursor:
-        super().execute(sql, params)
-
-        raise RuntimeError(
-            "Access Denied: Table dbprint-test:seedbank.INFORMATION_SCHEMA.PARTITIONS",
-        )
-
-
 class TestRowCountEstimateAddress:
     """Where the row-count estimate is read from, and what happens when that read fails.
 
@@ -217,7 +163,7 @@ class TestRowCountEstimateAddress:
     """
 
     def test_it_reads_the_dataset_qualified_partitions_view(self) -> None:
-        cursor = _RecordingCursor([(1234,)])
+        cursor = StubCursor([(1234,)])
 
         estimate = introspect.estimate_row_count(
             cursor,
@@ -236,7 +182,7 @@ class TestRowCountEstimateAddress:
     def test_it_sums_the_tables_partitions(self) -> None:
         """The estimate is a sum over partition rows, never a read of one of them."""
 
-        cursor = _RecordingCursor([(9,)])
+        cursor = StubCursor([(9,)])
 
         introspect.estimate_row_count(
             cursor,
@@ -249,7 +195,7 @@ class TestRowCountEstimateAddress:
     def test_a_table_with_no_partition_row_has_no_estimate(self) -> None:
         """SPEC-independent, but the engine's own reading: absent is not zero."""
 
-        cursor = _RecordingCursor([(None,)])
+        cursor = StubCursor([(None,)])
 
         assert (
             introspect.estimate_row_count(
@@ -265,7 +211,11 @@ class TestRowCountEstimateAddress:
 
         with pytest.raises(QueryFailed):
             introspect.estimate_row_count(
-                _RefusingCursor([]),
+                StubCursor(
+                    error=RuntimeError(
+                        "Access Denied: Table dbprint-test:seedbank.INFORMATION_SCHEMA.PARTITIONS",
+                    ),
+                ),
                 _PROJECT,
                 Identity.of(("seedbank", "accession"), DIALECT),
             )
@@ -338,13 +288,90 @@ class TestMixedCaseIdentifiers:
             ("Coll", "BASE TABLE", None),
             ("coll", "BASE TABLE", None),
         ]
-        adapter = _bigquery_adapter(_RowsCursor(rows), "seedbank")
+        adapter = _bigquery_adapter(StubCursor(rows), "seedbank")
 
         try:
             with pytest.raises(IdentifierRejected, match="case-collides-with"):
                 adapter.list_tables(include=["*"], exclude=[])
         finally:
             adapter.close()
+
+
+class TestTableKinds:
+    """`INFORMATION_SCHEMA.TABLES.table_type` values listed as tables, and the DDL they keep."""
+
+    def test_a_clone_is_listed_as_a_table_with_its_catalog_ddl(self) -> None:
+        rows: list[tuple[object, ...]] = [
+            ("accession", "BASE TABLE", "CREATE TABLE seedbank.accession (a INT64);"),
+            ("accession_copy", "CLONE", "CREATE TABLE seedbank.accession_copy CLONE x;"),
+        ]
+        adapter = _bigquery_adapter(StubCursor(rows), "seedbank")
+
+        try:
+            listed = {t.fqn: t.type for t in adapter.list_tables(include=["*"], exclude=[])}
+            ddl = adapter.extract_ddl("seedbank.accession_copy")
+        finally:
+            adapter.close()
+
+        assert listed == {"seedbank.accession": "table", "seedbank.accession_copy": "table"}
+        assert ddl.startswith("CREATE TABLE seedbank.accession_copy CLONE x;")
+
+    def test_an_external_table_and_a_snapshot_are_tables_profiled_only_on_opt_in(self) -> None:
+        rows: list[tuple[object, ...]] = [
+            ("accession", "BASE TABLE", "CREATE TABLE seedbank.accession (a INT64);"),
+            ("field_scan", "EXTERNAL", "CREATE EXTERNAL TABLE seedbank.field_scan OPTIONS();"),
+            ("accession_then", "SNAPSHOT", "CREATE SNAPSHOT TABLE seedbank.accession_then;"),
+        ]
+        adapter = _bigquery_adapter(StubCursor(rows), "seedbank")
+
+        try:
+            listed = {
+                t.fqn: (t.type, t.external, t.opt_in_only)
+                for t in adapter.list_tables(include=["*"], exclude=[])
+            }
+            ddl = adapter.extract_ddl("seedbank.field_scan")
+        finally:
+            adapter.close()
+
+        assert listed == {
+            "seedbank.accession": ("table", False, False),
+            "seedbank.field_scan": ("table", True, False),
+            "seedbank.accession_then": ("table", False, True),
+        }
+        assert ddl.startswith("CREATE EXTERNAL TABLE seedbank.field_scan")
+
+    @pytest.mark.parametrize(("table_type", "refused"), [("EXTERNAL", False), ("BASE TABLE", True)])
+    def test_a_refused_estimate_is_no_estimate_only_for_an_external_table(
+        self,
+        table_type: str,
+        refused: bool,
+    ) -> None:
+        adapter = _bigquery_adapter(
+            _RefusingPartitions([("field_scan", table_type, None)]),
+            "seedbank",
+        )
+
+        try:
+            adapter.list_tables(include=["*"], exclude=[])
+
+            if refused:
+                with pytest.raises(QueryFailed):
+                    adapter.estimate_row_count("seedbank.field_scan")
+            else:
+                assert adapter.estimate_row_count("seedbank.field_scan") is None
+        finally:
+            adapter.close()
+
+    def test_an_excluded_external_table_is_not_listed(self) -> None:
+        rows: list[tuple[object, ...]] = [("field_scan", "EXTERNAL", None)]
+        adapter = _bigquery_adapter(StubCursor(rows), "seedbank")
+
+        try:
+            listed = adapter.list_tables(include=["*"], exclude=["seedbank.field_scan"])
+        finally:
+            adapter.close()
+
+        assert listed == []
 
 
 def _table(adapter: BigqueryAdapter, dataset: str, name: str):
@@ -419,7 +446,7 @@ class TestGeographyAndJsonColumnsDoNotFailTheTable:
     documentation groups neither - so a call outside the type branches fails Phase A entirely.
     """
 
-    def test_a_geography_column_is_unsupported_and_its_siblings_still_profile(
+    def test_a_geography_column_is_kept_out_of_the_count_and_its_siblings_still_profile(
         self,
         bigquery_test_dataset,
     ) -> None:
@@ -444,8 +471,10 @@ class TestGeographyAndJsonColumnsDoNotFailTheTable:
             adapter.close()
 
         assert counts.row_count == 2
-        assert base["pt"].supported is False
-        assert base["n"].supported is True
+        # Spatial: null-counted alone, described by its own read rather than a distinct count.
+        assert base["pt"].supported is True
+        assert base["pt"].cardinality == 0
+        assert base["n"].cardinality == 2
 
     def test_a_json_column_still_measures_a_real_cardinality(
         self,
@@ -570,3 +599,11 @@ class TestTemporalValueListFailureDegradesTheWholeBlock:
         # column also emits and a name its classification never required are both errors.
         assert stat.unmeasured == ("distribution", "frequencies", "values")
         assert all(getattr(stat, name) is None for name in stat.unmeasured)
+
+
+class _RefusingPartitions(StubCursor):
+    def execute(self, sql: str, params: object = None) -> StubCursor:
+        if "PARTITIONS" in sql:
+            raise RuntimeError("Not found: PARTITIONS has no storage statistics for this table")
+
+        return super().execute(sql, params)

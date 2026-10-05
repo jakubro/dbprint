@@ -93,6 +93,22 @@ seeded into agreement across statements. Narrow with a filter instead of a sampl
 
 Setting `materialize_sample: false` on a `sample`-scoped table is refused the same way, before any statement runs.
 
+## Column types
+
+| Type | Profiled as | What to know |
+|---|---|---|
+| `ARRAY` | `composite` | It declares no element type: the elements take the one scalar type they share, or `VARIANT` when they mix |
+| structured `MAP(K, V)` | `composite` | — |
+| `VARIANT`, `OBJECT` | `json` | `types` keys are what `TYPEOF` returns |
+| `GEOGRAPHY`, `GEOMETRY` | `spatial` | Every value is `xy`; an empty value is one with no points |
+| `VECTOR(type, N)` | `vector` | `dimension` is `N` |
+
+## Table kinds
+
+An event table is profiled as a table. A temporary table is not listed.
+
+An external table is listed with `external: true` (SPEC 2.2.20) and, unless a `read_rows` rule opts it in, described from the catalog alone. Opted in, every statement scans the stage's files on warehouse time, and a file Snowflake cannot read is skipped without an error. An Iceberg table is an ordinary table.
+
 ## Namespaces
 
 `database` is optional. Omitted, the session has no current database; the connection reads every database `SHOW DATABASES` lists for the role — which needs no extra grant and no warehouse — less `SNOWFLAKE`, and reads each through its own `"<database>".INFORMATION_SCHEMA`. A configured name is matched to the spelling Snowflake stores. With no database, an unqualified name in `dbprint check --online` SQL assertions has nothing to resolve against. The grants below are per database, and a database the role cannot read is skipped with a warning. View dependencies are read per database holding a selected object; one whose dependency read fails is named in a warning and its views omit `depends_on` for that run.

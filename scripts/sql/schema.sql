@@ -8,8 +8,10 @@
 -- seedbank.germination_trial -- FK to accession
 -- seedbank.specimen_image    -- FK to accession
 -- seedbank.storage_reading   -- declared range partition key; teaches physical_layout (2.2.11)
--- fixture.shape_probe        -- second schema; ipv4/json/array/bytea shape coverage
+-- fixture.shape_probe        -- second schema; ipv4/json/array/bytea/geometry/vector/box shape coverage
 
+CREATE EXTENSION postgis;
+CREATE EXTENSION VECTOR;
 CREATE SCHEMA seedbank;
 CREATE SCHEMA fixture;
 
@@ -137,6 +139,7 @@ CREATE TABLE seedbank.specimen_image (
     file_name CHARACTER VARYING(80) NOT NULL,
     content_type CHARACTER VARYING(60) NOT NULL,
     thumbnail_b64 TEXT NOT NULL,
+    thumbnail BYTEA NOT NULL,
     byte_size BIGINT NOT NULL,
     captured_at TIMESTAMP(0) WITH TIME ZONE NOT NULL
 );
@@ -177,7 +180,10 @@ CREATE TABLE fixture.shape_probe (
     logger_ipv4 CHARACTER VARYING(45) NOT NULL,
     json_text TEXT NOT NULL,
     payload_bytes BYTEA,
-    tag_list TEXT[] NOT NULL
+    tag_list TEXT[] NOT NULL,
+    deployed_at GEOMETRY,
+    reading_embedding VECTOR(3),
+    calibration_box BOX
 );
 
 ALTER TABLE ONLY fixture.shape_probe

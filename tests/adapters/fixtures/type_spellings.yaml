@@ -10,13 +10,13 @@ bigquery:
   BOOL: boolean
   STRING: text
   STRING(10): text
-  BYTES: unsupported
-  BYTES(16): unsupported
+  BYTES: binary
+  BYTES(16): binary
   DATE: temporal
   DATETIME: temporal
   TIME: temporal
   TIMESTAMP: temporal
-  GEOGRAPHY: unsupported
+  GEOGRAPHY: spatial
   JSON: json
   INTERVAL: text
   RANGE<DATE>: text
@@ -79,17 +79,17 @@ clickhouse:
   Tuple(String, UInt8): unsupported
   Nested(a String): unsupported
   AggregateFunction(uniq, UInt64): unsupported
-  SimpleAggregateFunction(sum, UInt64): unsupported
+  SimpleAggregateFunction(sum, UInt64): numeric
   Variant(String, UInt8): json
   Dynamic: unsupported
-  Point: unsupported
-  Ring: unsupported
-  LineString: unsupported
-  MultiLineString: unsupported
-  Polygon: unsupported
-  MultiPolygon: unsupported
-  Geometry: unsupported
-  QBit(Float32, 8): unsupported
+  Point: spatial
+  Ring: spatial
+  LineString: spatial
+  MultiLineString: spatial
+  Polygon: spatial
+  MultiPolygon: spatial
+  Geometry: spatial
+  QBit(Float32, 8): vector
   Nothing: unsupported
 
 databricks:
@@ -108,23 +108,24 @@ databricks:
   timestamp: temporal
   timestamp_ntz: temporal
   variant: json
-  binary: unsupported
-  interval year: unsupported
-  interval year to month: unsupported
-  interval month: unsupported
-  interval day: unsupported
-  interval day to hour: unsupported
-  interval day to minute: unsupported
-  interval day to second: unsupported
-  interval hour: unsupported
-  interval hour to minute: unsupported
-  interval hour to second: unsupported
-  interval minute: unsupported
-  interval minute to second: unsupported
-  interval second: unsupported
+  binary: binary
+  interval: unsupported
+  interval year: text
+  interval year to month: text
+  interval month: text
+  interval day: text
+  interval day to hour: text
+  interval day to minute: text
+  interval day to second: text
+  interval hour: text
+  interval hour to minute: text
+  interval hour to second: text
+  interval minute: text
+  interval minute to second: text
+  interval second: text
   void: unsupported
-  geography(4326): unsupported
-  geometry(4326): unsupported
+  geography(4326): spatial
+  geometry(4326): spatial
   array<string>: unsupported
   map<string,int>: unsupported
   struct<a:int>: unsupported
@@ -161,8 +162,8 @@ duckdb:
   TIMESTAMP WITH TIME ZONE: temporal
   JSON: json
   VARIANT: json
-  BLOB: unsupported
-  GEOMETRY: unsupported
+  BLOB: binary
+  GEOMETRY: spatial
   INTEGER[]: unsupported
   INTEGER[3]: unsupported
   STRUCT(a INTEGER): unsupported
@@ -199,21 +200,21 @@ mysql:
   timestamp: temporal
   year: temporal
   json: json
-  binary(4): unsupported
-  varbinary(8): unsupported
-  tinyblob: unsupported
-  blob: unsupported
-  mediumblob: unsupported
-  longblob: unsupported
-  geometry: unsupported
-  point: unsupported
-  linestring: unsupported
-  polygon: unsupported
-  multipoint: unsupported
-  multilinestring: unsupported
-  multipolygon: unsupported
-  geometrycollection: unsupported
-  vector(3): unsupported
+  binary(4): binary
+  varbinary(8): binary
+  tinyblob: binary
+  blob: binary
+  mediumblob: binary
+  longblob: binary
+  geometry: spatial
+  point: spatial
+  linestring: spatial
+  polygon: spatial
+  multipoint: spatial
+  multilinestring: spatial
+  multipolygon: spatial
+  geometrycollection: spatial
+  vector(3): vector
 
 postgres:
   smallint: numeric
@@ -268,7 +269,7 @@ postgres:
   timestamp with time zone: temporal
   json: json
   jsonb: json
-  bytea: unsupported
+  bytea: binary
   point: unsupported
   line: unsupported
   lseg: unsupported
@@ -277,7 +278,7 @@ postgres:
   polygon: unsupported
   circle: unsupported
   xml: unsupported
-  jsonpath: unsupported
+  jsonpath: text
   aclitem: unsupported
   cid: unsupported
   xid: unsupported
@@ -285,9 +286,11 @@ postgres:
   refcursor: unsupported
   pg_snapshot: unsupported
   txid_snapshot: unsupported
-  geometry: unsupported
-  geography: unsupported
-  vector(3): unsupported
+  geometry: spatial
+  geography: spatial
+  vector(3): vector
+  halfvec(3): vector
+  sparsevec(3): vector
   integer[]: unsupported
 
 redshift:
@@ -307,11 +310,11 @@ redshift:
   timestamp without time zone: temporal
   timestamp with time zone: temporal
   super: json
-  varbyte: unsupported
-  binary varying: unsupported
-  varbinary: unsupported
-  geometry: unsupported
-  geography: unsupported
+  varbyte: binary
+  binary varying: binary
+  varbinary: binary
+  geometry: spatial
+  geography: spatial
   hllsketch: unsupported
 
 snowflake:
@@ -327,11 +330,11 @@ snowflake:
   TIMESTAMP_TZ: temporal
   VARIANT: json
   OBJECT: json
-  BINARY: unsupported
+  BINARY: binary
   ARRAY: unsupported
   MAP: unsupported
-  GEOGRAPHY: unsupported
-  GEOMETRY: unsupported
-  VECTOR: unsupported
+  GEOGRAPHY: spatial
+  GEOMETRY: spatial
+  VECTOR: vector
   FILE: unsupported
   UNKNOWN: unsupported

@@ -17,6 +17,7 @@ from click.testing import CliRunner
 from dbprint.cli.main import main
 from dbprint.mcp import ServedConnections, dispatch
 from dbprint.mcp.tools import TOOL_NAMES
+from tests import _mcp_pages
 from tests.fixtures.adversarial import (
     APPROXIMATE_ROW_COUNT_TABLE,
     DECLARED_MISSING_KIND,
@@ -84,13 +85,11 @@ def _dict_result(adversarial_print: AdversarialPrint, name: str, arguments: dict
 
 
 def _statistics(adversarial_print: AdversarialPrint, table: str) -> dict:
-    result = _dict_result(
-        adversarial_print,
-        "get_table_context",
-        {"table": table, "format": "json"},
-    )
+    arguments = {"table": table, "format": "json"}
 
-    return result["statistics"]
+    return _mcp_pages.merged(
+        _mcp_pages.pages(_state(adversarial_print), "get_table_context", arguments),
+    )["statistics"]
 
 
 def _diff(adversarial_print: AdversarialPrint) -> dict:
@@ -98,15 +97,11 @@ def _diff(adversarial_print: AdversarialPrint) -> dict:
 
 
 def _md(adversarial_print: AdversarialPrint, table: str) -> str:
-    result = dispatch(
-        _state(adversarial_print),
-        "get_table_context",
-        {"table": table, "format": "md"},
+    arguments = {"table": table, "format": "md"}
+
+    return _mcp_pages.joined(
+        _mcp_pages.pages(_state(adversarial_print), "get_table_context", arguments),
     )
-
-    assert isinstance(result, str)
-
-    return result
 
 
 def test_scoped_table_carries_the_population(adversarial_print: AdversarialPrint) -> None:

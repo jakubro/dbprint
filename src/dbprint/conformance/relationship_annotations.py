@@ -5,8 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from dbprint.spec.predicate import (
     MalformedPredicate,
     is_assertable_edge_stat,
@@ -15,10 +13,9 @@ from dbprint.spec.predicate import (
 from dbprint.spec.predicate import evaluate as eval_predicate
 from dbprint.spec.predicate import parse as parse_predicate
 from .issue import Issue
-from .layout import declared_artifacts, walkable_tables
+from .layout import annotated_tables
 from .progress import TableSink
 from .relationships import check_path_endpoint
-from .yaml_utils import load_yaml
 
 
 def check_entry(data: Any, path: str, tbl_fqn: str) -> list[Issue]:
@@ -56,34 +53,15 @@ def check_verdicts(
     """
 
     issues: list[Issue] = []
-    tables = walkable_tables(manifest_data)
-    total = len(tables)
+    tables = annotated_tables(
+        print_root,
+        manifest_data,
+        "relationships_annotations",
+        "relationships",
+        on_table,
+    )
 
-    for i, (tbl_fqn, tbl_entry) in enumerate(tables.items(), start=1):
-        if on_table is not None:
-            on_table(tbl_fqn, i, total)
-
-        artifacts = declared_artifacts(tbl_entry)
-
-        if "relationships_annotations" not in artifacts or "relationships" not in artifacts:
-            continue
-
-        tbl_dir = print_root / tbl_entry.get("path", "")
-        ann_path = tbl_dir / artifacts["relationships_annotations"]
-        rel_path = tbl_dir / artifacts["relationships"]
-
-        if not ann_path.is_file() or not rel_path.is_file():
-            continue
-
-        try:
-            ann_data = load_yaml(ann_path)
-            rel_data = load_yaml(rel_path)
-        except yaml.YAMLError:
-            continue
-
-        if not isinstance(ann_data, dict) or not isinstance(rel_data, dict):
-            continue
-
+    for ann_path, ann_data, rel_data in tables:
         entries = ann_data.get("refers_to")
 
         if not isinstance(entries, list):
@@ -116,34 +94,15 @@ def check_claims(
     """
 
     issues: list[Issue] = []
-    tables = walkable_tables(manifest_data)
-    total = len(tables)
+    tables = annotated_tables(
+        print_root,
+        manifest_data,
+        "relationships_annotations",
+        "relationships",
+        on_table,
+    )
 
-    for i, (tbl_fqn, tbl_entry) in enumerate(tables.items(), start=1):
-        if on_table is not None:
-            on_table(tbl_fqn, i, total)
-
-        artifacts = declared_artifacts(tbl_entry)
-
-        if "relationships_annotations" not in artifacts or "relationships" not in artifacts:
-            continue
-
-        tbl_dir = print_root / tbl_entry.get("path", "")
-        ann_path = tbl_dir / artifacts["relationships_annotations"]
-        rel_path = tbl_dir / artifacts["relationships"]
-
-        if not ann_path.is_file() or not rel_path.is_file():
-            continue
-
-        try:
-            ann_data = load_yaml(ann_path)
-            rel_data = load_yaml(rel_path)
-        except yaml.YAMLError:
-            continue
-
-        if not isinstance(ann_data, dict) or not isinstance(rel_data, dict):
-            continue
-
+    for ann_path, ann_data, rel_data in tables:
         entries = ann_data.get("refers_to")
 
         if not isinstance(entries, list):

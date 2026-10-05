@@ -40,6 +40,17 @@ def extract_ddl(cursor: Cursor, identity: Identity) -> str:
     return normalize(str(row[0]))
 
 
+def extract_external_ddl(cursor: Cursor, identity: Identity) -> str:
+    """An external table's definition from `SHOW EXTERNAL TABLE`, without its partition list."""
+
+    row = exec_query(cursor, f"SHOW EXTERNAL TABLE {identity.quoted()}").fetchone()
+
+    if not row or not row[0]:
+        raise ValueError(f"no DDL available for {identity.fqn!r}; not found in catalog")
+
+    return normalize(str(row[0]))
+
+
 def normalize(raw: str) -> str:
     """Strip trailing whitespace per line; ensure a single terminal newline."""
 

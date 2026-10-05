@@ -12,6 +12,8 @@ from .context_assembler import AssemblyOptions, AssemblyResult, PayloadResult, P
 from .context_assembler import assemble as assemble_context
 from .context_assembler import assemble_payloads as assemble_context_payloads
 from .context_assembler import assemble_structured as assemble_structured_context
+from .context_assembler import ranked_sections as context_sections
+from .context_assembler import structured_sections as structured_context_sections
 from .freshness import StaleEntry
 from .freshness import evaluate as evaluate_freshness
 from .freshness import format_age as format_freshness_age
@@ -67,7 +69,9 @@ __all__ = [
     "assemble_context",
     "assemble_context_payloads",
     "assemble_structured_context",
+    "context_sections",
     "evaluate_freshness",
     "format_freshness_age",
     "parse_duration",
+    "structured_context_sections",
 ]

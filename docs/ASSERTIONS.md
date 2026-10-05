@@ -160,6 +160,8 @@ tables:
 
 Multiple predicates on the same column compose with AND semantics: every predicate MUST pass for the column to pass.
 
+A column's `parts` (SPEC 2.2.18) are not assertable in this version: a `parts` key under a column reports `assertion.unknown-stat`.
+
 ### 2.4 Assertable stats
 
 The following stats from SPEC §2.2 are assertable:

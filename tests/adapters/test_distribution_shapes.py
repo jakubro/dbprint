@@ -296,6 +296,27 @@ def _profile(adapter: Adapter) -> dict:
     return dict(adapter.compute_statistics(table.fqn, columns, CONFIG, frozenset())[1])
 
 
+def _profile_counted(request: pytest.FixtureRequest, rows: list[int]) -> tuple[ColumnStats, int]:
+    from tests.adapters.test_dialect_guard import _install_recorder
+
+    con = request.getfixturevalue("duckdb_native_connection")
+    con.execute("CREATE TABLE lone (n INTEGER)")
+    con.execute(f"INSERT INTO lone (n) VALUES {', '.join(f'({b})' for b in rows)}")
+    adapter = DuckdbAdapter({"database": ":memory:"}, cursor_factory=lambda _params: con)
+    adapter.connect()
+    recorder = _install_recorder(adapter)
+
+    try:
+        table = next(iter(adapter.list_tables(include=["*.lone"], exclude=[])))
+        columns = adapter.introspect_columns(table.fqn)
+        before = len(recorder.statements)
+        stats = adapter.compute_statistics(table.fqn, columns, CONFIG, frozenset())[1]
+
+        return stats["n"], len(recorder.statements) - before
+    finally:
+        adapter.close()
+
+
 class TestDistributionShapes:
     """The verdict follows the data, on every vendor's own top-N fetch."""
 
@@ -399,27 +420,11 @@ class TestNoStatementIsAddedForValues:
     ) -> None:
         """The whole profile's statement count is pinned, so a second top-N fetch shows as one more."""
 
-        from tests.adapters.test_dialect_guard import _install_recorder
+        stats, statements = _profile_counted(request, _rows(SHAPES["dominant"]))
 
-        con = request.getfixturevalue("duckdb_native_connection")
-        con.execute("CREATE TABLE lone (n INTEGER)")
-        values = ", ".join(f"({b})" for b in _rows(SHAPES["dominant"]))
-        con.execute(f"INSERT INTO lone (n) VALUES {values}")
-        adapter = DuckdbAdapter({"database": ":memory:"}, cursor_factory=lambda _params: con)
-        adapter.connect()
-        recorder = _install_recorder(adapter)
-
-        try:
-            table = next(iter(adapter.list_tables(include=["*.lone"], exclude=[])))
-            columns = adapter.introspect_columns(table.fqn)
-            before = len(recorder.statements)
-            stats = adapter.compute_statistics(table.fqn, columns, CONFIG, frozenset())[1]
-
-            assert stats["n"].values
-            assert stats["n"].values[0].count == 96
-            assert len(recorder.statements) - before == 4
-        finally:
-            adapter.close()
+        assert stats.values
+        assert stats.values[0].count == 96
+        assert statements == 4
 
 
 class TestTheOverFetchBoundary:
@@ -541,26 +546,10 @@ class TestMeanAndSumPublishCentreOfMass:
         expressions on it must not become a second roundtrip.
         """
 
-        from tests.adapters.test_dialect_guard import _install_recorder
+        stats, statements = _profile_counted(request, _rows(self._COUNTS))
 
-        con = request.getfixturevalue("duckdb_native_connection")
-        con.execute("CREATE TABLE lone (n INTEGER)")
-        values = ", ".join(f"({b})" for b in _rows(self._COUNTS))
-        con.execute(f"INSERT INTO lone (n) VALUES {values}")
-        adapter = DuckdbAdapter({"database": ":memory:"}, cursor_factory=lambda _params: con)
-        adapter.connect()
-        recorder = _install_recorder(adapter)
-
-        try:
-            table = next(iter(adapter.list_tables(include=["*.lone"], exclude=[])))
-            columns = adapter.introspect_columns(table.fqn)
-            before = len(recorder.statements)
-            stats = adapter.compute_statistics(table.fqn, columns, CONFIG, frozenset())[1]
-
-            assert stats["n"].mean is not None
-            assert len(recorder.statements) - before == 4
-        finally:
-            adapter.close()
+        assert stats.mean is not None
+        assert statements == 4
 
 
 class TestExactIntegerTotals:

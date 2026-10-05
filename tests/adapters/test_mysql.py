@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import logging
 import secrets
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -17,7 +18,7 @@ import yaml
 from click.testing import CliRunner
 
 from dbprint.adapters import MysqlAdapter, TableScope
-from dbprint.adapters.base import ColumnMeta, PhaseB, UniqueKeyMeta
+from dbprint.adapters.base import ColumnMeta, PhaseB, UniqueKeyMeta, pre_classify
 from dbprint.adapters.errors import QueryFailed
 from dbprint.adapters.identifiers import Identity, UnknownTable
 from dbprint.adapters.mysql import DIALECT
@@ -26,9 +27,12 @@ from dbprint.adapters.mysql import introspect as introspect_module
 from dbprint.adapters.mysql import stats as stats_module
 from dbprint.adapters.mysql.connection import ConnectionParams, MysqlConnectionError, exec_query
 from dbprint.cli.main import main
-from dbprint.config import StatisticsConfig
+from dbprint.config import ConnectionConfig, StatisticsConfig
 from dbprint.conformance import validate_print
+from dbprint.engine import Engine
+from tests.adapters.conftest import StubCursor
 from tests.conftest import MysqlCluster
+from tests.live._harness import split_statements, write_project
 
 
 CREDS: dict[str, str] = {
@@ -44,25 +48,6 @@ _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "mysql"
 
 def _column(sql_type: str, name: str = "c") -> ColumnMeta:
     return ColumnMeta(name=name, sql_type=sql_type, nullable=True, default=None, ordinal=1)
-
-
-class _StubCursor:
-    """Canned-row cursor: exec_query just calls execute() and returns the cursor."""
-
-    def __init__(self, rows: list[tuple]) -> None:
-        self._rows = rows
-
-    def execute(self, sql: str, params: object = None) -> None:
-        return None
-
-    def fetchall(self) -> list[tuple]:
-        return self._rows
-
-    def fetchone(self) -> object:
-        return self._rows[0] if self._rows else None
-
-    def close(self) -> None:
-        pass
 
 
 class TestConnectionParams:
@@ -99,42 +84,6 @@ class TestDdlNormalization:
         assert ddl_module.normalize(self._RAW).endswith("\n")
 
 
-class _TraceStubCursor:
-    """Stub cursor whose `execute` succeeds and reports a fixed rowcount."""
-
-    def __init__(self, rowcount: int = 3) -> None:
-        self.rowcount = rowcount
-
-    def execute(self, sql: str, params: Any = None) -> None:
-        del sql, params
-
-    def fetchall(self) -> list[Any]:
-        return []
-
-    def fetchone(self) -> Any:
-        return None
-
-    def close(self) -> None:
-        pass
-
-
-class _TraceRaisingCursor:
-    """Stub cursor whose `execute` always raises - proves the seam wraps the failure."""
-
-    def execute(self, sql: str, params: Any = None) -> None:
-        del sql, params
-        raise RuntimeError("boom")
-
-    def fetchall(self) -> list[Any]:
-        return []
-
-    def fetchone(self) -> Any:
-        return None
-
-    def close(self) -> None:
-        pass
-
-
 class TestStatementTrace:
     """exec_query's own DEBUG record - statement, params, elapsed, rows."""
 
@@ -143,7 +92,7 @@ class TestStatementTrace:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         with caplog.at_level(logging.DEBUG, logger="dbprint.adapters.mysql.connection"):
-            exec_query(_TraceStubCursor(3), "SELECT %s", ("x",))
+            exec_query(StubCursor(rowcount=3), "SELECT %s", ("x",))
 
         assert "SELECT %s" in caplog.text
         assert "rows=3" in caplog.text
@@ -156,7 +105,7 @@ class TestStatementTrace:
             caplog.at_level(logging.DEBUG, logger="dbprint.adapters.mysql.connection"),
             pytest.raises(QueryFailed),
         ):
-            exec_query(_TraceRaisingCursor(), "SELECT 1")
+            exec_query(StubCursor(error=RuntimeError("boom")), "SELECT 1")
 
         assert "statement failed" in caplog.text
 
@@ -185,11 +134,14 @@ class TestClassificationDispatch:
     """The adapter's pre-classification steers Phase B; it mirrors SPEC 3.2."""
 
     def _pre(self, sql_type: str, cardinality: int, fk: bool = False) -> str:
-        return stats_module._pre_classify(
-            _column(sql_type),
+        column = _column(sql_type)
+
+        return pre_classify(
+            column,
             cardinality,
             StatisticsConfig(),
             fk,
+            supported=not stats_module._is_unsupported(column.classified_type),
         )
 
     def test_enum_low_cardinality_is_categorical(self) -> None:
@@ -560,7 +512,7 @@ class TestIndexesFunctionalKeyParts:
 
     def _indexes(self) -> list:
         return introspect_module.indexes(
-            _StubCursor(self._ROWS),
+            StubCursor(self._ROWS),
             Identity.of(("fixture", "t"), DIALECT),
         )
 
@@ -597,7 +549,7 @@ class TestUniqueKeysFunctionalKeyParts:
         return [
             group.columns
             for group in introspect_module.unique_keys(
-                _StubCursor(self._ROWS),
+                StubCursor(self._ROWS),
                 Identity.of(("fixture", "t"), DIALECT),
             )
         ]
@@ -620,63 +572,15 @@ class TestUniqueKeysFunctionalKeyParts:
 def herbarium_sheet_db(mysql_cluster: MysqlCluster) -> Iterator[dict[str, str]]:
     """Fresh database seeded from the herbarium_sheet fixture SQL."""
 
-    import mysql.connector
-
-    db_name = f"herbarium_catalog_{secrets.token_hex(4)}"
     schema = (_FIXTURE_DIR / "schema.sql").read_text()
     data = (_FIXTURE_DIR / "data.sql").read_text()
 
-    admin = mysql.connector.connect(
-        host="127.0.0.1",
-        port=mysql_cluster.port,
-        user="root",
-        password="",
-        autocommit=True,
-    )
-    cur = admin.cursor()
-    cur.execute(f"DROP DATABASE IF EXISTS `{db_name}`")
-    cur.execute(f"CREATE DATABASE `{db_name}`")
-    cur.close()
-    admin.close()
+    def seed(cur: Any) -> None:
+        for statement in split_statements(schema) + split_statements(data):
+            cur.execute(statement)
 
-    seeded = mysql.connector.connect(
-        host="127.0.0.1",
-        port=mysql_cluster.port,
-        user="root",
-        password="",
-        database=db_name,
-        autocommit=True,
-    )
-    cur = seeded.cursor()
-
-    for statement in _split_sql(schema) + _split_sql(data):
-        cur.execute(statement)
-
-    cur.close()
-    seeded.close()
-
-    creds = {
-        "host": "127.0.0.1",
-        "port": str(mysql_cluster.port),
-        "database": db_name,
-        "user": "root",
-        "password": "",
-    }
-
-    try:
+    with _scratch_database(mysql_cluster, "herbarium_catalog", seed) as creds:
         yield creds
-    finally:
-        admin = mysql.connector.connect(
-            host="127.0.0.1",
-            port=mysql_cluster.port,
-            user="root",
-            password="",
-            autocommit=True,
-        )
-        cur = admin.cursor()
-        cur.execute(f"DROP DATABASE IF EXISTS `{db_name}`")
-        cur.close()
-        admin.close()
 
 
 def _build(creds: dict[str, str]) -> MysqlAdapter:
@@ -800,42 +704,6 @@ class TestPhysicalLayout:
         try:
             fqn = f"{mysql_test_db['database']}.zz_plain"
             assert adapter.introspect_physical_layout(fqn) is None
-        finally:
-            adapter.close()
-
-
-class TestViewDependencies:
-    """`introspect_view_dependencies` needs MySQL 8's `information_schema.view_table_usage`,
-    which MariaDB lacks - so this exercises the documented omission path, not the populated one.
-    """
-
-    def _cursor(self, mysql_test_db: dict[str, str]) -> Any:
-        import mysql.connector
-
-        conn = mysql.connector.connect(
-            host=mysql_test_db["host"],
-            port=int(mysql_test_db["port"]),
-            user=mysql_test_db["user"],
-            password="",
-            database=mysql_test_db["database"],
-            autocommit=True,
-        )
-
-        return conn, conn.cursor()
-
-    def test_view_table_usage_is_absent_on_mariadb(self, mysql_test_db: dict[str, str]) -> None:
-        conn, cur = self._cursor(mysql_test_db)
-        try:
-            cur.execute("CREATE VIEW zz_v AS SELECT 1 AS x")
-        finally:
-            cur.close()
-            conn.close()
-
-        adapter = _build(mysql_test_db)
-
-        try:
-            with pytest.raises(QueryFailed, match="(?i)view_table_usage"):
-                adapter.introspect_view_dependencies()
         finally:
             adapter.close()
 
@@ -991,93 +859,265 @@ class TestAgainstMariaDB:
         adapter.close()
 
 
+class TestTableKindsOnTheListing:
+    """Which `information_schema.tables.table_type` values become tables, and which are skipped."""
+
+    def test_a_sequence_is_skipped_and_a_versioned_table_is_listed_and_remembered(self) -> None:
+        cursor = StubCursor(
+            [
+                ("seedbank", "batch", "SEQUENCE", "Aria"),
+                ("seedbank", "field_log", "SYSTEM VERSIONED", "InnoDB"),
+                ("seedbank", "sample", "BASE TABLE", "InnoDB"),
+            ],
+        )
+        selected, versioned = introspect_module.list_tables(cursor, "seedbank", ["*"], [])
+
+        assert [(meta.fqn, meta.type) for meta, _ in selected] == [
+            ("seedbank.field_log", "table"),
+            ("seedbank.sample", "table"),
+        ]
+        assert versioned == {"seedbank.field_log"}
+
+    def test_a_table_on_a_remote_engine_is_marked_whatever_its_case(self) -> None:
+        cursor = StubCursor(
+            [
+                ("seedbank", "field_log", "BASE TABLE", "federated"),
+                ("seedbank", "field_round", "BASE TABLE", "CONNECT"),
+                ("seedbank", "narrow", "BASE TABLE", "SPIDER"),
+                ("seedbank", "sample", "BASE TABLE", "InnoDB"),
+                ("seedbank", "wide", "BASE TABLE", "MERGE"),
+                ("seedbank", "sample_v", "VIEW", None),
+            ],
+        )
+        selected, _ = introspect_module.list_tables(cursor, "seedbank", ["*"], [])
+
+        assert {meta.fqn: (meta.type, meta.external) for meta, _ in selected} == {
+            "seedbank.field_log": ("table", True),
+            "seedbank.field_round": ("table", True),
+            "seedbank.narrow": ("table", True),
+            "seedbank.sample": ("table", False),
+            "seedbank.wide": ("table", False),
+            "seedbank.sample_v": ("view", False),
+        }
+
+
+@pytest.fixture
+def versioned_db(mysql_cluster: MysqlCluster) -> Iterator[dict[str, str]]:
+    """A system-versioned table with one updated row, one with explicit period columns, a sequence."""
+
+    def seed(cur: Any) -> None:
+        for statement in (
+            "CREATE TABLE field_log (id INT PRIMARY KEY, v INT) WITH SYSTEM VERSIONING",
+            "INSERT INTO field_log VALUES (1, 1)",
+            "UPDATE field_log SET v = 2 WHERE id = 1",
+            (
+                "CREATE TABLE field_round (id INT PRIMARY KEY, "
+                "row_start TIMESTAMP(6) GENERATED ALWAYS AS ROW START INVISIBLE, "
+                "row_end TIMESTAMP(6) GENERATED ALWAYS AS ROW END INVISIBLE, "
+                "PERIOD FOR SYSTEM_TIME(row_start, row_end)) WITH SYSTEM VERSIONING"
+            ),
+            "CREATE SEQUENCE batch",
+        ):
+            cur.execute(statement)
+
+    with _scratch_database(mysql_cluster, "versioned", seed) as creds:
+        yield creds
+
+
+class TestSystemVersionedTables:
+    """A system-versioned table reads like a table: its current rows, its declared columns."""
+
+    def test_listed_as_a_table_and_the_sequence_is_not(self, versioned_db: dict[str, str]) -> None:
+        adapter = MysqlAdapter(versioned_db)
+        adapter.connect()
+
+        try:
+            listed = {m.fqn: m.type for m in adapter.list_tables(include=["*"], exclude=[])}
+        finally:
+            adapter.close()
+
+        database = versioned_db["database"]
+
+        assert listed == {f"{database}.field_log": "table", f"{database}.field_round": "table"}
+
+    def test_columns_ddl_and_a_narrowed_count_describe_the_current_rows(
+        self,
+        versioned_db: dict[str, str],
+    ) -> None:
+        adapter = _build(versioned_db)
+        fqn = f"{versioned_db['database']}.field_log"
+
+        try:
+            columns = adapter.introspect_columns(fqn)
+            ddl = adapter.extract_ddl(fqn)
+            counts, _ = adapter.compute_base_statistics(
+                fqn,
+                columns,
+                StatisticsConfig(),
+                TableScope(filter="1 = 1"),
+            )
+        finally:
+            adapter.close()
+
+        assert [c.name for c in columns] == ["id", "v"]
+        assert ddl.rstrip().endswith("WITH SYSTEM VERSIONING")
+        assert (counts.row_count, counts.row_count_method) == (1, "exact")
+
+    def test_explicit_period_columns_are_ordinary_columns(
+        self,
+        versioned_db: dict[str, str],
+    ) -> None:
+        adapter = _build(versioned_db)
+
+        try:
+            columns = adapter.introspect_columns(f"{versioned_db['database']}.field_round")
+        finally:
+            adapter.close()
+
+        assert [c.name for c in columns] == ["id", "row_start", "row_end"]
+
+
+@pytest.fixture
+def federated_db(mysql_cluster: MysqlCluster) -> Iterator[dict[str, str]]:
+    """A FederatedX table whose connection string carries a password, over a table of this server."""
+
+    def seed(cur: Any) -> None:
+        cur.execute("SELECT DATABASE()")
+        (database,) = cur.fetchone()
+        user = f"remote_{secrets.token_hex(3)}"
+
+        for statement in (
+            "INSTALL SONAME 'ha_federatedx'",
+            f"CREATE USER '{user}'@'%' IDENTIFIED BY 's3cretpw'",
+            f"GRANT SELECT ON `{database}`.* TO '{user}'@'%'",
+            "CREATE TABLE sample (id INT)",
+            "INSERT INTO sample VALUES (1)",
+            (
+                f"CREATE TABLE field_log (id INT) ENGINE=FEDERATED CONNECTION="
+                f"'mysql://{user}:s3cretpw@127.0.0.1:{mysql_cluster.port}/{database}/sample'"
+            ),
+        ):
+            cur.execute(statement)
+
+    with _scratch_database(mysql_cluster, "federated", seed) as creds:
+        yield creds
+
+
+class TestMariadbViewDependencies:
+    """MariaDB has no `view_table_usage`, so its views' dependencies are not asked for at all."""
+
+    def test_the_read_answers_unmeasured_without_a_statement(
+        self,
+        federated_db: dict[str, str],
+    ) -> None:
+        adapter = _build(federated_db)
+        issued: list[str] = []
+        execute = adapter._cursor.execute
+
+        def recording(sql: str, *args: Any, **kwargs: Any) -> Any:
+            issued.append(sql)
+
+            return execute(sql, *args, **kwargs)
+
+        adapter._cursor.execute = recording
+
+        try:
+            assert adapter.introspect_view_dependencies() is None
+        finally:
+            adapter.close()
+
+        assert issued == []
+
+
+class TestAFederatedTableIsCatalogOnly:
+    """A FEDERATED table's rows are on another server, so no rule opting it in means no read."""
+
+    def test_it_is_listed_external_and_printed_without_a_query(
+        self,
+        federated_db: dict[str, str],
+        tmp_path: Path,
+    ) -> None:
+        adapter = _build(federated_db)
+        conn = ConnectionConfig(
+            name="primary",
+            adapter="mysql",
+            output=tmp_path,
+            include=(f"{federated_db['database']}.*",),
+        )
+
+        try:
+            Engine(adapter, conn, tmp_path).generate()
+        finally:
+            adapter.close()
+
+        root = tmp_path / "primary" / federated_db["database"]
+        remote = yaml.safe_load((root / "field_log/statistics.yaml").read_text())
+        local = yaml.safe_load((root / "sample/statistics.yaml").read_text())
+
+        assert remote["catalog_only"] is True
+        assert remote["external"] is True
+        assert (root / "field_log/ddl.sql").is_file()
+        assert "external" not in local
+        assert local["row_count"] == 1
+
+
+class TestFederatedDdlMasksItsPassword:
+    """SPEC 2.1.3: a FEDERATED table's DDL keeps where its rows live and masks the password."""
+
+    def test_the_connection_string_keeps_user_and_host_and_masks_the_password(
+        self,
+        federated_db: dict[str, str],
+    ) -> None:
+        adapter = _build(federated_db)
+
+        try:
+            ddl = adapter.extract_ddl(f"{federated_db['database']}.field_log")
+        finally:
+            adapter.close()
+
+        assert "s3cretpw" not in ddl
+        assert ":[HIDDEN]@127.0.0.1:" in ddl
+        assert "ENGINE=FEDERATED" in ddl
+
+    def test_a_spider_table_comment_is_masked(self) -> None:
+        cursor = StubCursor([('wrapper "mysql", user "u", password "p"', "SPIDER")])
+
+        comments = introspect_module.comments(cursor, Identity.of(("fixture", "t"), DIALECT))
+
+        assert comments.table == 'wrapper "mysql", user "u", password "[HIDDEN]"'
+
+    def test_another_engine_s_table_comment_is_kept(self) -> None:
+        cursor = StubCursor([("user:pw@x", "InnoDB")])
+
+        comments = introspect_module.comments(cursor, Identity.of(("fixture", "t"), DIALECT))
+
+        assert comments.table == "user:pw@x"
+
+
 @pytest.fixture
 def events_db(mysql_cluster: MysqlCluster) -> Iterator[dict[str, str]]:
     """Fresh database with a single mid-cardinality DATETIME column (60 distinct / 200 rows)."""
 
     from datetime import datetime, timedelta
 
-    import mysql.connector
-
-    db_name = f"events_test_{secrets.token_hex(4)}"
-    admin = mysql.connector.connect(
-        host="127.0.0.1",
-        port=mysql_cluster.port,
-        user="root",
-        password="",
-        autocommit=True,
-    )
-    cur = admin.cursor()
-    cur.execute(f"DROP DATABASE IF EXISTS `{db_name}`")
-    cur.execute(f"CREATE DATABASE `{db_name}`")
-    cur.close()
-    admin.close()
-
-    seeded = mysql.connector.connect(
-        host="127.0.0.1",
-        port=mysql_cluster.port,
-        user="root",
-        password="",
-        database=db_name,
-        autocommit=True,
-    )
-    cur = seeded.cursor()
-    cur.execute(
-        "CREATE TABLE curation_event (id INT PRIMARY KEY AUTO_INCREMENT, occurred_at DATETIME NOT NULL)",
-    )
-    base = datetime(2025, 1, 1, 12, 0, 0)  # noqa: DTZ001 - seeds a naive DATETIME column
-    rows = [((base + timedelta(days=i % 60)).strftime("%Y-%m-%d %H:%M:%S"),) for i in range(200)]
-    cur.executemany("INSERT INTO curation_event (occurred_at) VALUES (%s)", rows)
-    cur.close()
-    seeded.close()
-
-    creds = {
-        "host": "127.0.0.1",
-        "port": str(mysql_cluster.port),
-        "database": db_name,
-        "user": "root",
-        "password": "",
-    }
-
-    try:
-        yield creds
-    finally:
-        admin = mysql.connector.connect(
-            host="127.0.0.1",
-            port=mysql_cluster.port,
-            user="root",
-            password="",
-            autocommit=True,
+    def seed(cur: Any) -> None:
+        cur.execute(
+            "CREATE TABLE curation_event (id INT PRIMARY KEY AUTO_INCREMENT, occurred_at DATETIME NOT NULL)",
         )
-        cur = admin.cursor()
-        cur.execute(f"DROP DATABASE IF EXISTS `{db_name}`")
-        cur.close()
-        admin.close()
+        base = datetime(2025, 1, 1, 12, 0, 0)  # noqa: DTZ001 - seeds a naive DATETIME column
+        rows = [
+            ((base + timedelta(days=i % 60)).strftime("%Y-%m-%d %H:%M:%S"),) for i in range(200)
+        ]
+        cur.executemany("INSERT INTO curation_event (occurred_at) VALUES (%s)", rows)
+
+    with _scratch_database(mysql_cluster, "events_test", seed) as creds:
+        yield creds
 
 
 class TestDatetimeTemporalConformance:
     """Mid-cardinality MySQL datetime classifies temporal and prints conformance-clean."""
 
     _CONN = "mysql_dt"
-
-    def _write_project(self, project_dir: Path) -> None:
-        project_dir.mkdir(parents=True, exist_ok=True)
-        (project_dir / ".dbprint.yaml").write_text(
-            f"""\
-defaults:
-  max_age_days: 7
-  statistics:
-    enumeration_threshold: 50
-    top_n_values: 20
-    percentiles: [1, 25, 50, 75, 99]
-
-connections:
-  {self._CONN}:
-    adapter: mysql
-    auto: true
-    output: prints
-""",
-        )
 
     def test_datetime_column_temporal_and_conformant(
         self,
@@ -1086,7 +1126,7 @@ connections:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         project_dir = tmp_path / "project"
-        self._write_project(project_dir)
+        write_project(project_dir, self._CONN, "mysql")
         upper = self._CONN.upper()
         env = {
             f"DBPRINT_{upper}_HOST": events_db["host"],
@@ -1119,73 +1159,22 @@ connections:
         assert "percentiles" in occurred
 
 
-def _split_sql(text: str) -> list[str]:
-    """Split a fixture SQL script into individual statements (comments dropped)."""
-
-    lines = [ln for ln in text.splitlines() if not ln.strip().startswith("--")]
-
-    return [stmt.strip() for stmt in "\n".join(lines).split(";") if stmt.strip()]
-
-
 @pytest.fixture
 def years_db(mysql_cluster: MysqlCluster) -> Iterator[dict[str, str]]:
     """Fresh database with a mid-cardinality YEAR column (60 distinct / 200 rows)."""
 
-    import mysql.connector
+    def seed(cur: Any) -> None:
+        cur.execute(
+            "CREATE TABLE intake_record (id INT PRIMARY KEY AUTO_INCREMENT, collected YEAR NOT NULL)",
+        )
+        cur.executemany(
+            "INSERT INTO intake_record (collected) VALUES (%s)",
+            [(YEAR_MIN + (i % 60),) for i in range(200)],
+        )
+        cur.execute("ANALYZE TABLE intake_record")
 
-    db_name = f"years_test_{secrets.token_hex(4)}"
-    admin = mysql.connector.connect(
-        host="127.0.0.1",
-        port=mysql_cluster.port,
-        user="root",
-        password="",
-        autocommit=True,
-    )
-    cur = admin.cursor()
-    cur.execute(f"DROP DATABASE IF EXISTS `{db_name}`")
-    cur.execute(f"CREATE DATABASE `{db_name}`")
-    cur.close()
-    admin.close()
-
-    seeded = mysql.connector.connect(
-        host="127.0.0.1",
-        port=mysql_cluster.port,
-        user="root",
-        password="",
-        database=db_name,
-        autocommit=True,
-    )
-    cur = seeded.cursor(buffered=True)
-    cur.execute(
-        "CREATE TABLE intake_record (id INT PRIMARY KEY AUTO_INCREMENT, collected YEAR NOT NULL)",
-    )
-    cur.executemany(
-        "INSERT INTO intake_record (collected) VALUES (%s)",
-        [(YEAR_MIN + (i % 60),) for i in range(200)],
-    )
-    cur.execute("ANALYZE TABLE intake_record")
-    cur.close()
-    seeded.close()
-
-    yield {
-        "host": "127.0.0.1",
-        "port": str(mysql_cluster.port),
-        "database": db_name,
-        "user": "root",
-        "password": "",
-    }
-
-    admin = mysql.connector.connect(
-        host="127.0.0.1",
-        port=mysql_cluster.port,
-        user="root",
-        password="",
-        autocommit=True,
-    )
-    cur = admin.cursor()
-    cur.execute(f"DROP DATABASE IF EXISTS `{db_name}`")
-    cur.close()
-    admin.close()
+    with _scratch_database(mysql_cluster, "years_test", seed) as creds:
+        yield creds
 
 
 YEAR_MIN = 1960
@@ -1242,60 +1231,17 @@ class TestYearColumn:
 def times_db(mysql_cluster: MysqlCluster) -> Iterator[dict[str, str]]:
     """Fresh database with a mid-cardinality TIME column (60 distinct / 200 rows)."""
 
-    import mysql.connector
+    def seed(cur: Any) -> None:
+        cur.execute(
+            "CREATE TABLE field_round (id INT PRIMARY KEY AUTO_INCREMENT, run_at TIME NOT NULL)",
+        )
+        cur.executemany(
+            "INSERT INTO field_round (run_at) VALUES (%s)",
+            [(f"08:{i % 60:02d}:00",) for i in range(200)],
+        )
 
-    db_name = f"times_test_{secrets.token_hex(4)}"
-    admin = mysql.connector.connect(
-        host="127.0.0.1",
-        port=mysql_cluster.port,
-        user="root",
-        password="",
-        autocommit=True,
-    )
-    cur = admin.cursor()
-    cur.execute(f"DROP DATABASE IF EXISTS `{db_name}`")
-    cur.execute(f"CREATE DATABASE `{db_name}`")
-    cur.close()
-    admin.close()
-
-    seeded = mysql.connector.connect(
-        host="127.0.0.1",
-        port=mysql_cluster.port,
-        user="root",
-        password="",
-        database=db_name,
-        autocommit=True,
-    )
-    cur = seeded.cursor(buffered=True)
-    cur.execute(
-        "CREATE TABLE field_round (id INT PRIMARY KEY AUTO_INCREMENT, run_at TIME NOT NULL)",
-    )
-    cur.executemany(
-        "INSERT INTO field_round (run_at) VALUES (%s)",
-        [(f"08:{i % 60:02d}:00",) for i in range(200)],
-    )
-    cur.close()
-    seeded.close()
-
-    yield {
-        "host": "127.0.0.1",
-        "port": str(mysql_cluster.port),
-        "database": db_name,
-        "user": "root",
-        "password": "",
-    }
-
-    admin = mysql.connector.connect(
-        host="127.0.0.1",
-        port=mysql_cluster.port,
-        user="root",
-        password="",
-        autocommit=True,
-    )
-    cur = admin.cursor()
-    cur.execute(f"DROP DATABASE IF EXISTS `{db_name}`")
-    cur.close()
-    admin.close()
+    with _scratch_database(mysql_cluster, "times_test", seed) as creds:
+        yield creds
 
 
 class TestTimeColumn:
@@ -1739,3 +1685,48 @@ class TestOutOfRangeTemporal:
             conn.close()
 
         assert shifted_values == utc_values
+
+
+@contextmanager
+def _scratch_database(
+    cluster: MysqlCluster,
+    prefix: str,
+    seed: Callable[[Any], None],
+) -> Iterator[dict[str, str]]:
+    import mysql.connector
+
+    server = {
+        "host": "127.0.0.1",
+        "port": cluster.port,
+        "user": "root",
+        "password": "",
+        "autocommit": True,
+    }
+    name = f"{prefix}_{secrets.token_hex(4)}"
+
+    def admin(statement: str) -> None:
+        conn = mysql.connector.connect(**server)
+        cur = conn.cursor()
+        cur.execute(statement)
+        cur.close()
+        conn.close()
+
+    admin(f"DROP DATABASE IF EXISTS `{name}`")
+    admin(f"CREATE DATABASE `{name}`")
+
+    seeded = mysql.connector.connect(**server, database=name)
+    cur = seeded.cursor(buffered=True)
+    seed(cur)
+    cur.close()
+    seeded.close()
+
+    try:
+        yield {
+            "host": "127.0.0.1",
+            "port": str(cluster.port),
+            "database": name,
+            "user": "root",
+            "password": "",
+        }
+    finally:
+        admin(f"DROP DATABASE IF EXISTS `{name}`")

@@ -809,45 +809,6 @@ class TestColumnView:
         assert rendered["null_companions"] == []
 
 
-class TestFkTargetMap:
-    def test_single_column_edge_carries_detection(self) -> None:
-        relationships = {
-            "refers_to": [
-                {
-                    "column": ["cultivar_id"],
-                    "target_table": "t",
-                    "target_column": ["id"],
-                    "detection": "declared",
-                },
-            ],
-        }
-
-        assert view.fk_target_map(relationships)["cultivar_id"] == "t.id (declared)"
-
-    def test_missing_detection_defaults_to_inferred(self) -> None:
-        relationships = {
-            "refers_to": [
-                {"column": ["cultivar_id"], "target_table": "t", "target_column": ["id"]},
-            ],
-        }
-
-        assert view.fk_target_map(relationships)["cultivar_id"] == "t.id (inferred)"
-
-    def test_composite_edge_joins_columns(self) -> None:
-        relationships = {
-            "refers_to": [
-                {
-                    "column": ["a", "b"],
-                    "target_table": "t",
-                    "target_column": ["x", "y"],
-                    "detection": "declared",
-                },
-            ],
-        }
-
-        assert view.fk_target_map(relationships)["a,b"] == "t.(x,y) (declared)"
-
-
 class TestRelationshipRows:
     def test_every_edge_states_detection_both_directions(self, rich_conn: ConnectionConfig) -> None:
         found = catalogue.load_connections([rich_conn])[0]

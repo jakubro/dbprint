@@ -1,5 +1,5 @@
 format_version: 1
-generated_at: '2026-05-17T22:48:01Z'
+generated_at: '2026-03-09T14:27:36Z'
 connection: vocabulary
 adapter: postgres
 baseline:
@@ -9,7 +9,7 @@ baseline:
   dbprint_version: null
 target:
   source: live_database
-  scanned_at: '2026-05-17T22:48:01Z'
+  scanned_at: '2026-03-09T14:27:36Z'
   selectors:
     include:
     - '*'

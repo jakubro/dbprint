@@ -41,11 +41,16 @@ class TestVectors:
             pytest.param("4.00", 10071140874863616590, id="exact_decimal"),
             pytest.param("hello", 13362634815750784402, id="text"),
             pytest.param("true", 317521853213362953, id="boolean"),
-            pytest.param("2026-05-17T22:48:01Z", 11467405332662396900, id="temporal"),
+            pytest.param("2026-03-09T14:27:36Z", 9552359349123505343, id="temporal"),
             pytest.param("00:00:37", 10604805012337869669, id="time_of_day"),
+            pytest.param(b"\x0a\xff", 8458408032758825719, id="binary"),
         ],
     )
-    def test_low64_md5_matches_the_published_vector(self, canonical: str, expected: int) -> None:
+    def test_low64_md5_matches_the_published_vector(
+        self,
+        canonical: str | bytes,
+        expected: int,
+    ) -> None:
         assert low64_md5(canonical) == expected
 
 
@@ -73,6 +78,8 @@ class TestSketchKind:
             pytest.param("Date32", "temporal", id="clickhouse_date32"),
             pytest.param("DateTime64(6)", "temporal", id="clickhouse_datetime64"),
             pytest.param("FixedString(10)", "text", id="clickhouse_fixedstring"),
+            pytest.param("bytea", "binary", id="postgres_bytea"),
+            pytest.param("VARBINARY(16)", "binary", id="mysql_varbinary"),
         ],
     )
     def test_a_covered_type_resolves_its_kind(self, sql_type: str, kind: str) -> None:
@@ -84,7 +91,7 @@ class TestSketchKind:
             pytest.param("double precision", id="float"),
             pytest.param("money", id="money"),
             pytest.param("json", id="json"),
-            pytest.param("bytea", id="unsupported"),
+            pytest.param("integer[]", id="unsupported"),
             pytest.param("Decimal256(4)", id="clickhouse_wide_decimal"),
             pytest.param("BIGNUMERIC", id="bigquery_bignumeric"),
         ],
@@ -400,3 +407,11 @@ def test_an_exact_parent_answers_for_every_child_hash() -> None:
 
 def test_a_child_hash_at_the_parents_threshold_is_not_answerable() -> None:
     assert answerable_subset_containment([1024, 5000], list(range(1, 1025))) is None
+
+
+class TestBinaryCanonicalForm:
+    def test_the_published_hex_spelling_hashes_as_its_bytes(self) -> None:
+        assert low64_md5(canonical_form("0aff", "binary")) == 8458408032758825719
+
+    def test_a_driver_bytes_value_hashes_unencoded(self) -> None:
+        assert canonical_form(memoryview(b"\x0a\xff"), "binary") == b"\x0a\xff"

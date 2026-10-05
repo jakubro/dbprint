@@ -9,9 +9,7 @@ import pytest
 import yaml
 
 from dbprint.adapters import (
-    ColumnMeta,
     ColumnStats,
-    CommentsMeta,
     MockAdapter,
     MockTable,
     TableScope,
@@ -27,6 +25,7 @@ from dbprint.engine.orchestrator import (
     _serialize_statistics,
     _table_scope,
 )
+from tests._prints import quarter_scanned_table
 
 
 def _enriched() -> dict[str, _EnrichedColumnStats]:
@@ -265,45 +264,7 @@ def _generate(tmp_path: Path, rows_scanned: int, method: RowCountMethod) -> dict
 
 
 def _narrowed_fixture(rows_scanned: int, method: RowCountMethod) -> dict[str, MockTable]:
-    """A thousand-row table whose statistics were measured over a quarter of it."""
-
-    return {
-        "public.t": MockTable(
-            type="table",
-            namespace_path=("public", "t"),
-            ddl="CREATE TABLE public.t (bucket integer);\n",
-            columns=[
-                ColumnMeta(
-                    name="bucket",
-                    sql_type="integer",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
-                "bucket": ColumnStats(
-                    sql_type="integer",
-                    nullable=False,
-                    null_count=0,
-                    null_rate=0.0,
-                    cardinality=10,
-                    cardinality_ratio=0.04,
-                    cardinality_method="exact",
-                    values=tuple(ValueCount(value=str(i), count=25) for i in range(10)),
-                    values_coverage=1.0,
-                    distribution="uniform",
-                ),
-            },
-            samples={},
-            row_count=1000,
-            rows_scanned=rows_scanned,
-            row_count_method=method,
-        ),
-    }
+    return {"public.t": quarter_scanned_table(rows_scanned=rows_scanned, row_count_method=method)}
 
 
 def _conn(*rules: RuleConfig) -> ConnectionConfig:

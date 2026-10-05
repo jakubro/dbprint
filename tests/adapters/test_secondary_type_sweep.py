@@ -53,6 +53,7 @@ _VALUES: dict[str, tuple[Any, Any]] = {
     ),
     "label": ("plot-1", "plot-2"),
     "plots": (3, 7),
+    "payload": (b"\x0a\xff", b"\x00"),
     "id": (1, 2),
     # A zoneless ClickHouse DateTime64 is an instant shown in the server zone (UTC here).
     "sown_at_server": (
@@ -228,7 +229,7 @@ def _seed_snowflake(request: pytest.FixtureRequest) -> tuple[str, ...]:
     shim = request.getfixturevalue("snowflake_duckdb_connection")
     _seed_duckdb_family(shim.execute)
 
-    return ("opens_at", "fee", "is_open", "sown_on", "sown_at", "label", "plots")
+    return ("opens_at", "fee", "is_open", "sown_on", "sown_at", "label", "plots", "payload")
 
 
 _DUCKDB_COLUMNS = (
@@ -241,6 +242,7 @@ _DUCKDB_COLUMNS = (
     "sown_at_tz",
     "label",
     "plots",
+    "payload",
 )
 
 
@@ -248,14 +250,14 @@ def _seed_duckdb_family(execute: Callable[..., Any]) -> None:
     execute(
         "CREATE TABLE seedbank.slot (opens_at TIME, opens_at_tz TIMETZ, fee DECIMAL(12,4), "
         "is_open BOOLEAN, sown_on DATE, sown_at TIMESTAMP, sown_at_tz TIMESTAMPTZ, label VARCHAR, "
-        "plots INTEGER)",
+        "plots INTEGER, payload BLOB)",
     )
     execute(
         "INSERT INTO seedbank.slot VALUES "
         "('00:00:37', '01:00:00.25+02', 4, true, '2024-01-01', '2024-01-01 00:00:00.5', "
-        "'2024-01-01 00:00:00.5+00', 'plot-1', 3), "
+        "'2024-01-01 00:00:00.5+00', 'plot-1', 3, '\\x0A\\xFF'::BLOB), "
         "('12:30:00.25', '02:00:00+02', 1.25, false, '2024-02-29', '2024-06-01 12:00:00', "
-        "'2024-06-01 12:00:00+00', 'plot-2', 7)",
+        "'2024-06-01 12:00:00+00', 'plot-2', 7, '\\x00'::BLOB)",
     )
 
 
@@ -271,13 +273,14 @@ def _seed_redshift(request: pytest.FixtureRequest) -> tuple[str, ...]:
     shim.execute(
         "CREATE TABLE seedbank.slot (opens_at time, opens_at_tz timetz, fee numeric(12,4), "
         "is_open boolean, sown_on date, sown_at timestamp, sown_at_tz timestamptz, "
-        "label varchar(20), plots integer)",
+        "label varchar(20), plots integer, payload bytea)",
     )
     shim.execute(
         "INSERT INTO seedbank.slot VALUES "
         "('00:00:37', '01:00:00.25+02', 4, true, '2024-01-01', '2024-01-01 00:00:00.5', "
-        "'2024-01-01 00:00:00.5+00', 'plot-1', 3), ('12:30:00.25', '02:00:00+02', 1.25, false, "
-        "'2024-02-29', '2024-06-01 12:00:00', '2024-06-01 12:00:00+00', 'plot-2', 7)",
+        "'2024-01-01 00:00:00.5+00', 'plot-1', 3, '\\x0aff'::bytea), ('12:30:00.25', "
+        "'02:00:00+02', 1.25, false, '2024-02-29', '2024-06-01 12:00:00', '2024-06-01 12:00:00+00', "
+        "'plot-2', 7, '\\x00'::bytea)",
     )
     shim.execute("ANALYZE")
 
@@ -296,14 +299,14 @@ def _seed_postgres_family(creds: dict[str, str]) -> None:
         conn.execute(
             "CREATE TABLE seedbank.slot (opens_at time, opens_at_tz timetz, fee numeric(12,4), "
             "is_open boolean, sown_on date, sown_at timestamp, sown_at_tz timestamptz, "
-            "label varchar(20), plots integer)",
+            "label varchar(20), plots integer, payload bytea)",
         )
         conn.execute(
             "INSERT INTO seedbank.slot VALUES "
             "('00:00:37', '01:00:00.25+02', 4, true, '2024-01-01', '2024-01-01 00:00:00.5', "
-            "'2024-01-01 00:00:00.5+00', 'plot-1', 3), "
+            "'2024-01-01 00:00:00.5+00', 'plot-1', 3, '\\x0aff'::bytea), "
             "('12:30:00.25', '02:00:00+02', 1.25, false, '2024-02-29', '2024-06-01 12:00:00', "
-            "'2024-06-01 12:00:00+00', 'plot-2', 7)",
+            "'2024-06-01 12:00:00+00', 'plot-2', 7, '\\x00'::bytea)",
         )
         conn.execute("ANALYZE")
 
@@ -317,15 +320,15 @@ def _seed_mysql(request: pytest.FixtureRequest) -> tuple[str, ...]:
             (
                 "CREATE TABLE slot (id int primary key, opens_at time(6), fee decimal(12,4), "
                 "is_open tinyint(1), season year, sown_on date, sown_at datetime(6), "
-                "sown_at_tz timestamp(6) NULL, label varchar(20))"
+                "sown_at_tz timestamp(6) NULL, label varchar(20), payload varbinary(4))"
             ),
             "SET time_zone = '+00:00'",
             (
                 "INSERT INTO slot VALUES "
                 "(1, '00:00:37', 4, 1, 1990, '2024-01-01', '2024-01-01 00:00:00.5', "
-                "'2024-01-01 00:00:00.5', 'plot-1'), "
+                "'2024-01-01 00:00:00.5', 'plot-1', X'0AFF'), "
                 "(2, '12:30:00.25', 1.25, 0, 1991, '2024-02-29', '2024-06-01 12:00:00', "
-                "'2024-06-01 12:00:00', 'plot-2')"
+                "'2024-06-01 12:00:00', 'plot-2', X'00')"
             ),
             "ANALYZE TABLE slot",
         ],
@@ -341,6 +344,7 @@ def _seed_mysql(request: pytest.FixtureRequest) -> tuple[str, ...]:
         "sown_at",
         "sown_at_tz",
         "label",
+        "payload",
     )
 
 
@@ -368,34 +372,35 @@ def _seed_bigquery(request: pytest.FixtureRequest) -> tuple[str, ...]:
     table = f"`dbprint-test`.`{dataset}`.slot"
     cursor.execute(
         f"CREATE TABLE {table} (opens_at TIME, is_open BOOL, sown_on DATE, sown_at DATETIME, "
-        "sown_at_tz TIMESTAMP, label STRING, plots INT64)",
+        "sown_at_tz TIMESTAMP, label STRING, plots INT64, payload BYTES)",
     )
     cursor.execute(
         f"INSERT INTO {table} VALUES "
         "(TIME '00:00:37', true, DATE '2024-01-01', DATETIME '2024-01-01 00:00:00.5', "
-        "TIMESTAMP '2024-01-01 00:00:00.5+00', 'plot-1', 3), "
+        "TIMESTAMP '2024-01-01 00:00:00.5+00', 'plot-1', 3, FROM_HEX('0aff')), "
         "(TIME '12:30:00.25', false, DATE '2024-02-29', DATETIME '2024-06-01 12:00:00', "
-        "TIMESTAMP '2024-06-01 12:00:00+00', 'plot-2', 7)",
+        "TIMESTAMP '2024-06-01 12:00:00+00', 'plot-2', 7, FROM_HEX('00'))",
     )
 
-    return ("opens_at", "is_open", "sown_on", "sown_at", "sown_at_tz", "label", "plots")
+    return ("opens_at", "is_open", "sown_on", "sown_at", "sown_at_tz", "label", "plots", "payload")
 
 
 def _seed_databricks(request: pytest.FixtureRequest) -> tuple[str, ...]:
     cursor = request.getfixturevalue("databricks_test_schema")
     cursor.execute(
         "CREATE TABLE slot (fee DECIMAL(12,4), is_open BOOLEAN, sown_on DATE, "
-        "sown_at TIMESTAMP_NTZ, sown_at_tz TIMESTAMP, label STRING, plots INT) USING DELTA",
+        "sown_at TIMESTAMP_NTZ, sown_at_tz TIMESTAMP, label STRING, plots INT, payload BINARY) "
+        "USING DELTA",
     )
     cursor.execute(
         "INSERT INTO slot VALUES "
         "(4, true, DATE '2024-01-01', TIMESTAMP_NTZ '2024-01-01 00:00:00.5', "
-        "TIMESTAMP '2024-01-01 00:00:00.5+00:00', 'plot-1', 3), "
+        "TIMESTAMP '2024-01-01 00:00:00.5+00:00', 'plot-1', 3, X'0AFF'), "
         "(1.25, false, DATE '2024-02-29', TIMESTAMP_NTZ '2024-06-01 12:00:00', "
-        "TIMESTAMP '2024-06-01 12:00:00+00:00', 'plot-2', 7)",
+        "TIMESTAMP '2024-06-01 12:00:00+00:00', 'plot-2', 7, X'00')",
     )
 
-    return ("fee", "is_open", "sown_on", "sown_at", "sown_at_tz", "label", "plots")
+    return ("fee", "is_open", "sown_on", "sown_at", "sown_at_tz", "label", "plots", "payload")
 
 
 _NO_TIME_TZ = "absent: the engine has no time-of-day-with-zone type"
@@ -415,6 +420,7 @@ _CATALOGUE: dict[str, dict[str, str]] = {
         "text": "label",
         "boolean": "is_open",
         "temporal": "sown_at",
+        "binary": "payload",
     },
     "snowflake": {
         "date": "sown_on",
@@ -428,6 +434,7 @@ _CATALOGUE: dict[str, dict[str, str]] = {
         "text": "label",
         "boolean": "is_open",
         "temporal": "sown_at",
+        "binary": "payload",
     },
     "postgres": {
         "date": "sown_on",
@@ -441,6 +448,7 @@ _CATALOGUE: dict[str, dict[str, str]] = {
         "text": "label",
         "boolean": "is_open",
         "temporal": "sown_at",
+        "binary": "payload",
     },
     "redshift": {
         "date": "sown_on",
@@ -454,6 +462,7 @@ _CATALOGUE: dict[str, dict[str, str]] = {
         "text": "label",
         "boolean": "is_open",
         "temporal": "sown_at",
+        "binary": "payload",
     },
     "mysql": {
         "date": "sown_on",
@@ -467,6 +476,7 @@ _CATALOGUE: dict[str, dict[str, str]] = {
         "text": "label",
         "boolean": "is_open",
         "temporal": "sown_at",
+        "binary": "payload",
     },
     "clickhouse": {
         "date": "sown_on",
@@ -480,6 +490,7 @@ _CATALOGUE: dict[str, dict[str, str]] = {
         "text": "label",
         "boolean": "is_open",
         "temporal": "sown_at_server",
+        "binary": "absent: the engine has no binary type",
     },
     "bigquery": {
         "date": "sown_on",
@@ -493,6 +504,7 @@ _CATALOGUE: dict[str, dict[str, str]] = {
         "text": "label",
         "boolean": "is_open",
         "temporal": "sown_at",
+        "binary": "payload",
     },
     "databricks": {
         "date": "sown_on",
@@ -506,6 +518,7 @@ _CATALOGUE: dict[str, dict[str, str]] = {
         "text": "label",
         "boolean": "is_open",
         "temporal": "sown_at",
+        "binary": "payload",
     },
 }
 

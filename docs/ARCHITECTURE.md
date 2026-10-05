@@ -30,9 +30,11 @@ This map is maintained by hand. It is not generated from the tree and nothing ch
 │   │   ├── remote.py                       #   git-address --project: parse, then clone into a cache
 │   │   └── selectors.py                    #   fnmatch-based include/exclude matching
 │   ├── adapters/                           # Database adapters
-│   │   ├── base.py                         #   Adapter ABC + intermediate dataclass types
+│   │   ├── base.py                         #   Adapter ABC, SqlAdapter, intermediate dataclass types
 │   │   ├── errors.py                       #   QueryFailed - statement + params on failure
-│   │   ├── dialect.py                      #   per-adapter SQL dialect declarations
+│   │   ├── dialect.py                      #   per-adapter SQL dialect: what it accepts, how it spells it
+│   │   ├── statements.py                   #   statistics statements shared by the SQL adapters
+│   │   ├── pg_catalog.py                   #   catalog statements Postgres and Redshift share
 │   │   ├── trace_context.py                #   per-statement SQL tracing into the run log
 │   │   ├── mock.py                         #   deterministic in-memory adapter (for tests)
 │   │   ├── postgres/                       #   concrete adapter package
@@ -197,6 +199,8 @@ Three arrows above are narrower than they look, and each is deliberate:
 
 The `Adapter` abstract base class is the single integration surface for a database. Adding support for a new database means implementing this class.
 
+Every SQL engine's adapter subclasses `SqlAdapter` (`adapters/base.py`) rather than `Adapter` directly. It names its package's helper modules and its `Dialect` as class attributes, and `SqlAdapter` forwards each method to the matching module function with the table's identity and connection; a concrete adapter overrides a method only where its engine reads differently — a per-database session (`_handle`), a project argument, a catalog cache. `MockAdapter` stays on `Adapter`.
+
 Every adapter reads an identifier through one shared layer, `adapters/identifiers.py`: the fold, the SPEC 1.5 allowlist and collision rules at table and column grain, and the physical-identity carrier `list_tables` registers and every later statement quotes. A table is addressed by its captured parts, never by splitting its FQN. The FQN itself is built and taken apart only in `spec/fqn.py`, the one place its `.` separator is spelled.
 
 ### Abstract methods
@@ -247,6 +251,8 @@ class Adapter(ABC):
     def default_collation(self) -> str: ...
 
     def introspect_physical_layout(self, fqn: str) -> PhysicalLayout | None: ...
+
+    def introspect_merging(self, fqn: str) -> TableMerging | None: ...
 
     def introspect_view_dependencies(self) -> dict[str, tuple[str, ...]] | None: ...
 
@@ -314,6 +320,8 @@ All twenty-four are abstract: a subclass missing any one of them fails at instan
 
 **Phase A is issued in batches, because an engine compiles the whole statement before it reads a row.** It builds one aggregate expression per statistic per column — seven for a string-like column, five for a numeric one — so the statement grows with the table's width, and past some width an engine can spend longer compiling than it allows itself. `batched_by_cost` in `adapters/base.py` groups columns to a shared expression budget, and one driver, `run_phase_a`, owns the control flow for every adapter: batching, failure isolation, the row count and the exact recount. An adapter supplies only what is vendor-specific — the statement for a batch, the cost of a column, a null-count read, and, on the five that estimate, the recount statement. The row count is read once, by the first group, and reused: it is the denominator every ratio in the file is computed against, so taking it per group would manufacture a disagreement the format has rules for. Each group still counts the rows for itself, because the clamp that stops an approximate distinct count exceeding the non-null rows must bound a measurement by the read it came from rather than by a foreign one — so on a table taking writes a later group's cardinality can exceed the published count, which is the cross-read disagreement §2.2.4 already tolerates.
 
+**A statement every engine emits in one shape is written once.** `adapters/statements.py` builds each such statistics statement; an adapter hands it the source, its column operands and a rendering, and its `Dialect` declares how the engine spells what differs — the row count, the text a count tie breaks on, a pair's distinct count, grouping by position or by alias. Turning the rows into `ColumnStats` is `adapters/base.py`'s, beside `run_phase_b`. An adapter keeps what only its engine decides: the Phase A statement, the numeric and temporal aggregates, and sampling.
+
 A group that fails does not fail its table. The driver retries its columns one statement each, and a column still failing gets a null-count read alone, since `null_count` and `null_rate` are required on every column even under `unmeasured`. Such a column comes back in `PhaseA.unmeasured` with that count; the engine classifies it from its type, names the fields it lost, keeps it out of every later pass, and names `null_patterns` and `dependencies` unmeasured for the file, because both describe every column at once. Only a column whose null-count read fails too fails the table.
 
 The split exists because that decision cannot move into the adapter. `looks_like` is defined in `dbprint.spec`, and `adapters` does not import it (see the layering rules below) — so the ordering, rather than the layering, is what gives way.
@@ -332,15 +340,16 @@ Adapters do not return artifact-shaped dicts. They return typed intermediate rec
 
 | Type | Fields (summary) |
 |---|---|
-| `TableMeta` | `fqn`, `type` (`table` / `view` / `matview`), namespace path components |
+| `TableMeta` | `fqn`, `type` (`table` / `view` / `matview`), namespace path components, `external` (rows live in another system), `opt_in_only` (profiled only when a `read_rows` rule opts it in; never published) |
 | `ColumnMeta` | `name` (always lowercase — the artifact's map key), `sql_type`, `nullable`, `default`, ordinal position, `physical_name` (catalog spelling, only when it differs from `name`), `classify_as` (the built-in a user-defined type resolves to — a Postgres domain's base type, or `anyenum`/`anyrange`/`anymultirange`; classification and every adapter's routing read `classified_type`, while `sql_type` stays the declared name). The engine refuses a table two of whose columns fold to one `name` (SPEC 1.5.2) |
 | `ForeignKeyMeta` | `column` (array), `target_table`, `target_column` (array), `on_delete`, `on_update`, `constraint_name`, `detection` — `declared` for an edge read from the catalog (the default, so an adapter never sets it) and `inferred` for one the engine derived from column naming |
 | `IndexMeta` | `name`, `columns` (ordered array), `unique`, `type` (adapter-native: `btree`, `gin`, …) |
 | `UniqueKeyMeta` | `columns` (ordered array), `primary` — one declared-unique group and whether the schema named it the primary key |
-| `BaseStats` | Phase A per-column output — `null_count`, `cardinality`, `cardinality_method`, `supported`. `supported` is the adapter's own report, not re-derived by the caller: an adapter's unsupported-type list names vendor types the format's own list does not (a spatial type, a long-blob family), so the engine stamps a declined column `unsupported` whatever either list says of its type name. A declined column enters no statement but the null-count read: `run_phase_a`'s `declines` hook keeps it out of every batch and recount, and a type with a lossless comparable form (Postgres `money`/`json`, Databricks `variant`, BigQuery `JSON`) is read through its adapter's `render_operand` in every comparing statement instead. Adapters keep no type-family tuples: every adapter's `_pre_classify` is "declined, else `classify()`", and its Phase A/B routing asks the shared predicates in `spec/classification.py`. An adapter owns only vendor facts — the types it declines (`_UNSUPPORTED_TYPES`), the vendor spellings it profiles as `text` by representability (`_TEXT_TYPES`), and rendering routes. The two lists together are its `KNOWN_TYPES`, which `Adapter.recognises_type` reads so the engine can warn about a type nobody names |
+| `BaseStats` | Phase A per-column output — `null_count`, `cardinality`, `cardinality_method`, `supported`. `supported` is the adapter's own report, not re-derived by the caller: an adapter's unsupported-type list names vendor types the format's own list does not (Postgres's native geometric types, `xml`), so the engine stamps a declined column `unsupported` whatever either list says of its type name. A declined column enters no statement but the null-count read: `run_phase_a`'s `declines` hook keeps it out of every batch and recount, and a `spatial` or `vector` column takes the same null-count read but stays supported, described by its own read (`statements.spatial`, `statements.vector`) in place of Phase B; and a type with a lossless comparable form (Postgres `money`/`json`, Databricks `variant`, BigQuery `JSON`) is read through its adapter's `render_operand` in every comparing statement instead. Adapters keep no type-family tuples: the shared `pre_classify` in `adapters/base.py` is "declined, else `classify()`", and every adapter's Phase A/B routing asks the shared predicates in `spec/classification.py`. An adapter owns only vendor facts — the types it declines (`_UNSUPPORTED_TYPES`), the vendor spellings it profiles as `text` by representability (`_TEXT_TYPES`), and rendering routes. The two lists together are its `KNOWN_TYPES`, which `Adapter.recognises_type` reads so the engine can warn about a type nobody names |
 | `PhaseA` | Phase A's whole result — `stats` per measured column, `unmeasured` mapping each column no statement could measure to the null count a narrower read still obtained, the batch failures behind them, and a failed recount's cause. The engine warns from the failures; the adapter does not log |
 | `CommentsMeta` | `table` (str / None), `columns` (dict name -> str) |
 | `ColumnStats` | The classification-dependent payload — see [§2.2 of the spec](format/v1/SPEC.md#22-statisticsyaml) for the field matrix. Every value-bearing field (`values`, `range`, `percentiles`, timeline buckets, populated windows) holds only `None`, `bool`, `int`, `float`, `Decimal` or `str`, produced by `spec.rounding.measured_value`, which raises `UnrepresentableValue` for any other driver type and fails the table |
+| `PartStats` / `ColumnParts` | One descent's result ([SPEC 2.2.18](format/v1/SPEC.md)): each chosen part's `ColumnStats` over its own `occurrences`, with its samples and `size`, plus how many paths the descent found. `Adapter.profile_parts` returns one `ColumnParts` per column it descends into and defaults to none; the engine calls it per column after Phase B while `max_parts` is positive, then classifies, detects, redacts and serializes each part through the column path. `adapters.base.descend` is the shared walk: a kind-specific `children` step turns a `PartSource` (path, type, one-row-per-occurrence source) into its children, and `spec.parts.select_parts` chooses which to profile, so an array of records composes without either step knowing the other. `SqlAdapter.profile_parts` descends through the stats module's `ARRAYS` reads (the element source, size, distinct count and norm of an array), `RECORDS` reads (a record's or union's members and the source of each, held where its parent is non-null or its tag names it), `MAPS` reads (a map as one row per entry, its keys pre-cut to `max_parts` by one grouped statement and each key compared as a literal) and `DOCUMENTS` reads (a JSON document's objects as entries and arrays as elements, each part typed by the names its values hold and read through the matching scalar reader), counts a node's occurrences as its derived source's rows, and profiles each chosen part with the module's `profile_part` — its own Phase A and Phase B rerun over that source as a synthetic column `v`, so a part is measured by the code that measures a column. `Adapter.document_types` counts each `json` column's values by engine type name, which the engine reads whatever `max_parts` is |
 | `StatisticsConfig` | Input bundle: `enumeration_threshold`, `top_n_values`, `looks_like_sample_size`, `percentiles` |
 
 ### Cardinality measurement
@@ -389,7 +398,7 @@ Two consequences worth stating plainly. `TABLESAMPLE` binds to a base table and 
 
 ### Mock adapter
 
-`adapters/mock.py` is a deterministic in-memory adapter constructed from a fixture dict. It returns the dict's contents verbatim from every method. Engine tests run against the mock to exercise orchestration without paying the cost of a real database.
+`adapters/mock.py` is a deterministic in-memory adapter constructed from a fixture dict. It returns the dict's contents verbatim from every method. A fixture's `parts` states every part a descent would find (`MockParts`); `profile_parts` walks them through the shared `descend`, so the selection under `max_parts` is the engine's, not the fixture's. Engine tests run against the mock to exercise orchestration without paying the cost of a real database.
 
 ### Contract test suite
 
@@ -861,6 +870,7 @@ This pattern matches the spec's `validate_print` contract in [§6.5 of the spec]
 | `introspect_indexes` | table | Degrades: `indexes` is absent. |
 | `extract_comments` | table | Degrades: table and column descriptions are absent. |
 | `introspect_physical_layout` | table | Degrades: `physical_layout` is absent — indistinguishable from a table confirmed unclustered, since the format has no third state for this field. |
+| `introspect_merging` | table | Degrades: `merging` is absent and the file names it in `unmeasured`. |
 | `introspect_unique_keys` | table | Degrades: no declared key reaches `grain`, and `grain.search.exhausted` reads `false` rather than `true` or absent — a search run without knowing every declared key cannot claim to be exhaustive, the same distinction §2.2.12 draws between "the look was incomplete" and "the search found nothing." |
 | `compute_null_patterns` | table | Degrades: `null_patterns` is absent — indistinguishable from a table with nothing to relate, the same limitation as `introspect_physical_layout`. |
 | `introspect_view_dependencies` | connection | Degrades: every view/matview this run touches omits `depends_on`. One catalog read for the whole connection, so one failure costs every view rather than one table. |
@@ -997,9 +1007,23 @@ BigQuery's production driver speaks a REST/gRPC protocol, not a wire-compatible 
 
 The substitution is at the catalog layer, structural rather than a stand-in for one statement: several `INFORMATION_SCHEMA` views are absent from the emulator entirely (`TABLE_CONSTRAINTS`, `KEY_COLUMN_USAGE`, `COLUMNS.column_default`, `COLUMNS.collation_name`, `COLUMNS.clustering_ordinal_position`; `TABLE_OPTIONS` exists but returns no rows), and `COLUMNS.is_partitioning_column` always reports `NO`, even for a column a genuine `PARTITION BY` clause names (all measured directly against the emulator). Each is left to the environment-gated live suite (`tests/live/test_bigquery_live.py`): declared `PRIMARY KEY`/`FOREIGN KEY` relationships, `introspect_physical_layout`'s cluster/partition detection, and `extract_ddl`'s real recreate-DDL text all require it, since nothing about them is provable locally regardless of what a table actually declares.
 
-What it proves: the statistics-computation SQL genuinely, against a real engine — `APPROX_ QUANTILES`' single-call 101-boundary fetch, `APPROX_COUNT_DISTINCT`'s conditional use (skipped for a type it cannot group — GEOGRAPHY and every other `_is_unsupported` type — and routed through `TO_JSON_STRING` for JSON, which cannot be grouped directly either), the exact re-count `_settle_near_unique` runs for a column near SPEC 4.2's `candidate_key` threshold (converging with every other adapter's own exact-by-default there), and the materialized-copy path (a real throwaway table in the dataset, not a `_SESSION.`-scoped temp table — see `adapters.bigquery.stats.materialize`) all execute for real. `TABLESAMPLE SYSTEM` having no seed clause in the grammar is what makes this adapter declare `SAMPLE_FALLBACK_COHERENT = False`, so the engine refuses an unmaterialized sample scope before any statement here runs (same declaration ClickHouse and Redshift carry). What it cannot prove: the catalog gaps listed above, and any behavior a real BigQuery project's cost-based query planner or storage layer would show that a query-only emulator does not model — including whether `looks_like`'s own oversample draw is reproducible, since this emulator's `ORDER BY RAND()` was measured to return the same fixed order on every call regardless of a table's real sampling behavior, the one gap the environment-gated live suite alone can close.
+What it proves: the statistics-computation SQL genuinely, against a real engine — `APPROX_ QUANTILES`' single-call 101-boundary fetch, `APPROX_COUNT_DISTINCT`'s conditional use (skipped for a type it cannot group — every `_is_unsupported` type, and GEOGRAPHY, which the spatial read describes instead — and routed through `TO_JSON_STRING` for JSON, which cannot be grouped directly either), the exact re-count `_settle_near_unique` runs for a column near SPEC 4.2's `candidate_key` threshold (converging with every other adapter's own exact-by-default there), and the materialized-copy path (a real throwaway table in the dataset, not a `_SESSION.`-scoped temp table — see `adapters.bigquery.stats.materialize`) all execute for real. `TABLESAMPLE SYSTEM` having no seed clause in the grammar is what makes this adapter declare `SAMPLE_FALLBACK_COHERENT = False`, so the engine refuses an unmaterialized sample scope before any statement here runs (same declaration ClickHouse and Redshift carry). What it cannot prove: the catalog gaps listed above, and any behavior a real BigQuery project's cost-based query planner or storage layer would show that a query-only emulator does not model — including whether `looks_like`'s own oversample draw is reproducible, since this emulator's `ORDER BY RAND()` was measured to return the same fixed order on every call regardless of a table's real sampling behavior, the one gap the environment-gated live suite alone can close.
 
 ---
+
+### What no substrate has run
+
+Behavior the adapter pages under `docs/adapters/` state that rests on vendor documentation or a dialect check alone, never on a statement a substrate executed:
+
+| Adapter | Unverified |
+|---|---|
+| `postgres` | Profiling `halfvec` and `sparsevec`. The foreign-table catalog reads were measured on PostgreSQL 16 with `postgres_fdw` |
+| `mysql` | `JSON` parts and `VECTOR`, which MariaDB lacks; spatial reads on Oracle MySQL; the `CONNECT` and `SPIDER` `ENGINE` spellings and their DDL masking. FederatedX was measured reporting `FEDERATED` |
+| `clickhouse` | The `LiveView`, `RedisStreams`, `Hive`, `ArrowFlight`, `ExternalDistributed` and `Redis` engine spellings, and the `Replicated` and `Shared` prefixes on a merging engine; how a table inside a `MySQL` or `PostgreSQL` database engine is reported; whether a `direct` or `cache` dictionary reads its source on every `SELECT` |
+| `redshift` | The `SUPER` and spatial statements; for external tables, the `external_type` spellings against the adapter's known types, whether a non-owner holding `USAGE` sees them, which privilege `SHOW EXTERNAL TABLE` needs and whether it answers for a federated table, and whether `pg_class` carries them |
+| `snowflake` | The `ARRAY`, `MAP`, `VARIANT`/`OBJECT`, spatial and `VECTOR` statements; whether `SAMPLE`, a sampled copy and the `SHOW ... KEYS` reads accept an event table |
+| `databricks` | The spatial statement: open-source Spark has no `st_*` functions |
+| `bigquery` | The spatial statement; for external tables and snapshots, the `ddl` text `TABLES` returns, whether `COLUMNS` lists an autodetected external schema, whether `PARTITIONS` answers, and whether `TABLESAMPLE` runs on a snapshot |
 
 ## 11. MCP server
 

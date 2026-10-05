@@ -7,19 +7,17 @@ orders the distinct set by a hash of the value (SPEC 4.1.2) rather than storage 
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any
 
 from . import stats
-from .connection import Cursor, exec_query
+from .connection import DIALECT, Cursor, exec_query
 from .introspect import table_rows_estimate
 from .rendering import render_operand, render_text
-from ..base import MIN_SAMPLE_DRAW, TableScope
+from .. import statements
+from ..base import TableScope, is_string_like
 from ..identifiers import Identity
 from ..sql_layout import derived, indented
-
-
-SAMPLE_RATE_MULTIPLIER = 10  # over-sample to compensate for the DISTINCT filter
-SMALL_TABLE_FACTOR = 10  # row_count < n * factor -> direct DISTINCT path
 
 
 def sample_distinct(
@@ -36,12 +34,8 @@ def sample_distinct(
     """
 
     cn = stats._qualified(column)
-    seed = stats._seed(identity)
+    seed = statements.table_seed(identity)
     source = stats._source(identity.quoted(), scope, seed)
-    estimate = _scoped_estimate(table_rows_estimate(cursor, identity), scope)
-
-    if estimate <= 0 or estimate < n * SMALL_TABLE_FACTOR:
-        return _distinct(cursor, source, cn, n, seed, sql_type)
 
     # The over-sample stays row-random (SPEC 4.1.2 names the frequency-weighting
     # this costs); only the final `_distinct` step is hash-ordered.
@@ -55,37 +49,18 @@ def sample_distinct(
           {cn} IS NOT NULL
         ORDER BY
           RAND()
-        LIMIT {int(n * SAMPLE_RATE_MULTIPLIER)}
+        LIMIT {int(n * statements.SAMPLE_RATE_MULTIPLIER)}
         """,
         "ovs",
     )
-    values = _distinct(cursor, oversampled, "ovs.v", n, seed, sql_type)
 
-    if _starved(scope, values, n):
-        return _distinct(cursor, source, cn, n, seed, sql_type)
-
-    return values
-
-
-def _starved(scope: TableScope | None, values: list[Any], n: int) -> bool:
-    """Whether the draw came back too thin to infer from, and re-reading would help.
-
-    Only a predicate can starve it - a fraction sizes the draw to the rate it asked for.
-    """
-
-    if scope is None or not scope.filter:
-        return False
-
-    return len(values) < min(n, MIN_SAMPLE_DRAW)
-
-
-def _scoped_estimate(estimate: int, scope: TableScope | None) -> float:
-    """Rows the scoped read covers: a fraction scales the catalog estimate, a predicate cannot."""
-
-    if scope is None or scope.sample is None:
-        return float(estimate)
-
-    return estimate * scope.sample
+    return statements.sample_distinct(
+        scope,
+        n,
+        statements.scoped_estimate(table_rows_estimate(cursor, identity), scope),
+        direct=lambda: _distinct(cursor, source, cn, n, seed, sql_type),
+        draw=lambda: _distinct(cursor, oversampled, "ovs.v", n, seed, sql_type),
+    )
 
 
 def _distinct(
@@ -96,38 +71,20 @@ def _distinct(
     seed: int,
     sql_type: str | None,
 ) -> list[Any]:
-    """Up to n distinct non-null values of the column from one source expression.
-
-    Ordered by a hash of the value (SPEC 4.1.2): a fixed permutation of the distinct set,
-    independent of frequency and storage order, reproducible under the table's own seed.
-    """
-
     selected = (
         render_text(quoted_col, sql_type)
-        if sql_type is not None and stats._is_string_like(sql_type)
+        if sql_type is not None and is_string_like(sql_type, stats._is_unsupported)
         else render_operand(quoted_col, sql_type)
         if sql_type is not None
         else quoted_col
     )
-    rows = exec_query(
-        cursor,
-        f"""
-        SELECT
-          drw.v
-        FROM
-          (
-            SELECT DISTINCT
-              {indented(selected, 14)} AS v
-            FROM
-              {indented(source, 14)}
-            WHERE
-              {quoted_col} IS NOT NULL
-          ) drw
-        ORDER BY
-          MD5(CONCAT(%s, CAST(drw.v AS CHAR)))
-        LIMIT %s
-        """,
-        (str(seed), n),
-    ).fetchall()
 
-    return [r[0] for r in rows]
+    return statements.distinct_values(
+        partial(exec_query, cursor),
+        DIALECT,
+        source,
+        quoted_col,
+        selected,
+        n,
+        seed,
+    )

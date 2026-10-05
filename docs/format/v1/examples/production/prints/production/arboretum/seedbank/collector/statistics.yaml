@@ -1,7 +1,7 @@
 format_version: 1
 table: arboretum.seedbank.collector
 type: table
-profiled_at: '2026-05-17T22:48:01Z'
+profiled_at: '2026-03-09T14:27:36Z'
 row_count: 400
 row_count_method: exact
 grain:
@@ -792,7 +792,7 @@ columns:
       p75: '2008-10-27'
       p99: '2009-01-31'
     freshness:
-      max_age_days: 6311
+      max_age_days: 6242
       classification: dormant
     sketch:
       method: kmv_md5_lo64

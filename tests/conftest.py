@@ -31,7 +31,13 @@ from hypothesis.database import DirectoryBasedExampleDatabase
 
 from dbprint.cli import run_log
 from tests import _containment, _substrates
-from tests._provisioning import INSTALL_LOCK_PATH, discover_or_install, in_container
+from tests._provisioning import (
+    INSTALL_LOCK_PATH,
+    discover_or_install,
+    ensure_duckdb_spatial,
+    ensure_postgres_extension,
+    in_container,
+)
 
 
 # `check` must not vary between runs, so its profile derandomizes; `local` searches wider and keeps
@@ -58,7 +64,7 @@ INSTANT_PLACEHOLDER = "<instant>"
 _INSTANT_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z")
 
 # Run instants only - a temporal column's range/percentiles are ISO instants too.
-# Mirrors gen_reference_example.py's _INSTANT_KEYS.
+# Mirrors scripts/example_support.py's INSTANT_KEYS.
 _INSTANT_KEYS = frozenset({"generated_at", "profiled_at", "scanned_at"})
 
 # The print the package ships, and the only one carrying real producer output.
@@ -500,6 +506,40 @@ def postgres_cluster() -> PostgresCluster:
     handle = _substrates.shared(_scratch_root(), "postgres", _run_owner(), _start_postgres)
 
     return PostgresCluster(port=int(handle["port"]))
+
+
+@pytest.fixture(scope="session")
+def postgis(postgres_cluster: PostgresCluster) -> PostgresCluster:
+    """The run's cluster, with PostGIS available to `CREATE EXTENSION postgis`."""
+
+    bin_dir = _discover_postgres_bin_dir()
+    ensure_postgres_extension(bin_dir, "postgis", f"postgresql-{bin_dir.parent.name}-postgis-3")
+
+    return postgres_cluster
+
+
+@pytest.fixture(scope="session")
+def pgvector(postgres_cluster: PostgresCluster) -> PostgresCluster:
+    """The run's cluster, with pgvector available to `CREATE EXTENSION vector`."""
+
+    bin_dir = _discover_postgres_bin_dir()
+    ensure_postgres_extension(bin_dir, "vector", f"postgresql-{bin_dir.parent.name}-pgvector")
+
+    return postgres_cluster
+
+
+@pytest.fixture(scope="session")
+def duckdb_spatial() -> None:
+    """duckdb's `spatial` extension, loadable by any connection the test opens."""
+
+    before = _containment.snapshot()
+    ensure_duckdb_spatial()
+
+    # duckdb looks for extensions only under its own home directory, so the install lands there.
+    for root, names in _containment.escaped(before, _containment.snapshot()).items():
+        for name in names:
+            if name == ".duckdb":
+                _claim(f"appeared::{root}::{name}")
 
 
 def _start_postgres() -> dict[str, str]:

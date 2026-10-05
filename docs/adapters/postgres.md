@@ -52,7 +52,7 @@ GRANT TEMPORARY ON DATABASE my_db TO dbprint_ro;
 
 Granting `USAGE` on the schema moves both messages from naming the schema to naming the object, which is the signal that the remaining gap is `SELECT`. A run that ends `4 ok / 1 failed` exits `5`, and the tables that succeeded are still written.
 
-A plain view is the exception at every rung, including the bottom one: a role holding no grant at all still gets a complete print of it. No query is issued against a view, so its `statistics.yaml` comes from the catalog, and its DDL succeeds where every table's fails.
+A plain view is the exception at every rung, including the bottom one: a role holding no grant at all still gets a complete print of it. No query is issued against a view no `read_rows` rule opts in, so its `statistics.yaml` comes from the catalog, and its DDL succeeds where every table's fails. A view a `read_rows` rule opts in is queried like a table and needs `SELECT` on it.
 
 ## Sampling
 
@@ -80,9 +80,27 @@ each statistic for it is measured over its own draw of the rows
 
 The fallback is not an equivalent path. Each statement then draws its own rows, so a column's listed value counts and the non-null figure they are a share of come from different reads, and the file can disagree with itself on a table nobody wrote to. Setting `materialize_sample: false` chooses that trade deliberately, which is the right call where the tool must stay strictly read-only — and the wrong one where it was chosen to avoid a grant.
 
+## Foreign tables
+
+A foreign table is listed with `external: true` (SPEC 2.2.20). Unless a `read_rows` rule opts it in, it is described from the catalog alone: `USAGE` on its schema is enough, its DDL shows the `CREATE FOREIGN TABLE ... SERVER ... OPTIONS (...)` statement, and no statement reaches the remote server. The foreign server and its user mappings are never dumped.
+
+Opted in, it is read through the wrapper, which needs `SELECT` on it and a user mapping for the role, and every statement reads the remote system. `TABLESAMPLE` works on local tables only, so narrow one with a `filter`; a `sample` fails it with `foreign table <fqn> cannot be sampled (TABLESAMPLE applies to local tables only); narrow it with a filter rule instead`. A foreign partition is not listed, like any partition; reading its partitioned parent reads it too.
+
 ## Types without a comparison operator
 
 A `json` column is counted by its text, so two documents differing only in whitespace or key order count as two, and a `money` column is measured as `numeric`, publishing plain numbers rather than the session's currency spelling. A type with no equality operator at all (`point`, `xml`, `xid`, ...) is published `unsupported` with its null count, and a type nothing declares that fails a statement degrades that one column to `unmeasured`.
+
+## Column types
+
+| Type | Profiled as | What to know |
+|---|---|---|
+| array | `composite` | Postgres does not enforce dimensions, so a multi-dimensional array has one element part `[*]` over every element, never `[*][*]` |
+| composite type, or a domain over one | `composite` | `ROW(NULL, NULL)` is a value, not a NULL: it counts as held, with null fields |
+| `hstore` | `composite` | Recognized in whichever schema the extension lives |
+| `json`, `jsonb` | `json` | A `json` value is read as `jsonb`, so a key written twice counts once, as its last value; `types` keys are what `jsonb_typeof` returns |
+| `jsonpath` | `text` | Values are the paths' own spelling |
+| PostGIS `geometry`, `geography` | `spatial` | The native `point`, `box` and `polygon` are not OGC geometries and stay `unsupported` |
+| pgvector `vector`, `halfvec`, `sparsevec` | `vector` | `halfvec` and `sparsevec` need pgvector 0.7 or later; a `sparsevec` reports its declared dimension |
 
 ## Listed values
 

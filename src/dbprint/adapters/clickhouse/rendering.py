@@ -5,11 +5,12 @@ value: SPEC 2.2.4's domain rendering and SPEC 2.2.14's canonical sketch bytes.
 from __future__ import annotations
 
 import re
+from functools import partial
 from typing import assert_never
 
 from dbprint.spec.classification import base_type
 from dbprint.spec.sketch import SketchKind
-from ..base import TemporalShape
+from ..base import TemporalShape, lookup_operand, lookup_temporal_shape
 from ..sql_layout import call
 
 
@@ -29,12 +30,7 @@ _DECIMAL_SCALE_RE = re.compile(r"decimal\(\s*\d+\s*,\s*(\d+)\s*\)", re.IGNORECAS
 _OPERANDS: dict[str, str] = {}
 
 
-def render_operand(expr: str, sql_type: str) -> str:
-    """`expr` as every comparing, grouping or aggregating statement reads it."""
-
-    template = _OPERANDS.get(base_type(sql_type))
-
-    return template.format(expr) if template else expr
+render_operand = partial(lookup_operand, _OPERANDS)
 
 
 def render_text(expr: str, sql_type: str) -> str:
@@ -47,10 +43,7 @@ def render_text(expr: str, sql_type: str) -> str:
     return f"toString({expr})"
 
 
-def temporal_shape(sql_type: str) -> TemporalShape | None:
-    """What a value of `sql_type` is on ClickHouse, or None for a non-temporal type."""
-
-    return _SHAPES.get(base_type(sql_type))
+temporal_shape = partial(lookup_temporal_shape, _SHAPES)
 
 
 def stores_below_microsecond(sql_type: str) -> bool:

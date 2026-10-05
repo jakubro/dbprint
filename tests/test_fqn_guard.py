@@ -14,6 +14,7 @@ import dbprint
 _SRC = Path(dbprint.__file__).parent
 
 _NOT_AN_FQN = {
+    ("adapters/base.py", "member_source"): "a SQL record member reference",
     ("adapters/bigquery/ddl.py", "extract_ddl"): "a quoted SQL reference",
     ("adapters/bigquery/introspect.py", "_info_schema"): "a quoted SQL reference",
     ("adapters/databricks/introspect.py", "_uc_list_candidates"): "an error message",
@@ -32,15 +33,15 @@ _NOT_AN_FQN = {
     ("config/project.py", "_coerce_stat_change_threshold"): "a config key path in a message",
     ("config/project.py", "_coerce_vocabulary"): "a config key path in a message",
     ("conformance/diff.py", "check_redacted_values"): "a statistic path",
-    ("docs/view.py", "fk_target_map"): "a column-grain display name",
     ("engine/carried.py", "redaction_mismatches"): "a column-grain display name",
-    ("engine/context_assembler.py", "_build_fk_target_map"): "a column-grain display name",
+    ("engine/context_assembler.py", "fk_target_map"): "a column-grain display name",
     ("engine/context_assembler.py", "_markdown_joins"): "a column-grain display name",
     ("engine/context_assembler.py", "_markdown_relationships"): "a column-grain display name",
     ("engine/diff.py", "_diff_one_column_stats"): "a statistic path",
     ("engine/diff.py", "_get_path"): "a statistic path",
     ("engine/diff.py", "_stat_paths"): "a statistic path",
     ("engine/orchestrator.py", "_detect_columns"): "a column-grain display name",
+    ("engine/orchestrator.py", "_enriched_part"): "a column-grain display name",
     ("spec/absence.py", "_column_head"): "a field path",
     ("spec/absence.py", "_lookup"): "a field path",
     ("spec/absence.py", "_table_head"): "a field path",

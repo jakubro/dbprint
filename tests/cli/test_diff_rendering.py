@@ -56,6 +56,7 @@ class TestEmptyDiff:
             "Modified (grain)",
             "Modified (physical layout)",
             "Modified (depends_on)",
+            "Modified (external)",
             "Modified (statistics)",
             "Modified (relationships)",
             "Modified (indexes)",
@@ -65,7 +66,7 @@ class TestEmptyDiff:
             assert label in text
 
         # Every section renders the (none) marker on empty diff.
-        assert text.count("(none)") == 10
+        assert text.count("(none)") == 12
 
     def test_footer_emitted(self) -> None:
         text = render_human_text(_empty_diff(), _options())
@@ -685,6 +686,15 @@ _STRUCTURED_OPERANDS: dict[str, dict[str, Any]] = {
         "before": None,
         "after": {"mechanism": "cluster", "keys": [{"expression": "b"}]},
     },
+    "merging_changed": {
+        "before": None,
+        "after": {
+            "engine": "ReplacingMergeTree",
+            "key": [{"expression": "b"}],
+            "one_row_per_key": True,
+            "rows": "stored",
+        },
+    },
 }
 
 
@@ -740,7 +750,7 @@ class TestEveryKindRenders:
 
         text = render_human_text(_diff_with([event]), _options(threshold_override=0.0))
 
-        assert text.count("(none)") == 9, f"{kind} rendered in no section"
+        assert text.count("(none)") == 11, f"{kind} rendered in no section"
 
 
 class TestNumberSpelling:
@@ -801,3 +811,20 @@ class TestNumberSpelling:
         text = render_human_text(_diff_with([change]), _options(threshold_override=0.0))
 
         assert "status values: [{value: ok, count: 2}] -> [{value: ok, count: 3}]" in text
+
+
+class TestExternalSection:
+    def test_a_table_whose_rows_moved_elsewhere_is_rendered(self) -> None:
+        diff = _diff_with(
+            [
+                {
+                    "kind": "external_changed",
+                    "table": "public.remote_lot",
+                    "before": False,
+                    "after": True,
+                },
+            ],
+        )
+        text = render_human_text(diff, _options())
+        assert "public.remote_lot" in text
+        assert "~ rows: local -> external" in text

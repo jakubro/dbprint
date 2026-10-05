@@ -228,20 +228,7 @@ class TestContextRendering:
     ) -> None:
         """SPEC 2.7.1: a human-stated key never replaces the producer's own measurement."""
 
-        unique_keys = [UniqueKeyMeta(columns=("id",), primary=True)]
-        _generate(tmp_path, unique_keys=unique_keys)
-        root = tmp_path / "w"
-        (root / "public" / "wide" / "statistics.annotations.yaml").write_text(
-            yaml.safe_dump(
-                {
-                    "format_version": 1,
-                    "columns": {},
-                    "grain": {"keys": [{"columns": ["a", "b"], "note": "business key"}]},
-                },
-            ),
-        )
-        _regenerate(tmp_path, unique_keys)
-
+        root = _with_annotated_grain(tmp_path)
         manifest = yaml.safe_load((root / "manifest.yaml").read_text())
         text = assemble(
             manifest,
@@ -256,20 +243,7 @@ class TestContextRendering:
         self,
         tmp_path: Path,
     ) -> None:
-        unique_keys = [UniqueKeyMeta(columns=("id",), primary=True)]
-        _generate(tmp_path, unique_keys=unique_keys)
-        root = tmp_path / "w"
-        (root / "public" / "wide" / "statistics.annotations.yaml").write_text(
-            yaml.safe_dump(
-                {
-                    "format_version": 1,
-                    "columns": {},
-                    "grain": {"keys": [{"columns": ["a", "b"], "note": "business key"}]},
-                },
-            ),
-        )
-        _regenerate(tmp_path, unique_keys)
-
+        root = _with_annotated_grain(tmp_path)
         manifest = yaml.safe_load((root / "manifest.yaml").read_text())
         rendered = yaml.safe_load(
             assemble(
@@ -287,6 +261,24 @@ class TestContextRendering:
         assert rendered["statistics"]["grain"]["keys"] == [
             {"columns": ["id"], "detection": "declared"},
         ]
+
+
+def _with_annotated_grain(tmp_path: Path) -> Path:
+    unique_keys = [UniqueKeyMeta(columns=("id",), primary=True)]
+    _generate(tmp_path, unique_keys=unique_keys)
+    root = tmp_path / "w"
+    (root / "public" / "wide" / "statistics.annotations.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "format_version": 1,
+                "columns": {},
+                "grain": {"keys": [{"columns": ["a", "b"], "note": "business key"}]},
+            },
+        ),
+    )
+    _regenerate(tmp_path, unique_keys)
+
+    return root
 
 
 def _regenerate(tmp_path: Path, unique_keys: list[UniqueKeyMeta]) -> None:

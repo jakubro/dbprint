@@ -49,6 +49,16 @@ Every duckdb identifier resolves case-insensitively, so a capital in the catalog
 - **Column `collation`** — always `null`. duckdb exposes no per-column collation surface.
 - **Foreign key `on_delete` / `on_update`** — always `NO ACTION`. duckdb's catalog parses no referential-action clause at all.
 
+## Column types
+
+| Type | Profiled as | What to know |
+|---|---|---|
+| `T[]`, `T[n]` | `composite` | An array of floats with one length per value, such as an embedding in `FLOAT[n]`, also carries `norm` and `zero_count`; duckdb has no `vector` type |
+| `STRUCT(...)`, `UNION(...)` | `composite` | A nested field keeps its full path (`.spot.x`) |
+| `MAP(K, V)` | `composite` | `labels['site'] IS NULL` holds for an absent key, a null value, an empty map and a null map alike; the parts tell them apart |
+| `JSON` | `json` | `types` keys are what `json_type` returns |
+| `GEOMETRY` | `spatial` | Needs the `spatial` extension installed: dbprint loads it but never installs it, and without it `geometry` and `extent` are reported unmeasured with a warning. `srid` is a CRS string such as `OGC:CRS84`; duckdb 1.5.5 reads a file database's `GEOMETRY('OGC:CRS84')` column back with no CRS |
+
 ## Statement timeout
 
 duckdb has no server to cancel on, so `statement_timeout` is a client-side clock: a timer interrupts the connection when a statement outlives the limit. The interrupt is observed only where duckdb checks for it, so a statement can overrun briefly.

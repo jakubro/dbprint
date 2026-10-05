@@ -59,6 +59,7 @@ from dbprint.engine import (
 from dbprint.engine.carried import CommittedPrint
 from dbprint.spec.sketch import K as SPEC_SKETCH_K
 from dbprint.spec.sketch import canonical_form, decode_sketch, low64_md5
+from tests._prints import columns, exact_stats, mock_table
 from tests.conftest import normalize_instants
 
 
@@ -90,118 +91,107 @@ def _conn_config(
 
 
 def _curator_fixture() -> dict[str, MockTable]:
+    return _referencing_fixture(
+        "public.curator",
+        "herbarium_id",
+        "public.herbarium",
+        ddl="CREATE TABLE public.curator (id uuid PRIMARY KEY);\n",
+        relationships=[
+            ForeignKeyMeta(
+                column=("herbarium_id",),
+                target_table="public.herbarium",
+                target_column=("id",),
+                on_delete="CASCADE",
+                on_update="NO ACTION",
+                constraint_name="curator_herbarium_fk",
+            ),
+        ],
+    )
+
+
+def _referencing_fixture(
+    child: str,
+    fk_column: str,
+    parent: str,
+    *,
+    ddl: str,
+    relationships: list[ForeignKeyMeta],
+    parent_keys: tuple[UniqueKeyMeta, ...] = (),
+) -> dict[str, MockTable]:
+    uuids = [f"00000000-0000-7000-8000-{i:012d}" for i in range(20)]
+    uuid_length = Length(min=36, max=36, avg=36.0, p95=36.0)
+
     return {
-        "public.curator": MockTable(
-            type="table",
-            namespace_path=("public", "curator"),
-            ddl="CREATE TABLE public.curator (id uuid PRIMARY KEY);\n",
-            columns=[
-                ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1),
-                ColumnMeta(
-                    name="herbarium_id",
-                    sql_type="uuid",
-                    nullable=True,
-                    default=None,
-                    ordinal=2,
-                ),
-            ],
-            relationships=[
-                ForeignKeyMeta(
-                    column=("herbarium_id",),
-                    target_table="public.herbarium",
-                    target_column=("id",),
-                    on_delete="CASCADE",
-                    on_update="NO ACTION",
-                    constraint_name="curator_herbarium_fk",
-                ),
-            ],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+        child: mock_table(
+            child,
+            columns(("id", "uuid"), (fk_column, "uuid", True)),
+            {
                 # A fully-unique uuid classifies text (SPEC 4.2), which SPEC 2.2.3 marks R;
                 # 20 of 100 distinct values, each count 1, is long_tail.
-                "id": ColumnStats(
-                    sql_type="uuid",
-                    nullable=False,
-                    null_count=0,
-                    null_rate=0.0,
-                    cardinality=100,
-                    cardinality_ratio=1.0,
-                    cardinality_method="exact",
-                    values=tuple(
-                        ValueCount(value=f"00000000-0000-7000-8000-{i:012d}", count=1)
-                        for i in range(20)
-                    ),
+                "id": exact_stats(
+                    "uuid",
+                    100,
+                    1.0,
+                    values=tuple(ValueCount(value=u, count=1) for u in uuids),
                     values_coverage=0.2,
                     distribution="long_tail",
                     empty_count=0,
-                    length=Length(min=36, max=36, avg=36.0, p95=36.0),
+                    length=uuid_length,
                     inferred=Inferred(candidate_key=True),
                 ),
-                # herbarium_id carries a declared FK, so it classifies foreign_key_candidate,
-                # for which SPEC 2.2.3 marks these three fields required.
-                "herbarium_id": ColumnStats(
-                    sql_type="uuid",
+                # The referencing column classifies foreign_key_candidate, for which SPEC 2.2.3
+                # marks these three fields required.
+                fk_column: exact_stats(
+                    "uuid",
+                    20,
+                    0.2,
                     nullable=True,
                     null_count=10,
                     null_rate=0.1,
-                    cardinality=20,
-                    cardinality_ratio=0.2,
-                    cardinality_method="exact",
                     values=(
                         ValueCount(value="00000000-0000-7000-8000-000000000001", count=9),
                         ValueCount(value="00000000-0000-7000-8000-000000000002", count=8),
                     ),
                     values_coverage=0.188889,
                     distribution="uniform",
-                    length=Length(min=36, max=36, avg=36.0, p95=36.0),
+                    length=uuid_length,
                 ),
             },
+            ddl=ddl,
+            relationships=relationships,
             # A census is owed wherever a column carries a null (SPEC 2.2.10), and is stated
             # rather than derived: per-column counts cannot say which nulls share a row.
             null_patterns=NullPatterns(
                 patterns=(
                     NullPattern(columns=(), count=90),
-                    NullPattern(columns=("herbarium_id",), count=10),
+                    NullPattern(columns=(fk_column,), count=10),
                 ),
                 coverage=1.0,
             ),
-            samples={"id": [f"00000000-0000-7000-8000-{i:012d}" for i in range(20)]},
+            samples={"id": uuids},
             row_count=100,
         ),
-        "public.herbarium": MockTable(
-            type="table",
-            namespace_path=("public", "herbarium"),
-            ddl="CREATE TABLE public.herbarium (id uuid PRIMARY KEY);\n",
-            columns=[
-                ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+        parent: mock_table(
+            parent,
+            columns(("id", "uuid")),
+            {
                 # cardinality 20 is at or below enumeration_threshold(50) and top_n_values(20),
                 # so the column classifies categorical with an exhaustive value list.
-                "id": ColumnStats(
-                    sql_type="uuid",
-                    nullable=False,
-                    null_count=0,
-                    null_rate=0.0,
-                    cardinality=20,
-                    cardinality_ratio=1.0,
-                    cardinality_method="exact",
-                    values=tuple(
-                        ValueCount(value=f"00000000-0000-7000-8000-{i:012d}", count=1)
-                        for i in range(20)
-                    ),
+                "id": exact_stats(
+                    "uuid",
+                    20,
+                    1.0,
+                    values=tuple(ValueCount(value=u, count=1) for u in uuids),
                     values_coverage=1.0,
                     distribution="uniform",
-                    length=Length(min=36, max=36, avg=36.0, p95=36.0),
+                    length=uuid_length,
                     inferred=Inferred(candidate_key=True),
                 ),
             },
-            samples={"id": [f"00000000-0000-7000-8000-{i:012d}" for i in range(20)]},
+            ddl=f"CREATE TABLE {parent} (id uuid PRIMARY KEY);\n",
+            samples={"id": uuids},
             row_count=20,
+            unique_keys=list(parent_keys),
         ),
     }
 
@@ -2313,31 +2303,13 @@ class TestMaxRowsScannedCeiling:
 
         assert adapter.estimate_calls == []
 
-    @staticmethod
-    def _with_a_view(fixture: dict[str, MockTable]) -> dict[str, MockTable]:
-        fixture["public.active_curators_v"] = MockTable(
-            type="view",
-            namespace_path=("public", "active_curators_v"),
-            ddl="CREATE VIEW public.active_curators_v AS SELECT id FROM public.curator;\n",
-            columns=[
-                ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={},
-            samples={},
-        )
-
-        return fixture
-
     def test_a_view_draws_no_estimate_under_a_connection_level_ceiling(
         self,
         tmp_path: Path,
     ) -> None:
         """A view is never queried (SPEC 2.2.15), so no size condition can govern it."""
 
-        fixture = self._with_a_view(_sized_fixture(curator=280_421, herbarium=1000))
+        fixture = _with_a_view(_sized_fixture(curator=280_421, herbarium=1000))
         adapter = _EstimateCountingAdapter(fixture)
         conn = replace(_conn_config(tmp_path), max_rows_scanned=100_000)
         Engine(adapter, conn, tmp_path).generate()
@@ -2349,7 +2321,7 @@ class TestMaxRowsScannedCeiling:
         tmp_path: Path,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        fixture = self._with_a_view(_sized_fixture(curator=None, herbarium=1000))
+        fixture = _with_a_view(_sized_fixture(curator=None, herbarium=1000))
         conn = replace(_conn_config(tmp_path), max_rows_scanned=100_000)
 
         with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
@@ -2398,13 +2370,13 @@ class TestMaxRowsScannedCeiling:
     ) -> None:
         """The view's file is unaffected by the read it no longer takes."""
 
-        without_ceiling = self._with_a_view(_sized_fixture(curator=280_421, herbarium=1000))
+        without_ceiling = _with_a_view(_sized_fixture(curator=280_421, herbarium=1000))
         Engine(MockAdapter(without_ceiling), _conn_config(tmp_path), tmp_path).generate()
         baseline = tmp_path / "primary" / "public" / "active_curators_v" / "statistics.yaml"
         baseline_text = normalize_instants(baseline.read_text())
 
         shutil.rmtree(tmp_path / "primary")
-        with_ceiling = self._with_a_view(_sized_fixture(curator=280_421, herbarium=1000))
+        with_ceiling = _with_a_view(_sized_fixture(curator=280_421, herbarium=1000))
         conn = replace(_conn_config(tmp_path), max_rows_scanned=100_000)
         Engine(MockAdapter(with_ceiling), conn, tmp_path).generate()
 
@@ -2415,24 +2387,6 @@ class TestRecordedFreshnessThreshold:
     """Every entry records the threshold that governed its table on this run (SPEC 2.5), so a
     consumer reads the producer's decision rather than re-deriving it from a moved config.
     """
-
-    @staticmethod
-    def _with_a_view(fixture: dict[str, MockTable]) -> dict[str, MockTable]:
-        fixture["public.active_curators_v"] = MockTable(
-            type="view",
-            namespace_path=("public", "active_curators_v"),
-            ddl="CREATE VIEW public.active_curators_v AS SELECT id FROM public.curator;\n",
-            columns=[
-                ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={},
-            samples={},
-        )
-
-        return fixture
 
     def test_each_entry_records_what_its_own_rules_resolved(self, tmp_path: Path) -> None:
         conn = replace(
@@ -2449,7 +2403,7 @@ class TestRecordedFreshnessThreshold:
     def test_a_view_records_it_like_a_table(self, tmp_path: Path) -> None:
         """A threshold resolves by name, so a view has one whether or not it has statistics."""
 
-        engine = _build_engine(tmp_path, self._with_a_view(_curator_fixture()))
+        engine = _build_engine(tmp_path, _with_a_view(_curator_fixture()))
         engine.generate()
 
         assert _thresholds(tmp_path / "primary" / "manifest.yaml")["public.active_curators_v"] == 7
@@ -4196,108 +4150,14 @@ def _inferrable_fixture(*, declared: bool = False, target_key: bool = True) -> d
         ),
     ]
 
-    return {
-        "public.specimen_loan": MockTable(
-            type="table",
-            namespace_path=("public", "specimen_loan"),
-            ddl="CREATE TABLE public.specimen_loan (id uuid PRIMARY KEY, curator_id uuid);\n",
-            columns=[
-                ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1),
-                ColumnMeta(
-                    name="curator_id",
-                    sql_type="uuid",
-                    nullable=True,
-                    default=None,
-                    ordinal=2,
-                ),
-            ],
-            relationships=declared_fks if declared else [],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
-                # A fully-unique uuid classifies text (SPEC 4.2), which SPEC 2.2.3 marks R;
-                # 20 of 100 distinct values, each count 1, is long_tail.
-                "id": ColumnStats(
-                    sql_type="uuid",
-                    nullable=False,
-                    null_count=0,
-                    null_rate=0.0,
-                    cardinality=100,
-                    cardinality_ratio=1.0,
-                    cardinality_method="exact",
-                    values=tuple(
-                        ValueCount(value=f"00000000-0000-7000-8000-{i:012d}", count=1)
-                        for i in range(20)
-                    ),
-                    values_coverage=0.2,
-                    distribution="long_tail",
-                    empty_count=0,
-                    length=Length(min=36, max=36, avg=36.0, p95=36.0),
-                    inferred=Inferred(candidate_key=True),
-                ),
-                "curator_id": ColumnStats(
-                    sql_type="uuid",
-                    nullable=True,
-                    null_count=10,
-                    null_rate=0.1,
-                    cardinality=20,
-                    cardinality_ratio=0.2,
-                    cardinality_method="exact",
-                    values=(
-                        ValueCount(value="00000000-0000-7000-8000-000000000001", count=9),
-                        ValueCount(value="00000000-0000-7000-8000-000000000002", count=8),
-                    ),
-                    values_coverage=0.188889,
-                    distribution="uniform",
-                    length=Length(min=36, max=36, avg=36.0, p95=36.0),
-                ),
-            },
-            null_patterns=NullPatterns(
-                patterns=(
-                    NullPattern(columns=(), count=90),
-                    NullPattern(columns=("curator_id",), count=10),
-                ),
-                coverage=1.0,
-            ),
-            samples={"id": [f"00000000-0000-7000-8000-{i:012d}" for i in range(20)]},
-            row_count=100,
-        ),
-        "public.curator": MockTable(
-            type="table",
-            namespace_path=("public", "curator"),
-            ddl="CREATE TABLE public.curator (id uuid PRIMARY KEY);\n",
-            columns=[
-                ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
-                # cardinality 20 is at or below enumeration_threshold(50) and top_n_values(20),
-                # so the column classifies categorical with an exhaustive value list.
-                "id": ColumnStats(
-                    sql_type="uuid",
-                    nullable=False,
-                    null_count=0,
-                    null_rate=0.0,
-                    cardinality=20,
-                    cardinality_ratio=1.0,
-                    cardinality_method="exact",
-                    values=tuple(
-                        ValueCount(value=f"00000000-0000-7000-8000-{i:012d}", count=1)
-                        for i in range(20)
-                    ),
-                    values_coverage=1.0,
-                    distribution="uniform",
-                    length=Length(min=36, max=36, avg=36.0, p95=36.0),
-                    inferred=Inferred(candidate_key=True),
-                ),
-            },
-            samples={"id": [f"00000000-0000-7000-8000-{i:012d}" for i in range(20)]},
-            row_count=20,
-            unique_keys=([UniqueKeyMeta(columns=("id",), primary=True)] if target_key else []),
-        ),
-    }
+    return _referencing_fixture(
+        "public.specimen_loan",
+        "curator_id",
+        "public.curator",
+        ddl="CREATE TABLE public.specimen_loan (id uuid PRIMARY KEY, curator_id uuid);\n",
+        relationships=declared_fks if declared else [],
+        parent_keys=(UniqueKeyMeta(columns=("id",), primary=True),) if target_key else (),
+    )
 
 
 class TestInferredForeignKeys:
@@ -7060,3 +6920,15 @@ class TestAnEdgeWithACarriedEndpointMatchesAFullRun:
         engine = _build_engine(tmp_path, _curator_fixture())
 
         assert engine._add_value_derived_edges({}, committed.tables) == {}
+
+
+def _with_a_view(fixture: dict[str, MockTable]) -> dict[str, MockTable]:
+    fixture["public.active_curators_v"] = mock_table(
+        "public.active_curators_v",
+        columns(("id", "uuid")),
+        {},
+        type="view",
+        ddl="CREATE VIEW public.active_curators_v AS SELECT id FROM public.curator;\n",
+    )
+
+    return fixture

@@ -58,6 +58,12 @@ The profiling role needs create rights in that dataset (`roles/bigquery.dataEdit
 
 BigQuery is case-sensitive while the format addresses objects by lowercased paths, so the adapter carries an identity object holding the physical `(dataset, table)` and a lowercase-to-physical column map. `list_tables` is the only point where both forms are visible and **must run first** — looking up an unlisted table raises `UnknownTable` rather than falling back to a lowercased path, which would filter the catalog for a name that does not exist. Dataset and table names are folded for the artifact path; the physical spelling is kept for every query. The rule check refuses a case collision the same way as every other lowercasing adapter, at table grain and, for two columns folding to one key, at column grain (SPEC 1.5.2).
 
+## Table kinds
+
+A table clone is profiled as a table; the print names no base table. An external table is listed with `external: true` (SPEC 2.2.20) and a snapshot as a plain `table`; unless a `read_rows` rule opts either in, it is described from `INFORMATION_SCHEMA` alone. A snapshot is skipped by default for cost: its rows never change, so profiling it would bill a full read of a past state on every run. Other table types are not listed.
+
+Opted in, either is profiled like a table. An external table bills every statement for the bytes it reads, results from sources other than Cloud Storage are not cached, and a dry run may report 0 bytes; a `sample` rule is the cheapest way to profile one, since `TABLESAMPLE` reads a subset of its files.
+
 ## Namespaces
 
 `project` stays required: it is the billing and authentication context. `dataset` is optional; omitted, the connection lists every dataset in the project through `datasets.list` — not a billed query, filtered to the datasets the caller holds `bigquery.datasets.get` on, already part of `dataViewer` and `metadataViewer`, and leaving hidden datasets out — then reads each one's `INFORMATION_SCHEMA.TABLES`. Each of those is billed at the on-demand minimum, so listing cost scales with the dataset count. Every per-table read, and a sampled table's copy, uses the table's own dataset. Two datasets differing only in case that hold the same table name collide, as any case collision does. A dataset whose listing fails is skipped with a warning.
@@ -65,6 +71,13 @@ BigQuery is case-sensitive while the format addresses objects by lowercased path
 ## Column types
 
 **Listed values.** An `INTERVAL` or `RANGE` column lists its values as BigQuery's `CAST(... AS STRING)` text (`0-1 2 3:4:5`, `[2024-01-01, 2024-02-01)`), the text `length` is measured over.
+
+| Type | Profiled as | What to know |
+|---|---|---|
+| `ARRAY<T>` | `composite` | — |
+| `STRUCT<...>` | `composite` | — |
+| `JSON` | `json` | `types` keys are what `JSON_TYPE` returns |
+| `GEOGRAPHY` | `spatial` | Always SRID `4326` and never invalid, so `invalid_count` is absent; an empty value's kind is `geometrycollection`, and an extent crossing the antimeridian may hold a bound outside [-180, 180] |
 
 ## What it cannot deliver
 

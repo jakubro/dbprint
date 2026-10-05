@@ -464,6 +464,32 @@ class TestFreshnessThresholdIsBounded:
         with pytest.raises(ConfigError, match="expected integer"):
             load_project(tmp_path)
 
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [("max_parts", -1), ("max_part_depth", 0)],
+    )
+    def test_a_descent_bound_below_its_floor_is_refused(
+        self,
+        tmp_path: Path,
+        key: str,
+        value: int,
+    ) -> None:
+        _write_config(
+            tmp_path,
+            f"connections:\n  w:\n    adapter: postgres\n    statistics:\n      {key}: {value}\n",
+        )
+
+        with pytest.raises(ConfigError, match=f"statistics.{key}: expected an integer of at least"):
+            load_project(tmp_path)
+
+    def test_max_parts_zero_is_legal(self, tmp_path: Path) -> None:
+        _write_config(
+            tmp_path,
+            "connections:\n  w:\n    adapter: postgres\n    statistics:\n      max_parts: 0\n",
+        )
+
+        assert load_project(tmp_path).connections["w"].statistics.max_parts == 0
+
     def test_zero_is_legal_at_every_level(self, tmp_path: Path) -> None:
         """Zero says re-extract on every run, which the skip comparison already produces."""
 
@@ -1337,7 +1363,10 @@ class TestMaxRowsScanned:
             'connections:\n  w:\n    adapter: postgres\n    rules:\n      - include: ["*"]\n',
         )
 
-        with pytest.raises(ConfigError, match="max_rows_scanned, so it would do nothing"):
+        with pytest.raises(
+            ConfigError,
+            match="max_rows_scanned or read_rows, so it would do nothing",
+        ):
             load_project(root)
 
 
@@ -2093,3 +2122,57 @@ class TestSketchAllColumns:
             match="sketch_all_columns: expected true or false, got 1",
         ):
             load_project(tmp_path)
+
+
+class TestReadRows:
+    """`read_rows` opts a rule's plain views into being queried; it exists inside a rule only."""
+
+    @staticmethod
+    def _rules(tmp_path: Path, rules: str) -> ConnectionConfig:
+        root = _write_config(
+            tmp_path,
+            f"connections:\n  w:\n    adapter: postgres\n    rules:\n{rules}",
+        )
+
+        return load_project(root).connections["w"]
+
+    def test_a_later_rule_wins_so_a_view_can_be_carved_back_out(self, tmp_path: Path) -> None:
+        conn = self._rules(
+            tmp_path,
+            '      - read_rows: true\n      - include: ["s.v"]\n        read_rows: false\n',
+        )
+
+        assert conn.settings_for("s.other").read_rows is True
+        assert conn.settings_for("s.v").read_rows is False
+
+    def test_no_rule_setting_it_reads_no_view(self, tmp_path: Path) -> None:
+        conn = self._rules(tmp_path, "      - max_age_days: 3\n")
+
+        assert conn.settings_for("s.v").read_rows is False
+
+    def test_a_rule_setting_read_rows_alone_is_a_rule_that_sets_something(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        conn = self._rules(tmp_path, '      - include: ["s.v"]\n        read_rows: true\n')
+
+        assert conn.settings_for("s.v").read_rows is True
+
+    @pytest.mark.parametrize("where", ["connection", "defaults"])
+    def test_read_rows_outside_a_rule_is_refused_by_name(self, tmp_path: Path, where: str) -> None:
+        body = (
+            "connections:\n  w:\n    adapter: postgres\n    read_rows: true\n"
+            if where == "connection"
+            else "defaults:\n  read_rows: true\nconnections:\n  w:\n    adapter: postgres\n"
+        )
+
+        with pytest.raises(ConfigError, match="`read_rows` is not read here"):
+            load_project(_write_config(tmp_path, body))
+
+    def test_a_non_boolean_is_refused(self, tmp_path: Path) -> None:
+        with pytest.raises(ConfigError, match="read_rows: expected true or false, got 'yes'"):
+            self._rules(tmp_path, '      - read_rows: "yes"\n')
+
+    def test_read_rows_with_min_rows_is_refused(self, tmp_path: Path) -> None:
+        with pytest.raises(ConfigError, match="read_rows: true with min_rows"):
+            self._rules(tmp_path, "      - read_rows: true\n        min_rows: 5\n")

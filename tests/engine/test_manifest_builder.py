@@ -48,7 +48,7 @@ def _entry(**overrides: Any) -> ManifestTableEntry:
         "has_relationships_annotations": False,
         "row_count": 2500,
         "columns": 16,
-        "profiled_at": "2026-05-17T22:48:01Z",
+        "profiled_at": "2026-03-09T14:27:36Z",
     }
     fields.update(overrides)
 

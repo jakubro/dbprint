@@ -25,6 +25,7 @@ from dbprint.adapters.base import ColumnProgress, PhaseB
 from dbprint.config.project import ConnectionConfig, DiffConfig
 from dbprint.engine import DiffRequest, Engine, GenerateRequest, ProgressEvent
 from dbprint.spec.sketch import SketchKind
+from tests._prints import VAULT_COLUMNS, columns, exact_stats, mock_table
 
 
 def _conn_config(tmp_path: Path) -> ConnectionConfig:
@@ -90,53 +91,15 @@ def _two_real_tables() -> dict[str, MockTable]:
     """Two genuinely-named seedbank objects, each with its own real column set."""
 
     return {
-        "seedbank.taxon": MockTable(
-            type="table",
-            namespace_path=("seedbank", "taxon"),
-            ddl=(
-                "CREATE TABLE seedbank.taxon (\n"
-                "    taxon_id integer NOT NULL,\n"
-                "    scientific_name character varying(120) NOT NULL\n"
-                ");\n"
-            ),
-            columns=[
-                ColumnMeta(
-                    name="taxon_id",
-                    sql_type="integer",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-                ColumnMeta(
-                    name="scientific_name",
-                    sql_type="character varying(120)",
-                    nullable=False,
-                    default=None,
-                    ordinal=2,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
-                "taxon_id": ColumnStats(
-                    sql_type="integer",
-                    nullable=False,
-                    null_count=0,
-                    null_rate=0.0,
-                    cardinality=300,
-                    cardinality_ratio=1.0,
-                    cardinality_method="exact",
-                    inferred=Inferred(candidate_key=True),
-                ),
-                "scientific_name": ColumnStats(
-                    sql_type="character varying(120)",
-                    nullable=False,
-                    null_count=0,
-                    null_rate=0.0,
-                    cardinality=300,
-                    cardinality_ratio=1.0,
-                    cardinality_method="exact",
+        "seedbank.taxon": mock_table(
+            "seedbank.taxon",
+            columns(("taxon_id", "integer"), ("scientific_name", "character varying(120)")),
+            {
+                "taxon_id": exact_stats("integer", 300, 1.0, inferred=Inferred(candidate_key=True)),
+                "scientific_name": exact_stats(
+                    "character varying(120)",
+                    300,
+                    1.0,
                     inferred=Inferred(candidate_key=True),
                 ),
             },
@@ -146,53 +109,12 @@ def _two_real_tables() -> dict[str, MockTable]:
             },
             row_count=300,
         ),
-        "seedbank.vault": MockTable(
-            type="table",
-            namespace_path=("seedbank", "vault"),
-            ddl=(
-                "CREATE TABLE seedbank.vault (\n"
-                "    vault_id integer NOT NULL,\n"
-                "    shelf_code character varying(8) NOT NULL\n"
-                ");\n"
-            ),
-            columns=[
-                ColumnMeta(
-                    name="vault_id",
-                    sql_type="integer",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-                ColumnMeta(
-                    name="shelf_code",
-                    sql_type="character varying(8)",
-                    nullable=False,
-                    default=None,
-                    ordinal=2,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
-                "vault_id": ColumnStats(
-                    sql_type="integer",
-                    nullable=False,
-                    null_count=0,
-                    null_rate=0.0,
-                    cardinality=8,
-                    cardinality_ratio=0.166667,
-                    cardinality_method="exact",
-                ),
-                "shelf_code": ColumnStats(
-                    sql_type="character varying(8)",
-                    nullable=False,
-                    null_count=0,
-                    null_rate=0.0,
-                    cardinality=6,
-                    cardinality_ratio=0.125,
-                    cardinality_method="exact",
-                ),
+        "seedbank.vault": mock_table(
+            "seedbank.vault",
+            VAULT_COLUMNS[:2],
+            {
+                "vault_id": exact_stats("integer", 8, 0.166667),
+                "shelf_code": exact_stats("character varying(8)", 6, 0.125),
             },
             samples={"vault_id": [1, 2, 3], "shelf_code": ["A", "B", "C"]},
             row_count=48,

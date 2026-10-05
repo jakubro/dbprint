@@ -14,11 +14,13 @@ from mcp.shared.exceptions import MCPError as SdkMcpError
 from mcp.types import (
     CallToolRequestParams,
     CallToolResult,
+    ListResourceTemplatesResult,
     ListResourcesResult,
     ListToolsResult,
     PaginatedRequestParams,
     ReadResourceRequestParams,
     ReadResourceResult,
+    ResourceTemplate,
     TextContent,
     TextResourceContents,
     Tool,
@@ -71,10 +73,10 @@ def build_server(state: ServedConnections) -> Server:
 
     async def list_resources(
         _ctx: ServerRequestContext,
-        _params: PaginatedRequestParams | None,
+        params: PaginatedRequestParams | None,
     ) -> ListResourcesResult:
         try:
-            entries = resources.enumerate_for(state)
+            listed = resources.list_page(state, params.cursor if params else None)
         except errors.McpError as exc:
             # Mapped verbatim to ErrorData, as read_resource does below - unmapped, the SDK
             # sanitizes errors.McpError into an opaque internal error instead of its code.
@@ -88,7 +90,19 @@ def build_server(state: ServedConnections) -> Server:
                     description=e.description,
                     mime_type=e.mime_type,
                 )
-                for e in entries
+                for e in listed.entries
+            ],
+            next_cursor=listed.next_cursor,
+        )
+
+    async def list_resource_templates(
+        _ctx: ServerRequestContext,
+        _params: PaginatedRequestParams | None,
+    ) -> ListResourceTemplatesResult:
+        return ListResourceTemplatesResult(
+            resource_templates=[
+                ResourceTemplate(uri_template=template, name=name, mime_type=mime)
+                for template, name, mime in resources.TEMPLATES
             ],
         )
 
@@ -108,19 +122,26 @@ def build_server(state: ServedConnections) -> Server:
                     uri=params.uri,
                     text=result.content,
                     mime_type=result.mime_type,
+                    meta=result.meta(),
                 ),
             ],
         )
 
     async def list_tools(
         _ctx: ServerRequestContext,
-        _params: PaginatedRequestParams | None,
+        params: PaginatedRequestParams | None,
     ) -> ListToolsResult:
+        try:
+            definitions, next_cursor = tools.list_page(params.cursor if params else None)
+        except errors.McpError as exc:
+            raise SdkMcpError(exc.code, exc.detail) from exc
+
         return ListToolsResult(
             tools=[
                 Tool(name=t.name, description=t.description, input_schema=t.input_schema)
-                for t in tools.TOOL_DEFINITIONS
+                for t in definitions
             ],
+            next_cursor=next_cursor,
         )
 
     async def call_tool(
@@ -153,6 +174,7 @@ def build_server(state: ServedConnections) -> Server:
         version=DBPRINT_VERSION,
         instructions=SERVER_DESCRIPTION,
         on_list_resources=list_resources,
+        on_list_resource_templates=list_resource_templates,
         on_read_resource=read_resource,
         on_list_tools=list_tools,
         on_call_tool=call_tool,

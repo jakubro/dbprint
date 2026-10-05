@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from .adapter import SnowflakeAdapter
-from .connection import DIALECT, ConnectionParams, Cursor, CursorFactory, SnowflakeConnectionError
+from .connection import DIALECT, ConnectionParams, Cursor, SnowflakeConnectionError
 from ..identifiers import IdentifierRejected
 
 
@@ -11,7 +11,6 @@ __all__ = [
     "DIALECT",
     "ConnectionParams",
     "Cursor",
-    "CursorFactory",
     "IdentifierRejected",
     "SnowflakeAdapter",
     "SnowflakeConnectionError",

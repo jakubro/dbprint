@@ -99,7 +99,7 @@ class TestGeneratorAgreement:
             "user": postgres_cluster.superuser,
             "password": "postgres",
         }
-        generator._create_database(credentials)
+        generator.support.create_database(credentials)
 
         assert generator.build_cast(credentials) == CAST.read_text(), (
             "the committed recording is not what the CLI emits; run `just demo`"

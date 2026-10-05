@@ -15,7 +15,7 @@ from dbprint.spec.sensitivity import Sensitivity
 
 # SPEC 3.4: reserved for potential future classifications.
 _RESERVED_CLASSIFICATIONS = frozenset(
-    {"geographic", "monetary", "binary", "array", "composite", "enum"},
+    {"geographic", "monetary", "enum"},
 )
 
 # SPEC 4.1.6: empty - every name it covers is a shipped `looks_like` pattern.

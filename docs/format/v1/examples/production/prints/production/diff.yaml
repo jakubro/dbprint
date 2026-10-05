@@ -1,15 +1,15 @@
 format_version: 1
-generated_at: '2026-05-17T22:48:01Z'
+generated_at: '2026-03-09T14:27:36Z'
 connection: production
 adapter: postgres
 baseline:
   source: committed_prints
   path: prints/production
-  generated_at: '2026-05-17T22:48:01Z'
-  dbprint_version: 0.9.0
+  generated_at: '2026-03-09T14:27:36Z'
+  dbprint_version: 0.10.0
 target:
   source: live_database
-  scanned_at: '2026-05-17T22:48:01Z'
+  scanned_at: '2026-03-09T14:27:36Z'
   selectors:
     include:
     - arboretum.seedbank.*

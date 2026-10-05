@@ -55,6 +55,8 @@
         "top_n_values": {"type": "integer", "minimum": 1},
         "top_n_null_patterns": {"type": "integer", "minimum": 1},
         "looks_like_sample_size": {"type": "integer", "minimum": 1},
+        "max_parts": {"type": "integer", "minimum": 0},
+        "max_part_depth": {"type": "integer", "minimum": 1},
         "percentiles": {
           "type": "array",
           "items": {"type": "integer", "minimum": 1, "maximum": 99}

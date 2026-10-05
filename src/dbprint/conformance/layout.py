@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from pathlib import Path
 
 import yaml
 
 from .issue import Issue
+from .progress import TableSink
 from .yaml_utils import load_yaml
 
 
@@ -114,6 +116,47 @@ def declared_artifacts(tbl_entry: dict) -> dict:
         return {}
 
     return {kind: name for kind, name in artifacts.items() if isinstance(name, str)}
+
+
+def annotated_tables(
+    print_root: Path,
+    manifest_data: dict,
+    annotations: str,
+    sibling: str,
+    on_table: TableSink | None = None,
+) -> Iterator[tuple[Path, dict, dict]]:
+    """Each table's annotations path, its parsed body and its sibling artifact's parsed body.
+
+    Skips a table missing a file or with an unparseable body; `on_table` fires per walked table.
+    """
+
+    tables = walkable_tables(manifest_data)
+    total = len(tables)
+
+    for i, (tbl_fqn, tbl_entry) in enumerate(tables.items(), start=1):
+        if on_table is not None:
+            on_table(tbl_fqn, i, total)
+
+        artifacts = declared_artifacts(tbl_entry)
+
+        if annotations not in artifacts or sibling not in artifacts:
+            continue
+
+        tbl_dir = print_root / tbl_entry.get("path", "")
+        ann_path = tbl_dir / artifacts[annotations]
+        sibling_path = tbl_dir / artifacts[sibling]
+
+        if not ann_path.is_file() or not sibling_path.is_file():
+            continue
+
+        try:
+            ann_data = load_yaml(ann_path)
+            sibling_data = load_yaml(sibling_path)
+        except yaml.YAMLError:
+            continue
+
+        if isinstance(ann_data, dict) and isinstance(sibling_data, dict):
+            yield ann_path, ann_data, sibling_data
 
 
 def _check_path_segments(print_root: Path) -> list[Issue]:

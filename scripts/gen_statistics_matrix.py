@@ -32,10 +32,14 @@ _BASE_FIELDS = frozenset(
 _CLASSIFICATIONS = (
     "boolean",
     "json",
+    "composite",
+    "spatial",
+    "vector",
     "foreign_key_candidate",
     "categorical",
     "temporal",
     "numeric",
+    "binary",
     "text",
     "unsupported",
 )

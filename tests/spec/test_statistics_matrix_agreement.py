@@ -26,6 +26,8 @@ _R_PILCROW = "R\u00b6"  # REQUIRED unless the column carries a redacted marker
 _R_PILCROW_VBAR = "R\u00b6\u2016"  # both the pilcrow condition and the type-admission footnote
 _R_REFERENCE_MARK = "R\u203b"  # REQUIRED unless the day-resolution footnote applies
 _R_PILCROW_REFERENCE_MARK = "R\u00b6\u203b"  # both the redaction and the day-resolution footnote
+_R_PILCROW_LOZENGE = "R\u00b6\u25ca"  # both the redaction and the no-bounded-value footnote
+_R_LOZENGE = "R\u25ca"  # REQUIRED unless the column holds no value for the bounds to describe
 
 # SPEC 2.2.3's footnote conditions: the flat row is REQUIRED and each reader subtracts the
 # condition procedurally, so every footnote - alone or combined - maps to plain R's membership.
@@ -38,6 +40,8 @@ _REQUIRED_VERDICTS = frozenset(
         _R_PILCROW_VBAR,
         _R_REFERENCE_MARK,
         _R_PILCROW_REFERENCE_MARK,
+        _R_PILCROW_LOZENGE,
+        _R_LOZENGE,
     },
 )
 
@@ -149,6 +153,8 @@ def test_the_footnote_conditions_reach_exactly_their_known_cells() -> None:
     pilcrow_vbarred: set[tuple[str, str]] = set()
     reference_marked: set[tuple[str, str]] = set()
     pilcrow_reference_marked: set[tuple[str, str]] = set()
+    pilcrow_lozenged: set[tuple[str, str]] = set()
+    lozenged: set[tuple[str, str]] = set()
 
     for field, verdicts in field_matrix.items():
         for classification, verdict in zip(classifications, verdicts, strict=True):
@@ -164,6 +170,10 @@ def test_the_footnote_conditions_reach_exactly_their_known_cells() -> None:
                 reference_marked.add((field, classification))
             elif verdict == _R_PILCROW_REFERENCE_MARK:
                 pilcrow_reference_marked.add((field, classification))
+            elif verdict == _R_PILCROW_LOZENGE:
+                pilcrow_lozenged.add((field, classification))
+            elif verdict == _R_LOZENGE:
+                lozenged.add((field, classification))
 
     assert daggered == {
         ("range", "temporal"),
@@ -185,6 +195,8 @@ def test_the_footnote_conditions_reach_exactly_their_known_cells() -> None:
         ("quantized_count", "numeric"),
         ("empty_count", "text"),
         ("length", "text"),
+        ("empty_count", "binary"),
+        ("length", "binary"),
     }
     assert pilcrow_vbarred == {
         ("length", "categorical"),
@@ -193,4 +205,11 @@ def test_the_footnote_conditions_reach_exactly_their_known_cells() -> None:
     assert reference_marked == set()
     assert pilcrow_reference_marked == {
         ("quantized_count", "temporal"),
+    }
+    assert pilcrow_lozenged == {
+        ("extent", "spatial"),
+    }
+    assert lozenged == {
+        ("dimension", "vector"),
+        ("norm", "vector"),
     }

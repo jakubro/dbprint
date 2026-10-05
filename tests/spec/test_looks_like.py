@@ -204,7 +204,7 @@ class TestPriorityOrder:
         assert detect([f"free text value {i}" for i in range(TOLERANCE_MIN_SAMPLES)]) is None
 
 
-def _repeat(value: str, n: int = TOLERANCE_MIN_SAMPLES + 10) -> list[str]:
+def _repeat(value: str | bytes, n: int = TOLERANCE_MIN_SAMPLES + 10) -> list[str | bytes]:
     """A sample wide enough for the threshold to have room in it, all of one value."""
 
     return [value] * n
@@ -212,7 +212,7 @@ def _repeat(value: str, n: int = TOLERANCE_MIN_SAMPLES + 10) -> list[str]:
 
 # Canonical sample per LooksLike value (SPEC 4.1.4 priority order).
 # Coverage is asserted against get_args(LooksLike), so an unregistered pattern fails loudly.
-_CANONICAL_SAMPLES: tuple[tuple[LooksLike, str], ...] = (
+_CANONICAL_SAMPLES: tuple[tuple[LooksLike, str | bytes], ...] = (
     ("uuid", "00000000-0000-7000-8000-000000000000"),
     ("email", "person@example.com"),
     ("url", "https://example.com/resource"),
@@ -251,6 +251,12 @@ _CANONICAL_SAMPLES: tuple[tuple[LooksLike, str], ...] = (
     # hostname-shaped; there is no dedicated pattern, so filename wins.
     ("filename", "db.internal.example"),
     ("prose", "the quick brown fox jumps over the lazy dog"),
+    ("png", b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"),
+    ("jpeg", b"\xff\xd8\xff\xe0\x00\x10JFIF"),
+    ("gif", b"GIF89a\x01\x00\x01\x00"),
+    ("pdf", b"%PDF-" + b"1.7\n%"),
+    ("gzip", b"\x1f\x8b\x08\x00\x00\x00"),
+    ("zip", b"PK\x03\x04\x14\x00"),
 )
 
 
@@ -269,7 +275,7 @@ class TestSubsumptionMatrix:
         _CANONICAL_SAMPLES,
         ids=[row[0] for row in _CANONICAL_SAMPLES],
     )
-    def test_the_expected_claimant_wins(self, pattern: str, sample: str) -> None:
+    def test_the_expected_claimant_wins(self, pattern: str, sample: str | bytes) -> None:
         assert detect(_repeat(sample)) == pattern, f"expected {pattern} to claim {sample!r}"
 
 
@@ -1316,3 +1322,18 @@ def test_a_near_miss_carries_its_candidate_and_share(
     expected: LooksLikeMatch,
 ) -> None:
     assert detect_with_evidence(values) == expected
+
+
+class TestBinaryContentKinds:
+    """SPEC 4.1.1: a binary value is read by its leading bytes, and only a binary value is."""
+
+    def test_a_string_spelling_of_a_signature_is_never_a_binary_kind(self) -> None:
+        assert detect(["%PDF- report"] * 20) is None
+
+    def test_bytes_matching_no_signature_report_no_pattern(self) -> None:
+        assert detect([b"\x00\x01\x02\x03"] * 20) is None
+
+    def test_each_driver_container_for_bytes_is_read(self) -> None:
+        sample = [bytearray(b"GIF87a.."), memoryview(b"GIF89a.."), b"GIF89a.."]
+
+        assert detect(sample) == "gif"

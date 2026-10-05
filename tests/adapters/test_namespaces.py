@@ -497,7 +497,7 @@ class _EntryShim:
 
         if "svv_redshift_databases" in flat:
             self._rows = [(name,) for name in sorted(self._shims)]
-        elif "svv_redshift_tables" in flat:
+        elif "svv_redshift_tables" in flat or "svv_external_tables" in flat:
             self._rows = [
                 row
                 for name in sorted(self._shims)

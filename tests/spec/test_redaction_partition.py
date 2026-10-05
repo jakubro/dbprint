@@ -46,6 +46,10 @@ _READS_THE_MARKER_FOR_ANOTHER_REASON: dict[tuple[str, str], str] = {
         "engine/orchestrator.py",
         "_normalize_table",
     ): "skips a query whose result the partition withholds",
+    (
+        "conformance/statistics.py",
+        "_check_unredacted_sensitive",
+    ): "warns when a cell value is published with no marker",
 }
 
 
@@ -88,10 +92,14 @@ def test_apply_redaction_rule_keeps_the_count_profile_and_drops_the_rest() -> No
         "distribution",
         "frequencies",
         "freshness",
+        "geometry",
         "inferred",
         "null_count",
         "null_rate",
         "nullable",
+        "occurrences",
+        "parts",
+        "parts_found",
         "percentiles",
         "physical_layout_key",
         "physical_name",
@@ -99,7 +107,9 @@ def test_apply_redaction_rule_keeps_the_count_profile_and_drops_the_rest() -> No
         "range",
         "redacted",
         "rows_scanned",
+        "size",
         "sql_type",
+        "types",
         "unmeasured",
         "values",
         "values_coverage",

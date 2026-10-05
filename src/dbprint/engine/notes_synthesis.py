@@ -9,6 +9,7 @@ from decimal import Decimal
 from typing import Any
 
 from dbprint.spec.absence import Absence, column_value, read_column_field
+from dbprint.spec.classification import is_binary_type
 from dbprint.spec.scope import ScanScope, list_is_complete, qualify
 from dbprint.spec.value_text import spell_number, spell_percent
 from .yaml_dumper import spell_value
@@ -16,6 +17,7 @@ from .yaml_dumper import spell_value
 
 TEXT_TOP_VALUES_LIMIT = 2  # values shown once a text column's list is not exhaustive
 NULL_RATE_DISPLAY_THRESHOLD = 0.01  # suffix shows only when null_rate >= this
+UNIT_NORM_TOLERANCE = 0.001  # both norm bounds this close to 1 read as unit-normalized
 
 
 def synthesize(
@@ -98,7 +100,19 @@ def _base_template(
         return _text_notes(stats, redaction, params, scope)
 
     if classification == "json":
-        return "json"
+        return "json" + _types_suffix(stats) + _parts_suffix(stats)
+
+    if classification == "composite":
+        return "composite" + _parts_suffix(stats) + _empty_arrays_suffix(stats)
+
+    if classification == "binary":
+        return "binary" + _length_suffix(stats)
+
+    if classification == "spatial":
+        return _spatial_notes(stats)
+
+    if classification == "vector":
+        return _vector_notes(stats)
 
     # unsupported and any future fallback
     return column_value(stats, "sql_type") or "unsupported"
@@ -395,8 +409,81 @@ def _degenerate_census_suffix(stats: dict[str, Any]) -> str:
     return ", ".join(bits)
 
 
+def _empty_arrays_suffix(stats: dict[str, Any]) -> str:
+    empty = column_value(stats, "empty_count")
+
+    return f", {spell_number(empty)} empty" if isinstance(empty, int) and empty else ""
+
+
+def _types_suffix(stats: dict[str, Any]) -> str:
+    types = column_value(stats, "types")
+
+    if not isinstance(types, dict) or not types:
+        return ""
+
+    return " (" + ", ".join(f"{name} {spell_number(n)}" for name, n in types.items()) + ")"
+
+
+def _parts_suffix(stats: dict[str, Any]) -> str:
+    found = column_value(stats, "parts_found")
+    parts = column_value(stats, "parts")
+
+    if not isinstance(found, int):
+        return ""
+
+    listed = len(parts) if isinstance(parts, dict) else 0
+
+    if listed == found:
+        return f", {spell_number(found)} parts"
+
+    return f", {spell_number(listed)} of {spell_number(found)} parts listed"
+
+
+def _vector_notes(stats: dict[str, Any]) -> str:
+    dimension = column_value(stats, "dimension")
+    norm = column_value(stats, "norm")
+    zero_count = column_value(stats, "zero_count")
+    note = "vector"
+
+    if isinstance(dimension, dict):
+        lo, hi = dimension["min"], dimension["max"]
+        note += f", dimension {lo}" if lo == hi else f", mixed dimension {lo}-{hi}"
+
+    if isinstance(norm, dict) and all(
+        abs(norm[bound] - 1) <= UNIT_NORM_TOLERANCE for bound in ("min", "max")
+    ):
+        note += ", unit-normalized: inner product ranks as cosine"
+
+    if isinstance(zero_count, int) and zero_count:
+        note += f", {spell_number(zero_count)} zero vectors"
+
+    return note
+
+
+def _spatial_notes(stats: dict[str, Any]) -> str:
+    geometry = column_value(stats, "geometry")
+    note = "spatial"
+
+    if isinstance(geometry, dict):
+        kinds = ", ".join(f"{k['kind']} {spell_number(k['count'])}" for k in geometry["kinds"])
+        note += f": {kinds}" if kinds else ""
+
+        if srids := geometry.get("srids"):
+            note += "; srid " + ", ".join(str(s["srid"]) for s in srids)
+
+    extent = column_value(stats, "extent")
+
+    if isinstance(extent, dict):
+        note += (
+            f"; extent x {_statistic(extent['min_x'])}..{_statistic(extent['max_x'])}, "
+            f"y {_statistic(extent['min_y'])}..{_statistic(extent['max_y'])}"
+        )
+
+    return note
+
+
 def _length_suffix(stats: dict[str, Any]) -> str:
-    """The character-length span (SPEC 2.2.4), silent wherever the column carries none."""
+    """The length span (SPEC 2.2.4) - bytes on a binary type - silent wherever none is carried."""
 
     length = column_value(stats, "length")
 
@@ -408,7 +495,10 @@ def _length_suffix(stats: dict[str, Any]) -> str:
     if mn is None or mx is None or avg is None:
         return ""
 
-    return f", length {_statistic(mn)}..{_statistic(mx)} (avg {_statistic(avg)})"
+    sql_type = column_value(stats, "sql_type")
+    unit = " bytes" if isinstance(sql_type, str) and is_binary_type(sql_type) else ""
+
+    return f", length {_statistic(mn)}..{_statistic(mx)}{unit} (avg {_statistic(avg)})"
 
 
 def _redaction_primitive(stats: dict[str, Any]) -> str | None:

@@ -16,6 +16,14 @@ from click.testing import CliRunner
 
 from dbprint.adapters import ColumnMeta, ColumnStats, CommentsMeta, Inferred, MockAdapter, MockTable
 from dbprint.cli.main import main
+from tests._prints import (
+    SHAPE_PROBE_COLUMNS,
+    VAULT_COLUMNS,
+    exact_stats,
+    mock_table,
+    unmeasured_stats,
+    uuid_id_table,
+)
 
 
 PROJECT_YAML = """\
@@ -41,32 +49,6 @@ _CREDS = {
 }
 
 
-def _table() -> MockTable:
-    return MockTable(
-        type="table",
-        namespace_path=("public", "t"),
-        ddl="CREATE TABLE public.t (id uuid PRIMARY KEY);\n",
-        columns=[ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1)],
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={
-            "id": ColumnStats(
-                sql_type="uuid",
-                nullable=False,
-                null_count=0,
-                null_rate=0.0,
-                cardinality=10,
-                cardinality_ratio=1.0,
-                cardinality_method="exact",
-                inferred=Inferred(candidate_key=True),
-            ),
-        },
-        samples={"id": [f"00000000-0000-7000-8000-{i:012d}" for i in range(10)]},
-        row_count=10,
-    )
-
-
 class _ConnectFails(MockAdapter):
     """Adapter that fails at connect() with a fixed message (no password)."""
 
@@ -74,7 +56,7 @@ class _ConnectFails(MockAdapter):
     MESSAGE = "could not connect to Postgres at badhost:5432/db as 'u': connection refused"
 
     def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
-        super().__init__({"public.t": _table()})
+        super().__init__({"public.t": uuid_id_table("public.t")})
 
     def connect(self) -> None:
         raise RuntimeError(self.MESSAGE)
@@ -88,7 +70,7 @@ class _Healthy(MockAdapter):
     REQUIRED_KEYS = ("host", "port", "database", "user", "password")
 
     def __init__(self, _credentials: dict[str, str], **_options: object) -> None:
-        super().__init__({"public.t": _table()})
+        super().__init__({"public.t": uuid_id_table("public.t")})
 
 
 @pytest.fixture
@@ -241,125 +223,18 @@ def _storage_reading_table() -> MockTable:
 def _vault_table() -> MockTable:
     """`seedbank.vault` - the print's real 6-column storage-site table."""
 
-    return MockTable(
-        type="table",
-        namespace_path=("seedbank", "vault"),
-        ddl=(
-            "CREATE TABLE seedbank.vault (\n"
-            "    vault_id integer NOT NULL,\n"
-            "    shelf_code character varying(8) NOT NULL,\n"
-            "    site_name character varying(80) NOT NULL,\n"
-            "    target_temperature_c numeric(4,1) NOT NULL,\n"
-            "    opens_at time without time zone NOT NULL,\n"
-            "    closes_at time without time zone NOT NULL\n"
-            ");\n\n"
-            "ALTER TABLE ONLY seedbank.vault\n"
-            "    ADD CONSTRAINT vault_pkey PRIMARY KEY (vault_id, shelf_code);\n"
-        ),
-        columns=[
-            ColumnMeta(
-                name="vault_id",
-                sql_type="integer",
-                nullable=False,
-                default=None,
-                ordinal=1,
-            ),
-            ColumnMeta(
-                name="shelf_code",
-                sql_type="character varying(8)",
-                nullable=False,
-                default=None,
-                ordinal=2,
-            ),
-            ColumnMeta(
-                name="site_name",
-                sql_type="character varying(80)",
-                nullable=False,
-                default=None,
-                ordinal=3,
-            ),
-            ColumnMeta(
-                name="target_temperature_c",
-                sql_type="numeric(4,1)",
-                nullable=False,
-                default=None,
-                ordinal=4,
-            ),
-            ColumnMeta(
-                name="opens_at",
-                sql_type="time without time zone",
-                nullable=False,
-                default=None,
-                ordinal=5,
-            ),
-            ColumnMeta(
-                name="closes_at",
-                sql_type="time without time zone",
-                nullable=False,
-                default=None,
-                ordinal=6,
-            ),
-        ],
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={
-            "vault_id": ColumnStats(
-                sql_type="integer",
-                nullable=False,
-                null_count=0,
-                null_rate=0.0,
-                cardinality=8,
-                cardinality_ratio=0.166667,
-                cardinality_method="exact",
-            ),
-            "shelf_code": ColumnStats(
-                sql_type="character varying(8)",
-                nullable=False,
-                null_count=0,
-                null_rate=0.0,
-                cardinality=6,
-                cardinality_ratio=0.125,
-                cardinality_method="exact",
-            ),
-            "site_name": ColumnStats(
-                sql_type="character varying(80)",
-                nullable=False,
-                null_count=0,
-                null_rate=0.0,
-                cardinality=8,
-                cardinality_ratio=0.166667,
-                cardinality_method="exact",
-            ),
-            "target_temperature_c": ColumnStats(
-                sql_type="numeric(4,1)",
-                nullable=False,
-                null_count=0,
-                null_rate=0.0,
-                cardinality=3,
-                cardinality_ratio=0.0625,
-                cardinality_method="exact",
-            ),
-            "opens_at": ColumnStats(
-                sql_type="time without time zone",
-                nullable=False,
-                null_count=0,
-                null_rate=0.0,
-                cardinality=2,
-                cardinality_ratio=0.041667,
-                cardinality_method="exact",
-            ),
-            "closes_at": ColumnStats(
-                sql_type="time without time zone",
-                nullable=False,
-                null_count=0,
-                null_rate=0.0,
-                cardinality=2,
-                cardinality_ratio=0.041667,
-                cardinality_method="exact",
-            ),
+    return mock_table(
+        "seedbank.vault",
+        VAULT_COLUMNS,
+        {
+            "vault_id": exact_stats("integer", 8, 0.166667),
+            "shelf_code": exact_stats("character varying(8)", 6, 0.125),
+            "site_name": exact_stats("character varying(80)", 8, 0.166667),
+            "target_temperature_c": exact_stats("numeric(4,1)", 3, 0.0625),
+            "opens_at": exact_stats("time without time zone", 2, 0.041667),
+            "closes_at": exact_stats("time without time zone", 2, 0.041667),
         },
-        samples={},
+        primary_key=("vault_id", "shelf_code"),
         row_count=48,
     )
 
@@ -367,97 +242,17 @@ def _vault_table() -> MockTable:
 def _shape_probe_table() -> MockTable:
     """`fixture.shape_probe` - the print's real 5-column format-coverage table."""
 
-    return MockTable(
-        type="table",
-        namespace_path=("fixture", "shape_probe"),
-        ddl=(
-            "CREATE TABLE fixture.shape_probe (\n"
-            "    probe_id integer NOT NULL,\n"
-            "    logger_ipv4 character varying(45) NOT NULL,\n"
-            "    json_text text NOT NULL,\n"
-            "    payload_bytes bytea,\n"
-            "    tag_list text[] NOT NULL\n"
-            ");\n\n"
-            "ALTER TABLE ONLY fixture.shape_probe\n"
-            "    ADD CONSTRAINT shape_probe_pkey PRIMARY KEY (probe_id);\n"
-        ),
-        columns=[
-            ColumnMeta(
-                name="probe_id",
-                sql_type="integer",
-                nullable=False,
-                default=None,
-                ordinal=1,
-            ),
-            ColumnMeta(
-                name="logger_ipv4",
-                sql_type="character varying(45)",
-                nullable=False,
-                default=None,
-                ordinal=2,
-            ),
-            ColumnMeta(name="json_text", sql_type="text", nullable=False, default=None, ordinal=3),
-            ColumnMeta(
-                name="payload_bytes",
-                sql_type="bytea",
-                nullable=True,
-                default=None,
-                ordinal=4,
-            ),
-            ColumnMeta(name="tag_list", sql_type="text[]", nullable=False, default=None, ordinal=5),
-        ],
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={
-            "probe_id": ColumnStats(
-                sql_type="integer",
-                nullable=False,
-                null_count=0,
-                null_rate=0.0,
-                cardinality=50,
-                cardinality_ratio=1.0,
-                cardinality_method="exact",
-                inferred=Inferred(candidate_key=True),
-            ),
-            "logger_ipv4": ColumnStats(
-                sql_type="character varying(45)",
-                nullable=False,
-                null_count=0,
-                null_rate=0.0,
-                cardinality=10,
-                cardinality_ratio=0.2,
-                cardinality_method="exact",
-            ),
-            "json_text": ColumnStats(
-                sql_type="text",
-                nullable=False,
-                null_count=0,
-                null_rate=0.0,
-                cardinality=50,
-                cardinality_ratio=1.0,
-                cardinality_method="exact",
-            ),
-            "payload_bytes": ColumnStats(
-                sql_type="bytea",
-                nullable=True,
-                null_count=0,
-                null_rate=0.0,
-                cardinality=None,
-                cardinality_ratio=None,
-                cardinality_method=None,
-            ),
-            "tag_list": ColumnStats(
-                sql_type="text[]",
-                nullable=False,
-                null_count=0,
-                null_rate=0.0,
-                cardinality=None,
-                cardinality_ratio=None,
-                cardinality_method=None,
-            ),
+    return mock_table(
+        "fixture.shape_probe",
+        SHAPE_PROBE_COLUMNS,
+        {
+            "probe_id": exact_stats("integer", 50, 1.0, inferred=Inferred(candidate_key=True)),
+            "logger_ipv4": exact_stats("character varying(45)", 10, 0.2),
+            "json_text": exact_stats("text", 50, 1.0),
+            "payload_bytes": unmeasured_stats("bytea", nullable=True),
+            "tag_list": unmeasured_stats("text[]"),
         },
-        samples={},
+        primary_key=("probe_id",),
         row_count=50,
     )
 

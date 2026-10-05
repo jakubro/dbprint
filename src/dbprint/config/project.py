@@ -24,6 +24,8 @@ TOP_N_VALUES_DEFAULT = 20
 TOP_N_NULL_PATTERNS_DEFAULT = 20
 LOOKS_LIKE_SAMPLE_SIZE_DEFAULT = 1000
 PERCENTILES_DEFAULT = (1, 25, 50, 75, 99)
+MAX_PARTS_DEFAULT = 20
+MAX_PART_DEPTH_DEFAULT = 3
 MAX_AGE_DAYS_DEFAULT = 7
 
 # `max_rows_scanned` snaps its resolved fraction down this grid, so estimate drift stays
@@ -63,6 +65,7 @@ _RULE_ONLY_KEYS: dict[str, str] = {
     "sample": "",
     "filter": "",
     "min_rows": ", sample: 0.01",
+    "read_rows": "",
 }
 
 _STATISTICS_INT_KEYS: tuple[str, ...] = (
@@ -70,7 +73,12 @@ _STATISTICS_INT_KEYS: tuple[str, ...] = (
     "top_n_values",
     "top_n_null_patterns",
     "looks_like_sample_size",
+    "max_parts",
+    "max_part_depth",
 )
+
+# The integer keys a value below this floor is refused for; `max_parts: 0` turns descent off.
+_STATISTICS_INT_FLOORS: dict[str, int] = {"max_parts": 0, "max_part_depth": 1}
 
 
 class ConfigError(ValueError):
@@ -86,6 +94,8 @@ class StatisticsConfig:
     top_n_null_patterns: int = TOP_N_NULL_PATTERNS_DEFAULT
     looks_like_sample_size: int = LOOKS_LIKE_SAMPLE_SIZE_DEFAULT
     percentiles: tuple[int, ...] = PERCENTILES_DEFAULT
+    max_parts: int = MAX_PARTS_DEFAULT
+    max_part_depth: int = MAX_PART_DEPTH_DEFAULT
 
 
 @dataclass(frozen=True)
@@ -107,6 +117,7 @@ class RuleConfig:
     max_rows_scanned: int | None = None
     statistics: dict[str, Any] = field(default_factory=dict)
     max_age_days: int | None = None
+    read_rows: bool | None = None
     label: str = ""
 
     def matches(self, fqn: str, row_count: int | None = None) -> bool:
@@ -169,6 +180,8 @@ class TableSettings:
     max_rows_scanned: int | None = None
     ceiling_yielded: bool = False
     matched_rules: tuple[str, ...] = ()
+    read_rows: bool = False
+    sample_rule: str = ""
 
 
 @dataclass(frozen=True)
@@ -270,6 +283,31 @@ class ConnectionConfig:
 
         return primitive
 
+    def redaction_for_part(
+        self,
+        qualified: str,
+        column_sensitivity: str | None,
+        column_looks_like: str | None,
+        sensitivity: str | None,
+        looks_like: str | None,
+    ) -> str | None:
+        """The primitive covering one part of the column `qualified` names (SPEC 2.2.9).
+
+        A rule covers the part when it covers its column, or when it lists the part's own
+        detection; a `columns` glob never names a part. Declaration order, last match wins.
+        """
+
+        primitive: str | None = None
+
+        for rule in self.redact:
+            if rule.covers(qualified, column_sensitivity, column_looks_like) or (
+                (sensitivity is not None and sensitivity in rule.sensitivity)
+                or (looks_like is not None and looks_like in rule.looks_like)
+            ):
+                primitive = rule.with_
+
+        return primitive
+
     def settings_for(self, fqn: str, row_count: int | None = None) -> TableSettings:
         """Effective settings for one table: connection values, then every matching rule.
 
@@ -295,6 +333,7 @@ class ConnectionConfig:
         cap_position = 0 if self.max_rows_scanned is not None else -1
         sample_position = -1
         matched_rules: list[str] = []
+        read_rows = False
 
         for index, rule in enumerate(self.rules):
             if not rule.matches(fqn, row_count):
@@ -307,6 +346,9 @@ class ConnectionConfig:
 
             if rule.max_age_days is not None:
                 max_age_days = rule.max_age_days
+
+            if rule.read_rows is not None:
+                read_rows = rule.read_rows
 
             if rule.sample is not None:
                 sample = rule.sample
@@ -346,6 +388,10 @@ class ConnectionConfig:
             max_rows_scanned=governing_cap,
             ceiling_yielded=ceiling_yielded,
             matched_rules=tuple(matched_rules),
+            read_rows=read_rows,
+            sample_rule=sample_rule
+            if sample is not None and sample_position >= cap_position
+            else "",
         )
 
 
@@ -740,6 +786,7 @@ def _parse_rule(
         config_path,
         f"connection {conn_name!r}: {label}.max_rows_scanned",
     )
+    read_rows = _coerce_read_rows(raw.get("read_rows"), config_path, conn_name, label)
 
     # A rule that changes nothing is a mis-nested or misspelled key ignored keys would hide.
     if (
@@ -748,11 +795,21 @@ def _parse_rule(
         and not statistics
         and max_age_days is None
         and max_rows_scanned is None
+        and read_rows is None
     ):
         raise ConfigError(
             f"{config_path}: connection {conn_name!r}: {label} sets no sample, filter, statistics, "
-            f"max_age_days or max_rows_scanned, so it would do nothing. Remove it or give it a "
-            f"setting.",
+            f"max_age_days, max_rows_scanned or read_rows, so it would do nothing. Remove it or "
+            f"give it a setting.",
+        )
+
+    # A view has no row-count estimate, so a size condition never selects one it could read.
+    if read_rows and min_rows is not None:
+        raise ConfigError(
+            f"{config_path}: connection {conn_name!r}: {label} sets read_rows: true with min_rows. "
+            f"read_rows governs plain views, which have no row-count estimate, so min_rows never "
+            f"selects one and the rule's read_rows could never apply. Drop min_rows, or move "
+            f"read_rows into a rule of its own.",
         )
 
     # A rule that sets something but matches nothing. An absent `include` defaults to
@@ -780,6 +837,7 @@ def _parse_rule(
         max_rows_scanned=max_rows_scanned,
         statistics=statistics,
         max_age_days=max_age_days,
+        read_rows=read_rows,
         label=label,
     )
 
@@ -918,12 +976,30 @@ def _reject_misplaced_keys(
 
         for key, remediation_tail in _RULE_ONLY_KEYS.items():
             if key in block:
+                what = (
+                    "opts a rule's own views into being read"
+                    if key == "read_rows"
+                    else "narrows a rule's own tables"
+                )
                 raise ConfigError(
-                    f"{config_path}: {where}: `{key}` is not read here - it narrows a rule's own "
-                    f"tables, not the connection. Move it into a `rules:` list: "
+                    f"{config_path}: {where}: `{key}` is not read here - it {what}, "
+                    f"not the connection. Move it into a `rules:` list: "
                     f'rules: [{{include: ["schema.table"], {key}: {block[key]!r}'
                     f"{remediation_tail}}}].",
                 )
+
+
+def _coerce_read_rows(value: Any, config_path: Path, conn_name: str, label: str) -> bool | None:
+    if value is None:
+        return None
+
+    if not isinstance(value, bool):
+        raise ConfigError(
+            f"{config_path}: connection {conn_name!r}: {label}.read_rows: expected true or false, "
+            f"got {value!r}.",
+        )
+
+    return value
 
 
 def _coerce_min_rows(value: Any, config_path: Path, conn_name: str, label: str) -> int | None:
@@ -1059,6 +1135,12 @@ def _coerce_statistics_integers(
             raise ConfigError(
                 f"{config_path}: connection {conn_name!r}: {label}.statistics.{key}: expected "
                 f"integer, got {value!r}.",
+            )
+
+        if key in _STATISTICS_INT_FLOORS and value < _STATISTICS_INT_FLOORS[key]:
+            raise ConfigError(
+                f"{config_path}: connection {conn_name!r}: {label}.statistics.{key}: expected "
+                f"an integer of at least {_STATISTICS_INT_FLOORS[key]}, got {value}.",
             )
 
         overrides[key] = value

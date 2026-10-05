@@ -90,10 +90,10 @@
     },
     "Kind": {
       "enum": [
-        "table_added", "table_removed", "table_type_changed",
+        "table_added", "table_removed", "table_type_changed", "external_changed",
         "column_added", "column_removed", "column_type_changed", "column_nullable_changed", "column_default_changed",
         "column_physical_name_changed", "column_collation_changed",
-        "statistic_changed", "table_row_count_changed", "grain_changed", "physical_layout_changed", "depends_on_changed",
+        "statistic_changed", "table_row_count_changed", "grain_changed", "physical_layout_changed", "merging_changed", "depends_on_changed",
         "relationship_added", "relationship_removed", "relationship_modified",
         "index_added", "index_removed", "index_modified",
         "comment_changed"
@@ -109,6 +109,7 @@
         {"$ref": "#/$defs/TableAdded"},
         {"$ref": "#/$defs/TableRemoved"},
         {"$ref": "#/$defs/TableTypeChanged"},
+        {"$ref": "#/$defs/ExternalChanged"},
         {"$ref": "#/$defs/ColumnAdded"},
         {"$ref": "#/$defs/ColumnRemoved"},
         {"$ref": "#/$defs/ColumnTypeChanged"},
@@ -120,6 +121,7 @@
         {"$ref": "#/$defs/TableRowCountChanged"},
         {"$ref": "#/$defs/GrainChanged"},
         {"$ref": "#/$defs/PhysicalLayoutChanged"},
+        {"$ref": "#/$defs/MergingChanged"},
         {"$ref": "#/$defs/DependsOnChanged"},
         {"$ref": "#/$defs/RelationshipAdded"},
         {"$ref": "#/$defs/RelationshipRemoved"},
@@ -191,6 +193,16 @@
       "required": ["kind", "table", "before", "after"],
       "type": "object"
     },
+    "ExternalChanged": {
+      "properties": {
+        "kind": {"const": "external_changed"},
+        "table": {"type": "string"},
+        "before": {"type": "boolean"},
+        "after": {"type": "boolean"}
+      },
+      "required": ["kind", "table", "before", "after"],
+      "type": "object"
+    },
     "ColumnPhysicalNameChanged": {
       "properties": {
         "kind": {"const": "column_physical_name_changed"},
@@ -216,6 +228,7 @@
     "StatisticChanged": {
       "properties": {
         "kind": {"const": "statistic_changed"},
+        "part": {"type": "string", "minLength": 1},
         "stat": {"type": "string"},
         "before": {},
         "after": {},
@@ -294,6 +307,36 @@
         "table": {"type": "string"},
         "before": {"oneOf": [{"$ref": "#/$defs/PhysicalLayoutState"}, {"type": "null"}]},
         "after": {"oneOf": [{"$ref": "#/$defs/PhysicalLayoutState"}, {"type": "null"}]}
+      },
+      "required": ["kind", "table", "before", "after"],
+      "type": "object"
+    },
+    "MergingState": {
+      "type": "object",
+      "required": ["engine", "key", "one_row_per_key", "rows"],
+      "properties": {
+        "engine": {"type": "string"},
+        "key": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["expression"],
+            "properties": {
+              "expression": {"type": "string"},
+              "column": {"type": "string"}
+            }
+          }
+        },
+        "one_row_per_key": {"type": "boolean"},
+        "rows": {"enum": ["stored", "merged"]}
+      }
+    },
+    "MergingChanged": {
+      "properties": {
+        "kind": {"const": "merging_changed"},
+        "table": {"type": "string"},
+        "before": {"oneOf": [{"$ref": "#/$defs/MergingState"}, {"type": "null"}]},
+        "after": {"oneOf": [{"$ref": "#/$defs/MergingState"}, {"type": "null"}]}
       },
       "required": ["kind", "table", "before", "after"],
       "type": "object"

@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from typing import Any, cast
 
 from dbprint.config.selectors import expand
+from dbprint.spec.classification import map_types
 from dbprint.spec.fqn import join as join_fqn
 from .connection import DIALECT, Cursor, exec_query
 from ..base import (
@@ -42,11 +43,14 @@ from ..sql_layout import listed
 # The spellings information_schema.tables.table_type actually reports for Snowflake.
 _TABLE_TYPE_MAP: dict[str, TableType] = {
     "BASE TABLE": "table",
+    "EVENT TABLE": "table",
     "EXTERNAL TABLE": "table",
-    "TEMPORARY TABLE": "table",
     "VIEW": "view",
     "MATERIALIZED VIEW": "matview",
 }
+
+# Reported kinds deliberately left out: a temporary table lives in its own session alone.
+_UNLISTED_TABLE_TYPES = frozenset({"TEMPORARY TABLE"})
 
 _FK_ACTIONS: dict[str, FkAction] = {
     "NO ACTION": "NO ACTION",
@@ -139,7 +143,7 @@ def list_tables(
     candidates: list[_Candidate] = []
 
     for catalog, schema, name, table_type in rows:
-        if fold(schema) in _SYSTEM_SCHEMAS:
+        if fold(schema) in _SYSTEM_SCHEMAS or table_type in _UNLISTED_TABLE_TYPES:
             continue
 
         canonical_type = _TABLE_TYPE_MAP.get(table_type)
@@ -148,7 +152,8 @@ def list_tables(
             continue
 
         physical = (catalog, schema, name)
-        candidates.append((table_meta(physical, canonical_type), physical))
+        meta = table_meta(physical, canonical_type, external=table_type == "EXTERNAL TABLE")
+        candidates.append((meta, physical))
 
     in_scope = set(
         expand(
@@ -201,6 +206,8 @@ def columns(cursor: Cursor, identity: Identity) -> list[ColumnMeta]:
         identity.parts,
     ).fetchall()
 
+    maps = _map_types(cursor, identity) if any(row[2] == "MAP" for row in rows) else {}
+
     return [
         column_meta(
             col_name,
@@ -209,6 +216,7 @@ def columns(cursor: Cursor, identity: Identity) -> list[ColumnMeta]:
             default=col_default,
             ordinal=int(ordinal),
             collation=collation_name,
+            classify_as=maps.get(col_name),
         )
         for col_name, ordinal, data_type, is_nullable, col_default, collation_name in rows
     ]
@@ -555,3 +563,10 @@ def _info_schema(database: str, view: str) -> str:
 def _like(name: str) -> str:
     # A wildcard in the name only widens the match; the caller keeps the exact one.
     return name.replace("'", "''")
+
+
+def _map_types(cursor: Cursor, identity: Identity) -> dict[str, str]:
+    # `COLUMNS` reports a structured map as bare `MAP`; `DESCRIBE TABLE` names its key and value.
+    rows = exec_query(cursor, f"DESCRIBE TABLE {identity.quoted()}").fetchall()
+
+    return {str(row[0]): str(row[1]) for row in rows if map_types(str(row[1])) is not None}

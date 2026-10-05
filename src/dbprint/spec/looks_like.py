@@ -49,6 +49,12 @@ LooksLike = Literal[
     "semver",
     "filename",
     "prose",
+    "png",
+    "jpeg",
+    "gif",
+    "pdf",
+    "gzip",
+    "zip",
 ]
 
 MATCH_THRESHOLD = 0.95
@@ -293,8 +299,8 @@ class LooksLikeMatch:
 def detect(values: Iterable[object]) -> LooksLike | None:
     """Return the pattern assigned to >= 95% of the sample, or None.
 
-    Each value is coerced with `str()` and assigned exactly one pattern - the first in
-    priority order - before anything is counted; the denominator is the whole sample,
+    Each value is coerced with `str()` (a binary value is read by its leading bytes) and assigned
+    exactly one pattern - the first in priority order - before anything is counted; the denominator is the whole sample,
     including values that matched nothing (SPEC 4.1.1, 4.1.3).
     """
 
@@ -311,10 +317,9 @@ def detect_with_evidence(values: Iterable[object]) -> LooksLikeMatch:
     if not sample:
         return LooksLikeMatch(None, 0, 0)
 
-    stringified = (v if isinstance(v, str) else str(v) for v in sample)
-    assigned: Counter[LooksLike] = Counter(p for p in map(_assign, stringified) if p is not None)
+    assigned: Counter[LooksLike] = Counter(p for p in map(_assign_any, sample) if p is not None)
 
-    for pattern, _ in _PRIORITY:
+    for pattern in _ORDER:
         if assigned[pattern] / len(sample) >= MATCH_THRESHOLD:
             return LooksLikeMatch(pattern, len(sample), assigned[pattern])
 
@@ -335,13 +340,22 @@ def _best_scoring(assigned: Counter[LooksLike]) -> tuple[LooksLike | None, int]:
     best: LooksLike | None = None
     best_count = 0
 
-    for pattern, _ in _PRIORITY:
+    for pattern in _ORDER:
         count = assigned[pattern]
 
         if count > best_count:
             best, best_count = pattern, count
 
     return best, best_count
+
+
+def _assign_any(value: object) -> LooksLike | None:
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        head = bytes(value[:8])
+
+        return next((kind for kind, magic in _BINARY_KINDS if head.startswith(magic)), None)
+
+    return _assign(value if isinstance(value, str) else str(value))
 
 
 def _assign(value: str) -> LooksLike | None:
@@ -799,4 +813,22 @@ _STRUCTURAL: tuple[tuple[LooksLike, Callable[[str], bool]], ...] = (
 _PRIORITY: tuple[tuple[LooksLike, Callable[[str], bool]], ...] = (
     *_STRUCTURAL,
     ("prose", _match_prose),
+)
+
+# SPEC 4.1.1's file signatures; no two share a prefix, so their order resolves nothing.
+_BINARY_KINDS: tuple[tuple[LooksLike, bytes], ...] = (
+    ("png", b"\x89PNG\r\n\x1a\n"),
+    ("jpeg", b"\xff\xd8\xff"),
+    ("gif", b"GIF87a"),
+    ("gif", b"GIF89a"),
+    ("pdf", b"%PDF-"),
+    ("gzip", b"\x1f\x8b"),
+    ("zip", b"PK\x03\x04"),
+    ("zip", b"PK\x05\x06"),
+    ("zip", b"PK\x07\x08"),
+)
+
+_ORDER: tuple[LooksLike, ...] = (
+    *(pattern for pattern, _ in _PRIORITY),
+    *dict.fromkeys(kind for kind, _ in _BINARY_KINDS),
 )

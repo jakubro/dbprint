@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -11,11 +12,13 @@ import yaml
 
 from dbprint.config import ConnectionConfig
 from dbprint.config.project import RuleConfig
-from dbprint.mcp import McpError, ServedConnections, dispatch
+from dbprint.engine import AssemblyOptions, Purpose, assemble_context, assemble_structured_context
+from dbprint.mcp import McpError, ServedConnections, dispatch, paging
 from dbprint.mcp.tools import (
     TOOL_DEFINITIONS,
     TOOL_NAMES,
 )
+from tests import _mcp_pages
 
 
 def _state_for(conn: ConnectionConfig) -> ServedConnections:
@@ -44,12 +47,12 @@ def _dict_result(state: ServedConnections, name: str, arguments: dict[str, Any])
     return result
 
 
-class TestNoToolReturnsAnUnboundedReply:
+class TestEveryListReplyIsPaged:
     """A reply past a client's ceiling is not a large answer but no answer, plus a turn."""
 
     @staticmethod
     def _wide_manifest(conn: ConnectionConfig, tables: int) -> None:
-        """Grow the manifest past every listing cap, reusing one seeded table's entry."""
+        """Grow the manifest past a page, reusing one seeded table's entry."""
 
         path = conn.output / conn.name / "manifest.yaml"
         manifest = yaml.safe_load(path.read_text())
@@ -57,18 +60,31 @@ class TestNoToolReturnsAnUnboundedReply:
         manifest["tables"] = {f"seedbank.t{i:04d}": dict(entry) for i in range(tables)}
         path.write_text(yaml.safe_dump(manifest))
 
-    def test_a_catalogue_listing_is_capped_and_says_what_it_was_cut_from(
+    @staticmethod
+    def _walk(state: ServedConnections, name: str, arguments: dict[str, Any]) -> list[dict]:
+        pages = [_dict_result(state, name, arguments)]
+
+        while "next_cursor" in pages[-1]:
+            pages.append(
+                _dict_result(state, name, {**arguments, "cursor": pages[-1]["next_cursor"]}),
+            )
+
+        return pages
+
+    def test_a_wide_listing_walks_to_every_table_once_in_pages_under_the_bound(
         self,
         primary_conn: ConnectionConfig,
     ) -> None:
         self._wide_manifest(primary_conn, 600)
-        result = _dict_result(_state_for(primary_conn), "list_tables", {})
+        pages = self._walk(_state_for(primary_conn), "list_tables", {"detail": True})
+        names = [entry["table"] for page in pages for entry in page["tables"]]
 
-        assert len(result["tables"]) == 500
-        assert result["truncated"] is True
-        assert result["total"] == 600
+        assert len(pages) > 1
+        assert all(len(json.dumps(page, indent=2, default=str)) <= 20_000 for page in pages)
+        assert names == [f"seedbank.t{i:04d}" for i in range(600)]
+        assert {page["total"] for page in pages} == {600}
 
-    def test_a_narrowed_listing_under_the_cap_carries_no_marker(
+    def test_a_listing_that_fits_is_one_page_with_its_total(
         self,
         primary_conn: ConnectionConfig,
     ) -> None:
@@ -79,50 +95,169 @@ class TestNoToolReturnsAnUnboundedReply:
             {"pattern": "seedbank.t000*"},
         )
 
-        assert len(result["tables"]) == 10
+        assert result["tables"] == [f"seedbank.t000{i}" for i in range(10)]
+        assert result["total"] == 10
+        assert "next_cursor" not in result
         assert "truncated" not in result
 
-    def test_a_manifest_caps_its_table_map_and_keeps_the_rest_whole(
+    def test_a_manifest_pages_its_table_map_and_keeps_the_rest_on_the_first_page(
         self,
         primary_conn: ConnectionConfig,
     ) -> None:
         self._wide_manifest(primary_conn, 600)
-        result = _dict_result(_state_for(primary_conn), "get_manifest", {})
+        pages = self._walk(_state_for(primary_conn), "get_manifest", {})
+        names = [fqn for page in pages for fqn in page["tables"]]
 
-        assert len(result["tables"]) == 500
-        assert result["truncated"] is True
-        assert result["total"] == 600
-        assert result["format_version"] == 1
-        assert "generated_at" in result
+        assert len(pages) > 1
+        assert names == [f"seedbank.t{i:04d}" for i in range(600)]
+        assert pages[0]["format_version"] == 1
+        assert all("generated_at" not in page for page in pages[1:])
+        assert all(len(json.dumps(page, indent=2, default=str)) <= 20_000 for page in pages)
 
-    def test_a_manifest_narrowed_by_pattern_reaches_past_the_cap(
+    def test_a_manifest_written_out_of_order_still_pages_in_fqn_order(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        path = primary_conn.output / primary_conn.name / "manifest.yaml"
+        manifest = yaml.safe_load(path.read_text())
+        entry = next(iter(manifest["tables"].values()))
+        manifest["tables"] = {f"seedbank.t{i:04d}": dict(entry) for i in reversed(range(600))}
+        path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+        pages = self._walk(_state_for(primary_conn), "get_manifest", {})
+
+        assert [fqn for page in pages for fqn in page["tables"]] == [
+            f"seedbank.t{i:04d}" for i in range(600)
+        ]
+
+    def test_a_header_larger_than_a_page_arrives_in_parts_and_every_page_fits(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        path = primary_conn.output / primary_conn.name / "manifest.yaml"
+        manifest = yaml.safe_load(path.read_text())
+        failed = [f"seedbank.withdrawn_{i:05d}" for i in range(2_000)]
+        manifest["failed_tables"] = failed
+        path.write_text(yaml.safe_dump(manifest))
+        pages = self._walk(_state_for(primary_conn), "get_manifest", {})
+
+        assert len(pages) > 1
+        assert all(len(json.dumps(page, indent=2, default=str)) <= 20_000 for page in pages)
+        assert _mcp_pages.merged(pages)["failed_tables"] == failed
+
+    def test_a_column_search_walks_every_match_and_names_unreadable_tables_up_front(
         self,
         primary_conn: ConnectionConfig,
     ) -> None:
         self._wide_manifest(primary_conn, 600)
-        result = _dict_result(
-            _state_for(primary_conn),
-            "get_manifest",
-            {"pattern": "seedbank.t059*"},
-        )
+        manifest_path = primary_conn.output / primary_conn.name / "manifest.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text())
+        broken = dict(manifest["tables"]["seedbank.t0599"], path="broken")
+        manifest["tables"]["seedbank.t0599"] = broken
+        manifest_path.write_text(yaml.safe_dump(manifest))
+        broken_dir = primary_conn.output / primary_conn.name / "broken"
+        broken_dir.mkdir()
+        (broken_dir / "statistics.yaml").write_text("not: valid: yaml: [")
 
-        assert sorted(result["tables"]) == [f"seedbank.t059{i}" for i in range(10)]
-        assert "truncated" not in result
+        pages = self._walk(_state_for(primary_conn), "search_columns", {})
+        matches = [(m["table"], m["column"], m.get("part")) for p in pages for m in p["matches"]]
 
-    def test_a_column_search_is_capped_and_an_explicit_limit_wins(
+        assert len(pages) > 1
+        assert len(matches) == len(set(matches)) == pages[0]["total"]
+        assert {table for table, _, _ in matches} == {f"seedbank.t{i:04d}" for i in range(599)}
+        assert pages[0]["unreadable_tables"] == ["seedbank.t0599"]
+        assert all("unreadable_tables" not in page for page in pages[1:])
+
+    def test_a_diff_pages_its_changes_in_file_order(self, primary_conn: ConnectionConfig) -> None:
+        path = primary_conn.output / primary_conn.name / "diff.yaml"
+        diff = yaml.safe_load(path.read_text())
+        diff["changes"] = [
+            {"kind": "table_added", "table": f"seedbank.t{i:04d}"} for i in reversed(range(900))
+        ]
+        path.write_text(yaml.safe_dump(diff))
+
+        pages = self._walk(_state_for(primary_conn), "get_diff", {})
+
+        assert len(pages) > 1
+        assert [c["table"] for p in pages for c in p["changes"]] == [
+            f"seedbank.t{i:04d}" for i in reversed(range(900))
+        ]
+        assert "summary" in pages[0]
+        assert all("summary" not in page for page in pages[1:])
+
+    def test_an_item_larger_than_a_page_arrives_in_parts_that_rebuild_it(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        path = primary_conn.output / primary_conn.name / "manifest.yaml"
+        manifest = yaml.safe_load(path.read_text())
+        fqn = next(iter(manifest["tables"]))
+        manifest["tables"][fqn]["statistics_params"] = {"note": 'xé"' * 15_000}
+        path.write_text(yaml.safe_dump(manifest))
+
+        pages = self._walk(_state_for(primary_conn), "get_manifest", {"pattern": fqn})
+        parts = [page["tables"][fqn] for page in pages if fqn in page["tables"]]
+
+        assert [part["part"] for part in parts] == list(range(1, len(parts) + 1))
+        assert len(parts) > 1
+        assert {part["parts"] for part in parts} == {len(parts)}
+        assert all(len(json.dumps(page, indent=2, default=str)) <= 20_000 for page in pages)
+        assert json.loads("".join(part["text"] for part in parts)) == manifest["tables"][fqn]
+
+    def test_a_cursor_reused_under_other_filters_is_refused(
         self,
         primary_conn: ConnectionConfig,
     ) -> None:
         self._wide_manifest(primary_conn, 600)
         state = _state_for(primary_conn)
-        default = _dict_result(state, "search_columns", {})
-        explicit = _dict_result(state, "search_columns", {"limit": 5})
+        cursor = _dict_result(state, "list_tables", {"detail": True})["next_cursor"]
 
-        assert len(default["matches"]) == 200
-        assert default["truncated"] is True
-        assert len(explicit["matches"]) == 5
-        assert explicit["truncated"] is True
-        assert explicit["total"] == default["total"] > 200
+        with pytest.raises(McpError) as caught:
+            dispatch(state, "list_tables", {"detail": True, "pattern": "x*", "cursor": cursor})
+
+        assert caught.value.code == -32602
+        assert "without `cursor`" in caught.value.detail
+
+    def test_a_cursor_from_another_tool_is_refused(self, primary_conn: ConnectionConfig) -> None:
+        self._wide_manifest(primary_conn, 600)
+        state = _state_for(primary_conn)
+        cursor = _dict_result(state, "get_manifest", {})["next_cursor"]
+
+        with pytest.raises(McpError) as caught:
+            dispatch(state, "list_tables", {"cursor": cursor})
+
+        assert caught.value.code == -32602
+
+    def test_a_cursor_over_a_rewritten_print_is_refused_naming_the_change(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        self._wide_manifest(primary_conn, 600)
+        state = _state_for(primary_conn)
+        cursor = _dict_result(state, "list_tables", {"detail": True})["next_cursor"]
+        self._wide_manifest(primary_conn, 601)
+
+        with pytest.raises(McpError) as caught:
+            dispatch(state, "list_tables", {"detail": True, "cursor": cursor})
+
+        assert caught.value.code == -32602
+        assert "changed" in caught.value.detail
+
+    @pytest.mark.parametrize("cursor", ["x", "e30", "bm90IGpzb24"])
+    def test_a_cursor_no_reply_issued_is_refused(
+        self,
+        primary_conn: ConnectionConfig,
+        cursor: str,
+    ) -> None:
+        with pytest.raises(McpError) as caught:
+            dispatch(_state_for(primary_conn), "list_tables", {"cursor": cursor})
+
+        assert caught.value.code == -32602
+
+    def test_the_removed_limit_is_an_unknown_argument(self, primary_conn: ConnectionConfig) -> None:
+        with pytest.raises(McpError) as caught:
+            dispatch(_state_for(primary_conn), "search_columns", {"limit": 5})
+
+        assert "takes no argument 'limit'" in caught.value.detail
 
     def test_a_diff_filters_by_table_including_the_relationship_events(
         self,
@@ -178,20 +313,119 @@ class TestNoToolReturnsAnUnboundedReply:
         assert caught.value.code == -32602
         assert "column_added" in caught.value.detail
 
-    def test_a_table_context_call_carries_a_default_budget(
+    @staticmethod
+    def _wide_ddl(conn: ConnectionConfig) -> None:
+        ddl = conn.output / conn.name / "arboretum" / "fixture" / "shape_probe" / "ddl.sql"
+        ddl.write_text(ddl.read_text() + "".join(f"-- field note {i}\n" for i in range(2_000)))
+
+    @pytest.mark.parametrize("purpose", ["profile", "query"])
+    def test_a_wide_context_pages_and_omits_no_section(
+        self,
+        primary_conn: ConnectionConfig,
+        purpose: Purpose,
+    ) -> None:
+        self._wide_ddl(primary_conn)
+        arguments = {"table": "arboretum.fixture.shape_probe", "purpose": purpose}
+        text_pages = _mcp_pages.pages(_state_for(primary_conn), "get_table_context", arguments)
+        unbudgeted = assemble_context(
+            manifest=yaml.safe_load(
+                (primary_conn.output / primary_conn.name / "manifest.yaml").read_text(),
+            ),
+            print_root=primary_conn.output / primary_conn.name,
+            tables=["arboretum.fixture.shape_probe"],
+            options=AssemblyOptions(purpose=purpose),
+        ).text
+        document = _mcp_pages.joined(text_pages)
+
+        assert len(text_pages) > 1
+        assert all(len(page) <= 20_000 for page in text_pages)
+        assert "truncated" not in document
+        assert sorted(document.split("\n\n")) == sorted(unbudgeted.split("\n\n"))
+
+    def test_a_profile_context_concatenates_to_the_unbudgeted_rendering(
         self,
         primary_conn: ConnectionConfig,
     ) -> None:
-        """An unbudgeted caller gets a truncation marker rather than an unbounded reply."""
+        self._wide_ddl(primary_conn)
+        arguments = {"table": "arboretum.fixture.shape_probe"}
+        text_pages = _mcp_pages.pages(_state_for(primary_conn), "get_table_context", arguments)
+        unbudgeted = assemble_context(
+            manifest=yaml.safe_load(
+                (primary_conn.output / primary_conn.name / "manifest.yaml").read_text(),
+            ),
+            print_root=primary_conn.output / primary_conn.name,
+            tables=["arboretum.fixture.shape_probe"],
+            options=AssemblyOptions(),
+        ).text
 
-        result = dispatch(
+        assert _mcp_pages.joined(text_pages) == unbudgeted
+
+    @pytest.mark.parametrize("fmt", ["json", "yaml"])
+    def test_a_structured_context_pages_merge_to_the_unbudgeted_object(
+        self,
+        primary_conn: ConnectionConfig,
+        fmt: str,
+    ) -> None:
+        root = primary_conn.output / primary_conn.name
+        object_pages = _mcp_pages.pages(
             _state_for(primary_conn),
             "get_table_context",
-            {"table": "arboretum.seedbank.taxon"},
+            {"table": "arboretum.seedbank.accession", "format": fmt},
         )
 
-        assert isinstance(result, str)
-        assert "# Table: arboretum.seedbank.taxon" in result
+        assert len(object_pages) > 1
+        assert all(len(paging.serialized(page)) <= 20_000 for page in object_pages)
+        assert _mcp_pages.merged(object_pages) == assemble_structured_context(
+            manifest=yaml.safe_load((root / "manifest.yaml").read_text()),
+            print_root=root,
+            table="arboretum.seedbank.accession",
+            options=AssemblyOptions(format=fmt),
+        )
+
+    @pytest.mark.parametrize("fmt", ["json", "yaml"])
+    def test_a_value_longer_than_a_page_arrives_in_parts_byte_identical(
+        self,
+        primary_conn: ConnectionConfig,
+        fmt: str,
+    ) -> None:
+        table_dir = primary_conn.output / primary_conn.name / "arboretum" / "seedbank" / "taxon"
+        statistics = yaml.safe_load((table_dir / "statistics.yaml").read_text())
+        column = next(name for name, col in statistics["columns"].items() if col.get("values"))
+        long_value = 'pétale "' * 4_000
+        statistics["columns"][column]["values"][0]["value"] = long_value
+        (table_dir / "statistics.yaml").write_text(yaml.safe_dump(statistics))
+
+        object_pages = _mcp_pages.pages(
+            _state_for(primary_conn),
+            "get_table_context",
+            {"table": "arboretum.seedbank.taxon", "format": fmt},
+        )
+        rebuilt = _mcp_pages.merged(object_pages)["statistics"]["columns"][column]
+
+        assert all(len(paging.serialized(page)) <= 20_000 for page in object_pages)
+        assert rebuilt["values"][0]["value"] == long_value
+
+    def test_a_context_cursor_over_a_rewritten_statistics_file_is_refused(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        state = _state_for(primary_conn)
+        arguments = {"table": "arboretum.fixture.shape_probe", "format": "json"}
+        cursor = _dict_result(state, "get_table_context", arguments)["next_cursor"]
+        stats = (
+            primary_conn.output
+            / primary_conn.name
+            / "arboretum"
+            / "fixture"
+            / "shape_probe"
+            / "statistics.yaml"
+        )
+        stats.write_text(stats.read_text() + "\n")
+
+        with pytest.raises(McpError) as caught:
+            dispatch(state, "get_table_context", {**arguments, "cursor": cursor})
+
+        assert "changed" in caught.value.detail
 
 
 class TestEveryCallIsCheckedAgainstTheToolsOwnSchema:
@@ -270,14 +504,18 @@ class TestEveryCallIsCheckedAgainstTheToolsOwnSchema:
 
         assert caught.value.code == -32602
 
-    def test_a_value_below_a_declared_minimum_is_refused(
+    def test_the_removed_budget_is_an_unknown_argument(
         self,
         primary_conn: ConnectionConfig,
     ) -> None:
         with pytest.raises(McpError) as caught:
-            dispatch(_state_for(primary_conn), "search_columns", {"limit": 0})
+            dispatch(
+                _state_for(primary_conn),
+                "get_table_context",
+                {"table": "arboretum.seedbank.taxon", "budget_tokens": 4000},
+            )
 
-        assert ">= 1" in caught.value.detail
+        assert "takes no argument 'budget_tokens'" in caught.value.detail
 
     def test_a_value_outside_an_enum_names_the_accepted_set(
         self,
@@ -387,6 +625,27 @@ class TestResolveValue:
         assert isinstance(result, dict)
         assert result["match"] == "stored"
         assert result["spellings"][0]["value"] == "genus"
+
+    def test_a_wide_domain_pages_after_the_answer_and_shortens_no_value(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        path = primary_conn.output / primary_conn.name / "arboretum/seedbank/taxon/statistics.yaml"
+        statistics = yaml.safe_load(path.read_text())
+        wide = [{"value": f"genus {i:02d} " + "x" * 2_000, "count": 1} for i in range(40)]
+        statistics["columns"]["rank"]["values"] += wide
+        path.write_text(yaml.safe_dump(statistics))
+        arguments = {"table": "arboretum.seedbank.taxon", "column": "rank", "text": "GENUS"}
+
+        result_pages = _mcp_pages.pages(_state_for(primary_conn), "resolve_value", arguments)
+        keys = [key for page in result_pages for key in page if key in {"spellings", "domain"}]
+        domain = [entry["value"] for page in result_pages for entry in page.get("domain", [])]
+
+        assert len(result_pages) > 1
+        assert all(len(json.dumps(page, indent=2)) <= 20_000 for page in result_pages)
+        assert all(page["match"] == "stored" and page["listed"] == 43 for page in result_pages)
+        assert keys.index("spellings") < keys.index("domain")
+        assert domain == ["species", "genus", "family"] + [entry["value"] for entry in wide]
 
     def test_an_unknown_column_names_the_columns_the_table_has(
         self,
@@ -563,10 +822,12 @@ class TestGetTableContext:
         """MCP.md 4.1: json returns table/ddl/description/stats/relationships, not a string."""
 
         state = _state_for(primary_conn)
-        result = _dict_result(
-            state,
-            "get_table_context",
-            {"table": "arboretum.fixture.shape_probe", "format": "json"},
+        result = _mcp_pages.merged(
+            _mcp_pages.pages(
+                state,
+                "get_table_context",
+                {"table": "arboretum.fixture.shape_probe", "format": "json"},
+            ),
         )
 
         assert result["table"] == "arboretum.fixture.shape_probe"
@@ -585,22 +846,13 @@ class TestGetTableContext:
     ) -> None:
         """MCP.md 4.1: yaml is the same structured object as json, serialized as YAML text."""
 
-        import yaml
-
         state = _state_for(primary_conn)
-        json_result = dispatch(
-            state,
-            "get_table_context",
-            {"table": "arboretum.seedbank.collector", "format": "json"},
-        )
-        yaml_result = dispatch(
-            state,
-            "get_table_context",
-            {"table": "arboretum.seedbank.collector", "format": "yaml"},
-        )
+        arguments = {"table": "arboretum.seedbank.collector"}
+        json_pages = _mcp_pages.pages(state, "get_table_context", {**arguments, "format": "json"})
+        yaml_pages = _mcp_pages.pages(state, "get_table_context", {**arguments, "format": "yaml"})
 
-        assert isinstance(yaml_result, str)
-        assert yaml.safe_load(yaml_result) == json_result
+        assert all(isinstance(page, str) for page in yaml_pages)
+        assert _mcp_pages.merged(yaml_pages) == _mcp_pages.merged(json_pages)
 
     def test_json_format_respects_include_flags(self, primary_conn: ConnectionConfig) -> None:
         state = _state_for(primary_conn)
@@ -619,27 +871,10 @@ class TestGetTableContext:
         assert "relationships" not in result
         assert "ddl" in result
 
-    def test_json_format_budget_drops_whole_sections(self, primary_conn: ConnectionConfig) -> None:
-        """budget_tokens still applies to structured output - sections drop, identity survives."""
-
-        state = _state_for(primary_conn)
-        result = _dict_result(
-            state,
-            "get_table_context",
-            {"table": "arboretum.seedbank.collector", "format": "json", "budget_tokens": 1},
-        )
-
-        assert result["table"] == "arboretum.seedbank.collector"
-        assert "ddl" not in result
-        assert "statistics" not in result
-        assert result["_truncated"]
-
     def test_md_format_is_unaffected_by_the_structured_path(
         self,
         primary_conn: ConnectionConfig,
     ) -> None:
-        """md is an independent code path from json/yaml; budget_tokens must not affect it."""
-
         state = _state_for(primary_conn)
         result = dispatch(
             state,
@@ -1277,6 +1512,7 @@ class TestSearchColumns:
 
         assert cols == {
             "logger_ipv4",
+            "deployed_at",
             "full_name",
             "email",
             "phone",
@@ -1318,24 +1554,6 @@ class TestSearchColumns:
 
         assert match["row_count"] == 5
         assert match["rows_scanned"] == 2
-
-    def test_limit_caps_and_signals_truncation(self, primary_conn: ConnectionConfig) -> None:
-        state = _state_for(primary_conn)
-        result = _dict_result(state, "search_columns", {"pattern": "*", "limit": 1})
-
-        assert len(result["matches"]) == 1
-        assert result["truncated"] is True
-
-    def test_limit_above_the_match_count_does_not_signal_truncation(
-        self,
-        primary_conn: ConnectionConfig,
-    ) -> None:
-        """1000 comfortably exceeds the committed print's total column count across every table."""
-
-        state = _state_for(primary_conn)
-        result = _dict_result(state, "search_columns", {"pattern": "*", "limit": 1000})
-
-        assert "truncated" not in result
 
 
 class TestGetManifest:
@@ -1479,6 +1697,26 @@ class TestGetReference:
 
         with pytest.raises(McpError):
             dispatch(self._EMPTY_STATE, "get_reference", {"document": "spec", "section": ""})
+
+    def test_a_section_longer_than_a_page_pages_and_rejoins_exactly(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from dbprint.mcp import reference as reference_module
+
+        body = "".join(f"Line {i} of a long leaf section.\n" for i in range(3_000))
+        document = f"## 1. One\n\n{body}\n## 2. Two\n\nBody two.\n"
+        monkeypatch.setattr(reference_module, "_read", lambda document_: document)
+
+        text_pages = _mcp_pages.pages(
+            self._EMPTY_STATE,
+            "get_reference",
+            {"document": "spec", "section": "1"},
+        )
+
+        assert len(text_pages) > 1
+        assert all(len(page) <= 20_000 for page in text_pages)
+        assert _mcp_pages.joined(text_pages) == f"## 1. One\n\n{body}"
 
 
 class TestResolveValueReadsTheStatisticsItWasPromised:

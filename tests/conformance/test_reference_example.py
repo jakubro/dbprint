@@ -211,11 +211,13 @@ class TestProducerAgreement:
 
     def test_regenerating_reproduces_the_committed_tree(
         self,
-        postgres_cluster: PostgresCluster,
+        postgis: PostgresCluster,
+        pgvector: PostgresCluster,
         tmp_path: Path,
     ) -> None:
+        del pgvector
         generator = _load_generator()
-        credentials = _fresh_database(postgres_cluster, generator)
+        credentials = _fresh_database(postgis, generator)
 
         generator.build_example(credentials, tmp_path / "example")
         regenerated = normalize_print_tree(
@@ -446,7 +448,7 @@ def _fresh_database(cluster: PostgresCluster, generator: Any) -> dict[str, str]:
         "user": cluster.superuser,
         "password": "postgres",
     }
-    generator._create_database(credentials)
+    generator.support.create_database(credentials)
 
     return credentials
 

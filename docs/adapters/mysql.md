@@ -85,6 +85,28 @@ There is no fallback path to choose here: setting `materialize_sample: false` on
 
 A `SET` column lists its values as MySQL's own text, members in declared order (`red,blue`); a `BIT` column lists the integer a query compares with (`b'101'` is `5`).
 
+## Column types
+
+| Type | Profiled as | What to know |
+|---|---|---|
+| `JSON` | `json` | `types` keys are what `JSON_TYPE` returns |
+| `geometry`, `point`, `linestring`, `polygon`, their `multi` forms, `geometrycollection` | `spatial` | Only an empty collection counts as empty, since MySQL has no `POINT EMPTY`. A column holding a geographic SRID reports `extent` unmeasured. On MariaDB, `invalid_count` is absent |
+| `VECTOR(N)` | `vector` | `norm` and `zero_count` are always reported unmeasured: no MySQL function outside HeatWave takes a vector's norm |
+
+## Table kinds
+
+A MariaDB system-versioned table is profiled over its current rows; history rows are never read, and its implicit `row_start`/`row_end` columns are not published. Where your session sets `system_versioning_asof`, the print describes the table as of that time. A `SEQUENCE` is not listed.
+
+A MariaDB view never carries `depends_on`: MariaDB's catalog holds only the view's definition text.
+
+A `FEDERATED`, `CONNECT` or `SPIDER` table is listed with `external: true` (SPEC 2.2.20) and, unless a `read_rows` rule opts it in, described from the catalog alone. Opted in, every statement reaches the remote side, and a `FEDERATED` read that cannot use an index fetches every remote row. `MERGE`, `CSV`, `ARCHIVE`, `MEMORY`, `BLACKHOLE` and `NDB` are ordinary tables.
+
+## Credentials in a remote table's DDL
+
+A `FEDERATED`, `CONNECT` or `SPIDER` table keeps its remote login in its own options, and `SHOW CREATE TABLE` returns it verbatim. `ddl.sql` replaces the password with `[HIDDEN]` wherever the options carry one — a URL's `user:password@`, a `PWD=` or `Password=` value, a Spider `password`, `REMOTE_PASSWORD` — and keeps the rest of where the rows live. A `CONNECTION` naming a `CREATE SERVER` object carries no password; dbprint never reads `mysql.servers`.
+
+A print written by an earlier release may hold the password in `ddl.sql`. The first `generate` on this release re-reads every table it lists, since a print from another version is never fresh; run it with full scope so no table is carried untouched, and rotate the remote password, since every earlier commit of the print still holds it.
+
 ## Namespaces
 
 `database` is optional. Omitted, the session has no default database and the connection reads every database `information_schema` shows the account, less `information_schema`, `mysql`, `performance_schema` and `sys`; a database the account cannot read is simply absent. A sampled table's copy lands in the table's own database, so `CREATE TEMPORARY TABLES` is needed on each database holding a sampled table. With no database, an unqualified name in `dbprint check --online` SQL assertions has nothing to resolve against.

@@ -9,10 +9,8 @@ from pathlib import Path
 
 import pytest
 import yaml
-from click.testing import CliRunner
 
-from dbprint.cli.main import main
-from dbprint.conformance import validate_print
+from tests.live import _harness as harness
 
 
 # Every variable `_live_creds` reads without a default, so exporting exactly what the skip
@@ -57,33 +55,12 @@ def _apply_fixtures(creds: dict[str, str]) -> None:
     try:
         cursor = conn.cursor()
 
-        for path in ("schema.redshift.sql", "data.redshift.sql"):
-            for statement in _split_sql((_FIXTURE_DIR / path).read_text()):
-                cursor.execute(statement)
+        for statement in harness.fixture_statements(_FIXTURE_DIR, "redshift"):
+            cursor.execute(statement)
 
         cursor.close()
     finally:
         conn.close()
-
-
-def _write_project(project_dir: Path) -> None:
-    project_dir.mkdir(parents=True, exist_ok=True)
-    (project_dir / ".dbprint.yaml").write_text(
-        f"""\
-defaults:
-  max_age_days: 7
-  statistics:
-    enumeration_threshold: 50
-    top_n_values: 20
-    percentiles: [1, 25, 50, 75, 99]
-
-connections:
-  {CONN_NAME}:
-    adapter: redshift
-    auto: true
-    output: prints
-""",
-    )
 
 
 def _credential_env(creds: dict[str, str]) -> dict[str, str]:
@@ -104,26 +81,17 @@ def test_redshift_live_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     creds = _live_creds()
     _apply_fixtures(creds)
 
-    project_dir = tmp_path / "project"
-    _write_project(project_dir)
-    monkeypatch.chdir(project_dir)
-
-    for key, value in _credential_env(creds).items():
-        monkeypatch.setenv(key, value)
-
-    result = CliRunner().invoke(main, ["generate", "--no-tui"])
-    assert result.exit_code in (0, 3), (
-        f"generate failed (exit={result.exit_code}):\n{result.output}"
+    print_dir = harness.generate(
+        tmp_path,
+        monkeypatch,
+        CONN_NAME,
+        "redshift",
+        _credential_env(creds),
     )
 
-    print_dir = project_dir / "prints" / CONN_NAME
     assert (print_dir / "manifest.yaml").is_file()
 
-    issues = validate_print(print_dir)
-    errors = [i for i in issues if i.severity == "error"]
-    assert errors == [], "Conformance violations:\n" + "\n".join(
-        f"  {e.code} at {e.path}: {e.detail}" for e in errors
-    )
+    harness.assert_conformant(print_dir)
 
     manifest = yaml.safe_load((print_dir / "manifest.yaml").read_text())
     assert "public.loan_request" in manifest["tables"], (
@@ -170,19 +138,14 @@ def test_redshift_live_composite_grain_search_survives(
     creds = _live_creds()
     _apply_fixtures(creds)
 
-    project_dir = tmp_path / "project"
-    _write_project(project_dir)
-    monkeypatch.chdir(project_dir)
-
-    for key, value in _credential_env(creds).items():
-        monkeypatch.setenv(key, value)
-
-    result = CliRunner().invoke(main, ["generate", "--no-tui"])
-    assert result.exit_code in (0, 3), (
-        f"generate failed (exit={result.exit_code}):\n{result.output}"
+    print_dir = harness.generate(
+        tmp_path,
+        monkeypatch,
+        CONN_NAME,
+        "redshift",
+        _credential_env(creds),
     )
 
-    print_dir = project_dir / "prints" / CONN_NAME
     stats_path = print_dir / "public" / "germination_reading" / "statistics.yaml"
     assert stats_path.is_file(), (
         "germination_reading is missing statistics.yaml - the table was lost, not just the probe"
@@ -210,21 +173,15 @@ def test_redshift_live_late_binding_view_omits_depends_on(
     creds = _live_creds()
     _apply_fixtures(creds)
 
-    project_dir = tmp_path / "project"
-    _write_project(project_dir)
-    monkeypatch.chdir(project_dir)
-
-    for key, value in _credential_env(creds).items():
-        monkeypatch.setenv(key, value)
-
-    result = CliRunner().invoke(main, ["generate", "--no-tui"])
-    assert result.exit_code in (0, 3), (
-        f"generate failed (exit={result.exit_code}):\n{result.output}"
+    print_dir = harness.generate(
+        tmp_path,
+        monkeypatch,
+        CONN_NAME,
+        "redshift",
+        _credential_env(creds),
     )
 
-    stats_path = (
-        project_dir / "prints" / CONN_NAME / "public" / "herbarium_late_view" / "statistics.yaml"
-    )
+    stats_path = print_dir / "public" / "herbarium_late_view" / "statistics.yaml"
     assert stats_path.is_file(), "herbarium_late_view is missing statistics.yaml"
 
     stats = yaml.safe_load(stats_path.read_text())
@@ -300,40 +257,20 @@ def test_redshift_live_sampled_table_profiles(
     creds = _live_creds()
     _apply_fixtures(creds)
 
-    project_dir = tmp_path / "project"
-    project_dir.mkdir(parents=True, exist_ok=True)
-    (project_dir / ".dbprint.yaml").write_text(
-        f"""\
-defaults:
-  max_age_days: 7
-  statistics:
-    enumeration_threshold: 50
-    top_n_values: 20
-    percentiles: [1, 25, 50, 75, 99]
-
-connections:
-  {CONN_NAME}:
-    adapter: redshift
-    auto: true
-    output: prints
+    print_dir = harness.generate(
+        tmp_path,
+        monkeypatch,
+        CONN_NAME,
+        "redshift",
+        _credential_env(creds),
+        rules="""\
     rules:
       - include: ["public.herbarium_sheet"]
         sample: 0.99
 """,
     )
-    monkeypatch.chdir(project_dir)
 
-    for key, value in _credential_env(creds).items():
-        monkeypatch.setenv(key, value)
-
-    result = CliRunner().invoke(main, ["generate", "--no-tui"])
-    assert result.exit_code in (0, 3), (
-        f"generate failed (exit={result.exit_code}):\n{result.output}"
-    )
-
-    stats_path = (
-        project_dir / "prints" / CONN_NAME / "public" / "herbarium_sheet" / "statistics.yaml"
-    )
+    stats_path = print_dir / "public" / "herbarium_sheet" / "statistics.yaml"
     assert stats_path.is_file(), "a sampled table's statistics.yaml is missing - materialize failed"
 
 
@@ -381,9 +318,3 @@ def test_redshift_live_materialized_view_gets_real_statistics() -> None:
 
     assert tables.get("public.dbprint_mv_test") == "matview"
     assert tables.get("public.dbprint_mv_base") == "table"
-
-
-def _split_sql(text: str) -> list[str]:
-    lines = [ln for ln in text.splitlines() if not ln.strip().startswith("--")]
-
-    return [stmt.strip() for stmt in "\n".join(lines).split(";") if stmt.strip()]

@@ -29,16 +29,10 @@ class TestComputeNullRate:
         assert compute_null_rate(1000, 1000) == 1.0
 
 
-class TestAllThreeAdaptersShareOneFunction:
-    """De-triplication is the point - a fix to one must be a fix to all three."""
+class TestTheSharedPhaseBUsesThisFunction:
+    """Every adapter's Phase B assembles through `adapters.base`, so a fix here reaches all eight."""
 
-    def test_no_adapter_carries_its_own_copy(self) -> None:
-        from dbprint.adapters.mysql.stats import compute_null_rate as mysql_compute_null_rate
-        from dbprint.adapters.postgres.stats import compute_null_rate as postgres_compute_null_rate
-        from dbprint.adapters.snowflake.stats import (
-            compute_null_rate as snowflake_compute_null_rate,
-        )
+    def test_the_shared_assembly_carries_no_copy(self) -> None:
+        from dbprint.adapters.base import compute_null_rate as shared
 
-        assert postgres_compute_null_rate is compute_null_rate
-        assert mysql_compute_null_rate is compute_null_rate
-        assert snowflake_compute_null_rate is compute_null_rate
+        assert shared is compute_null_rate

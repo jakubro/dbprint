@@ -22,6 +22,7 @@ from dbprint.engine.diff import (
     compute,
     grain_from_block,
     has_schema_changes,
+    merging_from_block,
     physical_layout_from_block,
 )
 from dbprint.spec import drift
@@ -515,6 +516,37 @@ class TestGrainChanges:
         after = _table(grain=TableGrainState(keys=(GrainKeyState(("id",), "declared"),)))
         diff = _compute({"public.t": before}, {"public.t": after})
         assert has_schema_changes(diff) is True
+
+
+_REPLACING = {
+    "engine": "ReplacingMergeTree",
+    "key": [{"expression": "id", "column": "id"}],
+    "one_row_per_key": True,
+    "rows": "stored",
+}
+
+
+class TestMergingChanges:
+    def test_a_table_recreated_on_a_merging_engine_reports_once(self) -> None:
+        before = _table(merging=merging_from_block(None))
+        after = _table(merging=merging_from_block(_REPLACING))
+        diff = _compute({"public.t": before}, {"public.t": after})
+
+        assert [c for c in diff["changes"] if c["kind"] == "merging_changed"] == [
+            {
+                "kind": "merging_changed",
+                "table": "public.t",
+                "before": None,
+                "after": _REPLACING,
+            },
+        ]
+        assert has_schema_changes(diff) is True
+
+    def test_either_side_unknown_emits_nothing(self) -> None:
+        before = _table(merging=None)
+        after = _table(merging=merging_from_block(_REPLACING))
+
+        assert "merging_changed" not in _kinds(_compute({"public.t": before}, {"public.t": after}))
 
 
 class TestPhysicalLayoutChanges:
@@ -1135,6 +1167,16 @@ class TestPopulationSuppression:
 
         assert diff["changes"] == []
 
+    def test_a_parts_occurrences_suppressed_under_scope(self) -> None:
+        def side(occurrences: int) -> TableState:
+            return _table(
+                columns={"a": ColumnState("a", "json", True, None)},
+                statistics={"a": {"parts": {".k": {"occurrences": occurrences, "null_rate": 0.0}}}},
+                scoped=True,
+            )
+
+        assert _compute({"public.t": side(10)}, {"public.t": side(900)})["changes"] == []
+
     def test_unscoped_both_sides_is_unaffected(self) -> None:
         """The control: ordinary drift on an ordinary table still reports."""
 
@@ -1631,6 +1673,26 @@ class TestUnevaluatedTables:
         assert diff["summary"]["tables_modified"] == 1
         assert diff["summary"]["unevaluated_tables"] == 0
 
+    def test_a_view_queried_on_both_sides_is_compared_like_a_table(self) -> None:
+        """Comparability follows the artifact, so a view read through counts as a table does."""
+
+        before = _table(
+            fqn="a.v",
+            columns={"x": ColumnState("x", "int", True, None)},
+            statistics={"x": {"cardinality": 10}},
+        )
+        after = _table(
+            fqn="a.v",
+            columns={"x": ColumnState("x", "int", True, None)},
+            statistics={"x": {"cardinality": 15}},
+        )
+        before.type = after.type = "view"
+        diff = _compute({"a.v": before}, {"a.v": after})
+
+        assert "statistic_changed" in _kinds(diff)
+        assert diff["summary"]["tables_modified"] == 1
+        assert diff["summary"]["unevaluated_tables"] == 0
+
     def test_a_carried_forward_table_is_unevaluated_though_both_sides_hydrated(self) -> None:
         """Its current state IS its baseline state, so equality is arithmetic, not evidence."""
 
@@ -1763,6 +1825,18 @@ _COLUMN_SAMPLES: dict[str, tuple[Any, Any]] = {
     "unmeasured": ([], ["mean"]),
     "freshness": ({"max_age_days": 1}, {"max_age_days": 2}),
     "sketch": ({"values": "a"}, {"values": "b"}),
+    "geometry": ({"empty_count": 0}, {"empty_count": 1}),
+    "extent": ({"min_x": 1.0}, {"min_x": 2.0}),
+    "dimension": ({"min": 768, "max": 768}, {"min": 1024, "max": 1024}),
+    "norm": ({"min": 0.99, "max": 1.01}, {"min": 0.5, "max": 2.0}),
+    "parts": (
+        {".status": {"classification": "categorical"}},
+        {".status": {"classification": "text"}},
+    ),
+    "parts_found": (3, 4),
+    "size": ({"max": 3}, {"max": 4}),
+    "occurrences": (10, 11),
+    "types": ({"OBJECT": 3}, {"OBJECT": 2, "ARRAY": 1}),
 }
 _SHAPE_COLUMN_FIELDS = {"sql_type", "nullable", "physical_name", "collation"}
 
@@ -1849,6 +1923,20 @@ class TestTableTypeAndCollation:
         ]
         assert diff["summary"]["tables_modified"] == 1
         assert diff_module.has_schema_changes(diff)
+
+    def test_rows_moving_to_another_system_is_a_shape_change_counted_as_modified(self) -> None:
+        diff = _compute({"public.t": _table(external=False)}, {"public.t": _table(external=True)})
+
+        assert diff["changes"] == [
+            {"kind": "external_changed", "table": "public.t", "before": False, "after": True},
+        ]
+        assert diff["summary"]["tables_modified"] == 1
+        assert diff_module.has_schema_changes(diff)
+
+    def test_a_side_without_statistics_compares_no_external(self) -> None:
+        diff = _compute({"public.t": _table(external=None)}, {"public.t": _table(external=True)})
+
+        assert _kinds(diff) == []
 
     def test_an_unknown_baseline_type_compares_nothing(self) -> None:
         diff = _compute({"public.t": _table(type=None)}, {"public.t": _table(type="view")})

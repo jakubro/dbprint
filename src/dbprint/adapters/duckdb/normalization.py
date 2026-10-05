@@ -6,7 +6,8 @@ from __future__ import annotations
 
 from . import stats
 from .connection import Cursor, exec_query
-from ..base import TableScope, seed_from_fqn
+from .. import statements
+from ..base import TableScope
 from ..identifiers import Identity
 from ..sql_layout import indented
 
@@ -24,7 +25,7 @@ def compute_normalized_cardinality(
     source = stats._source(
         identity.quoted(),
         scope,
-        seed_from_fqn(identity.fqn, stats.SEED_MODULUS),
+        statements.table_seed(identity),
     )
 
     row = exec_query(

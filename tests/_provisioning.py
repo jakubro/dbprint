@@ -72,6 +72,47 @@ def discover_or_install(
     )
 
 
+def ensure_postgres_extension(bin_dir: Path, extension: str, package: str) -> None:
+    """Make `extension` creatable in the cluster `bin_dir` runs, apt-installing `package` on miss
+    inside a container; raise on a host miss.
+    """
+
+    control = Path(
+        "/usr/share/postgresql",
+        bin_dir.parent.name,
+        "extension",
+        f"{extension}.control",
+    )
+
+    if not control.exists() and in_container():
+        with _install_lock():
+            if not control.exists():
+                _apt_install((package,))
+
+    if not control.exists():
+        raise RuntimeError(
+            f"Postgres extension {extension!r} is not installed. Install: {package}.",
+        )
+
+
+def ensure_duckdb_spatial() -> None:
+    """Make duckdb's `spatial` extension loadable, downloading it on miss inside a container."""
+
+    import duckdb
+
+    try:
+        duckdb.connect().execute("LOAD spatial")
+    except duckdb.Error:
+        if not in_container():
+            raise RuntimeError(
+                "duckdb's spatial extension is not installed. Install: "
+                "`python -c \"import duckdb; duckdb.connect().execute('INSTALL spatial')\"`.",
+            ) from None
+
+        with _install_lock():
+            duckdb.connect().execute("INSTALL spatial")
+
+
 def ensure_java() -> Path:
     """Locate a JVM, apt-installing a headless JRE on miss inside a container."""
 

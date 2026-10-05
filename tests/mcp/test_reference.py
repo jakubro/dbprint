@@ -118,6 +118,32 @@ class TestSectionOf:
         assert shallow is not None and "1.1 Project root" in shallow
         assert deep is not None and "Deep text." in deep
 
+    def test_a_section_lists_its_direct_subsections_instead_of_inlining_them(self) -> None:
+        text = reference.section_of(_SAMPLE, "1")
+
+        assert text is not None
+        assert text.startswith("## 1. Directory layout")
+        assert "Root text." not in text
+        assert "Connection text." not in text
+        assert text.splitlines()[-2:] == ["- 1.1 Project root", "- 1.2 Connection root"]
+
+    def test_unnumbered_subheadings_stay_in_their_parents_text(self) -> None:
+        text = reference.section_of(
+            "## 2. Diff\n\nIntro.\n\n##### `table_added`\n\nAdded body.\n\n"
+            "### 2.1 Numbered\n\nNumbered body.\n",
+            "2",
+        )
+
+        assert text is not None
+        assert "Added body." in text
+        assert "Numbered body." not in text
+        assert text.splitlines()[-1] == "- 2.1 Numbered"
+
+    def test_a_leaf_section_carries_no_subsection_list(self) -> None:
+        text = reference.section_of(_SAMPLE, "1.1.1")
+
+        assert text == "#### 1.1.1 Nested detail\n\nDeep text.\n"
+
     def test_unknown_number_returns_none(self) -> None:
         assert reference.section_of(_SAMPLE, "9.9") is None
 

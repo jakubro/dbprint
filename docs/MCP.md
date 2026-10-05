@@ -109,7 +109,9 @@ A second form carries an empty authority:
 dbprint:///reference/<document>
 ```
 
-This addresses a server-global resource that belongs to no connection - §3.2's two reference documents. An empty authority MUST NOT be read as a zero-length connection name: a connection name is never empty in practice, and this form is checked ahead of any connection-scoped one, so it can never collide with one. Do not "simplify" it into a reserved connection name (e.g. a connection literally named `reference`) — the empty authority is what guarantees no collision is possible, a reserved name would not.
+This addresses a server-global resource that belongs to no connection - §3.2's two reference documents.
+
+Either form takes an optional query naming one page of the resource (§3.4): `?page=<n>`, and `&version=<v>` on any page past the first. The bare URI is page 1. `page` and `version` are the only query keys; any other is a malformed URI. An empty authority MUST NOT be read as a zero-length connection name: a connection name is never empty in practice, and this form is checked ahead of any connection-scoped one, so it can never collide with one. Do not "simplify" it into a reserved connection name (e.g. a connection literally named `reference`) — the empty authority is what guarantees no collision is possible, a reserved name would not.
 
 ### 3.2 Per-artifact resource list
 
@@ -149,6 +151,8 @@ The server MUST also expose these two server-global resources, one per document,
 - `description`, `statistics_annotations` and `relationships_annotations` resources are listed ONLY when the corresponding per-table file (`description.md` / `statistics.annotations.yaml` / `relationships.annotations.yaml`) is present.
 - The two reference resources are listed exactly once each — server-global, never once per connection, and present even when the resolved connection set is empty.
 
+`resources/list` honours the protocol's own `cursor`: a reply whose serialized entries would pass 20,000 characters carries the entries that fit and `nextCursor`, and passing that back returns the next run of the same order. Every page but the last carries `nextCursor`. The cursor is pinned to every served connection's `manifest.yaml` as §4.8 pins a tool's cursor; one followed after any of them changed is `-32602 InvalidParams` saying the print changed. `tools/list` pages by the same rule, and its seven tools fit one page.
+
 Resource entries returned by `resources/list` include `uri`, `name` (human-readable label), `description` (what the resource holds and, for a per-table file, which tool returns the same content interpreted), and `mimeType`. Ordering MUST be deterministic: the two reference resources first (`spec` then `assertions`), then by connection name, then by FQN, then by artifact name (`ddl` -> `statistics` -> `relationships` -> `description` -> `statistics_annotations` -> `relationships_annotations`).
 
 ### 3.4 Reading
@@ -156,6 +160,8 @@ Resource entries returned by `resources/list` include `uri`, `name` (human-reada
 `resources/read` returns the file content with the matching mimeType. Behaviors:
 
 - The server MUST serve the file as it is on disk at the time of the call; see §7.1 for the freshness contract.
+- A file whose text, serialized as a JSON string, passes 20,000 characters is read a page at a time. Pages break at line boundaries, and a line longer than a page at a character boundary; the pages' text concatenated in order is the file byte for byte. Every read carries `_meta: {"page": <n>, "pages": <m>, "version": "<v>"}` beside its text, where `version` identifies the file as it was read. Page `n` past the first is read as `<uri>?page=<n>&version=<v>`, with the `version` page 1 reported.
+- A `page` that is not a whole number from 1 to the resource's page count MUST return `-32602 InvalidParams` naming the valid range. A page past the first asked for without `version` MUST return `-32602 InvalidParams`, and so MUST a `version` the file has moved past since it was read — a rewritten file never answers an old page number with new text.
 - Reading a missing `description.md` or `statistics.annotations.yaml` MUST return JSON-RPC error `-32602 InvalidParams` with detail explaining the resource is optional and not authored for this table.
 - Reading a manifest-listed artifact whose file is missing from disk MUST return JSON-RPC error `-32603 InternalError` with detail recommending `dbprint generate`.
 - YAML parse failures MUST surface as `-32603 InternalError` with the parser's error message and the affected file path.
@@ -166,7 +172,7 @@ Resource entries returned by `resources/list` include `uri`, `name` (human-reada
 
 ### 4.1 `get_table_context`
 
-Returns an assembled context fragment for one table, formatted for direct insertion into an LLM prompt — the tool to read before writing SQL against a table (`purpose: query`) or answering a question about its data (`purpose: profile`). A budgeted call may omit sections to fit and never returns empty on success; the truncation marker in the result names what was dropped, down to the whole table when nothing fits.
+Returns an assembled context fragment for one table, formatted for direct insertion into an LLM prompt — the tool to read before writing SQL against a table (`purpose: query`) or answering a question about its data (`purpose: profile`). Nothing is dropped to fit a client: a context larger than a page is paged (§4.8), section by section.
 
 `purpose` selects what the fragment is for, and is the first thing a caller decides:
 
@@ -179,7 +185,7 @@ Under `query` the fragment carries no statistics, no null patterns and no physic
 
 The value table is what an exact-match predicate is written from, and it carries only the lists a predicate can be written from: a column whose `values_coverage` is `1.0` is rendered in full, one `<value> (<count>)` entry per value, with the coverage cell stating that the list is the column's whole domain; a column with a coverage below `1.0` shows its five most frequent values (a spelling group counting as one), with the coverage cell stating, as a percentage, the share of the column those five cover and that they are a sample. A column with no `values_coverage` — `numeric` and `temporal`, whose list is a frequency sample and never a domain (SPEC 2.2.3) — has no row. A value carrying a note in `statistics.annotations.yaml` renders it inline (`<value> (<count>) = <note>`); a redacted column publishes its counts and no literal; a scoped table's exhaustive list says so over the rows scanned, never over the table. A value is spelled so it reads back as itself: a number or boolean bare, a string holding whitespace single-quoted, and one holding a line break, control or invisible character double-quoted with YAML escapes, always on one line — `NULL` is a genuine null, `'NULL'` the stored string. Every number in the markdown is spelled as `statistics.yaml` spells it — positional, never in exponent form, counts as plain digits — and a share strictly between 0 and 1 never rounds onto `0%` or `100%`.
 
-On a table whose `statistics.yaml` carries `scope` (SPEC 2.2.8), the `format: "json"`/`"yaml"` object carries that block verbatim as `scope`, beside `row_count`, at its top level under both purposes, so a budget or `include_stats: false` that drops the statistics object never drops the population it describes. Under `profile` Markdown, every claim a single unread row could falsify — a complete value list, a candidate key, a freshness verdict — carries `over the rows scanned` in its own Notes cell.
+On a table whose `statistics.yaml` carries `scope` (SPEC 2.2.8), the `format: "json"`/`"yaml"` object carries that block verbatim as `scope`, beside `row_count`, at its top level under both purposes, so `include_stats: false`, which drops the statistics object, never drops the population it describes. Under `profile` Markdown, every claim a single unread row could falsify — a complete value list, a candidate key, a freshness verdict — carries `over the rows scanned` in its own Notes cell.
 
 `include_ddl`, `include_description`, `include_annotations` and `include_relationships` narrow the `query` selection the way they narrow `profile` — `include_relationships` governs the Joins list; `include_stats` has nothing to drop there.
 
@@ -198,7 +204,7 @@ On a table whose `statistics.yaml` carries `scope` (SPEC 2.2.8), the `format: "j
       "include_relationships": { "type": "boolean", "default": true, "description": "Include the Relationships section (md) or relationships object (json/yaml); under `query`, the Joins list" },
       "include_description": { "type": "boolean", "default": true, "description": "Include the table's description.md, when authored" },
       "include_annotations": { "type": "boolean", "default": true, "description": "Include statistics.annotations.yaml notes and claims, when authored" },
-      "budget_tokens": { "type": "integer", "minimum": 1, "description": "Soft cap in tokens, defaulting to 8000. Sections drop whole, never truncated mid-section: the table's identity is charged first, then each section in priority order is measured against what is left, and one that does not fit is skipped while later, smaller ones may still be included" }
+      "cursor": { "type": "string", "minLength": 1, "description": "`next_cursor` from this call's previous page; omit for the first page" }
     },
     "required": ["table"]
   }
@@ -211,7 +217,11 @@ Return:
 - `format: "json"` -> a structured object. Under `profile`: `table`, `ddl`, `description`, `annotations`, `statistics`, `relationships`, `relationship_annotations`. Under `query`: `table`, `ddl`, `values` (per column: the `entries` the Markdown shows with counts and notes, the column's `coverage`, the same coverage statement the Markdown renders, and for a sampled list `shown_coverage` — the share the shown entries cover), `joins` (`refers_to` and `referenced_by`, each edge as its columns, its table and its `detection`, plus `rejected` where a human overruled it), `dictionary` (column -> note) and `description`.
 - `format: "yaml"` -> the same structured object emitted as YAML.
 
-`budget_tokens` is a soft cap. The table's identity is charged first, then each remaining section in priority order is measured against what is left, and one that does not fit is skipped while later, smaller ones may still be included. Sections drop whole, never truncated mid-section. Token counting MAY be approximate. Under `query` that priority is DDL, then the value table, then the Joins list, then the data dictionary — identity is not ranked among them, being pinned instead.
+Paged per §4.8, section by section in priority order, the table's identity first: under `profile` the order the sections are listed above, and under `query` DDL, then the value table, then the Joins list, then the data dictionary. A page holds whole sections until the next would cross the bound; a section larger than a page continues on the next at a row boundary — a Markdown line, or one column's entry in json/yaml — and a single row larger than a page at a character boundary in Markdown, or as parts (§4.8) in json/yaml.
+
+- `format: "md"` — every page but the last ends with the line `<!-- next_cursor: <cursor> -->`, preceded by a newline; with that newline and line removed, the pages concatenate to the whole fragment.
+- `format: "json"` — the cursor is the `next_cursor` key. The identity fields ride the first page; merging the pages key by key, `statistics.columns` and the per-column `values`, `annotations` and `dictionary` maps included, yields the whole object.
+- `format: "yaml"` — each page is a YAML document of that page's json object, and every page but the last ends with the comment line `# next_cursor: <cursor>`.
 
 `format: "json"` or `"yaml"` carries a `_corrupted` field naming every declared artifact (`statistics`, `relationships`, `statistics_annotations`, `relationships_annotations`) that failed to parse, mapped to the parse-error message; absent when nothing was corrupt. `format: "md"` prepends the same information as a note before the rendered sections. A corrupt artifact still degrades that one section rather than failing the call — this field is what tells a corrupt file from one the object's type never had.
 
@@ -230,25 +240,24 @@ Returns the FQNs of tables matching a pattern — the tool for which tables exis
     "properties": {
       "connection": { "type": "string", "description": "Connection name from .dbprint.yaml; omit it to use the server's default connection" },
       "pattern": { "type": "string", "minLength": 1, "description": "fnmatch glob over dotted table names, e.g. 'sales.*'; defaults to '*'" },
-      "detail": { "type": "boolean", "default": false, "description": "Project each entry's type/row_count/columns/profiled_at from the manifest plus its freshness verdict; false returns bare FQN strings, unchanged" }
+      "detail": { "type": "boolean", "default": false, "description": "Project each entry's type/row_count/columns/profiled_at from the manifest plus its freshness verdict; false returns bare FQN strings, unchanged" },
+      "cursor": { "type": "string", "minLength": 1, "description": "`next_cursor` from this call's previous page; omit for the first page" }
     }
   }
 }
 ```
 
-Return: `{ "tables": ["arboretum.seedbank.accession", "arboretum.seedbank.germination_trial", ...] }`. Sorted lexicographically; deterministic across calls.
+Return: `{ "tables": ["arboretum.seedbank.accession", "arboretum.seedbank.germination_trial", ...], "total": 2 }`. Sorted lexicographically; deterministic across calls. Paged per §4.8: `tables` is the paged list, and `total` counts every table `pattern` matched.
 
-**Capped at 500 entries.** A reply the cap cut carries `truncated: true` and the `total` it was cut from; narrow with `pattern` to reach past it. A bare `truncated` would say a caller missed something without saying whether it missed ten entries or ten thousand.
-
-A `failed_tables` key beside `tables` lists, sorted and filtered by the same `pattern`, the tables the last `generate` run could not profile (SPEC 2.5); it is present only when non-empty. A name listed there and absent from `tables` exists and is unprofiled.
+A `failed_tables` key beside `tables` lists, sorted and filtered by the same `pattern`, the tables the last `generate` run could not profile (SPEC 2.5); it is present only when non-empty, on the first page. A name listed there and absent from `tables` exists and is unprofiled.
 
 `detail: true` returns `{ "tables": [{ "table": ..., "type": ..., "row_count": ..., "columns": ..., "profiled_at": ... }, ...] }` instead — the manifest entry's own fields, projected alongside the FQN, still sorted lexicographically by FQN. `row_count` is absent for a plain view, the same as in the manifest itself.
 
-Each detailed entry also carries the freshness verdict `dbprint list` and `dbprint check` reach for that table, from the same per-table threshold: `freshness` is `live` when `profiled_at` is within `max_age_days`, `stale` when it is older, and `dormant` when `profiled_at` is absent or unparseable; `age_days` is the age in days at the call, rounded to two places, and null for `dormant`; `max_age_days` is the threshold judged against — the entry's own recorded value, else what the connection's rules resolve to. A table whose threshold is refused (its rules raise, or its recorded `max_age_days` is negative or not whole) carries `threshold_error` with the reason `dbprint check` reports, and no `freshness`, `age_days` or `max_age_days`; the connection default is never substituted. When a threshold resolved without a `min_rows` rule that selects the table — no row count is available offline — the reply carries `warnings`, one sentence naming those tables. `now` is the server's clock at the call.
+Each detailed entry also carries the freshness verdict `dbprint list` and `dbprint check` reach for that table, from the same per-table threshold: `freshness` is `live` when `profiled_at` is within `max_age_days`, `stale` when it is older, and `dormant` when `profiled_at` is absent or unparseable; `age_days` is the age in days at the call, rounded to two places, and null for `dormant`; `max_age_days` is the threshold judged against — the entry's own recorded value, else what the connection's rules resolve to. A table whose threshold is refused (its rules raise, or its recorded `max_age_days` is negative or not whole) carries `threshold_error` with the reason `dbprint check` reports, and no `freshness`, `age_days` or `max_age_days`; the connection default is never substituted. When a threshold resolved without a `min_rows` rule that selects the table — no row count is available offline — the page carries `warnings`, one sentence naming those of its own tables. `now` is the server's clock at the call.
 
 ### 4.3 `search_columns`
 
-The first call for locating a fact across the print when its table is not yet known — a name glob, a `text` search over column notes, and optional classification/sql_type/sensitivity/looks_like/redacted glob filters and a candidate_key match, ANDed. `pattern` alone reproduces the original by-name search; any predicate may be used alone or combined with the rest. Every glob filter needs the field present to match at all — `sensitivity: "*"` finds every column carrying any detection, never a column with none. A plain view carries a catalog-only `statistics.yaml` (SPEC 2.2.15), so `pattern`, `classification` and `sql_type` reach every column its catalog read; `sensitivity`, `looks_like`, `redacted` and `candidate_key` never match a view column, since the marker forbids every field those filters test.
+The first call for locating a fact across the print when its table is not yet known — a name glob, a `text` search over column notes, and optional classification/sql_type/sensitivity/looks_like/redacted glob filters and a candidate_key match, ANDed. `pattern` alone reproduces the original by-name search; any predicate may be used alone or combined with the rest. A column's parts (SPEC 2.2.18) are searched too: `pattern` and `text` read a part as `<column><path>` (`items[*].sku`), the filters read the part's own fields, and a part's match carries `part` and `occurrences` beside `column` — so `sensitivity: "*"` also finds a sensitive key inside a document. Every glob filter needs the field present to match at all — `sensitivity: "*"` finds every column carrying any detection, never a column with none. A view described without a query carries a catalog-only `statistics.yaml` (SPEC 2.2.15), so `pattern`, `classification` and `sql_type` reach every column its catalog read; `sensitivity`, `looks_like`, `redacted` and `candidate_key` never match a catalog-only view's column, since the marker forbids every field those filters test.
 
 ```json
 {
@@ -257,16 +266,16 @@ The first call for locating a fact across the print when its table is not yet kn
     "type": "object",
     "additionalProperties": false,
     "properties": {
-      "pattern": { "type": "string", "minLength": 1, "description": "fnmatch glob over column names; optional - omit to filter by the other predicates alone" },
-      "classification": { "type": "string", "description": "fnmatch glob against the column's classification (boolean, categorical, foreign_key_candidate, json, numeric, temporal, text, unsupported)" },
+      "pattern": { "type": "string", "minLength": 1, "description": "fnmatch glob over column names, and over a part as `<column><path>` (`items[*].sku`); optional - omit to filter by the other predicates alone" },
+      "classification": { "type": "string", "description": "fnmatch glob against the column's classification (binary, boolean, categorical, composite, foreign_key_candidate, json, numeric, spatial, temporal, text, unsupported, vector)" },
       "sql_type": { "type": "string", "description": "fnmatch glob against the column's sql_type" },
       "sensitivity": { "type": "string", "description": "fnmatch glob against inferred.sensitivity (contact, credential, date_of_birth, demographic, employment, financial_account, geolocation, health, national_id, online_identifier, personal_name, postal_address) - a glob of '*' sweeps every column carrying any detection. A detection, never a verdict; its absence on a column is not an assertion that the column is safe" },
-      "looks_like": { "type": "string", "description": "fnmatch glob against inferred.looks_like (base64, bic, card_number, content_type, country_code, currency_code, ean, email, filename, hex, iban, imei, ip, isbn, iso8601_date, iso8601_datetime, iso8601_duration, json, jwt, latlon, mac_address, numeric_string, path, phone, postal_code, prose, semver, timezone, url, urn, uuid, vin)" },
+      "looks_like": { "type": "string", "description": "fnmatch glob against inferred.looks_like (base64, bic, card_number, content_type, country_code, currency_code, ean, email, filename, gif, gzip, hex, iban, imei, ip, isbn, iso8601_date, iso8601_datetime, iso8601_duration, jpeg, json, jwt, latlon, mac_address, numeric_string, path, pdf, phone, png, postal_code, prose, semver, timezone, url, urn, uuid, vin, zip)" },
       "redacted": { "type": "string", "description": "fnmatch glob against the column's redacted marker (drop, hash, mask)" },
       "candidate_key": { "type": "boolean", "description": "Exact match against inferred.candidate_key" },
       "text": { "type": "string", "minLength": 1, "description": "Case-insensitive substring matched against the column name, its annotation note and its per-value notes - words, not meaning. A match found through per-value notes carries them as `value_notes`" },
-      "limit": { "type": "integer", "minimum": 1, "description": "Cap on returned matches; a capped response carries `truncated: true`" },
-      "connection": { "type": "string", "description": "Connection name from .dbprint.yaml; omit it to use the server's default connection" }
+      "connection": { "type": "string", "description": "Connection name from .dbprint.yaml; omit it to use the server's default connection" },
+      "cursor": { "type": "string", "minLength": 1, "description": "`next_cursor` from this call's previous page; omit for the first page" }
     }
   }
 }
@@ -292,7 +301,8 @@ Return:
       "candidate_key": true,
       "annotation": "Always lowercased on write."
     }
-  ]
+  ],
+  "total": 1
 }
 ```
 
@@ -302,9 +312,9 @@ Return:
 
 `text` is a case-insensitive substring match against the column name, the column's `note` in `statistics.annotations.yaml` and each of its per-value `note`s (SPEC 2.7.1) — words, not meaning; table-level `description.md` is not searched. It is ANDed with every other filter. A match found through per-value notes carries `value_notes`, the list of `{value, note}` entries whose note contains the text; a match through the name or the column note alone carries none.
 
-`limit` caps the number of matches (tables are walked in FQN order, columns within a table in name order, so which matches survive a cap is deterministic); a capped response carries `truncated: true`. A glob matching no real value (e.g. `classification: "nope"`) returns an empty match list, never an error — the enumerated values in each filter's description are the format's own, not a validated allowlist.
+Paged per §4.8: `matches` is the paged list, walked in table FQN order and column name order within a table, and `total` counts every match. A glob matching no real value (e.g. `classification: "nope"`) returns an empty match list, never an error — the enumerated values in each filter's description are the format's own, not a validated allowlist.
 
-`unreadable_tables` is present only when at least one table's `statistics.yaml` or `statistics.annotations.yaml` failed to parse, naming every such table's FQN, sorted. A `statistics.yaml` failure means that table's columns are absent from `matches` entirely, since the column list itself could not be read; a `statistics.annotations.yaml` failure alone still returns the table's columns, only without the `annotation` field an annotation would have carried. Either way a corrupt file removes only what it alone supplied, not the whole call, and the reply always names it.
+`unreadable_tables` is present only when at least one table's `statistics.yaml` or `statistics.annotations.yaml` failed to parse, naming every such table's FQN, sorted, on the first page whichever page that table's columns would have reached. A `statistics.yaml` failure means that table's columns are absent from `matches` entirely, since the column list itself could not be read; a `statistics.annotations.yaml` failure alone still returns the table's columns, only without the `annotation` field an annotation would have carried. Either way a corrupt file removes only what it alone supplied, not the whole call, and the reply always names it.
 
 ### 4.4 `get_manifest`
 
@@ -318,7 +328,8 @@ Returns the parsed `manifest.yaml` content as a JSON object — an index of tabl
     "additionalProperties": false,
     "properties": {
       "connection": { "type": "string", "description": "Connection name from .dbprint.yaml; omit it to use the server's default connection" },
-      "pattern": { "type": "string", "minLength": 1, "description": "fnmatch glob over the FQN keys of `tables`, the same spelling `list_tables` takes; filters that map and `failed_tables` only" }
+      "pattern": { "type": "string", "minLength": 1, "description": "fnmatch glob over the FQN keys of `tables`, the same spelling `list_tables` takes; filters that map and `failed_tables` only" },
+      "cursor": { "type": "string", "minLength": 1, "description": "`next_cursor` from this call's previous page; omit for the first page" }
     }
   }
 }
@@ -326,7 +337,7 @@ Returns the parsed `manifest.yaml` content as a JSON object — an index of tabl
 
 Return: the parsed manifest dict per [SPEC §2.5](format/v1/SPEC.md#25-manifestyaml).
 
-**The `tables` map is capped at 500 entries; every other key of the document is returned whole.** `pattern` filters that map, and `failed_tables` with it, by the same fnmatch spelling `list_tables` takes, so one spelling means one thing across the surface. A capped reply carries `truncated: true` and the `total` the cap was taken from. A reply that dropped a header key to save bytes would be a different artifact, not a truncated one.
+**The `tables` map is paged per §4.8, in FQN order; every other key of the document rides the first page whole.** `pattern` filters that map, and `failed_tables` with it, by the same fnmatch spelling `list_tables` takes, so one spelling means one thing across the surface. Every page carries `total`, the number of `tables` entries `pattern` matched. A reply that dropped a header key to save bytes would be a different artifact, not a paged one.
 
 ### 4.5 `get_diff`
 
@@ -341,7 +352,8 @@ Returns the parsed `diff.yaml` content as a JSON object — the answer to what c
     "properties": {
       "connection": { "type": "string", "description": "Connection name from .dbprint.yaml; omit it to use the server's default connection" },
       "table": { "type": "string", "minLength": 1, "description": "Keep only changes naming this fully-qualified table, including the relationship events that name it as source or target" },
-      "kind": { "type": "string", "enum": ["table_added", "table_removed", "table_type_changed", "column_added", "column_removed", "column_type_changed", "column_nullable_changed", "column_default_changed", "column_physical_name_changed", "column_collation_changed", "statistic_changed", "table_row_count_changed", "grain_changed", "physical_layout_changed", "depends_on_changed", "relationship_added", "relationship_removed", "relationship_modified", "index_added", "index_removed", "index_modified", "comment_changed"], "description": "Keep only changes of this kind" }
+      "kind": { "type": "string", "enum": ["table_added", "table_removed", "table_type_changed", "external_changed", "column_added", "column_removed", "column_type_changed", "column_nullable_changed", "column_default_changed", "column_physical_name_changed", "column_collation_changed", "statistic_changed", "table_row_count_changed", "grain_changed", "physical_layout_changed", "merging_changed", "depends_on_changed", "relationship_added", "relationship_removed", "relationship_modified", "index_added", "index_removed", "index_modified", "comment_changed"], "description": "Keep only changes of this kind" },
+      "cursor": { "type": "string", "minLength": 1, "description": "`next_cursor` from this call's previous page; omit for the first page" }
     }
   }
 }
@@ -349,7 +361,7 @@ Returns the parsed `diff.yaml` content as a JSON object — the answer to what c
 
 Return: the parsed diff dict per [SPEC §2.6](format/v1/SPEC.md#26-diffyaml). The diff is the one produced by the last successful `dbprint generate` for the connection.
 
-**The `changes` list is capped at 500 events; every other key of the document is returned whole.** Two filters narrow it, ANDed: `table` keeps the events naming that fully-qualified table — including the three relationship events, which carry `source_table` and `target_table` where every other event carries `table`, so a filter reading one field alone would silently drop them — and `kind` keeps one event kind, declared as the packaged `diff.schema.json` enum so the list cannot drift from the format. A capped reply carries `truncated: true` and the `total` the cap was taken from.
+**The `changes` list is paged per §4.8, in file order; every other key of the document rides the first page whole.** Two filters narrow it, ANDed: `table` keeps the events naming that fully-qualified table — including the three relationship events, which carry `source_table` and `target_table` where every other event carries `table`, so a filter reading one field alone would silently drop them — and `kind` keeps one event kind, declared as the packaged `diff.schema.json` enum so the list cannot drift from the format. Every page carries `total`, the number of events the filters kept.
 
 **The schema guarantees none of those fields.** `$defs/Change` requires `kind` alone and no variant declares a table field, so these are producer facts: an event carrying none of the three is simply not matched by a `table` filter.
 
@@ -365,16 +377,17 @@ Returns a slice of the format spec or the assertion DSL spec, addressed by secti
     "additionalProperties": false,
     "properties": {
       "document": { "type": "string", "enum": ["assertions", "spec"], "description": "Which specification - the format spec, or the assertion DSL" },
-      "section": { "type": "string", "minLength": 1, "description": "A section number in the document's own scheme (e.g. '3', '2.2.4'), or a spec_ref citation copied verbatim from a finding ('\u00a72.2.4', 'ASSERTIONS.md \u00a71.4') - any heading depth. Omit for the table of contents." }
+      "section": { "type": "string", "minLength": 1, "description": "A section number in the document's own scheme (e.g. '3', '2.2.4'), or a spec_ref citation copied verbatim from a finding ('\u00a72.2.4', 'ASSERTIONS.md \u00a71.4') - any heading depth. Omit for the table of contents." },
+      "cursor": { "type": "string", "minLength": 1, "description": "`next_cursor` from this call's previous page; omit for the first page" }
     },
     "required": ["document"]
   }
 }
 ```
 
-Return: a markdown string.
+Return: a markdown string, paged per §4.8 the way `get_table_context`'s Markdown is.
 
-- With `section`, the matching heading and everything up to the next heading at the same or a shallower level — one rule for every depth, `##`/`###`/`####` alike.
+- With `section`, the matching heading and its own body — everything up to its first subsection, or up to the next heading at the same or a shallower level when it has none. A section with subsections then lists its direct ones, one `- <number and title>` line each, under `Subsections, each read by its own number:`; their text is read by passing that number. One rule for every depth, `##`/`###`/`####` alike.
 - Without `section`, the document's heading tree instead of the whole document.
 - `section` MUST accept the document's own bare numbering scheme (`"3"`, `"2.2.4"`) AND a `spec_ref` citation copied verbatim from a finding (`"§2.2.4"`, `"ASSERTIONS.md §1.4"`, per conformance/issue.py's own convention) — a caller never strips the citation prefix by hand.
 - `section` naming a number no heading in that document carries MUST fail (`isError: true`, §8.2), detail naming the section numbers that document actually has.
@@ -385,7 +398,7 @@ Return: a markdown string.
 
 ### 4.7 `resolve_value`
 
-Resolves a phrase, a code or a spelling against one column's published values — what a caller reads before writing a literal into a filter. Offline: the column's `values` list, its counts, and any `values[].note` in `statistics.annotations.yaml`. No database, and no second artifact.
+Resolves a phrase, a code or a spelling against one column's published values — what a caller reads before writing a literal into a filter. Given `part`, it resolves against that part's values instead (SPEC 2.2.18), over the part's own occurrences, and the reply carries `part`. Offline: the column's `values` list, its counts, and any `values[].note` in `statistics.annotations.yaml`. No database, and no second artifact.
 
 ```json
 {
@@ -396,8 +409,10 @@ Resolves a phrase, a code or a spelling against one column's published values �
     "properties": {
       "table": { "type": "string", "minLength": 1, "description": "Fully-qualified table name" },
       "column": { "type": "string", "minLength": 1, "description": "Column name as the print spells it" },
+      "part": { "type": "string", "minLength": 1, "description": "A part of the column, by its path as the print keys it (`.status`, `[*]`); omit it to resolve against the column itself" },
       "text": { "type": "string", "minLength": 1, "description": "The phrase, code or spelling from the question, as written" },
-      "connection": { "type": "string", "description": "Connection name from .dbprint.yaml; omit it to use the server's default connection" }
+      "connection": { "type": "string", "description": "Connection name from .dbprint.yaml; omit it to use the server's default connection" },
+      "cursor": { "type": "string", "minLength": 1, "description": "`next_cursor` from this call's previous page; omit for the first page" }
     },
     "required": ["table", "column", "text"]
   }
@@ -416,9 +431,24 @@ The reply carries `table`, `column`, `text` and a `match`, which is the first of
 
 Every reply carries `coverage` (the column's `values_coverage`, `null` where the classification publishes none), `exhaustive` (whether the list carries every distinct value the column has over the table — `values_coverage` of `1.0`, or on a `numeric`/`temporal` column `frequencies.listed` equal to an exact `cardinality`, SPEC 2.2.5, and never on a table whose file carries `scope`) and `listed` (how many entries the print carries). Where the list is a top-N cut the reply also carries `sample_caveat`, a fixed sentence stating that a spelling absent from a sample is not evidence it is absent from the column. Where the list is complete over what was read and at most fifty entries long, the reply carries `domain`: the whole list with counts and notes, so a small vocabulary needs exactly one call.
 
+Paged per §4.8: every key other than the lists rides every page, `spellings` or `candidates` is walked before `domain`, and `total` counts the entries of both. A value is never shortened — one too long for a page arrives in parts.
+
 On a table read in part (SPEC 2.2.8) every reply, `unavailable` included, also carries the file's `scope` block and its `row_count`; `exhaustive` is `false`; a complete list's `sample_caveat` states that the list is the whole domain over the rows scanned, not over the table; and `domain` is the scanned rows' whole domain. `none` describes the listed values only — whether that extends to the column is what `exhaustive` says.
 
 A `match: "none"` is an answer, not an error. An empty exhaustive list — a column with no non-null value publishes `values: []` at `values_coverage: 1.0` (SPEC 7.4) — answers `none` with an empty `domain`. An unknown table fails per §8.2 as `get_table_context` does; an unknown column fails the same way, its detail naming the columns that table's statistics do carry. A `statistics.yaml` the manifest declares but that is absent from disk, or that does not parse, fails with the same errors §8.2 lists for those conditions — never as an unknown column; a `statistics.annotations.yaml` that does not parse fails the same way, since the notes it would carry are part of the answer. A table that declares no statistics artifact answers `match: "unavailable"` with that reason.
+
+### 4.8 Paging
+
+Every reply is bounded: the text a client receives for one call — a dict reply serialized as JSON with two-space indent, or a bare string as it stands — is at most 20,000 characters. A reply that would be longer is cut into pages; nothing is dropped to fit. A list reply pages its items as below; a document — `get_table_context`, `get_reference` — pages its text as §4.1 states. The bound is the server's, not the caller's — a caller wanting less narrows with the tool's own filters.
+
+- `cursor` — an optional string argument. Omitted, a call returns its first page.
+- `next_cursor` — present on every page but the last. Passed back unchanged as `cursor`, with every other argument exactly as before, it returns the next page.
+- `total` — on every page of a list reply: how many items the call matched in all, never how many this page holds.
+- **The first page carries the rest.** Every key other than the paged list — a document's header fields, `failed_tables`, `unreadable_tables` — comes before any list item and appears once, on the first page, except where a tool's own section says a key rides every page (§4.7). A key whose value alone exceeds a page is sent in parts like an item, starting on the first page, so the list begins only after it.
+- **Order.** Pages follow the list's own order, so following `next_cursor` to the last page yields each item exactly once.
+- **Parts.** An item too large for any page is sent in its own place as consecutive entries `{"part": <n>, "parts": <m>, "text": "<chunk>"}`, one per page. The `text` of parts `1` to `m`, concatenated in order, is the item's JSON, and parses to the item.
+
+A cursor is opaque and belongs to the call that issued it: the tool, its other arguments, and every print file its reply read. Following a cursor after any of those files changed on disk is a failed call (`isError: true`, §8.2) saying the print changed, never a page that silently skips or repeats items — the call starts over without `cursor`. A cursor that does not decode, or one issued by another tool or under other arguments, is a failed call too.
 
 ---
 
@@ -485,6 +515,8 @@ Consequence: a `dbprint generate` run completing while the server is running is 
 
 Per §2, the server advertises `subscribe: false` and `listChanged: false`. The server MUST NOT emit `notifications/resources/updated` or `notifications/resources/listChanged`.
 
+`resources/templates/list` returns one template per §3.2 URI pattern in its page form — `dbprint://{connection}/{table}/statistics{?page,version}`, `dbprint:///reference/{document}{?page,version}` and so on — so a client that builds URIs from templates reaches every page.
+
 ### 7.3 Shutdown
 
 The server MUST handle SIGTERM and SIGINT cleanly:
@@ -518,6 +550,10 @@ Two channels, not one. `resources/read` failures are genuine JSON-RPC protocol e
 | Reading `diff` with no committed diff for the connection | `-32603 InternalError` | `"no diff available at <path>. Run dbprint diff or dbprint generate first."` |
 | Reading `reading` with no reading.md for the connection | `-32603 InternalError` | `"no reading guide available at <path>. Run dbprint generate first."` |
 | Resource requested with malformed URI | `-32602 InvalidParams` | `"URI 'foo' does not match the dbprint:// scheme."` |
+| `page` outside the resource's pages, or not a whole number | `-32602 InvalidParams` | `"'dbprint://a/manifest?page=9' names no page of this resource: pages run 1 to 3."` |
+| A page past the first without `version` | `-32602 InvalidParams` | ``"'dbprint://a/manifest?page=2' asks for a page past the first without `version`. Pass the `version` the first page's `_meta` reported, as `?page=<n>&version=<v>`."`` |
+| `version` the file has moved past | `-32602 InvalidParams` | `"'dbprint://a/manifest?page=2&version=0f1e': the file changed on disk since that version was read. Read page 1 again for its current version."` |
+| `resources/list` cursor over a print that changed since it was issued | `-32602 InvalidParams` | ``"the print changed on disk since this cursor was issued, so resources/list cannot resume where it left off. Call again without `cursor` to start over."`` |
 
 ### 8.2 Tool errors (`tools/call`) — `isError: true`, not a protocol error
 
@@ -534,7 +570,6 @@ Every call is checked against the tool's own advertised `inputSchema` before the
 | A key of the wrong type | `"pattern 7 must be of type string."` |
 | An empty string where one is required | `"table '' must be a non-empty string."` |
 | A value outside a declared enum | `"format 'yml' must be one of ['md', 'json', 'yaml']."` |
-| A value below a declared minimum | `"budget_tokens 0 must be an integer >= 1."` |
 | `resolve_value` called with a `column` the table's statistics do not carry | `"column 'rnk' not found in table 'arboretum.seedbank.taxon'. Columns: rank, scientific_name, taxon_id."` |
 | `resolve_value` on a table whose declared `statistics.yaml` is absent from disk | `"manifest references statistics.yaml but file is absent at <path>. Re-run dbprint generate."` |
 | `resolve_value` on a table whose `statistics.yaml` or `statistics.annotations.yaml` does not parse | `"<path>: YAML parse error: <message>"` |
@@ -544,6 +579,9 @@ Every call is checked against the tool's own advertised `inputSchema` before the
 | Manifest parses as YAML but is not the shape every reader below it walks | `"<path>: <reason the shape is wrong>"` |
 | YAML parse error in a print file | `"<path>: YAML parse error: <message>"` |
 | Tool requested with unknown name | `"unknown tool 'foo'. Available: ['get_diff', 'get_manifest', ...]"` |
+| `cursor` that no reply issued | `` "cursor 'x' is not one this server issued. Pass back a reply's `next_cursor` unchanged, or call again without `cursor` for the first page." `` |
+| `cursor` issued by another tool, or by the same tool under other arguments | `` "this cursor was not issued by list_tables with these arguments. Repeat the call that returned it with the same arguments, or call again without `cursor`." `` |
+| `cursor` whose print files changed on disk since it was issued | `` "the print changed on disk since this cursor was issued, so list_tables cannot resume where it left off. Call again without `cursor` to start over." `` |
 | `get_reference` called with `document` outside its declared enum | `"document 'readme' must be one of ['assertions', 'spec']."` |
 | `get_reference` called with a `section` no heading in that document carries | `"section '9.9' not found in spec. Available: ['0', '0.1', '0.2', ...]"` |
 

@@ -11,7 +11,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from dbprint.config.selectors import expand
-from dbprint.spec.classification import is_nullable_type
+from dbprint.spec.classification import base_type, is_nullable_type, top_level_arguments
 from .connection import Cursor, exec_query
 from ..base import (
     ColumnMeta,
@@ -21,6 +21,7 @@ from ..base import (
     PhysicalLayout,
     PhysicalLayoutKey,
     SkippedNamespace,
+    TableMerging,
     TableMeta,
     TableType,
     UniqueKeyMeta,
@@ -33,12 +34,74 @@ from ..identifiers import Identity, column_meta, enforce_table_identifiers, fold
 # collation model, so this names the fixed byte-comparison semantic rather than querying it.
 DEFAULT_COLLATION = "binary"
 
+# Unions whose members are named by type (SPEC 2.2.18), which the shared tables read as documents.
+_UNION_TYPES = ("variant", "dynamic")
+
 _TABLE_TYPE_BY_ENGINE: dict[str, TableType] = {
     "View": "view",
     "MaterializedView": "matview",
 }
 
+# Engines whose rows a read would consume from a queue, never stored, or never finish producing.
+_UNLISTED_ENGINES = (
+    "AzureQueue",
+    "FileLog",
+    "GenerateRandom",
+    "Kafka",
+    "LiveView",
+    "NATS",
+    "Null",
+    "RabbitMQ",
+    "RedisStreams",
+    "S3Queue",
+    "WindowView",
+)
+
+# Engines whose rows ClickHouse does not store: every read fetches them from another system.
+REMOTE_ENGINES = frozenset(
+    {
+        "ArrowFlight",
+        "AzureBlobStorage",
+        "COSN",
+        "DeltaLake",
+        "DeltaLakeAzure",
+        "DeltaLakeLocal",
+        "DeltaLakeS3",
+        "Executable",
+        "ExecutablePool",
+        "ExternalDistributed",
+        "GCS",
+        "HDFS",
+        "Hive",
+        "Hudi",
+        "Iceberg",
+        "IcebergAzure",
+        "IcebergHDFS",
+        "IcebergLocal",
+        "IcebergS3",
+        "JDBC",
+        "MongoDB",
+        "MySQL",
+        "ODBC",
+        "OSS",
+        "Paimon",
+        "PaimonAzure",
+        "PaimonHDFS",
+        "PaimonLocal",
+        "PaimonS3",
+        "PostgreSQL",
+        "Redis",
+        "S3",
+        "SQLite",
+        "URL",
+        "YTsaurus",
+    },
+)
+
 _Candidate = tuple[TableMeta, tuple[str, str]]
+
+# Appended to a catalog read that returns DDL or a comment when the session would unmask secrets.
+SECRETS_HIDDEN = "\nSETTINGS\n  format_display_secrets_in_show_and_select = 0"
 
 
 def list_tables(
@@ -47,7 +110,7 @@ def list_tables(
     include: list[str],
     exclude: list[str],
 ) -> tuple[list[_Candidate], dict[str, bool], tuple[SkippedNamespace, ...]]:
-    """Enumerate tables/views/matviews in each of `databases`, less a matview's `.inner_id` storage.
+    """Enumerate tables/views/matviews in each of `databases`, less view storage and unlisted engines.
 
     Each comes with its physical spelling, beside the samplable map and every database that failed to list.
     """
@@ -60,7 +123,7 @@ def list_tables(
         try:
             listed = exec_query(
                 cursor,
-                """
+                f"""
                 SELECT
                   tbl.name,
                   tbl.engine,
@@ -70,10 +133,12 @@ def list_tables(
                 WHERE
                   tbl.database = %s
                   AND tbl.name NOT LIKE '.inner_id.%%'
+                  AND tbl.name NOT LIKE '.inner.%%'
+                  AND tbl.engine NOT IN ({", ".join(["%s"] * len(_UNLISTED_ENGINES))})
                 ORDER BY
                   tbl.name
                 """,
-                (database,),
+                (database, *_UNLISTED_ENGINES),
             ).fetchall()
         except QueryFailed as exc:
             skipped.append(SkippedNamespace(name=database, cause=str(exc)))
@@ -87,7 +152,7 @@ def list_tables(
     for database, name, engine, sampling_key in rows:
         table_type = _TABLE_TYPE_BY_ENGINE.get(str(engine), "table")
         physical = (database, str(name))
-        meta = table_meta(physical, table_type)
+        meta = table_meta(physical, table_type, external=str(engine) in REMOTE_ENGINES)
         candidates.append((meta, physical))
         samplable[meta.fqn] = bool(sampling_key)
 
@@ -161,6 +226,7 @@ def columns(cursor: Cursor, identity: Identity) -> list[ColumnMeta]:
             nullable=is_nullable_type(str(col_type)),
             default=default_expression or None,
             ordinal=int(position),
+            classify_as="union" if base_type(str(col_type)) in _UNION_TYPES else None,
         )
         for name, col_type, position, default_expression in rows
     ]
@@ -248,6 +314,94 @@ def physical_layout(cursor: Cursor, identity: Identity) -> PhysicalLayout | None
     )
 
 
+def merging(cursor: Cursor, identity: Identity, *, final: bool) -> TableMerging | None:
+    """The merging engine family and sorting key from `system.tables` (SPEC 2.2.19), or None.
+
+    A matview with inner storage answers for its `.inner_id.<uuid>` table; `final` is the
+    session's own `final` setting, under which every plain read returns merged rows.
+    """
+
+    row = exec_query(
+        cursor,
+        """
+        SELECT
+          tbl.engine,
+          tbl.sorting_key,
+          toString(tbl.uuid)
+        FROM
+          system.tables tbl
+        WHERE
+          tbl.database = %s
+          AND tbl.name = %s
+        """,
+        identity.parts,
+    ).fetchone()
+
+    if row is not None and row[0] == "MaterializedView":
+        row = exec_query(
+            cursor,
+            """
+            SELECT
+              tbl.engine,
+              tbl.sorting_key,
+              toString(tbl.uuid)
+            FROM
+              system.tables tbl
+            WHERE
+              tbl.database = %s
+              AND tbl.name = %s
+            """,
+            (identity.parts[0], f".inner_id.{row[2]}"),
+        ).fetchone()
+
+    family = _MERGING_PREFIX_RE.sub("", str(row[0])) if row is not None else ""
+
+    if row is None or family not in _ONE_ROW_PER_KEY:
+        return None
+
+    return TableMerging(
+        engine=family,
+        keys=tuple(
+            _partition_key(part.strip())
+            for part in top_level_arguments(str(row[1] or ""))
+            if part.strip()
+        ),
+        one_row_per_key=_ONE_ROW_PER_KEY[family],
+        rows="merged" if final else "stored",
+    )
+
+
+def shows_secrets(cursor: Cursor) -> bool:
+    """Whether this session asks the server to print secrets in `SHOW` and `system.tables`."""
+
+    row = exec_query(
+        cursor,
+        "SELECT getSetting('format_display_secrets_in_show_and_select')",
+    ).fetchone()
+
+    return bool(row and row[0] in (True, 1, "1", "true"))
+
+
+def final_reads(cursor: Cursor) -> bool:
+    """Whether this session reads every table as `FINAL` - a profile can turn `final` on."""
+
+    row = exec_query(cursor, "SELECT getSetting('final')").fetchone()
+
+    return bool(row and row[0] in (True, 1, "1", "true"))
+
+
+# The engines whose merges combine rows sharing the sorting key, and whether one row per key
+# survives a full merge (the collapsing two keep a state and a cancel row). SPEC 2.2.19.
+_ONE_ROW_PER_KEY = {
+    "ReplacingMergeTree": True,
+    "SummingMergeTree": True,
+    "AggregatingMergeTree": True,
+    "CoalescingMergeTree": True,
+    "CollapsingMergeTree": False,
+    "VersionedCollapsingMergeTree": False,
+}
+_MERGING_PREFIX_RE = re.compile(r"^(Replicated|Shared)(?=\w*MergeTree$)")
+
 _BASE_COLUMN_RE = re.compile(r"^`?([A-Za-z_][A-Za-z0-9_$]*)`?$")
 
 
@@ -268,19 +422,19 @@ def view_dependencies(cursor: Cursor) -> None:
     del cursor
 
 
-def comments(cursor: Cursor, identity: Identity) -> CommentsMeta:
+def comments(cursor: Cursor, identity: Identity, *, hide_secrets: bool = False) -> CommentsMeta:
     """Table comment + per-column comments; ClickHouse reports an absent comment as `''`."""
 
     table_row = exec_query(
         cursor,
-        """
+        f"""
         SELECT
           tbl.comment
         FROM
           system.tables tbl
         WHERE
           tbl.database = %s
-          AND tbl.name = %s
+          AND tbl.name = %s{SECRETS_HIDDEN if hide_secrets else ""}
         """,
         identity.parts,
     ).fetchone()

@@ -21,6 +21,7 @@ import duckdb
 import pytest
 
 from dbprint.adapters import Adapter, StatisticsConfig
+from dbprint.adapters import base as base_module
 from dbprint.adapters.base import TableScope
 from dbprint.adapters.bigquery import DIALECT as BIGQUERY_DIALECT
 from dbprint.adapters.bigquery import stats as bigquery_stats
@@ -213,8 +214,8 @@ class Sweep:
         if wide:
             self.adapter.default_collation()
 
-            # The emulator has no view-usage view, and MariaDB no VIEW_TABLE_USAGE (measured).
-            if self.vendor not in ("bigquery", "mysql"):
+            # The emulator has no view-usage view (measured).
+            if self.vendor != "bigquery":
                 self.adapter.introspect_view_dependencies()
 
         for table in self.adapter.list_tables(include=include or ["*"], exclude=[]):
@@ -739,7 +740,7 @@ def _install_classification_spy(monkeypatch: pytest.MonkeyPatch, module: ModuleT
     """Collect every pre-classification the adapter's dispatch actually assigned."""
 
     seen: set[str] = set()
-    original = module._pre_classify
+    original = base_module.pre_classify
 
     def spy(*args: Any, **kwargs: Any) -> Any:
         result = original(*args, **kwargs)
@@ -747,7 +748,9 @@ def _install_classification_spy(monkeypatch: pytest.MonkeyPatch, module: ModuleT
 
         return result
 
-    monkeypatch.setattr(module, "_pre_classify", spy)
+    for owner in (base_module, module):
+        if hasattr(owner, "pre_classify"):
+            monkeypatch.setattr(owner, "pre_classify", spy)
 
     return seen
 
@@ -775,6 +778,8 @@ def _capture_connect_kwargs(
 
         def is_connected(self) -> bool:
             return True
+
+        server_info = "8.0.36"
 
     class _StubDriver:
         Error = _StubError

@@ -1,4 +1,4 @@
-"""Redshift catalog reads: batched `SVV_REDSHIFT_*`/`STV_MV_INFO`, the standard PostgreSQL catalog
+"""Redshift catalog reads: batched `SVV_*`/`STV_MV_INFO`, the standard PostgreSQL catalog
 tables for constraints, and per-object `SHOW` for DDL - lowercased (SPEC 1.3).
 
 The catalog stores a quoted `CREATE`'s case, so reads past enumeration bind `Identity`'s spelling.
@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from dbprint.config.selectors import expand
 from dbprint.spec.fqn import join as join_fqn
 from .connection import exec_query
+from .. import pg_catalog
 from ..base import (
     ColumnMeta,
     CommentsMeta,
@@ -105,6 +106,10 @@ def list_tables(
         physical = (database, schema, name)
         candidates.append((table_meta(physical, canonical_type), physical))
 
+    candidates += [
+        (table_meta(physical, "table", external=True), physical)
+        for physical in _external_tables(cursor, databases)
+    ]
     in_scope = set(
         expand(
             [meta.fqn for meta, _ in candidates],
@@ -116,6 +121,71 @@ def list_tables(
     enforce_table_identifiers(selected)
 
     return selected
+
+
+def external_columns(cursor: Cursor, identity: Identity) -> list[ColumnMeta]:
+    """An external table's columns from `SVV_EXTERNAL_COLUMNS`, `external_type` as the type."""
+
+    rows = exec_query(
+        cursor,
+        """
+        SELECT
+          col.columnname,
+          col.columnnum,
+          col.external_type,
+          col.is_nullable
+        FROM
+          svv_external_columns col
+        WHERE
+          col.redshift_database_name = CURRENT_DATABASE()
+          AND col.schemaname = %s
+          AND col.tablename = %s
+        ORDER BY
+          col.columnnum
+        """,
+        identity.addressed,
+    ).fetchall()
+
+    return [
+        column_meta(
+            col_name,
+            sql_type=str(external_type),
+            nullable=_nullable(str(is_nullable)),
+            default=None,
+            ordinal=int(ordinal),
+        )
+        for col_name, ordinal, external_type, is_nullable in rows
+    ]
+
+
+def external_physical_layout(cursor: Cursor, identity: Identity) -> PhysicalLayout | None:
+    """An external table's partition columns in `part_key` order, None when it has none."""
+
+    rows = exec_query(
+        cursor,
+        """
+        SELECT
+          col.columnname
+        FROM
+          svv_external_columns col
+        WHERE
+          col.redshift_database_name = CURRENT_DATABASE()
+          AND col.schemaname = %s
+          AND col.tablename = %s
+          AND col.part_key > 0
+        ORDER BY
+          col.part_key
+        """,
+        identity.addressed,
+    ).fetchall()
+
+    if not rows:
+        return None
+
+    return PhysicalLayout(
+        mechanism="partition",
+        keys=tuple(PhysicalLayoutKey(expression=fold(name), column=fold(name)) for (name,) in rows),
+    )
 
 
 def columns(cursor: Cursor, identity: Identity) -> list[ColumnMeta]:
@@ -182,33 +252,7 @@ def relationships(cursor: Cursor, identity: Identity) -> list[ForeignKeyMeta]:
 
     rows = exec_query(
         cursor,
-        """
-        SELECT
-          con.conname AS constraint_name,
-          con.conkey AS src_attnums,
-          con.confkey AS dst_attnums,
-          tnp.nspname AS dst_schema,
-          tcl.relname AS dst_table,
-          con.confdeltype AS on_delete,
-          con.confupdtype AS on_update,
-          con.conrelid AS src_relid,
-          con.confrelid AS dst_relid
-
-        FROM
-          pg_constraint con
-          JOIN pg_class scl ON scl.oid = con.conrelid
-          JOIN pg_namespace snp ON snp.oid = scl.relnamespace
-          JOIN pg_class tcl ON tcl.oid = con.confrelid
-          JOIN pg_namespace tnp ON tnp.oid = tcl.relnamespace
-
-        WHERE
-          con.contype = 'f'
-          AND snp.nspname = %s
-          AND scl.relname = %s
-
-        ORDER BY
-          con.conname
-        """,
+        pg_catalog.FOREIGN_KEYS,
         identity.addressed,
     ).fetchall()
 
@@ -508,3 +552,30 @@ def _attnums_to_names(cursor: Cursor, relid: int, attnums: list[int]) -> list[st
     name_by_attnum = {int(attnum): fold(str(attname)) for attnum, attname in rows}
 
     return [name_by_attnum[a] for a in attnums if a in name_by_attnum]
+
+
+def _external_tables(cursor: Cursor, databases: Sequence[str]) -> list[tuple[str, str, str]]:
+    """External tables of `databases` - `tabletype` also names external views, which are not."""
+
+    placeholders = listed(["%s"] * len(databases), 12)
+    rows = exec_query(
+        cursor,
+        f"""
+        SELECT
+          ext.redshift_database_name,
+          ext.schemaname,
+          ext.tablename
+        FROM
+          svv_external_tables ext
+        WHERE
+          ext.redshift_database_name IN (
+            {placeholders}
+          )
+          AND COALESCE(TRIM(ext.tabletype), '') IN ('TABLE', '')
+        ORDER BY
+          ext.redshift_database_name, ext.schemaname, ext.tablename
+        """,
+        tuple(databases),
+    ).fetchall()
+
+    return [(str(database), str(schema), str(name)) for database, schema, name in rows]

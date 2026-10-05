@@ -1,9 +1,21 @@
 format_version: 1
 table: arboretum.fixture.shape_probe
 type: table
-profiled_at: '2026-05-17T22:48:01Z'
+profiled_at: '2026-03-09T14:27:36Z'
 row_count: 50
 row_count_method: exact
+null_patterns:
+  coverage: 1.0
+  coverage_method: measured
+  patterns:
+  - columns: []
+    count: 40
+  - columns:
+    - deployed_at
+    count: 5
+  - columns:
+    - reading_embedding
+    count: 5
 grain:
   keys:
   - columns:
@@ -300,10 +312,214 @@ columns:
     nullable: true
     null_count: 0
     null_rate: 0.0
-    classification: unsupported
+    classification: categorical
+    cardinality: 50
+    cardinality_ratio: 1.0
+    cardinality_method: exact
+    inferred:
+      candidate_key: true
+    values:
+    - value: deadbeef0001
+      count: 1
+    - value: deadbeef0002
+      count: 1
+    - value: deadbeef0003
+      count: 1
+    - value: deadbeef0004
+      count: 1
+    - value: deadbeef0005
+      count: 1
+    - value: deadbeef0006
+      count: 1
+    - value: deadbeef0007
+      count: 1
+    - value: deadbeef0008
+      count: 1
+    - value: deadbeef0009
+      count: 1
+    - value: deadbeef000a
+      count: 1
+    - value: deadbeef000b
+      count: 1
+    - value: deadbeef000c
+      count: 1
+    - value: deadbeef000d
+      count: 1
+    - value: deadbeef000e
+      count: 1
+    - value: deadbeef000f
+      count: 1
+    - value: deadbeef0010
+      count: 1
+    - value: deadbeef0011
+      count: 1
+    - value: deadbeef0012
+      count: 1
+    - value: deadbeef0013
+      count: 1
+    - value: deadbeef0014
+      count: 1
+    - value: deadbeef0015
+      count: 1
+    - value: deadbeef0016
+      count: 1
+    - value: deadbeef0017
+      count: 1
+    - value: deadbeef0018
+      count: 1
+    - value: deadbeef0019
+      count: 1
+    - value: deadbeef001a
+      count: 1
+    - value: deadbeef001b
+      count: 1
+    - value: deadbeef001c
+      count: 1
+    - value: deadbeef001d
+      count: 1
+    - value: deadbeef001e
+      count: 1
+    - value: deadbeef001f
+      count: 1
+    - value: deadbeef0020
+      count: 1
+    - value: deadbeef0021
+      count: 1
+    - value: deadbeef0022
+      count: 1
+    - value: deadbeef0023
+      count: 1
+    - value: deadbeef0024
+      count: 1
+    - value: deadbeef0025
+      count: 1
+    - value: deadbeef0026
+      count: 1
+    - value: deadbeef0027
+      count: 1
+    - value: deadbeef0028
+      count: 1
+    - value: deadbeef0029
+      count: 1
+    - value: deadbeef002a
+      count: 1
+    - value: deadbeef002b
+      count: 1
+    - value: deadbeef002c
+      count: 1
+    - value: deadbeef002d
+      count: 1
+    - value: deadbeef002e
+      count: 1
+    - value: deadbeef002f
+      count: 1
+    - value: deadbeef0030
+      count: 1
+    - value: deadbeef0031
+      count: 1
+    - value: deadbeef0032
+      count: 1
+    values_coverage: 1.0
+    values_coverage_method: measured
+    distribution: uniform
+    length:
+      min: 6
+      max: 6
+      avg: 6.0
+      p95: 6.0
+    sketch:
+      method: kmv_md5_lo64
+      values: CiZlluleC64PnQugJ+Ab+hEJgJvAkp1iFKX4X/0Pu2kiIXYZAJC8MyLTJwlJBqcaKYnJwF+g2ccs3hPpOuA8QDA0GmPUk+qENmGiJcxRcwE2hcL1D/ORLDhzXQo8GWsAQB2fWybmnQ9D516iS9X8o0m+TVaa3/EvTmNgC/g0oe1ci9BJoW5Hq1yqToJm9UvyXwyB+vvQGCJgTn2uKXp2dGIcK43DcroyZhNz2r2btcRmrviHAydogGq2UI0sNfX+a7iNsOxrIJ9uFsuxC/JekXUyOMiU4g+Uecj0y0vY/p2M8E175sZMy43LCRtfa+ffjuCXP/O4AAyR9DU4O1+DNZuMceHoLMhJoMFLDEJBXyCrxtluO6D+A69bnsspEPWJte09j1g9Fki4aMHhokD//rsmLPOQ01OGv8quk8jZ/a3Ie/SKvpcJAcxGjDWLeLHz0NVmAGa/G9XWGDgK3gqGFOLNdletgrEN5s1ZqUs7TufsZJ2OtqrodvGJ63Di2cad9299l7RPEG3+zjtG+cKmmg==
   tag_list:
     sql_type: text[]
     nullable: false
+    null_count: 0
+    null_rate: 0.0
+    classification: composite
+    cardinality: 5
+    cardinality_ratio: 0.1
+    cardinality_method: exact
+    empty_count: 0
+    parts:
+      '[*]':
+        sql_type: text
+        null_count: 0
+        null_rate: 0.0
+        classification: categorical
+        occurrences: 100
+        cardinality: 6
+        cardinality_ratio: 0.06
+        cardinality_method: exact
+        values:
+        - value: probe
+          count: 50
+        - value: sensor-0
+          count: 10
+        - value: sensor-1
+          count: 10
+        - value: sensor-2
+          count: 10
+        - value: sensor-3
+          count: 10
+        - value: sensor-4
+          count: 10
+        values_coverage: 1.0
+        values_coverage_method: measured
+        distribution: imbalanced
+        length:
+          min: 5
+          max: 8
+          avg: 6.5
+          p95: 8.0
+    parts_found: 1
+    size:
+      min: 2
+      max: 2
+      avg: 2.0
+      p95: 2
+  deployed_at:
+    sql_type: geometry
+    nullable: true
+    null_count: 5
+    null_rate: 0.1
+    classification: spatial
+    inferred:
+      sensitivity: geolocation
+    geometry:
+      kinds:
+      - kind: point
+        count: 39
+      - kind: polygon
+        count: 6
+      srids:
+      - srid: 4326
+        count: 45
+      dimensions:
+      - dimensions: xy
+        count: 45
+      empty_count: 1
+      invalid_count: 0
+    extent:
+      min_x: 16.601
+      min_y: 49.2
+      max_x: 16.649
+      max_y: 49.206
+  reading_embedding:
+    sql_type: vector(3)
+    nullable: true
+    null_count: 5
+    null_rate: 0.1
+    classification: vector
+    zero_count: 2
+    dimension:
+      min: 3
+      max: 3
+    norm:
+      min: 1.414214
+      max: 7.28011
+  calibration_box:
+    sql_type: box
+    nullable: true
     null_count: 0
     null_rate: 0.0
     classification: unsupported

@@ -12,17 +12,22 @@ from typing import Any, ClassVar, Literal, Self
 
 from dbprint.config import StatisticsConfig
 from dbprint.config.selectors import expand
+from dbprint.spec.parts import parent
 from dbprint.spec.sketch import SketchKind, canonical_form, low64_md5
 from .base import (
     Adapter,
     BaseStats,
     ColumnMeta,
+    ColumnParts,
     ColumnProgress,
     ColumnStats,
     CommentsMeta,
     ForeignKeyMeta,
     IndexMeta,
+    Length,
     NullPatterns,
+    PartSource,
+    PartStats,
     PhaseA,
     PhaseB,
     PhysicalLayout,
@@ -32,10 +37,24 @@ from .base import (
     TableScope,
     TableType,
     UniqueKeyMeta,
+    descend,
 )
 
 
-__all__ = ["MockAdapter", "MockTable"]
+__all__ = ["MockAdapter", "MockParts", "MockTable"]
+
+
+@dataclass(frozen=True)
+class MockParts:
+    """Every part a column holds, as a descent would find it; `failure` makes the descent raise.
+
+    The engine's own walk (`descend`) chooses among them, so a fixture states candidates, not
+    the outcome of `max_parts`.
+    """
+
+    candidates: tuple[PartStats, ...] = ()
+    size: Length | None = None
+    failure: Exception | None = None
 
 
 @dataclass(frozen=True)
@@ -75,6 +94,10 @@ class MockTable:
     # subject column -> (from, to); stated, never derived - a fixture states the window it
     # wants `compute_populated_windows` to hand back.
     populated_windows: dict[str, tuple[str, str]] = field(default_factory=dict)
+    # column -> the parts a descent into it finds; a column absent here is not descended.
+    parts: dict[str, MockParts] = field(default_factory=dict)
+    external: bool = False
+    opt_in_only: bool = False
 
 
 class MockAdapter(Adapter):
@@ -133,6 +156,8 @@ class MockAdapter(Adapter):
                 fqn=fqn,
                 type=self._fixture[fqn].type,
                 namespace_path=self._fixture[fqn].namespace_path,
+                external=self._fixture[fqn].external,
+                opt_in_only=self._fixture[fqn].opt_in_only,
             )
             for fqn in in_scope
         ]
@@ -247,6 +272,45 @@ class MockAdapter(Adapter):
                 for name, s in tbl.stats.items()
             },
         )
+
+    def profile_parts(
+        self,
+        fqn: str,
+        columns: list[ColumnMeta],
+        config: StatisticsConfig,
+        counts: TableCounts,
+        scope: TableScope | None = None,
+    ) -> dict[str, ColumnParts]:
+        """The fixture's stated parts, walked and chosen by the shared `descend` driver."""
+
+        del counts, scope
+        tbl = self._lookup(fqn)
+        out: dict[str, ColumnParts] = {}
+
+        for col in columns:
+            stated = tbl.parts.get(col.name)
+
+            if stated is None:
+                continue
+
+            if stated.failure is not None:
+                raise stated.failure
+
+            by_path = {part.path: part for part in stated.candidates}
+            out[col.name] = descend(
+                PartSource(path="", sql_type=col.sql_type, source=col.name),
+                config,
+                children=lambda node, by_path=by_path: [
+                    PartSource(path=path, sql_type=part.stats.sql_type, source=path)
+                    for path, part in by_path.items()
+                    if _parent_path(path) == node.path
+                ],
+                occurrences=lambda node, by_path=by_path: by_path[node.path].occurrences,
+                profile=lambda node, _n, by_path=by_path: by_path[node.path],
+                size=stated.size,
+            )
+
+        return out
 
     def materialize_scope(self, fqn: str, scope: TableScope) -> TableScope:
         """Mark a sampled draw materialized, with no real copy behind it.
@@ -455,3 +519,7 @@ def _without_value_list(stats: ColumnStats) -> ColumnStats:
     """
 
     return replace(stats, values=None, values_coverage=None, distribution=None)
+
+
+def _parent_path(path: str) -> str:
+    return parent(path) or ""

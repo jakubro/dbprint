@@ -11,9 +11,9 @@ import itertools
 import logging
 import time
 import traceback
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -26,6 +26,7 @@ from dbprint.adapters.base import (
     Adapter,
     BaseStats,
     ColumnMeta,
+    ColumnParts,
     ColumnProgress,
     ColumnStats,
     CommentsMeta,
@@ -38,10 +39,12 @@ from dbprint.adapters.base import (
     Inferred,
     Length,
     NullPatterns,
+    PartStats,
     PhaseA,
     PhysicalLayout,
     Populated,
     TableCounts,
+    TableMerging,
     TableMeta,
     TableScope,
     TableType,
@@ -54,7 +57,7 @@ from dbprint.adapters.identifiers import IdentifierRejected, reject_column_colli
 from dbprint.config import ConfigError, ConnectionConfig, TableSettings, selectors
 from dbprint.config.duration import format_duration_seconds
 from dbprint.spec import artifact_yaml
-from dbprint.spec.absence import SAMPLED_CLASSIFICATIONS, SAMPLE_VERDICTS, emits
+from dbprint.spec.absence import SAMPLED_CLASSIFICATIONS, block_value, emits, sample_verdicts
 from dbprint.spec.artifact_yaml import ArtifactLoader
 from dbprint.spec.classification import (
     Classification,
@@ -64,6 +67,7 @@ from dbprint.spec.classification import (
     compute_null_rate,
     has_calendar_component,
     has_day_resolution,
+    is_binary_type,
     is_candidate_key,
     is_numeric_type,
     is_string_like_type,
@@ -71,6 +75,7 @@ from dbprint.spec.classification import (
 from dbprint.spec.coverage import coverage_share, is_incoherent
 from dbprint.spec.epoch import bounds_epoch_unit, sample_epoch_unit
 from dbprint.spec.looks_like import detect_with_evidence
+from dbprint.spec.parts import KEYS, last_member, parent, pools_floats
 from dbprint.spec.redaction import (
     WITHHELD_UNDER_REDACTION,
     Primitive,
@@ -92,7 +97,12 @@ from dbprint.spec.sketch import (
     pack_sketch,
     sketch_kind,
 )
-from dbprint.spec.statistics_matrix import FORBIDDEN_FIELDS, REQUIRED_FIELDS
+from dbprint.spec.spatial import Geometry
+from dbprint.spec.statistics_matrix import (
+    FORBIDDEN_FIELDS,
+    REQUIRED_FIELDS,
+    part_forbidden_fields,
+)
 from dbprint.spec.temporal_age import freshness_classification
 from dbprint.spec.temporal_age import max_age_days as derive_max_age_days
 from dbprint.spec.v1 import FORMAT_VERSION
@@ -109,8 +119,10 @@ from .carried import (
     freshness,
     plan_carry,
     redaction_mismatches,
+    resolved_part_redaction,
     resolved_redaction,
 )
+from .catalog_only import described_without_query
 from .manifest_builder import (
     ManifestTableEntry,
     profiling_params_dict,
@@ -857,8 +869,11 @@ class Engine:
         row_count_estimate: int | None = None
 
         # Its own `try`: a catalog read that raises has to fail this table, not the run.
-        # A plain view is never queried (SPEC 2.2.15), so no size condition can govern it.
-        if read_row_counts and tbl.type != "view":
+        # A plain view has no row-count estimate, so no size condition can govern it; an external
+        # or opt-in-only object no rule opts in is never read, so its estimate would decide nothing.
+        unread = (tbl.external or tbl.opt_in_only) and not self._opts_in(tbl.fqn)
+
+        if read_row_counts and tbl.type != "view" and not unread:
             try:
                 with _operation("estimate_row_count"):
                     row_count_estimate = self._adapter.estimate_row_count(tbl.fqn)
@@ -910,7 +925,14 @@ class Engine:
         verdict = (
             None
             if force
-            else freshness(committed, settings, generated_at=generated_at, conn=self._conn)
+            else freshness(
+                committed,
+                settings,
+                generated_at=generated_at,
+                conn=self._conn,
+                external=tbl.external,
+                opt_in_only=tbl.opt_in_only,
+            )
         )
 
         if verdict is not None and verdict.fresh:
@@ -1066,9 +1088,16 @@ class Engine:
             comments = CommentsMeta(table=None, columns={})
             comments_known = False
 
-        if tbl.type == "view":
-            # No query is ever issued against a view, so its file says so (SPEC 2.2.15)
-            # rather than going unwritten; the columns above are the catalog's.
+        if described_without_query(
+            tbl.type,
+            read_rows=settings.read_rows,
+            has_columns=bool(columns),
+            external=tbl.external,
+            opt_in_only=tbl.opt_in_only,
+        ):
+            # Nothing is queried, so the file says so (SPEC 2.2.15) rather than going
+            # unwritten; the columns above are the catalog's.
+            catalog_layout = self._catalog_layout(tbl)
             view_fk_source_columns = frozenset(c for fk in relationships for c in fk.column)
             view_statistics_yaml = _serialize_catalog_only_statistics(
                 tbl.fqn,
@@ -1078,6 +1107,8 @@ class Engine:
                 view_fk_source_columns,
                 settings.statistics.enumeration_threshold,
                 depends_on,
+                external=tbl.external,
+                physical_layout=catalog_layout,
             )
 
             return _PerTableContext(
@@ -1106,9 +1137,28 @@ class Engine:
 
         fk_source_columns = frozenset(c for fk in relationships for c in fk.column)
 
+        if tbl.type == "view" and settings.sample is not None:
+            raise ValueError(
+                f"view {tbl.fqn!r}: {settings.sample_rule or 'a rule'} sets sample "
+                f"{settings.sample}, and a sampling clause binds to a table, not a view. Narrow "
+                f"the view with a filter rule instead.",
+            )
+
+        if tbl.type == "view" and self._conn.size_conditions_name(tbl.fqn):
+            _LOG.warning(
+                "view %r has no row-count estimate; rules carrying `min_rows` or a "
+                "`max_rows_scanned` ceiling do not apply to it, so it is read whole",
+                tbl.fqn,
+            )
+
         try:
             with _operation("introspect_physical_layout"):
-                physical_layout = self._adapter.introspect_physical_layout(tbl.fqn)
+                # A view declares no layout of its own (SPEC 2.2.11).
+                physical_layout = (
+                    None
+                    if tbl.type == "view"
+                    else self._adapter.introspect_physical_layout(tbl.fqn)
+                )
 
             physical_layout_known = True
         except _OperationFailed as exc:
@@ -1121,8 +1171,24 @@ class Engine:
             physical_layout_known = False
 
         try:
+            with _operation("introspect_merging"):
+                merging = self._adapter.introspect_merging(tbl.fqn)
+
+            merging_known = True
+        except _OperationFailed as exc:
+            _LOG.warning(
+                "introspect_merging failed for %r: %s",
+                tbl.fqn,
+                _one_line(exc.cause, self._conn.statement_timeout),
+            )
+            merging = None
+            merging_known = False
+
+        try:
             with _operation("introspect_unique_keys"):
-                declared_keys = self._adapter.introspect_unique_keys(tbl.fqn)
+                declared_keys = (
+                    [] if tbl.type == "view" else self._adapter.introspect_unique_keys(tbl.fqn)
+                )
         except _OperationFailed as exc:
             # `None`, not `[]`: a missing declared-key list must not read as a table with no
             # keys - `_compute_grain` below carries this into `grain.search.exhausted`.
@@ -1133,10 +1199,14 @@ class Engine:
             )
             declared_keys = None
 
-        scope = _table_scope(settings)
+        scope = _table_scope(settings, count_exactly=tbl.type == "view")
         # A sampling construct redraws per statement, so a sampled table is copied once and every
         # call reads the copy (SPEC 2.2.8 keeps `scope`); on success it is released later, not here.
         read_scope = self._materialize_scope(tbl.fqn, scope)
+
+        # A materialized copy is a plain table filled by one SELECT a session `final` never reaches.
+        if merging is not None and read_scope is not None and read_scope.materialized is not None:
+            merging = replace(merging, rows="stored")
 
         try:
             with _operation("compute_base_statistics"):
@@ -1289,6 +1359,19 @@ class Engine:
                 settings.statistics.enumeration_threshold,
             )
 
+        enriched = self._with_types(tbl.fqn, measured, enriched, read_scope)
+
+        if settings.statistics.max_parts > 0:
+            enriched = self._with_parts(
+                tbl.fqn,
+                measured,
+                enriched,
+                settings,
+                counts,
+                read_scope,
+                generated_at,
+            )
+
         _stamp_values_coverage_method(tbl.fqn, counts.rows_scanned, enriched)
         statistics_yaml = _serialize_statistics(
             tbl.fqn,
@@ -1311,11 +1394,14 @@ class Engine:
                 block
                 for block, known in (
                     ("physical_layout", physical_layout_known),
+                    ("merging", merging_known),
                     ("null_patterns", null_patterns_known),
                     ("dependencies", dependencies_known),
                 )
                 if not known
             ),
+            merging=merging,
+            external=tbl.external,
         )
 
         return _PerTableContext(
@@ -1344,6 +1430,7 @@ class Engine:
             indexes_known=indexes_known,
             comments_known=comments_known,
             physical_layout_known=physical_layout_known,
+            merging_known=merging_known,
             grain_known=declared_keys is not None and grain_probe_ok,
             unique_keys=tuple(declared_keys or ()),
         )
@@ -1497,6 +1584,259 @@ class Engine:
 
         return inference.can_be_target(inventory[fqn])
 
+    def _with_types(
+        self,
+        fqn: str,
+        columns: list[ColumnMeta],
+        enriched: dict[str, _EnrichedColumnStats],
+        scope: TableScope | None,
+    ) -> dict[str, _EnrichedColumnStats]:
+        """Count each `json` column's values by engine type name (SPEC 2.2.4).
+
+        A failed read leaves the columns without `types`, never the table unprofiled.
+        """
+
+        documents = [
+            col
+            for col in columns
+            if (column := enriched.get(col.name)) is not None and column.classification == "json"
+        ]
+
+        if not documents:
+            return enriched
+
+        try:
+            with _operation("document_types"):
+                found = self._adapter.document_types(fqn, documents, scope)
+        except _OperationFailed as exc:
+            _LOG.warning(
+                "table %r: the document type counts could not be read; `types` is omitted: %s",
+                fqn,
+                _one_line(exc.cause, self._conn.statement_timeout),
+            )
+
+            return enriched
+
+        return {
+            name: replace(column, stats=replace(column.stats, types=found[name]))
+            if name in found
+            else column
+            for name, column in enriched.items()
+        }
+
+    def _with_parts(
+        self,
+        fqn: str,
+        columns: list[ColumnMeta],
+        enriched: dict[str, _EnrichedColumnStats],
+        settings: TableSettings,
+        counts: TableCounts,
+        scope: TableScope | None,
+        generated_at: str,
+    ) -> dict[str, _EnrichedColumnStats]:
+        """Descend into each array, record, map or JSON column the adapter can (SPEC 2.2.18).
+
+        A descent is contained to its column: one that fails leaves the column as it was.
+        """
+
+        out = dict(enriched)
+
+        for col in columns:
+            column = out.get(col.name)
+
+            if column is None or column.classification not in ("unsupported", "json"):
+                continue
+
+            try:
+                with _operation("profile_parts"):
+                    found = self._adapter.profile_parts(
+                        fqn,
+                        [col],
+                        settings.statistics,
+                        counts,
+                        scope,
+                    )
+            except _OperationFailed as exc:
+                _LOG.warning(
+                    "table %r: column %r could not be descended into; its parts are not "
+                    "published: %s",
+                    fqn,
+                    col.name,
+                    _one_line(exc.cause, self._conn.statement_timeout),
+                )
+
+                continue
+
+            if col.name in found:
+                out[col.name] = self._descended(
+                    fqn,
+                    col,
+                    column,
+                    found[col.name],
+                    settings,
+                    generated_at,
+                    counts.rows_scanned,
+                )
+
+        return out
+
+    def _descended(
+        self,
+        fqn: str,
+        col: ColumnMeta,
+        column: _EnrichedColumnStats,
+        found: ColumnParts,
+        settings: TableSettings,
+        generated_at: str,
+        rows_scanned: int,
+    ) -> _EnrichedColumnStats:
+        classification = classify(
+            sql_type=col.classified_type,
+            cardinality=column.stats.cardinality,
+            has_declared_fk=False,
+            enumeration_threshold=settings.statistics.enumeration_threshold,
+            has_parts=True,
+        )
+        inferred = column.inferred
+
+        # A column first measured here never ran detection, which skips an unsupported column.
+        if classification == "composite" and inferred is None:
+            sensitivity = detect_sensitivity(col.physical_name or col.name, [], None)
+            inferred = Inferred(sensitivity=sensitivity) if sensitivity is not None else None
+
+        column_inferred = (
+            (inferred.sensitivity, inferred.looks_like) if inferred is not None else (None, None)
+        )
+        parents = {parent(part.path) for part in found.parts}
+        stats = column.stats
+
+        # An array's own shape and distinct count ride the descent, not Phase A, which declines it.
+        if classification == "composite":
+            ratio = (
+                compute_cardinality_ratio(found.cardinality, rows_scanned)
+                if found.cardinality is not None
+                else None
+            )
+            stats = replace(
+                stats,
+                cardinality=found.cardinality,
+                cardinality_ratio=ratio,
+                cardinality_method="exact" if found.cardinality is not None else None,
+                empty_count=found.empty_count,
+                norm=found.norm,
+                zero_count=found.zero_count,
+            )
+
+            if (
+                found.cardinality is not None
+                and ratio is not None
+                and (is_candidate_key(found.cardinality, ratio))
+            ):
+                inferred = replace(inferred or Inferred(), candidate_key=True)
+
+        parts = [
+            self._enriched_part(
+                fqn,
+                col,
+                part,
+                column_inferred,
+                has_parts=part.path in parents,
+                settings=settings,
+                generated_at=generated_at,
+            )
+            for part in found.parts
+        ]
+        keyed = {part.path for part in found.parts if part.keyed}
+        open_key_sets = {
+            part.path
+            for part in parts
+            if part.path.endswith(KEYS) and part.enriched.redaction is None
+        }
+
+        return replace(
+            column,
+            stats=stats,
+            classification=classification,
+            inferred=inferred,
+            parts=tuple(
+                part for part in parts if not _spells_hidden_key(part.path, keyed, open_key_sets)
+            ),
+            parts_found=found.found,
+            size=found.size,
+        )
+
+    def _enriched_part(
+        self,
+        fqn: str,
+        col: ColumnMeta,
+        part: PartStats,
+        column_inferred: tuple[str | None, str | None],
+        *,
+        has_parts: bool,
+        settings: TableSettings,
+        generated_at: str,
+    ) -> _EnrichedPart:
+        occurrences = part.occurrences
+        stats = replace(
+            part.stats,
+            null_rate=compute_null_rate(part.stats.null_count, occurrences),
+            cardinality_ratio=(
+                compute_cardinality_ratio(part.stats.cardinality, occurrences)
+                if part.stats.cardinality is not None
+                else None
+            ),
+        )
+        classification = classify(
+            sql_type=stats.sql_type,
+            cardinality=stats.cardinality,
+            has_declared_fk=False,
+            enumeration_threshold=settings.statistics.enumeration_threshold,
+            has_parts=has_parts,
+        )
+        samples = list(part.samples)
+        looks_like = None
+
+        if classification in SAMPLED_CLASSIFICATIONS and samples:
+            looks_like = detect_with_evidence(samples).pattern
+
+            if looks_like == "numeric_string" and is_numeric_type(stats.sql_type):
+                looks_like = None
+
+        sensitivity = (
+            detect_sensitivity(last_member(part.path) or col.name, samples, looks_like)
+            if classification != "unsupported"
+            else None
+        )
+        inferred = (
+            Inferred(looks_like=looks_like, sensitivity=sensitivity)
+            if looks_like is not None or sensitivity is not None
+            else None
+        )
+        freshness = (
+            _derive_freshness(stats.range.max, generated_at)
+            if classification == "temporal" and stats.range is not None
+            else None
+        )
+        if pools_floats(part.path, classification, stats.sql_type):
+            stats = replace(stats, values=None, frequencies=None, distribution=None)
+
+        enriched = _EnrichedColumnStats(
+            stats=_fill_empty_value_shape(stats, classification),
+            classification=classification,
+            inferred=inferred,
+            redaction=resolved_part_redaction(
+                self._conn,
+                f"{fqn}.{col.name}",
+                classification,
+                column_inferred,
+                (sensitivity, looks_like),
+            ),
+            freshness=freshness,
+        )
+        _stamp_values_coverage_method(fqn, occurrences, {part.path: enriched})
+
+        return _EnrichedPart(part.path, occurrences, enriched, part.size)
+
     def _detect_columns(
         self,
         fqn: str,
@@ -1601,7 +1941,10 @@ class Engine:
             # lowercased map key - a token-boundary detector reads `firstName`.
             sensitivity = None
 
-            if classification != "unsupported":
+            # A spatial value is coordinates by type, whatever the column is named (SPEC 4.4.1).
+            if classification == "spatial":
+                sensitivity = "geolocation"
+            elif classification != "unsupported":
                 try:
                     sensitivity = detect_sensitivity(
                         col.physical_name or col.name,
@@ -1892,6 +2235,30 @@ class Engine:
 
         return {name: Populated(from_=start, to=end) for name, (start, end) in windows.items()}
 
+    def _catalog_layout(self, tbl: TableMeta) -> PhysicalLayout | None:
+        # SPEC 2.2.15 lets a catalog-only file omit an unreadable layout, so a failure drops it.
+        if tbl.type == "view":
+            return None
+
+        try:
+            with _operation("introspect_physical_layout"):
+                return self._adapter.introspect_physical_layout(tbl.fqn)
+        except _OperationFailed as exc:
+            _LOG.warning(
+                "introspect_physical_layout failed for %r: %s",
+                tbl.fqn,
+                _one_line(exc.cause, self._conn.statement_timeout),
+            )
+
+            return None
+
+    def _opts_in(self, fqn: str) -> bool:
+        # A table whose rules conflict reads as opted in, so the settings read below fails it.
+        try:
+            return self._conn.settings_for(fqn).read_rows
+        except ConfigError:
+            return True
+
     def _materialize_scope(self, fqn: str, scope: TableScope | None) -> TableScope | None:
         """The scope every statistics statement reads: one copied draw, or `scope` itself.
 
@@ -1991,34 +2358,14 @@ class Engine:
 
         emitter = emitter or _ProgressEmitter(None, self._conn.name)
         pool = pool or SessionPool([self])
-        candidates: dict[str, set[str]] = {}
-
-        for ctx in per_table_meta.values():
-            for fk in ctx.relationships:
-                if len(fk.column) == 1:
-                    candidates.setdefault(ctx.fqn, set()).add(fk.column[0])
-
-                if len(fk.target_column) == 1:
-                    candidates.setdefault(fk.target_table, set()).add(fk.target_column[0])
-
-        for ctx in per_table_meta.values():
-            cols_payload = (
-                ctx.statistics_payload.get("columns")
-                if isinstance(ctx.statistics_payload, dict)
-                else None
-            )
-
-            if not isinstance(cols_payload, dict):
-                continue
-
-            widened = _widened_sketch_candidates(
-                cols_payload,
+        candidates = _join_key_candidates(
+            per_table_meta,
+            lambda cols, ctx: _widened_sketch_candidates(
+                cols,
                 ctx.unique_keys,
                 self._conn.sketch_all_columns,
-            )
-
-            if widened:
-                candidates.setdefault(ctx.fqn, set()).update(widened)
+            ),
+        )
 
         eligible: dict[str, list[tuple[str, str, SketchKind]]] = {}
 
@@ -2289,30 +2636,10 @@ class Engine:
         pass, like `_write_key_sketches`; a scoped column stays eligible, a redacted one withholds it.
         """
 
-        candidates: dict[str, set[str]] = {}
-
-        for ctx in per_table_meta.values():
-            for fk in ctx.relationships:
-                if len(fk.column) == 1:
-                    candidates.setdefault(ctx.fqn, set()).add(fk.column[0])
-
-                if len(fk.target_column) == 1:
-                    candidates.setdefault(fk.target_table, set()).add(fk.target_column[0])
-
-        for ctx in per_table_meta.values():
-            cols_payload = (
-                ctx.statistics_payload.get("columns")
-                if isinstance(ctx.statistics_payload, dict)
-                else None
-            )
-
-            if not isinstance(cols_payload, dict):
-                continue
-
-            declared = _normalized_cardinality_candidates(cols_payload, ctx.unique_keys)
-
-            if declared:
-                candidates.setdefault(ctx.fqn, set()).update(declared)
+        candidates = _join_key_candidates(
+            per_table_meta,
+            lambda cols, ctx: _normalized_cardinality_candidates(cols, ctx.unique_keys),
+        )
 
         pool = pool or SessionPool([self])
         owner = owner or {}
@@ -2468,6 +2795,19 @@ class _EnrichedColumnStats:
     physical_name: str | None = None
     collation: str | None = None
     values_coverage_method: str | None = None
+    parts: tuple[_EnrichedPart, ...] | None = None
+    parts_found: int | None = None
+    size: Length | None = None
+
+
+@dataclass
+class _EnrichedPart:
+    """One part of a column (SPEC 2.2.18), enriched the way a column is, over its occurrences."""
+
+    path: str
+    occurrences: int
+    enriched: _EnrichedColumnStats
+    size: Length | None = None
 
 
 @dataclass
@@ -2514,7 +2854,35 @@ class _PerTableContext:
     indexes_known: bool = True
     comments_known: bool = True
     physical_layout_known: bool = True
+    merging_known: bool = True
     grain_known: bool = True
+
+
+def _join_key_candidates(
+    per_table_meta: dict[str, _PerTableContext],
+    widen: Callable[[dict[str, Any], _PerTableContext], set[str]],
+) -> dict[str, set[str]]:
+    candidates: dict[str, set[str]] = {}
+
+    for ctx in per_table_meta.values():
+        for fk in ctx.relationships:
+            if len(fk.column) == 1:
+                candidates.setdefault(ctx.fqn, set()).add(fk.column[0])
+
+            if len(fk.target_column) == 1:
+                candidates.setdefault(fk.target_table, set()).add(fk.target_column[0])
+
+    for ctx in per_table_meta.values():
+        cols_payload = (
+            ctx.statistics_payload.get("columns")
+            if isinstance(ctx.statistics_payload, dict)
+            else None
+        )
+
+        if isinstance(cols_payload, dict) and (widened := widen(cols_payload, ctx)):
+            candidates.setdefault(ctx.fqn, set()).update(widened)
+
+    return candidates
 
 
 def _widened_sketch_candidates(
@@ -2956,7 +3324,14 @@ def _warn_degraded_blocks(
         if cause is None:
             continue
 
-        block = "temporal statistics" if "range" in (column.unmeasured or ()) else "top values"
+        named = column.unmeasured or ()
+        block = (
+            "temporal statistics"
+            if "range" in named
+            else "spatial statistics"
+            if "extent" in named
+            else "top values"
+        )
         reason = _one_line(cause, statement_timeout)
         _LOG.warning(
             "table %r: column %r %s %s",
@@ -3026,7 +3401,7 @@ def _with_phase_b_unread(
         obtained = {"cardinality", "cardinality_ratio", "cardinality_method", *counts_kept}
 
         if detection.sample_error is not None:
-            owed |= SAMPLE_VERDICTS
+            owed |= sample_verdicts(detection.classification)
 
         out[col.name] = _EnrichedColumnStats(
             stats=ColumnStats(
@@ -3113,12 +3488,17 @@ def _owed_fields(
 
     # The two SPEC 2.2.3 conditional cells an unredacted, uninferred column can still meet.
     if classification in ("categorical", "foreign_key_candidate") and (
-        not is_string_like_type(sql_type) or null_count >= rows_scanned
+        not (is_string_like_type(sql_type) or is_binary_type(sql_type))
+        or null_count >= rows_scanned
     ):
         owed -= {"length"}
 
     if classification == "temporal" and not has_day_resolution(sql_type):
         owed -= {"quantized_count"}
+
+    # No non-null value leaves nothing for a box or a vector's bounds to describe (SPEC 2.2.3).
+    if null_count >= rows_scanned:
+        owed -= {"extent", "dimension", "norm"}
 
     return tuple(sorted(owed))
 
@@ -3363,10 +3743,10 @@ def _timeline_unit(span_days: int | None) -> Literal["day", "week", "month"]:
     return "month"
 
 
-def _table_scope(settings: TableSettings) -> TableScope | None:
+def _table_scope(settings: TableSettings, *, count_exactly: bool = False) -> TableScope | None:
     """Row-level narrowing in force for one table, or None for a full scan."""
 
-    scope = TableScope(sample=settings.sample, filter=settings.filter)
+    scope = TableScope(sample=settings.sample, filter=settings.filter, count_exactly=count_exactly)
 
     return scope if scope.narrows else None
 
@@ -3388,6 +3768,8 @@ def _serialize_statistics(
     populated_windows: dict[str, Populated] | None = None,
     depends_on: tuple[str, ...] | None = None,
     unmeasured: tuple[str, ...] = (),
+    merging: TableMerging | None = None,
+    external: bool = False,
 ) -> str:
     columns_payload: dict[str, Any] = {}
     narrows = scope is not None and scope.narrows
@@ -3415,7 +3797,11 @@ def _serialize_statistics(
         if e.collation is not None and e.collation != default_collation:
             col_dict["collation"] = e.collation
 
-        if e.classification != "unsupported" and "cardinality" not in (e.stats.unmeasured or ()):
+        if (
+            e.classification not in ("unsupported", "spatial", "vector")
+            and e.stats.cardinality is not None
+            and "cardinality" not in (e.stats.unmeasured or ())
+        ):
             col_dict["cardinality"] = e.stats.cardinality
             col_dict["cardinality_ratio"] = e.stats.cardinality_ratio
             col_dict["cardinality_method"] = e.stats.cardinality_method
@@ -3436,6 +3822,13 @@ def _serialize_statistics(
         for field_name, value in _emitted_extras(e, salt):
             col_dict[field_name] = value
 
+        if e.parts is not None:
+            col_dict["parts"] = {part.path: _part_block(fqn, name, part, salt) for part in e.parts}
+            col_dict["parts_found"] = e.parts_found
+
+        if e.size is not None:
+            col_dict["size"] = _length_entry(e.size)
+
         apply_redaction_rule(col_dict)
         _drop_forbidden_fields(fqn, name, e.classification, col_dict)
         _mark_unmeasured(col_dict, e.stats.unmeasured, e.classification)
@@ -3451,6 +3844,9 @@ def _serialize_statistics(
         # estimate, but a table the catalog cannot size is counted instead.
         "row_count_method": counts.row_count_method,
     }
+
+    if external:
+        payload["external"] = True
 
     if narrows and scope is not None:
         block: dict[str, Any] = {"rows_scanned": counts.rows_scanned}
@@ -3479,14 +3875,20 @@ def _serialize_statistics(
 
     # Absent means "not clustered", never "not checked" - every adapter answers it.
     if physical_layout is not None:
-        payload["physical_layout"] = {
-            "mechanism": physical_layout.mechanism,
-            "keys": [
+        payload["physical_layout"] = _physical_layout_block(physical_layout)
+
+    # Absent means "no merging engine", never "not checked" (SPEC 2.2.19).
+    if merging is not None:
+        payload["merging"] = {
+            "engine": merging.engine,
+            "key": [
                 {"expression": key.expression, "column": key.column}
                 if key.column is not None
                 else {"expression": key.expression}
-                for key in physical_layout.keys
+                for key in merging.keys
             ],
+            "one_row_per_key": merging.one_row_per_key,
+            "rows": merging.rows,
         }
 
     # Declared keys are catalog-cheap, so `keys: []` states "nothing declared, nothing
@@ -3537,6 +3939,18 @@ def _serialize_statistics(
     return _dump_yaml(payload)
 
 
+def _physical_layout_block(layout: PhysicalLayout) -> dict[str, Any]:
+    return {
+        "mechanism": layout.mechanism,
+        "keys": [
+            {"expression": key.expression, "column": key.column}
+            if key.column is not None
+            else {"expression": key.expression}
+            for key in layout.keys
+        ],
+    }
+
+
 def _serialize_catalog_only_statistics(
     fqn: str,
     table_type: str,
@@ -3545,6 +3959,9 @@ def _serialize_catalog_only_statistics(
     fk_source_columns: frozenset[str],
     enumeration_threshold: int,
     depends_on: tuple[str, ...] | None = None,
+    *,
+    external: bool = False,
+    physical_layout: PhysicalLayout | None = None,
 ) -> str:
     """The statistics artifact for an object nothing was queried for (SPEC 2.2.15).
 
@@ -3574,6 +3991,9 @@ def _serialize_catalog_only_statistics(
         if col.collation is not None:
             col_dict["collation"] = col.collation
 
+        if physical_layout is not None and col.name in {k.column for k in physical_layout.keys}:
+            col_dict["physical_layout_key"] = True
+
         columns_payload[col.name] = col_dict
 
     payload: dict[str, Any] = {
@@ -3584,6 +4004,12 @@ def _serialize_catalog_only_statistics(
         "catalog_only": True,
         "grain": {"keys": []},
     }
+
+    if external:
+        payload["external"] = True
+
+    if physical_layout is not None:
+        payload["physical_layout"] = _physical_layout_block(physical_layout)
 
     # Catalog-derived, like `physical_layout` - SPEC 2.2.15 licenses either MAY still be
     # emitted here, unlike a measurement such as `dependencies`. Absent means could not ask.
@@ -3621,6 +4047,69 @@ def _drop_forbidden_fields(
             classification,
             ", ".join(dropped),
         )
+
+
+def _spells_hidden_key(path: str, keyed: set[str], open_key_sets: set[str]) -> bool:
+    """Whether `path` spells, at any step, a map key - a cell value - whose key set is withheld."""
+
+    step: str | None = path
+
+    while step is not None:
+        if step in keyed and f"{parent(step) or ''}{KEYS}" not in open_key_sets:
+            return True
+
+        step = parent(step)
+
+    return False
+
+
+def _part_block(fqn: str, column: str, part: _EnrichedPart, salt: str | None) -> dict[str, Any]:
+    """One part as SPEC 2.2.18 writes it: its column block over its occurrences, less the delta."""
+
+    e = part.enriched
+    block: dict[str, Any] = {
+        "sql_type": e.stats.sql_type,
+        "null_count": e.stats.null_count,
+        "null_rate": e.stats.null_rate,
+        "classification": e.classification,
+        "occurrences": part.occurrences,
+    }
+
+    if e.stats.cardinality is not None and "cardinality" not in (e.stats.unmeasured or ()):
+        block["cardinality"] = e.stats.cardinality
+        block["cardinality_ratio"] = e.stats.cardinality_ratio
+        block["cardinality_method"] = e.stats.cardinality_method
+
+    for field_name, value in _emitted_extras(e, salt):
+        block[field_name] = value
+
+    if part.size is not None:
+        block["size"] = _length_entry(part.size)
+
+    apply_redaction_rule(block)
+    dropped = sorted(f for f in block if f in part_forbidden_fields(e.classification))
+
+    for field_name in dropped:
+        del block[field_name]
+
+    if dropped:
+        _LOG.warning(
+            "table %r, column %r, part %r: classification %r forbids %s; suppressed on the way "
+            "to the file",
+            fqn,
+            column,
+            part.path,
+            e.classification,
+            ", ".join(dropped),
+        )
+
+    _mark_unmeasured(block, e.stats.unmeasured, e.classification)
+
+    return block
+
+
+def _length_entry(length: Length) -> dict[str, Any]:
+    return {"min": length.min, "max": length.max, "avg": length.avg, "p95": length.p95}
 
 
 def _emitted_extras(e: _EnrichedColumnStats, salt: str | None = None):
@@ -3746,8 +4235,40 @@ def _emitted_extras(e: _EnrichedColumnStats, salt: str | None = None):
             },
         )
 
+    if s.geometry is not None:
+        yield "geometry", _geometry_entry(s.geometry)
+
+    if s.extent is not None:
+        yield "extent", asdict(s.extent)
+
+    if s.dimension is not None:
+        yield "dimension", {"min": s.dimension[0], "max": s.dimension[1]}
+
+    if s.norm is not None:
+        yield "norm", {"min": s.norm[0], "max": s.norm[1]}
+
+    if s.types is not None:
+        yield "types", dict(sorted(s.types, key=lambda kind: (-kind[1], kind[0])))
+
     if s.unrepresentable:
         yield "unrepresentable", list(s.unrepresentable)
+
+
+def _geometry_entry(geometry: Geometry) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "kinds": [{"kind": kind, "count": count} for kind, count in geometry.kinds],
+    }
+
+    if geometry.srids is not None:
+        entry["srids"] = [{"srid": srid, "count": count} for srid, count in geometry.srids]
+
+    entry["dimensions"] = [{"dimensions": d, "count": count} for d, count in geometry.dimensions]
+    entry["empty_count"] = geometry.empty_count
+
+    if geometry.invalid_count is not None:
+        entry["invalid_count"] = geometry.invalid_count
+
+    return entry
 
 
 def _apply_redaction_rule_to(payload: dict[str, Any]) -> None:
@@ -3771,8 +4292,7 @@ def _mark_unmeasured(
         return
 
     owed = set(names) & (
-        REQUIRED_FIELDS.get(classification, frozenset())
-        | (SAMPLE_VERDICTS if classification in SAMPLED_CLASSIFICATIONS else frozenset())
+        REQUIRED_FIELDS.get(classification, frozenset()) | sample_verdicts(classification)
     )
 
     if is_redacted(col_dict):
@@ -4163,7 +4683,7 @@ def _entry_from_context(
         statistics_params=_statistics_override(conn, fqn, ctx.row_count_estimate),
         max_rows_scanned=(
             None
-            if ctx.type == "view"
+            if ctx.type == "view" or block_value(ctx.statistics_payload, "catalog_only") is True
             else conn.settings_for(fqn, ctx.row_count_estimate).max_rows_scanned
         ),
     )
@@ -4327,7 +4847,7 @@ def _incoming_from_carried(
                     referencer_column=tuple(entry["column"]),
                     on_delete=entry.get("on_delete"),
                     on_update=entry.get("on_update"),
-                    detection=entry.get("detection") or "inferred",
+                    detection=relationship_graph.edge_detection(entry),
                     constraint_name=entry.get("constraint_name"),
                 )
             except (KeyError, TypeError):
@@ -4424,7 +4944,7 @@ def _serialize_carried_relationships(
 def _edge_fields(entry: Mapping[str, Any]) -> dict[str, Any]:
     """A refers_to entry's own fields, `observed` dropped, in the order a producer writes them."""
 
-    detection = str(entry.get("detection") or "inferred")
+    detection = relationship_graph.edge_detection(entry)
 
     return _without_none(
         {
@@ -4668,6 +5188,7 @@ def _table_state_from_context(
     if ctx.statistics_payload:
         # The flags gate this run's write; the artifact's marker is what a later diff reads back.
         table_unmeasured = set(ctx.statistics_payload.get("unmeasured") or [])
+        state.external = ctx.statistics_payload.get("external") is True
 
         if ctx.grain_known:
             state.grain = diff_module.grain_from_block(ctx.statistics_payload.get("grain"))
@@ -4676,6 +5197,9 @@ def _table_state_from_context(
             state.physical_layout = diff_module.physical_layout_from_block(
                 ctx.statistics_payload.get("physical_layout"),
             )
+
+        if ctx.merging_known and "merging" not in table_unmeasured:
+            state.merging = diff_module.merging_from_block(ctx.statistics_payload.get("merging"))
 
         depends_on = ctx.statistics_payload.get("depends_on")
         state.depends_on = tuple(depends_on) if isinstance(depends_on, list) else None

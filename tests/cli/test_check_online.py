@@ -12,12 +12,11 @@ from unittest.mock import patch
 
 import pytest
 import yaml
-from click.testing import CliRunner
+from click.testing import CliRunner, Result
 
 from dbprint.adapters import (
     ColumnMeta,
     ColumnStats,
-    CommentsMeta,
     Inferred,
     Length,
     MockAdapter,
@@ -28,6 +27,13 @@ from dbprint.adapters import (
 )
 from dbprint.cli import run_log
 from dbprint.cli.main import main
+from tests._prints import (
+    SHAPE_PROBE_COLUMNS,
+    VAULT_COLUMNS,
+    exact_stats,
+    mock_table,
+    unmeasured_stats,
+)
 
 
 PROJECT_BASE = """\
@@ -214,96 +220,32 @@ def _fixture() -> dict[str, MockTable]:
     """
 
     return {
-        "fixture.shape_probe": MockTable(
-            type="table",
-            namespace_path=("fixture", "shape_probe"),
-            ddl=(
-                "CREATE TABLE fixture.shape_probe (\n"
-                "    probe_id integer NOT NULL,\n"
-                "    logger_ipv4 character varying(45) NOT NULL,\n"
-                "    json_text text NOT NULL,\n"
-                "    payload_bytes bytea,\n"
-                "    tag_list text[] NOT NULL\n"
-                ");\n"
-            ),
-            columns=[
-                ColumnMeta(
-                    name="probe_id",
-                    sql_type="integer",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-                ColumnMeta(
-                    name="logger_ipv4",
-                    sql_type="character varying(45)",
-                    nullable=False,
-                    default=None,
-                    ordinal=2,
-                ),
-                ColumnMeta(
-                    name="json_text",
-                    sql_type="text",
-                    nullable=False,
-                    default=None,
-                    ordinal=3,
-                ),
-                ColumnMeta(
-                    name="payload_bytes",
-                    sql_type="bytea",
-                    nullable=True,
-                    default=None,
-                    ordinal=4,
-                ),
-                ColumnMeta(
-                    name="tag_list",
-                    sql_type="text[]",
-                    nullable=False,
-                    default=None,
-                    ordinal=5,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            # Matches `_seed_clean_print`'s committed `id`, so a live run drifts on
-            # nothing (SPEC 3.2: a cardinality-3 integer classifies categorical).
-            unique_keys=[UniqueKeyMeta(columns=("probe_id",), primary=True)],
-            stats={
-                "probe_id": ColumnStats(
-                    sql_type="integer",
-                    nullable=False,
-                    null_count=0,
-                    null_rate=0.0,
-                    cardinality=3,
-                    cardinality_ratio=1.0,
-                    cardinality_method="exact",
+        "fixture.shape_probe": mock_table(
+            "fixture.shape_probe",
+            SHAPE_PROBE_COLUMNS,
+            {
+                "probe_id": exact_stats(
+                    "integer",
+                    3,
+                    1.0,
                     values=tuple(ValueCount(value=i, count=1) for i in range(1, 4)),
                     values_coverage=1.0,
                     distribution="uniform",
                     inferred=Inferred(candidate_key=True),
                 ),
-                "logger_ipv4": ColumnStats(
-                    sql_type="character varying(45)",
-                    nullable=False,
-                    null_count=0,
-                    null_rate=0.0,
-                    cardinality=1,
-                    cardinality_ratio=0.333333,
-                    cardinality_method="exact",
+                "logger_ipv4": exact_stats(
+                    "character varying(45)",
+                    1,
+                    0.333333,
                     values=(ValueCount(value="10.0.0.1", count=3),),
                     values_coverage=1.0,
                     distribution="dominant_value",
                     length=Length(min=8, max=8, avg=8.0, p95=8.0),
                 ),
-                "json_text": ColumnStats(
-                    sql_type="text",
-                    nullable=False,
-                    null_count=0,
-                    null_rate=0.0,
-                    cardinality=3,
-                    cardinality_ratio=1.0,
-                    cardinality_method="exact",
+                "json_text": exact_stats(
+                    "text",
+                    3,
+                    1.0,
                     values=tuple(
                         ValueCount(value=f'{{"reading": {i}.0}}', count=1) for i in range(1, 4)
                     ),
@@ -312,25 +254,12 @@ def _fixture() -> dict[str, MockTable]:
                     inferred=Inferred(candidate_key=True),
                     length=Length(min=16, max=16, avg=16.0, p95=16.0),
                 ),
-                "payload_bytes": ColumnStats(
-                    sql_type="bytea",
-                    nullable=True,
-                    null_count=0,
-                    null_rate=0.0,
-                    cardinality=None,
-                    cardinality_ratio=None,
-                    cardinality_method=None,
-                ),
-                "tag_list": ColumnStats(
-                    sql_type="text[]",
-                    nullable=False,
-                    null_count=0,
-                    null_rate=0.0,
-                    cardinality=None,
-                    cardinality_ratio=None,
-                    cardinality_method=None,
-                ),
+                "payload_bytes": unmeasured_stats("bytea", nullable=True),
+                "tag_list": unmeasured_stats("text[]"),
             },
+            # Matches `_seed_clean_print`'s committed `id`, so a live run drifts on
+            # nothing (SPEC 3.2: a cardinality-3 integer classifies categorical).
+            unique_keys=[UniqueKeyMeta(columns=("probe_id",), primary=True)],
             samples={"probe_id": [1, 2, 3]},
             row_count=3,
         ),
@@ -353,6 +282,14 @@ def _credential_env() -> dict[str, str]:
         "DBPRINT_PRIMARY_USER": "u",
         "DBPRINT_PRIMARY_PASSWORD": "p",
     }
+
+
+def _invoke_online(monkeypatch: pytest.MonkeyPatch, adapter: type, *args: str) -> Result:
+    for k, v in _credential_env().items():
+        monkeypatch.setenv(k, v)
+
+    with patch.dict("dbprint.cli.adapter_registry.ADAPTERS", {"postgres": adapter}, clear=True):
+        return CliRunner().invoke(main, ["check", "--online", *args])
 
 
 def _patch_registry():
@@ -792,17 +729,8 @@ class TestDriftVocabulary:
         (tmp_path / ".dbprint.yaml").write_text(_project_with_assertions(""))
         _seed_clean_print(tmp_path, committed_print)
         monkeypatch.chdir(tmp_path)
-
-        for k, v in _credential_env().items():
-            monkeypatch.setenv(k, v)
-
-        with patch.dict(
-            "dbprint.cli.adapter_registry.ADAPTERS",
-            {"postgres": _ExtraColumnAdapter},
-            clear=True,
-        ):
-            json_result = CliRunner().invoke(main, ["check", "--online", "--format", "json"])
-            human_result = CliRunner().invoke(main, ["check", "--online"])
+        json_result = _invoke_online(monkeypatch, _ExtraColumnAdapter, "--format", "json")
+        human_result = _invoke_online(monkeypatch, _ExtraColumnAdapter)
 
         assert json_result.exit_code == 3
         data = json.loads(json_result.stdout)
@@ -821,17 +749,8 @@ class TestDriftVocabulary:
         (tmp_path / ".dbprint.yaml").write_text(_project_with_assertions(""))
         _seed_print_with_cardinality(tmp_path, committed_print, cardinality=2)
         monkeypatch.chdir(tmp_path)
-
-        for k, v in _credential_env().items():
-            monkeypatch.setenv(k, v)
-
-        with patch.dict(
-            "dbprint.cli.adapter_registry.ADAPTERS",
-            {"postgres": _ExtraColumnAdapter},
-            clear=True,
-        ):
-            json_result = CliRunner().invoke(main, ["check", "--online", "--format", "json"])
-            human_result = CliRunner().invoke(main, ["check", "--online"])
+        json_result = _invoke_online(monkeypatch, _ExtraColumnAdapter, "--format", "json")
+        human_result = _invoke_online(monkeypatch, _ExtraColumnAdapter)
 
         assert json_result.exit_code == 3
         data = json.loads(json_result.stdout)
@@ -1237,144 +1156,45 @@ class TestARefusedTableDoesNotCostTheConnectionItsOnlinePhase:
 def _vault_table() -> MockTable:
     """`seedbank.vault` - the print's real 6-column storage-site table."""
 
-    return MockTable(
-        type="table",
-        namespace_path=("seedbank", "vault"),
-        ddl=(
-            "CREATE TABLE seedbank.vault (\n"
-            "    vault_id integer NOT NULL,\n"
-            "    shelf_code character varying(8) NOT NULL,\n"
-            "    site_name character varying(80) NOT NULL,\n"
-            "    target_temperature_c numeric(4,1) NOT NULL,\n"
-            "    opens_at time without time zone NOT NULL,\n"
-            "    closes_at time without time zone NOT NULL\n"
-            ");\n"
-        ),
-        columns=[
-            ColumnMeta(
-                name="vault_id",
-                sql_type="integer",
-                nullable=False,
-                default=None,
-                ordinal=1,
-            ),
-            ColumnMeta(
-                name="shelf_code",
-                sql_type="character varying(8)",
-                nullable=False,
-                default=None,
-                ordinal=2,
-            ),
-            ColumnMeta(
-                name="site_name",
-                sql_type="character varying(80)",
-                nullable=False,
-                default=None,
-                ordinal=3,
-            ),
-            ColumnMeta(
-                name="target_temperature_c",
-                sql_type="numeric(4,1)",
-                nullable=False,
-                default=None,
-                ordinal=4,
-            ),
-            ColumnMeta(
-                name="opens_at",
-                sql_type="time without time zone",
-                nullable=False,
-                default=None,
-                ordinal=5,
-            ),
-            ColumnMeta(
-                name="closes_at",
-                sql_type="time without time zone",
-                nullable=False,
-                default=None,
-                ordinal=6,
-            ),
-        ],
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        unique_keys=[UniqueKeyMeta(columns=("vault_id",), primary=True)],
-        stats={
-            "vault_id": ColumnStats(
-                sql_type="integer",
-                nullable=False,
-                null_count=0,
-                null_rate=0.0,
-                cardinality=3,
-                cardinality_ratio=1.0,
-                cardinality_method="exact",
+    def single(sql_type: str, value: Any, **fields: Any) -> ColumnStats:
+        return exact_stats(
+            sql_type,
+            1,
+            0.333333,
+            values=(ValueCount(value=value, count=3),),
+            values_coverage=1.0,
+            distribution="dominant_value",
+            **fields,
+        )
+
+    return mock_table(
+        "seedbank.vault",
+        VAULT_COLUMNS,
+        {
+            "vault_id": exact_stats(
+                "integer",
+                3,
+                1.0,
                 values=tuple(ValueCount(value=i, count=1) for i in range(1, 4)),
                 values_coverage=1.0,
                 distribution="uniform",
                 inferred=Inferred(candidate_key=True),
             ),
-            "shelf_code": ColumnStats(
-                sql_type="character varying(8)",
-                nullable=False,
-                null_count=0,
-                null_rate=0.0,
-                cardinality=1,
-                cardinality_ratio=0.333333,
-                cardinality_method="exact",
-                values=(ValueCount(value="A", count=3),),
-                values_coverage=1.0,
-                distribution="dominant_value",
+            "shelf_code": single(
+                "character varying(8)",
+                "A",
                 length=Length(min=1, max=1, avg=1.0, p95=1.0),
             ),
-            "site_name": ColumnStats(
-                sql_type="character varying(80)",
-                nullable=False,
-                null_count=0,
-                null_rate=0.0,
-                cardinality=1,
-                cardinality_ratio=0.333333,
-                cardinality_method="exact",
-                values=(ValueCount(value="Example Vault", count=3),),
-                values_coverage=1.0,
-                distribution="dominant_value",
+            "site_name": single(
+                "character varying(80)",
+                "Example Vault",
                 length=Length(min=13, max=13, avg=13.0, p95=13.0),
             ),
-            "target_temperature_c": ColumnStats(
-                sql_type="numeric(4,1)",
-                nullable=False,
-                null_count=0,
-                null_rate=0.0,
-                cardinality=1,
-                cardinality_ratio=0.333333,
-                cardinality_method="exact",
-                values=(ValueCount(value=-20.0, count=3),),
-                values_coverage=1.0,
-                distribution="dominant_value",
-            ),
-            "opens_at": ColumnStats(
-                sql_type="time without time zone",
-                nullable=False,
-                null_count=0,
-                null_rate=0.0,
-                cardinality=1,
-                cardinality_ratio=0.333333,
-                cardinality_method="exact",
-                values=(ValueCount(value="07:30:00", count=3),),
-                values_coverage=1.0,
-                distribution="dominant_value",
-            ),
-            "closes_at": ColumnStats(
-                sql_type="time without time zone",
-                nullable=False,
-                null_count=0,
-                null_rate=0.0,
-                cardinality=1,
-                cardinality_ratio=0.333333,
-                cardinality_method="exact",
-                values=(ValueCount(value="17:00:00", count=3),),
-                values_coverage=1.0,
-                distribution="dominant_value",
-            ),
+            "target_temperature_c": single("numeric(4,1)", -20.0),
+            "opens_at": single("time without time zone", "07:30:00"),
+            "closes_at": single("time without time zone", "17:00:00"),
         },
+        unique_keys=[UniqueKeyMeta(columns=("vault_id",), primary=True)],
         samples={"vault_id": [1, 2, 3]},
         row_count=3,
     )
@@ -1616,16 +1436,7 @@ class TestAPartialOnlineScanIsReported:
         )
         _seed_two_table_print(tmp_path, committed_print)
         monkeypatch.chdir(tmp_path)
-
-        for k, v in _credential_env().items():
-            monkeypatch.setenv(k, v)
-
-        with patch.dict(
-            "dbprint.cli.adapter_registry.ADAPTERS",
-            {"postgres": _PartiallyFailingAdapter},
-            clear=True,
-        ):
-            result = CliRunner().invoke(main, ["check", "--online", "--format", "json"])
+        result = _invoke_online(monkeypatch, _PartiallyFailingAdapter, "--format", "json")
 
         payload = json.loads(result.stdout)[0]
         codes = [
@@ -1645,16 +1456,7 @@ class TestAPartialOnlineScanIsReported:
         (tmp_path / ".dbprint.yaml").write_text(_project_with_assertions(""))
         _seed_two_table_print(tmp_path, committed_print)
         monkeypatch.chdir(tmp_path)
-
-        for k, v in _credential_env().items():
-            monkeypatch.setenv(k, v)
-
-        with patch.dict(
-            "dbprint.cli.adapter_registry.ADAPTERS",
-            {"postgres": _TwoTableAdapter},
-            clear=True,
-        ):
-            result = CliRunner().invoke(main, ["check", "--online", "--format", "json"])
+        result = _invoke_online(monkeypatch, _TwoTableAdapter, "--format", "json")
 
         assert result.exit_code == 0
         assert json.loads(result.stdout)[0]["not_run"] == []
@@ -1679,16 +1481,7 @@ class TestAPartialOnlineScanIsReported:
         )
         _seed_two_table_print(tmp_path, committed_print)
         monkeypatch.chdir(tmp_path)
-
-        for k, v in _credential_env().items():
-            monkeypatch.setenv(k, v)
-
-        with patch.dict(
-            "dbprint.cli.adapter_registry.ADAPTERS",
-            {"postgres": _PartiallyFailingAdapter},
-            clear=True,
-        ):
-            result = CliRunner().invoke(main, ["check", "--online", "--format", "json"])
+        result = _invoke_online(monkeypatch, _PartiallyFailingAdapter, "--format", "json")
 
         payload = json.loads(result.stdout)[0]
         codes = [i["code"] for i in payload["assertion_issues"]]

@@ -4,9 +4,9 @@ credentials dict; `cursor_factory` lets tests substitute a substrate-appropriate
 
 from __future__ import annotations
 
-import copy
-from typing import Any, ClassVar, Literal, Self
+from typing import Any, ClassVar
 
+from . import connection as connection_module
 from . import ddl as ddl_module
 from . import introspect as introspect_module
 from . import looks_like as looks_like_module
@@ -18,35 +18,32 @@ from .connection import (
     BigqueryConnectionError,
     Connection,
     ConnectionParams,
-    CursorFactory,
     DatasetLister,
     default_dataset_lister,
-    exec_query,
 )
 from ..base import (
-    Adapter,
-    BaseStats,
     ColumnMeta,
-    ColumnProgress,
     CommentsMeta,
     ForeignKeyMeta,
     IndexMeta,
-    NullPatterns,
     PhaseA,
-    PhaseB,
     PhysicalLayout,
     SketchKind,
     SkippedNamespace,
+    SqlAdapter,
     StatisticsConfig,
     TableCounts,
     TableMeta,
     TableScope,
     UniqueKeyMeta,
 )
-from ..identifiers import Identity, IdentityRegistry
+from ..dialect import Dialect
+from ..driver import CursorFactory
+from ..errors import QueryFailed
+from ..identifiers import IdentityRegistry
 
 
-class BigqueryAdapter(Adapter):
+class BigqueryAdapter(SqlAdapter):
     """Concrete Adapter for Google BigQuery backed by google-cloud-bigquery.
 
     BigQuery is case-sensitive while dbprint addresses objects by lowercased paths, so the adapter
@@ -64,10 +61,20 @@ class BigqueryAdapter(Adapter):
     # every other adapter's - it carries its own expiration instead (bigquery/stats.py).
     MATERIALIZED_SCOPE_SESSION_SCOPED: ClassVar[bool] = False
 
+    DIALECT: ClassVar[Dialect] = DIALECT
+    _driver = connection_module
+    _introspect = introspect_module
+    _ddl = ddl_module
+    _stats = stats_module
+    _looks_like = looks_like_module
+    _sketch = sketch_module
+    _normalization = normalization_module
+    _not_connected = BigqueryConnectionError
+
     def __init__(
         self,
         credentials: dict[str, str],
-        cursor_factory: CursorFactory | None = None,
+        cursor_factory: CursorFactory[ConnectionParams] | None = None,
         *,
         statement_timeout: int | None = None,
         dataset_lister: DatasetLister | None = None,
@@ -83,18 +90,7 @@ class BigqueryAdapter(Adapter):
         self._dataset_lister = dataset_lister or default_dataset_lister
         self._identities = IdentityRegistry(DIALECT)
         self._skipped: tuple[SkippedNamespace, ...] = ()
-
-    def connect(self) -> None:
-        self._connection.open()
-
-    def close(self) -> None:
-        self._connection.close()
-
-    def new_session(self) -> Self:
-        session = copy.copy(self)
-        session._connection = self._connection.sibling()
-
-        return session
+        self._external: frozenset[str] = frozenset()
 
     def list_tables(self, include: list[str], exclude: list[str]) -> list[TableMeta]:
         datasets = (
@@ -111,6 +107,7 @@ class BigqueryAdapter(Adapter):
         )
         self._ddl_cache.update({fqn: ddl_module.normalize(ddl) for fqn, ddl in ddl_by_fqn.items()})
         self._identities.register(selected)
+        self._external = frozenset(meta.fqn for meta, _ in selected if meta.external)
 
         return [meta for meta, _ in selected]
 
@@ -158,18 +155,22 @@ class BigqueryAdapter(Adapter):
             self._identity(fqn),
         )
 
-    def introspect_view_dependencies(self) -> dict[str, tuple[str, ...]] | None:
-        return introspect_module.view_dependencies(self._cursor)
-
     def extract_comments(self, fqn: str) -> CommentsMeta:
         return introspect_module.comments(self._cursor, self._params.project, self._identity(fqn))
 
     def estimate_row_count(self, fqn: str) -> int | None:
-        return introspect_module.estimate_row_count(
-            self._cursor,
-            self._params.project,
-            self._identity(fqn),
-        )
+        try:
+            return introspect_module.estimate_row_count(
+                self._cursor,
+                self._params.project,
+                self._identity(fqn),
+            )
+        except QueryFailed as exc:
+            # BigQuery keeps no storage statistics for an external table, so a refusal is no estimate.
+            if fqn not in self._external or exc.timed_out:
+                raise
+
+            return None
 
     def compute_base_statistics(
         self,
@@ -187,133 +188,6 @@ class BigqueryAdapter(Adapter):
             columns,
             scope,
         )
-
-    def compute_column_statistics(
-        self,
-        fqn: str,
-        columns: list[ColumnMeta],
-        config: StatisticsConfig,
-        counts: TableCounts,
-        base: dict[str, BaseStats],
-        fk_source_columns: frozenset[str],
-        *,
-        suppress_values: frozenset[str] = frozenset(),
-        on_column: ColumnProgress | None = None,
-        scope: TableScope | None = None,
-    ) -> PhaseB:
-        return stats_module.compute_columns(
-            self._cursor,
-            self._identity(fqn),
-            columns,
-            config,
-            counts,
-            base,
-            fk_source_columns,
-            suppress_values,
-            on_column,
-            scope,
-        )
-
-    def compute_null_patterns(
-        self,
-        fqn: str,
-        columns: list[ColumnMeta],
-        config: StatisticsConfig,
-        counts: TableCounts,
-        base: dict[str, BaseStats],
-        scope: TableScope | None = None,
-    ) -> NullPatterns | None:
-        return stats_module.compute_null_patterns(
-            self._cursor,
-            self._identity(fqn),
-            columns,
-            config,
-            counts,
-            base,
-            scope,
-        )
-
-    def probe_grain(
-        self,
-        fqn: str,
-        columns: list[ColumnMeta],
-        counts: TableCounts,
-        candidates: tuple[tuple[str, str], ...],
-        scope: TableScope | None = None,
-    ) -> tuple[tuple[str, str], ...]:
-        return stats_module.probe_grain(
-            self._cursor,
-            self._identity(fqn),
-            columns,
-            counts,
-            candidates,
-            scope,
-        )
-
-    def probe_timeline(
-        self,
-        fqn: str,
-        columns: list[ColumnMeta],
-        counts: TableCounts,
-        column: str,
-        unit: Literal["day", "week", "month"],
-        scope: TableScope | None = None,
-    ) -> tuple[tuple[str, int], ...]:
-        return stats_module.probe_timeline(
-            self._cursor,
-            self._identity(fqn),
-            columns,
-            counts,
-            column,
-            unit,
-            scope,
-        )
-
-    def compute_populated_windows(
-        self,
-        fqn: str,
-        columns: list[ColumnMeta],
-        counts: TableCounts,
-        anchor_column: str,
-        subject_columns: tuple[str, ...],
-        scope: TableScope | None = None,
-    ) -> dict[str, tuple[str, str]]:
-        return stats_module.compute_populated_windows(
-            self._cursor,
-            self._identity(fqn),
-            columns,
-            counts,
-            anchor_column,
-            subject_columns,
-            scope,
-        )
-
-    def probe_dependencies(
-        self,
-        fqn: str,
-        columns: list[ColumnMeta],
-        counts: TableCounts,
-        base: dict[str, BaseStats],
-        candidates: tuple[tuple[str, str], ...],
-        scope: TableScope | None = None,
-    ) -> dict[tuple[str, str], float]:
-        return stats_module.probe_dependencies(
-            self._cursor,
-            self._identity(fqn),
-            columns,
-            counts,
-            base,
-            candidates,
-            scope,
-        )
-
-    def materialize_scope(self, fqn: str, scope: TableScope) -> TableScope:
-        return stats_module.materialize(self._cursor, self._identity(fqn), scope)
-
-    def release_scope(self, fqn: str, scope: TableScope) -> None:
-        del fqn
-
-        stats_module.release(self._cursor, scope)
 
     def sample_values(
         self,
@@ -341,44 +215,8 @@ class BigqueryAdapter(Adapter):
         kind: SketchKind,
         k: int,
     ) -> tuple[int, ...]:
-        return sketch_module.compute_key_sketch(
-            self._cursor,
-            self._identity(fqn),
-            column,
-            sql_type,
-            kind,
-            k,
-        )
+        """`h` is a signed INT64 over the full unsigned pattern, so `(h < 0), h` sorts it unsigned."""
 
-    def compute_normalized_cardinality(
-        self,
-        fqn: str,
-        column: str,
-        scope: TableScope | None = None,
-    ) -> int:
-        return normalization_module.compute_normalized_cardinality(
-            self._cursor,
-            self._identity(fqn),
-            column,
-            scope,
-        )
+        hashes = self._key_sketch(fqn, column, sql_type, kind, k, order="(h < 0), h")
 
-    def execute_query(self, sql: str) -> list[tuple[Any, ...]]:
-        """Run user-authored SQL and return all rows; SQL assertion path (ASSERTIONS.md 3) -
-        read-only is the operator's own IAM role, not enforced here (ASSERTIONS.md 3.4).
-        """
-
-        cursor = exec_query(self._cursor, sql)
-        rows = cursor.fetchall()
-
-        return [tuple(row) for row in rows]
-
-    def _identity(self, fqn: str) -> Identity:
-        return self._identities[fqn]
-
-    @property
-    def _cursor(self) -> Any:
-        if not self._connection.is_open():
-            raise BigqueryConnectionError("adapter is not connected; call connect() first")
-
-        return self._connection.cursor
+        return tuple(sketch_module.unsigned(h) for h in hashes)

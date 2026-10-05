@@ -17,17 +17,15 @@ import yaml
 
 from dbprint.adapters import (
     ColumnMeta,
-    ColumnStats,
-    CommentsMeta,
     MockAdapter,
     MockTable,
     StatisticsConfig,
     TableScope,
-    ValueCount,
 )
 from dbprint.adapters.base import BaseStats, ColumnProgress, PhaseA, PhaseB, TableCounts
 from dbprint.config import ConnectionConfig, RuleConfig
 from dbprint.engine import Engine
+from tests._prints import quarter_scanned_table
 
 
 COPY = "dbprint_sample_test"
@@ -229,41 +227,4 @@ def _run(
 
 
 def _fixture() -> dict[str, MockTable]:
-    """A thousand-row table whose statistics were measured over a quarter of it."""
-
-    return {
-        "public.t": MockTable(
-            type="table",
-            namespace_path=("public", "t"),
-            ddl="CREATE TABLE public.t (bucket integer);\n",
-            columns=[
-                ColumnMeta(
-                    name="bucket",
-                    sql_type="integer",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
-                "bucket": ColumnStats(
-                    sql_type="integer",
-                    nullable=False,
-                    null_count=0,
-                    null_rate=0.0,
-                    cardinality=10,
-                    cardinality_ratio=0.04,
-                    cardinality_method="exact",
-                    values=tuple(ValueCount(value=str(i), count=25) for i in range(10)),
-                    values_coverage=1.0,
-                    distribution="uniform",
-                ),
-            },
-            samples={"bucket": ["1", "2", "3"]},
-            row_count=1000,
-            rows_scanned=250,
-        ),
-    }
+    return {"public.t": quarter_scanned_table(samples={"bucket": ["1", "2", "3"]})}

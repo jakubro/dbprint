@@ -8,7 +8,9 @@ writing, and the `relationships.broken-reciprocity` conformance check.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from dbprint.adapters.base import FkAction, ForeignKeyMeta
 
@@ -26,6 +28,12 @@ class IncomingFk:
     on_update: FkAction | None
     detection: str
     constraint_name: str | None
+
+
+def edge_detection(entry: Mapping[str, Any]) -> str:
+    """An edge's `detection`; absent reads `inferred`, the weaker claim (SPEC 2.3.2)."""
+
+    return entry.get("detection") or "inferred"
 
 
 def resolve(

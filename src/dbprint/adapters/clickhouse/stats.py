@@ -4,6 +4,7 @@ internally and both MUST converge; native one-pass aggregates keep each phase on
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import replace
 from functools import partial
@@ -12,54 +13,65 @@ from typing import Any, Literal
 from dbprint.config import StatisticsConfig
 from dbprint.spec.classification import (
     base_type,
-    classify,
-    compute_cardinality_ratio,
-    compute_null_rate,
+    element_type,
+    is_nullable_type,
     is_numeric_type,
-    is_string_like_type,
+    stored_type,
 )
-from dbprint.spec.coverage import coverage_share, enumeration_limit
-from dbprint.spec.distribution import classify as classify_distribution
 from dbprint.spec.distribution import summarize as summarize_frequencies
-from dbprint.spec.percentiles import coherent_percentiles
 from dbprint.spec.rounding import (
-    UnrepresentableValue,
-    measured_text,
     measured_value,
     round_statistic,
 )
-from dbprint.spec.temporal_range import is_representable
+from dbprint.spec.spatial import Extent, Geometry
 from .connection import DIALECT, Cursor, exec_query
 from .introspect import estimate_row_count
 from .rendering import render_domain, render_text, stores_below_microsecond, temporal_shape
+from .. import statements
 from ..base import (
+    ArrayReads,
     BaseStats,
     CardinalityMethod,
     ColumnMeta,
     ColumnProgress,
+    ColumnReads,
     ColumnStats,
     Distribution,
+    DocumentReads,
     Frequencies,
-    Length,
+    Member,
     NullPatterns,
+    NumericBlock,
+    PartSource,
     PhaseA,
     PhaseB,
     Range,
+    RecordReads,
     RowCountMethod,
     TableCounts,
     TableScope,
+    TopN,
     ValueCount,
-    has_measurable_nulls,
+    ValueList,
+    VectorReading,
+    declared_maps,
+    declared_members,
+    empty_base_stats,
+    is_string_like,
+    key_literal,
     materialized_name,
-    null_flags,
-    null_patterns_from_rows,
-    order_values,
+    measure_columns,
+    numeric_block_from_row,
+    phase_a_cost,
+    profile_over,
     run_phase_a,
-    run_phase_b,
-    temporal_block_unmeasured,
+    unrepresentable_fields,
+    value_list_from_rows,
+    whole_temporal_block,
 )
-from ..identifiers import SOURCE_ALIAS, Identity, quote, source_column
-from ..sql_layout import derived, indented, select_from
+from ..identifiers import SOURCE_ALIAS, Identity, quote, source_column, string_literal
+from ..sql_layout import call, derived, indented, select_from
+from ..statements import column_alias
 
 
 APPROXIMATE_THRESHOLD = 1_000_000
@@ -73,15 +85,8 @@ _UNSUPPORTED_TYPES = (
     "aggregatefunction",
     "simpleaggregatefunction",
     "dynamic",
-    "point",
-    "ring",
-    "linestring",
-    "multilinestring",
-    "polygon",
-    "multipolygon",
-    "geometry",
-    "qbit",
     "nothing",
+    "union",
 )
 
 # Vendor spellings profiled as text by representability (SPEC 3.1), declared so none is guessed.
@@ -125,7 +130,7 @@ def compute_base(
     approximate = estimate > APPROXIMATE_THRESHOLD and not narrows
     rows_scanned, phase_a = run_phase_a(
         columns,
-        _phase_a_cost,
+        phase_a_cost,
         partial(_phase_a_statement, cursor, source, approximate=approximate),
         partial(_null_counts, cursor, source),
         partial(_recount, cursor, source) if approximate else None,
@@ -147,41 +152,201 @@ def compute_columns(
     suppress_values: frozenset[str] = frozenset(),
     on_column: ColumnProgress | None = None,
     scope: TableScope | None = None,
+    *,
+    source: str | None = None,
 ) -> PhaseB:
     """Phase B: the classification-specific statistics, keyed by column name."""
 
-    if not columns:
-        return PhaseB({})
+    source = source or _source(identity, scope)
+    reads = ColumnReads(
+        value_list=partial(_fetch_value_list, cursor, source),
+        numeric_block=partial(_fetch_numeric_block, cursor, source),
+        temporal=partial(whole_temporal_block, partial(_fetch_temporal_block, cursor, source)),
+        length_p95=partial(_fetch_length_p95, cursor, source),
+        spatial=partial(_fetch_spatial, cursor, source),
+        vector=partial(_fetch_vector, cursor, source),
+    )
 
-    if counts.rows_scanned == 0:
-        if scope is not None and scope.narrows:
-            # A narrowed read drew nothing; an exact, exhaustive shape for columns
-            # nobody read would overclaim (SPEC 2.2.7).
-            return PhaseB({})
+    return measure_columns(
+        columns,
+        config,
+        counts,
+        base,
+        fk_source_columns,
+        reads,
+        suppress_values=suppress_values,
+        on_column=on_column,
+        scope=scope,
+    )
 
-        return PhaseB({c.name: _empty_stats(c) for c in columns})
 
-    source = _source(identity, scope)
-    total = len(columns)
-    position = {col.name: index for index, col in enumerate(columns, start=1)}
+def table_source(identity: Identity, scope: TableScope | None) -> str:
+    """The FROM expression a table's statistics read, which a descent derives its parts from."""
 
-    def measure(col: ColumnMeta) -> ColumnStats:
-        if on_column is not None:
-            on_column(position[col.name], total, col.name)
+    return _source(identity, scope)
 
-        pre = _pre_classify(col, base[col.name].cardinality, config, col.name in fk_source_columns)
-        return _phase_b(
+
+def profile_part(
+    cursor: Cursor,
+    identity: Identity,
+    source: str,
+    column: ColumnMeta,
+    config: StatisticsConfig,
+    *,
+    suppress_values: frozenset[str] = frozenset(),
+) -> ColumnStats:
+    """A part's statistics over its derived `source` (SPEC 2.2.18), as a column's are read."""
+
+    return profile_over(
+        column,
+        lambda columns: run_phase_a(
+            columns,
+            phase_a_cost,
+            partial(_phase_a_statement, cursor, source, approximate=False),
+            partial(_null_counts, cursor, source),
+            declines=lambda col: _is_unsupported(col.classified_type),
+        ),
+        lambda columns, counts, base: compute_columns(
             cursor,
-            source,
-            col,
-            base[col.name],
-            counts.rows_scanned,
-            pre,
+            identity,
+            columns,
             config,
-            suppressed=col.name in suppress_values,
-        )
+            counts,
+            base,
+            frozenset(),
+            suppress_values,
+            source=source,
+        ),
+    )
 
-    return run_phase_b(columns, measure)
+
+ARRAYS = ArrayReads(
+    elements=lambda node, _element: derived(
+        select_from([f"arrayJoin({node.operand}) AS v"], node.source),
+        SOURCE_ALIAS,
+    ),
+    size=lambda operand: f"length({operand})",
+    distinct=lambda operand: f"uniqExact({operand})",
+    norm=lambda operand: f"L2Norm({operand})",
+)
+
+
+def root_type(column: ColumnMeta) -> str:
+    """The type a descent reads a column as: its declared spelling, which names a union's types,
+    or the type a `SimpleAggregateFunction` stores.
+    """
+
+    return stored_type(column.sql_type)
+
+
+def element_type_of(_cursor: Cursor, node: PartSource) -> str | None:
+    """An array node's element type; a `Nested` column's elements are tuples of its members."""
+
+    if base_type(node.sql_type) == "nested":
+        return "Tuple" + node.sql_type.strip()[len("Nested") :]
+
+    return element_type(node.sql_type)
+
+
+def _clickhouse_members(cursor: Cursor, node: PartSource) -> list[Member]:
+    if base_type(node.sql_type) != "dynamic":
+        return declared_members(node.sql_type)
+
+    # `Dynamic` declares no members: the types it holds are read off its values.
+    held = exec_query(
+        cursor,
+        select_from([f"DISTINCT dynamicType({node.operand})"], node.source)
+        + f"\nWHERE\n  {node.operand} IS NOT NULL",
+    ).fetchall()
+
+    return [Member(name=str(t), sql_type=str(t), union=True) for (t,) in sorted(held)]
+
+
+def _member_source(node: PartSource, member: Member) -> str:
+    dynamic = base_type(node.sql_type) == "dynamic"
+    literal = string_literal(member.name)
+
+    if member.union:
+        tag = "dynamicType" if dynamic else "variantType"
+        element = "dynamicElement" if dynamic else "variantElement"
+        accessor = f"{element}({node.operand}, {literal})"
+        presence = f"{tag}({node.operand}) = {literal}"
+    else:
+        position = member.name.isdigit() and member.name == str(member.position)
+        accessor = (
+            f"tupleElement({node.operand}, {member.position})"
+            if position
+            else f"tupleElement({node.operand}, {literal})"
+        )
+        presence = f"{node.operand} IS NOT NULL" if is_nullable_type(node.sql_type) else ""
+
+    statement = select_from([f"{accessor} AS v"], node.source)
+
+    return derived(f"{statement}\nWHERE\n  {presence}" if presence else statement, SOURCE_ALIAS)
+
+
+RECORDS = RecordReads(members=_clickhouse_members, source=_member_source)
+
+
+# A map may hold one key twice: each instance counts it once, and `m[k]` reads its first value.
+MAPS = declared_maps(
+    lambda node, _key, _value: (
+        [f"arrayJoin(arrayDistinct(mapKeys({node.operand}))) AS k", f"{node.operand}[k] AS v"],
+        node.source,
+    ),
+    size=lambda operand: f"length(mapKeys({operand}))",
+    backslash_escapes=True,
+)
+
+
+_DOCUMENT_READS = {
+    "String": "JSONExtractString({})",
+    "Int64": "JSONExtractInt({})",
+    "UInt64": "JSONExtractUInt({})",
+    "Double": "JSONExtractFloat({})",
+    "Bool": "JSONExtractBool({})",
+}
+
+
+def _json_text(operand: str) -> str:
+    # A `JSON` value serializes to its text and a part's raw JSON is text already, nullable or not.
+    return f"assumeNotNull(toString({operand}))"
+
+
+DOCUMENTS = DocumentReads(
+    type_of=lambda operand: f"toString(JSONType({_json_text(operand)}))",
+    null_name="Null",
+    general="JSON",
+    object_name="Object",
+    array_name="Array",
+    key_sql_type="String",
+    names=frozenset({"json", "object", "array"}),
+    numeric=("UInt64", "Int64", "Double"),
+    entries=lambda node: derived(
+        select_from(
+            [
+                f"arrayJoin(arrayDistinct(JSONExtractKeys({_json_text(node.operand)}))) AS k",
+                f"JSONExtractRaw({_json_text(node.operand)}, k) AS v",
+            ],
+            node.source,
+        ),
+        "ent",
+    ),
+    elements=lambda node: derived(
+        select_from(
+            [f"arrayJoin(JSONExtractArrayRaw({_json_text(node.operand)})) AS v"],
+            node.source,
+        ),
+        "ent",
+    ),
+    read=lambda value, sql_type: _DOCUMENT_READS.get(sql_type, "{}").format(value),
+    size=lambda operand: (
+        f"CASE JSONType({_json_text(operand)})"
+        f"\n  WHEN 'Object' THEN length(arrayDistinct(JSONExtractKeys({_json_text(operand)})))"
+        f"\n  WHEN 'Array' THEN JSONLength({_json_text(operand)})\nEND"
+    ),
+    literal=partial(key_literal, backslash_escapes=True),
+)
 
 
 def compute_null_patterns(
@@ -195,29 +360,16 @@ def compute_null_patterns(
 ) -> NullPatterns | None:
     """Which columns are null together, in one grouped scan. See SPEC 2.2.10."""
 
-    if not has_measurable_nulls(counts, base):
-        return None
-
-    source = _source(identity, scope)
-    quoted = [source_column(col, DIALECT) for col in columns]
-    cap = config.top_n_null_patterns
-    rows = exec_query(
-        cursor,
-        f"""
-        SELECT
-          {indented(null_flags(quoted, concat=True), 10)} AS dbprint_nulls,
-          count() AS cnt
-        FROM
-          {indented(source, 10)}
-        GROUP BY
-          dbprint_nulls
-        ORDER BY
-          cnt DESC, dbprint_nulls ASC
-        LIMIT {cap + 1}
-        """,
-    ).fetchall()
-
-    return null_patterns_from_rows(rows, columns, counts.rows_scanned, cap)
+    return statements.null_patterns(
+        partial(exec_query, cursor),
+        DIALECT,
+        _source(identity, scope),
+        columns,
+        [source_column(col, DIALECT) for col in columns],
+        config,
+        counts,
+        base,
+    )
 
 
 def probe_grain(
@@ -228,25 +380,16 @@ def probe_grain(
     candidates: tuple[tuple[str, str], ...],
     scope: TableScope | None = None,
 ) -> tuple[tuple[str, str], ...]:
-    """One batched statement testing every candidate pair (SPEC 2.2.12) - `uniqExact(tuple(a, b))`
-    never the bare form, which silently drops any row where either argument is NULL (measured).
-    """
+    """One batched statement testing every candidate pair. See SPEC 2.2.12."""
 
-    if not candidates:
-        return ()
-
-    source = _source(identity, scope)
-    physical = {col.name: source_column(col, DIALECT) for col in columns}
-    exprs = [
-        f"uniqExact(tuple({physical[a]}, {physical[b]})) AS dbprint_grain_{i}"
-        for i, (a, b) in enumerate(candidates)
-    ]
-    row = exec_query(cursor, select_from(exprs, source)).fetchone()
-
-    if row is None:
-        return ()
-
-    return tuple(pair for i, pair in enumerate(candidates) if row[i] == counts.rows_scanned)
+    return statements.grain_pairs(
+        partial(exec_query, cursor),
+        DIALECT,
+        _source(identity, scope),
+        counts,
+        candidates,
+        {col.name: source_column(col, DIALECT) for col in columns},
+    )
 
 
 def probe_timeline(
@@ -262,38 +405,18 @@ def probe_timeline(
 
     del counts
 
-    source = _source(identity, scope)
-    by_name = {col.name: col for col in columns}
-    col = by_name[column]
+    col = {c.name: c for c in columns}[column]
     cn = source_column(col, DIALECT)
     date_only = temporal_shape(col.classified_type) == "date"
-    bucket_expr = _timeline_bucket_expr(cn, unit, date_only=date_only)
-    rendered = render_domain("bkt.bucket_start", col.classified_type)
 
-    rows = exec_query(
-        cursor,
-        f"""
-        SELECT
-          {indented(rendered, 10)} AS bucket_text,
-          bkt.cnt
-        FROM
-          (
-            SELECT
-              {bucket_expr} AS bucket_start,
-              count() AS cnt
-            FROM
-              {indented(source, 14)}
-            WHERE
-              {cn} IS NOT NULL
-            GROUP BY
-              bucket_start
-          ) bkt
-        ORDER BY
-          bkt.bucket_start
-        """,
-    ).fetchall()
-
-    return tuple((measured_text(row[0], "timeline"), int(row[1])) for row in rows)
+    return statements.timeline(
+        partial(exec_query, cursor),
+        DIALECT,
+        _source(identity, scope),
+        cn,
+        _timeline_bucket_expr(cn, unit, date_only=date_only),
+        render_domain("bkt.bucket_start", col.classified_type),
+    )
 
 
 def _timeline_bucket_expr(cn: str, unit: str, *, date_only: bool) -> str:
@@ -339,26 +462,12 @@ def compute_populated_windows(
         to_expr = f"maxIf({anchor_cn}, {subject_cn} IS NOT NULL)"
         rendered_from = render_domain(from_expr, anchor.classified_type)
         rendered_to = render_domain(to_expr, anchor.classified_type)
-        exprs.append(f"{rendered_from} AS from_{_alias(subject)}")
-        exprs.append(f"{rendered_to} AS to_{_alias(subject)}")
+        exprs.append(f"{rendered_from} AS from_{column_alias(subject)}")
+        exprs.append(f"{rendered_to} AS to_{column_alias(subject)}")
 
     row = exec_query(cursor, select_from(exprs, source)).fetchone()
 
-    if row is None:
-        return {}
-
-    windows: dict[str, tuple[str, str]] = {}
-
-    for i, subject in enumerate(subject_columns):
-        from_text, to_text = row[2 * i], row[2 * i + 1]
-
-        if from_text is not None and to_text is not None:
-            windows[subject] = (
-                measured_text(from_text, "populated.from"),
-                measured_text(to_text, "populated.to"),
-            )
-
-    return windows
+    return statements.windows_from_row(row, subject_columns)
 
 
 def probe_dependencies(
@@ -370,35 +479,18 @@ def probe_dependencies(
     candidates: tuple[tuple[str, str], ...],
     scope: TableScope | None = None,
 ) -> dict[tuple[str, str], float]:
-    """One batched statement measuring every candidate pair's joint cardinality (SPEC 2.2.13) -
-    the null-safe `uniqExact(tuple(...))` form, or null-bearing rows inflate the ratio.
-    """
+    """One batched statement measuring every candidate pair's joint cardinality. See SPEC 2.2.13."""
 
     del counts
 
-    if not candidates:
-        return {}
-
-    source = _source(identity, scope)
-    physical = {col.name: source_column(col, DIALECT) for col in columns}
-    exprs = [
-        f"uniqExact(tuple({physical[a]}, {physical[b]})) AS dbprint_dep_{i}"
-        for i, (a, b) in enumerate(candidates)
-    ]
-    row = exec_query(cursor, select_from(exprs, source)).fetchone()
-
-    if row is None:
-        return {}
-
-    out: dict[tuple[str, str], float] = {}
-
-    for i, (a, b) in enumerate(candidates):
-        joint = row[i]
-
-        if joint:
-            out[(a, b)] = min(1.0, base[a].cardinality / joint)
-
-    return out
+    return statements.dependency_strengths(
+        partial(exec_query, cursor),
+        DIALECT,
+        _source(identity, scope),
+        base,
+        candidates,
+        {col.name: source_column(col, DIALECT) for col in columns},
+    )
 
 
 def materialize(cursor: Cursor, identity: Identity, scope: TableScope) -> TableScope:
@@ -473,7 +565,7 @@ def _table_row_count(
     if scope is None or not scope.narrows:
         return rows_scanned, "exact"
 
-    estimate = estimate_row_count(cursor, identity)
+    estimate = -1 if scope.count_exactly else estimate_row_count(cursor, identity)
 
     if estimate >= 0:
         return int(estimate), "approximate"
@@ -483,26 +575,18 @@ def _table_row_count(
     return (int(row[0]) if row and row[0] is not None else rows_scanned), "exact"
 
 
-def _phase_a_cost(column: ColumnMeta) -> int:
-    if is_numeric_type(column.classified_type):
-        return 5
-
-    if _is_string_like(column.classified_type):
-        return 7
-
-    return 2
-
-
 def _null_counts(
     cursor: Cursor,
     source: str,
     columns: list[ColumnMeta],
 ) -> tuple[int, dict[str, int]]:
-    counts = [f"count({source_column(col, DIALECT)})" for col in columns]
-    row = exec_query(cursor, select_from(["count()", *counts], source)).fetchone()
-    rows, *non_null = (int(value) for value in row) if row else (0, *(0 for _ in columns))
-
-    return rows, {col.name: rows - n for col, n in zip(columns, non_null, strict=True)}
+    return statements.null_counts(
+        partial(exec_query, cursor),
+        DIALECT,
+        source,
+        columns,
+        lambda col: source_column(col, DIALECT),
+    )
 
 
 def _recount(
@@ -510,12 +594,13 @@ def _recount(
     source: str,
     columns: list[ColumnMeta],
 ) -> Sequence[Any] | None:
-    select_parts = [
-        f"uniqExact({source_column(col, DIALECT)}) AS {_alias(f'card_{col.name}')}"
-        for col in columns
-    ]
-
-    return exec_query(cursor, select_from(select_parts, source)).fetchone()
+    return statements.recount(
+        partial(exec_query, cursor),
+        DIALECT,
+        source,
+        columns,
+        lambda col: source_column(col, DIALECT),
+    )
 
 
 def _phase_a_statement(
@@ -533,14 +618,14 @@ def _phase_a_statement(
 
     for col in columns:
         cn = source_column(col, DIALECT)
-        a = _alias(col.name)
+        a = column_alias(col.name)
         select_parts.append(f"countIf({cn} IS NULL) AS null_{a}")
 
         if is_numeric_type(col.classified_type):
             select_parts.append(f"countIf({cn} = 0) AS zero_{a}")
             select_parts.append(f"countIf({cn} < 0) AS neg_{a}")
             select_parts.append(f"countIf({cn} = trunc({cn})) AS quant_{a}")
-        elif _is_string_like(col.classified_type):
+        elif is_string_like(col.classified_type, _is_unsupported):
             # A non-String type (UUID, Enum) has no native `= ''`/`length()`; casting first
             # is what every "string-like" type here actually shares (Postgres does the same).
             rendered = f"toString({cn})"
@@ -555,7 +640,10 @@ def _phase_a_statement(
     row = exec_query(cursor, select_from(select_parts, source)).fetchone()
 
     if row is None:
-        return 0, {c.name: _empty_base(c) for c in columns}
+        return 0, {
+            c.name: empty_base_stats(supported=not _is_unsupported(c.classified_type))
+            for c in columns
+        }
 
     row_count = int(row[0])
     out: dict[str, BaseStats] = {}
@@ -575,9 +663,10 @@ def _phase_a_statement(
                 int(row[idx + 2]),
             )
             idx += 3
-        elif _is_string_like(col.classified_type):
+        elif is_string_like(col.classified_type, _is_unsupported):
             empty_count = int(row[idx])
-            length_min, length_max, length_avg = row[idx + 1], row[idx + 2], row[idx + 3]
+            length_min, length_max = (None if v is None else int(v) for v in row[idx + 1 : idx + 3])
+            length_avg = row[idx + 3]
             idx += 4
 
         # uniqCombined64 errs both ways; cardinality is non-null-only (SPEC 2.2.2), so clamp.
@@ -600,233 +689,116 @@ def _phase_a_statement(
     return row_count, out
 
 
-def _empty_stats(col: ColumnMeta) -> ColumnStats:
-    """SPEC 2.2.7 edge case: a table read in full and found empty -> minimal column stats."""
-
-    if _is_unsupported(col.classified_type):
-        return ColumnStats(
-            sql_type=col.sql_type,
-            nullable=col.nullable,
-            null_count=0,
-            null_rate=0.0,
-            cardinality=None,
-            cardinality_ratio=None,
-            cardinality_method=None,
-        )
-
-    return ColumnStats(
-        sql_type=col.sql_type,
-        nullable=col.nullable,
-        null_count=0,
-        null_rate=0.0,
-        cardinality=0,
-        cardinality_ratio=0.0,
-        cardinality_method="exact",
-    )
-
-
-def _phase_b(
-    cursor: Cursor,
-    source: str,
-    col: ColumnMeta,
-    base: BaseStats,
-    rows_scanned: int,
-    pre: str,
-    config: StatisticsConfig,
-    *,
-    suppressed: bool = False,
-) -> ColumnStats:
-    """Build the final ColumnStats for one column based on the pre-classification."""
-
-    null_count = base.null_count
-    null_rate = compute_null_rate(null_count, rows_scanned)
-
-    if pre == "unsupported":
-        return ColumnStats(
-            sql_type=col.sql_type,
-            nullable=col.nullable,
-            null_count=null_count,
-            null_rate=null_rate,
-            cardinality=None,
-            cardinality_ratio=None,
-            cardinality_method=None,
-        )
-
-    cardinality = int(base.cardinality)
-    cardinality_ratio = compute_cardinality_ratio(cardinality, rows_scanned)
-    method: CardinalityMethod = base.cardinality_method
-    non_null = rows_scanned - null_count
-    length = None
-
-    if base.length_min is not None and base.length_max is not None:
-        length_p95 = _fetch_length_p95(cursor, source, col)
-        length = (
-            Length(
-                min=int(base.length_min),
-                max=int(base.length_max),
-                avg=round_statistic(base.length_avg),
-                p95=length_p95,
-            )
-            if length_p95 is not None
-            else None
-        )
-
-    stats = ColumnStats(
-        sql_type=col.sql_type,
-        nullable=col.nullable,
-        null_count=null_count,
-        null_rate=null_rate,
-        cardinality=cardinality,
-        cardinality_ratio=cardinality_ratio,
-        cardinality_method=method,
-        # Phase A gates these on raw sql_type, not on `pre` - a numeric type that classifies
-        # categorical would otherwise carry a field its own classification forbids.
-        zero_count=base.zero_count if pre == "numeric" else None,
-        negative_count=base.negative_count if pre == "numeric" else None,
-        empty_count=base.empty_count if pre == "text" else None,
-        quantized_count=base.quantized_count if pre == "numeric" else None,
-        length=length,
-    )
-
-    if pre == "json":
-        return stats
-
-    if pre == "boolean":
-        values, coverage, _ = _fetch_value_list(cursor, source, col, non_null, config)
-
-        return replace(stats, values=values, values_coverage=coverage)
-
-    if pre == "categorical":
-        values, coverage, exhaustive = _fetch_value_list(cursor, source, col, non_null, config)
-        distribution = classify_distribution(
-            [v.count for v in values],
-            non_null,
-            exhaustive=exhaustive,
-        )
-
-        return replace(stats, values=values, values_coverage=coverage, distribution=distribution)
-
-    if pre == "numeric":
-        rng, percentiles, distribution, frequencies, values, mean, total = _fetch_numeric_block(
-            cursor,
-            source,
-            col,
-            non_null,
-            config,
-        )
-
-        return replace(
-            stats,
-            range=rng,
-            percentiles=percentiles,
-            distribution=distribution,
-            frequencies=frequencies,
-            values=values,
-            mean=mean,
-            sum=total,
-        )
-
-    if pre == "temporal":
-        try:
-            rng, percentiles, distribution, unrepresentable, frequencies, values, quantized = (
-                _fetch_temporal_block(cursor, source, col, non_null, config)
-            )
-        except UnrepresentableValue:
-            raise
-        except Exception as exc:  # noqa: BLE001 - the temporal block degrades as a whole, and its
-            # fields are REQUIRED here (SPEC 2.2.3); the column names what the read cost it
-            # rather than leaving an absence a reader would read as a structural cause.
-            return replace(
-                stats,
-                unmeasured=temporal_block_unmeasured(col.classified_type),
-                unmeasured_cause=exc,
-            )
-
-        return replace(
-            stats,
-            range=rng,
-            percentiles=percentiles,
-            distribution=distribution,
-            frequencies=frequencies,
-            unrepresentable=unrepresentable or None,
-            values=values,
-            quantized_count=quantized,
-        )
-
-    if suppressed and pre == "text":
-        return stats
-
-    values, coverage, exhaustive = _fetch_value_list(cursor, source, col, non_null, config)
-    distribution = classify_distribution([v.count for v in values], non_null, exhaustive=exhaustive)
-
-    return replace(stats, values=values, values_coverage=coverage, distribution=distribution)
-
-
-def _pre_classify(
-    col: ColumnMeta,
-    cardinality: int,
-    config: StatisticsConfig,
-    has_declared_fk: bool,
-) -> str:
-    if _is_unsupported(col.classified_type):
-        return "unsupported"
-
-    return classify(
-        col.classified_type,
-        cardinality,
-        has_declared_fk,
-        config.enumeration_threshold,
-    )
-
-
 def _fetch_value_list(
     cursor: Cursor,
     source: str,
     col: ColumnMeta,
     non_null: int,
     config: StatisticsConfig,
-) -> tuple[tuple[ValueCount, ...], float, bool]:
-    """Ordered value list, its coverage, and whether it enumerates the column - one row beyond
-    the bound is fetched, so truncation is observed rather than predicted (SPEC 2.2.4).
-    """
-
+) -> ValueList:
     cn = source_column(col, DIALECT)
-    limit = enumeration_limit(config.enumeration_threshold, config.top_n_values)
     # `toString` stays the ordering key, since it decides the cutoff; a number publishes natively.
     native = is_numeric_type(col.classified_type)
-    rows = exec_query(
-        cursor,
-        f"""
-        SELECT
-          {render_text(cn, col.classified_type)} AS rendered,
-          count() AS cnt,
-          any({cn}) AS native
-        FROM
-          {indented(source, 10)}
-        WHERE
-          {cn} IS NOT NULL
-        GROUP BY
-          {cn}
-        ORDER BY
-          cnt DESC, rendered ASC
-        LIMIT {limit + 1}
-        """,
-    ).fetchall()
-    exhaustive = len(rows) <= limit
-    kept = rows if exhaustive else rows[: config.top_n_values]
-    entries = order_values(
-        (
-            ValueCount(
-                value=measured_value(value if native else text, f"values[{i}]"),
-                count=int(cnt),
-            )
-            for i, (text, cnt, value) in enumerate(kept)
+    rows = statements.most_frequent(
+        partial(exec_query, cursor),
+        DIALECT,
+        source,
+        render_text(cn, col.classified_type),
+        config,
+        non_null=cn,
+        group=cn,
+        extra=(f"any({cn}) AS native",),
+    )
+
+    return value_list_from_rows(
+        [(value if native else text, cnt) for text, cnt, value in rows],
+        non_null,
+        config,
+    )
+
+
+def _fetch_vector(cursor: Cursor, source: str, col: ColumnMeta) -> VectorReading:
+    cn = source_column(col, DIALECT)
+    # `QBit(element, dimension)`: the type fixes the element count; the Array cast is lossless.
+    declared = re.search(r"qbit\(\s*\w+\s*,\s*(\d+)", col.classified_type, re.IGNORECASE)
+
+    return statements.vector(
+        partial(exec_query, cursor),
+        source,
+        cn,
+        dimension=int(declared.group(1)) if declared else f"length(CAST({cn} AS Array(Float64)))",
+        norm=f"L2Norm(CAST({cn} AS Array(Float64)))",
+    )
+
+
+def _fetch_spatial(cursor: Cursor, source: str, col: ColumnMeta) -> tuple[Geometry, Extent | None]:
+    cn = source_column(col, DIALECT)
+    geo_type = base_type(col.classified_type)
+    # Every vertex as one flat Array(Point), computed once beside the value it came from.
+    flattened = derived(
+        select_from([f"{cn} AS dbprint_geo", f"{_points(cn, geo_type)} AS dbprint_points"], source),
+        "spt",
+    )
+    min_x, min_y, max_x, max_y = (
+        call(
+            "if",
+            "empty(spt.dbprint_points)",
+            "NULL",
+            f"{fn}(arrayMap(p -> p.{axis}, spt.dbprint_points))",
+        )
+        for fn, axis in (("arrayMin", 1), ("arrayMin", 2), ("arrayMax", 1), ("arrayMax", 2))
+    )
+
+    # The geo types carry no reference system and no validity, and are planar 2D.
+    return statements.spatial(
+        partial(exec_query, cursor),
+        flattened,
+        "spt.dbprint_geo",
+        statements.SpatialAccessors(
+            kind=(
+                "variantType(spt.dbprint_geo)"
+                if geo_type == "geometry"
+                else "toTypeName(spt.dbprint_geo)"
+            ),
+            srid=None,
+            flag=0,
+            empty="empty(spt.dbprint_points)",
+            invalid=None,
+            bounds=(min_x, min_y, max_x, max_y),
         ),
     )
-    values = tuple(entries)
-    total = sum(v.count for v in values)
 
-    return values, coverage_share(total, non_null, exhaustive=exhaustive), exhaustive
+
+_GEO_VARIANTS = (
+    ("Point", "point"),
+    ("Ring", "ring"),
+    ("LineString", "linestring"),
+    ("MultiLineString", "multilinestring"),
+    ("Polygon", "polygon"),
+    ("MultiPolygon", "multipolygon"),
+)
+
+
+def _points(cn: str, geo_type: str) -> str:
+    if geo_type == "point":
+        return f"[{cn}]"
+
+    if geo_type in ("ring", "linestring"):
+        return cn
+
+    if geo_type != "geometry":
+        return call("arrayFlatten", cn)
+
+    # A `Geometry` value is a Variant of the six, each reached through its own element.
+    *branches, (_, last) = (
+        (variant, _points(f"variantElement({cn}, '{variant}')", geo_type))
+        for variant, geo_type in _GEO_VARIANTS
+    )
+    tests = [
+        arg for variant, points in branches for arg in (f"variantType({cn}) = '{variant}'", points)
+    ]
+
+    return call("multiIf", *tests, last)
 
 
 def _fetch_numeric_block(
@@ -835,15 +807,9 @@ def _fetch_numeric_block(
     col: ColumnMeta,
     non_null: int,
     config: StatisticsConfig,
-) -> tuple[
-    Range,
-    dict[str, Any],
-    Distribution,
-    Frequencies,
-    tuple[ValueCount, ...],
-    float | None,
-    float | None,
-]:
+    *,
+    values: bool = True,
+) -> NumericBlock:
     cn = source_column(col, DIALECT)
     keys = config.percentiles
     select_parts = [
@@ -855,31 +821,21 @@ def _fetch_numeric_block(
     ]
     row = exec_query(cursor, select_from(select_parts, source)).fetchone()
 
-    if row is None:
-        return Range(min=None, max=None), {}, "uniform", summarize_frequencies([]), (), None, None
-
-    rng = Range(
-        min=round_statistic(row[0], exact_int=True),
-        max=round_statistic(row[1], exact_int=True),
-    )
-    mean = round_statistic(row[2])
-    total = round_statistic(row[3], exact_int=True)
-    percentile_values = row[4 : 4 + len(keys)]
-    percentiles = coherent_percentiles(
-        {f"p{p:02d}": round_statistic(v) for p, v in zip(keys, percentile_values, strict=True)},
-        rng.min,
-        rng.max,
-    )
-    distribution, frequencies, values = _approximate_distribution_via_top_n(
-        cursor,
-        source,
-        cn,
-        non_null,
+    return numeric_block_from_row(
+        row,
+        row[4 : 4 + len(keys)] if row else (),
         config,
-        measured_value,
+        None
+        if not values
+        else lambda: _approximate_distribution_via_top_n(
+            cursor,
+            source,
+            cn,
+            non_null,
+            config,
+            measured_value,
+        ),
     )
-
-    return rng, percentiles, distribution, frequencies, values, mean, total
 
 
 def _fetch_temporal_block(
@@ -961,29 +917,9 @@ def _fetch_temporal_block(
         lambda v: v,
         group_expr=None if stores_below_microsecond(col.classified_type) else cn,
     )
-    unrepresentable = _unrepresentable_fields(rng, percentiles)
+    unrepresentable = unrepresentable_fields(rng, percentiles)
 
     return rng, percentiles, distribution, unrepresentable, frequencies, values, quantized_count
-
-
-def _unrepresentable_fields(rng: Range, percentiles: dict[str, Any]) -> tuple[str, ...]:
-    """Field names per SPEC 2.2.4 whose rendered text names a year outside 0001-9999."""
-
-    names = []
-
-    if rng.min is not None and not is_representable(rng.min):
-        names.append("min")
-
-    if rng.max is not None and not is_representable(rng.max):
-        names.append("max")
-
-    for key in sorted(percentiles):
-        value = percentiles[key]
-
-        if value is not None and not is_representable(value):
-            names.append(key)
-
-    return tuple(names)
 
 
 def _percentile_exprs(cn: str, keys: Sequence[int]) -> list[str]:
@@ -1021,65 +957,18 @@ def _approximate_distribution_via_top_n(
     config: StatisticsConfig,
     value_transform: Any,
     group_expr: str | None = None,
-) -> tuple[Distribution, Frequencies, tuple[ValueCount, ...]]:
-    """Distribution, frequencies, and the same top-N rows `values` publishes (SPEC 2.2.3)."""
-
-    limit = enumeration_limit(config.enumeration_threshold, config.top_n_values)
-    grouping = group_expr or select_expr
-    rows = exec_query(
-        cursor,
-        f"""
-        SELECT
-          {indented(select_expr, 10)} AS rendered,
-          count() AS cnt
-        FROM
-          {indented(source, 10)}
-        WHERE
-          {indented(grouping, 10)} IS NOT NULL
-        GROUP BY
-          {indented(grouping, 10)}
-        ORDER BY
-          cnt DESC, rendered ASC
-        LIMIT {limit + 1}
-        """,
-    ).fetchall()
-    exhaustive = len(rows) <= limit
-    kept = rows if exhaustive else rows[: config.top_n_values]
-    entries = order_values(
-        (ValueCount(value=value_transform(value), count=int(cnt)) for value, cnt in kept),
-    )
-    values = tuple(entries)
-    kept_counts = [v.count for v in values]
-
-    return (
-        classify_distribution(kept_counts, non_null, exhaustive=exhaustive),
-        summarize_frequencies(kept_counts),
-        values,
-    )
-
-
-def _empty_base(col: ColumnMeta) -> BaseStats:
-    """Phase A's answer for a table whose batched query yielded no row."""
-
-    return BaseStats(
-        null_count=0,
-        cardinality=0,
-        cardinality_method="exact",
-        supported=not _is_unsupported(col.classified_type),
+) -> TopN:
+    return statements.top_n(
+        partial(exec_query, cursor),
+        DIALECT,
+        source,
+        select_expr,
+        non_null,
+        config,
+        value_transform,
+        column=group_expr or select_expr,
     )
 
 
 def _is_unsupported(sql_type: str) -> bool:
     return base_type(sql_type) in _UNSUPPORTED_TYPES
-
-
-def _matches(sql_type: str, types: tuple[str, ...]) -> bool:
-    return base_type(sql_type) in types
-
-
-def _is_string_like(sql_type: str) -> bool:
-    return not _is_unsupported(sql_type) and is_string_like_type(sql_type)
-
-
-def _alias(name: str) -> str:
-    return "".join(c if c.isalnum() else "_" for c in name)

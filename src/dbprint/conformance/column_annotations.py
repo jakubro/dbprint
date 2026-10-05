@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
-
-import yaml
 
 from dbprint.spec.absence import column_value, read_column_field
 from dbprint.spec.predicate import (
@@ -21,9 +20,8 @@ from dbprint.spec.predicate import resolve as resolve_stat
 from dbprint.spec.redaction import is_redacted
 from dbprint.spec.scope import ScanScope, list_is_table_domain, scope_of
 from .issue import Issue
-from .layout import declared_artifacts, walkable_tables
+from .layout import annotated_tables
 from .progress import TableSink
-from .yaml_utils import load_yaml
 
 
 def check_entry(data: Any, path: str, tbl_fqn: str) -> list[Issue]:
@@ -50,34 +48,15 @@ def check_stale_keys(
     """
 
     issues: list[Issue] = []
-    tables = walkable_tables(manifest_data)
-    total = len(tables)
+    tables = annotated_tables(
+        print_root,
+        manifest_data,
+        "statistics_annotations",
+        "statistics",
+        on_table,
+    )
 
-    for i, (tbl_fqn, tbl_entry) in enumerate(tables.items(), start=1):
-        if on_table is not None:
-            on_table(tbl_fqn, i, total)
-
-        artifacts = declared_artifacts(tbl_entry)
-
-        if "statistics_annotations" not in artifacts or "statistics" not in artifacts:
-            continue
-
-        tbl_dir = print_root / tbl_entry.get("path", "")
-        ann_path = tbl_dir / artifacts["statistics_annotations"]
-        stats_path = tbl_dir / artifacts["statistics"]
-
-        if not ann_path.is_file() or not stats_path.is_file():
-            continue
-
-        try:
-            ann_data = load_yaml(ann_path)
-            stats_data = load_yaml(stats_path)
-        except yaml.YAMLError:
-            continue
-
-        if not isinstance(ann_data, dict) or not isinstance(stats_data, dict):
-            continue
-
+    for ann_path, ann_data, stats_data in tables:
         columns = ann_data.get("columns")
 
         if not isinstance(columns, dict):
@@ -115,34 +94,15 @@ def check_grain_annotations(
     """
 
     issues: list[Issue] = []
-    tables = walkable_tables(manifest_data)
-    total = len(tables)
+    tables = annotated_tables(
+        print_root,
+        manifest_data,
+        "statistics_annotations",
+        "statistics",
+        on_table,
+    )
 
-    for i, (tbl_fqn, tbl_entry) in enumerate(tables.items(), start=1):
-        if on_table is not None:
-            on_table(tbl_fqn, i, total)
-
-        artifacts = declared_artifacts(tbl_entry)
-
-        if "statistics_annotations" not in artifacts or "statistics" not in artifacts:
-            continue
-
-        tbl_dir = print_root / tbl_entry.get("path", "")
-        ann_path = tbl_dir / artifacts["statistics_annotations"]
-        stats_path = tbl_dir / artifacts["statistics"]
-
-        if not ann_path.is_file() or not stats_path.is_file():
-            continue
-
-        try:
-            ann_data = load_yaml(ann_path)
-            stats_data = load_yaml(stats_path)
-        except yaml.YAMLError:
-            continue
-
-        if not isinstance(ann_data, dict) or not isinstance(stats_data, dict):
-            continue
-
+    for ann_path, ann_data, stats_data in tables:
         grain = ann_data.get("grain")
 
         if not isinstance(grain, dict):
@@ -196,60 +156,11 @@ def check_claims(
     """
 
     issues: list[Issue] = []
-    tables = walkable_tables(manifest_data)
-    total = len(tables)
+    fields = _annotated_columns(print_root, manifest_data, "claims", dict, on_table)
 
-    for i, (tbl_fqn, tbl_entry) in enumerate(tables.items(), start=1):
-        if on_table is not None:
-            on_table(tbl_fqn, i, total)
-
-        artifacts = declared_artifacts(tbl_entry)
-
-        if "statistics_annotations" not in artifacts or "statistics" not in artifacts:
-            continue
-
-        tbl_dir = print_root / tbl_entry.get("path", "")
-        ann_path = tbl_dir / artifacts["statistics_annotations"]
-        stats_path = tbl_dir / artifacts["statistics"]
-
-        if not ann_path.is_file() or not stats_path.is_file():
-            continue
-
-        try:
-            ann_data = load_yaml(ann_path)
-            stats_data = load_yaml(stats_path)
-        except yaml.YAMLError:
-            continue
-
-        if not isinstance(ann_data, dict) or not isinstance(stats_data, dict):
-            continue
-
-        columns = ann_data.get("columns")
-        stats_columns = stats_data.get("columns")
-
-        if not isinstance(columns, dict) or not isinstance(stats_columns, dict):
-            continue
-
-        rel = str(ann_path.relative_to(print_root))
-
-        for col_name, entry in columns.items():
-            if not isinstance(entry, dict):
-                continue
-
-            claims = entry.get("claims")
-
-            if not isinstance(claims, dict):
-                continue
-
-            col_stats = stats_columns.get(col_name)
-
-            if not isinstance(col_stats, dict):
-                continue
-
-            for stat, raw in claims.items():
-                issues.extend(
-                    _check_claim(rel, col_name, stat, raw, col_stats, scope_of(stats_data)),
-                )
+    for rel, col_name, claims, col_stats, scope in fields:
+        for stat, raw in claims.items():
+            issues.extend(_check_claim(rel, col_name, stat, raw, col_stats, scope))
 
     return issues
 
@@ -328,59 +239,10 @@ def check_value_notes(
     """
 
     issues: list[Issue] = []
-    tables = walkable_tables(manifest_data)
-    total = len(tables)
+    fields = _annotated_columns(print_root, manifest_data, "values", list, on_table)
 
-    for i, (tbl_fqn, tbl_entry) in enumerate(tables.items(), start=1):
-        if on_table is not None:
-            on_table(tbl_fqn, i, total)
-
-        artifacts = declared_artifacts(tbl_entry)
-
-        if "statistics_annotations" not in artifacts or "statistics" not in artifacts:
-            continue
-
-        tbl_dir = print_root / tbl_entry.get("path", "")
-        ann_path = tbl_dir / artifacts["statistics_annotations"]
-        stats_path = tbl_dir / artifacts["statistics"]
-
-        if not ann_path.is_file() or not stats_path.is_file():
-            continue
-
-        try:
-            ann_data = load_yaml(ann_path)
-            stats_data = load_yaml(stats_path)
-        except yaml.YAMLError:
-            continue
-
-        if not isinstance(ann_data, dict) or not isinstance(stats_data, dict):
-            continue
-
-        columns = ann_data.get("columns")
-        stats_columns = stats_data.get("columns")
-
-        if not isinstance(columns, dict) or not isinstance(stats_columns, dict):
-            continue
-
-        rel = str(ann_path.relative_to(print_root))
-
-        for col_name, entry in columns.items():
-            if not isinstance(entry, dict):
-                continue
-
-            values = entry.get("values")
-
-            if not isinstance(values, list):
-                continue
-
-            col_stats = stats_columns.get(col_name)
-
-            if not isinstance(col_stats, dict):
-                continue
-
-            issues.extend(
-                _check_value_notes(rel, col_name, values, col_stats, scope_of(stats_data)),
-            )
+    for rel, col_name, values, col_stats, scope in fields:
+        issues.extend(_check_value_notes(rel, col_name, values, col_stats, scope))
 
     return issues
 
@@ -436,3 +298,37 @@ def _value_unassertable(rel: str, col_name: str, i: int, reason: str) -> Issue:
         reason,
         "§2.7.1",
     )
+
+
+def _annotated_columns(
+    print_root: Path,
+    manifest_data: dict,
+    field: str,
+    kind: type,
+    on_table: TableSink | None,
+) -> Iterator[tuple[str, str, Any, dict[str, Any], ScanScope | None]]:
+    tables = annotated_tables(
+        print_root,
+        manifest_data,
+        "statistics_annotations",
+        "statistics",
+        on_table,
+    )
+
+    for ann_path, ann_data, stats_data in tables:
+        columns = ann_data.get("columns")
+        stats_columns = stats_data.get("columns")
+
+        if not isinstance(columns, dict) or not isinstance(stats_columns, dict):
+            continue
+
+        rel = str(ann_path.relative_to(print_root))
+
+        for col_name, entry in columns.items():
+            if not isinstance(entry, dict) or not isinstance(entry.get(field), kind):
+                continue
+
+            col_stats = stats_columns.get(col_name)
+
+            if isinstance(col_stats, dict):
+                yield rel, col_name, entry[field], col_stats, scope_of(stats_data)

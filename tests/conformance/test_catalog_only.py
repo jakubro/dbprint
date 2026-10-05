@@ -6,7 +6,10 @@ conformance invariants that read beyond it.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 from dbprint.conformance import Issue, statistics
 from dbprint.conformance.schema_validation import check_statistics
@@ -182,3 +185,37 @@ class TestQueriedFilesAreUnaffected:
 
         assert check_statistics(payload, PATH) == []
         assert statistics.check(payload, PATH, FQN) == []
+
+
+class TestAQueriedView:
+    """SPEC 2.2.15: the marker is independent of `type`, so a view read through is unmarked."""
+
+    @staticmethod
+    def _queried_view(committed_print: Path) -> dict[str, Any]:
+        path = committed_print / "production/arboretum/seedbank/taxon/statistics.yaml"
+        payload: dict[str, Any] = yaml.safe_load(path.read_text())
+        payload["type"] = "view"
+        payload["depends_on"] = ["arboretum.seedbank.accession"]
+        payload.pop("physical_layout", None)
+
+        return payload
+
+    def test_a_view_its_producer_queried_passes_with_no_marker(
+        self,
+        committed_print: Path,
+    ) -> None:
+        payload = self._queried_view(committed_print)
+
+        assert "catalog_only" not in payload
+        assert check_statistics(payload, PATH) == []
+        errors = [
+            i for i in statistics.check(payload, PATH, payload["table"]) if i.severity == "error"
+        ]
+
+        assert errors == []
+
+    def test_a_queried_view_still_owes_its_row_count(self, committed_print: Path) -> None:
+        payload = self._queried_view(committed_print)
+        del payload["row_count"]
+
+        assert "schema.missing-required-field" in _codes(check_statistics(payload, PATH))

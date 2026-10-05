@@ -277,6 +277,20 @@ class TestFreshnessVerdict:
         assert not verdict.fresh
         assert verdict.reason.startswith(reason)
 
+    def test_a_parameter_a_print_predates_reads_as_its_default(self) -> None:
+        recorded = statistics_params_dict(StatisticsConfig())
+        del recorded["max_parts"], recorded["max_part_depth"]
+        table = self._table(statistics_params=recorded)
+
+        assert freshness(table, self.SETTINGS, generated_at=self.NOW, conn=self.conn).fresh
+
+    def test_a_changed_descent_bound_makes_the_print_stale(self) -> None:
+        settings = TableSettings(statistics=StatisticsConfig(max_parts=0), max_age_days=7)
+        verdict = freshness(self._table(), settings, generated_at=self.NOW, conn=self.conn)
+
+        assert not verdict.fresh
+        assert verdict.reason.startswith("statistics_params (max_parts)")
+
     def test_no_committed_print_is_not_fresh(self) -> None:
         assert not freshness(None, self.SETTINGS, generated_at=self.NOW, conn=self.conn).fresh
 

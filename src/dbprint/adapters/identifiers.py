@@ -75,12 +75,24 @@ def string_literal(text: str) -> str:
     return "'" + text.replace("'", "''") + "'"
 
 
-def table_meta(physical: tuple[str, ...], type: TableType) -> TableMeta:
+def table_meta(
+    physical: tuple[str, ...],
+    type: TableType,
+    *,
+    external: bool = False,
+    opt_in_only: bool = False,
+) -> TableMeta:
     """The `TableMeta` a table whose catalog spells it `physical` is written under."""
 
     path = tuple(fold(part) for part in physical)
 
-    return TableMeta(fqn=join_fqn(path), type=type, namespace_path=path)
+    return TableMeta(
+        fqn=join_fqn(path),
+        type=type,
+        namespace_path=path,
+        external=external,
+        opt_in_only=opt_in_only,
+    )
 
 
 def column_meta(

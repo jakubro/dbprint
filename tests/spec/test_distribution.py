@@ -91,17 +91,13 @@ class TestSummarize:
         assert (result.top, result.bottom, result.listed, result.total) == (9, 1, 4, 20)
 
 
-class TestAllThreeAdaptersShareOneFunction:
-    """De-triplication is the point - a fix to one must be a fix to all three."""
+class TestTheSharedPhaseBUsesThisFunction:
+    """Every adapter's Phase B assembles through `adapters.base`, so a fix here reaches all eight."""
 
-    def test_no_adapter_carries_its_own_copy(self) -> None:
-        from dbprint.adapters.mysql.stats import classify_distribution as mysql_classify
-        from dbprint.adapters.postgres.stats import classify_distribution as postgres_classify
-        from dbprint.adapters.snowflake.stats import classify_distribution as snowflake_classify
+    def test_the_shared_assembly_carries_no_copy(self) -> None:
+        from dbprint.adapters.base import classify_distribution as shared
 
-        assert postgres_classify is classify
-        assert mysql_classify is classify
-        assert snowflake_classify is classify
+        assert shared is classify
 
 
 def test_a_single_row_single_value_list_is_dominant() -> None:

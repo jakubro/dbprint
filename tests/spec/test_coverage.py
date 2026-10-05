@@ -65,17 +65,13 @@ class TestIsIncoherent:
         assert is_incoherent(0, 0) is False
 
 
-class TestAllThreeAdaptersShareOneFunction:
-    """De-triplication is the point - a fix to one must be a fix to all three."""
+class TestTheSharedPhaseBUsesThisFunction:
+    """Every adapter's Phase B assembles through `adapters.base`, so a fix here reaches all eight."""
 
-    def test_no_adapter_carries_its_own_copy(self) -> None:
-        from dbprint.adapters.mysql.stats import coverage_share as mysql_coverage_share
-        from dbprint.adapters.postgres.stats import coverage_share as postgres_coverage_share
-        from dbprint.adapters.snowflake.stats import coverage_share as snowflake_coverage_share
+    def test_the_shared_assembly_carries_no_copy(self) -> None:
+        from dbprint.adapters.base import coverage_share as shared
 
-        assert postgres_coverage_share is coverage_share
-        assert mysql_coverage_share is coverage_share
-        assert snowflake_coverage_share is coverage_share
+        assert shared is coverage_share
 
 
 def test_the_enumeration_limit_is_the_larger_setting() -> None:

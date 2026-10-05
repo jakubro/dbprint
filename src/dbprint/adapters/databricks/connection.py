@@ -6,20 +6,25 @@ from __future__ import annotations
 
 import importlib
 import logging
-import time
-from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any
 
-from dbprint.config.duration import format_duration_seconds
-from .. import trace_context
+from .. import driver
 from ..dialect import Dialect
-from ..errors import QueryFailed
+from ..driver import Cursor, FactoryConnection
 
 
 # databricks-sql-connector defaults to native parameter binding (use_inline_params=False), which
 # the adapter does not override, and native positional binding takes `?` markers.
-DIALECT = Dialect(vendor="databricks", paramstyle="qmark", quote_char="`")
+DIALECT = Dialect(
+    vendor="databricks",
+    paramstyle="qmark",
+    quote_char="`",
+    text_type="STRING",
+    concat_null_flags=True,
+    pair_distinct="COUNT(DISTINCT STRUCT({a}, {b}))",
+    seed_hash="MD5(CONCAT({seed}, CAST({value} AS STRING)))",
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -61,97 +66,24 @@ class ConnectionParams:
             ) from exc
 
 
-class Cursor(Protocol):
-    """DB-API-compatible cursor surface used by the adapter."""
+class Connection(FactoryConnection):
+    """A Databricks session opened by a cursor factory."""
 
-    def execute(self, sql: str, params: Any = ...) -> Any: ...
+    error = DatabricksConnectionError
+    vendor = "Databricks"
+    timeout_ceiling = STATEMENT_TIMEOUT_CEILING_SECONDS
 
-    def fetchall(self) -> list[Any]: ...
+    def _default_factory(self, params: ConnectionParams) -> Any:
+        return _default_cursor_factory(params)
 
-    def fetchone(self) -> Any: ...
-
-    def close(self) -> None: ...
-
-
-CursorFactory = Callable[[ConnectionParams], Any]
-
-
-class Connection:
-    """Wraps a cursor-factory output with open/close lifecycle hooks."""
-
-    def __init__(
-        self,
-        params: ConnectionParams,
-        cursor_factory: CursorFactory | None = None,
-    ) -> None:
-        self.params = params
-        self._factory = cursor_factory or _default_cursor_factory
-        self._cursor: Cursor | None = None
-
-    def sibling(self) -> Connection:
-        """An unopened connection with the same parameters and cursor factory."""
-
-        return Connection(self.params, self._factory)
-
-    def open(self) -> None:
-        limit = self.params.statement_timeout
-
-        if limit is not None and limit > STATEMENT_TIMEOUT_CEILING_SECONDS:
-            ceiling = format_duration_seconds(STATEMENT_TIMEOUT_CEILING_SECONDS)
-
-            raise DatabricksConnectionError(
-                f"statement_timeout {format_duration_seconds(limit)} exceeds Databricks's ceiling "
-                f"of {ceiling} ({STATEMENT_TIMEOUT_CEILING_SECONDS} seconds).",
-            )
-
-        try:
-            self._cursor = self._factory(self.params)
-        except DatabricksConnectionError:
-            raise
-        except Exception as exc:
-            raise DatabricksConnectionError(
-                f"could not open Databricks session for {self.params.server_hostname!r}: {exc}",
-            ) from exc
-
-    def close(self) -> None:
-        if self._cursor is not None:
-            try:
-                self._cursor.close()
-            except Exception:  # noqa: BLE001, S110 - close-time failure is uninteresting
-                pass
-
-            self._cursor = None
-
-    def is_open(self) -> bool:
-        return self._cursor is not None
-
-    @property
-    def cursor(self) -> Cursor:
-        if self._cursor is None:
-            raise DatabricksConnectionError("connection is not open; call connect() first")
-
-        return self._cursor
+    def _open_failure(self, exc: Exception) -> str:
+        return f"could not open Databricks session for {self.params.server_hostname!r}: {exc}"
 
 
 def exec_query(cursor: Cursor, sql: str, params: Any = None) -> Cursor:
     """Run a query and return the cursor; DEBUG-traces the text and params as a pair."""
 
-    started = time.monotonic()
-
-    try:
-        if params is None:
-            cursor.execute(sql)
-        else:
-            cursor.execute(sql, params)
-    except Exception as exc:
-        failure = QueryFailed(exc, sql, params, timed_out=_is_timeout(exc))
-        trace_context.log_failure(_LOG, started, failure)
-
-        raise failure from exc
-
-    trace_context.log_success(_LOG, started, sql, params, getattr(cursor, "rowcount", None))
-
-    return cursor
+    return driver.execute(_LOG, _is_timeout, cursor, sql, params)
 
 
 def _default_cursor_factory(params: ConnectionParams) -> Any:

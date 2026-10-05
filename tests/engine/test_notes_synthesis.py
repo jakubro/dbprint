@@ -259,6 +259,86 @@ class TestJson:
         assert synthesize(_stats("json")) == "json"
 
 
+class TestBinary:
+    def test_the_length_reads_as_bytes(self) -> None:
+        s = _stats(
+            "binary",
+            sql_type="bytea",
+            length={"min": 16, "max": 16, "avg": 16.0, "p95": 16.0},
+        )
+
+        assert synthesize(s) == "binary, length 16..16 bytes (avg 16.0)"
+
+    def test_a_binary_key_reads_its_length_as_bytes_too(self) -> None:
+        s = _stats(
+            "foreign_key_candidate",
+            sql_type="BINARY(16)",
+            length={"min": 16, "max": 16, "avg": 16.0, "p95": 16.0},
+        )
+
+        assert synthesize(s) == "FK candidate, length 16..16 bytes (avg 16.0)"
+
+
+class TestSpatial:
+    def test_kinds_srids_and_extent(self) -> None:
+        s = _stats(
+            "spatial",
+            sql_type="geometry",
+            geometry={
+                "kinds": [{"kind": "point", "count": 39}, {"kind": "polygon", "count": 6}],
+                "srids": [{"srid": 4326, "count": 45}],
+                "dimensions": [{"dimensions": "xy", "count": 45}],
+                "empty_count": 1,
+            },
+            extent={"min_x": 16.601, "min_y": 49.2, "max_x": 16.649, "max_y": 49.206},
+        )
+
+        assert synthesize(s) == (
+            "spatial: point 39, polygon 6; srid 4326; extent x 16.601..16.649, y 49.2..49.206"
+        )
+
+    def test_a_withheld_extent_leaves_the_geometry(self) -> None:
+        s = _stats(
+            "spatial",
+            sql_type="geometry",
+            redacted="mask",
+            geometry={
+                "kinds": [{"kind": "point", "count": 3}],
+                "dimensions": [{"dimensions": "xy", "count": 3}],
+                "empty_count": 0,
+            },
+        )
+
+        assert synthesize(s).startswith("spatial: point 3")
+        assert "extent" not in synthesize(s)
+
+
+class TestVector:
+    def test_unit_normalized_embeddings_name_the_cheaper_operator(self) -> None:
+        s = _stats(
+            "vector",
+            sql_type="vector(768)",
+            dimension={"min": 768, "max": 768},
+            norm={"min": 0.999999, "max": 1.000001},
+            zero_count=0,
+        )
+
+        assert synthesize(s) == (
+            "vector, dimension 768, unit-normalized: inner product ranks as cosine"
+        )
+
+    def test_mixed_dimensions_and_zero_vectors(self) -> None:
+        s = _stats(
+            "vector",
+            sql_type="vector",
+            dimension={"min": 384, "max": 1536},
+            norm={"min": 0.4, "max": 12.0},
+            zero_count=3,
+        )
+
+        assert synthesize(s) == "vector, mixed dimension 384-1536, 3 zero vectors"
+
+
 class TestUnsupported:
     def test_shows_sql_type(self) -> None:
         s = _stats("unsupported", sql_type="bytea")

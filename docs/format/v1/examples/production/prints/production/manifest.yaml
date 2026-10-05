@@ -1,8 +1,8 @@
 format_version: 1
-generated_at: '2026-05-17T22:48:01Z'
+generated_at: '2026-03-09T14:27:36Z'
 connection: production
 adapter: postgres
-dbprint_version: 0.9.0
+dbprint_version: 0.10.0
 statistics_params:
   enumeration_threshold: 50
   top_n_values: 30
@@ -14,6 +14,8 @@ statistics_params:
   - 50
   - 75
   - 99
+  max_parts: 20
+  max_part_depth: 3
 profiling_params:
   infer_relationships: true
   sketch_all_columns: false
@@ -36,8 +38,8 @@ tables:
       ddl: ddl.sql
       statistics: statistics.yaml
       relationships: relationships.yaml
-    columns: 5
-    profiled_at: '2026-05-17T22:48:01Z'
+    columns: 8
+    profiled_at: '2026-03-09T14:27:36Z'
     row_count: 50
     max_age_days: 1
   arboretum.seedbank.accession:
@@ -51,7 +53,7 @@ tables:
       statistics_annotations: statistics.annotations.yaml
       relationships_annotations: relationships.annotations.yaml
     columns: 16
-    profiled_at: '2026-05-17T22:48:01Z'
+    profiled_at: '2026-03-09T14:27:36Z'
     row_count: 2500
     max_age_days: 1
   arboretum.seedbank.accession_summary:
@@ -64,7 +66,7 @@ tables:
       statistics_annotations: statistics.annotations.yaml
       relationships_annotations: relationships.annotations.yaml
     columns: 8
-    profiled_at: '2026-05-17T22:48:01Z'
+    profiled_at: '2026-03-09T14:27:36Z'
     max_age_days: 1
   arboretum.seedbank.collector:
     type: table
@@ -75,7 +77,7 @@ tables:
       relationships: relationships.yaml
       description: description.md
     columns: 10
-    profiled_at: '2026-05-17T22:48:01Z'
+    profiled_at: '2026-03-09T14:27:36Z'
     row_count: 400
     max_age_days: 1
   arboretum.seedbank.germination_by_taxon_mv:
@@ -87,7 +89,7 @@ tables:
       relationships: relationships.yaml
       statistics_annotations: statistics.annotations.yaml
     columns: 4
-    profiled_at: '2026-05-17T22:48:01Z'
+    profiled_at: '2026-03-09T14:27:36Z'
     row_count: 770
     max_age_days: 30
   arboretum.seedbank.germination_trial:
@@ -100,7 +102,7 @@ tables:
       description: description.md
       statistics_annotations: statistics.annotations.yaml
     columns: 8
-    profiled_at: '2026-05-17T22:48:01Z'
+    profiled_at: '2026-03-09T14:27:36Z'
     row_count: 900
     max_age_days: 1
   arboretum.seedbank.specimen_image:
@@ -110,8 +112,8 @@ tables:
       ddl: ddl.sql
       statistics: statistics.yaml
       relationships: relationships.yaml
-    columns: 8
-    profiled_at: '2026-05-17T22:48:01Z'
+    columns: 9
+    profiled_at: '2026-03-09T14:27:36Z'
     row_count: 700
     max_age_days: 1
   arboretum.seedbank.storage_reading:
@@ -122,7 +124,7 @@ tables:
       statistics: statistics.yaml
       relationships: relationships.yaml
     columns: 5
-    profiled_at: '2026-05-17T22:48:01Z'
+    profiled_at: '2026-03-09T14:27:36Z'
     row_count: 0
     max_age_days: 1
   arboretum.seedbank.taxon:
@@ -135,7 +137,7 @@ tables:
       description: description.md
       statistics_annotations: statistics.annotations.yaml
     columns: 8
-    profiled_at: '2026-05-17T22:48:01Z'
+    profiled_at: '2026-03-09T14:27:36Z'
     row_count: 300
     max_age_days: 1
   arboretum.seedbank.vault:
@@ -147,6 +149,6 @@ tables:
       relationships: relationships.yaml
       statistics_annotations: statistics.annotations.yaml
     columns: 6
-    profiled_at: '2026-05-17T22:48:01Z'
+    profiled_at: '2026-03-09T14:27:36Z'
     row_count: 48
     max_age_days: 1

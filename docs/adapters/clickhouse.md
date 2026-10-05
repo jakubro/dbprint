@@ -71,6 +71,29 @@ On ClickHouse, `materialize_sample` therefore decides whether a `sample`-scoped 
 
 Both path segments fold to lowercase for the FQN, and every statement addresses the table by the catalog's own spelling — `system.*` compares case-sensitively, so a folded name would address a table that does not exist. Two tables whose names differ only by case collide on one path and are refused with `case-collides-with-<other>`, like every other adapter. Column names fold to their lowercase map key and keep their catalog spelling in `physical_name`; ClickHouse holds two columns differing only by case, and such a table is refused at column grain (SPEC 1.5.2) while the rest of the run profiles.
 
+## Objects that are never listed
+
+Some engines hold no rows a read can describe, so `list_tables` leaves them out of the print — no file, no manifest entry, no `failed_tables` mark — and an `include` naming one matches nothing:
+
+- **Queue and stream engines** — `Kafka`, `RabbitMQ`, `NATS`, `FileLog`, `S3Queue`, `AzureQueue` and the Redis Streams engine. A read removes what it reads from the queue, so profiling one would consume messages a pipeline is waiting for; where direct reads are off, it fails every run.
+- **`Null`** — stores nothing; a read is always empty.
+- **`LiveView` and `WindowView`** — deliver results through `WATCH` or a target table, and a window view's own `.inner.` storage tables hold partial aggregation states. A window view writing `TO` a table of yours leaves that table listed.
+- **`GenerateRandom`** — returns random rows without end, so its first count would run until the statement limit.
+
+## Remote engines
+
+A table whose engine fetches its rows from another system on every read is listed with `external: true` (SPEC 2.2.20). Unless a `read_rows` rule opts it in, it is described from the catalog alone: no statement reaches the source, and an unreachable source does not fail the run. The engines this covers:
+
+- **Object storage and lakes** — `URL`, `S3` (and `COSN`, `OSS`, `GCS`), `AzureBlobStorage`, `HDFS`, `Hive`, and `DeltaLake`, `Hudi`, `Iceberg` and `Paimon` in every storage variant.
+- **Other databases** — `MySQL`, `PostgreSQL`, `ODBC`, `JDBC`, `MongoDB`, `Redis`, `SQLite`, `ArrowFlight`, `YTsaurus`, `ExternalDistributed`.
+- **`Executable` and `ExecutablePool`** — their script runs on every read.
+
+Opted in, such a table is read like any other, at the source's cost. It has no `SAMPLE BY` key, so narrow it with a `filter`: a `sample`, or a `max_rows_scanned` ceiling that resolves to a fraction, fails it. `Distributed`, `Remote`, `Merge`, `Dictionary` and the engines that store rows locally are ordinary tables.
+
+## Secrets in DDL
+
+`ddl.sql` shows every secret argument of an engine or table function as `[HIDDEN]`, and a URL's `user:password@` in the `ENGINE` clause too. Where your user profile turns `format_display_secrets_in_show_and_select` on, dbprint turns it off for its own reads; a server that refuses the override fails the table rather than publish the secret.
+
 ## What it cannot deliver
 
 - **`relationships`** — always empty. `REFERENTIAL_CONSTRAINTS` is documented permanently empty, and a `FOREIGN KEY` clause in `CREATE TABLE` is accepted and silently discarded.
@@ -78,6 +101,23 @@ Both path segments fold to lowercase for the FQN, and every statement addresses 
 - **`depends_on`** — always absent on every view. The dependency tables answer only the reverse edge, and only for materialized views.
 - **Index `columns`** — always empty for a data-skipping index. One covers an expression rather than a column list, so `columns` is empty rather than guessed.
 - **Column `collation`** — always the fixed constant `binary`. ClickHouse has no server-side collation model.
+
+## Column types
+
+| Type | Profiled as | What to know |
+|---|---|---|
+| `SimpleAggregateFunction(f, T)` | as `T` | `sql_type` keeps the declared spelling |
+| `AggregateFunction(f, T)` | `unsupported` | It holds aggregation states, not values |
+| `Array(T)` | `composite` | An array is never NULL; an empty one is the absent value, counted in `empty_count` |
+| `Tuple(...)`, `Variant(...)`, `Dynamic` | `composite` | An unnamed tuple element is addressed by position (`["1"]`), a variant member by its type (`.String`) |
+| `Map(K, V)` | `composite` | `m['k']` returns `0` or `''` for a missing key, never NULL; a key repeated within one map reports its first value |
+| `JSON` | `json` | A `null` and an absent path are the same, so a key that is `null` everywhere is not listed; `types` keys are what `JSONType` returns |
+| `Point`, `Ring`, `LineString`, `Polygon`, their `Multi` forms, `Geometry` | `spatial` | No SRID and no validity: `srids` and `invalid_count` are absent |
+| `QBit(element, N)` | `vector` | `dimension` is `N` |
+
+## Merging engines
+
+On `ReplacingMergeTree`, `SummingMergeTree`, `AggregatingMergeTree`, `CoalescingMergeTree`, `CollapsingMergeTree` and `VersionedCollapsingMergeTree`, with or without a `Replicated` or `Shared` prefix, the print counts the stored rows, which repeat a key until a background merge combines them. `row_count`, `cardinality` and `grain` describe those rows; query with `FINAL` for the merged ones, as the table's `merging` block and `dbprint context` both say. Where your user profile sets `final`, every read is already merged and the block says `rows: merged`.
 
 ## Temporal percentiles
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import anyio
 import pytest
@@ -369,6 +370,71 @@ class TestResourceMimeTypeReachesTheWire:
         assert listed == read
 
 
+class TestPagingReachesTheWire:
+    """MCP.md 3.3/3.4: the protocol cursor on the lists, `_meta` and page URIs on a read."""
+
+    def test_a_read_carries_its_page_metadata(self, primary_conn: ConnectionConfig) -> None:
+        async def _run() -> dict[str, Any] | None:
+            async with Client(build_server(_state_for(primary_conn))) as client:
+                result = await client.read_resource("dbprint://production/manifest")
+
+                return result.contents[0].meta
+
+        meta = anyio.run(_run)
+
+        assert meta is not None
+        assert (meta["page"], meta["pages"]) == (1, 1)
+        assert meta["version"]
+
+    def test_the_resource_list_pages_by_the_protocol_cursor(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        path = primary_conn.output / primary_conn.name / "manifest.yaml"
+        manifest = yaml.safe_load(path.read_text())
+        entry = next(iter(manifest["tables"].values()))
+        manifest["tables"] = {f"seedbank.t{i:04d}": dict(entry) for i in range(200)}
+        path.write_text(yaml.safe_dump(manifest))
+
+        async def _run() -> list[list[str]]:
+            async with Client(build_server(_state_for(primary_conn))) as client:
+                pages = [await client.list_resources()]
+
+                while pages[-1].next_cursor is not None:
+                    pages.append(await client.list_resources(cursor=pages[-1].next_cursor))
+
+                return [[str(r.uri) for r in page.resources] for page in pages]
+
+        pages = anyio.run(_run)
+        uris = [uri for page in pages for uri in page]
+
+        assert len(pages) > 1
+        assert len(uris) == len(set(uris))
+        assert sum("seedbank.t" in uri for uri in uris) == 200 * 3
+
+    def test_the_tool_list_is_one_page(self, primary_conn: ConnectionConfig) -> None:
+        async def _run() -> tuple[int, str | None]:
+            async with Client(build_server(_state_for(primary_conn))) as client:
+                listed = await client.list_tools()
+
+                return len(listed.tools), listed.next_cursor
+
+        assert anyio.run(_run) == (7, None)
+
+    def test_the_templates_advertise_the_page_form(self, primary_conn: ConnectionConfig) -> None:
+        async def _run() -> list[str]:
+            async with Client(build_server(_state_for(primary_conn))) as client:
+                listed = await client.list_resource_templates()
+
+                return [t.uri_template for t in listed.resource_templates]
+
+        templates = anyio.run(_run)
+
+        assert "dbprint://{connection}/{table}/statistics{?page,version}" in templates
+        assert "dbprint:///reference/{document}{?page,version}" in templates
+        assert all(t.endswith("{?page,version}") for t in templates)
+
+
 class TestHandshakeAdvertisesInstructions:
     def _instructions(self, conn: ConnectionConfig) -> str | None:
         async def _run() -> str | None:
@@ -525,11 +591,11 @@ class TestToolFormatShapesReachTheWire:
     def test_yaml_is_yaml_text_of_the_same_object(self, primary_conn: ConnectionConfig) -> None:
         json_text = self._call(
             primary_conn,
-            {"table": "arboretum.seedbank.collector", "format": "json"},
+            {"table": "arboretum.seedbank.storage_reading", "format": "json"},
         )
         yaml_text = self._call(
             primary_conn,
-            {"table": "arboretum.seedbank.collector", "format": "yaml"},
+            {"table": "arboretum.seedbank.storage_reading", "format": "yaml"},
         )
 
         assert not yaml_text.startswith("{")
@@ -547,19 +613,21 @@ class TestRealTransportErrorPaths:
 
         assert _stdio_list_resources_error_code(stdio_server) == -32603
 
-    def test_budgeted_md_never_returns_an_empty_success(self, stdio_server: StdioServer) -> None:
+    def test_a_paged_json_context_names_its_next_page_on_the_wire(
+        self,
+        stdio_server: StdioServer,
+    ) -> None:
         result = _stdio_call_tool(
             stdio_server,
             "get_table_context",
-            {"table": "arboretum.seedbank.collector", "format": "md", "budget_tokens": 1},
+            {"table": "arboretum.seedbank.accession", "format": "json"},
         )
         content = result.content[0]
         assert isinstance(content, TextContent)
 
-        # Never empty and successful - either the truncation marker names what was
-        # dropped, or the call failed outright.
-        assert content.text != ""
-        assert result.is_error or "truncated" in content.text
+        assert result.is_error is False
+        assert len(content.text) <= 20_000
+        assert "next_cursor" in json.loads(content.text)
 
     def test_corrupt_statistics_is_reported_not_silently_dropped(
         self,
@@ -749,7 +817,7 @@ class TestRealTransportErrorPaths:
 
         assert result.is_error is True
 
-    def test_bad_budget_tokens_is_a_failed_call_not_an_accepted_zero(
+    def test_the_removed_budget_is_a_failed_call_not_a_silent_default(
         self,
         stdio_server: StdioServer,
     ) -> None:
@@ -761,36 +829,22 @@ class TestRealTransportErrorPaths:
 
         assert result.is_error is True
 
-    def test_zero_limit_is_a_failed_call_not_an_empty_success(
+    def test_a_cursor_no_reply_issued_is_a_failed_call_not_a_traceback(
         self,
         stdio_server: StdioServer,
     ) -> None:
-        result = _stdio_call_tool(stdio_server, "search_columns", {"limit": 0})
+        result = _stdio_call_tool(stdio_server, "search_columns", {"cursor": "x"})
         content = result.content[0]
         assert isinstance(content, TextContent)
 
         assert result.is_error is True
-        assert "limit" in content.text
+        assert "cursor" in content.text
 
-    def test_non_integer_limit_is_a_failed_call_not_a_python_traceback(
+    def test_corruption_past_the_first_page_is_named_on_it(
         self,
         stdio_server: StdioServer,
     ) -> None:
-        result = _stdio_call_tool(stdio_server, "search_columns", {"limit": "5"})
-        content = result.content[0]
-        assert isinstance(content, TextContent)
-
-        assert result.is_error is True
-        assert "limit" in content.text
-
-    def test_corruption_past_the_result_cap_still_names_the_table(
-        self,
-        stdio_server: StdioServer,
-    ) -> None:
-        """A `limit` that caps `matches` on the first table must not blind the corruption scan.
-
-        `vault` sorts last, so `limit: 1` exhausts the cap before it; only a full scan reaches it.
-        """
+        """`vault` sorts last, so its columns would land on the last page; its fault does not."""
 
         vault_stats = (
             stdio_server.project_dir
@@ -803,11 +857,11 @@ class TestRealTransportErrorPaths:
         )
         vault_stats.write_text("not: valid: yaml: [")
 
-        result = _stdio_call_tool(stdio_server, "search_columns", {"limit": 1})
+        result = _stdio_call_tool(stdio_server, "search_columns", {})
         content = result.content[0]
         assert isinstance(content, TextContent)
         payload = json.loads(content.text)
 
         assert result.is_error is False
-        assert payload.get("truncated") is True
+        assert "next_cursor" in payload
         assert "arboretum.seedbank.vault" in payload.get("unreadable_tables", [])

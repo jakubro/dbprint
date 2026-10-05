@@ -9,13 +9,19 @@ import re
 from typing import Literal
 
 
+RecordKind = Literal["struct", "union"]
+
 Classification = Literal[
     "boolean",
     "json",
+    "composite",
+    "spatial",
+    "vector",
     "foreign_key_candidate",
     "categorical",
     "temporal",
     "numeric",
+    "binary",
     "text",
     "unsupported",
 ]
@@ -188,12 +194,36 @@ _CHARACTER_TYPES = (
     "mediumtext",
     "longtext",
 )
-_UNSUPPORTED_TYPES = (
+_BINARY_TYPES = (
     "bytea",
     "blob",
+    "tinyblob",
+    "mediumblob",
+    "longblob",
     "binary",
     "varbinary",
+    "varbyte",
+    "binary varying",
+    "bytes",
     "image",
+)
+# OGC simple-features types. Postgres resolves its native `point` and `polygon` to `geometric`
+# before classification, so they never land here.
+_SPATIAL_TYPES = (
+    "geometry",
+    "geography",
+    "point",
+    "linestring",
+    "polygon",
+    "multipoint",
+    "multilinestring",
+    "multipolygon",
+    "geometrycollection",
+    "ring",
+)
+# Native embedding types: pgvector's three, MySQL's and Snowflake's VECTOR, ClickHouse's QBit.
+_VECTOR_TYPES = ("vector", "halfvec", "sparsevec", "qbit")
+_UNSUPPORTED_TYPES = (
     "record",
     "struct",
     "array",
@@ -208,17 +238,31 @@ _UNSUPPORTED_TYPES = (
 # One or more trailing `[]`/`[n]` suffixes, read after every bracketed group is gone.
 _ARRAY_SUFFIX_RE = re.compile(r"(\[\d*\])+$")
 
+_FLOATING_TYPES = (
+    "real",
+    "double precision",
+    "double",
+    "float",
+    "float4",
+    "float8",
+    "float32",
+    "float64",
+    "bfloat16",
+)
+
 _GROUP_CLOSERS = {"(": ")", "<": ">"}
 
 # MySQL reports these inside `column_type` (`bigint unsigned`, `int unsigned zerofill`),
 # with no separating paren for a base-name split to key on.
 _MYSQL_NUMERIC_QUALIFIER_RE = re.compile(r"\b(unsigned|zerofill|signed)\b")
 
-# ClickHouse names a type by wrapping it (`Nullable(Int32)`, `LowCardinality(String)`) rather
-# than qualifying it - the wrapped name is the type, so unwrapping recurses to it directly.
+# ClickHouse names a type by wrapping it (`Nullable(Int32)`, `LowCardinality(String)`,
+# `SimpleAggregateFunction(sum, UInt64)`) rather than qualifying it - unwrapping recurses to it.
 # The wrapper name is captured (not just discarded) so `is_nullable_type` can share this same
 # definition rather than testing nullability with a second, unanchored pattern.
-_CLICKHOUSE_WRAPPER_RE = re.compile(r"^(nullable|lowcardinality)\((.+)\)$")
+_CLICKHOUSE_WRAPPER_RE = re.compile(
+    r"^(nullable|lowcardinality|simpleaggregatefunction)\((.+)\)$",
+)
 
 
 def base_type(sql_type: str) -> str:
@@ -228,18 +272,22 @@ def base_type(sql_type: str) -> str:
 
     lowered = sql_type.lower()
 
-    while True:
-        match = _CLICKHOUSE_WRAPPER_RE.match(lowered)
-
-        if match is None:
-            break
-
-        lowered = match.group(2)
+    while (unwrapped := _unwrapped(lowered)) is not None:
+        lowered = unwrapped[1]
 
     stripped = _without_groups(lowered)
     stripped = _MYSQL_NUMERIC_QUALIFIER_RE.sub("", stripped)
 
     return " ".join(stripped.split())
+
+
+def stored_type(sql_type: str) -> str:
+    """The type a ClickHouse `SimpleAggregateFunction(f, T)` stores, `T` as spelled; else `sql_type`."""
+
+    match = re.fullmatch(r"(?is)\s*SimpleAggregateFunction\((.*)\)\s*", sql_type)
+    arguments = top_level_arguments(match.group(1)) if match else []
+
+    return arguments[1].strip() if len(arguments) > 1 else sql_type
 
 
 def is_nullable_type(sql_type: str) -> bool:
@@ -251,16 +299,13 @@ def is_nullable_type(sql_type: str) -> bool:
 
     lowered = sql_type.lower()
 
-    while True:
-        match = _CLICKHOUSE_WRAPPER_RE.match(lowered)
-
-        if match is None:
-            return False
-
-        if match.group(1) == "nullable":
+    while (unwrapped := _unwrapped(lowered)) is not None:
+        if unwrapped[0] == "nullable":
             return True
 
-        lowered = match.group(2)
+        lowered = unwrapped[1]
+
+    return False
 
 
 def classify(
@@ -270,6 +315,7 @@ def classify(
     enumeration_threshold: int,
     *,
     catalog_only: bool = False,
+    has_parts: bool = False,
 ) -> Classification:
     """Return the v1 classification for a column per SPEC 3.2 priority order.
 
@@ -277,14 +323,22 @@ def classify(
     participates under `catalog_only` too. `cardinality=None` means either the adapter declined
     to profile (SPEC 3.1) or nothing was queried (`catalog_only`, SPEC 2.2.15); the two differ
     only in the unmatched-type fallthrough - `unsupported` and `text` respectively (SPEC 3.3).
+    `has_parts` says the producer descended into the column, which makes it `composite` unless
+    its type is JSON (SPEC 3.1).
     """
 
-    if _matches(base_type(sql_type), _UNSUPPORTED_TYPES) or is_array_type(sql_type):
+    if has_parts and not is_json_type(sql_type):
+        return "composite"
+    elif _matches(base_type(sql_type), _UNSUPPORTED_TYPES) or is_array_type(sql_type):
         return "unsupported"
     elif is_boolean_type(sql_type):
         return "boolean"
     elif is_json_type(sql_type):
         return "json"
+    elif is_spatial_type(sql_type):
+        return "spatial"
+    elif is_vector_type(sql_type):
+        return "vector"
     elif has_declared_fk:
         return "foreign_key_candidate"
     elif cardinality is not None and cardinality <= enumeration_threshold:
@@ -293,6 +347,8 @@ def classify(
         return "temporal"
     elif is_numeric_type(sql_type):
         return "numeric"
+    elif is_binary_type(sql_type):
+        return "binary"
     elif _matches(base_type(sql_type), _CHARACTER_TYPES) or cardinality is not None or catalog_only:
         return "text"
     else:
@@ -311,6 +367,9 @@ def is_string_like_type(sql_type: str) -> bool:
         or is_json_type(sql_type)
         or is_temporal_type(sql_type)
         or is_numeric_type(sql_type)
+        or is_binary_type(sql_type)
+        or is_spatial_type(sql_type)
+        or is_vector_type(sql_type)
     )
 
 
@@ -372,6 +431,24 @@ def is_temporal_type(sql_type: str) -> bool:
     return _matches(base_type(sql_type), _TEMPORAL_TYPES)
 
 
+def is_spatial_type(sql_type: str) -> bool:
+    """Whether `sql_type`'s values are OGC simple-features geometries (SPEC 3.1)."""
+
+    return _matches(base_type(sql_type), _SPATIAL_TYPES)
+
+
+def is_vector_type(sql_type: str) -> bool:
+    """Whether `sql_type` is a native embedding type (SPEC 3.1), never a plain float array."""
+
+    return _matches(base_type(sql_type), _VECTOR_TYPES)
+
+
+def is_binary_type(sql_type: str) -> bool:
+    """Whether `sql_type` holds bytes rather than characters - a binary string of any width."""
+
+    return _matches(base_type(sql_type), _BINARY_TYPES)
+
+
 def is_boolean_type(sql_type: str) -> bool:
     """Whether `sql_type` is a boolean, MySQL's `tinyint(1)` spelling included."""
 
@@ -396,6 +473,9 @@ def is_recognised_type(sql_type: str) -> bool:
             _matches(base, table)
             for table in (
                 _UNSUPPORTED_TYPES,
+                _BINARY_TYPES,
+                _SPATIAL_TYPES,
+                _VECTOR_TYPES,
                 _JSON_TYPES,
                 _TEMPORAL_TYPES,
                 _NUMERIC_TYPES,
@@ -403,6 +483,82 @@ def is_recognised_type(sql_type: str) -> bool:
             )
         )
     )
+
+
+def element_type(sql_type: str) -> str | None:
+    """The type of one element of the array `sql_type` names, or None where it names none.
+
+    Strips one trailing `[]`/`[n]`, or unwraps one `ARRAY<T>`/`Array(T)`/`array<T>`; a bare
+    `ARRAY` (Snowflake's semi-structured array) says nothing of its elements.
+    """
+
+    text = sql_type.strip()
+    suffix = re.search(r"\[\d*\]$", text)
+
+    if suffix is not None and is_array_type(text):
+        return text[: suffix.start()].rstrip()
+
+    match = re.fullmatch(r"(?is)array\s*([<(])(.*)([>)])", text)
+
+    if match is None or _GROUP_CLOSERS[match.group(1)] != match.group(3):
+        return None
+
+    return match.group(2).strip()
+
+
+def record_members(sql_type: str) -> tuple[RecordKind, list[tuple[str, str]]] | None:
+    """The members the record or union type `sql_type` declares, in order, or None for another.
+
+    Reads duckdb `STRUCT(a T)`/`UNION(a T)`, BigQuery `STRUCT<a T>`, Databricks `struct<a:T>` and
+    ClickHouse `Tuple(a T)`/`Variant(T1, T2)`; an unnamed tuple element is named by its 1-based
+    position and a variant member by its type. A quoted name is unquoted.
+    """
+
+    text = sql_type.strip()
+    nullable = re.fullmatch(r"(?is)nullable\((.*)\)", text)
+    text = nullable.group(1).strip() if nullable else text
+    match = re.fullmatch(r"(?is)(struct|union|tuple|variant)\s*([<(])(.*)([>)])", text)
+
+    if match is None or _GROUP_CLOSERS[match.group(2)] != match.group(4):
+        return None
+
+    word = match.group(1).lower()
+    arguments = [a.strip() for a in top_level_arguments(match.group(3)) if a.strip()]
+
+    if word == "variant":
+        return "union", [(argument, argument) for argument in arguments]
+
+    named = [_named_member(argument, colon=match.group(2) == "<") for argument in arguments]
+
+    if word == "tuple" and not all(named):
+        return "struct", [(str(i), a) for i, a in enumerate(arguments, start=1)]
+
+    if not all(named):
+        return None
+
+    return ("union" if word == "union" else "struct"), [m for m in named if m is not None]
+
+
+def map_types(sql_type: str) -> tuple[str, str] | None:
+    """The key and value types the map type `sql_type` declares, or None for another type.
+
+    Reads duckdb and Snowflake `MAP(K, V)`, Databricks `map<K,V>` and ClickHouse `Map(K, V)`.
+    """
+
+    match = re.fullmatch(r"(?is)map\s*([<(])(.*)([>)])", sql_type.strip())
+
+    if match is None or _GROUP_CLOSERS[match.group(1)] != match.group(3):
+        return None
+
+    arguments = [a.strip() for a in top_level_arguments(match.group(2))]
+
+    return (arguments[0], arguments[1]) if len(arguments) == 2 and all(arguments) else None
+
+
+def is_floating_type(sql_type: str) -> bool:
+    """Whether `sql_type` holds binary floating-point values, whose exact values pool no domain."""
+
+    return _matches(base_type(sql_type), _FLOATING_TYPES)
 
 
 def is_array_type(sql_type: str) -> bool:
@@ -413,8 +569,81 @@ def is_array_type(sql_type: str) -> bool:
     return _ARRAY_SUFFIX_RE.search(_without_groups(sql_type).rstrip()) is not None
 
 
+def _unwrapped(lowered: str) -> tuple[str, str] | None:
+    """The wrapper name and the type it holds, or None when `lowered` wraps nothing.
+
+    `SimpleAggregateFunction(f, T, ...)` stores plain values of `T`, its first type argument;
+    one with no type argument is left wrapped, so it still declines.
+    """
+
+    match = _CLICKHOUSE_WRAPPER_RE.match(lowered)
+
+    if match is None:
+        return None
+
+    wrapper, inner = match.groups()
+
+    if wrapper != "simpleaggregatefunction":
+        return wrapper, inner
+
+    arguments = top_level_arguments(inner)
+
+    return (wrapper, arguments[1].strip()) if len(arguments) > 1 else None
+
+
+def top_level_arguments(text: str) -> list[str]:
+    """`text` split at the commas outside every group and quote, each piece as written."""
+
+    parts: list[str] = [""]
+    closers: list[str] = []
+    quote: str | None = None
+
+    for char in text:
+        if quote is not None:
+            quote = None if char == quote else quote
+        elif char in "\"'`":
+            quote = char
+        elif char in _GROUP_CLOSERS:
+            closers.append(_GROUP_CLOSERS[char])
+        elif closers and char == closers[-1]:
+            closers.pop()
+        elif char == "," and not closers:
+            parts.append("")
+            continue
+
+        parts[-1] += char
+
+    return parts
+
+
 def _matches(base: str, types: tuple[str, ...]) -> bool:
     return base in types
+
+
+def _named_member(argument: str, *, colon: bool) -> tuple[str, str] | None:
+    if argument[:1] in '"`':
+        mark = argument[0]
+        quoted = re.match(rf"{mark}((?:[^{mark}]|{mark}{{2}})*){mark}", argument)
+
+        if quoted is None:
+            return None
+
+        name = quoted.group(1).replace(mark * 2, mark)
+        rest = argument[quoted.end() :]
+    else:
+        split = re.match(r"([A-Za-z_][A-Za-z0-9_$]*)(?=\s|:)", argument)
+
+        if split is None:
+            return None
+
+        name, rest = split.group(1), argument[split.end() :]
+
+    rest = rest.strip()
+
+    if colon and rest.startswith(":"):
+        rest = rest[1:].strip()
+
+    return (name, rest) if rest else None
 
 
 def _without_groups(sql_type: str) -> str:

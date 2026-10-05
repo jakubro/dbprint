@@ -44,7 +44,6 @@ _NOT_READERS = {
 _READS_ANOTHER_DOCUMENT: dict[tuple[str, str, str], str] = {
     ("assertions/parser.py", "_parse_tables", "row_count"): ".dbprint.yaml predicate key",
     ("conformance/column_annotations.py", "check_grain_annotations", "grain"): "annotation file",
-    ("conformance/column_annotations.py", "check_value_notes", "values"): "annotation file",
     **{
         ("engine/carried.py", "_columns", key): "hydrates a committed column verbatim"
         for key in (
@@ -64,6 +63,7 @@ _READS_ANOTHER_DOCUMENT: dict[tuple[str, str, str], str] = {
             "catalog_only",
             "collation",
             "depends_on",
+            "external",
             "grain",
             "physical_layout",
             "physical_name",
@@ -77,6 +77,7 @@ _READS_ANOTHER_DOCUMENT: dict[tuple[str, str, str], str] = {
     ("docs/view.py", "_row_count", "row_count"): "manifest entry",
     ("docs/view.py", "column_view", "values"): "annotation value notes",
     ("docs/view.py", "row_count_view", "rows_scanned"): "scope_view's own rendered mapping",
+    ("engine/thresholds.py", "resolve", "row_count"): "manifest entry",
     ("engine/context_assembler.py", "_annotated_grain", "grain"): "annotation file",
     ("engine/context_assembler.py", "_annotation_entry_has_content", "values"): "annotation",
     ("engine/context_assembler.py", "_load_table_artifacts", "row_count"): "manifest entry",

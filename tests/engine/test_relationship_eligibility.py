@@ -13,27 +13,18 @@ from typing import Any
 import yaml
 
 from dbprint.adapters.base import (
-    ColumnMeta,
     ColumnStats,
-    CommentsMeta,
     ForeignKeyMeta,
     UniqueKeyMeta,
 )
 from dbprint.adapters.mock import MockAdapter, MockTable
 from dbprint.config.project import ConnectionConfig, DiffConfig, StatisticsConfig
 from dbprint.engine import Engine, GenerateRequest
+from tests._prints import VAULT_COLUMNS, columns, exact_stats, mock_table
 
 
 def _stats(sql_type: str, cardinality: int, row_count: int) -> ColumnStats:
-    return ColumnStats(
-        sql_type=sql_type,
-        nullable=False,
-        null_count=0,
-        null_rate=0.0,
-        cardinality=cardinality,
-        cardinality_ratio=round(cardinality / row_count, 6),
-        cardinality_method="exact",
-    )
+    return exact_stats(sql_type, cardinality, round(cardinality / row_count, 6))
 
 
 def _uuid_samples(n: int) -> list[str]:
@@ -42,35 +33,10 @@ def _uuid_samples(n: int) -> list[str]:
 
 def _fixture() -> dict[str, MockTable]:
     return {
-        "seedbank.vault": MockTable(
-            type="table",
-            namespace_path=("seedbank", "vault"),
-            ddl=(
-                "CREATE TABLE seedbank.vault (\n"
-                "    vault_id integer NOT NULL,\n"
-                "    shelf_code character varying(8) NOT NULL\n"
-                ");\n"
-            ),
-            columns=[
-                ColumnMeta(
-                    name="vault_id",
-                    sql_type="integer",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-                ColumnMeta(
-                    name="shelf_code",
-                    sql_type="character varying(8)",
-                    nullable=False,
-                    default=None,
-                    ordinal=2,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+        "seedbank.vault": mock_table(
+            "seedbank.vault",
+            VAULT_COLUMNS[:2],
+            {
                 "vault_id": _stats("integer", 8, 48),
                 "shelf_code": _stats("character varying(8)", 6, 48),
             },
@@ -78,56 +44,19 @@ def _fixture() -> dict[str, MockTable]:
             row_count=48,
             unique_keys=[UniqueKeyMeta(columns=("vault_id", "shelf_code"), primary=True)],
         ),
-        "seedbank.collector": MockTable(
-            type="table",
-            namespace_path=("seedbank", "collector"),
+        "seedbank.collector": mock_table(
+            "seedbank.collector",
+            columns(("collector_id", "uuid")),
+            {"collector_id": _stats("uuid", 400, 400)},
             ddl="CREATE TABLE seedbank.collector (collector_id uuid NOT NULL);\n",
-            columns=[
-                ColumnMeta(
-                    name="collector_id",
-                    sql_type="uuid",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={"collector_id": _stats("uuid", 400, 400)},
             samples={"collector_id": _uuid_samples(20)},
             row_count=400,
             unique_keys=[UniqueKeyMeta(columns=("collector_id",), primary=True)],
         ),
-        "seedbank.germination_trial": MockTable(
-            type="table",
-            namespace_path=("seedbank", "germination_trial"),
-            ddl=(
-                "CREATE TABLE seedbank.germination_trial (\n"
-                "    trial_id integer NOT NULL,\n"
-                "    collector_id uuid NOT NULL\n"
-                ");\n"
-            ),
-            columns=[
-                ColumnMeta(
-                    name="trial_id",
-                    sql_type="integer",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-                ColumnMeta(
-                    name="collector_id",
-                    sql_type="uuid",
-                    nullable=False,
-                    default=None,
-                    ordinal=2,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+        "seedbank.germination_trial": mock_table(
+            "seedbank.germination_trial",
+            columns(("trial_id", "integer"), ("collector_id", "uuid")),
+            {
                 "trial_id": _stats("integer", 900, 900),
                 "collector_id": _stats("uuid", 400, 900),
             },
@@ -138,31 +67,13 @@ def _fixture() -> dict[str, MockTable]:
             row_count=900,
             unique_keys=[UniqueKeyMeta(columns=("trial_id",), primary=True)],
         ),
-        "seedbank.accession": MockTable(
-            type="table",
-            namespace_path=("seedbank", "accession"),
-            ddl=(
-                "CREATE TABLE seedbank.accession (\n"
-                "    accession_id bigint NOT NULL,\n"
-                "    collector_id uuid NOT NULL\n"
-                ");\n"
-            ),
-            columns=[
-                ColumnMeta(
-                    name="accession_id",
-                    sql_type="bigint",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-                ColumnMeta(
-                    name="collector_id",
-                    sql_type="uuid",
-                    nullable=False,
-                    default=None,
-                    ordinal=2,
-                ),
-            ],
+        "seedbank.accession": mock_table(
+            "seedbank.accession",
+            columns(("accession_id", "bigint"), ("collector_id", "uuid")),
+            {
+                "accession_id": _stats("bigint", 2500, 2500),
+                "collector_id": _stats("uuid", 400, 2500),
+            },
             relationships=[
                 ForeignKeyMeta(
                     column=("collector_id",),
@@ -173,12 +84,6 @@ def _fixture() -> dict[str, MockTable]:
                     constraint_name="accession_collector_id_fkey",
                 ),
             ],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
-                "accession_id": _stats("bigint", 2500, 2500),
-                "collector_id": _stats("uuid", 400, 2500),
-            },
             samples={
                 "accession_id": list(range(1, 21)),
                 "collector_id": _uuid_samples(20),
