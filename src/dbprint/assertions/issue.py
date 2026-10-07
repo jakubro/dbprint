@@ -5,6 +5,8 @@ The conformance suite owns the `Issue` dataclass; this module owns the `assertio
 
 from __future__ import annotations
 
+from dbprint.spec.predicate import ASSERTABLE_STATS
+
 
 # Configuration / discovery issues.
 
@@ -47,10 +49,8 @@ SQL_EXECUTION_ERROR = "assertion.sql-execution-error"
 SQL_TYPE_COERCION_ERROR = "assertion.sql-type-mismatch"
 
 
-# Stat name -> failure code lookup.
-
-STAT_TO_FAILURE_CODE: dict[str, str] = {
-    "row_count": ROW_COUNT_MISMATCH,
+# Each assertable stat's failure code (ASSERTIONS.md 2.4); `spec.predicate` owns the vocabulary.
+_FAILURE_CODES: dict[str, str] = {
     "null_count": NULL_COUNT_MISMATCH,
     "null_rate": NULL_RATE_MISMATCH,
     "cardinality": CARDINALITY_MISMATCH,
@@ -66,4 +66,9 @@ STAT_TO_FAILURE_CODE: dict[str, str] = {
     "range.max": RANGE_OUT_OF_BOUNDS,
     "freshness.classification": FRESHNESS_MISMATCH,
     "freshness.max_age_days": FRESHNESS_AGE_MISMATCH,
+}
+
+STAT_TO_FAILURE_CODE: dict[str, str] = {
+    "row_count": ROW_COUNT_MISMATCH,
+    **{stat: _FAILURE_CODES[stat] for stat in sorted(ASSERTABLE_STATS)},
 }

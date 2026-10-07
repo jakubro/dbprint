@@ -9,16 +9,15 @@ so it keeps its own hand-built fixture.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import yaml
 
 from dbprint.assertions import AssertionSet, TablePredicates, evaluate_statistic_assertions
 from dbprint.conformance.issue import Issue
+from tests._scripts import REPO_ROOT
 
 
 _ACCESSION_STATISTICS_PATH = (
-    Path(__file__).resolve().parents[2]
+    REPO_ROOT
     / "docs/format/v1/examples/production/prints/production/arboretum/seedbank/accession/statistics.yaml"
 )
 
@@ -743,3 +742,12 @@ class TestEachStatIsParsedByItsOwnForm:
                 spec_ref="ASSERTIONS.md §2.6",
             ),
         ]
+
+
+def test_every_failure_code_names_an_assertable_stat() -> None:
+    """A code for a stat the vocabulary dropped would never be raised; a missing one raises KeyError."""
+
+    from dbprint.assertions.issue import _FAILURE_CODES
+    from dbprint.spec.predicate import ASSERTABLE_STATS
+
+    assert set(_FAILURE_CODES) == ASSERTABLE_STATS

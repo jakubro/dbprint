@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import re
 from pathlib import Path
 from typing import Any, get_args
@@ -11,16 +10,16 @@ import pytest
 import yaml
 
 from dbprint.adapters.base import Distribution
-from dbprint.conformance import validate_print
 from dbprint.spec.classification import Classification
 from dbprint.spec.looks_like import LooksLike
 from dbprint.spec.redaction import MASK_PLACEHOLDER, Primitive
 from dbprint.spec.sensitivity import Sensitivity
+from tests._engine_run import conformance_errors
+from tests._scripts import REPO_ROOT, load_script
 from tests.conftest import PostgresCluster, normalize_print_tree
 from tests.spec import _spec_markdown
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = REPO_ROOT / "docs/format/v1/examples/production/prints/production"
 EXAMPLE_VOCABULARY = REPO_ROOT / "docs/format/v1/examples/vocabulary/prints/vocabulary"
 README = REPO_ROOT / "docs/format/v1/examples/README.md"
@@ -38,16 +37,14 @@ _NUMBER_WORDS = {
 
 
 def test_reference_example_has_zero_errors() -> None:
-    issues = validate_print(EXAMPLE)
-    errors = [i for i in issues if i.severity == "error"]
+    errors = conformance_errors(EXAMPLE)
     assert errors == [], "Reference example must conform with zero errors. Got:\n" + "\n".join(
         f"  {e.code} at {e.path}: {e.detail}" for e in errors
     )
 
 
 def test_vocabulary_example_has_zero_errors() -> None:
-    issues = validate_print(EXAMPLE_VOCABULARY)
-    errors = [i for i in issues if i.severity == "error"]
+    errors = conformance_errors(EXAMPLE_VOCABULARY)
     assert errors == [], "Vocabulary example must conform with zero errors. Got:\n" + "\n".join(
         f"  {e.code} at {e.path}: {e.detail}" for e in errors
     )
@@ -216,7 +213,7 @@ class TestProducerAgreement:
         tmp_path: Path,
     ) -> None:
         del pgvector
-        generator = _load_generator()
+        generator = load_script("gen_reference_example")
         credentials = _fresh_database(postgis, generator)
 
         generator.build_example(credentials, tmp_path / "example")
@@ -242,7 +239,7 @@ class TestVocabularyProducerAgreement:
         postgres_cluster: PostgresCluster,
         tmp_path: Path,
     ) -> None:
-        generator = _load_generator("gen_vocabulary_example")
+        generator = load_script("gen_vocabulary_example")
         credentials = _fresh_database(postgres_cluster, generator)
 
         generator.build_example(credentials, tmp_path / "example")
@@ -328,7 +325,7 @@ class TestAnnotationSeedingIsSearchBased:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        generator = _load_generator()
+        generator = load_script("gen_reference_example")
         source_root = tmp_path / "committed"
         (source_root / "public" / "curator").mkdir(parents=True)
         (source_root / "public" / "cultivar").mkdir(parents=True)
@@ -352,7 +349,7 @@ class TestAnnotationSeedingIsSearchBased:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        generator = _load_generator()
+        generator = load_script("gen_reference_example")
         source_root = tmp_path / "committed"
         (source_root / "public" / "curator").mkdir(parents=True)
         (source_root / "public" / "curator" / "statistics.annotations.yaml").write_text(
@@ -425,19 +422,6 @@ def _marked_columns() -> list[tuple[str, dict[str, Any]]]:
         for name, column in payload["columns"].items()
         if "redacted" in column
     ]
-
-
-def _load_generator(module_name: str = "gen_reference_example") -> Any:
-    path = REPO_ROOT / "scripts" / f"{module_name}.py"
-    spec = importlib.util.spec_from_file_location(module_name, path)
-
-    if spec is None or spec.loader is None:
-        pytest.fail(f"could not load {path}")
-
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    return module
 
 
 def _fresh_database(cluster: PostgresCluster, generator: Any) -> dict[str, str]:

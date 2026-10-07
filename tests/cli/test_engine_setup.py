@@ -11,7 +11,9 @@ import pytest
 from dbprint.adapters import Adapter
 from dbprint.cli import engine_setup
 from dbprint.cli.adapter_registry import ADAPTERS
-from dbprint.config.project import ConnectionConfig, DiffConfig, StatisticsConfig
+from dbprint.config.connections import env_var_name
+from dbprint.config.project import ConnectionConfig
+from tests._prints import connection_config
 
 
 _FILE_SUFFIXES = ("_file", "_path", "_dir", "_dirname")
@@ -44,21 +46,14 @@ def _recording(real: type[Adapter]) -> type[Adapter]:
 
 def _required_env(kind: str, path_key: str, value: str) -> dict[str, str]:
     adapter = ADAPTERS[kind]
-    env = {f"DBPRINT_C_{k.upper()}": "x" for k in adapter.REQUIRED_KEYS}
-    env[f"DBPRINT_C_{path_key.upper()}"] = value
+    env = {env_var_name("c", k): "x" for k in adapter.REQUIRED_KEYS}
+    env[env_var_name("c", path_key)] = value
 
     return env
 
 
 def _conn(kind: str, root: Path) -> ConnectionConfig:
-    return ConnectionConfig(
-        name="c",
-        adapter=cast(Any, kind),
-        auto=False,
-        output=root / "prints",
-        statistics=StatisticsConfig(),
-        diff=DiffConfig(),
-    )
+    return connection_config(name="c", adapter=cast(Any, kind), output=root / "prints")
 
 
 _PAIRS = [(kind, key) for kind in sorted(ADAPTERS) for key in ADAPTERS[kind].PATH_KEYS]

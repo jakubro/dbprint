@@ -11,9 +11,9 @@ import pytest
 from dbprint.adapters import ClickhouseAdapter, ColumnMeta, PostgresAdapter
 from dbprint.adapters.dialect import Vendor
 from dbprint.config.project import RedactRule
+from tests.adapters._composites import generate, psql
+from tests.adapters._dialects import STATS_MODULES, foreign_fragments
 from tests.adapters._sql_style import alias_violations, layout_violations, violations
-from tests.adapters.test_arrays import _generate, _psql
-from tests.adapters.test_dialect_guard import STATS_MODULES, _foreign_fragments
 
 
 _VECTOR_TYPES: dict[str, str] = {
@@ -28,7 +28,7 @@ _VECTOR_TYPES: dict[str, str] = {
 def embeddings(pgvector: object, postgres_test_db: dict[str, str]) -> dict[str, str]:
     del pgvector
 
-    with _psql(postgres_test_db) as conn:
+    with psql(postgres_test_db) as conn:
         conn.execute("CREATE EXTENSION vector")
         conn.execute(
             "CREATE TABLE public.document (doc_id integer, unit vector(3), raw vector(3), "
@@ -53,7 +53,7 @@ def test_pgvector_columns_publish_dimension_norm_and_zero_count(
     embeddings: dict[str, str],
     tmp_path: Path,
 ) -> None:
-    columns = _generate(PostgresAdapter(embeddings), "postgres", tmp_path, "*.document")
+    columns = generate(PostgresAdapter(embeddings), "postgres", tmp_path, "*.document")
 
     assert columns["unit"]["classification"] == "vector"
     assert columns["unit"]["dimension"] == {"min": 3, "max": 3}
@@ -73,7 +73,7 @@ def test_a_pgvector_type_off_the_search_path_is_still_a_vector(
 ) -> None:
     del pgvector
 
-    with _psql(postgres_test_db) as conn:
+    with psql(postgres_test_db) as conn:
         conn.execute("CREATE SCHEMA kit")
         conn.execute("CREATE EXTENSION vector SCHEMA kit")
         conn.execute("CREATE TABLE public.passage (passage_id integer, emb kit.vector(3))")
@@ -82,7 +82,7 @@ def test_a_pgvector_type_off_the_search_path_is_still_a_vector(
             "FROM generate_series(1, 30) i",
         )
 
-    emb = _generate(PostgresAdapter(postgres_test_db), "postgres", tmp_path, "*.passage")["emb"]
+    emb = generate(PostgresAdapter(postgres_test_db), "postgres", tmp_path, "*.passage")["emb"]
 
     assert emb["classification"] == "vector"
     assert not {"values", "cardinality", "sketch"} & set(emb)
@@ -94,7 +94,7 @@ def test_a_redact_rule_leaves_a_vector_column_unmarked(
     embeddings: dict[str, str],
     tmp_path: Path,
 ) -> None:
-    columns = _generate(
+    columns = generate(
         PostgresAdapter(embeddings),
         "postgres",
         tmp_path,
@@ -110,7 +110,7 @@ def test_a_view_over_a_vector_column_is_vector_by_type_alone(
     embeddings: dict[str, str],
     tmp_path: Path,
 ) -> None:
-    columns = _generate(PostgresAdapter(embeddings), "postgres", tmp_path, "*.document_view")
+    columns = generate(PostgresAdapter(embeddings), "postgres", tmp_path, "*.document_view")
 
     assert columns["unit"] == {
         "sql_type": "vector(3)",
@@ -135,7 +135,7 @@ def test_a_clickhouse_qbit_reads_its_dimension_from_the_type(
         {"host": "chdb", "database": "seedbank"},
         cursor_factory=lambda _params: cursor,
     )
-    columns = _generate(adapter, "clickhouse", tmp_path, "*.passage")
+    columns = generate(adapter, "clickhouse", tmp_path, "*.passage")
 
     assert columns["embedding"]["classification"] == "vector"
     assert columns["embedding"]["dimension"] == {"min": 4, "max": 4}
@@ -149,7 +149,7 @@ def test_the_vector_read_speaks_its_own_dialect(
 ) -> None:
     (statement,) = _read(vendor, monkeypatch, STATS_MODULES[vendor])
 
-    assert _foreign_fragments(statement, vendor) == []
+    assert foreign_fragments(statement, vendor) == []
     assert violations(statement, vendor) + alias_violations(statement, vendor) == []
     assert layout_violations(statement, vendor) == []
 

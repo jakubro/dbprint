@@ -29,11 +29,12 @@ from dbprint.adapters.base import pre_classify
 from dbprint.cli.adapter_registry import ADAPTERS
 from dbprint.config import StatisticsConfig
 from dbprint.config.project import ConnectionConfig
-from dbprint.conformance import validate_print
 from dbprint.engine import Engine
 from dbprint.spec.classification import base_type
-from tests.adapters.test_arrays import _psql
-from tests.engine.test_orchestrator import _conn_config, _curator_fixture
+from tests._curator import conn_config, curator_fixture
+from tests._engine_run import conformance_errors
+from tests.adapters._composites import psql
+from tests.adapters._type_spellings import DUCKDB_DECLARATIONS, POSTGRES_SKIPPED
 
 
 _CATALOG: dict[str, dict[str, str]] = yaml.safe_load(
@@ -82,13 +83,13 @@ def test_an_unrecognised_type_is_reported_once_per_column(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    fixture = _curator_fixture()
+    fixture = curator_fixture()
     table = fixture["public.curator"]
     columns = [replace(table.columns[0], sql_type="seedtag"), *table.columns[1:]]
     fixture["public.curator"] = replace(table, columns=columns)
 
     with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
-        Engine(MockAdapter(fixture), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(fixture), conn_config(tmp_path), tmp_path).generate()
 
     warnings = [r.getMessage() for r in caplog.records if "is not recognised" in r.getMessage()]
     assert warnings == [
@@ -105,7 +106,7 @@ def test_every_duckdb_system_type_is_catalogued() -> None:
         "SELECT DISTINCT logical_type FROM duckdb_types() "
         "WHERE database_name = 'system' AND logical_type NOT IN ('NULL', 'TYPE')",
     ).fetchall()
-    declarations = {name: _DUCKDB_DECLARATIONS.get(name, name) for (name,) in logical}
+    declarations = {name: DUCKDB_DECLARATIONS.get(name, name) for (name,) in logical}
     columns = ", ".join(f"c{i} {decl}" for i, decl in enumerate(declarations.values()))
     con.execute(f"CREATE TABLE sweep ({columns}, j JSON)")
     reported = [row[1] for row in con.execute("DESCRIBE sweep").fetchall()]
@@ -135,7 +136,7 @@ def test_every_clickhouse_type_family_is_catalogued(clickhouse_native_connection
 def test_every_postgres_catalog_base_type_is_catalogued(
     postgres_test_db: dict[str, str],
 ) -> None:
-    with _psql(postgres_test_db) as conn:
+    with psql(postgres_test_db) as conn:
         rows = conn.execute(
             """
             SELECT pg_catalog.format_type(t.oid, NULL)
@@ -146,7 +147,7 @@ def test_every_postgres_catalog_base_type_is_catalogued(
             """,
         ).fetchall()
 
-    reported = [name for (name,) in rows if name not in _POSTGRES_SKIPPED]
+    reported = [name for (name,) in rows if name not in POSTGRES_SKIPPED]
 
     assert _uncatalogued("postgres", reported) == []
 
@@ -155,7 +156,7 @@ def test_postgres_declines_what_it_cannot_compare_and_resolves_user_defined_type
     postgres_test_db: dict[str, str],
     tmp_path: Path,
 ) -> None:
-    with _psql(postgres_test_db) as conn:
+    with psql(postgres_test_db) as conn:
         conn.execute("CREATE DOMAIN sown_at AS timestamptz")
         conn.execute("CREATE DOMAIN weight_g AS numeric(12,2)")
         conn.execute("CREATE DOMAIN rating AS smallint")
@@ -206,7 +207,7 @@ def test_postgres_declines_what_it_cannot_compare_and_resolves_user_defined_type
 def test_postgres_resolves_a_domain_enum_and_range_to_what_classification_reads(
     postgres_test_db: dict[str, str],
 ) -> None:
-    with _psql(postgres_test_db) as conn:
+    with psql(postgres_test_db) as conn:
         conn.execute("CREATE DOMAIN sown_at AS timestamptz")
         conn.execute("CREATE TYPE stage AS ENUM ('seed', 'sprout')")
         conn.execute("CREATE TYPE bed_ref AS (row_no int, bay text)")
@@ -341,25 +342,11 @@ _CLICKHOUSE_SKIPPED = {
     "Nothing": "cannot be a table column",
 }
 
-_DUCKDB_DECLARATIONS = {
-    "ARRAY": "INTEGER[3]",
-    "DECIMAL": "DECIMAL(18,3)",
-    "ENUM": "ENUM('a', 'b')",
-    "LIST": "INTEGER[]",
-    "MAP": "MAP(VARCHAR, INTEGER)",
-    "STRUCT": "STRUCT(a INTEGER)",
-    "UNION": "UNION(n INTEGER, s VARCHAR)",
-}
-
-_POSTGRES_SKIPPED = {
-    "unknown": "a pseudo-type literal, never a column's declared type",
-}
-
 
 def _generated(adapter: Adapter, vendor: AdapterType, tmp_path: Path, table: str) -> dict[str, Any]:
     conn = ConnectionConfig(name="garden", adapter=vendor, output=tmp_path / "prints")
     result = Engine(adapter, conn, tmp_path).generate()
-    issues = [i for i in validate_print(tmp_path / "prints" / "garden") if i.severity == "error"]
+    issues = conformance_errors(tmp_path / "prints" / "garden")
 
     assert [t.error for t in result.tables if t.status != "ok"] == []
     assert issues == []

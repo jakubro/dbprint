@@ -29,7 +29,7 @@ from ..base import (
     row_count_or_none,
 )
 from ..dialect import Dialect
-from ..driver import CursorFactory
+from ..driver import CursorFactory, ServerParams
 from ..identifiers import IdentityRegistry
 
 
@@ -48,8 +48,7 @@ class ClickhouseAdapter(SqlAdapter):
     """
 
     KNOWN_TYPES: ClassVar[tuple[str, ...]] = stats_module.KNOWN_TYPES
-    REQUIRED_KEYS: ClassVar[tuple[str, ...]] = ("host",)
-    OPTIONAL_KEYS: ClassVar[tuple[str, ...]] = ("database", "port", "user", "password")
+    SERVER_PARAMS: ClassVar[type[ServerParams]] = ConnectionParams
     # SAMPLE's determinism depends on a declared SAMPLE BY key; an unmaterialized scope on a
     # table without one is not a seeded per-row guarantee.
     SAMPLE_FALLBACK_COHERENT: ClassVar[bool] = False
@@ -97,10 +96,10 @@ class ClickhouseAdapter(SqlAdapter):
             exclude,
         )
         self._samplable = samplable
-        self._identities.register(selected)
+        listed = self._register(selected)
         self._skipped = skipped
 
-        return [meta for meta, _ in selected]
+        return listed
 
     def skipped_namespaces(self) -> tuple[SkippedNamespace, ...]:
         return self._skipped

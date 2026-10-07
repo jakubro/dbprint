@@ -11,7 +11,6 @@ import re
 from collections.abc import Sequence
 from typing import Any, cast
 
-from dbprint.config.selectors import expand
 from dbprint.spec.classification import map_types
 from dbprint.spec.fqn import join as join_fqn
 from .connection import DIALECT, Cursor, exec_query
@@ -32,12 +31,12 @@ from ..errors import QueryFailed
 from ..identifiers import (
     Identity,
     column_meta,
-    enforce_table_identifiers,
     fold,
     quote,
+    select_tables,
     table_meta,
 )
-from ..sql_layout import listed
+from ..sql_layout import listed, split_top_level
 
 
 # The spellings information_schema.tables.table_type actually reports for Snowflake.
@@ -155,15 +154,7 @@ def list_tables(
         meta = table_meta(physical, canonical_type, external=table_type == "EXTERNAL TABLE")
         candidates.append((meta, physical))
 
-    in_scope = set(
-        expand(
-            [meta.fqn for meta, _ in candidates],
-            config_include=include,
-            config_exclude=exclude,
-        ),
-    )
-    selected = [entry for entry in candidates if entry[0].fqn in in_scope]
-    enforce_table_identifiers(selected)
+    selected = select_tables(candidates, include, exclude)
 
     return selected, tuple(skipped)
 
@@ -424,7 +415,9 @@ def _parse_cluster_by(value: str) -> PhysicalLayout:
 
     return PhysicalLayout(
         mechanism="cluster",
-        keys=tuple(_cluster_key(part.strip()) for part in _split_top_level_commas(inner)),
+        keys=tuple(
+            _cluster_key(part.strip()) for part in split_top_level(inner, DIALECT.quote_char)
+        ),
     )
 
 
@@ -435,30 +428,6 @@ def _cluster_key(expression: str) -> PhysicalLayoutKey:
         expression=expression,
         column=fold(match.group(1)) if match else None,
     )
-
-
-def _split_top_level_commas(text: str) -> list[str]:
-    """Split on commas outside parentheses - a clustering expression may nest a function call."""
-
-    parts: list[str] = []
-    depth = 0
-    current: list[str] = []
-
-    for ch in text:
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-
-        if ch == "," and depth == 0:
-            parts.append("".join(current))
-            current = []
-        else:
-            current.append(ch)
-
-    parts.append("".join(current))
-
-    return parts
 
 
 def view_dependencies(cursor: Cursor, databases: Sequence[str]) -> dict[str, tuple[str, ...]]:

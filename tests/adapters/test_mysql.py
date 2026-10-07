@@ -28,11 +28,14 @@ from dbprint.adapters.mysql import stats as stats_module
 from dbprint.adapters.mysql.connection import ConnectionParams, MysqlConnectionError, exec_query
 from dbprint.cli.main import main
 from dbprint.config import ConnectionConfig, StatisticsConfig
-from dbprint.conformance import validate_print
 from dbprint.engine import Engine
+from tests._cli import credential_env, write_project
+from tests._engine_run import conformance_errors
+from tests._prints import connection_config
+from tests.adapters._mysql import build_mysql
 from tests.adapters.conftest import StubCursor
 from tests.conftest import MysqlCluster
-from tests.live._harness import split_statements, write_project
+from tests.live._harness import split_statements
 
 
 CREDS: dict[str, str] = {
@@ -118,7 +121,7 @@ class TestExecuteQueryTrace:
         mysql_test_db: dict[str, str],
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        adapter = _build(mysql_test_db)
+        adapter = build_mysql(mysql_test_db)
 
         try:
             with caplog.at_level(logging.DEBUG, logger="dbprint.adapters.mysql.connection"):
@@ -191,7 +194,7 @@ class TestPhysicalColumnIdentity:
         mysql_test_db: dict[str, str],
     ) -> None:
         self._seed_mixed_case(mysql_test_db)
-        adapter = _build(mysql_test_db)
+        adapter = build_mysql(mysql_test_db)
 
         try:
             fqn = f"{mysql_test_db['database']}.curator_profile"
@@ -207,22 +210,11 @@ class TestPhysicalColumnIdentity:
         mysql_test_db: dict[str, str],
         tmp_path: Path,
     ) -> None:
-        from dbprint.config.project import ConnectionConfig, DiffConfig
         from dbprint.engine import Engine
 
         self._seed_mixed_case(mysql_test_db)
         fqn = f"{mysql_test_db['database']}.curator_profile"
-        conn = ConnectionConfig(
-            name="primary",
-            adapter="mysql",
-            auto=False,
-            output=tmp_path,
-            include=(fqn,),
-            exclude=(),
-            max_age_days=7,
-            statistics=StatisticsConfig(),
-            diff=DiffConfig(),
-        )
+        conn = connection_config(adapter="mysql", output=tmp_path, include=(fqn,))
         Engine(MysqlAdapter(mysql_test_db), conn, tmp_path).generate()
 
         table_dir = tmp_path / "primary" / mysql_test_db["database"] / "curator_profile"
@@ -232,7 +224,7 @@ class TestPhysicalColumnIdentity:
         assert column["physical_name"] == "fullName"
         assert column["inferred"]["sensitivity"] == "personal_name"
 
-        errors = [i for i in validate_print(tmp_path / "primary") if i.severity == "error"]
+        errors = conformance_errors(tmp_path / "primary")
         assert errors == [], "Conformance violations:\n" + "\n".join(
             f"  {e.code} at {e.path}: {e.detail}" for e in errors
         )
@@ -272,7 +264,7 @@ class TestCollation:
         mysql_test_db: dict[str, str],
     ) -> None:
         self._seed(mysql_test_db)
-        adapter = _build(mysql_test_db)
+        adapter = build_mysql(mysql_test_db)
 
         try:
             fqn = f"{mysql_test_db['database']}.labels"
@@ -290,22 +282,11 @@ class TestCollation:
         mysql_test_db: dict[str, str],
         tmp_path: Path,
     ) -> None:
-        from dbprint.config.project import ConnectionConfig, DiffConfig
         from dbprint.engine import Engine
 
         self._seed(mysql_test_db)
         fqn = f"{mysql_test_db['database']}.labels"
-        conn = ConnectionConfig(
-            name="primary",
-            adapter="mysql",
-            auto=False,
-            output=tmp_path,
-            include=(fqn,),
-            exclude=(),
-            max_age_days=7,
-            statistics=StatisticsConfig(),
-            diff=DiffConfig(),
-        )
+        conn = connection_config(adapter="mysql", output=tmp_path, include=(fqn,))
         Engine(MysqlAdapter(mysql_test_db), conn, tmp_path).generate()
 
         manifest = yaml.safe_load((tmp_path / "primary" / "manifest.yaml").read_text())
@@ -317,7 +298,7 @@ class TestCollation:
         assert "collation" not in columns["plain"]
         assert columns["forced"]["collation"] == "utf8mb4_bin"
 
-        errors = [i for i in validate_print(tmp_path / "primary") if i.severity == "error"]
+        errors = conformance_errors(tmp_path / "primary")
         assert errors == [], "Conformance violations:\n" + "\n".join(
             f"  {e.code} at {e.path}: {e.detail}" for e in errors
         )
@@ -333,7 +314,6 @@ class TestCollation:
 
         import mysql.connector
 
-        from dbprint.config.project import ConnectionConfig, DiffConfig
         from dbprint.engine import Engine
 
         conn_db = mysql.connector.connect(
@@ -357,17 +337,7 @@ class TestCollation:
         conn_db.close()
 
         fqn = f"{mysql_test_db['database']}.case_variants"
-        conn = ConnectionConfig(
-            name="primary",
-            adapter="mysql",
-            auto=False,
-            output=tmp_path,
-            include=(fqn,),
-            exclude=(),
-            max_age_days=7,
-            statistics=StatisticsConfig(),
-            diff=DiffConfig(),
-        )
+        conn = connection_config(adapter="mysql", output=tmp_path, include=(fqn,))
         Engine(MysqlAdapter(mysql_test_db), conn, tmp_path).generate()
 
         table_dir = tmp_path / "primary" / mysql_test_db["database"] / "case_variants"
@@ -412,7 +382,7 @@ class TestPhysicalTableIdentity:
 
     def test_the_table_name_folds_into_the_path(self, mysql_test_db: dict[str, str]) -> None:
         self._seed(mysql_test_db)
-        adapter = _build(mysql_test_db)
+        adapter = build_mysql(mysql_test_db)
         database = mysql_test_db["database"]
 
         try:
@@ -428,7 +398,7 @@ class TestPhysicalTableIdentity:
         mysql_test_db: dict[str, str],
     ) -> None:
         self._seed(mysql_test_db)
-        adapter = _build(mysql_test_db)
+        adapter = build_mysql(mysql_test_db)
         fqn = f"{mysql_test_db['database']}.mixedcase"
 
         try:
@@ -441,7 +411,8 @@ class TestPhysicalTableIdentity:
                 frozenset(),
             )
             samples = adapter.sample_values(fqn, "label", n=10)
-            normalized = adapter.compute_normalized_cardinality(fqn, "label")
+            label_type = next(c.classified_type for c in cols if c.name == "label")
+            normalized = adapter.compute_normalized_cardinality(fqn, "label", label_type)
         finally:
             adapter.close()
 
@@ -463,7 +434,7 @@ class TestPhysicalTableIdentity:
         cursor.close()
 
         try:
-            adapter = _build({**mysql_test_db, "database": "Seedbank"})
+            adapter = build_mysql({**mysql_test_db, "database": "Seedbank"})
 
             try:
                 listed = adapter.list_tables(include=["*"], exclude=[])
@@ -490,7 +461,7 @@ class TestPhysicalTableIdentity:
     ) -> None:
         """Falling back to the folded path would read an absent table as an empty one."""
 
-        adapter = _build(mysql_test_db)
+        adapter = build_mysql(mysql_test_db)
 
         try:
             with pytest.raises(UnknownTable, match="call list_tables"):
@@ -583,19 +554,6 @@ def herbarium_sheet_db(mysql_cluster: MysqlCluster) -> Iterator[dict[str, str]]:
         yield creds
 
 
-def _build(creds: dict[str, str]) -> MysqlAdapter:
-    """A connected adapter that has enumerated - what per-table extraction requires.
-
-    At `lower_case_table_names=0` a table never enumerated has no spelling to bind.
-    """
-
-    adapter = MysqlAdapter(creds)
-    adapter.connect()
-    adapter.list_tables(include=["*"], exclude=[])
-
-    return adapter
-
-
 class TestPhysicalLayout:
     """The declared partitioning key via `information_schema.partitions`."""
 
@@ -626,7 +584,7 @@ class TestPhysicalLayout:
             cur.close()
             conn.close()
 
-        adapter = _build(mysql_test_db)
+        adapter = build_mysql(mysql_test_db)
 
         try:
             layout = adapter.introspect_physical_layout(f"{mysql_test_db['database']}.zz_range")
@@ -655,7 +613,7 @@ class TestPhysicalLayout:
             cur.close()
             conn.close()
 
-        adapter = _build(mysql_test_db)
+        adapter = build_mysql(mysql_test_db)
 
         try:
             layout = adapter.introspect_physical_layout(f"{mysql_test_db['database']}.zz_expr")
@@ -682,7 +640,7 @@ class TestPhysicalLayout:
             cur.close()
             conn.close()
 
-        adapter = _build(mysql_test_db)
+        adapter = build_mysql(mysql_test_db)
 
         try:
             layout = adapter.introspect_physical_layout(f"{mysql_test_db['database']}.zz_cols")
@@ -699,7 +657,7 @@ class TestPhysicalLayout:
             cur.close()
             conn.close()
 
-        adapter = _build(mysql_test_db)
+        adapter = build_mysql(mysql_test_db)
 
         try:
             fqn = f"{mysql_test_db['database']}.zz_plain"
@@ -743,7 +701,7 @@ class TestRankedShapeSurvivesUserColumnNames:
         finally:
             conn.close()
 
-        adapter = _build(mysql_test_db)
+        adapter = build_mysql(mysql_test_db)
 
         try:
             fqn = f"{mysql_test_db['database']}.ranked_t"
@@ -771,7 +729,7 @@ class TestScopedSampling:
 
     @staticmethod
     def _sample(creds: dict[str, str], n: int, scope: TableScope | None) -> list:
-        adapter = _build(creds)
+        adapter = build_mysql(creds)
 
         try:
             return adapter.sample_values(f"{creds['database']}.viability_check", "label", n, scope)
@@ -806,7 +764,7 @@ class TestScopedSampling:
 
 class TestAgainstMariaDB:
     def test_enum_column_classified_categorical(self, herbarium_sheet_db: dict[str, str]) -> None:
-        adapter = _build(herbarium_sheet_db)
+        adapter = build_mysql(herbarium_sheet_db)
         fqn = f"{herbarium_sheet_db['database']}.herbarium_sheet"
         cols = adapter.introspect_columns(fqn)
         status = next(c for c in cols if c.name == "status")
@@ -821,7 +779,7 @@ class TestAgainstMariaDB:
         self,
         herbarium_sheet_db: dict[str, str],
     ) -> None:
-        adapter = _build(herbarium_sheet_db)
+        adapter = build_mysql(herbarium_sheet_db)
         ddl = adapter.extract_ddl(f"{herbarium_sheet_db['database']}.herbarium_sheet")
         assert "AUTO_INCREMENT=" not in ddl  # volatile table-option counter removed
         assert "AUTO_INCREMENT" in ddl  # column-level keyword preserved
@@ -829,7 +787,7 @@ class TestAgainstMariaDB:
         adapter.close()
 
     def test_secondary_index_listed(self, herbarium_sheet_db: dict[str, str]) -> None:
-        adapter = _build(herbarium_sheet_db)
+        adapter = build_mysql(herbarium_sheet_db)
         indexes = adapter.introspect_indexes(f"{herbarium_sheet_db['database']}.herbarium_sheet")
         names = {idx.name for idx in indexes}
         assert "herbarium_sheet_label_idx" in names
@@ -845,14 +803,14 @@ class TestAgainstMariaDB:
         only discriminator.
         """
 
-        adapter = _build(herbarium_sheet_db)
+        adapter = build_mysql(herbarium_sheet_db)
         keys = adapter.introspect_unique_keys(f"{herbarium_sheet_db['database']}.herbarium_sheet")
 
         assert keys == [UniqueKeyMeta(columns=("id",), primary=True)]
         adapter.close()
 
     def test_table_and_column_comments(self, herbarium_sheet_db: dict[str, str]) -> None:
-        adapter = _build(herbarium_sheet_db)
+        adapter = build_mysql(herbarium_sheet_db)
         comments = adapter.extract_comments(f"{herbarium_sheet_db['database']}.herbarium_sheet")
         assert comments.table == "Herbarium sheet catalog"
         assert comments.columns.get("label") == "human-facing specimen label"
@@ -944,7 +902,7 @@ class TestSystemVersionedTables:
         self,
         versioned_db: dict[str, str],
     ) -> None:
-        adapter = _build(versioned_db)
+        adapter = build_mysql(versioned_db)
         fqn = f"{versioned_db['database']}.field_log"
 
         try:
@@ -967,7 +925,7 @@ class TestSystemVersionedTables:
         self,
         versioned_db: dict[str, str],
     ) -> None:
-        adapter = _build(versioned_db)
+        adapter = build_mysql(versioned_db)
 
         try:
             columns = adapter.introspect_columns(f"{versioned_db['database']}.field_round")
@@ -1010,7 +968,7 @@ class TestMariadbViewDependencies:
         self,
         federated_db: dict[str, str],
     ) -> None:
-        adapter = _build(federated_db)
+        adapter = build_mysql(federated_db)
         issued: list[str] = []
         execute = adapter._cursor.execute
 
@@ -1037,7 +995,7 @@ class TestAFederatedTableIsCatalogOnly:
         federated_db: dict[str, str],
         tmp_path: Path,
     ) -> None:
-        adapter = _build(federated_db)
+        adapter = build_mysql(federated_db)
         conn = ConnectionConfig(
             name="primary",
             adapter="mysql",
@@ -1068,7 +1026,7 @@ class TestFederatedDdlMasksItsPassword:
         self,
         federated_db: dict[str, str],
     ) -> None:
-        adapter = _build(federated_db)
+        adapter = build_mysql(federated_db)
 
         try:
             ddl = adapter.extract_ddl(f"{federated_db['database']}.field_log")
@@ -1127,14 +1085,10 @@ class TestDatetimeTemporalConformance:
     ) -> None:
         project_dir = tmp_path / "project"
         write_project(project_dir, self._CONN, "mysql")
-        upper = self._CONN.upper()
-        env = {
-            f"DBPRINT_{upper}_HOST": events_db["host"],
-            f"DBPRINT_{upper}_PORT": events_db["port"],
-            f"DBPRINT_{upper}_DATABASE": events_db["database"],
-            f"DBPRINT_{upper}_USER": events_db["user"],
-            f"DBPRINT_{upper}_PASSWORD": events_db["password"],
-        }
+        env = credential_env(
+            self._CONN,
+            {key: events_db[key] for key in ("host", "port", "database", "user", "password")},
+        )
         monkeypatch.chdir(project_dir)
 
         for k, v in env.items():
@@ -1144,7 +1098,7 @@ class TestDatetimeTemporalConformance:
         assert result.exit_code in (0, 3), result.output
 
         print_dir = project_dir / "prints" / self._CONN
-        errors = [i for i in validate_print(print_dir) if i.severity == "error"]
+        errors = conformance_errors(print_dir)
         assert errors == [], "Conformance violations:\n" + "\n".join(
             f"  {e.code} at {e.path}: {e.detail}" for e in errors
         )
@@ -1190,7 +1144,7 @@ class TestYearColumn:
     """
 
     def _stats(self, creds: dict[str, str]):
-        adapter = _build(creds)
+        adapter = build_mysql(creds)
         fqn = f"{creds['database']}.intake_record"
         columns = adapter.introspect_columns(fqn)
         _, stats = adapter.compute_statistics(fqn, columns, StatisticsConfig(), frozenset())
@@ -1228,6 +1182,56 @@ class TestYearColumn:
 
 
 @pytest.fixture
+def bits_db(mysql_cluster: MysqlCluster) -> Iterator[dict[str, str]]:
+    """A unique BIT(8) column whose bytes read as a space, `A` and `a`."""
+
+    def seed(cur: Any) -> None:
+        cur.execute("CREATE TABLE type_probe (`condition` BIT(8) NOT NULL UNIQUE)")
+        cur.execute("INSERT INTO type_probe VALUES (32), (65), (97)")
+
+    with _scratch_database(mysql_cluster, "bits_test", seed) as creds:
+        yield creds
+
+
+@pytest.fixture
+def wide_bits_db(mysql_cluster: MysqlCluster) -> Iterator[dict[str, str]]:
+    """A unique BIT(16) column whose two values differ only by where a space byte sits."""
+
+    def seed(cur: Any) -> None:
+        cur.execute("CREATE TABLE type_probe (`condition` BIT(16) NOT NULL UNIQUE)")
+        cur.execute("INSERT INTO type_probe VALUES (0x2041), (0x4120)")
+
+    with _scratch_database(mysql_cluster, "wide_bits_test", seed) as creds:
+        yield creds
+
+
+class TestBitNormalizedCardinality:
+    def test_a_bit_column_folds_the_integer_every_other_statistic_reads(
+        self,
+        bits_db: dict[str, str],
+        tmp_path: Path,
+    ) -> None:
+        config = ConnectionConfig(name="garden", adapter="mysql", output=tmp_path / "prints")
+        Engine(MysqlAdapter(bits_db), config, tmp_path).generate()
+        stats_path = next((tmp_path / "prints").rglob("type_probe/statistics.yaml"))
+        column = yaml.safe_load(stats_path.read_text())["columns"]["condition"]
+
+        assert (column["cardinality"], column["normalized_cardinality"]) == (3, 3)
+
+    def test_a_wide_bit_column_never_trims_a_space_byte_away(
+        self,
+        wide_bits_db: dict[str, str],
+        tmp_path: Path,
+    ) -> None:
+        config = ConnectionConfig(name="garden", adapter="mysql", output=tmp_path / "prints")
+        Engine(MysqlAdapter(wide_bits_db), config, tmp_path).generate()
+        stats_path = next((tmp_path / "prints").rglob("type_probe/statistics.yaml"))
+        column = yaml.safe_load(stats_path.read_text())["columns"]["condition"]
+
+        assert (column["cardinality"], column["normalized_cardinality"]) == (2, 2)
+
+
+@pytest.fixture
 def times_db(mysql_cluster: MysqlCluster) -> Iterator[dict[str, str]]:
     """Fresh database with a mid-cardinality TIME column (60 distinct / 200 rows)."""
 
@@ -1252,7 +1256,7 @@ class TestTimeColumn:
     """
 
     def _stats(self, creds: dict[str, str]):
-        adapter = _build(creds)
+        adapter = build_mysql(creds)
         fqn = f"{creds['database']}.field_round"
         columns = adapter.introspect_columns(fqn)
         _, stats = adapter.compute_statistics(fqn, columns, StatisticsConfig(), frozenset())
@@ -1356,7 +1360,7 @@ class TestHashOrderedDraw:
         finally:
             conn.close()
 
-        adapter = _build(mysql_test_db)
+        adapter = build_mysql(mysql_test_db)
 
         try:
             fqn = f"{mysql_test_db['database']}.late_shape"
@@ -1398,7 +1402,7 @@ class TestHashOrderedDraw:
         finally:
             conn.close()
 
-        adapter = _build(mysql_test_db)
+        adapter = build_mysql(mysql_test_db)
 
         try:
             fqn = f"{mysql_test_db['database']}.stable_draw"
@@ -1449,7 +1453,7 @@ class TestSuppressionReachesTextAlone:
     ) -> PhaseB:
         from dbprint.config import StatisticsConfig
 
-        adapter = _build(creds)
+        adapter = build_mysql(creds)
         fqn = f"{creds['database']}.suppressible"
 
         try:
@@ -1553,7 +1557,7 @@ class TestOutOfRangeTemporal:
 
     @staticmethod
     def _profile(creds: dict[str, str]) -> PhaseB:
-        adapter = _build(creds)
+        adapter = build_mysql(creds)
         fqn = f"{creds['database']}.germination_reading"
 
         try:

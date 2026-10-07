@@ -18,9 +18,9 @@ from dbprint.adapters.base import (
     UniqueKeyMeta,
 )
 from dbprint.adapters.mock import MockAdapter, MockTable
-from dbprint.config.project import ConnectionConfig, DiffConfig, StatisticsConfig
+from dbprint.config.project import ConnectionConfig
 from dbprint.engine import Engine, GenerateRequest
-from tests._prints import VAULT_COLUMNS, columns, exact_stats, mock_table
+from tests._prints import VAULT_COLUMNS, columns, connection_config, exact_stats, mock_table
 
 
 def _stats(sql_type: str, cardinality: int, row_count: int) -> ColumnStats:
@@ -95,18 +95,7 @@ def _fixture() -> dict[str, MockTable]:
 
 
 def _conn(tmp_path: Path, *, infer_relationships: bool = True) -> ConnectionConfig:
-    return ConnectionConfig(
-        name="primary",
-        adapter="postgres",
-        auto=False,
-        output=tmp_path,
-        include=("*",),
-        exclude=(),
-        max_age_days=7,
-        statistics=StatisticsConfig(),
-        diff=DiffConfig(),
-        infer_relationships=infer_relationships,
-    )
+    return connection_config(output=tmp_path, infer_relationships=infer_relationships)
 
 
 def _relationships(tmp_path: Path, table: str) -> dict[str, Any]:

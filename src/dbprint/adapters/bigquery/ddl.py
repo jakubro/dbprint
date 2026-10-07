@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from .connection import DIALECT, Cursor, exec_query
 from ..identifiers import Identity, quote
+from ..sql_layout import trimmed_lines
 
 
 def extract_ddl(cursor: Cursor, project: str, identity: Identity) -> str:
@@ -31,8 +32,6 @@ def extract_ddl(cursor: Cursor, project: str, identity: Identity) -> str:
 
 
 def normalize(raw: str) -> str:
-    """Ensure a single terminal newline; the catalog's own text needs no further cleanup."""
+    """Strip trailing whitespace per line and ensure a single terminal newline."""
 
-    text = raw.strip("\n")
-
-    return text + "\n" if text else ""
+    return trimmed_lines(raw)

@@ -8,35 +8,37 @@ from pathlib import Path
 
 import yaml
 
+from dbprint.spec.artifacts import (
+    CANONICAL_ARTIFACTS,
+    DIFF_FILENAME,
+    MANIFEST_FILENAME,
+    PRODUCER_ARTIFACTS,
+    READING_GUIDE_FILENAME,
+    declared_artifacts,
+    walkable_tables,
+)
 from .issue import Issue
 from .progress import TableSink
 from .yaml_utils import load_yaml
 
 
 PATH_SEGMENT_RE = re.compile(r"^[a-z0-9_][a-z0-9_-]*$")
-PRODUCER_ARTIFACTS = {"ddl.sql", "statistics.yaml", "relationships.yaml"}
 _STALE_TABLE_REMEDY = (
     " A table an earlier release printed under this name is refused now: exclude it, delete this "
     "directory, and the next generate drops its entry."
 )
-CANONICAL_ARTIFACTS = {
-    *PRODUCER_ARTIFACTS,
-    "description.md",
-    "statistics.annotations.yaml",
-    "relationships.annotations.yaml",
-}
 
 
 def check(print_root: Path) -> tuple[list[Issue], dict | None]:
     """Run layout checks; also returns parsed manifest data when present."""
 
     issues: list[Issue] = []
-    manifest_path = print_root / "manifest.yaml"
+    manifest_path = print_root / MANIFEST_FILENAME
 
     if not manifest_path.is_file():
         issues.append(
             Issue(
-                "manifest.yaml",
+                MANIFEST_FILENAME,
                 "layout.missing-manifest",
                 "error",
                 "Connection root is missing manifest.yaml.",
@@ -49,7 +51,7 @@ def check(print_root: Path) -> tuple[list[Issue], dict | None]:
     try:
         manifest_data = load_yaml(manifest_path)
     except yaml.YAMLError as exc:
-        issues.append(Issue("manifest.yaml", "schema.invalid-yaml", "error", str(exc), "§2.5"))
+        issues.append(Issue(MANIFEST_FILENAME, "schema.invalid-yaml", "error", str(exc), "§2.5"))
 
         return issues, None
 
@@ -57,7 +59,7 @@ def check(print_root: Path) -> tuple[list[Issue], dict | None]:
     if not isinstance(manifest_data, dict):
         issues.append(
             Issue(
-                "manifest.yaml",
+                MANIFEST_FILENAME,
                 "schema.type-mismatch",
                 "error",
                 f"manifest.yaml must hold a mapping, found {type(manifest_data).__name__}.",
@@ -89,33 +91,6 @@ def check(print_root: Path) -> tuple[list[Issue], dict | None]:
     issues.extend(_check_diff_present(print_root, manifest_data))
 
     return issues, manifest_data
-
-
-def walkable_tables(manifest_data: dict) -> dict:
-    """The manifest entries a check can read, keyed by table name.
-
-    A non-mapping entry, or one whose `path` is not a string, drops silently here; the
-    schema check already reports it.
-    """
-
-    tables = manifest_data.get("tables") or {}
-
-    return {
-        fqn: entry
-        for fqn, entry in tables.items()
-        if isinstance(entry, dict) and isinstance(entry.get("path", ""), str)
-    }
-
-
-def declared_artifacts(tbl_entry: dict) -> dict:
-    """The artifacts map a check can read, empty when the entry has none readable."""
-
-    artifacts = tbl_entry.get("artifacts") or {}
-
-    if not isinstance(artifacts, dict):
-        return {}
-
-    return {kind: name for kind, name in artifacts.items() if isinstance(name, str)}
 
 
 def annotated_tables(
@@ -206,12 +181,12 @@ def _check_per_table_files(print_root: Path, manifest_data: dict) -> list[Issue]
 def _check_reading_guide_present(print_root: Path) -> list[Issue]:
     """SPEC 1.2: `reading.md` is REQUIRED at every connection root."""
 
-    if (print_root / "reading.md").is_file():
+    if (print_root / READING_GUIDE_FILENAME).is_file():
         return []
 
     return [
         Issue(
-            "reading.md",
+            READING_GUIDE_FILENAME,
             "layout.missing-reading-guide",
             "error",
             "Connection root is missing reading.md.",
@@ -227,12 +202,12 @@ def _check_diff_present(print_root: Path, manifest_data: dict) -> list[Issue]:
     naming a table is the decidable proxy, so an empty manifest is exempt.
     """
 
-    if not walkable_tables(manifest_data) or (print_root / "diff.yaml").is_file():
+    if not walkable_tables(manifest_data) or (print_root / DIFF_FILENAME).is_file():
         return []
 
     return [
         Issue(
-            "diff.yaml",
+            DIFF_FILENAME,
             "layout.missing-diff",
             "error",
             "Connection root is missing diff.yaml, though the manifest records a table.",

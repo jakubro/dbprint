@@ -60,10 +60,10 @@ def resolve(
 
     if unresolved:
         blank = [
-            _env_var_name(connection_name, key)
+            env_var_name(connection_name, key)
             for key in unresolved
-            if _env_var_name(connection_name, key) in env_map
-            or _env_var_name(connection_name, key) in dotenv_map
+            if env_var_name(connection_name, key) in env_map
+            or env_var_name(connection_name, key) in dotenv_map
         ]
 
         raise ConfigError(
@@ -83,6 +83,12 @@ def resolve(
     return resolved
 
 
+def env_var_name(connection_name: str, key: str) -> str:
+    """The environment variable that supplies `key` to `connection_name`."""
+
+    return f"DBPRINT_{connection_name.upper()}_{key.upper()}"
+
+
 def _resolve_one(
     connection_name: str,
     key: str,
@@ -96,7 +102,7 @@ def _resolve_one(
     an empty variable.
     """
 
-    env_key = _env_var_name(connection_name, key)
+    env_key = env_var_name(connection_name, key)
     exported = env_map.get(env_key)
     carried = dotenv_map.get(env_key)
 
@@ -134,10 +140,6 @@ def _carries_value(value: str | None, key: str) -> bool:
         return False
 
     return key in _EMPTY_IS_A_VALUE or bool(value.strip())
-
-
-def _env_var_name(connection_name: str, key: str) -> str:
-    return f"DBPRINT_{connection_name.upper()}_{key.upper()}"
 
 
 def _load_connections_file(path: Path) -> dict[str, dict[str, Any]]:
@@ -195,7 +197,7 @@ def _unresolved_message(
 ) -> str:
     """Name the sources, and any variable that was skipped for carrying no value."""
 
-    env_vars = ", ".join(_env_var_name(connection_name, k) for k in unresolved)
+    env_vars = ", ".join(env_var_name(connection_name, k) for k in unresolved)
     skipped = (
         f"\nSet but empty, so skipped: {', '.join(blank)}. An empty value is not a credential."
         if blank

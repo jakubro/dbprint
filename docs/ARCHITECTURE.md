@@ -34,7 +34,10 @@ This map is maintained by hand. It is not generated from the tree and nothing ch
 │   │   ├── errors.py                       #   QueryFailed - statement + params on failure
 │   │   ├── dialect.py                      #   per-adapter SQL dialect: what it accepts, how it spells it
 │   │   ├── statements.py                   #   statistics statements shared by the SQL adapters
-│   │   ├── pg_catalog.py                   #   catalog statements Postgres and Redshift share
+│   │   ├── identifiers.py                  #   fold, quote and select tables; the physical-identity registry
+│   │   ├── driver.py                       #   sessions, server credentials, install hints, connect failures
+│   │   ├── sql_layout.py                   #   SQL assembly, layout-key splitting, DDL line trimming
+│   │   ├── pg_catalog.py                   #   catalog reads Postgres and Redshift share: the FK read
 │   │   ├── trace_context.py                #   per-statement SQL tracing into the run log
 │   │   ├── mock.py                         #   deterministic in-memory adapter (for tests)
 │   │   ├── postgres/                       #   concrete adapter package
@@ -59,6 +62,7 @@ This map is maintained by hand. It is not generated from the tree and nothing ch
 │   │   ├── thresholds.py                   #   per-table freshness thresholds without a database
 │   │   ├── context_assembler.py            # per-table fragment builder for `dbprint context`
 │   │   ├── token_budget.py                 #   char/4 token approximation + section-priority selector
+│   │   ├── context_terms.py                #   the labels a Markdown reply prints, and its Terms legend
 │   │   ├── notes_synthesis.py              #   per-classification Notes templates
 │   │   ├── reading_guide.py                #   the reading.md written into every print
 │   │   ├── yaml_dumper.py                  #   deterministic YAML emission
@@ -87,7 +91,7 @@ This map is maintained by hand. It is not generated from the tree and nothing ch
 │   │   ├── state.py                        #   served-connection resolution
 │   │   ├── parse_cache.py                  #   parsed files kept across calls, re-checked against disk
 │   │   ├── resources.py                    #   resource URI handlers (pure)
-│   │   ├── reference.py                    #   packaged specification lookup, backing get_reference
+│   │   ├── reference.py                    #   packaged spec and guide lookup, backing get_reference
 │   │   ├── tools.py                        #   tool handlers (pure)
 │   │   ├── server.py                       #   the only module importing the MCP SDK
 │   │   └── errors.py                       #   McpError + JSON-RPC code mapping
@@ -97,14 +101,15 @@ This map is maintained by hand. It is not generated from the tree and nothing ch
 │   │   ├── sensitivity.py                  #   the SPEC must-not-leave-the-database category detector
 │   │   ├── redaction.py                    #   the SPEC cell-value redaction primitives
 │   │   ├── statistics_matrix.py            #   required/forbidden fields per classification
+│   │   ├── artifacts.py                    #   a print's filenames and the manifest entries a reader follows
 │   │   ├── absence.py                      #   what an absent field means, read by every consumer
 │   │   ├── scope.py                        #   what a scoped file's statistics cover, read by every consumer
 │   │   ├── coverage.py                     #   values_coverage arithmetic + its markers
 │   │   ├── distribution.py                 #   the SPEC distribution verdicts
 │   │   ├── temporal_range.py               #   temporal range bounds + span
 │   │   ├── temporal_age.py                 #   freshness age against the artifact's own clock
-│   │   ├── drift.py                        #   every recorded field's drift family - the one mapping
-│   │   ├── fqn.py                          #   the FQN syntax: the one join and split of its separator
+│   │   ├── drift.py                        #   every recorded field's drift family, and the diff's summary counters
+│   │   ├── fqn.py                          #   the FQN syntax: its one join and split, and a table's directory
 │   │   ├── epoch.py                        #   epoch-encoded integer detection + unit
 │   │   ├── sketch.py                       #   KMV sketch construction + containment
 │   │   ├── percentiles.py                  #   percentile/bound coherence past float64's exact range
@@ -191,7 +196,7 @@ Three arrows above are narrower than they look, and each is deliberate:
 - **`assertions` does not import `adapters`.** A SQL assertion needs to run SQL, but it declares a structural `Protocol` with the single method it uses and accepts anything satisfying it. The dependency is on a shape, not a package, which is what lets the evaluator be tested with a plain callable.
 - **`cli -> mcp` is a lazy, function-scoped import.** The MCP SDK ships behind the `[mcp]` extra, so importing it at module scope would make every `dbprint` invocation pay for — and fail without — a dependency that only `serve` needs. The `serve` command imports the package inside the callback and converts the `ImportError` into an install hint.
 - **`cli -> adapters` is the registry alone.** `adapter_registry.py` maps an adapter name to its class so a command can construct one; no other CLI module imports an adapter, and none touches SQL. The engine receives a built adapter and stays adapter-agnostic.
-- **`cli -> docs` is a lazy, function-scoped import, on the same terms as `cli -> mcp`.** Flask and Markdown ship behind the `[docs]` extra; `cli/commands/docs.py` imports `dbprint.docs` inside each subcommand's callback and converts the resulting `ImportError` into an install hint.
+- **`cli -> docs` is a lazy, function-scoped import, on the same terms as `cli -> mcp`.** Flask, Markdown and the waitress WSGI server ship behind the `[docs]` extra; `cli/commands/docs.py` imports `dbprint.docs` inside each subcommand's callback and converts the resulting `ImportError` into an install hint. waitress is imported inside `serve()` alone, so `docs build` never loads it.
 
 ---
 
@@ -310,7 +315,7 @@ class Adapter(ABC):
     ) -> tuple[int, ...]: ...
 
     def compute_normalized_cardinality(
-        self, fqn: str, column: str, scope: TableScope | None = None
+        self, fqn: str, column: str, sql_type: str, scope: TableScope | None = None
     ) -> int: ...
 ```
 
@@ -1036,7 +1041,7 @@ src/dbprint/mcp/
 ├── errors.py         # McpError + constructors per MCP.md §8
 ├── state.py          # ServedConnections + multi-conn default resolution
 ├── resources.py      # URI parse + per-artifact handlers (pure)
-├── reference.py      # packaged specification lookup, backing get_reference
+├── reference.py      # packaged spec and guide lookup, backing get_reference
 ├── tools.py          # 6 tool implementations (pure)
 └── server.py         # SDK adapter: wires handlers into mcp.server.Server
 ```
@@ -1053,7 +1058,7 @@ dbprint://<connection>/<rest>
 
 ### Multi-connection model
 
-`ServedConnections.build(project_config, conn_arg)` mirrors the CLI's implicit connection resolution:
+`ServedConnections.build(project_config, conn_arg)` takes its served set and default from `config.resolution.resolve_connections`, the resolution every CLI command reads:
 
 | Invocation | Served | Default |
 |---|---|---|
@@ -1079,7 +1084,7 @@ Hand-written, unlike `reading.md` beside it — prose aimed at an agent rather t
 
 ## 12. Docs site
 
-The `dbprint.docs` package renders a committed print as a browsable HTML site — `dbprint docs serve` (live, over HTTP) and `dbprint docs build` (static files). Gated on the `[docs]` install extra; both subcommands exit 1 with the documented install hint when it is not present.
+The `dbprint.docs` package renders a committed print as a browsable HTML site — `dbprint docs serve` (live, over HTTP) and `dbprint docs build` (static files). Gated on the `[docs]` install extra; both subcommands exit 1 with the documented install hint when it is not present. `docs serve` runs the Flask app under waitress through `create_server`, which binds before the CLI prints the served URL, so a port already in use exits 1 with one line; `waitress.serve` is not used because it calls `logging.basicConfig()` and would reformat every dbprint warning for the process lifetime.
 
 ### Module split
 
@@ -1090,7 +1095,7 @@ src/dbprint/docs/
 ├── diagram.py         # pure Mermaid flowchart source for one table
 ├── web.py             # the only module that imports Flask: app factory, routes, filters
 ├── build.py           # static site crawler, driven through Flask's test client
-├── templates/         # base.html (sidebar + Mermaid load), index/schema/table.html
+├── templates/         # base.html (sidebar + Mermaid load), index/schema/table.html, _context.html
 └── static/            # app.css, app.js, vendor/mermaid.min.js
 ```
 
@@ -1105,7 +1110,9 @@ A print's own vocabulary is presentation-sensitive — the site does not just fo
 - **Detection.** Every rendered relationship edge, in both `refers_to` and `referenced_by`, states its `detection`; an inferred edge never carries a filler `on_delete`/`on_update` it cannot have (SPEC 2.3.8).
 - **Absence.** An empty `columns` map reads as "the read matched no rows", never "this table has no columns" (SPEC 2.2.7); an empty `grain.keys` reads against `grain.search`'s tri-state (absent / bounded / exhausted), never as a flat "no grain".
 - **`notes_synthesis.synthesize()` reuse.** The FK target, `candidate_key`, `physical_layout_key`, `looks_like`, `sensitivity` and `epoch_unit` render through the same function `dbprint context` calls, so a wording change to one surface changes both. The site passes `hints_only`, which drops the classification-dispatched text: cardinality, null rate, range, percentiles and the value list all have a column of their own in the table.
+- **Context tab.** Table and schema pages carry the fragment `dbprint context` prints for the same selection — the one table, or every table of the schema sorted — once per purpose, assembled by `view.context_view` through `engine.assemble_context` with default `AssemblyOptions`, so its source text is byte-identical to the CLI's. Both purposes are in the page and the picker switches client-side, so a static build needs no server. The fragment quotes database values, so its renderer (`web._render_context`) shows raw HTML and Markdown links as text; `nl2br` keeps the header's identity lines apart. Each page assembles twice, uncached, which a static build pays per table and schema page.
 - **`sketch`** renders as a presence badge only — never the base64 payload, which runs to several kilobytes per column.
+- **Shared readings.** Every surface reads one engine function per table-level fact and words its result: `baseline.read_manifest` (what a manifest holds and why it cannot be read), `freshness.classify` (live, stale or dormant), `value_list` (a value's spellings and its notes), `table_readings` (grain, statistics parameters, cardinality saturation, which annotations stand) and `relationship_graph`'s rejected-edge lookup. `tests/consumer/register.py` pins each state a surface has disagreed on.
 
 ### Static build
 

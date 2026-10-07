@@ -24,18 +24,27 @@ from tests.fixtures.adversarial import (
     EXPONENT_FORM,
     EXTREME_TABLE,
     FUTURE_DATED_COLUMN,
+    GRAIN_NO_OUTCOME_TABLE,
+    GRAMMAR_VALUE,
     INCOMPLETE_GRAIN_TABLE,
     LINE_BREAK_VALUE,
     NEVER_DECLARED_KIND,
+    ORPHAN_SPELLING_COLUMN,
+    ORPHAN_SPELLING_TABLE,
+    ORPHAN_SPELLING_VALUE,
+    PERCENTILE_INSIDE_RANGE_COLUMN,
     REDACTED_COLUMN,
     SCOPED_COMPLETE_LIST_COLUMN,
     SCOPED_KEY_COLUMN,
     SCOPED_LATEST_COLUMN,
     SCOPED_TABLE,
+    SEVERAL_EDGES_TABLE,
     SPELLING_COLUMN,
     SPELLING_VALUES,
     TRUNCATED_FK_COLUMN,
     UNEVALUATED_TABLE,
+    UNREADABLE_PROFILED_AT,
+    UNREADABLE_PROFILED_TABLE,
     AdversarialPrint,
 )
 
@@ -48,6 +57,11 @@ COVERS = frozenset(
         "truncated_fk_values",
         "unevaluated_diff_table",
         "empty_columns_map",
+        "column_with_several_edges",
+        "orphan_spelling",
+        "percentile_inside_range",
+        "grain_search_without_outcome",
+        "unreadable_profiled_at",
         "approximate_row_count",
         "incomplete_grain_search",
         "catalog_only_table",
@@ -166,7 +180,7 @@ def test_incomplete_grain_search_reads_as_bounded_not_resolved(
 
     grain = view.grain_view(statistics)
 
-    assert grain == {"key_list": [], "search_ran": True, "exhausted": False}
+    assert grain == {"key_list": [], "state": "bounded"}
 
 
 def test_catalog_only_table_renders_no_dependency_or_layout_claim(
@@ -209,6 +223,7 @@ def test_a_delimiter_in_a_value_survives_the_view(adversarial_print: Adversarial
     assert {yaml.safe_load(bar["value"]) for bar in values["bars"]} == {
         DELIMITER_VALUE,
         LINE_BREAK_VALUE,
+        GRAMMAR_VALUE,
     }
 
 
@@ -284,3 +299,46 @@ def test_a_share_near_a_boundary_is_not_rounded_onto_it(
 
     assert "99.98% covered" in text
     assert "99.96% of scanned rows" in text
+
+
+def test_an_orphan_spelling_stays_its_own_value(adversarial_print: AdversarialPrint) -> None:
+    column = next(
+        c
+        for c in _page(adversarial_print, ORPHAN_SPELLING_TABLE)["columns"]
+        if c["name"] == ORPHAN_SPELLING_COLUMN
+    )
+
+    assert ORPHAN_SPELLING_VALUE in [bar["value"] for bar in column["value_list"]["bars"]]
+
+
+def test_a_grain_search_without_outcome_reads_as_not_determined(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    grain = _page(adversarial_print, GRAIN_NO_OUTCOME_TABLE)["grain"]
+
+    assert grain["state"] == "not_determined"
+
+
+def test_an_unreadable_profiled_at_is_shown_as_written(adversarial_print: AdversarialPrint) -> None:
+    text = " ".join(_page_text(adversarial_print, UNREADABLE_PROFILED_TABLE).split())
+
+    assert f"profiled {UNREADABLE_PROFILED_AT}" in text
+    assert " ago" not in text
+
+
+def test_the_bounds_are_the_range_not_a_percentile(adversarial_print: AdversarialPrint) -> None:
+    statistics = _statistics(adversarial_print, SCOPED_TABLE)
+    assert statistics is not None
+
+    rng = view.range_view(statistics["columns"][PERCENTILE_INSIDE_RANGE_COLUMN])
+
+    assert rng is not None
+    assert (rng["bounds"]["min"], rng["bounds"]["max"]) == ("2010-03-01", "2014-03-01")
+    assert ("p01", "2010-04-01") in rng["percentiles"]
+
+
+def test_the_notes_name_every_standing_edge(adversarial_print: AdversarialPrint) -> None:
+    text = _page_text(adversarial_print, SEVERAL_EDGES_TABLE)
+
+    assert "FK: public.cultivar.id (declared), public.wide_lookup.a (measured)" in text
+    assert "public.batch.id (inferred)" not in text.split("Relationships", 1)[0]

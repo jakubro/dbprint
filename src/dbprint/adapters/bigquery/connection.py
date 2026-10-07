@@ -95,14 +95,8 @@ def _default_cursor_factory(params: ConnectionParams) -> Any:
     Credentials resolve through ADC unless `credentials_file` names a service account key.
     """
 
-    try:
-        bigquery = importlib.import_module("google.cloud.bigquery")
-        dbapi = importlib.import_module("google.cloud.bigquery.dbapi")
-    except ImportError as exc:
-        raise BigqueryConnectionError(
-            "google-cloud-bigquery is not installed. Install dbprint with the [bigquery] "
-            "extra: `pip install dbprint[bigquery]`.",
-        ) from exc
+    bigquery = _import_bigquery("google.cloud.bigquery")
+    dbapi = _import_bigquery("google.cloud.bigquery.dbapi")
 
     return dbapi.connect(_client(bigquery, params)).cursor()
 
@@ -112,13 +106,7 @@ def default_dataset_lister(params: ConnectionParams) -> list[str]:
     it holds `bigquery.datasets.get` on, and leaving hidden datasets out.
     """
 
-    try:
-        bigquery = importlib.import_module("google.cloud.bigquery")
-    except ImportError as exc:
-        raise BigqueryConnectionError(
-            "google-cloud-bigquery is not installed. Install dbprint with the [bigquery] "
-            "extra: `pip install dbprint[bigquery]`.",
-        ) from exc
+    bigquery = _import_bigquery("google.cloud.bigquery")
 
     client = _client(bigquery, params)
 
@@ -148,3 +136,7 @@ def _is_timeout(exc: BaseException) -> bool:
     errors = getattr(cause, "errors", None) or []
 
     return any(isinstance(error, dict) and error.get("reason") == "timeout" for error in errors)
+
+
+def _import_bigquery(module: str) -> Any:
+    return driver.import_extra(module, "google-cloud-bigquery", "bigquery", BigqueryConnectionError)

@@ -5,28 +5,16 @@ Checked against a fresh render and against the validator's own `Issue(...)` call
 
 from __future__ import annotations
 
-import importlib.util
 import re
 from pathlib import Path
 
 import pytest
 
+from tests._scripts import load_script
 from tests.spec._issue_codes import SEVERITY_MAP, emitted_codes
 
 
-def _load_generator():
-    """Import scripts/gen_conformance_index.py so the test shares the generator's render path."""
-
-    path = Path(__file__).resolve().parents[2] / "scripts" / "gen_conformance_index.py"
-    spec = importlib.util.spec_from_file_location("gen_conformance_index", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    return module
-
-
-gen = _load_generator()
+gen = load_script("gen_conformance_index")
 
 _ROW = re.compile(r"^\| `([^`]+)` \| (error|warning) \|", re.MULTILINE)
 

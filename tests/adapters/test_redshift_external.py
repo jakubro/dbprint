@@ -10,11 +10,10 @@ import yaml
 
 from dbprint.adapters import RedshiftAdapter
 from dbprint.config.project import RuleConfig
-from dbprint.conformance import validate_print
 from dbprint.engine import Engine
+from tests._curator import conn_config
+from tests._engine_run import conformance_errors
 from tests.adapters.conftest import ExternalTableSeam, RedshiftDialectShim
-from tests.adapters.test_redshift import redshift_scratch_db  # noqa: F401
-from tests.engine.test_orchestrator import _conn_config
 
 
 REMOTE = "seedbank.seedbank.remote_reading"
@@ -77,7 +76,7 @@ def _listed(shim: RedshiftDialectShim, exclude: list[str]) -> dict[str, Any]:
 
 
 def test_an_external_table_is_listed_beside_local_ones_and_an_external_view_is_not(
-    redshift_scratch_db: Any,  # noqa: F811
+    redshift_scratch_db: Any,
 ) -> None:
     listed = _listed(_seeded(redshift_scratch_db), [])
 
@@ -87,12 +86,12 @@ def test_an_external_table_is_listed_beside_local_ones_and_an_external_view_is_n
     assert "seedbank.seedbank.remote_reading_v" not in listed
 
 
-def test_an_excluded_external_table_is_not_listed(redshift_scratch_db: Any) -> None:  # noqa: F811
+def test_an_excluded_external_table_is_not_listed(redshift_scratch_db: Any) -> None:
     assert REMOTE not in _listed(_seeded(redshift_scratch_db), ["seedbank.seedbank.*"])
 
 
 def test_columns_ddl_and_layout_come_from_the_external_catalog(
-    redshift_scratch_db: Any,  # noqa: F811
+    redshift_scratch_db: Any,
 ) -> None:
     adapter = _adapter(_seeded(redshift_scratch_db))
     adapter.connect()
@@ -117,7 +116,7 @@ def test_columns_ddl_and_layout_come_from_the_external_catalog(
 
 
 def test_a_catalog_only_print_reads_none_of_its_rows(
-    redshift_scratch_db: Any,  # noqa: F811
+    redshift_scratch_db: Any,
     tmp_path: Path,
 ) -> None:
     shim = _seeded(redshift_scratch_db)
@@ -130,11 +129,11 @@ def test_a_catalog_only_print_reads_none_of_its_rows(
     assert "row_count" not in statistics
     assert (tmp_path / "primary/seedbank/seedbank/remote_reading/ddl.sql").read_text() == _DDL
     assert [s for s in shim.statements if "remote_reading" in s and "SHOW EXTERNAL" not in s] == []
-    assert [i for i in validate_print(tmp_path / "primary") if i.severity == "error"] == []
+    assert conformance_errors(tmp_path / "primary") == []
 
 
 def test_an_opted_in_external_table_is_profiled(
-    redshift_scratch_db: Any,  # noqa: F811
+    redshift_scratch_db: Any,
     tmp_path: Path,
 ) -> None:
     conn = _conn(tmp_path, RuleConfig(include=(REMOTE,), read_rows=True))
@@ -147,7 +146,7 @@ def test_an_opted_in_external_table_is_profiled(
 
 
 def _conn(tmp_path: Path, *rules: RuleConfig) -> Any:
-    return replace(_conn_config(tmp_path), adapter="redshift", rules=rules)
+    return replace(conn_config(tmp_path), adapter="redshift", rules=rules)
 
 
 def _statistics(tmp_path: Path) -> dict[str, Any]:

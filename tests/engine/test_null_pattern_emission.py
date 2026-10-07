@@ -17,7 +17,6 @@ from dbprint.adapters import (
     BaseStats,
     ColumnMeta,
     ColumnStats,
-    CommentsMeta,
     MockAdapter,
     MockTable,
     NullPattern,
@@ -30,7 +29,8 @@ from dbprint.config import ConnectionConfig
 from dbprint.conformance.statistics import check
 from dbprint.engine import Engine
 from dbprint.engine.context_assembler import AssemblyOptions, assemble
-from tests._prints import VAULT_COLUMNS, exact_stats, mock_table
+from tests._engine_run import artifact
+from tests._prints import VAULT_COLUMNS, columns, exact_stats, mock_table
 
 
 ACCESSION_NULL_PATTERNS = NullPatterns(
@@ -155,8 +155,8 @@ class TestContextRendering:
         text = _context_accession(tmp_path, ACCESSION_NULL_PATTERNS, fmt="md")
 
         assert "## Columns null on the same rows" in text
-        assert "| 2353 | storage_temperature_c |" in text
-        assert "| 147 | storage_temperature_c, traits |" in text
+        assert "| 94.1% | storage_temperature_c |" in text
+        assert "| 5.9% | storage_temperature_c, traits |" in text
 
     def test_the_fully_populated_rows_are_named_not_left_blank(self, tmp_path: Path) -> None:
         text = _context_taxon(tmp_path, TAXON_NULL_PATTERNS, fmt="md")
@@ -168,7 +168,7 @@ class TestContextRendering:
 
         text = _context_accession(tmp_path, ACCESSION_NULL_PATTERNS, fmt="md")
 
-        assert "Observed over every scanned row." in text
+        assert "Shown combinations cover every scanned row." in text
 
     def test_a_table_without_a_census_renders_no_section(self, tmp_path: Path) -> None:
         text = _context_vault(tmp_path, fmt="md")
@@ -199,7 +199,7 @@ def _generate(
     Engine(adapter(fixture), conn, tmp_path).generate()
     schema, name = table_key.split(".")
 
-    return yaml.safe_load((tmp_path / "w" / schema / name / "statistics.yaml").read_text())
+    return artifact(tmp_path / "w", f"{schema}.{name}")
 
 
 def _context(tmp_path: Path, table_key: str, fixture: dict[str, MockTable], fmt: str) -> str:
@@ -242,37 +242,14 @@ def _accession_fixture(census: NullPatterns | None) -> dict[str, MockTable]:
     """
 
     return {
-        "seedbank.accession": MockTable(
-            type="table",
-            namespace_path=("seedbank", "accession"),
-            ddl=(
-                "CREATE TABLE seedbank.accession (\n"
-                "    accession_id bigint NOT NULL,\n"
-                "    traits jsonb,\n"
-                "    storage_temperature_c numeric(4,1)\n"
-                ");\n"
+        "seedbank.accession": mock_table(
+            "seedbank.accession",
+            columns(
+                ("accession_id", "bigint"),
+                ("traits", "jsonb", True),
+                ("storage_temperature_c", "numeric(4,1)", True),
             ),
-            columns=[
-                ColumnMeta(
-                    name="accession_id",
-                    sql_type="bigint",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-                ColumnMeta(name="traits", sql_type="jsonb", nullable=True, default=None, ordinal=2),
-                ColumnMeta(
-                    name="storage_temperature_c",
-                    sql_type="numeric(4,1)",
-                    nullable=True,
-                    default=None,
-                    ordinal=3,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+            {
                 "accession_id": ColumnStats(
                     sql_type="bigint",
                     nullable=False,
@@ -304,7 +281,11 @@ def _accession_fixture(census: NullPatterns | None) -> dict[str, MockTable]:
                     distribution="uniform",
                 ),
             },
-            samples={},
+            ddl="CREATE TABLE seedbank.accession (\n"
+            "    accession_id bigint NOT NULL,\n"
+            "    traits jsonb,\n"
+            "    storage_temperature_c numeric(4,1)\n"
+            ");\n",
             null_patterns=census,
             row_count=2500,
         ),
@@ -315,35 +296,10 @@ def _taxon_fixture(census: NullPatterns | None) -> dict[str, MockTable]:
     """seedbank.taxon's parent_taxon_id: null wherever a taxon has no parent."""
 
     return {
-        "seedbank.taxon": MockTable(
-            type="table",
-            namespace_path=("seedbank", "taxon"),
-            ddl=(
-                "CREATE TABLE seedbank.taxon (\n"
-                "    taxon_id integer NOT NULL,\n"
-                "    parent_taxon_id integer\n"
-                ");\n"
-            ),
-            columns=[
-                ColumnMeta(
-                    name="taxon_id",
-                    sql_type="integer",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-                ColumnMeta(
-                    name="parent_taxon_id",
-                    sql_type="integer",
-                    nullable=True,
-                    default=None,
-                    ordinal=2,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+        "seedbank.taxon": mock_table(
+            "seedbank.taxon",
+            columns(("taxon_id", "integer"), ("parent_taxon_id", "integer", True)),
+            {
                 "taxon_id": ColumnStats(
                     sql_type="integer",
                     nullable=False,
@@ -363,7 +319,10 @@ def _taxon_fixture(census: NullPatterns | None) -> dict[str, MockTable]:
                     cardinality_method="exact",
                 ),
             },
-            samples={},
+            ddl="CREATE TABLE seedbank.taxon (\n"
+            "    taxon_id integer NOT NULL,\n"
+            "    parent_taxon_id integer\n"
+            ");\n",
             null_patterns=census,
             row_count=300,
         ),
@@ -391,18 +350,10 @@ def _structural_fixture(census: NullPatterns) -> dict[str, MockTable]:
     """A placeholder shape for the one state nothing shipped exercises: a truncated census."""
 
     return {
-        "public.t": MockTable(
-            type="table",
-            namespace_path=("public", "t"),
-            ddl="CREATE TABLE public.t (a text, b text);\n",
-            columns=[
-                ColumnMeta(name="a", sql_type="text", nullable=True, default=None, ordinal=1),
-                ColumnMeta(name="b", sql_type="text", nullable=True, default=None, ordinal=2),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+        "public.t": mock_table(
+            "public.t",
+            columns(("a", "text", True), ("b", "text", True)),
+            {
                 "a": ColumnStats(
                     sql_type="text",
                     nullable=True,
@@ -422,7 +373,7 @@ def _structural_fixture(census: NullPatterns) -> dict[str, MockTable]:
                     cardinality_method="exact",
                 ),
             },
-            samples={},
+            ddl="CREATE TABLE public.t (a text, b text);\n",
             null_patterns=census,
             row_count=1,
         ),

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from dbprint.config import ConfigError, ConnectionConfig
+from dbprint.spec.temporal_age import negative_max_age_refusal
 
 
 @dataclass(frozen=True)
@@ -52,12 +53,7 @@ def resolve(conn: ConnectionConfig, manifest: dict[str, Any] | None) -> OfflineT
 
         if not isinstance(recorded, bool) and isinstance(recorded, (int, float)):
             if recorded < 0:
-                refused[fqn] = (
-                    f"{fqn}: max_age_days is {recorded}, which no print can ever satisfy: "
-                    f"every table re-extracts on every run and check reports every one of "
-                    f"them stale. Use 0 to ask for that deliberately, or a positive number "
-                    f"of days."
-                )
+                refused[fqn] = negative_max_age_refusal(f"{fqn}: max_age_days", recorded)
             elif not float(recorded).is_integer():
                 refused[fqn] = (
                     f"{fqn}: max_age_days is {recorded}, which is not a whole number of days."

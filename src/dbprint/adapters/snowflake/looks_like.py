@@ -17,7 +17,7 @@ from . import introspect, stats
 from .connection import DIALECT, Cursor, exec_query
 from .rendering import render_operand, render_text
 from .. import statements
-from ..base import TableScope, is_string_like
+from ..base import TableScope
 from ..identifiers import SOURCE_ALIAS, Identity
 from ..sql_layout import derived, indented
 
@@ -37,7 +37,7 @@ def sample_distinct(
 
     cn = identity.source_column(column)
     seed = statements.table_seed(identity)
-    source = stats._source(identity, scope, seed)
+    source = stats.table_source(identity, scope)
 
     # A materialized scope is a plain table the draw binds to directly; only an
     # unmaterialized narrowing has to be wrapped first.
@@ -61,33 +61,22 @@ def sample_distinct(
         scope,
         n,
         statements.scoped_estimate(introspect.row_count_estimate(cursor, identity), scope),
-        direct=lambda: _distinct(cursor, source, cn, n, seed, sql_type),
-        draw=lambda: _distinct(cursor, oversampled, "ovs.v", n, seed, sql_type),
+        direct=lambda: _distinct(partial(exec_query, cursor), source, cn, n, seed, sql_type),
+        draw=lambda: _distinct(
+            partial(exec_query, cursor),
+            oversampled,
+            "ovs.v",
+            n,
+            seed,
+            sql_type,
+        ),
     )
 
 
-def _distinct(
-    cursor: Cursor,
-    source: str,
-    quoted_col: str,
-    n: int,
-    seed: int,
-    sql_type: str | None,
-) -> list[Any]:
-    selected = (
-        render_text(quoted_col, sql_type)
-        if sql_type is not None and is_string_like(sql_type, stats._is_unsupported)
-        else render_operand(quoted_col, sql_type)
-        if sql_type is not None
-        else quoted_col
-    )
-
-    return statements.distinct_values(
-        partial(exec_query, cursor),
-        DIALECT,
-        source,
-        quoted_col,
-        selected,
-        n,
-        seed,
-    )
+_distinct = partial(
+    statements.typed_distinct_values,
+    dialect=DIALECT,
+    render_text=render_text,
+    render_operand=render_operand,
+    unsupported=stats._is_unsupported,
+)

@@ -14,10 +14,10 @@ from dbprint.adapters.dialect import Vendor
 from dbprint.adapters.sql_layout import derived, select_from
 from dbprint.config import StatisticsConfig
 from dbprint.config.project import RedactRule
+from tests.adapters._composites import duckdb_print, generate, parts_of, psql, snowflake
+from tests.adapters._credentials import DATABRICKS_CREDS
+from tests.adapters._dialects import STATS_MODULES, foreign_fragments
 from tests.adapters._sql_style import alias_violations, layout_violations, violations
-from tests.adapters.test_arrays import _duckdb, _generate, _parts_of, _psql
-from tests.adapters.test_dialect_guard import STATS_MODULES, _foreign_fragments
-from tests.adapters.test_distribution_shapes import _DATABRICKS_CREDS
 
 
 _LABELS = (
@@ -35,7 +35,7 @@ class TestDuckdb:
         self,
         tmp_path: Path,
     ) -> None:
-        labels = _duckdb(tmp_path, *_LABELS)["gauge"]["labels"]
+        labels = duckdb_print(tmp_path, *_LABELS)["gauge"]["labels"]
         parts = labels["parts"]
 
         assert labels["classification"] == "composite"
@@ -55,7 +55,7 @@ class TestDuckdb:
         assert (parts[".unit"]["occurrences"], parts[".unit"]["null_count"]) == (3, 0)
 
     def test_integer_quoted_and_awkward_keys_are_spelled_and_read(self, tmp_path: Path) -> None:
-        columns = _duckdb(
+        columns = duckdb_print(
             tmp_path,
             "CREATE TABLE gauge (gauge_no INTEGER, scale MAP(INTEGER, DOUBLE), "
             "tags MAP(VARCHAR, INTEGER))",
@@ -74,7 +74,7 @@ class TestDuckdb:
         assert columns["tags"]["parts"]['["it\'s \\\\ a\\nkey"]']["occurrences"] == 1
 
     def test_a_nested_map_reaches_its_inner_keys(self, tmp_path: Path) -> None:
-        deep = _duckdb(
+        deep = duckdb_print(
             tmp_path,
             "CREATE TABLE gauge (gauge_no INTEGER, deep MAP(VARCHAR, MAP(VARCHAR, INTEGER)))",
             "INSERT INTO gauge VALUES (1, MAP {'a': MAP {'b': 1}}), (2, MAP {'a': MAP {}})",
@@ -85,7 +85,7 @@ class TestDuckdb:
         assert deep["parts"][".a"]["empty_count"] == 1
 
     def test_the_key_cap_counts_every_key_it_cut(self, tmp_path: Path) -> None:
-        wide = _duckdb(
+        wide = duckdb_print(
             tmp_path,
             "CREATE TABLE gauge (gauge_no INTEGER, wide MAP(VARCHAR, INTEGER))",
             "INSERT INTO gauge SELECT i, MAP {'k' || i: i} FROM range(1000) r(i)",
@@ -97,7 +97,7 @@ class TestDuckdb:
         assert wide["parts_found"] == 1001
 
     def test_keys_that_look_like_emails_withhold_every_key_part(self, tmp_path: Path) -> None:
-        hits = _duckdb(
+        hits = duckdb_print(
             tmp_path,
             "CREATE TABLE gauge (gauge_no INTEGER, hits MAP(VARCHAR, INTEGER))",
             "INSERT INTO gauge SELECT i, MAP {'g' || i || '@example.invalid': i} FROM range(40) r(i)",
@@ -116,7 +116,7 @@ class TestDuckdb:
         self,
         tmp_path: Path,
     ) -> None:
-        labels = _duckdb(
+        labels = duckdb_print(
             tmp_path,
             *_LABELS,
             redact=(RedactRule(columns=("*.gauge.labels",), with_="mask"),),
@@ -126,7 +126,7 @@ class TestDuckdb:
         assert labels["parts"]["[keys]"]["redacted"] == "mask"
 
     def test_a_key_listed_without_its_key_set_is_withheld(self, tmp_path: Path) -> None:
-        solo = _duckdb(
+        solo = duckdb_print(
             tmp_path,
             "CREATE TABLE gauge (gauge_no INTEGER, solo MAP(VARCHAR, INTEGER))",
             "INSERT INTO gauge SELECT i, MAP {'a': i} FROM range(10) r(i)",
@@ -137,7 +137,7 @@ class TestDuckdb:
         assert solo["parts_found"] == 2
 
     def test_descent_off_leaves_the_map_unsupported(self, tmp_path: Path) -> None:
-        labels = _duckdb(tmp_path, *_LABELS, statistics=StatisticsConfig(max_parts=0))
+        labels = duckdb_print(tmp_path, *_LABELS, statistics=StatisticsConfig(max_parts=0))
 
         assert labels["gauge"]["labels"]["classification"] == "unsupported"
         assert "parts" not in labels["gauge"]["labels"]
@@ -147,7 +147,7 @@ def test_a_postgres_hstore_off_the_search_path_is_a_map(
     postgres_test_db: dict[str, str],
     tmp_path: Path,
 ) -> None:
-    with _psql(postgres_test_db) as conn:
+    with psql(postgres_test_db) as conn:
         conn.execute("CREATE SCHEMA IF NOT EXISTS kit")
         conn.execute("CREATE EXTENSION IF NOT EXISTS hstore SCHEMA kit")
         conn.execute("CREATE TABLE public.gauge (gauge_no integer, attrs kit.hstore)")
@@ -156,7 +156,7 @@ def test_a_postgres_hstore_off_the_search_path_is_a_map(
             "(2, 'unit=>F, site=>NULL'), (3, ''), (4, NULL)",
         )
 
-    attrs = _generate(PostgresAdapter(postgres_test_db), "postgres", tmp_path, "*.gauge")["attrs"]
+    attrs = generate(PostgresAdapter(postgres_test_db), "postgres", tmp_path, "*.gauge")["attrs"]
 
     assert attrs["classification"] == "composite"
     assert attrs["empty_count"] == 1
@@ -180,7 +180,7 @@ def test_a_clickhouse_map_counts_a_repeated_key_once_and_its_entries_twice(
         {"host": "chdb", "database": "seedbank"},
         cursor_factory=lambda _params: cursor,
     )
-    labels = _generate(adapter, "clickhouse", tmp_path, "*.gauge")["labels"]
+    labels = generate(adapter, "clickhouse", tmp_path, "*.gauge")["labels"]
 
     assert labels["size"]["max"] == 2
     assert labels["empty_count"] == 1
@@ -199,13 +199,27 @@ def test_a_databricks_map_is_descended(databricks_test_schema: Any) -> None:
         "INSERT INTO gauge VALUES (1, map('unit', 'C', 'site', 'north')), "
         f"(2, map('unit', 'F', 'site', NULL)), (3, map({_escaped_string(_AWKWARD)}, 'q'))",
     )
-    adapter = DatabricksAdapter(_DATABRICKS_CREDS, cursor_factory=lambda _params: cursor)
-    labels = _parts_of(adapter, "gauge", "labels")
+    adapter = DatabricksAdapter(DATABRICKS_CREDS, cursor_factory=lambda _params: cursor)
+    labels = parts_of(adapter, "gauge", "labels")
     parts = {p.path: p for p in labels.parts}
 
     assert labels.found == 4
     assert (parts[".site"].occurrences, parts[".site"].stats.null_count) == (2, 1)
     assert parts['["it\'s \\\\ a\\nkey"]'].occurrences == 1
+
+
+def test_a_snowflake_map_is_descended() -> None:
+    adapter = snowflake(
+        "CREATE TABLE seedbank.gauge (gauge_no INTEGER, labels MAP(VARCHAR, VARCHAR))",
+        "INSERT INTO seedbank.gauge VALUES (1, MAP {'unit': 'C', 'site': 'north'}), "
+        "(2, MAP {'unit': 'F', 'site': NULL}), (3, NULL)",
+    )
+    labels = parts_of(adapter, "gauge", "labels")
+    parts = {p.path: p for p in labels.parts}
+
+    assert sorted(parts) == [".site", ".unit", "[keys]"]
+    assert parts["[keys]"].occurrences == 4
+    assert (parts[".site"].occurrences, parts[".site"].stats.null_count) == (2, 1)
 
 
 @pytest.mark.parametrize(
@@ -228,7 +242,7 @@ def test_the_map_reads_speak_their_own_dialect(vendor: Vendor, sql_type: str) ->
     ]
 
     for statement in statements:
-        assert _foreign_fragments(statement, vendor) == []
+        assert foreign_fragments(statement, vendor) == []
         assert violations(statement, vendor) + alias_violations(statement, vendor) == []
         assert layout_violations(derived(statement, "src"), vendor) == []
 

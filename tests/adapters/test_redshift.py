@@ -4,18 +4,13 @@ against Postgres wrapped in `RedshiftDialectShim`; there is no local Redshift su
 
 from __future__ import annotations
 
-import secrets
-
-import psycopg
 import pytest
-from psycopg import sql
 
 from dbprint.adapters import RedshiftAdapter, StatisticsConfig
 from dbprint.adapters.identifiers import UnknownTable
 from dbprint.spec.sketch import low64_md5
+from tests.adapters._dialects import install_recorder
 from tests.adapters.conftest import RedshiftDialectShim
-from tests.adapters.test_dialect_guard import _install_recorder
-from tests.conftest import PostgresCluster
 
 
 def _redshift_adapter(shim: RedshiftDialectShim) -> RedshiftAdapter:
@@ -32,56 +27,6 @@ def _redshift_adapter(shim: RedshiftDialectShim) -> RedshiftAdapter:
     adapter.list_tables(include=["*"], exclude=[])
 
     return adapter
-
-
-@pytest.fixture
-def redshift_scratch_db(postgres_cluster: PostgresCluster):
-    """A bare Postgres database (no contract schema) for tests that build their own DDL."""
-
-    db_name = f"rs_scratch_{secrets.token_hex(4)}"
-    admin_creds = {
-        "host": "127.0.0.1",
-        "port": str(postgres_cluster.port),
-        "database": "postgres",
-        "user": postgres_cluster.superuser,
-        "password": "",
-    }
-    conn = psycopg.connect(
-        host=admin_creds["host"],
-        port=int(admin_creds["port"]),
-        dbname=admin_creds["database"],
-        user=admin_creds["user"],
-        password=admin_creds["password"],
-        autocommit=True,
-    )
-    conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(db_name)))
-    conn.close()
-
-    db_conn = psycopg.connect(
-        host=admin_creds["host"],
-        port=int(admin_creds["port"]),
-        dbname=db_name,
-        user=admin_creds["user"],
-        password=admin_creds["password"],
-        autocommit=True,
-    )
-
-    try:
-        yield db_conn
-    finally:
-        db_conn.close()
-        cleanup = psycopg.connect(
-            host=admin_creds["host"],
-            port=int(admin_creds["port"]),
-            dbname=admin_creds["database"],
-            user=admin_creds["user"],
-            password=admin_creds["password"],
-            autocommit=True,
-        )
-        cleanup.execute(
-            sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(db_name)),
-        )
-        cleanup.close()
 
 
 class TestPhysicalTableIdentity:
@@ -114,7 +59,7 @@ class TestPhysicalTableIdentity:
     def test_every_statement_carries_the_catalog_spelling(self, redshift_scratch_db) -> None:
         self._seed(redshift_scratch_db)
         adapter = _redshift_adapter(RedshiftDialectShim(redshift_scratch_db))
-        recorder = _install_recorder(adapter)
+        recorder = install_recorder(adapter)
 
         try:
             cols = adapter.introspect_columns("seedbank.seedbank.accession")
@@ -144,7 +89,7 @@ class TestPhysicalTableIdentity:
 
         self._seed(redshift_scratch_db)
         adapter = _redshift_adapter(RedshiftDialectShim(redshift_scratch_db))
-        recorder = _install_recorder(adapter)
+        recorder = install_recorder(adapter)
 
         try:
             adapter.extract_ddl("seedbank.seedbank.accession")
@@ -358,7 +303,7 @@ class TestDatabaseNameFilterIsEmitted:
     ) -> None:
         redshift_scratch_db.execute("CREATE TABLE public.scoped_test (a int)")
         adapter = _redshift_adapter(RedshiftDialectShim(redshift_scratch_db))
-        recorder = _install_recorder(adapter)
+        recorder = install_recorder(adapter)
 
         try:
             adapter.introspect_columns("seedbank.public.scoped_test")

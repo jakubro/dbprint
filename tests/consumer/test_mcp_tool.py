@@ -18,6 +18,7 @@ from dbprint.cli.main import main
 from dbprint.mcp import ServedConnections, dispatch
 from dbprint.mcp.tools import TOOL_NAMES
 from tests import _mcp_pages
+from tests._grammar import split_outside_literals
 from tests.fixtures.adversarial import (
     APPROXIMATE_ROW_COUNT_TABLE,
     DECLARED_MISSING_KIND,
@@ -29,18 +30,27 @@ from tests.fixtures.adversarial import (
     EXTREME_NULL_RATE,
     EXTREME_TABLE,
     FUTURE_DATED_COLUMN,
+    GRAIN_NO_OUTCOME_TABLE,
     INCOMPLETE_GRAIN_TABLE,
     NEVER_DECLARED_KIND,
+    ORPHAN_SPELLING_COLUMN,
+    ORPHAN_SPELLING_TABLE,
+    ORPHAN_SPELLING_VALUE,
     PARTIAL_AS_WHOLE,
+    PERCENTILE_INSIDE_RANGE_COLUMN,
     REDACTED_COLUMN,
+    REJECTED_EDGE_TARGET,
     SCOPED_COMPLETE_LIST_COLUMN,
     SCOPED_KEY_COLUMN,
     SCOPED_LATEST_COLUMN,
     SCOPED_TABLE,
+    SEVERAL_EDGES_COLUMN,
+    SEVERAL_EDGES_TABLE,
     SPELLING_COLUMN,
     SPELLING_VALUES,
     TRUNCATED_FK_COLUMN,
     UNEVALUATED_TABLE,
+    UNREADABLE_PROFILED_TABLE,
     AdversarialPrint,
 )
 
@@ -53,6 +63,11 @@ COVERS = frozenset(
         "truncated_fk_values",
         "unevaluated_diff_table",
         "empty_columns_map",
+        "column_with_several_edges",
+        "orphan_spelling",
+        "percentile_inside_range",
+        "grain_search_without_outcome",
+        "unreadable_profiled_at",
         "approximate_row_count",
         "incomplete_grain_search",
         "catalog_only_table",
@@ -108,7 +123,10 @@ def test_scoped_table_carries_the_population(adversarial_print: AdversarialPrint
     statistics = _statistics(adversarial_print, SCOPED_TABLE)
 
     assert statistics["scope"]["rows_scanned"] == 250
-    assert "Scanned: 250 of 1000 rows (25%)" in _md(adversarial_print, SCOPED_TABLE)
+    md = _md(adversarial_print, SCOPED_TABLE)
+
+    assert "Scanned: 250 of 1000 rows (25%); sampled\n" in md
+    assert "sample 0.25" not in md
 
 
 def test_redacted_column_carries_no_real_literal(adversarial_print: AdversarialPrint) -> None:
@@ -315,7 +333,7 @@ def test_scoped_latest_value_carries_the_clause(adversarial_print: AdversarialPr
         if line.startswith(f"| {SCOPED_LATEST_COLUMN} |")
     )
 
-    assert "freshness dormant over the rows scanned" in row
+    assert "freshness: dormant over the rows scanned" in row
 
 
 def test_a_value_is_spelled_so_it_reads_back_as_itself(
@@ -328,9 +346,14 @@ def test_a_value_is_spelled_so_it_reads_back_as_itself(
         for line in _md(adversarial_print, DELIMITER_TABLE).splitlines()
         if line.startswith(f"| {SPELLING_COLUMN} |")
     )
-    listed = row.split("3 distinct: ", 1)[1].split(", uniform", 1)[0]
+    notes = [c for c in re.split(r"(?<!\\)\|", row.strip()) if c.strip()][-1].strip()
+    facts = split_outside_literals(notes, "; ")
+    listed = next(f.split(": ", 1)[1] for f in facts if f.startswith("values (complete"))
+    entries = split_outside_literals(listed, ", ")
 
-    assert [yaml.safe_load(v) for v in listed.split(" / ")] == list(SPELLING_VALUES)
+    assert [yaml.safe_load(re.sub(r" \([^()]*%[^()]*\)$", "", v)) for v in entries] == list(
+        SPELLING_VALUES,
+    )
 
 
 def test_an_extreme_statistic_is_spelled_as_the_artifact_spells_it(
@@ -339,16 +362,20 @@ def test_an_extreme_statistic_is_spelled_as_the_artifact_spells_it(
     text = _md(adversarial_print, EXTREME_TABLE)
 
     assert EXPONENT_FORM.findall(text) == []
-    assert "mean=0.00000005" in text
+    assert "mean: 0.00000005" in text
 
 
 def test_a_share_near_a_boundary_is_not_rounded_onto_it(
     adversarial_print: AdversarialPrint,
 ) -> None:
     text = _md(adversarial_print, EXTREME_TABLE)
+    partial = [line for line in text.splitlines() if line.startswith(("| status |", "| sparse |"))]
 
-    assert PARTIAL_AS_WHOLE.findall(text) == []
-    assert "99.96% null" in text
+    assert [PARTIAL_AS_WHOLE.findall(line) for line in partial if "whole domain" not in line] == [
+        [],
+        [],
+    ]
+    assert "nulls: 99.96%" in text
     assert (
         _statistics(adversarial_print, EXTREME_TABLE)["columns"]["sparse"]["null_rate"]
         == EXTREME_NULL_RATE
@@ -397,5 +424,52 @@ def test_the_tool_serves_the_fragment_the_context_command_prints(
     finally:
         os.chdir(old_cwd)
 
+    arguments = {"table": SCOPED_TABLE, "format": "md"}
+    pages = _mcp_pages.pages(_state(adversarial_print), "get_table_context", arguments)
+
     assert result.exit_code == 0, result.output
-    assert _md(adversarial_print, SCOPED_TABLE) + "\n" == result.output
+    assert [page + "\n" for page in pages] == [result.output]
+
+
+def test_an_orphan_spelling_stays_its_own_value(adversarial_print: AdversarialPrint) -> None:
+    row = next(
+        line
+        for line in _md(adversarial_print, ORPHAN_SPELLING_TABLE).splitlines()
+        if line.startswith(f"| {ORPHAN_SPELLING_COLUMN} |")
+    )
+
+    assert ORPHAN_SPELLING_VALUE in row
+
+
+def test_a_grain_search_without_outcome_reads_as_not_determined(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    assert "Grain: not determined" in _md(adversarial_print, GRAIN_NO_OUTCOME_TABLE)
+
+
+def test_an_unreadable_profiled_at_reads_as_dormant(adversarial_print: AdversarialPrint) -> None:
+    tables = _dict_result(adversarial_print, "list_tables", {"detail": True})["tables"]
+    [entry] = [t for t in tables if t["table"] == UNREADABLE_PROFILED_TABLE]
+
+    assert (entry["freshness"], entry["age_days"]) == ("dormant", None)
+
+
+def test_a_percentile_band_never_reads_as_the_range(adversarial_print: AdversarialPrint) -> None:
+    row = next(
+        line
+        for line in _md(adversarial_print, SCOPED_TABLE).splitlines()
+        if line.startswith(f"| {PERCENTILE_INSIDE_RANGE_COLUMN} |")
+    )
+
+    assert "range: '2010-03-01' -> '2014-03-01' (1461 days); P1-P99: '2010-04-01' -> " in row
+
+
+def test_every_standing_edge_is_named_surest_first(adversarial_print: AdversarialPrint) -> None:
+    row = next(
+        line
+        for line in _md(adversarial_print, SEVERAL_EDGES_TABLE).splitlines()
+        if line.startswith(f"| {SEVERAL_EDGES_COLUMN} |")
+    )
+
+    assert "FK: public.cultivar.id (declared), public.wide_lookup.a (measured); " in row
+    assert REJECTED_EDGE_TARGET not in row

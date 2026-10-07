@@ -55,6 +55,31 @@ REGISTER: tuple[ClaimState, ...] = (
         "Never reports an unevaluated table as unchanged.",
     ),
     ClaimState(
+        "percentile_inside_range",
+        "Never labels a percentile as the column's range; a range states the true minimum and "
+        "maximum.",
+    ),
+    ClaimState(
+        "column_with_several_edges",
+        "Names every edge a human left standing on a column with several, the surest first; "
+        "never one edge in place of the rest, and never a rejected one.",
+    ),
+    ClaimState(
+        "orphan_spelling",
+        "Keeps a spelling whose canonical value the list lacks as a value of its own; never "
+        "drops its literal.",
+    ),
+    ClaimState(
+        "grain_search_without_outcome",
+        "Reads a grain search that records no outcome as not determined; never states a result "
+        "the file does not carry.",
+    ),
+    ClaimState(
+        "unreadable_profiled_at",
+        "Never presents a table whose profiled_at is not a readable timestamp as fresh, and never "
+        "fails over it; a structured surface carries the stamp as written.",
+    ),
+    ClaimState(
         "empty_columns_map",
         "Says the scan read nothing for the empty-columns table, never 'no columns'.",
     ),
@@ -94,7 +119,8 @@ REGISTER: tuple[ClaimState, ...] = (
     ClaimState(
         "delimiter_in_a_value",
         "Renders a value carrying a table delimiter or a line break without letting it add, "
-        "end or split a cell of the table the surface draws around it.",
+        "end or split a cell of the table the surface draws around it, or split a fact or list "
+        "entry of a Markdown grammar line.",
     ),
     ClaimState(
         "value_spelling",

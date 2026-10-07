@@ -173,7 +173,7 @@ def test_both_statistics_phases_read_the_same_source(
     A seed chosen per process or per call would leave the phases reading different rows.
     """
 
-    from tests.adapters.test_dialect_guard import _install_recorder
+    from tests.adapters._dialects import install_recorder
 
     vendor, factory = sql_adapter_factory
 
@@ -181,7 +181,7 @@ def test_both_statistics_phases_read_the_same_source(
         pytest.skip(f"{vendor} is not SAMPLE_FALLBACK_COHERENT; see module docstring.")
 
     adapter = factory()
-    recorder = _install_recorder(adapter)
+    recorder = install_recorder(adapter)
 
     try:
         table = next(t for t in adapter.list_tables(include=["*.viability_check"], exclude=[]))
@@ -245,7 +245,7 @@ def test_no_statement_draws_its_sample_more_than_once(
     return NULL when an offset exceeds a shorter later draw.
     """
 
-    from tests.adapters.test_dialect_guard import _install_recorder
+    from tests.adapters._dialects import install_recorder
 
     vendor, factory = sql_adapter_factory
 
@@ -253,7 +253,7 @@ def test_no_statement_draws_its_sample_more_than_once(
         pytest.skip(f"{vendor} is not SAMPLE_FALLBACK_COHERENT; see module docstring.")
 
     adapter = factory()
-    recorder = _install_recorder(adapter)
+    recorder = install_recorder(adapter)
 
     try:
         _profile(adapter, SAMPLE, SAMPLED_CONFIG)
@@ -287,7 +287,7 @@ class TestTheCopiedDraw:
         self,
         sql_adapter_factory: tuple[str, Callable[[], Adapter]],
     ) -> None:
-        from tests.adapters.test_dialect_guard import _install_recorder
+        from tests.adapters._dialects import install_recorder
 
         vendor, factory = sql_adapter_factory
 
@@ -295,7 +295,7 @@ class TestTheCopiedDraw:
             pytest.skip(f"{vendor} has no local `CREATE TEMPORARY TABLE`; see module docstring.")
 
         adapter = factory()
-        recorder = _install_recorder(adapter)
+        recorder = install_recorder(adapter)
 
         try:
             fqn, columns, scope = _copy_the_draw(adapter)
@@ -381,9 +381,10 @@ class TestTheCopiedDraw:
         adapter = factory()
 
         try:
-            fqn, _columns, scope = _copy_the_draw(adapter)
-            first = adapter.compute_normalized_cardinality(fqn, "label", scope)
-            second = adapter.compute_normalized_cardinality(fqn, "label", scope)
+            fqn, columns, scope = _copy_the_draw(adapter)
+            label_type = next(c.classified_type for c in columns if c.name == "label")
+            first = adapter.compute_normalized_cardinality(fqn, "label", label_type, scope)
+            second = adapter.compute_normalized_cardinality(fqn, "label", label_type, scope)
             adapter.release_scope(fqn, scope)
         finally:
             adapter.close()

@@ -1,9 +1,16 @@
 {% extends "base.html" %}
+{% from "_context.html" import context_panel %}
 {% block body %}
 
 <h1>{{ schema }} <span class="muted">{{ conn }}</span></h1>
 <p class="muted">{{ tables|length }} tables &middot; {{ n_edges }} intra-schema relationships</p>
 
+<div class="tabs">
+  <button class="tab-btn" data-tab="overview">Tables</button>
+  <button class="tab-btn" data-tab="context">Context</button>
+</div>
+
+<div data-tab-panel="overview">
 <table data-enhance>
   <thead>
     <tr>
@@ -27,5 +34,8 @@
     {% endfor %}
   </tbody>
 </table>
+</div>
+
+{{ context_panel(context) }}
 
 {% endblock %}

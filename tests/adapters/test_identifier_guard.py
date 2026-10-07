@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any, LiteralString, cast
 
 import duckdb
-import psycopg
 import pytest
 
 import dbprint.adapters as adapters_package
@@ -22,6 +21,7 @@ from dbprint.config.project import ConnectionConfig
 from dbprint.conformance.layout import PATH_SEGMENT_RE as VALIDATOR_PATH_SEGMENT_RE
 from dbprint.engine import EXIT_PARTIAL, Engine
 from tests.adapters.conftest import SnowflakeDialectShim, _adapter_factory_for
+from tests.conftest import pg_connect
 
 
 _PACKAGE = Path(adapters_package.__file__).parent
@@ -75,7 +75,7 @@ _KEYWORD_FOLDS = {
     ("mysql/introspect.py", "relationships"): "a referential-action keyword",
     ("mysql/introspect.py", "indexes"): "an index-type keyword",
     ("mysql/introspect.py", "comments"): "a storage-engine keyword",
-    ("mysql/connection.py", "open"): "a server-flavour keyword",
+    ("mysql/connection.py", "_opened"): "a server-flavour keyword",
     ("mysql/introspect.py", "list_tables"): "a storage-engine keyword",
     ("redshift/adapter.py", "_databases"): "matches a configured name to the stored spelling",
     ("redshift/introspect.py", "list_tables"): "a table-type keyword",
@@ -237,13 +237,7 @@ def test_a_case_colliding_column_pair_is_refused_through_the_real_adapter(
 
     if vendor == "postgres":
         creds = request.getfixturevalue("postgres_test_db")
-        with psycopg.connect(
-            host=creds["host"],
-            port=int(creds["port"]),
-            dbname=creds["database"],
-            user=creds["user"],
-            autocommit=True,
-        ) as conn:
+        with pg_connect(creds) as conn:
             for statement in statements:
                 conn.execute(cast(LiteralString, statement))
     else:

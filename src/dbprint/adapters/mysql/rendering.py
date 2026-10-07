@@ -36,8 +36,8 @@ def render_text(expr: str, sql_type: str) -> str:
     `empty_count` are measured over, and the value it publishes (SPEC 2.2.4).
     """
 
-    # A BIT's driver value is the integer a query compares with; its CHAR cast is raw bytes.
-    return expr if base_type(sql_type) == "bit" else f"CAST({expr} AS CHAR)"
+    # A BIT's driver value is an integer; read as a string, CAST or bare, it is raw bytes.
+    return f"CAST({expr} AS UNSIGNED)" if base_type(sql_type) == "bit" else f"CAST({expr} AS CHAR)"
 
 
 temporal_shape = partial(lookup_temporal_shape, _SHAPES)

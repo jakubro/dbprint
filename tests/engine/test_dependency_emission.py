@@ -10,13 +10,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from dbprint.adapters import (
     BaseStats,
     ColumnMeta,
     ColumnStats,
-    CommentsMeta,
     MockAdapter,
     MockTable,
     TableCounts,
@@ -24,6 +21,8 @@ from dbprint.adapters import (
 )
 from dbprint.config import ConnectionConfig, RuleConfig
 from dbprint.engine import Engine
+from tests._engine_run import artifact
+from tests._prints import columns, mock_table
 
 
 class TestCandidateSelection:
@@ -219,7 +218,7 @@ def _generate(
     fixture = _fixture(strengths, row_count)
     Engine(adapter(fixture), conn, tmp_path).generate()
 
-    return yaml.safe_load((tmp_path / "w" / "public" / "wide" / "statistics.yaml").read_text())
+    return artifact(tmp_path / "w", "public.wide")
 
 
 # One column per candidate-selection rule: `status`/`status_label` name-adjacent at equal
@@ -254,23 +253,14 @@ def _fixture(strengths: dict[tuple[str, str], float], row_count: int) -> dict[st
         )
 
     names = tuple(_CARDINALITIES)
-    columns = [
-        ColumnMeta(name=name, sql_type="text", nullable=False, default=None, ordinal=i)
-        for i, name in enumerate(names, start=1)
-    ]
     stats = {name: _column(name, null_count=(1 if name == "status_note" else 0)) for name in names}
 
     return {
-        "public.wide": MockTable(
-            type="table",
-            namespace_path=("public", "wide"),
+        "public.wide": mock_table(
+            "public.wide",
+            columns(*((name, "text") for name in names)),
+            stats,
             ddl="CREATE TABLE public.wide (placeholder text);\n",
-            columns=columns,
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats=stats,
-            samples={},
             row_count=row_count,
             dependency_strengths=dict(strengths),
         ),

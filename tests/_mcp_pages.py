@@ -37,10 +37,27 @@ def next_cursor(page: Any) -> str | None:
     return None if match is None else match.group(1) or match.group(2)
 
 
-def joined(text_pages: list[str]) -> str:
-    """Text pages with their cursor lines removed, concatenated."""
+_LEGEND = r"## Terms\n\n(?:- [^\n]*\n)*- [^\n]*"
+_FIRST_PAGE_LEGEND_RE = re.compile(rf"\n\n{_LEGEND}(?=\n|\Z)")
+_LATER_PAGE_LEGEND_RE = re.compile(rf"\A{_LEGEND}\n\n")
 
-    return "".join(_MARKER_RE.sub("", page) for page in text_pages)
+
+def joined(text_pages: list[str]) -> str:
+    """Text pages with their cursor lines and each page's legend removed, concatenated."""
+
+    return "".join(
+        without_legend(_MARKER_RE.sub("", page), first=number == 0)
+        for number, page in enumerate(text_pages)
+    )
+
+
+def without_legend(text: str, *, first: bool = True) -> str:
+    """`text` less its `## Terms` legend: after the header on a first page, else at the top."""
+
+    if first:
+        return _FIRST_PAGE_LEGEND_RE.sub("", text, count=1)
+
+    return _LATER_PAGE_LEGEND_RE.sub("", text, count=1)
 
 
 def merged(object_pages: list[Any]) -> dict[str, Any]:

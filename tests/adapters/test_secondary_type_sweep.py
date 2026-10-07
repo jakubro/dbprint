@@ -13,7 +13,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, get_args
 
-import psycopg
 import pytest
 
 import dbprint.adapters as adapters_package
@@ -29,6 +28,7 @@ from dbprint.spec.classification import (
 )
 from dbprint.spec.sketch import K, SketchKind, canonical_form, low64_md5, sketch_kind
 from tests.adapters.conftest import SQL_PARAMS, _adapter_factory_for, _mysql_exec_many
+from tests.conftest import pg_connect
 
 
 _UTC_PLUS_2 = dt.timezone(dt.timedelta(hours=2))
@@ -212,7 +212,7 @@ def _sweep_column(adapter: Adapter, fqn: str, col: ColumnMeta, held: tuple[Any, 
         assert set(hashes) == expected, f"{col.name} ({col.sql_type})"
 
     if is_string_like_type(col.classified_type) and not is_temporal_type(col.classified_type):
-        assert adapter.compute_normalized_cardinality(fqn, col.name) == 2
+        assert adapter.compute_normalized_cardinality(fqn, col.name, col.classified_type) == 2
 
     if classification in SAMPLED_CLASSIFICATIONS:
         assert len(adapter.sample_values(fqn, col.name, 10)) == 2
@@ -288,14 +288,7 @@ def _seed_redshift(request: pytest.FixtureRequest) -> tuple[str, ...]:
 
 
 def _seed_postgres_family(creds: dict[str, str]) -> None:
-    with psycopg.connect(
-        host=creds["host"],
-        port=int(creds["port"]),
-        dbname=creds["database"],
-        user=creds["user"],
-        password="",
-        autocommit=True,
-    ) as conn:
+    with pg_connect(creds) as conn:
         conn.execute(
             "CREATE TABLE seedbank.slot (opens_at time, opens_at_tz timetz, fee numeric(12,4), "
             "is_open boolean, sown_on date, sown_at timestamp, sown_at_tz timestamptz, "

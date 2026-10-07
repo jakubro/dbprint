@@ -10,14 +10,13 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
 from typing import get_args
 
 from dbprint.mcp.resources import ResourceKind
 from dbprint.mcp.tools import TOOL_DEFINITIONS
+from tests._scripts import REPO_ROOT
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_PATH = REPO_ROOT / "docs/examples/skill/dbprint.md"
 CLI_DOCS_PATH = REPO_ROOT / "docs/CLI.md"
 RELATIONSHIPS_SCHEMA_PATH = REPO_ROOT / "src/dbprint/spec/v1/relationships.schema.json"

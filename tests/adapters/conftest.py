@@ -15,7 +15,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, LiteralString, cast
@@ -50,7 +50,8 @@ from dbprint.adapters import (
     ValueCount,
 )
 from tests import _substrates
-from tests.conftest import MysqlCluster, PostgresCluster, _scratch_root
+from tests._prints import columns, mock_table
+from tests.conftest import MysqlCluster, PostgresCluster, _scratch_root, fresh_database, pg_connect
 
 
 # Adapter factory parameterization.
@@ -432,6 +433,7 @@ class SnowflakeDialectShim:
         con: duckdb.DuckDBPyConnection,
         cluster_by: dict[str, str] | None = None,
         table_types: dict[str, str] | None = None,
+        column_types: dict[str, str] | None = None,
     ) -> None:
         self._con = con
         self._rows: list[tuple[Any, ...]] | None = None
@@ -440,12 +442,21 @@ class SnowflakeDialectShim:
         self._cluster_by = {name.lower(): value for name, value in (cluster_by or {}).items()}
         # duckdb reports only BASE TABLE and VIEW; a test names the Snowflake kind a table reports.
         self._table_types = {name.lower(): kind for name, kind in (table_types or {}).items()}
+        # duckdb has one JSON type; a test names a column Snowflake reports as `OBJECT`.
+        self._column_types = {name.lower(): kind for name, kind in (column_types or {}).items()}
+
+        for macro in _SEMISTRUCTURED_MACROS:
+            con.execute(macro)
 
     def execute(self, sql: str, params: Any = None) -> SnowflakeDialectShim:
         # duckdb's own INFORMATION_SCHEMA spans every attached catalog, so an unqualified read
         # would pass here and fail on Snowflake; every read must name its database.
         if _UNQUALIFIED_INFO_SCHEMA_RE.search(sql):
             raise AssertionError(f"unqualified information_schema read: {sql}")
+
+        # duckdb matches a quoted name case-insensitively; Snowflake upper-cases an unquoted one.
+        if unresolved := _snowflake_unresolved_references(sql):
+            raise AssertionError(f"invalid identifier {', '.join(unresolved)}: {sql}")
 
         sql = _QUALIFIED_INFO_SCHEMA_RE.sub("information_schema.", sql)
         flat = " ".join(sql.lower().split())
@@ -482,8 +493,27 @@ class SnowflakeDialectShim:
 
         if self._table_types and "information_schema.tables" in flat and "table_type" in flat:
             self._rows = self._retyped(self._con.fetchall(), params)
+        elif flat.startswith("select col.column_name, col.ordinal_position, col.data_type"):
+            self._rows = [
+                (name, ordinal, self._column_type(name, data_type), *rest)
+                for name, ordinal, data_type, *rest in self._con.fetchall()
+            ]
 
         return self
+
+    def _column_type(self, name: str, data_type: str) -> str:
+        """The type `COLUMNS` reports: Snowflake has `ARRAY`, `VARIANT` and a bare `MAP`."""
+
+        if name.lower() in self._column_types:
+            return self._column_types[name.lower()]
+        elif data_type.endswith("]"):
+            return "ARRAY"
+        elif data_type == "JSON":
+            return "VARIANT"
+        elif data_type.startswith("MAP("):
+            return "MAP"
+        else:
+            return data_type
 
     def _retyped(self, rows: list[tuple[Any, ...]], params: Any) -> list[tuple[Any, ...]]:
         if len(rows) == 1 and len(rows[0]) == 1 and params:
@@ -592,12 +622,12 @@ class SnowflakeDialectShim:
 
         out: list[tuple[Any, ...]] = []
 
-        for index, (name, columns) in enumerate(rows):
+        for index, (name, key_columns) in enumerate(rows):
             # duckdb leaves a primary key's constraint_name NULL, but the adapter groups on
             # that name, so an unnamed key needs a stand-in or every key collapses into one.
             constraint_name = name or f"SYS_CONSTRAINT_{constraint_type.replace(' ', '_')}_{index}"
 
-            for sequence, column in enumerate(columns, start=1):
+            for sequence, column in enumerate(key_columns, start=1):
                 out.append(
                     (
                         None,
@@ -710,6 +740,42 @@ class SnowflakeDialectShim:
         ]
 
 
+# Snowflake's semi-structured functions over a value's JSON reading, so a list, a map and a
+# JSON document answer alike. A JSON fraction is DECIMAL to Snowflake's TYPEOF, never DOUBLE.
+_SEMISTRUCTURED_MACROS = (
+    """
+    CREATE OR REPLACE TEMP MACRO sf_typeof(x) AS
+    CASE json_type(to_json(x))
+      WHEN 'UBIGINT' THEN 'INTEGER'
+      WHEN 'BIGINT' THEN 'INTEGER'
+      WHEN 'NULL' THEN 'NULL_VALUE'
+      WHEN 'DOUBLE' THEN CASE WHEN typeof(x) = 'JSON' THEN 'DECIMAL' ELSE 'DOUBLE' END
+      ELSE json_type(to_json(x))
+    END
+    """,
+    "CREATE OR REPLACE TEMP MACRO is_null_value(x) AS json_type(to_json(x)) = 'NULL'",
+    """
+    CREATE OR REPLACE TEMP MACRO array_size(x) AS
+    CASE WHEN json_type(to_json(x)) = 'ARRAY' THEN json_array_length(to_json(x)) END
+    """,
+    "CREATE OR REPLACE TEMP MACRO object_keys(x) AS json_keys(to_json(x))",
+)
+_SEMISTRUCTURED_OPERAND = r'\w+\.(?:"(?:[^"]|"")+"|\w+)'
+_VARIANT_CAST_RE = re.compile(rf"({_SEMISTRUCTURED_OPERAND})::VARIANT")
+_FLATTEN_RE = re.compile(r"LATERAL FLATTEN\(INPUT => (.+?)(?:, MODE => '(OBJECT|ARRAY)')?\) (\w+)")
+# The array norm (SPEC 2.2.18) is the one REDUCE the adapter emits, wrapped in SQRT.
+_REDUCE_RE = re.compile(r"REDUCE\((.+?), 0, \(acc, e\) -> (.+?)\)\)")
+# A flattened or document value read as text: JSON's own cast keeps the string's quotes.
+_JSON_TEXT_RE = re.compile(r"\b(ent\.v|\w+\.value)::VARCHAR\b")
+_SQL_NAME = r'"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*'
+_SQL_STRING_RE = re.compile(r"'(?:[^']|'')*'")
+_DERIVED_ALIAS_RE = re.compile(rf"\)\s+({_SQL_NAME})")
+_CTE_RE = re.compile(rf"({_SQL_NAME})\s+AS\s*\(", re.IGNORECASE)
+_SELECT_HEAD_RE = re.compile(r"\s*SELECT\s+(?:DISTINCT\s+)?", re.IGNORECASE)
+_FROM_RE = re.compile(r"\s+FROM\b", re.IGNORECASE)
+_OUTPUT_NAME_RE = re.compile(rf"(?:\bAS\s+|\.)({_SQL_NAME})$", re.IGNORECASE)
+_QUALIFIED_REFERENCE_RE = re.compile(rf'(?<![\w."])({_SQL_NAME})\.({_SQL_NAME})')
+
 _QUALIFIED_INFO_SCHEMA_RE = re.compile(r'"(?:[^"]|"")+"\.information_schema\.', re.IGNORECASE)
 _UNQUALIFIED_INFO_SCHEMA_RE = re.compile(r'(?<!")(?<!\.)\binformation_schema\.', re.IGNORECASE)
 
@@ -753,9 +819,42 @@ def _to_duckdb(sql: str) -> str:
     return _rewrite_sketch_hash(
         _rewrite_count_distinct_multi(
             _rewrite_temporal_render(
-                _rewrite_nanosecond_part(_rewrite_sample(_unqualify_materialized(sql))),
+                _rewrite_nanosecond_part(
+                    _rewrite_sample(_unqualify_materialized(_rewrite_semistructured(sql))),
+                ),
             ),
         ),
+    )
+
+
+def _rewrite_semistructured(sql: str) -> str:
+    """Snowflake's `FLATTEN`, `VARIANT` and semi-structured functions -> duckdb's JSON reading.
+
+    Snowflake's bare `NUMBER` is `NUMBER(38, 0)`, its `FLOAT` 64-bit; duckdb's `FLOAT` is 32-bit.
+    """
+
+    sql = _VARIANT_CAST_RE.sub(r"to_json(\1)", sql)
+    sql = re.sub(r"\bTYPEOF\(", "sf_typeof(", sql)
+    sql = re.sub(r"\bMAP_SIZE\(", "cardinality(", sql)
+    sql = _FLATTEN_RE.sub(_flattened, sql)
+    sql = _REDUCE_RE.sub(r"list_reduce(\1, (acc, e) -> \2, 0))", sql)
+    sql = _JSON_TEXT_RE.sub(r"json_extract_string(\1, '$')", sql)
+    sql = re.sub(r"::NUMBER(?!\()", "::DECIMAL(38, 0)", sql)
+    sql = re.sub(r"::NUMBER\(", "::DECIMAL(", sql)
+
+    return re.sub(r"::FLOAT\b", "::DOUBLE", sql)
+
+
+def _flattened(match: re.Match[str]) -> str:
+    """One `LATERAL FLATTEN` as the entries of its input's JSON reading, `MODE` kept as a filter."""
+
+    operand, mode, alias = match.groups()
+    document = f"to_json({operand})"
+    kept = f" WHERE json_type({document}) = '{mode}'" if mode else ""
+
+    return (
+        f"LATERAL (SELECT jse.key AS key, jse.value AS value "
+        f"FROM json_each({document}) jse{kept}) {alias}"
     )
 
 
@@ -1152,27 +1251,15 @@ _CONTRACT_TEMPLATE = "dbprint_contract_template"
 def postgres_test_db(postgres_cluster: PostgresCluster) -> Iterator[dict[str, str]]:
     """Create a fresh DB in the shared cluster, copied from the seeded contract template."""
 
-    db_name = f"contract_{secrets.token_hex(4)}"
-    admin_creds = {
-        "host": "127.0.0.1",
-        "port": str(postgres_cluster.port),
-        "database": "postgres",
-        "user": postgres_cluster.superuser,
-        "password": "",
-    }
-    _contract_database_from_template(admin_creds, db_name)
-    db_creds = {**admin_creds, "database": db_name}
-
-    try:
-        yield db_creds
-    finally:
-        _exec_admin(
-            admin_creds,
-            sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(db_name)),
-        )
+    with fresh_database(
+        postgres_cluster,
+        "contract",
+        create=_contract_database_from_template,
+    ) as creds:
+        yield creds
 
 
-def _contract_database_from_template(admin_creds: dict[str, str], db_name: str) -> None:
+def _contract_database_from_template(admin_creds: Mapping[str, str], db_name: str) -> None:
     """Create `db_name` from the cluster's contract template, statistics included, seeding it on first use.
 
     The template is seeded under another name and renamed, so a failed seed never becomes it.
@@ -1180,14 +1267,7 @@ def _contract_database_from_template(admin_creds: dict[str, str], db_name: str) 
 
     template = sql.Identifier(_CONTRACT_TEMPLATE)
 
-    with psycopg.connect(
-        host=admin_creds["host"],
-        port=int(admin_creds["port"]),
-        dbname=admin_creds["database"],
-        user=admin_creds["user"],
-        password=admin_creds["password"],
-        autocommit=True,
-    ) as conn:
+    with pg_connect(admin_creds) as conn:
         conn.execute("SELECT pg_advisory_lock(hashtext(%s))", (_CONTRACT_TEMPLATE,))
 
         try:
@@ -1217,14 +1297,7 @@ def _contract_database_from_template(admin_creds: dict[str, str], db_name: str) 
 def _seed_contract_schema(creds: dict[str, str]) -> None:
     """Populate the DB with two tables + one view used by the contract suite."""
 
-    with psycopg.connect(
-        host=creds["host"],
-        port=int(creds["port"]),
-        dbname=creds["database"],
-        user=creds["user"],
-        password=creds["password"],
-        autocommit=True,
-    ) as conn:
+    with pg_connect(creds) as conn:
         conn.execute("CREATE SCHEMA IF NOT EXISTS seedbank")
         conn.execute(
             """
@@ -1325,18 +1398,6 @@ def _seed_contract_schema(creds: dict[str, str]) -> None:
 
 
 # Helpers.
-
-
-def _exec_admin(creds: dict[str, str], stmt: sql.SQL | sql.Composed) -> None:
-    with psycopg.connect(
-        host=creds["host"],
-        port=int(creds["port"]),
-        dbname=creds["database"],
-        user=creds["user"],
-        password=creds["password"],
-        autocommit=True,
-    ) as conn:
-        conn.execute(stmt)
 
 
 # Per-test MySQL database seeded with the contract-test schema (MariaDB substrate).
@@ -1790,34 +1851,23 @@ def redshift_postgres_connection(
 ) -> Iterator[RedshiftDialectShim]:
     """Fresh Postgres database, seeded with the contract schema, wrapped in the Redshift shim."""
 
-    db_name = f"contract_rs_{secrets.token_hex(4)}"
-    admin_creds = {
-        "host": "127.0.0.1",
-        "port": str(postgres_cluster.port),
-        "database": "postgres",
-        "user": postgres_cluster.superuser,
-        "password": "",
-    }
-    _contract_database_from_template(admin_creds, db_name)
-    db_creds = {**admin_creds, "database": db_name}
-
-    conn = psycopg.connect(
-        host=db_creds["host"],
-        port=int(db_creds["port"]),
-        dbname=db_creds["database"],
-        user=db_creds["user"],
-        password=db_creds["password"],
-        autocommit=True,
-    )
-
-    try:
+    with (
+        fresh_database(
+            postgres_cluster,
+            "contract_rs",
+            create=_contract_database_from_template,
+        ) as creds,
+        pg_connect(creds) as conn,
+    ):
         yield RedshiftDialectShim(conn)
-    finally:
-        conn.close()
-        _exec_admin(
-            admin_creds,
-            sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(db_name)),
-        )
+
+
+@pytest.fixture
+def redshift_scratch_db(postgres_cluster: PostgresCluster):
+    """A bare Postgres database (no contract schema) for tests that build their own DDL."""
+
+    with fresh_database(postgres_cluster, "rs_scratch") as creds, pg_connect(creds) as conn:
+        yield conn
 
 
 # Per-test schema on a session-scoped local PySpark + Delta session.
@@ -2467,11 +2517,9 @@ def _seed_contract_schema_bigquery(
 
 
 REFERENCE_FIXTURE: dict[str, MockTable] = {
-    "garden.seedbank.curator": MockTable(
-        type="table",
-        namespace_path=("garden", "seedbank", "curator"),
-        ddl="CREATE TABLE garden.seedbank.curator (id uuid PRIMARY KEY, email varchar(255));\n",
-        columns=[
+    "garden.seedbank.curator": mock_table(
+        "garden.seedbank.curator",
+        (
             ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1),
             ColumnMeta(
                 name="email",
@@ -2508,25 +2556,8 @@ REFERENCE_FIXTURE: dict[str, MockTable] = {
                 default=None,
                 ordinal=6,
             ),
-        ],
-        relationships=[
-            ForeignKeyMeta(
-                column=("herbarium_id",),
-                target_table="garden.seedbank.herbarium",
-                target_column=("id",),
-                on_delete="CASCADE",
-                on_update="NO ACTION",
-                constraint_name="curator_herbarium_id_fkey",
-            ),
-        ],
-        indexes=[
-            IndexMeta(name="curator_email_idx", columns=("email",), unique=False, type="btree"),
-        ],
-        comments=CommentsMeta(
-            table="Primary curator table",
-            columns={"email": "user-facing email address"},
         ),
-        stats={
+        {
             "id": ColumnStats(
                 sql_type="uuid",
                 nullable=False,
@@ -2632,6 +2663,24 @@ REFERENCE_FIXTURE: dict[str, MockTable] = {
                 ),
             ),
         },
+        ddl="CREATE TABLE garden.seedbank.curator (id uuid PRIMARY KEY, email varchar(255));\n",
+        relationships=[
+            ForeignKeyMeta(
+                column=("herbarium_id",),
+                target_table="garden.seedbank.herbarium",
+                target_column=("id",),
+                on_delete="CASCADE",
+                on_update="NO ACTION",
+                constraint_name="curator_herbarium_id_fkey",
+            ),
+        ],
+        indexes=[
+            IndexMeta(name="curator_email_idx", columns=("email",), unique=False, type="btree"),
+        ],
+        comments=CommentsMeta(
+            table="Primary curator table",
+            columns={"email": "user-facing email address"},
+        ),
         samples={
             "email": [f"user{i}@example.com" for i in range(50)],
             "id": [f"00000000-0000-7000-8000-{i:012d}" for i in range(50)],
@@ -2643,28 +2692,10 @@ REFERENCE_FIXTURE: dict[str, MockTable] = {
             UniqueKeyMeta(columns=("email",)),
         ],
     ),
-    "garden.seedbank.herbarium": MockTable(
-        type="table",
-        namespace_path=("garden", "seedbank", "herbarium"),
-        ddl=(
-            "CREATE TABLE garden.seedbank.herbarium "
-            "(id uuid PRIMARY KEY, code varchar(16) NOT NULL);\n"
-        ),
-        columns=[
-            ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1),
-            ColumnMeta(
-                name="code",
-                sql_type="varchar(16)",
-                nullable=False,
-                default=None,
-                ordinal=2,
-            ),
-        ],
-        relationships=[],
-        # No index entry for `code`: the mock states declared-unique directly, not a backing index.
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={
+    "garden.seedbank.herbarium": mock_table(
+        "garden.seedbank.herbarium",
+        columns(("id", "uuid"), ("code", "varchar(16)")),
+        {
             "id": ColumnStats(
                 sql_type="uuid",
                 nullable=False,
@@ -2696,23 +2727,20 @@ REFERENCE_FIXTURE: dict[str, MockTable] = {
                 inferred=Inferred(candidate_key=True),
             ),
         },
-        samples={},
+        ddl="CREATE TABLE garden.seedbank.herbarium "
+        "(id uuid PRIMARY KEY, code varchar(16) NOT NULL);\n",
         row_count=12_000,
         unique_keys=[
             UniqueKeyMeta(columns=("id",), primary=True),
             UniqueKeyMeta(columns=("code",)),
         ],
     ),
-    "fixture.staging.active_curators": MockTable(
+    "fixture.staging.active_curators": mock_table(
+        "fixture.staging.active_curators",
+        (),
+        {},
         type="view",
-        namespace_path=("fixture", "staging", "active_curators"),
         ddl="CREATE VIEW fixture.staging.active_curators AS SELECT 1;\n",
-        columns=[],
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={},
-        samples={},
     ),
 }
 
@@ -2758,3 +2786,97 @@ def _snowflake_name_parts(text: str) -> list[str]:
     parts.append(current if was_quoted else current.strip().upper())
 
     return parts
+
+
+def _snowflake_unresolved_references(sql: str) -> list[str]:
+    """Each `alias.column` naming a derived-table column only as duckdb resolves it.
+
+    Snowflake upper-cases an unquoted name, so `src."v"` misses `AS v`; implicit items go unchecked.
+    """
+
+    text = _SQL_STRING_RE.sub("''", sql)
+    outputs: dict[str, list[set[str]]] = {}
+
+    for alias, body in _derived_tables(text):
+        if (names := _select_names(body)) is not None:
+            outputs.setdefault(_snowflake_resolved(alias), []).append(names)
+
+    unresolved = []
+
+    for match in _QUALIFIED_REFERENCE_RE.finditer(text):
+        qualifier, name = (_snowflake_resolved(part) for part in match.groups())
+        candidates = outputs.get(qualifier, [])
+        folded = {n.upper() for names in candidates for n in names}
+
+        if not any(name in names for names in candidates) and name.upper() in folded:
+            unresolved.append(match.group(0))
+
+    return unresolved
+
+
+def _derived_tables(text: str) -> Iterator[tuple[str, str]]:
+    """Each parenthesised body with the alias naming it: `(...) alias` and `alias AS (...)`."""
+
+    for match in _DERIVED_ALIAS_RE.finditer(text):
+        if (start := _matching(text, match.start(), -1)) is not None:
+            yield match.group(1), text[start + 1 : match.start()]
+
+    for match in _CTE_RE.finditer(text):
+        if (end := _matching(text, match.end() - 1, 1)) is not None:
+            yield match.group(1), text[match.end() : end]
+
+
+def _matching(text: str, index: int, step: int) -> int | None:
+    """The parenthesis balancing the one at `index`, scanning in `step`'s direction."""
+
+    depth = 0
+    opening, closing = ("(", ")") if step == 1 else (")", "(")
+
+    while 0 <= index < len(text):
+        if text[index] == opening:
+            depth += 1
+        elif text[index] == closing:
+            depth -= 1
+
+            if depth == 0:
+                return index
+
+        index += step
+
+    return None
+
+
+def _select_names(body: str) -> set[str] | None:
+    """The column names a `SELECT` body outputs, resolved; None when any is implicit."""
+
+    head = _SELECT_HEAD_RE.match(body)
+
+    if head is None:
+        return None
+
+    items, current, depth = [], "", 0
+
+    for index in range(head.end(), len(body)):
+        char = body[index]
+
+        if depth == 0 and _FROM_RE.match(body, index):
+            break
+        elif depth == 0 and char == ",":
+            items.append(current)
+            current = ""
+            continue
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+
+        current += char
+
+    items.append(current)
+    named = [_OUTPUT_NAME_RE.search(item.strip()) for item in items]
+
+    return None if None in named else {_snowflake_resolved(m.group(1)) for m in named if m}
+
+
+def _snowflake_resolved(name: str) -> str:
+    return name[1:-1].replace('""', '"') if name.startswith('"') else name.upper()

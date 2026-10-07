@@ -12,7 +12,7 @@ from dbprint.adapters import TableScope
 from dbprint.adapters.base import seed_from_fqn
 from dbprint.adapters.identifiers import Identity
 from dbprint.adapters.mysql.stats import _source as mysql_source
-from dbprint.adapters.postgres.stats import _source as postgres_source
+from dbprint.adapters.postgres.stats import source as postgres_source
 from dbprint.adapters.snowflake import DIALECT as SNOWFLAKE_DIALECT
 from dbprint.adapters.snowflake.stats import _source as snowflake_source
 from dbprint.adapters.statements import scoped_estimate

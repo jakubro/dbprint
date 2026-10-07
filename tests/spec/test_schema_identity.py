@@ -13,9 +13,10 @@ from pathlib import Path
 
 import pytest
 
+from tests._scripts import REPO_ROOT
 
-REPO = Path(__file__).resolve().parents[2]
-SCHEMAS = sorted((REPO / "src/dbprint/spec/v1").glob("*.schema.json"))
+
+SCHEMAS = sorted((REPO_ROOT / "src/dbprint/spec/v1").glob("*.schema.json"))
 
 _HANDLE_RE = re.compile(r"//[^/]*/([^/]+)")
 
@@ -23,7 +24,7 @@ _HANDLE_RE = re.compile(r"//[^/]*/([^/]+)")
 def _packaging() -> dict:
     """The `[project]` table of pyproject.toml."""
 
-    return tomllib.loads((REPO / "pyproject.toml").read_text())["project"]
+    return tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["project"]
 
 
 def account_handle() -> str:

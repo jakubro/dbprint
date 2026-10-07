@@ -7,13 +7,15 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
 from dbprint.spec import artifact_yaml
-from dbprint.spec.fqn import split as split_fqn
+from dbprint.spec.artifacts import MANIFEST_FILENAME, walkable_tables
+from dbprint.spec.fqn import directory as fqn_directory
 
 
 _LOG = logging.getLogger(__name__)
@@ -37,10 +39,61 @@ def read_artifact(path: Path) -> Any:
     return artifact_yaml.load(path.read_text(encoding="utf-8"))
 
 
+ManifestState = Literal["absent", "unparseable", "malformed", "ok"]
+
+
+@dataclass(frozen=True)
+class ManifestRead:
+    """One connection's manifest as every surface reads it; `reason` says why it is unusable.
+
+    `manifest` keeps only `walkable_tables` entries: an unusable entry drops its own table alone.
+    """
+
+    path: Path
+    state: ManifestState
+    manifest: dict[str, Any] | None = None
+    reason: str | None = None
+
+
+def read_manifest(print_root: Path, read: ArtifactReader = read_artifact) -> ManifestRead:
+    """Read `print_root`'s manifest; an empty file is unusable, never an empty print."""
+
+    path = print_root / MANIFEST_FILENAME
+
+    if not path.is_file():
+        return ManifestRead(path, "absent")
+
+    try:
+        data = read(path)
+    except yaml.YAMLError as exc:
+        return ManifestRead(path, "unparseable", reason=str(exc))
+
+    reason = manifest_shape_error(data) or (None if isinstance(data, dict) else "the file is empty")
+
+    if reason is not None:
+        return ManifestRead(path, "malformed", reason=reason)
+
+    return ManifestRead(path, "ok", {**data, "tables": walkable_tables(data)})
+
+
+def unusable_manifest_message(read: ManifestRead, connection: str) -> str:
+    """How every CLI surface names a manifest it cannot read; missing and unusable stay apart.
+
+    Conflating them sends the user to `generate`, which overwrites the print instead of fixing it.
+    """
+
+    if read.state == "absent":
+        return f"no manifest at {read.path}. Run `dbprint generate {connection}` first."
+    elif read.state == "unparseable":
+        return f"could not parse {read.path}: {read.reason}"
+    else:
+        return f"ignoring {read.path}: {read.reason}"
+
+
 def load_baseline_manifest(prints_root: Path) -> dict[str, Any] | None:
     """Load `prints/<connection>/manifest.yaml` if present and usable; otherwise None."""
 
-    manifest = prints_root / "manifest.yaml"
+    manifest = prints_root / MANIFEST_FILENAME
 
     if not manifest.is_file():
         return None
@@ -82,22 +135,6 @@ def manifest_shape_error(data: Any) -> str | None:
     return None
 
 
-def walkable_tables(manifest: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
-    """The manifest entries a reader can follow, keyed by table name.
-
-    Followable means a mapping whose `path`, if present, is a string. One unusable entry
-    drops its own table and nothing else; the conformance suite is what reports it.
-    """
-
-    out: dict[str, dict[str, Any]] = {}
-
-    for fqn, entry in ((manifest or {}).get("tables") or {}).items():
-        if isinstance(entry, dict) and isinstance(entry.get("path", ""), str):
-            out[fqn] = entry
-
-    return out
-
-
 def failed_tables(manifest: Mapping[str, Any] | None) -> tuple[str, ...]:
     """The tables the writing run attempted and could not profile (SPEC 2.5); `()` when absent.
 
@@ -136,18 +173,7 @@ def table_directory(print_root: Path, fqn: str, entry: dict[str, Any]) -> Path:
 
     path = entry.get("path")
 
-    return print_root / (path if isinstance(path, str) and path else "/".join(split_fqn(fqn)))
-
-
-def declared_artifacts(entry: dict[str, Any]) -> dict[str, Any]:
-    """The artifact filenames a reader can open from one manifest entry; non-strings drop."""
-
-    artifacts = entry.get("artifacts") or {}
-
-    if not isinstance(artifacts, dict):
-        return {}
-
-    return {kind: name for kind, name in artifacts.items() if isinstance(name, str)}
+    return print_root / (path if isinstance(path, str) and path else fqn_directory(fqn))
 
 
 def missing_artifacts(table_dir: Path, artifacts: dict[str, Any]) -> tuple[str, ...]:

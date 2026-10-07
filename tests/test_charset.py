@@ -23,8 +23,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._scripts import REPO_ROOT
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Named by code point so this file stays ASCII. The rule bans every non-ASCII character;
 # these are the likely-accidental ones, kept for the message and the planted-violation tests.

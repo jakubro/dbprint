@@ -149,20 +149,6 @@ refers_to:
 referenced_by:
 - column:
   - trial_id
-  referencer_table: arboretum.fixture.shape_probe
-  referencer_column:
-  - probe_id
-  detection: measured
-  observed:
-    fanout_avg: 1.0
-    target_coverage: 0.055556
-    scope_compatible: true
-    fanout_max: 1
-    coherent: true
-    containment: 1.0
-    answerable_count: 50
-- column:
-  - trial_id
   referencer_table: arboretum.seedbank.accession
   referencer_column:
   - taxon_id

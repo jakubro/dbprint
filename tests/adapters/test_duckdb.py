@@ -243,13 +243,13 @@ class TestNoSessionSettingIsForced:
         self,
         con: duckdb.DuckDBPyConnection,
     ) -> None:
-        from tests.adapters.test_dialect_guard import _install_recorder
+        from tests.adapters._dialects import install_recorder
 
         con.execute("CREATE TABLE seedbank.wide AS SELECT range AS id FROM range(2000)")
         adapter = DuckdbAdapter({"database": ":memory:"}, cursor_factory=lambda _p: con)
         adapter.connect()
         adapter.list_tables(include=["*"], exclude=[])
-        recorder = _install_recorder(adapter)
+        recorder = install_recorder(adapter)
 
         adapter.sample_values("memory.seedbank.wide", "id", 10, TableScope(sample=0.1))
         adapter.close()

@@ -10,53 +10,31 @@ from __future__ import annotations
 
 import json
 import re
+import runpy
 from pathlib import Path
+from types import SimpleNamespace
 
+
+# `scripts/` is not a package, so the shared parser loads by path.
+spec_markdown = SimpleNamespace(**runpy.run_path(str(Path(__file__).with_name("spec_markdown.py"))))
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SPEC_PATH = REPO_ROOT / "docs/format/v1/SPEC.md"
+SPEC_PATH = spec_markdown.SPEC_PATH
 GUIDE_PATH = REPO_ROOT / "src/dbprint/engine/reading_guide.md"
 RELATIONSHIPS_SCHEMA_PATH = REPO_ROOT / "src/dbprint/spec/v1/relationships.schema.json"
 
-_BACKTICKED = re.compile(r"`([^`]+)`")
-
 _ALWAYS_REQUIRED = "R"
-
-
-def _section(text: str, start: str, end: str) -> str:
-    return text[text.index(start) : text.index(end)]
-
-
-def _table_rows(block: str) -> list[list[str]]:
-    rows = [
-        line for line in block.splitlines() if line.startswith("|") and not line.startswith("|--")
-    ]
-
-    return [[cell.strip() for cell in line.strip("|").split("|")] for line in rows]
 
 
 def _classification_matrix(spec: str) -> dict[str, dict[str, str]]:
     """SPEC 2.2.3's field matrix as {classification: {field: verdict}}."""
 
-    rows = _table_rows(_section(spec, "#### 2.2.3", "#### 2.2.4"))
-    header, body = rows[0], rows[1:]
-    classifications: list[str] = []
-
-    for cell in header[1:]:
-        match = _BACKTICKED.search(cell)
-        assert match is not None, f"header cell names no classification: {cell!r}"
-        classifications.append(match.group(1))
-
+    classifications = spec_markdown.matrix_classifications(spec)
     out: dict[str, dict[str, str]] = {c: {} for c in classifications}
 
-    for cells in body:
-        name = _BACKTICKED.search(cells[0])
-
-        if name is None:
-            continue
-
-        for cls, verdict in zip(classifications, cells[1:], strict=True):
-            out[cls][name.group(1)] = verdict
+    for field, verdicts in spec_markdown.matrix(spec).items():
+        for cls, verdict in zip(classifications, verdicts, strict=True):
+            out[cls][field] = verdict
 
     return out
 

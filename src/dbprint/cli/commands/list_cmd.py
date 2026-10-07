@@ -2,30 +2,29 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import rich_click as click
-import yaml
 from rich.console import Console
 
+from dbprint.config.resolution import ConnectionResolutionError, resolve
 from dbprint.engine import EXIT_GENERIC, EXIT_OK, thresholds
 from dbprint.engine.baseline import (
-    declared_artifacts,
     failed_tables,
-    manifest_shape_error,
+    read_manifest,
     table_directory,
-    walkable_tables,
+    unusable_manifest_message,
 )
-from dbprint.engine.freshness import evaluate
-from dbprint.spec import artifact_yaml
+from dbprint.engine.freshness import classify
+from dbprint.spec.artifacts import declared_artifacts
 from ..options import project_option, resolve_project
 from ..rendering import resolve_render_mode
 from ..rendering.errors import emit_error
 from ..rendering.list_data import render_data, render_not_run_piped, render_piped
 from ..rendering.list_tty import render_human
-from ..resolution import ConnectionResolutionError, resolve
 
 
 @click.command(name="list")
@@ -95,12 +94,12 @@ def list_command(
     entries: list[dict[str, Any]] = []
 
     for conn_config in connections:
-        manifest_path = conn_config.output / conn_config.name / "manifest.yaml"
+        read = read_manifest(conn_config.print_root)
 
-        if not manifest_path.is_file():
+        if read.manifest is None:
             _drop(
                 conn_config.name,
-                [f"no manifest at {manifest_path}"],
+                [unusable_manifest_message(read, conn_config.name)],
                 mode,
                 fmt_lower,
                 entries,
@@ -108,34 +107,7 @@ def list_command(
             overall_exit = max(overall_exit, EXIT_GENERIC)
             continue
 
-        try:
-            parsed = artifact_yaml.load(manifest_path.read_text(encoding="utf-8"))
-        except yaml.YAMLError as exc:
-            _drop(
-                conn_config.name,
-                [f"could not parse {manifest_path}: {exc}"],
-                mode,
-                fmt_lower,
-                entries,
-            )
-            overall_exit = max(overall_exit, EXIT_GENERIC)
-            continue
-
-        # A manifest that parses but that no reader can walk is dropped like one that will not.
-        unusable = manifest_shape_error(parsed) or _unwalkable_entry_reason(parsed)
-
-        if unusable is not None:
-            _drop(
-                conn_config.name,
-                [f"ignoring {manifest_path}: {unusable}"],
-                mode,
-                fmt_lower,
-                entries,
-            )
-            overall_exit = max(overall_exit, EXIT_GENERIC)
-            continue
-
-        manifest = parsed or {}
+        manifest = read.manifest
         resolved = thresholds.resolve(conn_config, manifest)
 
         # A table the cascade refuses has no threshold to bucket it by, so the counts would
@@ -151,7 +123,7 @@ def list_command(
                 err=True,
             )
 
-        print_root = conn_config.output / conn_config.name
+        print_root = conn_config.print_root
         summary = _summarize_connection(manifest, resolved, print_root)
 
         if fmt_lower in {"json", "yaml"}:
@@ -172,25 +144,16 @@ def _summarize_connection(
     resolved: thresholds.OfflineThresholds,
     print_root: Path,
 ) -> dict[str, Any]:
-    """Summarise one connection's manifest against its settled thresholds - buckets come from
-    `engine.freshness.evaluate`, so `check` and `list` never disagree about stale vs dormant.
+    """Summarise one connection's manifest against its settled thresholds, bucketed by
+    `engine.freshness.classify` so no surface disagrees about a verdict.
     """
 
     tables = manifest.get("tables", {})
-    now = datetime.now(UTC)
-    by_fqn = {e.fqn: e for e in evaluate(manifest, 0.0, now, threshold_for=resolved.threshold_for)}
-    live = stale = dormant = described = 0
+    verdicts = classify(manifest, datetime.now(UTC), threshold_for=resolved.threshold_for)
+    counted = Counter(verdict.verdict for verdict in verdicts.values())
+    described = 0
 
     for fqn, entry in tables.items():
-        stale_entry = by_fqn.get(fqn)
-
-        if stale_entry is None:
-            live += 1
-        elif stale_entry.age_days == float("inf"):
-            dormant += 1
-        else:
-            stale += 1
-
         # A declared-but-missing description does not count (SPEC 2.5): the manifest
         # promising a file is not the same fact as the file being there to read.
         artifacts = declared_artifacts(entry)
@@ -205,9 +168,9 @@ def _summarize_connection(
         "adapter": manifest.get("adapter", ""),
         "generated_at": manifest.get("generated_at", ""),
         "table_count": len(tables),
-        "live": live,
-        "stale": stale,
-        "dormant": dormant,
+        "live": counted["live"],
+        "stale": counted["stale"],
+        "dormant": counted["dormant"],
         "described": described,
         "failed_tables": list(failed_tables(manifest)),
     }
@@ -233,19 +196,3 @@ def _drop(
         entries.append({"connection": name, "ok": False, "causes": list(causes)})
     elif mode != "tty":
         render_not_run_piped(name, causes, click.get_text_stream("stdout"))
-
-
-def _unwalkable_entry_reason(manifest: Any) -> str | None:
-    """Why this manifest's tables cannot be summarised, or None when they can.
-
-    An entry the shared rule cannot follow (not a mapping, or a non-string path) has no
-    threshold and no artifacts, so it falls in no bucket.
-    """
-
-    declared = (manifest or {}).get("tables") or {}
-    unwalkable = sorted(set(declared) - set(walkable_tables(manifest)))
-
-    if not unwalkable:
-        return None
-
-    return f"no usable entry for {', '.join(unwalkable)}"

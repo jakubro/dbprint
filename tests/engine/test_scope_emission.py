@@ -17,7 +17,6 @@ from dbprint.adapters import (
 )
 from dbprint.adapters.base import RowCountMethod, TableCounts
 from dbprint.config import ConnectionConfig, RuleConfig, StatisticsConfig, TableSettings
-from dbprint.config.project import DiffConfig
 from dbprint.conformance.statistics import check
 from dbprint.engine import Engine
 from dbprint.engine.orchestrator import (
@@ -25,7 +24,8 @@ from dbprint.engine.orchestrator import (
     _serialize_statistics,
     _table_scope,
 )
-from tests._prints import quarter_scanned_table
+from tests._engine_run import artifact
+from tests._prints import connection_config, quarter_scanned_table
 
 
 def _enriched() -> dict[str, _EnrichedColumnStats]:
@@ -244,23 +244,10 @@ class TestTheEngineStampsWhatTheAdapterReported:
 
 
 def _generate(tmp_path: Path, rows_scanned: int, method: RowCountMethod) -> dict[str, Any]:
-    conn = ConnectionConfig(
-        name="primary",
-        adapter="postgres",
-        auto=True,
-        output=tmp_path,
-        include=("*",),
-        exclude=(),
-        max_age_days=7,
-        statistics=StatisticsConfig(),
-        diff=DiffConfig(),
-        rules=(RuleConfig(sample=0.25),),
-    )
+    conn = connection_config(output=tmp_path, auto=True, rules=(RuleConfig(sample=0.25),))
     Engine(MockAdapter(_narrowed_fixture(rows_scanned, method)), conn, tmp_path).generate()
 
-    return yaml.safe_load(
-        (tmp_path / "primary" / "public" / "t" / "statistics.yaml").read_text(),
-    )
+    return artifact(tmp_path / "primary", "public.t")
 
 
 def _narrowed_fixture(rows_scanned: int, method: RowCountMethod) -> dict[str, MockTable]:

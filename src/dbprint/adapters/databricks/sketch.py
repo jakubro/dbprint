@@ -5,9 +5,8 @@ lexicographically, so the result casts to DECIMAL(20,0), wide enough for the uns
 from __future__ import annotations
 
 from dbprint.spec.sketch import SketchKind
-from .connection import DIALECT
 from .rendering import render_canonical, render_operand
-from ..identifiers import Identity, qualified, quote
+from ..identifiers import Identity
 
 
 def canonical_value(
@@ -18,7 +17,7 @@ def canonical_value(
 ) -> tuple[str, str]:
     """The column reference a key sketch filters on, and the canonical value it hashes."""
 
-    quoted_col = qualified(quote(column, DIALECT))
+    quoted_col = identity.source_column(column)
 
     return quoted_col, render_canonical(render_operand(quoted_col, sql_type), sql_type, kind)
 

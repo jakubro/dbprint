@@ -8,14 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from dbprint.cli.main import main
-
-
-PROJECT_YAML = """\
-connections:
-  primary:
-    adapter: postgres
-    output: prints
-"""
+from tests._cli import PROJECT_YAML
 
 
 def _write_project(root: Path) -> None:

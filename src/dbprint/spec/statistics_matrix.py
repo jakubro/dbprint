@@ -529,3 +529,15 @@ def part_forbidden_fields(classification: str) -> frozenset[str]:
     return (FORBIDDEN_FIELDS.get(classification, frozenset()) - {"occurrences"}) | (
         PART_FORBIDDEN_FIELDS
     )
+
+
+def forbids(classification: str | None, field: str) -> bool:
+    """Whether SPEC 2.2.3's row for `classification` forbids `field`; an unknown one forbids nothing."""
+
+    return field in FORBIDDEN_FIELDS.get(classification or "", frozenset())
+
+
+def redactable_classifications() -> frozenset[str]:
+    """The classifications whose row admits the `redacted` marker (SPEC 2.2.9)."""
+
+    return frozenset(c for c in FORBIDDEN_FIELDS if not forbids(c, "redacted"))

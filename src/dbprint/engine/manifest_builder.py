@@ -8,18 +8,9 @@ from typing import Any
 from dbprint import __version__ as DBPRINT_VERSION
 from dbprint.adapters.base import TableType
 from dbprint.config import ConnectionConfig, StatisticsConfig
+from dbprint.spec.artifacts import ARTIFACT_FILENAMES, MANIFEST_ANNOTATIONS_FILENAME
 from dbprint.spec.v1 import FORMAT_VERSION
 from .diff import DiffSelectors
-
-
-ARTIFACT_FILENAMES = {
-    "ddl": "ddl.sql",
-    "statistics": "statistics.yaml",
-    "relationships": "relationships.yaml",
-    "description": "description.md",
-    "statistics_annotations": "statistics.annotations.yaml",
-    "relationships_annotations": "relationships.annotations.yaml",
-}
 
 
 @dataclass(frozen=True)
@@ -146,7 +137,7 @@ def build(
         payload["failed_tables"] = sorted(failed_tables)
 
     if has_manifest_annotations:
-        payload["manifest_annotations"] = "manifest.annotations.yaml"
+        payload["manifest_annotations"] = MANIFEST_ANNOTATIONS_FILENAME
 
     payload["tables"] = tables
 

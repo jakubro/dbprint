@@ -4,7 +4,6 @@ every adapter here exposes; nothing runs offline against the real service.
 
 from __future__ import annotations
 
-import importlib
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -91,13 +90,12 @@ def _default_cursor_factory(params: ConnectionParams) -> Any:
     - lazy, so a base install never pays the connector's import cost.
     """
 
-    try:
-        sql = importlib.import_module("databricks.sql")
-    except ImportError as exc:
-        raise DatabricksConnectionError(
-            "databricks-sql-connector is not installed. Install dbprint with the "
-            "[databricks] extra: `pip install dbprint[databricks]`.",
-        ) from exc
+    sql = driver.import_extra(
+        "databricks.sql",
+        "databricks-sql-connector",
+        "databricks",
+        DatabricksConnectionError,
+    )
 
     session_configuration = (
         {} if params.statement_timeout is None else {"STATEMENT_TIMEOUT": params.statement_timeout}

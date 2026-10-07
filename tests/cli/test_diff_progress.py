@@ -6,7 +6,6 @@ import logging
 from io import StringIO
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 import yaml
@@ -16,6 +15,7 @@ from rich.console import Console
 from dbprint.adapters import Inferred, MockAdapter, MockTable
 from dbprint.cli.main import main
 from dbprint.cli.rendering.progress import LiveProgressRenderer
+from tests._cli import STUB_CREDENTIALS, credential_env, patch_registry
 from tests._prints import SHAPE_PROBE_COLUMNS, exact_stats, mock_table, unmeasured_stats
 
 
@@ -173,15 +173,7 @@ def _seed_baseline(tmp_path: Path, connection: str) -> None:
 
 
 def _credential_env(name: str) -> dict[str, str]:
-    prefix = f"DBPRINT_{name.upper()}"
-
-    return {
-        f"{prefix}_HOST": "h",
-        f"{prefix}_PORT": "5432",
-        f"{prefix}_DATABASE": f"db_{name}",
-        f"{prefix}_USER": "u",
-        f"{prefix}_PASSWORD": "p",
-    }
+    return credential_env(name, {**STUB_CREDENTIALS, "database": f"db_{name}"})
 
 
 def _seed_project(tmp_path: Path) -> None:
@@ -209,11 +201,7 @@ def _run_live(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, adapter_class: ty
         lambda **kwargs: LiveProgressRenderer(console),
     )
 
-    with patch.dict(
-        "dbprint.cli.adapter_registry.ADAPTERS",
-        {"postgres": adapter_class},
-        clear=True,
-    ):
+    with patch_registry({"postgres": adapter_class}):
         CliRunner().invoke(main, ["diff", "--no-tui"])
 
     return buf.getvalue()

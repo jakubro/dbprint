@@ -13,7 +13,13 @@ from typing import Any
 
 from dbprint.config import selectors as selectors_module
 from dbprint.spec.absence import Absence, column_value, read_column_field
-from dbprint.spec.drift import DATA_CHANGE_KINDS, Data, column_field_rule
+from dbprint.spec.drift import (
+    DATA_CHANGE_KINDS,
+    NON_NUMERIC_STATS,
+    SUMMARY_COUNTERS,
+    Data,
+    column_field_rule,
+)
 from dbprint.spec.redaction import NOT_COMPARED_UNDER_REDACTION, is_redacted
 from dbprint.spec.v1 import FORMAT_VERSION
 
@@ -1103,17 +1109,9 @@ def _get_path(stats: dict[str, Any], path: str) -> Any:
 
 
 # `sql_type` and `freshness.*` are unreachable: `comparable_columns` drops them before
-# `_stat_paths` flattens a payload, so neither needs an entry.
-_NON_NUMERIC_STATS = {
-    "classification",
-    "distribution",
-    "values",
-    "cardinality_method",
-}
-
-
+# `_stat_paths` flattens a payload, so neither needs a `NON_NUMERIC_STATS` entry.
 def _is_numeric_stat(path: str) -> bool:
-    return path not in _NON_NUMERIC_STATS
+    return path not in NON_NUMERIC_STATS
 
 
 def _fk_key(fk: FkState) -> tuple[tuple[str, ...], str, tuple[str, ...]]:
@@ -1126,61 +1124,28 @@ def _summarize(
     unchanged_tables: int,
     unevaluated_tables: int,
 ) -> dict[str, int]:
+    counter_of = {kind: key for key, kinds in SUMMARY_COUNTERS.items() for kind in kinds}
     counts = {
         "tables_added": 0,
         "tables_removed": 0,
         "tables_modified": 0,
-        "columns_added": 0,
-        "columns_removed": 0,
-        "columns_type_changed": 0,
-        "columns_nullable_changed": 0,
-        "columns_default_changed": 0,
-        "statistics_drifted": 0,
-        "relationships_changed": 0,
-        "indexes_changed": 0,
-        "comments_changed": 0,
+        **dict.fromkeys(SUMMARY_COUNTERS, 0),
         "unchanged_tables": unchanged_tables,
         "unevaluated_tables": unevaluated_tables,
     }
-
     modified_tables: set[str] = set()
 
     for c in changes:
         kind = c["kind"]
+        counter = counter_of.get(kind)
 
-        if kind == "table_added":
-            counts["tables_added"] += 1
-        elif kind == "table_removed":
-            counts["tables_removed"] += 1
-        elif kind == "column_added":
-            counts["columns_added"] += 1
-            modified_tables.add(c["table"])
-        elif kind == "column_removed":
-            counts["columns_removed"] += 1
-            modified_tables.add(c["table"])
-        elif kind == "column_type_changed":
-            counts["columns_type_changed"] += 1
-            modified_tables.add(c["table"])
-        elif kind == "column_nullable_changed":
-            counts["columns_nullable_changed"] += 1
-            modified_tables.add(c["table"])
-        elif kind == "column_default_changed":
-            counts["columns_default_changed"] += 1
-            modified_tables.add(c["table"])
-        elif kind == DATA_CHANGE_KIND:
-            counts["statistics_drifted"] += 1
-            modified_tables.add(c["table"])
-        elif kind in {"relationship_added", "relationship_removed", "relationship_modified"}:
-            counts["relationships_changed"] += 1
+        if counter is not None:
+            counts[counter] += 1
+
+        # Every kind but a whole table's arrival or departure modifies its table (SPEC 2.6.4).
+        if counter == "relationships_changed":
             modified_tables.add(c.get("source_table", c.get("table", "")))
-        elif kind in {"index_added", "index_removed", "index_modified"}:
-            counts["indexes_changed"] += 1
-            modified_tables.add(c["table"])
-        elif kind == "comment_changed":
-            counts["comments_changed"] += 1
-            modified_tables.add(c["table"])
-        else:
-            # Every other kind has no counter of its own (SPEC 2.6.4) yet still modifies its table.
+        elif counter not in ("tables_added", "tables_removed"):
             modified_tables.add(c["table"])
 
     counts["tables_modified"] = len(modified_tables)

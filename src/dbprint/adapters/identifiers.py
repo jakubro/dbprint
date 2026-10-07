@@ -11,6 +11,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Self
 
+from dbprint.config.selectors import expand
 from dbprint.spec.fqn import SEPARATOR
 from dbprint.spec.fqn import join as join_fqn
 from .base import ColumnMeta, TableMeta, TableType
@@ -119,6 +120,27 @@ def column_meta(
         collation=collation,
         classify_as=classify_as,
     )
+
+
+def select_tables[C: tuple[TableMeta, tuple[str, ...]]](
+    candidates: Iterable[C],
+    include: list[str],
+    exclude: list[str],
+) -> list[C]:
+    """The candidates the selectors keep, in their own order, refusing SPEC 1.5 violations."""
+
+    listed = list(candidates)
+    in_scope = set(
+        expand(
+            [meta.fqn for meta, _ in listed],
+            config_include=include,
+            config_exclude=exclude,
+        ),
+    )
+    selected = [entry for entry in listed if entry[0].fqn in in_scope]
+    enforce_table_identifiers(selected)
+
+    return selected
 
 
 def enforce_table_identifiers(selected: Iterable[tuple[TableMeta, tuple[str, ...]]]) -> None:

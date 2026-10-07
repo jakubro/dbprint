@@ -4,13 +4,9 @@ statements, not relations, one object per call returning the recreate-DDL text.
 
 from __future__ import annotations
 
-import re
-
 from .connection import Cursor, exec_query
 from ..identifiers import Identity
-
-
-_TRAILING_WHITESPACE_RE = re.compile(r"[ \t]+$", re.MULTILINE)
+from ..sql_layout import trimmed_lines
 
 
 def extract_ddl(cursor: Cursor, identity: Identity) -> str:
@@ -54,7 +50,4 @@ def extract_external_ddl(cursor: Cursor, identity: Identity) -> str:
 def normalize(raw: str) -> str:
     """Strip trailing whitespace per line; ensure a single terminal newline."""
 
-    without_trailing = _TRAILING_WHITESPACE_RE.sub("", raw)
-    text = without_trailing.strip("\n")
-
-    return text + "\n" if text else ""
+    return trimmed_lines(raw)

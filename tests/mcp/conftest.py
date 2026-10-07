@@ -17,7 +17,7 @@ import pytest
 import yaml
 
 from dbprint.config import ConnectionConfig
-from dbprint.config.project import DiffConfig, StatisticsConfig
+from tests._prints import connection_config
 
 
 @pytest.fixture
@@ -28,13 +28,7 @@ def primary_conn(committed_print: Path) -> ConnectionConfig:
     lands on exactly the tree it wrote.
     """
 
-    return ConnectionConfig(
-        name="production",
-        adapter="postgres",
-        output=committed_print,
-        statistics=StatisticsConfig(),
-        diff=DiffConfig(),
-    )
+    return connection_config(name="production", output=committed_print)
 
 
 @pytest.fixture
@@ -47,13 +41,7 @@ def scoped_conn(tmp_path: Path) -> ConnectionConfig:
 
     _seed_print(tmp_path)
 
-    return ConnectionConfig(
-        name="primary",
-        adapter="postgres",
-        output=tmp_path / "prints",
-        statistics=StatisticsConfig(),
-        diff=DiffConfig(),
-    )
+    return connection_config(output=tmp_path / "prints")
 
 
 @dataclass(frozen=True)

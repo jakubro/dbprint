@@ -8,6 +8,7 @@ from .connection import Cursor, exec_query
 from .introspect import SECRETS_HIDDEN
 from ..credentials import mask_clickhouse_strings
 from ..identifiers import Identity
+from ..sql_layout import trimmed_lines
 
 
 def extract_ddl(cursor: Cursor, identity: Identity, *, hide_secrets: bool = False) -> str:
@@ -45,10 +46,7 @@ def normalize(raw: str) -> str:
     masked = (
         rest if end == -1 else rest[:start] + mask_clickhouse_strings(rest[start:end]) + rest[end:]
     )
-    lines = [line.rstrip() for line in (head + engine + masked).splitlines()]
-    text = "\n".join(lines).strip("\n")
-
-    return text + "\n" if text else ""
+    return trimmed_lines(head + engine + masked)
 
 
 def _closing_paren(text: str, start: int) -> int:

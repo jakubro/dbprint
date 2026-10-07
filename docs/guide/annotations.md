@@ -73,7 +73,7 @@ Not every annotation reaches every reader, and it is worth knowing which before 
 |---|---|
 | `description.md` | `dbprint context`, the MCP server, and the browsable print |
 | `statistics.annotations.yaml` | the same three, per column |
-| `relationships.annotations.yaml` | a verdict rejecting an inferred edge reaches all three; an edge a human adds that resolves against no producer edge reaches the structured renders only |
+| `relationships.annotations.yaml` | a verdict rejecting an inferred edge withholds the edge from `dbprint context` and the MCP server, and the browsable print draws it marked as rejected; an edge a human adds that resolves against no producer edge reaches the structured renders only |
 | `manifest.annotations.yaml` | the markdown render of `dbprint context` over two or more tables, and the MCP resource for the file itself |
 
 Two things to plan around. A human-authored edge that matches no producer edge is dropped from the markdown render and from the browsable print, which both iterate the producer's own edges; it survives in `--format json` and `--format yaml`, which carry the annotation list whole.

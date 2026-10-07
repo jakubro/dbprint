@@ -116,10 +116,73 @@ class TestServeInvocation:
 
         assert result.exit_code == EXIT_OK
         fake_serve.assert_called_once()
-        connections, host, port = fake_serve.call_args.args
+        connections, host, port, _ = fake_serve.call_args.args
         assert [c.name for c in connections] == ["primary"]
         assert host == "127.0.0.1"
         assert port == 9001
+
+    @pytest.mark.parametrize(
+        ("host", "url"),
+        [("127.0.0.1", "http://127.0.0.1:9001"), ("::1", "http://[::1]:9001")],
+    )
+    def test_prints_the_url_once_the_server_is_listening(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        host: str,
+        url: str,
+    ) -> None:
+        (tmp_path / ".dbprint.yaml").write_text(PROJECT_BASE)
+        monkeypatch.chdir(tmp_path)
+
+        with patch("dbprint.docs.serve", side_effect=lambda *args: args[3]()):
+            result = CliRunner().invoke(main, ["docs", "serve", "--host", host, "--port", "9001"])
+
+        assert result.exit_code == EXIT_OK
+        assert result.output == f"Serving on {url}\n"
+
+    def test_a_port_in_use_exits_1_with_one_line(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        (tmp_path / ".dbprint.yaml").write_text(PROJECT_BASE)
+        monkeypatch.chdir(tmp_path)
+        in_use = OSError(98, "Address already in use")
+
+        with patch("dbprint.docs.serve", side_effect=in_use):
+            result = CliRunner().invoke(main, ["docs", "serve", "--port", "9001"])
+
+        assert result.exit_code == EXIT_GENERIC
+        assert result.output == "Cannot serve on http://127.0.0.1:9001: Address already in use.\n"
+
+    def test_an_interrupt_exits_0_without_a_traceback(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        (tmp_path / ".dbprint.yaml").write_text(PROJECT_BASE)
+        monkeypatch.chdir(tmp_path)
+
+        with patch("dbprint.docs.serve", side_effect=KeyboardInterrupt):
+            result = CliRunner().invoke(main, ["docs", "serve"])
+
+        assert result.exit_code == EXIT_OK
+        assert "Traceback" not in result.output
+
+    def test_a_missing_server_package_gives_the_install_hint(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        (tmp_path / ".dbprint.yaml").write_text(PROJECT_BASE)
+        monkeypatch.chdir(tmp_path)
+
+        with patch("dbprint.docs.serve", side_effect=ImportError("waitress")):
+            result = CliRunner().invoke(main, ["docs", "serve"])
+
+        assert result.exit_code == EXIT_GENERIC
+        assert "Install dbprint[docs]" in result.output
 
     def test_all_widens_past_the_auto_set_default(
         self,

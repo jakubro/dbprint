@@ -8,9 +8,8 @@ from __future__ import annotations
 
 import re
 
-from dbprint.config.selectors import expand
 from dbprint.spec.fqn import join as join_fqn
-from .connection import Cursor, exec_query
+from .connection import DIALECT, Cursor, exec_query
 from ..base import (
     ColumnMeta,
     CommentsMeta,
@@ -24,7 +23,8 @@ from ..base import (
     UniqueKeyMeta,
 )
 from ..credentials import mask_secrets
-from ..identifiers import Identity, column_meta, enforce_table_identifiers, fold, table_meta
+from ..identifiers import Identity, column_meta, fold, select_tables, table_meta
+from ..sql_layout import split_top_level
 
 
 _TABLE_TYPE_MAP: dict[str, TableType] = {
@@ -103,17 +103,9 @@ def list_tables(
         if table_type == "SYSTEM VERSIONED":
             versioned.add(meta.fqn)
 
-    in_scope = set(
-        expand(
-            [meta.fqn for meta, _ in candidates],
-            config_include=include,
-            config_exclude=exclude,
-        ),
-    )
-    selected = [entry for entry in candidates if entry[0].fqn in in_scope]
-    enforce_table_identifiers(selected)
+    selected = select_tables(candidates, include, exclude)
 
-    return selected, frozenset(versioned & in_scope)
+    return selected, frozenset(versioned & {meta.fqn for meta, _ in selected})
 
 
 def columns(cursor: Cursor, identity: Identity) -> list[ColumnMeta]:
@@ -412,7 +404,9 @@ def physical_layout(cursor: Cursor, identity: Identity) -> PhysicalLayout | None
 def _parse_partition_expression(value: str) -> PhysicalLayout:
     return PhysicalLayout(
         mechanism="partition",
-        keys=tuple(_partition_key(part.strip()) for part in value.split(",")),
+        keys=tuple(
+            _partition_key(part.strip()) for part in split_top_level(value, DIALECT.quote_char)
+        ),
     )
 
 

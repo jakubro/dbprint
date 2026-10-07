@@ -35,7 +35,11 @@ from dbprint.spec.sketch import K as SKETCH_K
 from dbprint.spec.sketch import decode_sketch
 from dbprint.spec.statistics_matrix import FORBIDDEN_FIELDS as _FORBIDDEN_BY_CLASSIFICATION
 from dbprint.spec.statistics_matrix import REQUIRED_FIELDS as _REQUIRED_BY_CLASSIFICATION
-from dbprint.spec.statistics_matrix import part_forbidden_fields, part_required_fields
+from dbprint.spec.statistics_matrix import (
+    part_forbidden_fields,
+    part_required_fields,
+    redactable_classifications,
+)
 from dbprint.spec.temporal_age import day_count, parse_instant
 from dbprint.spec.temporal_range import LeadingYear, leading_year
 from dbprint.spec.value_text import scalar_text, value_order_key
@@ -223,18 +227,7 @@ _CONDITIONAL_CELLS: tuple[_ConditionalCell, ...] = (
     ),
     # `sketch` keeps its own code, `stats.sketch-on-redacted-column`.
     _ConditionalCell(
-        classifications=frozenset(
-            {
-                "boolean",
-                "categorical",
-                "foreign_key_candidate",
-                "text",
-                "numeric",
-                "temporal",
-                "binary",
-                "spatial",
-            },
-        ),
+        classifications=redactable_classifications(),
         fields=WITHHELD_UNDER_REDACTION - {"sketch"},
         reason=(
             "the column carries a redacted marker, which publishes only what a renaming of its "
@@ -1160,9 +1153,7 @@ def _check_null_pattern_totals(
             f"the entries partition the rows they cover, so they cannot exceed them"
         )
 
-        # `bounded` (SPEC 2.2.10) is the producer disclosing that the census and rows_scanned
-        # were not read at the same instant - the disagreement here is already named.
-        if block.get("coverage_method") == "bounded":
+        if _overrun_explained(block):
             issues.append(
                 Issue(
                     path,
@@ -1244,9 +1235,7 @@ def _check_null_pattern_reconciliation(
                 f"rows, but the column reports null_count {null_count}"
             )
 
-            # `bounded` (SPEC 2.2.10) is the producer disclosing that the census and this
-            # column's null_count were not read at the same instant.
-            if block.get("coverage_method") == "bounded":
+            if _overrun_explained(block):
                 issues.append(
                     Issue(
                         path,
@@ -1268,6 +1257,24 @@ def _check_null_pattern_reconciliation(
                 )
 
     return issues
+
+
+def _overrun_explained(block: dict) -> bool:
+    """Whether a census overrun can only be writes between its reads (SPEC 2.2.10).
+
+    `bounded` discloses it; a capped list (coverage < 1.0, no `coverage_method`) covers fewer rows.
+    """
+
+    coverage = block.get("coverage")
+    method = block.get("coverage_method")
+    truncated = (
+        method is None
+        and isinstance(coverage, (int, float))
+        and not isinstance(coverage, bool)
+        and coverage < 1.0
+    )
+
+    return method == "bounded" or truncated
 
 
 def _pattern_columns(entry: dict) -> tuple[str, ...]:
@@ -2266,7 +2273,7 @@ def _check_types_sum(col: dict, col_path: str, rows_scanned: int) -> list[Issue]
         Issue(
             col_path,
             "stats.types-sum-mismatch",
-            "error",
+            "warning",
             f"types sums to {counted}, but the population less null_count is "
             f"{rows_scanned - null_count}.",
             "§2.2.4",

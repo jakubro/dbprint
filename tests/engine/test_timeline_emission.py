@@ -10,9 +10,7 @@ from typing import Any
 import yaml
 
 from dbprint.adapters import (
-    ColumnMeta,
     ColumnStats,
-    CommentsMeta,
     MockAdapter,
     MockTable,
     PhysicalLayout,
@@ -24,6 +22,8 @@ from dbprint.config.project import RedactRule
 from dbprint.conformance import validate_print
 from dbprint.engine import Engine
 from dbprint.engine.context_assembler import AssemblyOptions, assemble
+from tests._engine_run import artifact
+from tests._prints import columns, mock_table
 
 
 class TestAnchorSelection:
@@ -284,8 +284,9 @@ class TestContextRendering:
         )
 
         assert (
-            "Timeline: created_at (month), 2 bucket(s), "
-            "2024-01-01T00:00:00 to 2024-02-01T00:00:00, 15% of scanned rows" in text
+            "Timeline: created_at (month); buckets: 2; "
+            "bucket starts: '2024-01-01T00:00:00' -> '2024-02-01T00:00:00'; "
+            "covers: 15% of scanned rows" in text
         )
 
     def test_no_anchor_says_nothing(self, tmp_path: Path) -> None:
@@ -351,7 +352,7 @@ def _generate(
     )
     Engine(MockAdapter(fixture), conn, tmp_path).generate()
 
-    return yaml.safe_load((tmp_path / "w" / "public" / "wide" / "statistics.yaml").read_text())
+    return artifact(tmp_path / "w", "public.wide")
 
 
 def _context(
@@ -410,33 +411,17 @@ def _fixture(
             ),
         )
 
-    names = list(columns_spec)
-    columns = [
-        ColumnMeta(
-            name=name,
-            sql_type=columns_spec[name][0],
-            nullable=columns_spec[name][1] > 0,
-            default=None,
-            ordinal=i,
-        )
-        for i, name in enumerate(names, start=1)
-    ]
     stats = {
         name: _column(sql_type, null_count, cardinality, spans.get(name, 900))
         for name, (sql_type, null_count, cardinality) in columns_spec.items()
     }
 
     return {
-        "public.wide": MockTable(
-            type="table",
-            namespace_path=("public", "wide"),
+        "public.wide": mock_table(
+            "public.wide",
+            columns(*((name, t, nulls > 0) for name, (t, nulls, _) in columns_spec.items())),
+            stats,
             ddl="CREATE TABLE public.wide (placeholder text);\n",
-            columns=columns,
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats=stats,
-            samples={},
             row_count=row_count,
             rows_scanned=rows_scanned,
             physical_layout=physical_layout,

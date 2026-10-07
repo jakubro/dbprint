@@ -1,4 +1,4 @@
-"""Relationship-graph reverse-index tests.
+"""Relationship-graph reverse-index and rejected-edge tests.
 
 `resolve()` is pure and table-agnostic, so each case borrows the shipped print's own edge
 that best matches the shape under test - self-referential, composite-key, two-referencer,
@@ -7,8 +7,11 @@ or an object with no incoming edges at all.
 
 from __future__ import annotations
 
+import copy
+from typing import Any
+
 from dbprint.adapters.base import ForeignKeyMeta
-from dbprint.engine.relationship_graph import resolve
+from dbprint.engine.relationship_graph import rejected_edges, resolve, withhold_rejected
 
 
 def _fk(
@@ -106,3 +109,73 @@ class TestResolve:
         graph = {"seedbank.specimen_image": []}
         out = resolve(graph)
         assert out == {"seedbank.specimen_image": []}
+
+
+_EDGES: dict[str, Any] = {
+    "refers_to": [
+        {
+            "column": ["herbarium_id"],
+            "target_table": "public.herbarium",
+            "target_column": ["id"],
+            "detection": "declared",
+        },
+        {
+            "column": ["garden_id"],
+            "target_table": "public.garden",
+            "target_column": ["garden_code"],
+            "detection": "inferred",
+        },
+    ],
+    "referenced_by": [
+        {
+            "column": ["id"],
+            "referencer_table": "public.accession",
+            "referencer_column": ["sheet_id"],
+            "detection": "measured",
+        },
+    ],
+}
+
+
+def _verdict(column: str, target_table: str, target_column: str) -> dict[str, Any]:
+    return {
+        "column": [column],
+        "target_table": target_table,
+        "target_column": [target_column],
+        "verdict": "rejected",
+    }
+
+
+class TestWithholdRejected:
+    def test_an_own_rejected_edge_is_withheld_and_the_rest_kept(self) -> None:
+        rejected = rejected_edges([_verdict("garden_id", "public.garden", "garden_code")])
+        shown = withhold_rejected(_EDGES, rejected, {}, "public.sheet")
+
+        assert shown is not None
+        assert [e["column"] for e in shown["refers_to"]] == [["herbarium_id"]]
+        assert shown["referenced_by"] == _EDGES["referenced_by"]
+
+    def test_a_referencers_rejection_withholds_the_incoming_edge(self) -> None:
+        incoming = {("public.accession", ("sheet_id",), "public.sheet", ("id",)): {}}
+        shown = withhold_rejected(_EDGES, {}, incoming, "public.sheet")
+
+        assert shown is not None
+        assert shown["referenced_by"] == []
+        assert len(shown["refers_to"]) == 2
+
+    def test_a_verdict_on_a_declared_edge_withholds_nothing(self) -> None:
+        rejected = rejected_edges([_verdict("herbarium_id", "public.herbarium", "id")])
+
+        assert withhold_rejected(_EDGES, rejected, {}, "public.sheet") is _EDGES
+
+    def test_a_verdict_on_another_edge_withholds_nothing(self) -> None:
+        rejected = rejected_edges([_verdict("other_id", "public.other", "id")])
+
+        assert withhold_rejected(_EDGES, rejected, {}, "public.sheet") is _EDGES
+
+    def test_the_input_is_never_mutated(self) -> None:
+        before = copy.deepcopy(_EDGES)
+        rejected = rejected_edges([_verdict("garden_id", "public.garden", "garden_code")])
+        withhold_rejected(_EDGES, rejected, {}, "public.sheet")
+
+        assert before == _EDGES

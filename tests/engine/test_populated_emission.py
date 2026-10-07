@@ -10,9 +10,7 @@ from typing import Any
 import yaml
 
 from dbprint.adapters import (
-    ColumnMeta,
     ColumnStats,
-    CommentsMeta,
     MockAdapter,
     MockTable,
     Range,
@@ -20,6 +18,8 @@ from dbprint.adapters import (
 from dbprint.config import ConnectionConfig, RuleConfig
 from dbprint.engine import Engine
 from dbprint.engine.context_assembler import AssemblyOptions, assemble
+from tests._engine_run import artifact
+from tests._prints import columns, mock_table
 
 
 class TestAnchorReuse:
@@ -83,7 +83,7 @@ class TestContextRendering:
     def test_the_notes_cell_states_the_window(self, tmp_path: Path) -> None:
         text = _context(tmp_path)
 
-        assert "populated 2026-03-04T00:00:00 to 2026-08-27T00:00:00" in text
+        assert "populated: '2026-03-04T00:00:00' -> '2026-08-27T00:00:00'" in text
 
     def test_a_fully_populated_column_carries_no_populated_suffix(self, tmp_path: Path) -> None:
         text = _context(tmp_path, added_later_null_count=0)
@@ -136,9 +136,7 @@ def _generate(
     )
     Engine(MockAdapter(fixture), conn, tmp_path).generate()
 
-    return yaml.safe_load(
-        (tmp_path / "w" / "fixture" / "backfilled" / "statistics.yaml").read_text(),
-    )
+    return artifact(tmp_path / "w", "fixture.backfilled")
 
 
 def _context(tmp_path: Path, **kwargs: Any) -> str:
@@ -187,33 +185,20 @@ def _fixture(
             cardinality_method="exact",
         )
 
-    table = MockTable(
-        type="table",
-        namespace_path=("fixture", "backfilled"),
-        ddl=(
-            "CREATE TABLE fixture.backfilled (created_at timestamp, added_later text, "
-            "abandoned text);\n"
+    table = mock_table(
+        "fixture.backfilled",
+        columns(
+            ("created_at", anchor_sql_type),
+            ("added_later", "text", True),
+            ("abandoned", "text", True),
         ),
-        columns=[
-            ColumnMeta(
-                name="created_at",
-                sql_type=anchor_sql_type,
-                nullable=False,
-                default=None,
-                ordinal=1,
-            ),
-            ColumnMeta(name="added_later", sql_type="text", nullable=True, default=None, ordinal=2),
-            ColumnMeta(name="abandoned", sql_type="text", nullable=True, default=None, ordinal=3),
-        ],
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={
+        {
             "created_at": created_at,
             "added_later": subject(added_later_null_count),
             "abandoned": subject(40),
         },
-        samples={},
+        ddl="CREATE TABLE fixture.backfilled (created_at timestamp, added_later text, "
+        "abandoned text);\n",
         row_count=row_count,
         timeline_buckets={"created_at": (("2024-01-01T00:00:00", row_count),)}
         if is_temporal

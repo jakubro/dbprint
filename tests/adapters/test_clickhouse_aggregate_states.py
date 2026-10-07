@@ -9,9 +9,9 @@ import pytest
 import yaml
 
 from dbprint.adapters import ClickhouseAdapter
-from dbprint.config.project import ConnectionConfig, DiffConfig, StatisticsConfig
-from dbprint.conformance import validate_print
 from dbprint.engine import Engine
+from tests._engine_run import conformance_errors
+from tests._prints import connection_config
 
 
 @pytest.fixture
@@ -40,16 +40,11 @@ def rollup(clickhouse_native_connection: Any, tmp_path: Path) -> dict[str, Any]:
         cursor_factory=lambda _p: cursor,
     )
     adapter.connect()
-    conn_config = ConnectionConfig(
-        name="primary",
+    conn_config = connection_config(
         adapter="clickhouse",
-        auto=True,
         output=tmp_path,
+        auto=True,
         include=("*.reading_rollup",),
-        exclude=(),
-        max_age_days=7,
-        statistics=StatisticsConfig(),
-        diff=DiffConfig(),
     )
 
     try:
@@ -57,7 +52,7 @@ def rollup(clickhouse_native_connection: Any, tmp_path: Path) -> dict[str, Any]:
     finally:
         adapter.close()
 
-    errors = [i for i in validate_print(tmp_path / "primary") if i.severity == "error"]
+    errors = conformance_errors(tmp_path / "primary")
     (written,) = (tmp_path / "primary").rglob("statistics.yaml")
 
     assert errors == [], errors

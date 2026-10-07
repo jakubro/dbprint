@@ -1,6 +1,6 @@
-"""Mock-adapter tables built over a minimal valid table, plus the reference print's own shapes.
+"""Mock-adapter tables and a connection built over minimal valid defaults, plus reference shapes.
 
-A builder fills every field a test leaves unstated, so a table-shape change lands in one place.
+A builder fills every field a test leaves unstated, so a shape or default change lands in one place.
 """
 
 from __future__ import annotations
@@ -8,6 +8,18 @@ from __future__ import annotations
 from typing import Any
 
 from dbprint.adapters import ColumnMeta, ColumnStats, CommentsMeta, Inferred, MockTable, ValueCount
+from dbprint.config.project import ConnectionConfig
+
+
+def connection_config(
+    *,
+    name: str = "primary",
+    adapter: Any = "postgres",
+    **overrides: Any,
+) -> ConnectionConfig:
+    """A `primary` postgres connection with every field a test leaves unstated at its default."""
+
+    return ConnectionConfig(name=name, adapter=adapter, **overrides)
 
 
 def columns(*spec: tuple[str, str] | tuple[str, str, bool]) -> tuple[ColumnMeta, ...]:
@@ -50,7 +62,8 @@ def mock_table(
     The DDL is spelled from `table_columns` as `pg_dump` does, plus any `primary_key` constraint.
     """
 
-    schema, name = fqn.split(".")
+    namespace_path = tuple(fqn.split("."))
+    name = namespace_path[-1]
     body = ",\n".join(
         f"    {c.name} {c.sql_type}{'' if c.nullable else ' NOT NULL'}" for c in table_columns
     )
@@ -64,7 +77,7 @@ def mock_table(
 
     fields: dict[str, Any] = {
         "type": "table",
-        "namespace_path": (schema, name),
+        "namespace_path": namespace_path,
         "ddl": ddl,
         "columns": list(table_columns),
         "relationships": [],

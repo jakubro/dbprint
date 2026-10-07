@@ -1,4 +1,4 @@
-"""Packaged SPEC.md/ASSERTIONS.md, sliced by heading (MCP.md 4.6).
+"""Packaged SPEC.md/ASSERTIONS.md and the reading guide, sliced by heading (MCP.md 4.6).
 
 Read through `importlib.resources` against the installed package first, the only path a wheel
 install has. `hatch_build.py` force-includes both documents at build time rather than committing
@@ -13,6 +13,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Literal
 
+from dbprint.engine.reading_guide import READING_GUIDE_TEXT
 from . import errors
 
 
@@ -97,28 +98,70 @@ def section_of(text: str, number: str) -> str | None:
     """`section()`'s own logic, over already-loaded text - independently testable."""
 
     cleaned = _CITATION_PREFIX_RE.sub("", number).strip()
-    lines = text.splitlines()
     headings = _parse_headings(text)
 
     for index, h in enumerate(headings):
-        if h.number != cleaned:
-            continue
-
-        inside = [c for c in headings[index + 1 :] if c.start < h.end]
-        direct = [c for c in inside if not any(o.start < c.start < o.end for o in inside)]
-        # An unnumbered heading cannot be asked for by number, so its text stays in the parent's.
-        children = [c for c in direct if c.number is not None]
-        end = children[0].start if children else h.end
-        body = "\n".join(lines[h.start : end]).rstrip() + "\n"
-
-        if not children:
-            return body
-
-        listed = "\n".join(f"- {c.title}" for c in children)
-
-        return f"{body}\nSubsections, each read by its own number:\n\n{listed}\n"
+        if h.number == cleaned:
+            return _slice(text.splitlines(), headings, index, by_number=True)
 
     return None
+
+
+def guide_heading_tree() -> str:
+    """The packaged reading guide's heading tree - this dbprint version's guide, not a print's."""
+
+    return heading_tree_of(READING_GUIDE_TEXT)
+
+
+def guide_section(heading: str) -> str | None:
+    """The guide heading whose title matches `heading`, case- and whitespace-insensitively."""
+
+    return guide_section_of(READING_GUIDE_TEXT, heading)
+
+
+def guide_headings() -> list[str]:
+    """Every guide heading's title, in document order - named by an unknown-heading error."""
+
+    return [h.title for h in _parse_headings(READING_GUIDE_TEXT)]
+
+
+def guide_section_of(text: str, heading: str) -> str | None:
+    """`guide_section()`'s own logic, over already-loaded text - independently testable."""
+
+    wanted = _folded(heading)
+    headings = _parse_headings(text)
+
+    for index, h in enumerate(headings):
+        if _folded(h.title) == wanted:
+            return _slice(text.splitlines(), headings, index, by_number=False)
+
+    return None
+
+
+def _slice(lines: list[str], headings: list[_Heading], index: int, *, by_number: bool) -> str:
+    """A heading's own body up to its first addressable subsection, then those subsections listed.
+
+    Under `by_number` an unnumbered heading cannot be asked for, so its text stays in the parent's.
+    """
+
+    h = headings[index]
+    inside = [c for c in headings[index + 1 :] if c.start < h.end]
+    direct = [c for c in inside if not any(o.start < c.start < o.end for o in inside)]
+    children = [c for c in direct if c.number is not None] if by_number else direct
+    end = children[0].start if children else h.end
+    body = "\n".join(lines[h.start : end]).rstrip() + "\n"
+
+    if not children:
+        return body
+
+    listed = "\n".join(f"- {c.title}" for c in children)
+    addressed = "number" if by_number else "heading"
+
+    return f"{body}\nSubsections, each read by its own {addressed}:\n\n{listed}\n"
+
+
+def _folded(title: str) -> str:
+    return " ".join(title.split()).casefold()
 
 
 def _read(document: ReferenceDocument) -> str:

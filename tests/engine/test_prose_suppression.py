@@ -10,29 +10,20 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from dbprint.adapters import (
     BaseStats,
     ColumnMeta,
-    ColumnStats,
-    CommentsMeta,
-    Length,
     MockAdapter,
     MockTable,
     StatisticsConfig,
     TableCounts,
     TableScope,
-    ValueCount,
 )
 from dbprint.adapters.base import ColumnProgress, PhaseB
-from dbprint.conformance import validate_print
 from dbprint.engine import Engine
-from tests.engine.test_orchestrator import _conn_config
-
-
-PROSE = [f"the quick brown fox number {i} jumped over a lazy dog today" for i in range(40)]
-EMAILS = [f"user{i}@example.com" for i in range(40)]
+from tests._curator import conn_config
+from tests._engine_run import artifact, conformance_errors
+from tests.engine._prose import prose_fixture
 
 
 class TestASuppressedColumnEmitsNoList:
@@ -79,7 +70,7 @@ class TestASuppressedColumnEmitsNoList:
 
     def test_the_print_conforms(self, tmp_path: Path) -> None:
         _generate(tmp_path)
-        errors = [i for i in validate_print(tmp_path / "primary") if i.severity == "error"]
+        errors = conformance_errors(tmp_path / "primary")
 
         assert errors == [], "\n".join(f"  {e.code} at {e.path}: {e.detail}" for e in errors)
 
@@ -88,8 +79,8 @@ class TestTheEngineAsksForTheSkip:
     """The artifact cannot distinguish a skipped scan from a discarded result."""
 
     def test_only_the_prose_columns_are_suppressed(self, tmp_path: Path) -> None:
-        adapter = _RecordingAdapter(_fixture())
-        Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
+        adapter = _RecordingAdapter(prose_fixture())
+        Engine(adapter, conn_config(tmp_path), tmp_path).generate()
 
         assert adapter.suppressed == {"field_notes", "phone"}
 
@@ -131,104 +122,10 @@ class _RecordingAdapter(MockAdapter):
 
 def _profile(tmp_path: Path) -> dict[str, Any]:
     _generate(tmp_path)
-    payload = yaml.safe_load(
-        (tmp_path / "primary" / "public" / "curator_note" / "statistics.yaml").read_text(),
-    )
+    payload = artifact(tmp_path / "primary", "public.curator_note")
 
     return payload["columns"]
 
 
 def _generate(tmp_path: Path) -> None:
-    Engine(MockAdapter(_fixture()), _conn_config(tmp_path), tmp_path).generate()
-
-
-def _fixture() -> dict[str, MockTable]:
-    """One table carrying the cases the exemption has to tell apart.
-
-    `field_notes` and `phone` are prose and suppressed; `institution` (text, reporting `email`)
-    and `status` (categorical, reporting prose) are not reached.
-    """
-
-    # A hundred distinct values over two hundred rows: above the enumeration threshold, so
-    # the column classifies text, and the top-twenty list covers a fifth - hence long_tail.
-    listed = tuple(ValueCount(value=f"v{i:02d}", count=2) for i in range(20))
-
-    def text_stats() -> ColumnStats:
-        return ColumnStats(
-            sql_type="text",
-            nullable=False,
-            null_count=0,
-            null_rate=0.0,
-            cardinality=100,
-            cardinality_ratio=0.5,
-            cardinality_method="exact",
-            values=listed,
-            values_coverage=0.2,
-            distribution="long_tail",
-            empty_count=0,
-            length=Length(min=3, max=3, avg=3.0, p95=3.0),
-        )
-
-    # Three values, enumerated in full, so this one's counts have to add up.
-    status = ColumnStats(
-        sql_type="text",
-        nullable=False,
-        null_count=0,
-        null_rate=0.0,
-        cardinality=3,
-        cardinality_ratio=0.015,
-        cardinality_method="exact",
-        values=(
-            ValueCount(value="a", count=100),
-            ValueCount(value="b", count=60),
-            ValueCount(value="c", count=40),
-        ),
-        values_coverage=1.0,
-        distribution="imbalanced",
-        length=Length(min=1, max=1, avg=1.0, p95=1.0),
-    )
-
-    return {
-        "public.curator_note": MockTable(
-            type="table",
-            namespace_path=("public", "curator_note"),
-            ddl=(
-                "CREATE TABLE public.curator_note "
-                "(field_notes text, institution text, status text, phone text);\n"
-            ),
-            columns=[
-                ColumnMeta(
-                    name="field_notes",
-                    sql_type="text",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-                ColumnMeta(
-                    name="institution",
-                    sql_type="text",
-                    nullable=False,
-                    default=None,
-                    ordinal=2,
-                ),
-                ColumnMeta(name="status", sql_type="text", nullable=False, default=None, ordinal=3),
-                ColumnMeta(name="phone", sql_type="text", nullable=False, default=None, ordinal=4),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
-                "field_notes": text_stats(),
-                "institution": text_stats(),
-                "status": status,
-                "phone": text_stats(),
-            },
-            samples={
-                "field_notes": PROSE,
-                "institution": EMAILS,
-                "status": PROSE,
-                "phone": PROSE,
-            },
-            row_count=200,
-        ),
-    }
+    Engine(MockAdapter(prose_fixture()), conn_config(tmp_path), tmp_path).generate()

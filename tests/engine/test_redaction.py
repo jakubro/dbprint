@@ -13,9 +13,7 @@ import pytest
 import yaml
 
 from dbprint.adapters import (
-    ColumnMeta,
     ColumnStats,
-    CommentsMeta,
     Frequencies,
     Length,
     MockAdapter,
@@ -32,9 +30,11 @@ from dbprint.config.project import (
 )
 from dbprint.engine import Engine
 from dbprint.spec.redaction import MASK_PLACEHOLDER, Primitive, redact_value
+from tests._curator import conn_config, curator_fixture
+from tests._engine_run import artifact, conformance_errors
+from tests._prints import columns, mock_table
 from tests.conftest import normalize_instants
-from tests.engine.test_orchestrator import _conn_config, _curator_fixture
-from tests.engine.test_prose_suppression import _fixture as _prose_fixture
+from tests.engine._prose import prose_fixture
 
 
 def _run(tmp_path: Path, *rules: RedactRule, salt: str | None = None) -> dict[str, Any]:
@@ -44,8 +44,8 @@ def _run(tmp_path: Path, *rules: RedactRule, salt: str | None = None) -> dict[st
 def _generate(tmp_path: Path, *rules: RedactRule, salt: str | None = None) -> str:
     """Profile the curator fixture under `rules` and return the artifact as written."""
 
-    conn = replace(_conn_config(tmp_path), redact=rules, redaction_salt=salt)
-    Engine(MockAdapter(_curator_fixture()), conn, tmp_path).generate()
+    conn = replace(conn_config(tmp_path), redact=rules, redaction_salt=salt)
+    Engine(MockAdapter(curator_fixture()), conn, tmp_path).generate()
 
     return (tmp_path / "primary" / "public" / "curator" / "statistics.yaml").read_text()
 
@@ -62,23 +62,10 @@ def _contacts_fixture() -> dict[str, MockTable]:
     addresses = sorted(f"user{i}@example.com" for i in range(12))
 
     return {
-        "seedbank.collector": MockTable(
-            type="table",
-            namespace_path=("seedbank", "collector"),
-            ddl="CREATE TABLE seedbank.collector (institution text);\n",
-            columns=[
-                ColumnMeta(
-                    name="institution",
-                    sql_type="text",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+        "seedbank.collector": mock_table(
+            "seedbank.collector",
+            columns(("institution", "text")),
+            {
                 "institution": ColumnStats(
                     sql_type="text",
                     nullable=False,
@@ -92,6 +79,7 @@ def _contacts_fixture() -> dict[str, MockTable]:
                     distribution="uniform",
                 ),
             },
+            ddl="CREATE TABLE seedbank.collector (institution text);\n",
             samples={"institution": addresses},
             row_count=96,
         ),
@@ -99,12 +87,10 @@ def _contacts_fixture() -> dict[str, MockTable]:
 
 
 def _run_contacts(tmp_path: Path, *rules: RedactRule) -> dict[str, Any]:
-    conn = replace(_conn_config(tmp_path), redact=rules)
+    conn = replace(conn_config(tmp_path), redact=rules)
     Engine(MockAdapter(_contacts_fixture()), conn, tmp_path).generate()
 
-    return yaml.safe_load(
-        (tmp_path / "primary" / "seedbank" / "collector" / "statistics.yaml").read_text(),
-    )
+    return artifact(tmp_path / "primary", "seedbank.collector")
 
 
 class TestNoRulesChangeNothing:
@@ -199,7 +185,7 @@ class TestSaltIsAPrecondition:
         """An unsalted digest of an email is reversible, so it is refused not defaulted."""
 
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             redact=(RedactRule(columns=("*.herbarium_id",), with_="hash"),),
         )
 
@@ -215,7 +201,7 @@ class TestSaltIsAPrecondition:
         """A variable exported empty resolves to a string, and hashes exactly as no salt does."""
 
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             redact=(RedactRule(columns=("*.herbarium_id",), with_="hash"),),
         )
 
@@ -224,7 +210,7 @@ class TestSaltIsAPrecondition:
 
     def test_mask_needs_no_salt(self, tmp_path: Path) -> None:
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             redact=(RedactRule(columns=("*.herbarium_id",), with_="mask"),),
         )
 
@@ -234,7 +220,7 @@ class TestSaltIsAPrecondition:
         """One representation downstream, whichever spelling of "nothing" arrived."""
 
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             redact=(RedactRule(columns=("*.herbarium_id",), with_="mask"),),
         )
 
@@ -244,7 +230,7 @@ class TestSaltIsAPrecondition:
         """Trimming it would change every digest of a secret whose whitespace is its own."""
 
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             redact=(RedactRule(columns=("*.herbarium_id",), with_="hash"),),
         )
 
@@ -337,11 +323,7 @@ class TestADefaultsRuleReachesTheArtifact:
         conn = load_project(tmp_path).connections["primary"]
         Engine(MockAdapter(_contacts_fixture()), conn, tmp_path).generate()
 
-        return yaml.safe_load(
-            (
-                tmp_path / "prints" / "primary" / "seedbank" / "collector" / "statistics.yaml"
-            ).read_text(),
-        )
+        return artifact(tmp_path / "prints" / "primary", "seedbank.collector")
 
     def test_a_defaults_rule_redacts_the_print(self, tmp_path: Path) -> None:
         payload = self._generate(
@@ -382,14 +364,13 @@ class TestADefaultsRuleReachesTheArtifact:
 
 class TestConformance:
     def test_a_redacted_print_validates(self, tmp_path: Path) -> None:
-        from dbprint.conformance import validate_print
 
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             redact=(RedactRule(columns=("*.herbarium_id",), with_="drop"),),
         )
-        Engine(MockAdapter(_curator_fixture()), conn, tmp_path).generate()
-        errors = [i for i in validate_print(tmp_path / "primary") if i.severity == "error"]
+        Engine(MockAdapter(curator_fixture()), conn, tmp_path).generate()
+        errors = conformance_errors(tmp_path / "primary")
 
         assert errors == []
 
@@ -397,7 +378,7 @@ class TestConformance:
         """A `json` or `unsupported` column has no cell values, so there is nothing to redact."""
 
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             redact=(RedactRule(columns=("*",), with_="mask"),),
         )
         Engine(MockAdapter(_valueless_fixture()), conn, tmp_path).generate()
@@ -417,13 +398,11 @@ class TestConformance:
         """`field_notes` publishes no literal at all, and the marker still reports its cover."""
 
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             redact=(RedactRule(columns=("*",), with_="mask"),),
         )
-        Engine(MockAdapter(_prose_fixture()), conn, tmp_path).generate()
-        columns = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "curator_note" / "statistics.yaml").read_text(),
-        )["columns"]
+        Engine(MockAdapter(prose_fixture()), conn, tmp_path).generate()
+        columns = artifact(tmp_path / "primary", "public.curator_note")["columns"]
 
         assert columns["field_notes"]["classification"] == "text"
         assert columns["field_notes"]["inferred"]["looks_like"] == "prose"
@@ -439,13 +418,11 @@ class TestConformance:
         """`looks_like: [prose]` matches `field_notes` and `status`; only the text one strips."""
 
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             redact=(RedactRule(looks_like=("prose",), with_="mask"),),
         )
-        Engine(MockAdapter(_prose_fixture()), conn, tmp_path).generate()
-        columns = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "curator_note" / "statistics.yaml").read_text(),
-        )["columns"]
+        Engine(MockAdapter(prose_fixture()), conn, tmp_path).generate()
+        columns = artifact(tmp_path / "primary", "public.curator_note")["columns"]
 
         assert columns["field_notes"]["redacted"] == "mask"
         assert "values" not in columns["field_notes"]
@@ -459,13 +436,11 @@ class TestConformance:
         """The exemption follows the column: `phone` loses its list, `institution` keeps one."""
 
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             redact=(RedactRule(sensitivity=("contact",), with_="mask"),),
         )
-        Engine(MockAdapter(_prose_fixture()), conn, tmp_path).generate()
-        columns = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "curator_note" / "statistics.yaml").read_text(),
-        )["columns"]
+        Engine(MockAdapter(prose_fixture()), conn, tmp_path).generate()
+        columns = artifact(tmp_path / "primary", "public.curator_note")["columns"]
 
         assert columns["phone"]["classification"] == "text"
         assert columns["phone"]["inferred"]["looks_like"] == "prose"
@@ -483,13 +458,11 @@ class TestConformance:
         """The prose exemption stops at `categorical`, which always carries a value list."""
 
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             redact=(RedactRule(columns=("*",), with_="mask"),),
         )
-        Engine(MockAdapter(_prose_fixture()), conn, tmp_path).generate()
-        status = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "curator_note" / "statistics.yaml").read_text(),
-        )["columns"]["status"]
+        Engine(MockAdapter(prose_fixture()), conn, tmp_path).generate()
+        status = artifact(tmp_path / "primary", "public.curator_note")["columns"]["status"]
 
         assert status["classification"] == "categorical"
         assert status["inferred"]["looks_like"] == "prose"
@@ -499,15 +472,13 @@ class TestConformance:
     def test_a_print_carrying_name_only_sensitivity_validates(self, tmp_path: Path) -> None:
         """`phone` classifies numeric, never sampled, so `contact` comes from its name alone."""
 
-        from dbprint.conformance import validate_print
-
-        conn = _conn_config(tmp_path)
+        conn = conn_config(tmp_path)
         Engine(MockAdapter(_valueless_fixture()), conn, tmp_path).generate()
         columns = _shapes_payload(tmp_path)["columns"]
 
         assert columns["phone"]["inferred"] == {"sensitivity": "contact"}
 
-        errors = [i for i in validate_print(tmp_path / "primary") if i.severity == "error"]
+        errors = conformance_errors(tmp_path / "primary")
         assert errors == [], "\n".join(f"  {e.code} at {e.path}: {e.detail}" for e in errors)
 
 
@@ -516,12 +487,10 @@ class TestACoveredColumnIsNeverSketched:
 
     @staticmethod
     def _columns(tmp_path: Path, **kwargs: Any) -> dict[str, Any]:
-        conn = replace(_conn_config(tmp_path, enumeration_threshold=0), **kwargs)
+        conn = replace(conn_config(tmp_path, enumeration_threshold=0), **kwargs)
         Engine(MockAdapter(_sketchable_prose_fixture()), conn, tmp_path).generate()
 
-        return yaml.safe_load(
-            (tmp_path / "primary" / "seedbank" / "collector" / "statistics.yaml").read_text(),
-        )["columns"]
+        return artifact(tmp_path / "primary", "seedbank.collector")["columns"]
 
     def test_a_covered_prose_column_carries_no_sketch(self, tmp_path: Path) -> None:
         """`field_notes` publishes no literal, so only the marker can exclude it."""
@@ -572,13 +541,11 @@ class TestACoveredColumnIsNeverSketched:
         """No literal survived to be redacted and none was measured either."""
 
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             redact=(RedactRule(columns=("*.field_notes",), with_="mask"),),
         )
         Engine(MockAdapter(_unmeasured_values_fixture()), conn, tmp_path).generate()
-        field_notes = yaml.safe_load(
-            (tmp_path / "primary" / "seedbank" / "accession" / "statistics.yaml").read_text(),
-        )["columns"]["field_notes"]
+        field_notes = artifact(tmp_path / "primary", "seedbank.accession")["columns"]["field_notes"]
 
         assert field_notes["unmeasured"] == ["distribution", "values", "values_coverage"]
         assert field_notes["redacted"] == "mask"
@@ -629,10 +596,8 @@ class TestBoundsUnderARedactedColumn:
         sensitivity rule's coverage cannot be known at load time.
         """
 
-        from dbprint.conformance import validate_print
-
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             redact=(RedactRule(sensitivity=("contact",), with_="drop"),),
         )
         Engine(MockAdapter(_valueless_fixture()), conn, tmp_path).generate()
@@ -641,11 +606,11 @@ class TestBoundsUnderARedactedColumn:
         assert phone["redacted"] == "drop"
         assert "range" not in phone
         assert "percentiles" not in phone
-        assert [i for i in validate_print(tmp_path / "primary") if i.severity == "error"] == []
+        assert conformance_errors(tmp_path / "primary") == []
 
     def _phone(self, tmp_path: Path, primitive: str) -> dict[str, Any]:
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             redact=(RedactRule(columns=("*.phone",), with_=primitive),),
         )
         Engine(MockAdapter(_valueless_fixture()), conn, tmp_path).generate()
@@ -654,16 +619,12 @@ class TestBoundsUnderARedactedColumn:
 
     def _observed_at(self, tmp_path: Path, primitive: str) -> dict[str, Any]:
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             redact=(RedactRule(columns=("*.observed_at",), with_=primitive),),
             redaction_salt="pepper",
         )
         Engine(MockAdapter(_dated_fixture()), conn, tmp_path).generate()
-        payload = yaml.safe_load(
-            (
-                tmp_path / "primary" / "seedbank" / "germination_trial" / "statistics.yaml"
-            ).read_text(),
-        )
+        payload = artifact(tmp_path / "primary", "seedbank.germination_trial")
 
         return payload["columns"]["observed_at"]
 
@@ -689,23 +650,10 @@ class TestAggregatesUnderARedactedColumn:
         distinct = len(counts)
         total = float(sum(values))
         mean = total / non_null
-        table = MockTable(
-            type="table",
-            namespace_path=("fixture", "staging"),
-            ddl="CREATE TABLE fixture.staging (amount bigint);\n",
-            columns=[
-                ColumnMeta(
-                    name="amount",
-                    sql_type="bigint",
-                    nullable=True,
-                    default=None,
-                    ordinal=1,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+        table = mock_table(
+            "fixture.staging",
+            columns(("amount", "bigint", True)),
+            {
                 "amount": ColumnStats(
                     sql_type="bigint",
                     nullable=True,
@@ -731,19 +679,17 @@ class TestAggregatesUnderARedactedColumn:
                     ),
                 ),
             },
-            samples={},
+            ddl="CREATE TABLE fixture.staging (amount bigint);\n",
             row_count=non_null,
         )
         # enumeration_threshold=0 keeps `amount` out of the categorical bucket regardless of
         # cardinality, so both scenarios below classify `numeric` - the footnote's own axis.
         conn = replace(
-            _conn_config(tmp_path, enumeration_threshold=0),
+            conn_config(tmp_path, enumeration_threshold=0),
             redact=(RedactRule(columns=("*.amount",), with_="mask"),) if redact else (),
         )
         Engine(MockAdapter({"fixture.staging": table}), conn, tmp_path).generate()
-        payload = yaml.safe_load(
-            (tmp_path / "primary" / "fixture" / "staging" / "statistics.yaml").read_text(),
-        )
+        payload = artifact(tmp_path / "primary", "fixture.staging")
 
         return payload["columns"]["amount"]
 
@@ -776,23 +722,10 @@ class TestAggregatesUnderARedactedColumn:
         rows = 480
         values = tuple(f"institute {i:012d}" for i in range(distinct))
         per_value = rows // distinct
-        collector = MockTable(
-            type="table",
-            namespace_path=("seedbank", "collector"),
-            ddl="CREATE TABLE seedbank.collector (institution text);\n",
-            columns=[
-                ColumnMeta(
-                    name="institution",
-                    sql_type="text",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+        collector = mock_table(
+            "seedbank.collector",
+            columns(("institution", "text")),
+            {
                 "institution": ColumnStats(
                     sql_type="text",
                     nullable=False,
@@ -808,17 +741,15 @@ class TestAggregatesUnderARedactedColumn:
                     empty_count=0,
                 ),
             },
-            samples={},
+            ddl="CREATE TABLE seedbank.collector (institution text);\n",
             row_count=rows,
         )
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             redact=(RedactRule(columns=("*.institution",), with_="mask"),),
         )
         Engine(MockAdapter({"seedbank.collector": collector}), conn, tmp_path).generate()
-        payload = yaml.safe_load(
-            (tmp_path / "primary" / "seedbank" / "collector" / "statistics.yaml").read_text(),
-        )
+        payload = artifact(tmp_path / "primary", "seedbank.collector")
 
         return payload["columns"]["institution"]
 
@@ -892,7 +823,7 @@ class TestRedactedDayCounts:
         assert observed_at["freshness"]["classification"] == "stale"
 
     def test_an_unredacted_column_is_uncoarsened(self, tmp_path: Path) -> None:
-        conn = replace(_conn_config(tmp_path), redact=())
+        conn = replace(conn_config(tmp_path), redact=())
         Engine(MockAdapter(_stale_dated_fixture()), conn, tmp_path).generate()
         observed_at = self._payload(tmp_path)
 
@@ -901,7 +832,7 @@ class TestRedactedDayCounts:
 
     def _observed_at(self, tmp_path: Path, primitive: str) -> dict[str, Any]:
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             redact=(RedactRule(columns=("*.observed_at",), with_=primitive),),
             redaction_salt="pepper",
         )
@@ -910,11 +841,7 @@ class TestRedactedDayCounts:
         return self._payload(tmp_path)
 
     def _payload(self, tmp_path: Path) -> dict[str, Any]:
-        payload = yaml.safe_load(
-            (
-                tmp_path / "primary" / "seedbank" / "germination_trial" / "statistics.yaml"
-            ).read_text(),
-        )
+        payload = artifact(tmp_path / "primary", "seedbank.germination_trial")
 
         return payload["columns"]["observed_at"]
 
@@ -953,22 +880,18 @@ def _redacted_print_errors(
 ) -> list[Any]:
     """Generate under one rule and return the print's error-severity conformance issues."""
 
-    from dbprint.conformance import validate_print
-
     conn = replace(
-        _conn_config(tmp_path),
+        conn_config(tmp_path),
         redact=(RedactRule(columns=(columns_glob,), with_=primitive),),
         redaction_salt="pepper",
     )
     Engine(MockAdapter(fixture), conn, tmp_path).generate()
 
-    return [i for i in validate_print(tmp_path / "primary") if i.severity == "error"]
+    return conformance_errors(tmp_path / "primary")
 
 
 def _shapes_payload(tmp_path: Path) -> dict[str, Any]:
-    return yaml.safe_load(
-        (tmp_path / "primary" / "fixture" / "contact_probe" / "statistics.yaml").read_text(),
-    )
+    return artifact(tmp_path / "primary", "fixture.contact_probe")
 
 
 def _valueless_fixture() -> dict[str, MockTable]:
@@ -979,37 +902,14 @@ def _valueless_fixture() -> dict[str, MockTable]:
     """
 
     return {
-        "fixture.contact_probe": MockTable(
-            type="table",
-            namespace_path=("fixture", "contact_probe"),
-            ddl="CREATE TABLE fixture.contact_probe (phone bigint, payload jsonb, field_photo bytea);\n",
-            columns=[
-                ColumnMeta(
-                    name="phone",
-                    sql_type="bigint",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-                ColumnMeta(
-                    name="payload",
-                    sql_type="jsonb",
-                    nullable=True,
-                    default=None,
-                    ordinal=2,
-                ),
-                ColumnMeta(
-                    name="field_photo",
-                    sql_type="bytea",
-                    nullable=True,
-                    default=None,
-                    ordinal=3,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+        "fixture.contact_probe": mock_table(
+            "fixture.contact_probe",
+            columns(
+                ("phone", "bigint"),
+                ("payload", "jsonb", True),
+                ("field_photo", "bytea", True),
+            ),
+            {
                 "phone": ColumnStats(
                     sql_type="bigint",
                     nullable=False,
@@ -1048,7 +948,7 @@ def _valueless_fixture() -> dict[str, MockTable]:
                     cardinality_method=None,
                 ),
             },
-            samples={},
+            ddl="CREATE TABLE fixture.contact_probe (phone bigint, payload jsonb, field_photo bytea);\n",
             row_count=100,
         ),
     }
@@ -1067,23 +967,10 @@ def _dated_fixture() -> dict[str, MockTable]:
     observed_max = (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     return {
-        "seedbank.germination_trial": MockTable(
-            type="table",
-            namespace_path=("seedbank", "germination_trial"),
-            ddl="CREATE TABLE seedbank.germination_trial (observed_at timestamp);\n",
-            columns=[
-                ColumnMeta(
-                    name="observed_at",
-                    sql_type="timestamp",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+        "seedbank.germination_trial": mock_table(
+            "seedbank.germination_trial",
+            columns(("observed_at", "timestamp")),
+            {
                 "observed_at": ColumnStats(
                     sql_type="timestamp",
                     nullable=False,
@@ -1104,7 +991,7 @@ def _dated_fixture() -> dict[str, MockTable]:
                     quantized_count=0,
                 ),
             },
-            samples={},
+            ddl="CREATE TABLE seedbank.germination_trial (observed_at timestamp);\n",
             row_count=100,
         ),
     }
@@ -1114,23 +1001,10 @@ def _unmeasured_values_fixture() -> dict[str, MockTable]:
     """A text column whose value read failed: no literal published, and `unmeasured` says so."""
 
     return {
-        "seedbank.accession": MockTable(
-            type="table",
-            namespace_path=("seedbank", "accession"),
-            ddl="CREATE TABLE seedbank.accession (field_notes text);\n",
-            columns=[
-                ColumnMeta(
-                    name="field_notes",
-                    sql_type="text",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+        "seedbank.accession": mock_table(
+            "seedbank.accession",
+            columns(("field_notes", "text")),
+            {
                 "field_notes": ColumnStats(
                     sql_type="text",
                     nullable=False,
@@ -1144,7 +1018,7 @@ def _unmeasured_values_fixture() -> dict[str, MockTable]:
                     unmeasured=("values", "values_coverage", "distribution"),
                 ),
             },
-            samples={},
+            ddl="CREATE TABLE seedbank.accession (field_notes text);\n",
             row_count=200,
         ),
     }
@@ -1175,33 +1049,14 @@ def _sketchable_prose_fixture() -> dict[str, MockTable]:
         )
 
     return {
-        "seedbank.collector": MockTable(
-            type="table",
-            namespace_path=("seedbank", "collector"),
-            ddl="CREATE TABLE seedbank.collector (field_notes text, institution text);\n",
-            columns=[
-                ColumnMeta(
-                    name="field_notes",
-                    sql_type="text",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-                ColumnMeta(
-                    name="institution",
-                    sql_type="text",
-                    nullable=False,
-                    default=None,
-                    ordinal=2,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+        "seedbank.collector": mock_table(
+            "seedbank.collector",
+            columns(("field_notes", "text"), ("institution", "text")),
+            {
                 "field_notes": stats(notes, 58),
                 "institution": stats(institutions, 13),
             },
+            ddl="CREATE TABLE seedbank.collector (field_notes text, institution text);\n",
             samples={"field_notes": list(notes), "institution": list(institutions)},
             row_count=40,
         ),

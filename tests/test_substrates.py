@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from tests import _substrates
+from tests._scripts import REPO_ROOT
 from tests._substrates import Owner
 
 
@@ -111,11 +112,10 @@ class TestShared:
             print(_substrates.shared(root, "k", owner, start)["port"])
             """,
         )
-        lib_root = Path(__file__).resolve().parent.parent
         processes = [
             subprocess.Popen(
                 [sys.executable, "-c", code, str(tmp_path)],
-                cwd=lib_root,
+                cwd=REPO_ROOT,
                 stdout=subprocess.PIPE,
                 text=True,
             )

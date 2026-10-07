@@ -8,12 +8,14 @@ from unittest.mock import patch
 import pytest
 
 from dbprint.engine.writer import (
+    WriterError,
+    write_atomic,
+)
+from dbprint.spec.artifacts import (
     DESCRIPTION_FILENAME,
     MANIFEST_ANNOTATIONS_FILENAME,
     RELATIONSHIPS_ANNOTATIONS_FILENAME,
     STATISTICS_ANNOTATIONS_FILENAME,
-    WriterError,
-    write_atomic,
 )
 
 

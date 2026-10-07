@@ -6,27 +6,17 @@ import pytest
 
 from dbprint.adapters import (
     ColumnStats,
-    CommentsMeta,
     MockAdapter,
     MockTable,
     TableCounts,
 )
 from dbprint.adapters.base import PhaseB
 from dbprint.config import StatisticsConfig
+from tests._prints import mock_table
 
 
 def _empty_table() -> MockTable:
-    return MockTable(
-        type="table",
-        namespace_path=("schema", "t"),
-        ddl="CREATE TABLE schema.t (id int);\n",
-        columns=[],
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={},
-        samples={},
-    )
+    return mock_table("schema.t", (), {}, ddl="CREATE TABLE schema.t (id int);\n")
 
 
 class TestLifecycle:
@@ -74,15 +64,11 @@ class TestFixtureRoundTrip:
 
 class TestDeterminism:
     def test_sample_values_respects_n(self) -> None:
-        tbl = MockTable(
-            type="table",
-            namespace_path=("schema", "t"),
+        tbl = mock_table(
+            "schema.t",
+            (),
+            {},
             ddl="CREATE TABLE schema.t (id int);\n",
-            columns=[],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={},
             samples={"id": list(range(100))},
         )
         adapter = MockAdapter({"schema.t": tbl})
@@ -113,15 +99,10 @@ def _stats_table(
     cardinality: int,
     normalized_cardinalities: dict[str, int] | None = None,
 ) -> MockTable:
-    return MockTable(
-        type="table",
-        namespace_path=("schema", "t"),
-        ddl="CREATE TABLE schema.t (s text);\n",
-        columns=[],
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={
+    return mock_table(
+        "schema.t",
+        (),
+        {
             "s": ColumnStats(
                 sql_type="text",
                 nullable=True,
@@ -132,7 +113,7 @@ def _stats_table(
                 cardinality_method="exact",
             ),
         },
-        samples={},
+        ddl="CREATE TABLE schema.t (s text);\n",
         normalized_cardinalities=normalized_cardinalities or {},
     )
 
@@ -159,7 +140,7 @@ class TestNormalizedCardinality:
         adapter = MockAdapter({"schema.t": _stats_table(cardinality=5)})
         adapter.connect()
 
-        assert adapter.compute_normalized_cardinality("schema.t", "s") == 5
+        assert adapter.compute_normalized_cardinality("schema.t", "s", "text") == 5
 
     def test_uses_the_stated_merge_count_when_present(self) -> None:
         adapter = MockAdapter(
@@ -167,10 +148,10 @@ class TestNormalizedCardinality:
         )
         adapter.connect()
 
-        assert adapter.compute_normalized_cardinality("schema.t", "s") == 3
+        assert adapter.compute_normalized_cardinality("schema.t", "s", "text") == 3
 
     def test_missing_column_falls_back_to_zero(self) -> None:
         adapter = MockAdapter({"schema.t": _empty_table()})
         adapter.connect()
 
-        assert adapter.compute_normalized_cardinality("schema.t", "no_such_col") == 0
+        assert adapter.compute_normalized_cardinality("schema.t", "no_such_col", "text") == 0

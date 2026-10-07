@@ -744,7 +744,7 @@ normalized_cardinality: 4102   # cardinality: 4118 - 16 values merge under foldi
 | Adapter | Function |
 |---|---|
 | Postgres | `LOWER(TRIM(CAST(col AS text)))` |
-| MySQL | `LOWER(TRIM(CAST(col AS CHAR)))` |
+| MySQL | `LOWER(TRIM(CAST(col AS CHAR)))`; a `BIT` column `LOWER(TRIM(CAST(col AS UNSIGNED)))`, folding the integer its other statistics read rather than its raw bytes |
 | Snowflake | `LOWER(TRIM(TO_VARCHAR(col)))` |
 | duckdb | `LOWER(TRIM(CAST(col AS VARCHAR)))` |
 
@@ -933,11 +933,13 @@ scope:
 
 The same denominator governs every table-level block outside the §2.2.3 matrix too, each stated in its own section rather than repeated here: `null_patterns.coverage` (§2.2.10) and `timeline.buckets[].count`/`timeline.coverage` (§2.2.16) are both counts over `rows_scanned`, on the identical terms this paragraph sets for a per-column cell.
 
-**Every column of a scoped file echoes `rows_scanned`.** A reader of one column block recomputes `null_rate`, `cardinality_ratio` and `values_coverage` without leaving it, and needs only the file head's `row_count` to rescale a count to table grain. The field is REQUIRED on every column — `unsupported` included, since its `null_rate` is scanned-set-relative too — whenever the top-level `scope` block is present, and MUST NOT be emitted on any column otherwise (§2.2.3). A file whose `rows_scanned` equals `row_count` still emits the marker on every column; omitting it there would make its absence mean two different things again.
+**Every column of a scoped file echoes `rows_scanned`.** A reader of one column block recomputes `null_rate`, `cardinality_ratio` and `values_coverage` without leaving it, and needs only the file head's `row_count` to rescale a row count to table grain. The field is REQUIRED on every column — `unsupported` included, since its `null_rate` is scanned-set-relative too — whenever the top-level `scope` block is present, and MUST NOT be emitted on any column otherwise (§2.2.3). A file whose `rows_scanned` equals `row_count` still emits the marker on every column; omitting it there would make its absence mean two different things again.
 
 **`row_count` describes the table, not the slice.** It counts the rows in the table whether or not the read narrowed. The two fields are read together: `rows_scanned` of `row_count`.
 
-**`rows_scanned` / `row_count` is the sampling fraction the rescaling uses, not `sample`.** A scanned-set count is scaled up to table grain by MULTIPLYING it by the reciprocal, `row_count / rows_scanned` — stated in that direction because the ratio itself is less than one, and applying it as a multiplier shrinks the very figure it is meant to raise. `sample` is the fraction the producer *asked* the database to read: passed through as configured, or, under a `max_rows_scanned` ceiling, snapped to a power of the producer's own ceiling grid against a catalog estimate — not a measurement of what the scan touched. `rows_scanned` and `row_count` are both required fields already, `rows_scanned` is already the stated denominator above, and naming their ratio as authoritative costs nothing further. Wherever `row_count_method` is `approximate`, this rescaling ratio is itself an estimate: `rows_scanned` is exact, but `row_count` is not.
+**`rows_scanned` / `row_count` is the sampling fraction the rescaling uses, not `sample`.** A row count (below) is scaled up to table grain by MULTIPLYING it by the reciprocal, `row_count / rows_scanned` — stated in that direction because the ratio itself is less than one, and applying it as a multiplier shrinks the very figure it is meant to raise. `sample` is the fraction the producer *asked* the database to read: passed through as configured, or, under a `max_rows_scanned` ceiling, snapped to a power of the producer's own ceiling grid against a catalog estimate — not a measurement of what the scan touched. `rows_scanned` and `row_count` are both required fields already, `rows_scanned` is already the stated denominator above, and naming their ratio as authoritative costs nothing further. Wherever `row_count_method` is `approximate`, this rescaling ratio is itself an estimate: `rows_scanned` is exact, but `row_count` is not.
+
+**Only a row count rescales, and only under `sample`.** A row count counts scanned rows: `null_count`, every `values` entry `count` (a `boolean`'s true/false split included), `zero_count`, `negative_count`, `empty_count`, `quantized_count`, `frequencies.top`, `frequencies.bottom`, `frequencies.total`, every `null_patterns` entry `count` (§2.2.10), and a part's `occurrences` (§2.2.18). Under `sample` a reader MAY multiply a row count by `row_count / rows_scanned` for an estimate at table grain. A reader MUST NOT rescale a field that is not a row count, by that ratio or any other: `cardinality` and `frequencies.listed` count distinct values, which do not grow in proportion to the rows read; `null_rate`, `cardinality_ratio`, `values_coverage` and `null_patterns.coverage` are ratios; `range.min`, `range.max`, `percentiles`, `mean`, `length`, `dimension`, `norm` and `freshness.max_age_days` are bounds and summaries; and `sum` is a partial total (above). Under `filter` nothing rescales: a predicate chose the rows read, so they are no sample of the table.
 
 **`filter` is provenance, not a query language.** Producers record the predicate verbatim and MUST NOT parse, rewrite, normalize, or validate it. Consumers MUST treat it as opaque text — it exists so a reader can judge whether these numbers answer their question, not so a tool can reconstruct the query.
 
@@ -1007,7 +1009,7 @@ null_patterns:
 
 **The counts reconcile against each column's own `null_count`.** For any column, the sum of `count` over the entries naming it MUST NOT exceed that column's `null_count`, and MUST equal it exactly where `coverage` is `1.0`. This is the one arithmetic identity in the format that crosses from a table-level object to a per-column one, and it is what catches two figures that came from different reads of the same table.
 
-**`coverage_method`** (enum, OPTIONAL; `measured` | `bounded`): whether an untruncated list of patterns agreed with `rows_scanned` (`measured`) or a producer detected the two disagreeing (`bounded`), because the pattern counts and the row count they are measured against were not read at the same instant — the same distinction §2.2.4 draws for `values_coverage_method`, applied to this block. Emitted only for a list a producer's own cap did not cut short; a truncated list is short by design, which is a different, already-explained condition `coverage_method` does not cover. A sampled table whose statements each redraw an unmaterialized sample can show the identical symptom from a different cause — a working fix already exists for that one (a materialized draw removes it entirely, reading `measured`) — and `coverage_method` states the symptom it observed, not which of the two causes produced it.
+**`coverage_method`** (enum, OPTIONAL; `measured` | `bounded`): whether an untruncated list of patterns agreed with `rows_scanned` (`measured`) or a producer detected the two disagreeing (`bounded`), because the pattern counts and the row count they are measured against were not read at the same instant — the same distinction §2.2.4 draws for `values_coverage_method`, applied to this block. Emitted only for a list a producer's own cap did not cut short; a truncated list is short by design, which is a different, already-explained condition `coverage_method` does not cover. A validator reads that truncation from the block itself: `coverage` below `1.0` with `coverage_method` absent. Such a list covers a subset of the scanned rows, so it can sum above `rows_scanned`, or name a column more often than its `null_count`, only where the table took writes between the two reads — the disagreement `bounded` discloses — and is reported with the same `-bounded` warnings. A sampled table whose statements each redraw an unmaterialized sample can show the identical symptom from a different cause — a working fix already exists for that one (a materialized draw removes it entirely, reading `measured`) — and `coverage_method` states the symptom it observed, not which of the two causes produced it.
 
 **Absence is a claim about the data, not about the producer.** The block MUST be omitted when no column in the file carries a null, and MUST be present when any does — unless the file's own `unmeasured` list names it (§2.2.1), which is how a producer whose pattern count failed records that rather than asserting the table has none. Both cases are checkable against the `null_count` of every column in the same file, so an absent block with no marker never leaves a reader deciding between "no nulls" and "not measured".
 
@@ -1508,7 +1510,7 @@ A `refers_to` or `referenced_by` entry MAY carry `observed`: what joining across
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `fanout_avg` | number | R | Child `row_count` / child column's `cardinality`, rounded per §2.2.6 — average rows per distinct key on the referencing side. Both operands describe the same rows only where the child was read whole, which is what `scope_compatible` guarantees: under a `scope` (§2.2.8) `row_count` counts the table while `cardinality` counts the rows scanned, and their ratio answers neither question |
+| `fanout_avg` | number | R | (Child `row_count` - child column's `null_count`) / child column's `cardinality`, rounded per §2.2.6 — average rows per distinct key among the referencing rows that carry one; a null referencing value joins to nothing and is not counted. The numerator is never taken below `cardinality`, since each distinct key has at least one row. Both operands describe the same rows only where the child was read whole, which is what `scope_compatible` guarantees: under a `scope` (§2.2.8) `row_count` counts the table while `cardinality` counts the rows scanned, and their ratio answers neither question |
 | `fanout_max` | number | O | The referencing column's own `values[0].count` (§2.2.4 orders by count descending) — the true worst-case group size, not the mean. Absent wherever `values` itself is (§7.2) |
 | `target_coverage` | number | R | The fraction of the parent's distinct values this edge actually reaches. Measured from both endpoints' `sketch` (§2.2.14) when both carry one and the measurement has evidence to report; cardinality-derived (child `cardinality` / parent `cardinality`) otherwise — the same field, silently upgraded to the sharper number when the sketches exist to support it, never a second field carrying the other formula |
 | `containment` | number | O | The fraction of the *child's* distinct values found in the parent's set, measured from both endpoints' `sketch` (§2.2.14) — the question `target_coverage` cannot answer, since a small `target_coverage` and a `containment` near 1 both hold whenever a few child values reach a much larger parent. Present only when both endpoints carry a `sketch` and the measurement has evidence to report; no cardinality-derived fallback exists for it |
@@ -1516,7 +1518,7 @@ A `refers_to` or `referenced_by` entry MAY carry `observed`: what joining across
 | `coherent` | bool | O | `false` when the child's cardinality exceeds the parent's — arithmetically impossible for a real containment. Present only when both sides measured `cardinality_method: exact` (§2.2.6); a scoped or sampled comparison cannot support the claim either way, so the field is omitted rather than guessed |
 | `scope_compatible` | bool | R | `false` whenever either endpoint carries a `scope` block (§2.2.8). Every other field in this table is absent whenever this is `false`; no ratio is ever published across a mismatched pair — and a scoped endpoint is a mismatch even where both sides carry the same `sample`, since two draws at one rate are still two draws and a value-identity comparison across them is not measurable. That is the position §2.2.14 already takes in withholding `sketch` from a scoped table; a consumer wanting these numbers profiles the two endpoints unscoped |
 
-**Absence of the whole block.** A composite edge (`column`/`target_column` longer than one) and an edge where either endpoint carries no `cardinality` — a catalog-only file (§2.2.15), or an object this run could not measure one for — carry no `observed` block at all; see §7.3.
+**Absence of the whole block.** A composite edge (`column`/`target_column` longer than one) and an edge where either endpoint carries no `cardinality`, or the referencing column no `null_count` — a catalog-only file (§2.2.15), or an object this run could not measure one for — carry no `observed` block at all; see §7.3.
 
 **Sketch-measured fields and their error.** `containment` and a sketch-measured `target_coverage` are derived from the two endpoints' `sketch` (§2.2.14), and which computation applies depends on whether the child sketch is exhaustive.
 
@@ -1534,7 +1536,7 @@ A producer MAY compare two columns' sketches (§2.2.14) across every table pair 
 
 A pair is proposed only where all three hold:
 
-1. **The referencing ("child") column is a reference, not a category.** Its `cardinality` exceeds `enumeration_threshold`, or it carries `inferred.candidate_key`. A column enumerable in full is a lookup value, and a containment of `1.0` over a handful of values is as likely to be coincidence as evidence.
+1. **The referencing ("child") column is a reference, not a category.** Its `cardinality` exceeds `enumeration_threshold`. A column enumerable in full is a lookup value, and a containment of `1.0` over a handful of values is as likely to be coincidence as evidence. Measured uniqueness does not change that: on a table of a few rows every column is a candidate key.
 2. **The referenced ("parent") column is key-like.** It carries a single-column PRIMARY KEY, a sole single-column UNIQUE, or `inferred.candidate_key` — the population §2.2.14 already sketches for this reason.
 3. **The measurement can carry the claim.** Either both sketches are exhaustive and `containment` (§2.3.10) is exactly `1.0`, which an exhaustive comparison makes exact with no margin at all; or `answerable_count` is at least 400 and `containment` is at least `0.95`. 400 is where §2.3.10's own `1/sqrt(answerable_count)` margin falls to `0.05` — the slack the `0.95` floor leaves.
 
@@ -1825,7 +1827,7 @@ The effective collation moved: `collation` where present, else that side's manif
   stat: <dot_path>                    # e.g., "cardinality", "percentiles.p99", "distribution"
   before: <value>                     # type matches stat's data type
   after: <value>
-  delta: <numeric>                    # OMITTED for non-numeric stats (distribution, classification, values)
+  delta: <numeric>                    # OMITTED for non-numeric stats (distribution, classification, values, cardinality_method)
   delta_pct: <float>                  # OMITTED when before == 0 (division by zero) or stat is non-numeric
 ```
 
@@ -2017,7 +2019,7 @@ The CLI `--threshold FLOAT` flag overrides all per-stat thresholds for one run (
 | **Connection default collation moves** | No event on a column whose collation is implicit on both sides; every column the move affects carries an explicit `collation` on one side and reports through `column_collation_changed`. |
 | **Repartitioning** | `physical_layout_changed` only; `physical_layout_key` on each key column is not compared (§2.2.11). |
 | **Case-only table rename** | No event: the table's catalog spelling is recorded only in `ddl.sql`, which v1 does not parse. |
-| **`statistic_changed` with non-numeric stats** (`distribution`, `classification`, `values`) | `delta` and `delta_pct` OMITTED; only `before` and `after`. |
+| **`statistic_changed` with non-numeric stats** (`distribution`, `classification`, `values`, `cardinality_method`) | `delta` and `delta_pct` OMITTED; only `before` and `after`. |
 | **`statistic_changed` with `before: 0`** | `delta_pct` OMITTED (division by zero); `delta` still present. |
 | **Comment removed** | `comment_changed` with `after: null`. |
 | **Comment added** (never existed in baseline) | `comment_changed` with `before: null`. |
@@ -2100,7 +2102,7 @@ An entry addresses an edge by `column` / `target_table` / `target_column` — th
 
 **An entry that resolves against nothing is a human-authored edge** the producer did not, and structurally could not, emit - §2.7's layering rule covers this file the same as any other. This is the channel a path-valued endpoint (§2.3.9) is authored through: a warehouse storing a join key inside a semi-structured column has no producer-emitted edge to annotate, so the entry is stated here directly, with `path` / `target_path` alongside `column` / `target_column`.
 
-**Rejecting an edge does not remove it.** `refers_to` and `referenced_by` are producer measurements (§2.3); a `verdict` is a consumer-facing correction layered over them; a table's own graph is unchanged. `dbprint context` renders a rejected edge marked, not omitted, so a consumer sees both what the producer inferred and that a human overruled it.
+**Rejecting an edge does not remove it from the print.** `refers_to` and `referenced_by` are producer measurements (§2.3); a `verdict` is a consumer-facing correction layered over them, and the table's own graph on disk is unchanged. A consumer handing the graph to an agent that writes queries withholds a rejected edge rather than marking it: `dbprint context` and `dbprint serve` omit it from every rendering, both sides of it, and from the relationship events of `diff.yaml` they return, so a reader never meets it as a join path. A browsing surface may still draw it, marked as rejected. A `verdict` addressing a `detection: declared` edge withholds nothing.
 
 **A `verdict` addressing an edge absent from `relationships.yaml` is stale**: reported at warning severity, the same treatment `statistics.annotations.yaml` staleness gets (§2.7.1). An entry carrying no `verdict` needs no counterpart to resolve against, so a human-authored addition is never stale.
 
@@ -2682,13 +2684,13 @@ Grouped by concern. `E` = error, `W` = warning.
 | `stats.population-marker-mismatch` | E | A column's `rows_scanned` disagrees with what the file's `scope` requires — absent or wrong when scoped, present when not (§2.2.8) |
 | `stats.null-patterns-absent-with-nulls` | E | `null_patterns` is omitted although some column reports a non-zero `null_count` and the file's own `unmeasured` list does not name it, or present although no column reports one (§2.2.10) |
 | `stats.null-patterns-unknown-column` | E | A `null_patterns` entry names a column absent from the file's `columns` map (§2.2.10) |
-| `stats.null-patterns-sum-exceeds-rows-scanned` | E | The `null_patterns` counts sum to more rows than were scanned (§2.2.10), `coverage_method` absent or `measured`. `coverage_method: bounded` reports `stats.null-patterns-sum-exceeds-rows-scanned-bounded` instead — see below |
-| `stats.null-patterns-sum-exceeds-rows-scanned-bounded` | W | The same disagreement as `stats.null-patterns-sum-exceeds-rows-scanned`, where `coverage_method: bounded` (§2.2.10) already discloses that the pattern counts and `rows_scanned` were not read at the same instant. WARNING because the producer has already named the cause this error exists to catch |
+| `stats.null-patterns-sum-exceeds-rows-scanned` | E | The `null_patterns` counts sum to more rows than were scanned (§2.2.10), `coverage_method` `measured`, or absent at `coverage: 1.0`. `coverage_method: bounded`, and a truncated list (`coverage` below `1.0`, `coverage_method` absent), report `stats.null-patterns-sum-exceeds-rows-scanned-bounded` instead — see below |
+| `stats.null-patterns-sum-exceeds-rows-scanned-bounded` | W | The same disagreement as `stats.null-patterns-sum-exceeds-rows-scanned`, where `coverage_method: bounded` (§2.2.10) already discloses that the pattern counts and `rows_scanned` were not read at the same instant, or the list is truncated (`coverage` below `1.0`, `coverage_method` absent) and so can overrun only through writes between the two reads. WARNING because the cause this error exists to catch is already named or the only one possible |
 | `stats.null-patterns-coverage-mismatch` | E | `null_patterns.coverage` disagrees with the listed counts over `rows_scanned` (§2.2.10) |
 | `stats.null-patterns-not-ordered` | E | `null_patterns.patterns` is not ordered by `count` descending, ties by ascending `columns` (§2.2.10) |
 | `stats.null-patterns-duplicate-combination` | E | The same combination of columns appears in more than one `null_patterns` entry (§2.2.10) |
-| `stats.null-patterns-reconciliation-mismatch` | E | The `null_patterns` counts naming a column exceed its `null_count`, or fall short of it at `coverage: 1.0` (§2.2.10), `coverage_method` absent or `measured`. `coverage_method: bounded` reports `stats.null-patterns-reconciliation-mismatch-bounded` instead — see below |
-| `stats.null-patterns-reconciliation-mismatch-bounded` | W | The same disagreement as `stats.null-patterns-reconciliation-mismatch`, where `coverage_method: bounded` (§2.2.10) already discloses the cause. WARNING for the same reason |
+| `stats.null-patterns-reconciliation-mismatch` | E | The `null_patterns` counts naming a column exceed its `null_count`, or fall short of it at `coverage: 1.0` (§2.2.10), `coverage_method` `measured`, or absent at `coverage: 1.0`. `coverage_method: bounded`, and a truncated list (`coverage` below `1.0`, `coverage_method` absent), report `stats.null-patterns-reconciliation-mismatch-bounded` instead — see below |
+| `stats.null-patterns-reconciliation-mismatch-bounded` | W | The same disagreement as `stats.null-patterns-reconciliation-mismatch`, where `coverage_method: bounded` (§2.2.10) already discloses the cause, or the list is truncated (`coverage` below `1.0`, `coverage_method` absent) and so can overcount a column only through writes between the reads. WARNING for the same reason |
 | `stats.physical-name-matches-key` | W | `physical_name` is present and equals the column's own map key; the field asserts nothing and MUST be omitted (§2.2.4) |
 | `stats.physical-layout-unknown-column` | E | `physical_layout.keys` names a `column` absent from the file's `columns` map (§2.2.11) |
 | `stats.merging-unknown-column` | E | `merging.key` names a `column` absent from the file's `columns` map (§2.2.19) |
@@ -2717,7 +2719,7 @@ Grouped by concern. `E` = error, `W` = warning.
 | `stats.geometry-count-mismatch` | E | A `geometry` list's counts do not sum to the column's non-null count, or `empty_count`/`invalid_count` exceeds it (§2.2.4) |
 | `stats.extent-inverted` | E | An `extent` carries `min_x > max_x` or `min_y > max_y` (§2.2.4) |
 | `stats.vector-bounds-inverted` | E | A `dimension` or `norm` carries `min > max` (§2.2.4) |
-| `stats.types-sum-mismatch` | E | A `types` map does not sum to its population: the scanned rows less `null_count` on a column, `occurrences - null_count` on a part (§2.2.4) |
+| `stats.types-sum-mismatch` | W | A `types` map does not sum to its population: the scanned rows less `null_count` on a column, `occurrences - null_count` on a part (§2.2.4). WARNING because `types` is counted in its own statement, apart from the ones reading `rows_scanned` and `null_count`, against a table taking writes — the cross-statement disagreement `stats.values-sum-mismatch` tolerates for the same reason |
 | `stats.part-path-not-canonical` | E | A `parts` key does not parse under the §2.2.18 grammar, or is not in its one canonical spelling |
 | `stats.part-parent-unlisted` | E | A part's parent part is not listed in the same `parts` map (§2.2.18) |
 | `stats.parts-found-below-listed` | E | `parts_found` is below the number of `parts` entries (§2.2.18) |
@@ -2746,7 +2748,7 @@ Grouped by concern. `E` = error, `W` = warning.
 | `relationships.mirror-mismatch` | E | A `refers_to` entry and its `referenced_by` mirror address the same edge but differ on a field both entry schemas define other than the address (`detection`, `on_delete`, `on_update`, `constraint_name`, `observed`), including a field present on one side only (§2.3.3, §2.3.10). Where several entries share one address, both sides must carry the same set |
 | `relationships.ineligible-target-is-referenced` | E | `eligible_target: false` but `referenced_by` carries an `inferred` entry — naming inference cannot resolve an edge to an ineligible object (§2.3.8). A `declared` entry there is unaffected; a composite key inference never reaches can still be a real FK target |
 | `relationships.path-on-composite-endpoint` | E | `path` (or `target_path`) is present but its partner array (`column` or `target_column`) names more than one column (§2.3.9) — a path endpoint is representable only on a single-column endpoint |
-| `relationships.observed-fanout-mismatch` | E | `observed.fanout_avg` disagrees with the referencing column's own `row_count / cardinality`, rounded per §2.2.6 (§2.3.10) |
+| `relationships.observed-fanout-mismatch` | E | `observed.fanout_avg` disagrees with the referencing column's own `(row_count - null_count) / cardinality`, numerator floored at `cardinality`, rounded per §2.2.6 (§2.3.10) |
 | `relationships.observed-coverage-mismatch` | E | `observed.target_coverage` disagrees with the two endpoints' own `cardinality / cardinality`, rounded per §2.2.6 (§2.3.10) |
 | `relationships.observed-coherent-mismatch` | E | `observed.coherent` disagrees with whether the referencing column's `cardinality` exceeds the referenced column's (§2.3.10) |
 | `relationships.observed-containment-mismatch` | E | `observed.containment` disagrees with the bottom-k intersection estimate recomputed from the two endpoints' own `sketch` (§2.3.10, §2.2.14) |
@@ -2761,7 +2763,7 @@ Grouped by concern. `E` = error, `W` = warning.
 | `diff.summary-total-mismatch` | W | `tables_modified + unchanged_tables + unevaluated_tables + tables_added` doesn't equal `target.tables_scanned` (§2.6.4). WARNING on the same grounds as `diff.summary-count-mismatch`: the events remain readable, and every operand is redundant with them |
 | `diff.relationship-modified-no-change` | E | `relationship_modified` event without `on_delete` OR `on_update` sub-objects (§2.6.6 rule) |
 | `diff.comment-target-column-mismatch` | E | `comment_changed` with `target=column` missing `column` field, OR `target=table` with `column` field present |
-| `diff.statistic-changed-delta-on-non-numeric` | E | `statistic_changed` with `delta` or `delta_pct` on stats where they MUST be omitted (distribution, classification, values) |
+| `diff.statistic-changed-delta-on-non-numeric` | E | `statistic_changed` with `delta` or `delta_pct` on stats where they MUST be omitted (distribution, classification, values, cardinality_method) |
 | `diff.statistic-changed-delta-pct-sign-mismatch` | E | `statistic_changed` where `delta` and `delta_pct` disagree in sign |
 | `diff.row-count-changed-delta-mismatch` | E | `table_row_count_changed` where `delta` doesn't equal `after - before` |
 | `diff.grain-changed-no-change` | E | `grain_changed` event's `before` and `after` are identical (§2.6.6) |
@@ -2797,8 +2799,8 @@ Grouped by concern. `E` = error, `W` = warning.
 ### 6.4 Catalog totals
 
 - **156 codes** across 10 groups
-- **125 error** codes (gate conformance)
-- **31 warning** codes (recoverable anomalies)
+- **124 error** codes (gate conformance)
+- **32 warning** codes (recoverable anomalies)
 
 The catalog MAY grow in MINOR releases (additive only). Existing codes' semantics MUST NOT change.
 

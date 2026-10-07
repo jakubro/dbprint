@@ -5,14 +5,12 @@ No healthy run exercises a degrade; regenerate with `python -m tests.fixtures.un
 
 from __future__ import annotations
 
-import re
 import shutil
 from pathlib import Path
 
 from dbprint.adapters import (
     ColumnMeta,
     ColumnStats,
-    CommentsMeta,
     Length,
     MockAdapter,
     MockTable,
@@ -24,6 +22,8 @@ from dbprint.adapters import (
 from dbprint.adapters.base import BaseStats, TableScope, temporal_block_unmeasured
 from dbprint.config import ConnectionConfig
 from dbprint.engine import Engine
+from tests._prints import columns, mock_table
+from tests._scripts import load_script
 
 
 COMMITTED = Path(__file__).resolve().parent / "unmeasured_print"
@@ -34,9 +34,6 @@ ROW_COUNT = 400
 # The engine stamps the real run instant, so an unfrozen restage rewrites four files that
 # carry no other change - and the gate normalizes instants on both sides, so nothing reads it.
 FROZEN_INSTANT = "2026-09-04T14:00:17Z"
-
-_INSTANT_KEYS = frozenset({"generated_at", "profiled_at", "scanned_at"})
-_INSTANT_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z")
 
 
 class CensusFails(MockAdapter):
@@ -80,43 +77,21 @@ def restage() -> None:
         shutil.rmtree(COMMITTED)
 
     COMMITTED.mkdir(parents=True)
-    _freeze_instants(build(COMMITTED))
+    load_script("example_support").normalize_timestamps(build(COMMITTED), FROZEN_INSTANT)
 
 
 def _fixture() -> dict[str, MockTable]:
     """One table whose temporal block was lost and whose census failed, plus a column with nulls."""
 
     return {
-        TABLE: MockTable(
-            type="table",
-            namespace_path=("seedbank", "accession"),
-            ddl=(
-                "CREATE TABLE seedbank.accession (\n"
-                "    logged_at timestamp NOT NULL,\n"
-                "    field_notes text\n"
-                ");\n"
-            ),
-            columns=[
-                ColumnMeta(
-                    name="logged_at",
-                    sql_type="timestamp",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-                ColumnMeta(
-                    name="field_notes",
-                    sql_type="text",
-                    nullable=True,
-                    default=None,
-                    ordinal=2,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={"logged_at": _degraded(), "field_notes": _measured()},
-            samples={},
+        TABLE: mock_table(
+            "seedbank.accession",
+            columns(("logged_at", "timestamp"), ("field_notes", "text", True)),
+            {"logged_at": _degraded(), "field_notes": _measured()},
+            ddl="CREATE TABLE seedbank.accession (\n"
+            "    logged_at timestamp NOT NULL,\n"
+            "    field_notes text\n"
+            ");\n",
             row_count=ROW_COUNT,
         ),
     }
@@ -154,27 +129,6 @@ def _measured() -> ColumnStats:
         values_coverage=0.111111,
         distribution="long_tail",
     )
-
-
-def _freeze_instants(print_root: Path) -> None:
-    """Rewrite every run instant to `FROZEN_INSTANT`, the same freeze the shipped examples take."""
-
-    for path in print_root.rglob("*.yaml"):
-        lines = path.read_text().splitlines(keepends=True)
-        changed = False
-
-        for i, line in enumerate(lines):
-            if line.lstrip().split(":", 1)[0] not in _INSTANT_KEYS:
-                continue
-
-            frozen = _INSTANT_RE.sub(FROZEN_INSTANT, line)
-
-            if frozen != line:
-                lines[i] = frozen
-                changed = True
-
-        if changed:
-            path.write_text("".join(lines))
 
 
 if __name__ == "__main__":

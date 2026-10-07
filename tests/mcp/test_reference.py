@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from dbprint.mcp import reference
+from tests._scripts import REPO_ROOT
 
 
 _SAMPLE = """\
@@ -167,6 +168,51 @@ class TestSectionOf:
         assert "0.1 What this spec covers" in text
 
 
+_GUIDE = """\
+# Reading a seed-bank print
+
+Opening text.
+
+## Vocabulary
+
+Vocabulary text.
+
+## Fields  that are easy to misread
+
+Misread text.
+
+### `values_coverage`
+
+Coverage text.
+"""
+
+
+class TestGuideSectionOf:
+    def test_a_heading_resolves_case_insensitively_with_whitespace_collapsed(self) -> None:
+        exact = reference.guide_section_of(_GUIDE, "Vocabulary")
+        folded = reference.guide_section_of(_GUIDE, "  vocabulary ")
+
+        assert exact == folded == "## Vocabulary\n\nVocabulary text.\n"
+
+    def test_a_heading_with_subsections_lists_them_by_title(self) -> None:
+        text = reference.guide_section_of(_GUIDE, "fields that are easy to misread")
+
+        assert text == (
+            "## Fields  that are easy to misread\n\nMisread text.\n\n"
+            "Subsections, each read by its own heading:\n\n- `values_coverage`\n"
+        )
+
+    def test_the_top_heading_lists_its_direct_subsections_only(self) -> None:
+        text = reference.guide_section_of(_GUIDE, "Reading a seed-bank print")
+
+        assert text is not None
+        assert text.splitlines()[-2:] == ["- Vocabulary", "- Fields  that are easy to misread"]
+        assert "Vocabulary text." not in text
+
+    def test_an_unknown_heading_returns_none(self) -> None:
+        assert reference.guide_section_of(_GUIDE, "No such heading") is None
+
+
 class TestHeadingTreeOf:
     def test_lists_every_heading_including_unnumbered(self) -> None:
         tree = reference.heading_tree_of(_SAMPLE)
@@ -221,7 +267,7 @@ class TestAgainstRealPackagedContent:
 
         import re
 
-        sources = (Path(__file__).resolve().parents[2] / "src/dbprint").rglob("*.py")
+        sources = (REPO_ROOT / "src/dbprint").rglob("*.py")
         cited: set[str] = set()
 
         for source in sources:
@@ -238,7 +284,7 @@ class TestAgainstRealPackagedContent:
 
         import re
 
-        sources = (Path(__file__).resolve().parents[2] / "src/dbprint").rglob("*.py")
+        sources = (REPO_ROOT / "src/dbprint").rglob("*.py")
         cited: set[str] = set()
 
         for source in sources:
@@ -249,6 +295,26 @@ class TestAgainstRealPackagedContent:
 
         for citation in cited:
             assert reference.section("assertions", citation) is not None, citation
+
+
+class TestThePackagedGuide:
+    """The installed guide, read with no print: `get_reference` serves this copy."""
+
+    def test_its_heading_tree_lists_the_guide(self) -> None:
+        tree = reference.guide_heading_tree()
+
+        assert tree.startswith("- Reading a dbprint print\n")
+        assert "  - Vocabulary\n" in tree
+
+    def test_its_vocabulary_section_stops_at_the_next_heading(self) -> None:
+        text = reference.guide_section("vocabulary")
+
+        assert text is not None
+        assert text.startswith("## Vocabulary\n")
+        assert "## Fields that are easy to misread" not in text
+
+    def test_every_listed_heading_resolves(self) -> None:
+        assert all(reference.guide_section(title) for title in reference.guide_headings())
 
 
 class TestSourceTreeFallback:
@@ -295,7 +361,7 @@ class TestSourceTreeFallback:
 
         import sys
 
-        repo_root = Path(__file__).resolve().parents[2]
+        repo_root = REPO_ROOT
         sys.path.insert(0, str(repo_root))
         from hatch_build import PACKAGED
 

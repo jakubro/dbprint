@@ -12,7 +12,6 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, LiteralString, cast
 
-import psycopg
 import pytest
 
 from dbprint.adapters import (
@@ -51,6 +50,7 @@ from tests.adapters.conftest import (
     _adapter_factory_for,
     _mysql_exec_many,
 )
+from tests.conftest import pg_connect
 
 
 # Method names required on every concrete adapter, written out rather than derived from the
@@ -1831,13 +1831,7 @@ def _seed(request: pytest.FixtureRequest, vendor: str, statements: list[str]) ->
     if vendor == "postgres":
         creds = request.getfixturevalue("postgres_test_db")
 
-        with psycopg.connect(
-            host=creds["host"],
-            port=int(creds["port"]),
-            dbname=creds["database"],
-            user=creds["user"],
-            autocommit=True,
-        ) as conn:
+        with pg_connect(creds) as conn:
             for statement in statements:
                 conn.execute(cast(LiteralString, statement))
     elif vendor == "mysql":

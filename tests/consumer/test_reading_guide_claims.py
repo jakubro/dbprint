@@ -9,32 +9,19 @@ the teaching each fail this module.
 
 from __future__ import annotations
 
-import importlib.util
 import re
-from pathlib import Path
 
 import pytest
 
+from tests._scripts import REPO_ROOT, load_script
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+
 SPEC_PATH = REPO_ROOT / "docs" / "format" / "v1" / "SPEC.md"
 
 _HEADING = re.compile(r"^#{2,4} (\d+(?:\.\d+)*)", re.MULTILINE)
 
 
-def _load_generator():
-    """Import scripts/gen_reading_guide.py, matching tests/engine/test_reading_guide.py."""
-
-    path = REPO_ROOT / "scripts" / "gen_reading_guide.py"
-    spec = importlib.util.spec_from_file_location("gen_reading_guide", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    return module
-
-
-gen = _load_generator()
+gen = load_script("gen_reading_guide")
 
 COVERS = frozenset(
     {
@@ -44,6 +31,11 @@ COVERS = frozenset(
         "truncated_fk_values",
         "unevaluated_diff_table",
         "empty_columns_map",
+        "column_with_several_edges",
+        "orphan_spelling",
+        "percentile_inside_range",
+        "grain_search_without_outcome",
+        "unreadable_profiled_at",
         "approximate_row_count",
         "incomplete_grain_search",
         "catalog_only_table",
@@ -78,6 +70,11 @@ ANCHORS: dict[str, tuple[str, str]] = {
     "declared_missing_artifact": ("7.3", "artifacts"),
     "delimiter_in_a_value": ("2.2.3", "values"),
     "value_spelling": ("2.2.4", "values"),
+    "orphan_spelling": ("2.2.4", "spelling_of"),
+    "column_with_several_edges": ("2.3", "refers_to"),
+    "percentile_inside_range": ("2.2.4", "percentiles"),
+    "grain_search_without_outcome": ("2.2.12", "exhausted"),
+    "unreadable_profiled_at": ("2.5", "profiled_at"),
     # The three scanned-set claims rest on SPEC 2.2.8's one rule; the guide names its block.
     "scoped_complete_list": ("2.2.8", "scope"),
     "scoped_candidate_key": ("2.2.8", "scope"),

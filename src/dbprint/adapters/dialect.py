@@ -40,6 +40,7 @@ class Dialect:
     row_count: str = "COUNT(1)"
     count_fn: str = "COUNT"
     distinct_count: str = "COUNT(DISTINCT {})"
+    trim_fold: str = "LOWER(TRIM({}))"
     text_type: str | None = "VARCHAR"
     order_by_alias: bool = False
     group_by_ordinal: bool = True

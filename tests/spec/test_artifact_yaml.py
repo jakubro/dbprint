@@ -16,9 +16,10 @@ from click.testing import CliRunner
 from dbprint.cli.main import main
 from dbprint.conformance.yaml_utils import SourcedFloat, SourcedInt, load_yaml
 from dbprint.spec import artifact_yaml
+from tests._scripts import REPO_ROOT
 
 
-_EXAMPLES = Path(__file__).resolve().parents[2] / "docs/format/v1/examples"
+_EXAMPLES = REPO_ROOT / "docs/format/v1/examples"
 _PROJECT_YAML = "connections:\n  production:\n    adapter: postgres\n    output: prints\n"
 _CONTEXT = ["context", "arboretum.seedbank.accession"]
 

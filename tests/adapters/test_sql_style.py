@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._scripts import REPO_ROOT
 from tests.adapters._sql_style import (
     file_layout_violations,
     file_violations,
@@ -18,21 +19,22 @@ from tests.adapters._sql_style import (
 )
 
 
-_LIB = Path(__file__).resolve().parents[2]
 _FENCE_RE = re.compile(r"```sql\n(.*?)```", re.DOTALL)
 _PLACEHOLDER_RE = re.compile(r"<[a-z_]+>")
 
 
 def _files_written_by_hand() -> list[tuple[Path, str]]:
-    files = [(path, "postgres") for path in sorted((_LIB / "scripts/sql").glob("*.sql"))]
+    files = [(path, "postgres") for path in sorted((REPO_ROOT / "scripts/sql").glob("*.sql"))]
     files += [
-        (path, "postgres") for path in sorted((_LIB / "tests/integration/fixtures").glob("*.sql"))
+        (path, "postgres")
+        for path in sorted((REPO_ROOT / "tests/integration/fixtures").glob("*.sql"))
     ]
     files += [
-        (path, "mysql") for path in sorted((_LIB / "tests/adapters/fixtures/mysql").glob("*.sql"))
+        (path, "mysql")
+        for path in sorted((REPO_ROOT / "tests/adapters/fixtures/mysql").glob("*.sql"))
     ]
 
-    for vendor_dir in sorted((_LIB / "tests/live/fixtures").iterdir()):
+    for vendor_dir in sorted((REPO_ROOT / "tests/live/fixtures").iterdir()):
         files += [(path, vendor_dir.name) for path in sorted(vendor_dir.glob("*.sql"))]
 
     return files
@@ -41,7 +43,7 @@ def _files_written_by_hand() -> list[tuple[Path, str]]:
 def _fences() -> list[tuple[str, str, str]]:
     return [
         (f"{page.name}#{index}", page.stem, fence)
-        for page in sorted((_LIB / "docs/adapters").glob("*.md"))
+        for page in sorted((REPO_ROOT / "docs/adapters").glob("*.md"))
         for index, fence in enumerate(_FENCE_RE.findall(page.read_text(encoding="utf-8")))
     ]
 
@@ -49,7 +51,7 @@ def _fences() -> list[tuple[str, str, str]]:
 @pytest.mark.parametrize(
     ("path", "dialect"),
     _files_written_by_hand(),
-    ids=lambda value: value.relative_to(_LIB).as_posix() if isinstance(value, Path) else value,
+    ids=lambda value: value.relative_to(REPO_ROOT).as_posix() if isinstance(value, Path) else value,
 )
 def test_a_sql_file_written_by_hand_keeps_the_house_style(path: Path, dialect: str) -> None:
     text = path.read_text(encoding="utf-8")

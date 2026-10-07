@@ -44,3 +44,42 @@ def call(name: str, *args: str) -> str:
         return flat
 
     return f"{name}(\n  {listed(args, 2)}\n)"
+
+
+def split_top_level(text: str, quote_char: str) -> list[str]:
+    """Split `text` on the commas outside parentheses, quoted identifiers and string literals."""
+
+    parts: list[str] = []
+    current: list[str] = []
+    depth = 0
+    quoted: str | None = None
+
+    for ch in text:
+        if quoted is not None:
+            quoted = None if ch == quoted else quoted
+        elif ch in (quote_char, "'"):
+            quoted = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+            continue
+
+        current.append(ch)
+
+    parts.append("".join(current))
+
+    return parts
+
+
+def trimmed_lines(text: str) -> str:
+    """`text` with each line's trailing whitespace and the outer blank lines stripped, ending in
+    one newline, or empty when nothing is left (SPEC 2.1.3).
+    """
+
+    joined = "\n".join(line.rstrip() for line in text.split("\n")).strip("\n")
+
+    return joined + "\n" if joined else ""

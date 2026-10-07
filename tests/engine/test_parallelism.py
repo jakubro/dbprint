@@ -14,7 +14,7 @@ from dbprint.adapters import MockAdapter, MockTable, TableScope, trace_context
 from dbprint.adapters.base import ColumnMeta, PhaseA, StatisticsConfig, TableCounts
 from dbprint.config.project import ConnectionConfig, RuleConfig
 from dbprint.engine import Engine, GenerateRequest, GenerateResult, orchestrator
-from tests.engine.test_orchestrator import _curator_fixture
+from tests._curator import curator_fixture
 
 
 PINNED_NOW = "2026-01-01T00:00:00Z"
@@ -67,11 +67,12 @@ class _SessionRecordingAdapter(MockAdapter):
         self,
         fqn: str,
         column: str,
+        sql_type: str,
         scope: TableScope | None = None,
     ) -> int:
         self.calls.append(("normalized", fqn, id(self)))
 
-        return super().compute_normalized_cardinality(fqn, column, scope)
+        return super().compute_normalized_cardinality(fqn, column, sql_type, scope)
 
     def release_scope(self, fqn: str, scope: TableScope) -> None:
         self.calls.append(("release", fqn, id(self)))
@@ -94,7 +95,7 @@ class _OneTableFailsAdapter(_SessionRecordingAdapter):
 
 
 def _fixture() -> dict[str, MockTable]:
-    base = _curator_fixture()
+    base = curator_fixture()
     herbarium = base["public.herbarium"]
     extra = {
         f"public.h{i}": replace(herbarium, namespace_path=("public", f"h{i}")) for i in range(1, 7)

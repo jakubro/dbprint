@@ -6,7 +6,6 @@ binary fails fast with an actionable error.
 
 from __future__ import annotations
 
-import importlib
 import logging
 import shutil
 import subprocess
@@ -86,8 +85,7 @@ class Connection:
             )
         except psycopg.Error as exc:
             raise PostgresConnectionError(
-                f"could not connect to Postgres at {self.params.host}:{self.params.port}/"
-                f"{self.params.database} as {self.params.user!r}: {exc}",
+                driver.connect_failure("Postgres", self.params, exc),
             ) from exc
 
     def close(self) -> None:
@@ -147,13 +145,7 @@ def ensure_pg_dump_available() -> None:
 def _import_psycopg() -> Any:
     """Import psycopg lazily; raise an actionable error when the extra is absent."""
 
-    try:
-        return importlib.import_module("psycopg")
-    except ImportError as exc:
-        raise PostgresConnectionError(
-            "psycopg is not installed. Install dbprint with the [postgres] extra: "
-            "`pip install dbprint[postgres]`.",
-        ) from exc
+    return driver.import_extra("psycopg", "psycopg", "postgres", PostgresConnectionError)
 
 
 def _session_options(statement_timeout: int | None) -> dict[str, str]:

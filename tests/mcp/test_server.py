@@ -23,6 +23,7 @@ from mcp.types import CallToolResult, TextContent
 from dbprint.config import ConnectionConfig
 from dbprint.mcp import ServedConnections, build_server
 from dbprint.mcp import tools as tools_module
+from tests._scripts import REPO_ROOT
 from .conftest import StdioServer
 
 
@@ -129,10 +130,10 @@ def _stdio_read_resource_error(server: StdioServer, uri: str) -> SdkMcpError:
     return anyio.run(_run)
 
 
-def _stdio_list_resources_error_code(server: StdioServer) -> int:
-    """Drive `resources/list` over the real stdio wire; return the JSON-RPC code."""
+def _stdio_list_resource_uris(server: StdioServer) -> list[str]:
+    """Drive `resources/list` over the real stdio wire; the first page's URIs."""
 
-    async def _run() -> int:
+    async def _run() -> list[str]:
         async with (
             stdio_client(_stdio_params(server)) as (read, write),
             ClientSession(
@@ -141,13 +142,9 @@ def _stdio_list_resources_error_code(server: StdioServer) -> int:
             ) as session,
         ):
             await session.initialize()
+            page = await session.list_resources()
 
-            try:
-                await session.list_resources()
-            except SdkMcpError as exc:
-                return exc.error.code
-
-            raise AssertionError("list_resources did not raise an MCPError")
+            return [str(r.uri) for r in page.resources]
 
     return anyio.run(_run)
 
@@ -473,6 +470,15 @@ class TestTheInstructionsRouteBeforeTheyInterpret:
 
         assert "Scope." in reading
 
+    def test_the_routing_names_the_guide(self) -> None:
+        from dbprint.mcp.server import SERVER_DESCRIPTION
+
+        routing = SERVER_DESCRIPTION.split("Reading an answer:", 1)[0]
+
+        assert "how to read json/yaml fields: get_reference document: guide" in " ".join(
+            routing.split(),
+        )
+
 
 class TestTheInstructionsCarryTheQueryWriterRules:
     """The two decisions an agent makes badly untold: which context to read, and when to ask."""
@@ -483,6 +489,16 @@ class TestTheInstructionsCarryTheQueryWriterRules:
         assert "offers no other" not in SERVER_DESCRIPTION
         # `rows_scanned / row_count` is below 1: an agent multiplying by it shrinks the count.
         assert "rescaled by rows_scanned / row_count" not in SERVER_DESCRIPTION
+        assert "Under a sample a count MAY be multiplied" not in SERVER_DESCRIPTION
+
+    def test_a_distinct_count_never_rescales(self) -> None:
+        from dbprint.mcp.server import SERVER_DESCRIPTION
+
+        scope = " ".join(SERVER_DESCRIPTION.split("- Scope.", 1)[1].split("\n-", 1)[0].split())
+        never = scope.split("under a filter nothing rescales, and", 1)[1]
+
+        assert "a distinct count," in never
+        assert never.rstrip().endswith("never does.")
 
     def test_the_guide_states_the_same_facts_in_the_prints_own_files(self) -> None:
         """The guide's reader holds files, not tools; the tools are its closing sentence."""
@@ -503,7 +519,7 @@ class TestTheInstructionsCarryTheQueryWriterRules:
 
 # `SERVER_DESCRIPTION` is delivered unprompted on every connect, so each entry anchors one of its
 # claims to the SPEC sentence behind it: a moved or reworded sentence fails here instead.
-_SPEC_PATH = Path(__file__).resolve().parents[2] / "docs/format/v1/SPEC.md"
+_SPEC_PATH = REPO_ROOT / "docs/format/v1/SPEC.md"
 
 _SERVER_DESCRIPTION_ANCHORS = (
     (
@@ -512,6 +528,10 @@ _SERVER_DESCRIPTION_ANCHORS = (
             "sample is representative"
         ),
         "SPEC 2.2.8's sum-not-rescalable sentence moved",
+    ),
+    (
+        "A reader MUST NOT rescale a field that is not a row count",
+        "SPEC 2.2.8's only-row-counts-rescale sentence moved",
     ),
     (
         'absence means "not detected", never "safe to publish"',
@@ -605,13 +625,19 @@ class TestToolFormatShapesReachTheWire:
 class TestRealTransportErrorPaths:
     """Error paths only a real transport can exercise, over a real stdio subprocess."""
 
-    def test_list_resources_maps_a_corrupt_manifest(self, stdio_server: StdioServer) -> None:
+    def test_a_corrupt_manifest_withholds_only_its_tables_from_the_listing(
+        self,
+        stdio_server: StdioServer,
+    ) -> None:
         manifest_path = (
             stdio_server.project_dir / "prints" / stdio_server.conn_name / "manifest.yaml"
         )
         manifest_path.write_text("not: valid: yaml: [")
 
-        assert _stdio_list_resources_error_code(stdio_server) == -32603
+        uris = _stdio_list_resource_uris(stdio_server)
+
+        assert f"dbprint://{stdio_server.conn_name}/manifest" in uris
+        assert not any("arboretum." in uri for uri in uris)
 
     def test_a_paged_json_context_names_its_next_page_on_the_wire(
         self,

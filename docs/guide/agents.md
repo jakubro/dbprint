@@ -61,15 +61,15 @@ The server states which tool answers which question, then how to read an answer,
 > - Which table or column holds a fact, by name, type, shape (email, phone) or what its notes say: search_columns (`text` searches the notes).
 > - Which tables exist, their row counts, whether their statistics are stale: list_tables with detail: true.
 > - What changed since the previous run: get_diff.
-> - What a field or a finding's spec_ref means: get_reference.
+> - What a field or a finding's spec_ref means: get_reference; how to read json/yaml fields: get_reference document: guide.
 > - The raw manifest index: get_manifest.
 >
 > Reading an answer:
-> - Scope. A table with a scope block was read in part, by a sample or a row filter; its statistics describe the rows scanned, not the table. Under a sample a count MAY be multiplied by row_count / rows_scanned for a rough table-wide figure; under a filter nothing rescales, and a ratio, bound, percentile, sum or mean never does.
+> - Scope. A table with a scope block was read in part, by a sample or a row filter; its statistics describe the rows scanned, not the table. Under a sample a row count - nulls, a value's count, a true/false split - MAY be multiplied by row_count / rows_scanned for a rough table-wide figure; under a filter nothing rescales, and a distinct count, ratio, bound, percentile, sum or mean never does.
 > - Inference. Fields under inferred, and relationships whose detection is inferred or measured, are dbprint's guesses, not database constraints. No sensitivity on a column means nothing was detected, not that the column is safe to publish.
 > - Absence. A missing field is not zero. A field named in an unmeasured list was not measured this run: its value is unknown, not none.
 
-**Get the rescaling direction right.** Under a sample, a count on a column carrying a population marker scales to table grain by `count * (row_count / rows_scanned)`; under a filter nothing rescales. A ratio, a bound, a percentile or an aggregate is not scalable at all, under any formula.
+**Get the rescaling direction right.** Under a sample, a row count — nulls, a value's count, a true/false split — on a column carrying a population marker scales to table grain by `count * (row_count / rows_scanned)`; under a filter nothing rescales. A distinct count, a ratio, a bound, a percentile or an aggregate is not scalable at all, under any formula.
 
 `looks_like` publishes the `sampled`/`matched` draw it rests on and `candidate_key` is recomputable from `cardinality_ratio`; `sensitivity` publishes no evidence at all — an agent that has learned to trust `looks_like`'s published evidence should not extend the same trust to a `sensitivity` flag with nothing behind it.
 
@@ -114,10 +114,10 @@ $ dbprint context 'arboretum.seedbank.*' --budget 4000
 
 | `--purpose` | Sections | Read it when |
 |---|---|---|
-| `profile` (default) | Header, DDL, Description, Annotations, Cardinality table, Relationships | You want to know what is in the table and how much of it was measured |
-| `query` | Header, DDL, Joins, Data dictionary, Column values | You are about to write SQL against the table |
+| `profile` (default) | Header, Terms, DDL, Description, Annotations, Cardinality table, Relationships | You want to know what is in the table and how much of it was measured |
+| `query` | Header, Terms, DDL, Joins, Data dictionary, Column values | You are about to write SQL against the table |
 
-`query` drops every statistic and renders instead what a query writer needs a literal from: the columns whose value list a predicate can be written from, each with its counts, and a coverage cell saying whether that list is the column's whole domain or, as a percentage, the share of it the five most frequent values cover. A value with a note in `statistics.annotations.yaml` carries it inline, so what a code means sits beside the code itself. Every value and number is spelled so it reads back as itself — `NULL` is a genuine null, `'NULL'` the stored string; the [MCP server specification](../MCP.md#41-get_table_context) states the full rule. The join paths are the `## Joins` list: the DDL's foreign keys and the edges the print inferred or measured, each with its detection, so a table whose catalog declares no key still says what it joins to.
+`query` drops every statistic but each nullable column's null share — the cue that a predicate needs an `IS NULL` arm — and renders instead what a query writer needs a literal from: the columns whose value list a predicate can be written from, each with its counts, and a coverage cell saying whether that list is the column's whole domain or, as a percentage, the share of it the five most frequent values cover. A value with a note in `statistics.annotations.yaml` carries it inline, so what a code means sits beside the code itself. Every value and number is spelled so it reads back as itself — `NULL` is a genuine null, `'NULL'` the stored string; the [MCP server specification](../MCP.md#41-get_table_context) states the full rule. The join paths are the `## Joins` list: the DDL's foreign keys and the edges the print inferred or measured, each with its detection, so a table whose catalog declares no key still says what it joins to.
 
 When the fragment is over budget, dropping a whole section usually beats letting `--budget` truncate, because you choose what goes:
 
@@ -139,4 +139,4 @@ Three things are worth stating in your own rules file, because they are the misr
 
 - **A sampled table's ratios are denominated in `rows_scanned`, not in `row_count`.** A `null_rate` under a `scope` block describes the sample. [Choosing what to profile](scoping.md) covers the block; the print's own `reading.md` says the same thing to whoever opens it.
 - **An absent field is not a zero.** The format distinguishes "measured and absent" from "never measured", and [SPEC 7](../format/v1/SPEC.md#7-reading-an-absence) is written from the reader's side specifically for this.
-- **Only a count rescales to table grain, and only by multiplying.** See "Get the rescaling direction right" above — the two ratios are reciprocals, so an agent that reaches for the wrong one gets a plausible number rather than an obvious error.
+- **Only a row count rescales to table grain, and only by multiplying.** See "Get the rescaling direction right" above — the two ratios are reciprocals, so an agent that reaches for the wrong one gets a plausible number rather than an obvious error.

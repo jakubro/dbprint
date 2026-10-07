@@ -17,6 +17,7 @@ import pytest
 import yaml
 
 from dbprint.adapters import ColumnStats, StatisticsConfig, TableCounts, TableScope
+from dbprint.adapters import base as adapters_base
 from dbprint.adapters.base import PhaseB
 from dbprint.adapters.errors import QueryFailed
 from dbprint.adapters.identifiers import Identity, UnknownTable
@@ -24,6 +25,9 @@ from dbprint.adapters.postgres import DIALECT, PostgresAdapter, PostgresConnecti
 from dbprint.adapters.postgres.connection import ConnectionParams, exec_query
 from dbprint.adapters.postgres.ddl import extract_ddl, normalize
 from dbprint.spec.distribution import classify as classify_distribution
+from tests._engine_run import conformance_errors
+from tests._prints import connection_config
+from tests.conftest import pg_connect
 
 
 # Lazy-driver (missing [postgres] extra) unit test (no DB).
@@ -39,7 +43,7 @@ class TestMissingExtra:
 
         with (
             patch(
-                "dbprint.adapters.postgres.connection.importlib.import_module",
+                "dbprint.adapters.driver.importlib.import_module",
                 side_effect=ImportError("psycopg not installed"),
             ),
             pytest.raises(PostgresConnectionError, match=r"dbprint\[postgres\]"),
@@ -463,16 +467,8 @@ class TestPhysicalColumnIdentity:
     """SPEC 2.2.1: the `columns` map key is lowercase even where the catalog spelling differs."""
 
     def _seed_mixed_case(self, creds: dict[str, str]) -> None:
-        import psycopg
 
-        with psycopg.connect(
-            host=creds["host"],
-            port=int(creds["port"]),
-            dbname=creds["database"],
-            user=creds["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
+        with pg_connect(creds) as conn:
             conn.execute(
                 'CREATE TABLE public.curator (id serial primary key, "fullName" text, '
                 '"seedCount" int)',
@@ -557,21 +553,13 @@ class TestPhysicalColumnIdentity:
     ) -> None:
         """Detection reads the catalog's own case, so a redact rule reaches a camelCase column."""
 
-        from dbprint.config.project import ConnectionConfig, DiffConfig, RedactRule
-        from dbprint.conformance import validate_print
+        from dbprint.config.project import RedactRule
         from dbprint.engine import Engine
 
         self._seed_mixed_case(postgres_test_db)
-        conn = ConnectionConfig(
-            name="primary",
-            adapter="postgres",
-            auto=False,
+        conn = connection_config(
             output=tmp_path,
             include=(f"{postgres_test_db['database']}.public.curator",),
-            exclude=(),
-            max_age_days=7,
-            statistics=StatisticsConfig(),
-            diff=DiffConfig(),
             redact=(RedactRule(sensitivity=("personal_name",), with_="mask"),),
         )
         adapter = PostgresAdapter(postgres_test_db)
@@ -593,7 +581,7 @@ class TestPhysicalColumnIdentity:
         assert column["inferred"]["sensitivity"] == "personal_name"
         assert column["redacted"] == "mask"
 
-        errors = [i for i in validate_print(tmp_path / "primary") if i.severity == "error"]
+        errors = conformance_errors(tmp_path / "primary")
         assert errors == [], "Conformance violations:\n" + "\n".join(
             f"  {e.code} at {e.path}: {e.detail}" for e in errors
         )
@@ -606,16 +594,8 @@ class TestPhysicalTableIdentity:
     """
 
     def _seed_mixed_case_table(self, creds: dict[str, str]) -> None:
-        import psycopg
 
-        with psycopg.connect(
-            host=creds["host"],
-            port=int(creds["port"]),
-            dbname=creds["database"],
-            user=creds["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
+        with pg_connect(creds) as conn:
             conn.execute('CREATE SCHEMA "Seedbank"')
             conn.execute('CREATE TABLE "Seedbank"."Accession" (id int, label text)')
             conn.execute(
@@ -689,6 +669,7 @@ class TestPhysicalTableIdentity:
             normalized = adapter.compute_normalized_cardinality(
                 f"{postgres_test_db['database']}.seedbank.accession",
                 "label",
+                next(c.classified_type for c in cols if c.name == "label"),
             )
         finally:
             adapter.close()
@@ -734,16 +715,8 @@ class TestCollation:
     """SPEC 2.2.2/2.2.4: `cardinality` and its neighbors are collation-relative."""
 
     def _seed(self, creds: dict[str, str]) -> None:
-        import psycopg
 
-        with psycopg.connect(
-            host=creds["host"],
-            port=int(creds["port"]),
-            dbname=creds["database"],
-            user=creds["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
+        with pg_connect(creds) as conn:
             conn.execute(
                 "CREATE TABLE public.labels (id serial primary key, "
                 'plain text, forced text COLLATE "C")',
@@ -778,21 +751,12 @@ class TestCollation:
         postgres_test_db: dict[str, str],
         tmp_path: Path,
     ) -> None:
-        from dbprint.config.project import ConnectionConfig, DiffConfig
-        from dbprint.conformance import validate_print
         from dbprint.engine import Engine
 
         self._seed(postgres_test_db)
-        conn = ConnectionConfig(
-            name="primary",
-            adapter="postgres",
-            auto=False,
+        conn = connection_config(
             output=tmp_path,
             include=(f"{postgres_test_db['database']}.public.labels",),
-            exclude=(),
-            max_age_days=7,
-            statistics=StatisticsConfig(),
-            diff=DiffConfig(),
         )
         adapter = PostgresAdapter(postgres_test_db)
         Engine(adapter, conn, tmp_path).generate()
@@ -814,7 +778,7 @@ class TestCollation:
         assert "collation" not in columns["plain"]
         assert columns["forced"]["collation"] == "C"
 
-        errors = [i for i in validate_print(tmp_path / "primary") if i.severity == "error"]
+        errors = conformance_errors(tmp_path / "primary")
         assert errors == [], "Conformance violations:\n" + "\n".join(
             f"  {e.code} at {e.path}: {e.detail}" for e in errors
         )
@@ -822,18 +786,10 @@ class TestCollation:
 
 class TestEdgeCases:
     def test_all_null_column(self, postgres_test_db: dict[str, str]) -> None:
-        import psycopg
 
         from dbprint.config import StatisticsConfig
 
-        with psycopg.connect(
-            host=postgres_test_db["host"],
-            port=int(postgres_test_db["port"]),
-            dbname=postgres_test_db["database"],
-            user=postgres_test_db["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
+        with pg_connect(postgres_test_db) as conn:
             conn.execute("CREATE TABLE public.nullable_t (id int PRIMARY KEY, opt text)")
             conn.execute("INSERT INTO public.nullable_t (id, opt) VALUES (1, NULL), (2, NULL)")
 
@@ -854,16 +810,8 @@ class TestEdgeCases:
             adapter.close()
 
     def test_composite_fk_emits_array(self, postgres_test_db: dict[str, str]) -> None:
-        import psycopg
 
-        with psycopg.connect(
-            host=postgres_test_db["host"],
-            port=int(postgres_test_db["port"]),
-            dbname=postgres_test_db["database"],
-            user=postgres_test_db["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
+        with pg_connect(postgres_test_db) as conn:
             conn.execute(
                 """
                 CREATE TABLE public.parent (a int, b int, PRIMARY KEY (a, b))
@@ -891,16 +839,8 @@ class TestEdgeCases:
             adapter.close()
 
     def test_self_referential_fk(self, postgres_test_db: dict[str, str]) -> None:
-        import psycopg
 
-        with psycopg.connect(
-            host=postgres_test_db["host"],
-            port=int(postgres_test_db["port"]),
-            dbname=postgres_test_db["database"],
-            user=postgres_test_db["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
+        with pg_connect(postgres_test_db) as conn:
             conn.execute(
                 """
                 CREATE TABLE public.curator (
@@ -924,16 +864,8 @@ class TestEdgeCases:
             adapter.close()
 
     def test_view_listed_but_no_relationships(self, postgres_test_db: dict[str, str]) -> None:
-        import psycopg
 
-        with psycopg.connect(
-            host=postgres_test_db["host"],
-            port=int(postgres_test_db["port"]),
-            dbname=postgres_test_db["database"],
-            user=postgres_test_db["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
+        with pg_connect(postgres_test_db) as conn:
             conn.execute("CREATE TABLE public.src (id int PRIMARY KEY)")
             conn.execute("CREATE VIEW public.src_v AS SELECT * FROM public.src")
 
@@ -946,16 +878,8 @@ class TestEdgeCases:
             adapter.close()
 
     def test_matview_listed_with_type(self, postgres_test_db: dict[str, str]) -> None:
-        import psycopg
 
-        with psycopg.connect(
-            host=postgres_test_db["host"],
-            port=int(postgres_test_db["port"]),
-            dbname=postgres_test_db["database"],
-            user=postgres_test_db["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
+        with pg_connect(postgres_test_db) as conn:
             conn.execute("CREATE TABLE public.src (id int PRIMARY KEY)")
             conn.execute("CREATE MATERIALIZED VIEW public.src_mv AS SELECT * FROM public.src")
 
@@ -977,16 +901,7 @@ class TestEdgeCases:
         on one is reached by the `pg_index` arm, whose join carries no relkind filter.
         """
 
-        import psycopg
-
-        with psycopg.connect(
-            host=postgres_test_db["host"],
-            port=int(postgres_test_db["port"]),
-            dbname=postgres_test_db["database"],
-            user=postgres_test_db["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
+        with pg_connect(postgres_test_db) as conn:
             conn.execute("CREATE TABLE public.mv_src (id int PRIMARY KEY, code text NOT NULL)")
             conn.execute(
                 "CREATE MATERIALIZED VIEW public.mv_src_mv AS SELECT id, code FROM public.mv_src",
@@ -1007,18 +922,10 @@ class TestEdgeCases:
             adapter.close()
 
     def test_varied_types(self, postgres_test_db: dict[str, str]) -> None:
-        import psycopg
 
         from dbprint.config import StatisticsConfig
 
-        with psycopg.connect(
-            host=postgres_test_db["host"],
-            port=int(postgres_test_db["port"]),
-            dbname=postgres_test_db["database"],
-            user=postgres_test_db["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
+        with pg_connect(postgres_test_db) as conn:
             conn.execute(
                 """
                 CREATE TABLE public.varied (
@@ -1098,18 +1005,9 @@ class TestEdgeCases:
         falls through the same path.
         """
 
-        import psycopg
-
         from dbprint.config import StatisticsConfig
 
-        with psycopg.connect(
-            host=postgres_test_db["host"],
-            port=int(postgres_test_db["port"]),
-            dbname=postgres_test_db["database"],
-            user=postgres_test_db["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
+        with pg_connect(postgres_test_db) as conn:
             conn.execute("CREATE TYPE public.street_address_t AS (institution text, phone text)")
             conn.execute("CREATE DOMAIN public.street_address_d AS public.street_address_t")
             conn.execute(
@@ -1161,16 +1059,7 @@ class TestEdgeCases:
     ) -> None:
         """The union with `pg_constraint` must not scramble a composite key's positions."""
 
-        import psycopg
-
-        with psycopg.connect(
-            host=postgres_test_db["host"],
-            port=int(postgres_test_db["port"]),
-            dbname=postgres_test_db["database"],
-            user=postgres_test_db["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
+        with pg_connect(postgres_test_db) as conn:
             conn.execute(
                 "CREATE TABLE public.pairs (id int PRIMARY KEY, b text NOT NULL, a text NOT NULL)",
             )
@@ -1199,16 +1088,7 @@ class TestEdgeCases:
         out of `introspect_unique_keys` even though `indisunique` is true.
         """
 
-        import psycopg
-
-        with psycopg.connect(
-            host=postgres_test_db["host"],
-            port=int(postgres_test_db["port"]),
-            dbname=postgres_test_db["database"],
-            user=postgres_test_db["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
+        with pg_connect(postgres_test_db) as conn:
             conn.execute(
                 "CREATE TABLE public.soft_deletes (id int PRIMARY KEY, "
                 "code text NOT NULL, deleted_at timestamp)",
@@ -1244,16 +1124,8 @@ class TestPhysicalLayout:
     """The declared partition key via `pg_get_partkeydef`, on the parent relation only."""
 
     def _connect(self, postgres_test_db: dict[str, str]) -> Any:
-        import psycopg
 
-        return psycopg.connect(
-            host=postgres_test_db["host"],
-            port=int(postgres_test_db["port"]),
-            dbname=postgres_test_db["database"],
-            user=postgres_test_db["user"],
-            password="",
-            autocommit=True,
-        )
+        return pg_connect(postgres_test_db)
 
     def test_a_single_column_key_is_recovered(
         self,
@@ -1390,16 +1262,8 @@ class TestViewDependencies:
     """`introspect_view_dependencies` via `pg_depend`/`pg_rewrite`, one query for the run."""
 
     def _connect(self, postgres_test_db: dict[str, str]) -> Any:
-        import psycopg
 
-        return psycopg.connect(
-            host=postgres_test_db["host"],
-            port=int(postgres_test_db["port"]),
-            dbname=postgres_test_db["database"],
-            user=postgres_test_db["user"],
-            password="",
-            autocommit=True,
-        )
+        return pg_connect(postgres_test_db)
 
     def test_a_view_reading_two_tables_lists_both(
         self,
@@ -1506,16 +1370,8 @@ class TestPartitionChildExclusion:
     """`list_tables` enumerates a partitioned table's parent, never its children."""
 
     def _connect(self, postgres_test_db: dict[str, str]) -> Any:
-        import psycopg
 
-        return psycopg.connect(
-            host=postgres_test_db["host"],
-            port=int(postgres_test_db["port"]),
-            dbname=postgres_test_db["database"],
-            user=postgres_test_db["user"],
-            password="",
-            autocommit=True,
-        )
+        return pg_connect(postgres_test_db)
 
     def test_attached_partitions_collapse_to_the_parent_alone(
         self,
@@ -1646,16 +1502,7 @@ class TestHashOrderedDraw:
     ) -> None:
         """5,000 rows stays on the small path, where n=1000 clears `n * SMALL_TABLE_FACTOR`."""
 
-        import psycopg
-
-        with psycopg.connect(
-            host=postgres_test_db["host"],
-            port=int(postgres_test_db["port"]),
-            dbname=postgres_test_db["database"],
-            user=postgres_test_db["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
+        with pg_connect(postgres_test_db) as conn:
             conn.execute("CREATE TABLE public.late_shape (v text)")
             conn.execute(
                 "INSERT INTO public.late_shape SELECT 'row-' || i FROM generate_series(1, 4000) i",
@@ -1685,16 +1532,7 @@ class TestHashOrderedDraw:
     def test_two_draws_over_unchanged_data_agree(self, postgres_test_db: dict[str, str]) -> None:
         """The hash order is a function of the table's own seed, not session state."""
 
-        import psycopg
-
-        with psycopg.connect(
-            host=postgres_test_db["host"],
-            port=int(postgres_test_db["port"]),
-            dbname=postgres_test_db["database"],
-            user=postgres_test_db["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
+        with pg_connect(postgres_test_db) as conn:
             conn.execute("CREATE TABLE public.stable_draw (v text)")
             conn.execute(
                 "INSERT INTO public.stable_draw SELECT 'val-' || i FROM generate_series(1, 5000) i",
@@ -1729,7 +1567,6 @@ class TestApproximateCardinality:
 
     @staticmethod
     def _profile(creds: dict[str, str], fqn: str, threshold: int) -> PhaseB:
-        from dbprint.adapters.postgres import stats as pg_stats
         from dbprint.config import StatisticsConfig
 
         adapter = _connected(creds)
@@ -1737,7 +1574,7 @@ class TestApproximateCardinality:
         try:
             cols = adapter.introspect_columns(fqn)
 
-            with patch.object(pg_stats, "APPROXIMATE_THRESHOLD", threshold):
+            with patch.object(adapters_base, "APPROXIMATE_THRESHOLD", threshold):
                 _, computed = adapter.compute_statistics(
                     fqn,
                     cols,
@@ -1753,16 +1590,7 @@ class TestApproximateCardinality:
     def _seed(creds: dict[str, str], *, analyze: bool) -> None:
         """500 rows: `id` unique (negative n_distinct), `label` four values."""
 
-        import psycopg
-
-        with psycopg.connect(
-            host=creds["host"],
-            port=int(creds["port"]),
-            dbname=creds["database"],
-            user=creds["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
+        with pg_connect(creds) as conn:
             conn.execute("CREATE TABLE public.wide_t (id int, label text)")
             conn.execute(
                 "INSERT INTO public.wide_t "
@@ -1860,16 +1688,7 @@ class TestStaleEstimateCannotUnboundTheRead:
     def _seed(creds: dict[str, str]) -> None:
         """Analyze on four labels, then add two thousand more without re-analyzing."""
 
-        import psycopg
-
-        with psycopg.connect(
-            host=creds["host"],
-            port=int(creds["port"]),
-            dbname=creds["database"],
-            user=creds["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
+        with pg_connect(creds) as conn:
             conn.execute("CREATE TABLE public.stale_t (label text)")
             conn.execute(
                 "INSERT INTO public.stale_t SELECT 'label_' || (g % 4) "
@@ -1882,17 +1701,16 @@ class TestStaleEstimateCannotUnboundTheRead:
 
     @staticmethod
     def _profile(creds: dict[str, str]) -> tuple[PhaseB, list[str]]:
-        from dbprint.adapters.postgres import stats as pg_stats
         from dbprint.config import StatisticsConfig
-        from tests.adapters.test_dialect_guard import _install_recorder
+        from tests.adapters._dialects import install_recorder
 
         adapter = _connected(creds)
-        recorder = _install_recorder(adapter)
+        recorder = install_recorder(adapter)
 
         try:
             cols = adapter.introspect_columns(f"{creds['database']}.public.stale_t")
 
-            with patch.object(pg_stats, "APPROXIMATE_THRESHOLD", 10):
+            with patch.object(adapters_base, "APPROXIMATE_THRESHOLD", 10):
                 _, computed = adapter.compute_statistics(
                     f"{creds['database']}.public.stale_t",
                     cols,
@@ -1954,16 +1772,7 @@ class TestApproximateEstimateBoundedByNonNullCount:
     def _seed(creds: dict[str, str]) -> None:
         """1000 unique values, analyzed, then 500 nulls added without re-analyzing."""
 
-        import psycopg
-
-        with psycopg.connect(
-            host=creds["host"],
-            port=int(creds["port"]),
-            dbname=creds["database"],
-            user=creds["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
+        with pg_connect(creds) as conn:
             conn.execute("CREATE TABLE public.null_heavy_t (val int)")
             conn.execute(
                 "INSERT INTO public.null_heavy_t SELECT g FROM generate_series(1, 1000) g",
@@ -1975,7 +1784,6 @@ class TestApproximateEstimateBoundedByNonNullCount:
 
     @staticmethod
     def _profile(creds: dict[str, str]) -> ColumnStats:
-        from dbprint.adapters.postgres import stats as pg_stats
         from dbprint.config import StatisticsConfig
 
         adapter = _connected(creds)
@@ -1983,7 +1791,7 @@ class TestApproximateEstimateBoundedByNonNullCount:
         try:
             cols = adapter.introspect_columns(f"{creds['database']}.public.null_heavy_t")
 
-            with patch.object(pg_stats, "APPROXIMATE_THRESHOLD", 10):
+            with patch.object(adapters_base, "APPROXIMATE_THRESHOLD", 10):
                 _, computed = adapter.compute_statistics(
                     f"{creds['database']}.public.null_heavy_t",
                     cols,
@@ -2037,16 +1845,8 @@ class TestScopedStatistics:
 
     @staticmethod
     def _seed(creds: dict[str, str], *, analyze: bool = False) -> None:
-        import psycopg
 
-        with psycopg.connect(
-            host=creds["host"],
-            port=int(creds["port"]),
-            dbname=creds["database"],
-            user=creds["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
+        with pg_connect(creds) as conn:
             conn.execute("CREATE TABLE public.scoped_t (id int, bucket int)")
             conn.execute(
                 "INSERT INTO public.scoped_t SELECT g, g % 4 FROM generate_series(1, 400) g",
@@ -2211,10 +2011,10 @@ class TestScopedStatistics:
 
     @staticmethod
     def _sample_statements(creds: dict[str, str], n: int, scope: TableScope | None) -> list[str]:
-        from tests.adapters.test_dialect_guard import _install_recorder
+        from tests.adapters._dialects import install_recorder
 
         adapter = _connected(creds)
-        recorder = _install_recorder(adapter)
+        recorder = install_recorder(adapter)
 
         try:
             adapter.sample_values(f"{creds['database']}.public.scoped_t", "bucket", n, scope)
@@ -2266,18 +2066,10 @@ class TestDatelessTemporal:
 
     @staticmethod
     def _profile(creds: dict[str, str]) -> PhaseB:
-        import psycopg
 
         from dbprint.config import StatisticsConfig
 
-        with psycopg.connect(
-            host=creds["host"],
-            port=int(creds["port"]),
-            dbname=creds["database"],
-            user=creds["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
+        with pg_connect(creds) as conn:
             conn.execute("CREATE TABLE public.field_round (id int, run_at time)")
             # 60 distinct values clear the enumeration threshold, so the column is temporal.
             conn.execute(
@@ -2332,16 +2124,8 @@ class TestOutOfRangeTemporal:
 
     @staticmethod
     def _seed(creds: dict[str, str], values: list[str]) -> None:
-        import psycopg
 
-        with psycopg.connect(
-            host=creds["host"],
-            port=int(creds["port"]),
-            dbname=creds["database"],
-            user=creds["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
+        with pg_connect(creds) as conn:
             conn.execute("SET TimeZone = 'UTC'")
             conn.execute("CREATE TABLE public.viability_check (id int, taken_at timestamptz)")
             # 60 distinct minutes clear the enumeration threshold, so the column is temporal.
@@ -2463,20 +2247,12 @@ class TestOutOfRangeTemporal:
         Called directly rather than through `compute_statistics`: an all-NULL column has
         cardinality 0, so the classifier never routes it to the temporal branch.
         """
-        import psycopg
 
         from dbprint.adapters.base import ColumnMeta
         from dbprint.adapters.postgres import stats as pg_stats
         from dbprint.config import StatisticsConfig
 
-        with psycopg.connect(
-            host=postgres_test_db["host"],
-            port=int(postgres_test_db["port"]),
-            dbname=postgres_test_db["database"],
-            user=postgres_test_db["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
+        with pg_connect(postgres_test_db) as conn:
             conn.execute("CREATE TABLE public.all_null_ts (id int, taken_at timestamptz)")
             conn.execute("INSERT INTO public.all_null_ts (id, taken_at) VALUES (1, NULL)")
 
@@ -2489,7 +2265,7 @@ class TestOutOfRangeTemporal:
             )
             rng, percentiles, _, unrepresentable, _, _, _ = pg_stats._fetch_temporal_block(
                 conn,
-                pg_stats._source(f"{postgres_test_db['database']}.public.all_null_ts", None),
+                pg_stats.source(f"{postgres_test_db['database']}.public.all_null_ts", None),
                 col,
                 0,
                 StatisticsConfig(),
@@ -2530,7 +2306,6 @@ def _taken_at_in_two_zones(
     fetch: Callable[..., Any],
     limit: int,
 ) -> tuple[Any, Any]:
-    import psycopg
 
     from dbprint.adapters.base import ColumnMeta
     from dbprint.adapters.postgres import stats as pg_stats
@@ -2543,17 +2318,10 @@ def _taken_at_in_two_zones(
         default=None,
         ordinal=1,
     )
-    source = pg_stats._source(f"{creds['database']}.public.viability_check", None)
+    source = pg_stats.source(f"{creds['database']}.public.viability_check", None)
     read = []
 
-    with psycopg.connect(
-        host=creds["host"],
-        port=int(creds["port"]),
-        dbname=creds["database"],
-        user=creds["user"],
-        password="",
-        autocommit=True,
-    ) as conn:
+    with pg_connect(creds) as conn:
         for zone in ("UTC", "America/New_York"):
             conn.execute(f"SET TimeZone = '{zone}'")
             first, *_ = fetch(conn, source, col, limit, StatisticsConfig())

@@ -4,26 +4,14 @@ derives from the producer schemas they layer over (SPEC 2.7.1 grain, 2.7.2 refer
 
 from __future__ import annotations
 
-import importlib.util
 import json
-from pathlib import Path
 
 import pytest
 
-
-def _load_generator():
-    """Import scripts/gen_annotation_schemas.py so the test shares the derivation path."""
-
-    path = Path(__file__).resolve().parents[2] / "scripts" / "gen_annotation_schemas.py"
-    spec = importlib.util.spec_from_file_location("gen_annotation_schemas", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    return module
+from tests._scripts import load_script
 
 
-gen = _load_generator()
+gen = load_script("gen_annotation_schemas")
 
 
 class TestGoldenReference:

@@ -14,10 +14,10 @@ import yaml
 from dbprint.adapters import DatabricksAdapter, StatisticsConfig
 from dbprint.adapters.databricks.introspect import UnmappedTableType
 from dbprint.adapters.identifiers import table_meta
-from dbprint.config import ConnectionConfig, DiffConfig
-from dbprint.conformance import validate_print
 from dbprint.engine import Engine
 from dbprint.spec.sketch import low64_md5
+from tests._engine_run import conformance_errors
+from tests._prints import connection_config
 from tests.adapters.conftest import RecordedResponseCursor
 
 
@@ -504,19 +504,14 @@ class TestAnsiIntervalsAreMeasuredAsText:
     """SPEC 3.1: an orderable interval classifies by measurement, the legacy one stays declined."""
 
     def _generate(self, cursor, tmp_path, table: str) -> dict:
-        conn_config = ConnectionConfig(
-            name="primary",
+        conn_config = connection_config(
             adapter="databricks",
-            auto=True,
             output=tmp_path,
+            auto=True,
             include=(f"*.{table}",),
-            exclude=(),
-            max_age_days=7,
-            statistics=StatisticsConfig(),
-            diff=DiffConfig(),
         )
         Engine(_databricks_adapter(cursor), conn_config, tmp_path).generate()
-        errors = [i for i in validate_print(tmp_path / "primary") if i.severity == "error"]
+        errors = conformance_errors(tmp_path / "primary")
         (written,) = (tmp_path / "primary").rglob("statistics.yaml")
 
         assert errors == [], errors

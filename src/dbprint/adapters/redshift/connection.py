@@ -4,7 +4,6 @@ applied; read-only is the connected user's own grants.
 
 from __future__ import annotations
 
-import importlib
 import logging
 from types import MappingProxyType
 from typing import Any
@@ -51,10 +50,7 @@ class Connection(FactoryConnection):
         return _default_cursor_factory(params)
 
     def _open_failure(self, exc: Exception) -> str:
-        return (
-            f"could not connect to Redshift at {self.params.host}:{self.params.port}/"
-            f"{self.params.database} as {self.params.user!r}: {exc}"
-        )
+        return driver.connect_failure("Redshift", self.params, exc)
 
 
 def exec_query(cursor: Cursor, sql: str, params: Any = None) -> Cursor:
@@ -68,13 +64,12 @@ def _default_cursor_factory(params: ConnectionParams) -> Any:
     - lazy, so a base install never pays redshift_connector's import cost.
     """
 
-    try:
-        redshift_connector = importlib.import_module("redshift_connector")
-    except ImportError as exc:
-        raise RedshiftConnectionError(
-            "redshift-connector is not installed. Install dbprint with the [redshift] "
-            "extra: `pip install dbprint[redshift]`.",
-        ) from exc
+    redshift_connector = driver.import_extra(
+        "redshift_connector",
+        "redshift-connector",
+        "redshift",
+        RedshiftConnectionError,
+    )
 
     conn = redshift_connector.connect(
         host=params.host,

@@ -5,11 +5,12 @@ its failure wording.
 
 from __future__ import annotations
 
+import importlib
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import MISSING, dataclass, fields
 from logging import Logger
-from types import MappingProxyType
+from types import MappingProxyType, ModuleType
 from typing import Any, ClassVar, Protocol, Self
 
 from dbprint.config.duration import format_duration_seconds
@@ -79,6 +80,27 @@ def execute(
     return traced(logger, is_timeout, run, sql, params)
 
 
+def import_extra(module: str, package: str, extra: str, error: type[Exception]) -> ModuleType:
+    """`module`, imported lazily so a base install never pays for it; `error` names the extra."""
+
+    try:
+        return importlib.import_module(module)
+    except ImportError as exc:
+        raise error(
+            f"{package} is not installed. Install dbprint with the [{extra}] extra: "
+            f"`pip install dbprint[{extra}]`.",
+        ) from exc
+
+
+def connect_failure(vendor: str, params: ServerParams, exc: Exception) -> str:
+    """How every server adapter words a connection it could not open."""
+
+    where = f"{params.host}:{params.port}"
+    where += f"/{params.database}" if params.database is not None else ""
+
+    return f"could not connect to {vendor} at {where} as {params.user!r}: {exc}"
+
+
 @dataclass(frozen=True)
 class ServerParams:
     """Resolved host credentials; a subclass names `error` and the keys its server defaults."""
@@ -92,6 +114,20 @@ class ServerParams:
     password: str
     database: str | None = None
     statement_timeout: int | None = None
+
+    @classmethod
+    def required_keys(cls) -> tuple[str, ...]:
+        """The credential keys with no default, in the order a resolver asks for them."""
+
+        return tuple(
+            f.name for f in fields(cls) if f.default is MISSING and f.name not in cls.defaults
+        )
+
+    @classmethod
+    def optional_keys(cls) -> tuple[str, ...]:
+        """`database`, then every key the server defaults."""
+
+        return ("database", *cls.defaults)
 
     @classmethod
     def from_credentials(cls, creds: dict[str, str], statement_timeout: int | None = None) -> Self:
@@ -177,5 +213,5 @@ class FactoryConnection:
     def _open_failure(self, exc: Exception) -> str:
         raise NotImplementedError
 
-    def _opened(self, cursor: Any) -> Any:
+    def _opened(self, cursor: Any, /) -> Any:
         return cursor

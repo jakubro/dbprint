@@ -80,33 +80,27 @@ def require_complete(result: Any, expected: frozenset[str]) -> None:
         raise SystemExit(f"generate never reached {sorted(missing)}; it saw {sorted(profiled)}")
 
 
-def normalize_timestamps(print_root: Path) -> None:
-    """Freeze only the run instants: `.yaml` lines keyed in `INSTANT_KEYS`, never a `.sql` literal.
-
-    A temporal column's `range`/`percentiles` values are ISO instants too; a pattern would hit them.
-    """
+def normalize_timestamps(print_root: Path, instant: str = FROZEN_TIMESTAMP) -> None:
+    """Freeze every `.yaml` file's run instants to `instant`, never a `.sql` literal."""
 
     for path in print_root.rglob("*.yaml"):
         if not path.is_file():
             continue
 
-        lines = path.read_text().splitlines(keepends=True)
-        changed = False
+        text = path.read_text()
+        frozen = freeze_instants(text, instant)
 
-        for i, line in enumerate(lines):
-            key = line.lstrip().split(":", 1)[0]
+        if frozen != text:
+            path.write_text(frozen)
 
-            if key not in INSTANT_KEYS:
-                continue
 
-            frozen = _TIMESTAMP_RE.sub(FROZEN_TIMESTAMP, line)
+def freeze_instants(text: str, instant: str) -> str:
+    """Rewrite the run instants in a YAML document - lines keyed in `INSTANT_KEYS` - to `instant`.
 
-            if frozen != line:
-                lines[i] = frozen
-                changed = True
+    A temporal column's `range`/`percentiles` values are ISO instants too; a pattern would hit them.
+    """
 
-        if changed:
-            path.write_text("".join(lines))
+    return "".join(_freeze_line(line, instant) for line in text.splitlines(keepends=True))
 
 
 def swap_in(regenerated: Path, connection: str, print_root: Path) -> None:
@@ -275,3 +269,9 @@ def _wait_for_postgres(port: int, timeout: float = 20.0) -> None:
             time.sleep(0.2)
 
     raise SystemExit(f"postgres did not become ready on port {port}: {last}")
+
+
+def _freeze_line(line: str, instant: str) -> str:
+    key = line.lstrip().split(":", 1)[0].strip().strip('"')
+
+    return _TIMESTAMP_RE.sub(instant, line) if key in INSTANT_KEYS else line

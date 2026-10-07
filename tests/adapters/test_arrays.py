@@ -7,32 +7,24 @@ from types import ModuleType
 from typing import Any
 
 import duckdb
-import psycopg
 import pytest
-import yaml
 
 from dbprint.adapters import (
-    Adapter,
-    AdapterType,
     BigqueryAdapter,
     ClickhouseAdapter,
     DatabricksAdapter,
     PostgresAdapter,
 )
-from dbprint.adapters.base import ColumnParts, PartSource
+from dbprint.adapters.base import PartSource
 from dbprint.adapters.dialect import Vendor
 from dbprint.adapters.duckdb import DuckdbAdapter
 from dbprint.adapters.sql_layout import select_from
 from dbprint.config import StatisticsConfig
-from dbprint.config.project import ConnectionConfig, RedactRule
-from dbprint.conformance import validate_print
-from dbprint.engine import Engine
+from dbprint.config.project import RedactRule
+from tests.adapters._composites import duckdb_print, generate, parts_of, psql, snowflake
+from tests.adapters._credentials import DATABRICKS_CREDS
+from tests.adapters._dialects import STATS_MODULES, foreign_fragments, install_recorder
 from tests.adapters._sql_style import alias_violations, layout_violations, violations
-from tests.adapters.test_dialect_guard import STATS_MODULES, _foreign_fragments, _install_recorder
-from tests.adapters.test_distribution_shapes import _DATABRICKS_CREDS
-
-
-_SALT = "array-test-salt"
 
 
 class TestDuckdb:
@@ -40,7 +32,7 @@ class TestDuckdb:
         self,
         tmp_path: Path,
     ) -> None:
-        tags = _duckdb(
+        tags = duckdb_print(
             tmp_path,
             "CREATE TABLE seed_lot (lot_no INTEGER, tags VARCHAR[])",
             "INSERT INTO seed_lot VALUES (1, ['gift', 'sale']), (2, []), (3, NULL), (4, ['sale', NULL])",
@@ -66,8 +58,8 @@ class TestDuckdb:
             "CREATE TABLE reading (reading_id INTEGER, grid INTEGER[][])",
             "INSERT INTO reading VALUES (1, [[1, 2], [3]]), (2, [[]]), (3, [[4]])",
         )
-        grid = _duckdb(tmp_path / "deep", *statements)["reading"]["grid"]
-        shallow = _duckdb(
+        grid = duckdb_print(tmp_path / "deep", *statements)["reading"]["grid"]
+        shallow = duckdb_print(
             tmp_path / "shallow",
             *statements,
             statistics=StatisticsConfig(max_part_depth=1),
@@ -83,7 +75,7 @@ class TestDuckdb:
         self,
         tmp_path: Path,
     ) -> None:
-        items = _duckdb(
+        items = duckdb_print(
             tmp_path,
             "CREATE TABLE order_line (line_id INTEGER, items STRUCT(sku VARCHAR, qty INTEGER)[])",
             "INSERT INTO order_line VALUES (1, [{'sku': 'a', 'qty': 1}]), (2, [])",
@@ -96,7 +88,7 @@ class TestDuckdb:
         self,
         tmp_path: Path,
     ) -> None:
-        emb = _duckdb(
+        emb = duckdb_print(
             tmp_path,
             "CREATE TABLE passage (passage_id INTEGER, emb FLOAT[4])",
             "INSERT INTO passage SELECT i, [0.6, 0.8, 0, 0]::FLOAT[4] FROM range(100) r(i)",
@@ -122,7 +114,7 @@ class TestDuckdb:
         con.close()
         adapter = DuckdbAdapter({"database": str(database)})
         adapter.connect()
-        recorder = _install_recorder(adapter)
+        recorder = install_recorder(adapter)
 
         try:
             fqn = next(t.fqn for t in adapter.list_tables(include=["*"], exclude=[]))
@@ -138,7 +130,7 @@ class TestDuckdb:
         assert not [s for s in element_reads if "group by" in s]
 
     def test_a_float_array_with_few_values_lists_them(self, tmp_path: Path) -> None:
-        element = _duckdb(
+        element = duckdb_print(
             tmp_path,
             "CREATE TABLE weight (weight_id INTEGER, steps DOUBLE[])",
             "INSERT INTO weight SELECT i, [0.5, 1.0] FROM range(30) r(i)",
@@ -148,7 +140,7 @@ class TestDuckdb:
         assert sorted(v["value"] for v in element["values"]) == [0.5, 1.0]
 
     def test_descent_off_leaves_the_array_unsupported(self, tmp_path: Path) -> None:
-        tags = _duckdb(
+        tags = duckdb_print(
             tmp_path,
             "CREATE TABLE seed_lot (lot_no INTEGER, tags VARCHAR[])",
             "INSERT INTO seed_lot VALUES (1, ['gift'])",
@@ -159,7 +151,7 @@ class TestDuckdb:
         assert not {"cardinality", "size", "parts"} & set(tags)
 
     def test_a_rule_on_the_column_marks_its_elements(self, tmp_path: Path) -> None:
-        tags = _duckdb(
+        tags = duckdb_print(
             tmp_path,
             "CREATE TABLE seed_lot (lot_no INTEGER, tags VARCHAR[])",
             "INSERT INTO seed_lot VALUES (1, ['gift', 'sale'])",
@@ -170,7 +162,7 @@ class TestDuckdb:
         assert tags["parts"]["[*]"]["redacted"] == "mask"
 
     def test_an_array_of_emails_is_caught_by_a_looks_like_rule(self, tmp_path: Path) -> None:
-        element = _duckdb(
+        element = duckdb_print(
             tmp_path,
             "CREATE TABLE grower (grower_id INTEGER, contacts VARCHAR[])",
             "INSERT INTO grower SELECT i, ['grower' || i || '@example.invalid'] FROM range(40) r(i)",
@@ -185,14 +177,14 @@ def test_a_postgres_array_reads_every_dimension_through_one_element_part(
     postgres_test_db: dict[str, str],
     tmp_path: Path,
 ) -> None:
-    with _psql(postgres_test_db) as conn:
+    with psql(postgres_test_db) as conn:
         conn.execute("CREATE TABLE public.plot (plot_id integer, grid integer[], tags text[])")
         conn.execute(
             "INSERT INTO public.plot VALUES (1, '{{1,2},{3,4}}', '{gift,sale}'), "
             "(2, '{}', '{}'), (3, NULL, '{sale}')",
         )
 
-    columns = _generate(PostgresAdapter(postgres_test_db), "postgres", tmp_path, "*.plot")
+    columns = generate(PostgresAdapter(postgres_test_db), "postgres", tmp_path, "*.plot")
 
     assert list(columns["grid"]["parts"]) == ["[*]"]
     assert columns["grid"]["parts"]["[*]"]["occurrences"] == 4
@@ -216,7 +208,7 @@ def test_a_clickhouse_array_counts_its_null_elements(
         {"host": "chdb", "database": "seedbank"},
         cursor_factory=lambda _params: cursor,
     )
-    tags = _generate(adapter, "clickhouse", tmp_path, "*.plot")["tags"]
+    tags = generate(adapter, "clickhouse", tmp_path, "*.plot")["tags"]
 
     assert tags["null_count"] == 0
     assert tags["empty_count"] == 1
@@ -235,7 +227,7 @@ def test_a_bigquery_array_is_descended(bigquery_test_dataset: Any) -> None:
         {"project": "dbprint-test", "dataset": dataset},
         cursor_factory=lambda _params: cursor,
     )
-    tags = _parts_of(adapter, "plot", "tags")
+    tags = parts_of(adapter, "plot", "tags")
 
     assert tags.cardinality == 3
     assert tags.empty_count == 1
@@ -248,12 +240,29 @@ def test_a_databricks_array_is_descended(databricks_test_schema: Any) -> None:
     cursor.execute(
         "INSERT INTO plot VALUES (1, array('gift', 'sale')), (2, array()), (3, array('sale'))",
     )
-    adapter = DatabricksAdapter(_DATABRICKS_CREDS, cursor_factory=lambda _params: cursor)
-    tags = _parts_of(adapter, "plot", "tags")
+    adapter = DatabricksAdapter(DATABRICKS_CREDS, cursor_factory=lambda _params: cursor)
+    tags = parts_of(adapter, "plot", "tags")
 
     assert tags.empty_count == 1
     assert [(p.path, p.occurrences) for p in tags.parts] == [("[*]", 3)]
     assert tags.parts[0].stats.values is not None
+
+
+def test_a_snowflake_array_is_descended_to_its_innermost_elements() -> None:
+    setup = (
+        "CREATE TABLE seedbank.plot (plot_id INTEGER, tags VARCHAR[], grid INTEGER[][])",
+        (
+            "INSERT INTO seedbank.plot VALUES (1, ['gift', 'sale'], [[1, 2], [3]]), "
+            "(2, [], [[4]]), (3, ['sale'], NULL)"
+        ),
+    )
+    tags = parts_of(snowflake(*setup), "plot", "tags")
+    grid = parts_of(snowflake(*setup), "plot", "grid")
+
+    assert tags.empty_count == 1
+    assert [(p.path, p.occurrences) for p in tags.parts] == [("[*]", 3)]
+    assert [v.value for v in tags.parts[0].stats.values or ()] == ["sale", "gift"]
+    assert [(p.path, p.occurrences) for p in grid.parts] == [("[*]", 3), ("[*][*]", 4)]
 
 
 @pytest.mark.parametrize(
@@ -279,97 +288,6 @@ def test_the_array_reads_speak_their_own_dialect(vendor: Vendor, sql_type: str) 
     ]
 
     for statement in statements:
-        assert _foreign_fragments(statement, vendor) == []
+        assert foreign_fragments(statement, vendor) == []
         assert violations(statement, vendor) + alias_violations(statement, vendor) == []
         assert layout_violations(statement, vendor) == []
-
-
-def _parts_of(adapter: Adapter, table: str, column: str) -> ColumnParts:
-    """One column's descent, read straight off the adapter: these substrates extract no DDL."""
-
-    adapter.connect()
-
-    try:
-        fqn = next(
-            t.fqn
-            for t in adapter.list_tables(include=["*"], exclude=[])
-            if t.fqn.rsplit(".", 1)[-1] == table
-        )
-        columns = [c for c in adapter.introspect_columns(fqn) if c.name == column]
-        counts, _ = adapter.compute_base_statistics(fqn, columns, StatisticsConfig())
-
-        return adapter.profile_parts(fqn, columns, StatisticsConfig(), counts)[column]
-    finally:
-        adapter.close()
-
-
-def _duckdb(
-    tmp_path: Path,
-    *statements: str,
-    statistics: StatisticsConfig | None = None,
-    redact: tuple[RedactRule, ...] = (),
-) -> dict[str, dict[str, Any]]:
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    database = tmp_path / "garden.duckdb"
-    con = duckdb.connect(str(database))
-
-    for statement in statements:
-        con.execute(statement)
-
-    con.close()
-    conn = ConnectionConfig(
-        name="garden",
-        adapter="duckdb",
-        output=tmp_path / "prints",
-        redact=redact,
-        redaction_salt=_SALT,
-        statistics=statistics or StatisticsConfig(),
-    )
-    Engine(DuckdbAdapter({"database": str(database)}), conn, tmp_path).generate()
-    errors = [i for i in validate_print(tmp_path / "prints" / "garden") if i.severity == "error"]
-
-    assert errors == [], errors
-
-    return {
-        path.parent.name: yaml.safe_load(path.read_text())["columns"]
-        for path in (tmp_path / "prints" / "garden").rglob("statistics.yaml")
-    }
-
-
-def _generate(
-    adapter: Adapter,
-    name: AdapterType,
-    tmp_path: Path,
-    include: str,
-    redact: tuple[RedactRule, ...] = (),
-) -> dict[str, Any]:
-    conn = ConnectionConfig(
-        name="primary",
-        adapter=name,
-        output=tmp_path,
-        include=(include,),
-        redact=redact,
-    )
-
-    try:
-        Engine(adapter, conn, tmp_path).generate()
-    finally:
-        adapter.close()
-
-    (written,) = (tmp_path / "primary").rglob("statistics.yaml")
-    errors = [i for i in validate_print(tmp_path / "primary") if i.severity == "error"]
-
-    assert errors == [], errors
-
-    return yaml.safe_load(written.read_text())["columns"]
-
-
-def _psql(creds: dict[str, str]) -> psycopg.Connection:
-    return psycopg.connect(
-        host=creds["host"],
-        port=int(creds["port"]),
-        dbname=creds["database"],
-        user=creds["user"],
-        password="",
-        autocommit=True,
-    )

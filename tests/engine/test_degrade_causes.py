@@ -22,9 +22,9 @@ from dbprint.adapters.redshift import ddl as redshift_ddl
 from dbprint.adapters.redshift.connection import DIALECT as REDSHIFT
 from dbprint.config import ConnectionConfig
 from dbprint.config.project import RedactRule
-from dbprint.conformance import validate_print
 from dbprint.engine import Engine
 from dbprint.spec.rounding import UnrepresentableValue
+from tests._engine_run import conformance_errors
 
 
 _PACKAGE = Path(adapters_package.__file__).parent
@@ -187,7 +187,7 @@ def test_a_column_phase_b_could_not_measure_keeps_what_phase_a_read(
     label = yaml.safe_load(next(root.rglob("statistics.yaml")).read_text())["columns"]["label"]
     assert label["length"] == {"min": 0, "max": 6, "avg": 4.592, "p95": 6.0}
     assert "length" not in label["unmeasured"]
-    assert [i.code for i in validate_print(root) if i.severity == "error"] == []
+    assert [i.code for i in conformance_errors(root)] == []
 
 
 def test_a_degraded_column_never_names_a_field_it_never_owed(
@@ -225,7 +225,7 @@ def test_a_degraded_column_never_names_a_field_it_never_owed(
     assert columns["field_notes"]["inferred"]["looks_like"] == "prose"
     assert not {"range", "percentiles"} & set(columns["viability_pct"].get("unmeasured", ()))
     assert not {"values", "distribution"} & set(columns["field_notes"].get("unmeasured", ()))
-    assert [i.code for i in validate_print(root) if i.severity == "error"] == []
+    assert [i.code for i in conformance_errors(root)] == []
 
 
 def test_a_timed_out_show_table_is_not_retried_as_a_view() -> None:

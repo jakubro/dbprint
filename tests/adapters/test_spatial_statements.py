@@ -14,8 +14,8 @@ from dbprint.adapters import ColumnMeta
 from dbprint.adapters.base import ExtentNotMeasured
 from dbprint.adapters.dialect import Vendor
 from dbprint.adapters.errors import QueryFailed
+from tests.adapters._dialects import STATS_MODULES, foreign_fragments
 from tests.adapters._sql_style import alias_violations, layout_violations, violations
-from tests.adapters.test_dialect_guard import STATS_MODULES, _foreign_fragments
 
 
 _SPATIAL_TYPES: dict[str, str] = {
@@ -53,7 +53,7 @@ def test_the_spatial_read_speaks_its_own_dialect(
     grouped = [s for s in statements if "group by" in s.lower()]
 
     assert len(grouped) == 1, statements
-    assert _foreign_fragments(grouped[0], vendor) == []
+    assert foreign_fragments(grouped[0], vendor) == []
     assert violations(grouped[0], vendor) + alias_violations(grouped[0], vendor) == []
     assert layout_violations(grouped[0], vendor) == []
 

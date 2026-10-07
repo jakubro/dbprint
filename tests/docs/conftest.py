@@ -14,20 +14,14 @@ import pytest
 import yaml
 
 from dbprint.config import ConnectionConfig
-from dbprint.config.project import DiffConfig, StatisticsConfig
+from tests._prints import connection_config
 
 
 WHEN = datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _connection(tmp_path: Path, name: str = "primary") -> ConnectionConfig:
-    return ConnectionConfig(
-        name=name,
-        adapter="postgres",
-        output=tmp_path / "prints",
-        statistics=StatisticsConfig(),
-        diff=DiffConfig(),
-    )
+    return connection_config(name=name, output=tmp_path / "prints")
 
 
 def _write(path: Path, data: dict[str, Any]) -> None:

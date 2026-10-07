@@ -13,9 +13,7 @@ from typing import Any
 import yaml
 
 from dbprint.adapters import (
-    ColumnMeta,
     ColumnStats,
-    CommentsMeta,
     MockAdapter,
     MockTable,
     PhysicalLayout,
@@ -24,6 +22,8 @@ from dbprint.adapters import (
 from dbprint.config import ConnectionConfig
 from dbprint.engine import Engine, GenerateRequest
 from dbprint.engine.context_assembler import AssemblyOptions, assemble
+from tests._engine_run import artifact
+from tests._prints import columns, mock_table
 
 
 CLUSTER = PhysicalLayout(
@@ -189,9 +189,7 @@ def _generate(
 ) -> dict[str, Any]:
     Engine(adapter(_fixture(layout)), _conn(tmp_path), tmp_path).generate()
 
-    return yaml.safe_load(
-        (tmp_path / "w" / "seedbank" / "specimen_loan" / "statistics.yaml").read_text(),
-    )
+    return artifact(tmp_path / "w", "seedbank.specimen_loan")
 
 
 def _regenerate(tmp_path: Path, layout: PhysicalLayout | None) -> dict[str, Any]:
@@ -244,44 +242,15 @@ def _fixture(layout: PhysicalLayout | None) -> dict[str, MockTable]:
         )
 
     return {
-        "seedbank.specimen_loan": MockTable(
-            type="table",
-            namespace_path=("seedbank", "specimen_loan"),
-            ddl=(
-                "CREATE TABLE seedbank.specimen_loan (vault_id text, logged_at text, condition text);\n"
-            ),
-            columns=[
-                ColumnMeta(
-                    name="vault_id",
-                    sql_type="text",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-                ColumnMeta(
-                    name="logged_at",
-                    sql_type="text",
-                    nullable=False,
-                    default=None,
-                    ordinal=2,
-                ),
-                ColumnMeta(
-                    name="condition",
-                    sql_type="text",
-                    nullable=False,
-                    default=None,
-                    ordinal=3,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+        "seedbank.specimen_loan": mock_table(
+            "seedbank.specimen_loan",
+            columns(("vault_id", "text"), ("logged_at", "text"), ("condition", "text")),
+            {
                 "vault_id": _column(),
                 "logged_at": _column(),
                 "condition": _column(),
             },
-            samples={},
+            ddl="CREATE TABLE seedbank.specimen_loan (vault_id text, logged_at text, condition text);\n",
             physical_layout=layout,
             row_count=100,
         ),

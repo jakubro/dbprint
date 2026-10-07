@@ -18,8 +18,8 @@ from dbprint.adapters import (
     StatisticsConfig,
     TableScope,
 )
+from dbprint.adapters import base as adapters_base
 from dbprint.adapters.base import PhaseB
-from dbprint.adapters.snowflake import stats as snowflake_stats
 from tests.adapters.conftest import SnowflakeDialectShim
 
 
@@ -57,7 +57,7 @@ def _profile(
         adapter.list_tables(include=["*"], exclude=[])
         columns = adapter.introspect_columns("memory.seedbank.curation_event")
 
-        with patch.object(snowflake_stats, "APPROXIMATE_THRESHOLD", threshold):
+        with patch.object(adapters_base, "APPROXIMATE_THRESHOLD", threshold):
             return adapter.compute_statistics(
                 "memory.seedbank.curation_event",
                 columns,
@@ -144,8 +144,6 @@ def _cardinality_methods(
     adapters: dict[str, Adapter],
     scope: TableScope | None,
 ) -> dict[str, str | None]:
-    from dbprint.adapters.clickhouse import stats as clickhouse_stats
-    from dbprint.adapters.postgres import stats as postgres_stats
 
     methods = {}
 
@@ -153,11 +151,7 @@ def _cardinality_methods(
         table = next(t for t in adapter.list_tables(include=["*.viability_check"], exclude=[]))
         columns = adapter.introspect_columns(table.fqn)
 
-        with (
-            patch.object(snowflake_stats, "APPROXIMATE_THRESHOLD", 10),
-            patch.object(postgres_stats, "APPROXIMATE_THRESHOLD", 10),
-            patch.object(clickhouse_stats, "APPROXIMATE_THRESHOLD", 10),
-        ):
+        with patch.object(adapters_base, "APPROXIMATE_THRESHOLD", 10):
             stats = adapter.compute_statistics(
                 table.fqn,
                 columns,

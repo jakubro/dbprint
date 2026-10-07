@@ -75,3 +75,13 @@ def freshness_classification(days: int) -> FreshnessClassification:
         return "stale"
     else:
         return "dormant"
+
+
+def negative_max_age_refusal(subject: str, value: float) -> str:
+    """Why a negative `max_age_days` is refused, wherever one is read; `subject` names its site."""
+
+    return (
+        f"{subject} is {value}, which no print can ever satisfy: every table re-extracts on every "
+        f"run and check reports every one of them stale. Use 0 to ask for that deliberately, or a "
+        f"positive number of days."
+    )

@@ -6,22 +6,13 @@ Compares SPEC 6.3's rows against the emitted codes in both directions, plus 6.4'
 from __future__ import annotations
 
 from tests.spec._issue_codes import emitted_codes
-from tests.spec._spec_markdown import section, table_rows
+from tests.spec._spec_markdown import error_catalog, section
 
 
 def _catalog_codes() -> dict[str, str]:
     """Every `code: severity` pair from SPEC 6.3's markdown, across all ten groups."""
 
-    block = section("### 6.3 Error catalog", "### 6.4 Catalog totals")
-    codes: dict[str, str] = {}
-
-    for row in table_rows(block):
-        if len(row) != 3 or not row[0].startswith("`"):
-            continue  # the repeated `| Code | Sev | Trigger |` header, once per group
-
-        codes[row[0].strip("`")] = row[1]
-
-    return codes
+    return {entry["code"]: entry["severity"] for entry in error_catalog()}
 
 
 def test_the_catalog_still_parses() -> None:

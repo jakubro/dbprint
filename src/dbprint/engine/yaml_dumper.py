@@ -170,6 +170,30 @@ def spell_value(value: Any) -> str:
     return "NULL" if value is None else spell_inline(value)
 
 
+def spell_literal(value: Any) -> str:
+    """Spell one value as an SQL literal: strings and timestamps single-quoted with `''` doubled.
+
+    Numbers, booleans and `NULL` stay bare; a string holding an invisible character is escaped.
+    """
+
+    if value is None:
+        return "NULL"
+
+    if isinstance(value, bool):
+        return "true" if value else "false"
+
+    if isinstance(value, int | float | decimal.Decimal):
+        return scalar_text(value)
+
+    if isinstance(value, str):
+        if any(_escaped(char) for char in value):
+            return _double_quoted(value)
+
+        return "'" + value.replace("'", "''") + "'"
+
+    return "'" + scalar_text(value).replace("'", "''") + "'"
+
+
 # Printed raw these read as nothing or as an ordinary space; U+0020 is the one space left bare.
 _ESCAPED_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Co", "Cs", "Cn"})
 _SHORT_ESCAPES = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t", "\0": "\\0"}

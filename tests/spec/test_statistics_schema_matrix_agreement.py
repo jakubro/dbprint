@@ -9,20 +9,13 @@ guards; `test_statistics_matrix_agreement.py` binds the matrix to the markdown t
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
 from dbprint.spec.statistics_matrix import FORBIDDEN_FIELDS
+from tests._scripts import REPO_ROOT
 
 
-_SCHEMA_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "src"
-    / "dbprint"
-    / "spec"
-    / "v1"
-    / "statistics.schema.json"
-)
+_SCHEMA_PATH = REPO_ROOT / "src" / "dbprint" / "spec" / "v1" / "statistics.schema.json"
 
 # Each classification's `oneOf` branch, by its `$defs` name.
 _RULES_DEF_BY_CLASSIFICATION = {

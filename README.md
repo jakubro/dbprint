@@ -1,6 +1,6 @@
 # dbprint
 
-[![PyPI](https://img.shields.io/pypi/v/dbprint.svg)](https://pypi.org/project/dbprint/) [![Docs](https://img.shields.io/badge/docs-jakubro.github.io-blue.svg)](https://jakubro.github.io/dbprint/) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/jakubro/dbprint/blob/main/LICENSE) [![Status](https://img.shields.io/badge/status-actively_developed-green.svg)](#)
+[![PyPI](https://img.shields.io/pypi/v/dbprint.svg)](https://pypi.org/project/dbprint/) [![Docs](https://img.shields.io/badge/docs-jakubro.github.io-blue.svg)](https://jakubro.github.io/dbprint/) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/jakubro/dbprint/blob/main/LICENSE) [![Status](https://img.shields.io/badge/status-actively_developed-green.svg)](#) [![M8ven Score](https://m8ven.ai/badge/mcp/jakubro-dbprint-1jc05n?v=0571c23784758aea08f9efbba4a8995f)](https://m8ven.ai/mcp/jakubro-dbprint-1jc05n?s=readme)
 
 **A new engineer onboards once. Your agent onboards every session.**
 

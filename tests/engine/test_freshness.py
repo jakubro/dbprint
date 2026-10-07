@@ -63,6 +63,16 @@ class TestEvaluate:
         assert stale[0].fqn == "a"
         assert stale[0].age_days == pytest.approx(10.0)
 
+    @pytest.mark.parametrize(("max_age_days", "age"), [(7.0, 7.0), (0.0, 0.0)])
+    def test_an_entry_exactly_at_its_threshold_is_stale(
+        self,
+        max_age_days: float,
+        age: float,
+    ) -> None:
+        manifest = _manifest_with(("a", _ts(_NOW, age)))
+
+        assert [s.fqn for s in evaluate(manifest, max_age_days, _NOW)] == ["a"]
+
     def test_missing_profiled_at_treated_as_unknown(self) -> None:
         manifest = _manifest_with(("a", None))
         stale = evaluate(manifest, 7.0, _NOW)

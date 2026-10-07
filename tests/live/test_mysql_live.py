@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests._cli import credential_env, generate
+from tests._engine_run import assert_conformant
 from tests.live import _harness as harness
 
 
@@ -62,15 +64,10 @@ def _apply_fixtures(creds: dict[str, str]) -> None:
 
 
 def _credential_env(creds: dict[str, str]) -> dict[str, str]:
-    upper = CONN_NAME.upper()
-
-    return {
-        f"DBPRINT_{upper}_HOST": creds["host"],
-        f"DBPRINT_{upper}_PORT": str(creds["port"]),
-        f"DBPRINT_{upper}_DATABASE": creds["database"],
-        f"DBPRINT_{upper}_USER": creds["user"],
-        f"DBPRINT_{upper}_PASSWORD": creds["password"] or "",
-    }
+    return credential_env(
+        CONN_NAME,
+        {key: creds[key] for key in ("host", "port", "database", "user", "password")},
+    )
 
 
 def test_mysql_live_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -79,11 +76,11 @@ def test_mysql_live_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     creds = _live_creds()
     _apply_fixtures(creds)
 
-    print_dir = harness.generate(tmp_path, monkeypatch, CONN_NAME, "mysql", _credential_env(creds))
+    print_dir = generate(tmp_path, monkeypatch, CONN_NAME, "mysql", _credential_env(creds))
 
     assert (print_dir / "manifest.yaml").is_file()
 
-    harness.assert_conformant(print_dir)
+    assert_conformant(print_dir)
 
     db = creds["database"]
     stats = yaml.safe_load((print_dir / db / "herbarium_sheet/statistics.yaml").read_text())

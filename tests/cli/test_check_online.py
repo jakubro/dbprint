@@ -27,6 +27,7 @@ from dbprint.adapters import (
 )
 from dbprint.cli import run_log
 from dbprint.cli.main import main
+from tests._cli import credential_env, patch_registry
 from tests._prints import (
     SHAPE_PROBE_COLUMNS,
     VAULT_COLUMNS,
@@ -274,30 +275,16 @@ def _query_results() -> dict[str, list[tuple[Any, ...]]]:
     }
 
 
-def _credential_env() -> dict[str, str]:
-    return {
-        "DBPRINT_PRIMARY_HOST": "h",
-        "DBPRINT_PRIMARY_PORT": "5432",
-        "DBPRINT_PRIMARY_DATABASE": "d",
-        "DBPRINT_PRIMARY_USER": "u",
-        "DBPRINT_PRIMARY_PASSWORD": "p",
-    }
-
-
 def _invoke_online(monkeypatch: pytest.MonkeyPatch, adapter: type, *args: str) -> Result:
-    for k, v in _credential_env().items():
+    for k, v in credential_env().items():
         monkeypatch.setenv(k, v)
 
-    with patch.dict("dbprint.cli.adapter_registry.ADAPTERS", {"postgres": adapter}, clear=True):
+    with patch_registry({"postgres": adapter}):
         return CliRunner().invoke(main, ["check", "--online", *args])
 
 
 def _patch_registry():
-    return patch.dict(
-        "dbprint.cli.adapter_registry.ADAPTERS",
-        {"postgres": _MockPgAdapter},
-        clear=True,
-    )
+    return patch_registry({"postgres": _MockPgAdapter})
 
 
 class TestOfflineStatisticAssertions:
@@ -369,7 +356,7 @@ class TestOnlineNoDrift:
         _seed_clean_print(tmp_path, committed_print)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         with _patch_registry():
@@ -530,7 +517,7 @@ class TestOfflineAssertionErrorDoesNotSuppressOnline:
         _seed_clean_print(tmp_path, committed_print)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         with _patch_registry():
@@ -566,7 +553,7 @@ class TestOfflineAssertionErrorDoesNotSuppressOnline:
         _seed_clean_print(tmp_path, committed_print)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         with _patch_registry():
@@ -680,7 +667,7 @@ class TestDriftVocabulary:
         _seed_print_with_cardinality(tmp_path, committed_print, cardinality=2)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         with _patch_registry():
@@ -705,14 +692,10 @@ class TestDriftVocabulary:
         _seed_clean_print(tmp_path, committed_print)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
-        with patch.dict(
-            "dbprint.cli.adapter_registry.ADAPTERS",
-            {"postgres": _RowCountChangedAdapter},
-            clear=True,
-        ):
+        with patch_registry({"postgres": _RowCountChangedAdapter}):
             json_result = CliRunner().invoke(main, ["check", "--online", "--format", "json"])
 
         assert json_result.exit_code == 3
@@ -772,7 +755,7 @@ class TestDriftVocabulary:
         _seed_print_with_cardinality(tmp_path, committed_print, cardinality=2)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         with _patch_registry():
@@ -802,7 +785,7 @@ class TestOnlineSqlAssertions:
         _seed_clean_print(tmp_path, committed_print)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         with _patch_registry():
@@ -832,7 +815,7 @@ class TestOnlineSqlAssertions:
         _seed_clean_print(tmp_path, committed_print)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         with _patch_registry():
@@ -870,14 +853,10 @@ class TestOnlineSqlAssertions:
         _seed_clean_print(tmp_path, committed_print)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
-        with patch.dict(
-            "dbprint.cli.adapter_registry.ADAPTERS",
-            {"postgres": _RecordingAdapter},
-            clear=True,
-        ):
+        with patch_registry({"postgres": _RecordingAdapter}):
             result = CliRunner().invoke(main, ["check", "--online"])
 
         assert result.exit_code == 0
@@ -936,14 +915,10 @@ class TestConnectionFailureIsReportedAsItself:
         _seed_clean_print(tmp_path, committed_print)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
-        with patch.dict(
-            "dbprint.cli.adapter_registry.ADAPTERS",
-            {"postgres": _UnreachableAdapter},
-            clear=True,
-        ):
+        with patch_registry({"postgres": _UnreachableAdapter}):
             return CliRunner().invoke(main, ["check", "--online", *args])
 
     def test_connection_failure_reaches_the_structured_output(
@@ -1025,14 +1000,10 @@ class TestDriftCountSurvivesALateAssertionConnectionFailure:
         _seed_clean_print(tmp_path, committed_print)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
-        with patch.dict(
-            "dbprint.cli.adapter_registry.ADAPTERS",
-            {"postgres": _ReconnectFailsAdapter},
-            clear=True,
-        ):
+        with patch_registry({"postgres": _ReconnectFailsAdapter}):
             return CliRunner().invoke(main, ["check", "--online", "--format", "json"])
 
     def test_the_connection_still_fails(
@@ -1089,7 +1060,7 @@ class TestARefusedTableDoesNotCostTheConnectionItsOnlinePhase:
         _seed_clean_print(tmp_path, committed_print)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         with _patch_registry():
@@ -1144,7 +1115,7 @@ class TestARefusedTableDoesNotCostTheConnectionItsOnlinePhase:
         stats_path.write_text(yaml.safe_dump(stats))
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         with _patch_registry():
@@ -1383,14 +1354,10 @@ class TestAPartialOnlineScanIsReported:
         _seed_two_table_print(tmp_path, committed_print)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
-        with patch.dict(
-            "dbprint.cli.adapter_registry.ADAPTERS",
-            {"postgres": _PartiallyFailingAdapter},
-            clear=True,
-        ):
+        with patch_registry({"postgres": _PartiallyFailingAdapter}):
             return CliRunner().invoke(main, ["check", "--online", *args])
 
     def test_a_partial_scan_does_not_exit_zero(
@@ -1506,14 +1473,10 @@ class TestAPartialOnlineScanIsReported:
         _seed_two_table_print(tmp_path, committed_print)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
-        with patch.dict(
-            "dbprint.cli.adapter_registry.ADAPTERS",
-            {"postgres": _PartiallyFailingAdapter},
-            clear=True,
-        ):
+        with patch_registry({"postgres": _PartiallyFailingAdapter}):
             result = CliRunner().invoke(main, ["diff", "--format", "json"])
 
         assert result.exit_code == 5
@@ -1546,14 +1509,10 @@ class TestTheSameTableIsNotReportedTwice:
         _seed_two_table_print(tmp_path, committed_print)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
-        with patch.dict(
-            "dbprint.cli.adapter_registry.ADAPTERS",
-            {"postgres": _RefusedTablePartiallyFailingAdapter},
-            clear=True,
-        ):
+        with patch_registry({"postgres": _RefusedTablePartiallyFailingAdapter}):
             return CliRunner().invoke(main, ["check", "--online", "--format", "json"])
 
     def test_the_table_appears_once(
@@ -1630,7 +1589,7 @@ class TestAStalePrintStillSuppressesTheOnlinePhase:
         _age_the_print(prints, days=30)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         with _patch_registry():
@@ -1654,7 +1613,7 @@ class TestRunLog:
         _seed_clean_print(tmp_path, committed_print)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         with _patch_registry():
@@ -1677,7 +1636,7 @@ class TestRunLog:
         _seed_clean_print(tmp_path, committed_print)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         with _patch_registry(), patch.object(run_log, "LOGS_ROOT", tmp_path / "logs"):
@@ -1704,14 +1663,10 @@ class TestATargetListingNoCommittedTable:
         _seed_clean_print(tmp_path, committed_print)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
-        with patch.dict(
-            "dbprint.cli.adapter_registry.ADAPTERS",
-            {"postgres": _EmptyTargetAdapter},
-            clear=True,
-        ):
+        with patch_registry({"postgres": _EmptyTargetAdapter}):
             result = CliRunner().invoke(main, ["check", "--online"])
 
         assert result.exit_code == 4

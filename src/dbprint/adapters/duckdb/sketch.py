@@ -5,7 +5,6 @@ low 64 bits, and the `0x` prefix plus `UBIGINT` cast parses them unsigned big-en
 from __future__ import annotations
 
 from dbprint.spec.sketch import SketchKind
-from . import stats
 from .rendering import render_canonical
 from ..identifiers import Identity
 
@@ -18,7 +17,7 @@ def canonical_value(
 ) -> tuple[str, str]:
     """The column reference a key sketch filters on, and the canonical value it hashes."""
 
-    quoted_col = stats._qualified(column)
+    quoted_col = identity.source_column(column)
 
     return quoted_col, render_canonical(quoted_col, sql_type, kind)
 

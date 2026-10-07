@@ -18,16 +18,18 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 import psycopg
 import pytest
 from hypothesis import HealthCheck, settings
 from hypothesis.configuration import set_hypothesis_home_dir
 from hypothesis.database import DirectoryBasedExampleDatabase
+from psycopg import sql
 
 from dbprint.cli import run_log
 from tests import _containment, _substrates
@@ -38,6 +40,7 @@ from tests._provisioning import (
     ensure_postgres_extension,
     in_container,
 )
+from tests._scripts import REPO_ROOT, load_script
 
 
 # `check` must not vary between runs, so its profile derandomizes; `local` searches wider and keeps
@@ -61,14 +64,10 @@ settings.load_profile(os.environ.get("DBPRINT_HYPOTHESIS_PROFILE", "check"))
 # Not a plausible timestamp, so a normalized payload cannot pass for one a producer wrote.
 INSTANT_PLACEHOLDER = "<instant>"
 
-_INSTANT_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z")
-
-# Run instants only - a temporal column's range/percentiles are ISO instants too.
-# Mirrors scripts/example_support.py's INSTANT_KEYS.
-_INSTANT_KEYS = frozenset({"generated_at", "profiled_at", "scanned_at"})
+_EXAMPLE_SUPPORT = load_script("example_support")
 
 # The print the package ships, and the only one carrying real producer output.
-_COMMITTED_PRINTS = Path(__file__).resolve().parent.parent / "docs/format/v1/examples"
+_COMMITTED_PRINTS = REPO_ROOT / "docs/format/v1/examples"
 _COMMITTED_PRINTS = _COMMITTED_PRINTS / "production/prints"
 
 # One fixed path outside any per-cluster data_dir (which does not exist yet when the lock
@@ -461,21 +460,10 @@ def _serialize_cluster_bootstrap() -> Iterator[None]:
 def normalize_instants(text: str) -> str:
     """Collapse what a clock decided, so two producer runs compare on content alone.
 
-    Every run stamps its own instants, so comparing raw payloads holds only when the pair lands
-    inside one second. Scoped to keys in `_INSTANT_KEYS`, so a temporal column's own
-    `range`/`percentiles` still show a real difference.
+    Run instants only, so a temporal column's own `range`/`percentiles` still show a real difference.
     """
 
-    return "".join(_normalize_instant_line(line) for line in text.splitlines(keepends=True))
-
-
-def _normalize_instant_line(line: str) -> str:
-    key = line.lstrip().split(":", 1)[0].strip().strip('"')
-
-    if key not in _INSTANT_KEYS:
-        return line
-
-    return _INSTANT_RE.sub(INSTANT_PLACEHOLDER, line)
+    return _EXAMPLE_SUPPORT.freeze_instants(text, INSTANT_PLACEHOLDER)
 
 
 def normalize_print_tree(root: Path) -> dict[str, str]:
@@ -494,6 +482,61 @@ class PostgresCluster:
 
     port: int
     superuser: str = "postgres"
+
+    def creds(self, database: str = "postgres") -> dict[str, str]:
+        """Superuser credentials for `database` on this cluster."""
+
+        return {
+            "host": "127.0.0.1",
+            "port": str(self.port),
+            "database": database,
+            "user": self.superuser,
+            "password": "",
+        }
+
+
+def pg_connect(creds: Mapping[str, str], **kwargs: Any) -> psycopg.Connection[tuple[Any, ...]]:
+    """An autocommit connection to the database `creds` names."""
+
+    return psycopg.connect(
+        host=creds["host"],
+        port=int(creds["port"]),
+        dbname=creds["database"],
+        user=creds["user"],
+        password=creds.get("password", ""),
+        autocommit=True,
+        **kwargs,
+    )
+
+
+@contextmanager
+def fresh_database(
+    cluster: PostgresCluster,
+    prefix: str,
+    *,
+    create: Callable[[Mapping[str, str], str], None] | None = None,
+) -> Iterator[dict[str, str]]:
+    """Credentials for a new database in `cluster`, force-dropped on exit.
+
+    `create(admin_creds, name)` replaces the bare `CREATE DATABASE`.
+    """
+
+    admin = cluster.creds()
+    name = f"{prefix}_{secrets.token_hex(4)}"
+
+    if create is None:
+        with pg_connect(admin) as conn:
+            conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    else:
+        create(admin, name)
+
+    try:
+        yield cluster.creds(name)
+    finally:
+        with pg_connect(admin) as conn:
+            conn.execute(
+                sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)),
+            )
 
 
 @pytest.fixture(scope="session")

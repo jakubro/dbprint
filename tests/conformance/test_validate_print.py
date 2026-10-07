@@ -11,11 +11,10 @@ import yaml
 
 from dbprint.conformance import ValidationTick, validate_print
 from dbprint.conformance.issue import Issue
+from tests._scripts import REPO_ROOT
 
 
-_EXAMPLE = (
-    Path(__file__).resolve().parents[2] / "docs/format/v1/examples/production/prints/production"
-)
+_EXAMPLE = REPO_ROOT / "docs/format/v1/examples/production/prints/production"
 
 
 @pytest.fixture

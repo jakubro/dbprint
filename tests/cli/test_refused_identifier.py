@@ -11,6 +11,7 @@ import yaml
 from click.testing import CliRunner
 
 from dbprint.cli.main import main
+from dbprint.config.connections import env_var_name
 
 
 _PROJECT = """\
@@ -31,7 +32,7 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         con = duckdb.connect(str(tmp_path / f"{name}.duckdb"))
         con.execute("CREATE TABLE bed AS SELECT i AS id FROM range(20) r(i)")
         con.close()
-        monkeypatch.setenv(f"DBPRINT_{name.upper()}_DATABASE", str(tmp_path / f"{name}.duckdb"))
+        monkeypatch.setenv(env_var_name(name, "database"), str(tmp_path / f"{name}.duckdb"))
 
     (tmp_path / ".dbprint.yaml").write_text(_PROJECT)
     monkeypatch.chdir(tmp_path)

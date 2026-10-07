@@ -33,7 +33,11 @@ _NOT_A_DISPLAYED_NUMBER = {
     ("docs/view.py", "skyline_heights"): "skyline bar heights",
     ("docs/view.py", "values_view"): "a value bar width",
     ("docs/web.py", "_relative_time"): "an elapsed duration, not a statistic",
-    ("engine/notes_synthesis.py", "_non_null_total"): "an estimated count, not a display",
+    ("engine/notes_synthesis.py", "_non_null"): "an estimated count, not a display",
+    (
+        "engine/context_assembler.py",
+        "_null_pattern_population",
+    ): "an estimated count, not a display",
 }
 
 _TEMPLATE_FORMATTER = re.compile(r"\|\s*(round|format|human)\b|'%")

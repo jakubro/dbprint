@@ -13,13 +13,27 @@ import yaml
 from dbprint.config import ConnectionConfig
 from dbprint.engine.baseline import (
     ArtifactReader,
-    declared_artifacts,
     failed_tables,
-    manifest_shape_error,
+    read_manifest,
     table_directory,
+)
+from dbprint.engine.context_assembler import incoming_rejections
+from dbprint.engine.relationship_graph import (
+    edge_detection,
+    edge_key,
+    rejected_edges,
+    withhold_rejected,
+)
+from dbprint.engine.yaml_dumper import dump_yaml
+from dbprint.spec.artifacts import (
+    ARTIFACT_FILENAMES,
+    DIFF_FILENAME,
+    MANIFEST_ANNOTATIONS_FILENAME,
+    MANIFEST_FILENAME,
+    READING_GUIDE_FILENAME,
+    declared_artifacts,
     walkable_tables,
 )
-from dbprint.engine.reading_guide import READING_GUIDE_FILENAME
 from dbprint.spec.fqn import join as join_fqn
 from . import errors, paging
 from .reference import ReferenceDocument, read_document
@@ -63,19 +77,11 @@ _KIND_MIME = {
 # Connection-grain resources with no `fqn` - the URI form `dbprint://<connection>/<kind>`.
 _CONNECTION_LEVEL_KINDS = frozenset({"manifest", "diff", "reading", "manifest_annotations"})
 _CONNECTION_LEVEL_FILE = {
-    "manifest": "manifest.yaml",
-    "diff": "diff.yaml",
-    "manifest_annotations": "manifest.annotations.yaml",
+    "manifest": MANIFEST_FILENAME,
+    "diff": DIFF_FILENAME,
+    "manifest_annotations": MANIFEST_ANNOTATIONS_FILENAME,
 }
 
-_KIND_FILE = {
-    "ddl": "ddl.sql",
-    "statistics": "statistics.yaml",
-    "relationships": "relationships.yaml",
-    "description": "description.md",
-    "statistics_annotations": "statistics.annotations.yaml",
-    "relationships_annotations": "relationships.annotations.yaml",
-}
 
 # Never declared is licensed - no human wrote one (SPEC 2.4, 2.7). Declared but missing is
 # not: `manifest.missing-artifact` (SPEC 2.5) applies to these kinds exactly as to any other.
@@ -94,8 +100,8 @@ _TABLE_KIND_DESCRIPTION = {
         "fields applied; read this file raw only for the sketch"
     ),
     "relationships": (
-        "relationships.yaml as written. get_table_context lists the same edges as its "
-        "Joins list, each with its detection"
+        "relationships.yaml without the edges a human rejected in relationships_annotations. "
+        "get_table_context lists the same edges as its Joins list, each with its detection"
     ),
     "description": "Human-authored description.md. get_table_context includes it",
     "statistics_annotations": (
@@ -103,8 +109,8 @@ _TABLE_KIND_DESCRIPTION = {
         "search_columns `text` searches them"
     ),
     "relationships_annotations": (
-        "Human-authored notes on relationships, including rejected edges. "
-        "get_table_context marks a rejected edge in its Joins list"
+        "Human-authored notes on relationships, including the edges a human rejected; no "
+        "other resource or tool lists a rejected edge"
     ),
 }
 
@@ -175,7 +181,7 @@ TEMPLATES: tuple[tuple[str, str, str], ...] = (
     *(
         (f"dbprint://{{connection}}/{{table}}/{kind}{{?page,version}}", f"table {kind}", mime)
         for kind, mime in _KIND_MIME.items()
-        if kind in _KIND_FILE
+        if kind in ARTIFACT_FILENAMES
     ),
 )
 
@@ -210,7 +216,7 @@ def parse_uri(uri: str) -> ResourceRef | ReferenceRef:
         fqn = join_fqn(parts[1:-1])
         kind = parts[-1]
 
-        if kind in _KIND_FILE:
+        if kind in ARTIFACT_FILENAMES:
             return ResourceRef(connection=connection, kind=cast(ResourceKind, kind), fqn=fqn)
 
     raise errors.malformed_uri(uri)
@@ -220,7 +226,7 @@ def list_page(state: ServedConnections, cursor: str | None) -> ListPage:
     """The `resources/list` page `cursor` points at, under MCP.md 4.8's bound and cursor rules."""
 
     entries = enumerate_for(state)
-    manifests = tuple(conn.output / conn.name / "manifest.yaml" for conn in state.served.values())
+    manifests = tuple(conn.print_root / MANIFEST_FILENAME for conn in state.served.values())
     call = paging.Call("resources/list", {}, manifests)
 
     def render(units: Any, first: bool, next_cursor: str | None) -> dict[str, Any]:
@@ -309,18 +315,20 @@ def _read_whole(state: ServedConnections, uri: str) -> ReadResult:
         raise errors.unknown_connection(ref.connection, list(configured))
 
     conn = state.served[ref.connection]
-    print_root = conn.output / conn.name
+    print_root = conn.print_root
 
     if ref.kind == "manifest":
-        return _read_text(print_root / "manifest.yaml", _KIND_MIME["manifest"], state.files.read)
+        return _read_text(print_root / MANIFEST_FILENAME, _KIND_MIME["manifest"], state.files.read)
 
     if ref.kind == "diff":
-        diff_path = print_root / "diff.yaml"
+        diff_path = print_root / DIFF_FILENAME
 
         if not diff_path.is_file():
             raise errors.no_diff_available(str(diff_path))
 
-        return _read_text(diff_path, _KIND_MIME["diff"], state.files.read)
+        whole = _read_text(diff_path, _KIND_MIME["diff"], state.files.read)
+
+        return _diff_without_rejected_events(whole, print_root, diff_path, state.files.read)
 
     if ref.kind == "reading":
         reading_path = print_root / READING_GUIDE_FILENAME
@@ -354,8 +362,8 @@ def _read_whole(state: ServedConnections, uri: str) -> ReadResult:
 
     if manifest is None:
         raise errors.manifest_references_missing_file(
-            "manifest.yaml",
-            str(print_root / "manifest.yaml"),
+            MANIFEST_FILENAME,
+            str(print_root / MANIFEST_FILENAME),
         )
 
     entry = walkable_tables(manifest).get(ref.fqn)
@@ -372,7 +380,7 @@ def _read_whole(state: ServedConnections, uri: str) -> ReadResult:
 
     if file_name is None:
         if ref.kind in _OPTIONAL_ARTIFACT_KINDS:
-            raise errors.missing_optional_artifact(_KIND_FILE[ref.kind], ref.fqn)
+            raise errors.missing_optional_artifact(ARTIFACT_FILENAMES[ref.kind], ref.fqn)
 
         # The manifest never declared this kind for this table - the caller's own request
         # against this object's type, not an inconsistency to repair (SPEC 2.3).
@@ -385,7 +393,19 @@ def _read_whole(state: ServedConnections, uri: str) -> ReadResult:
         # inconsistency `conformance/manifest.py` already flags at ERROR severity (SPEC 2.5).
         raise errors.manifest_references_missing_file(file_name, str(file_path))
 
-    return _read_text(file_path, _KIND_MIME[ref.kind], state.files.read)
+    whole = _read_text(file_path, _KIND_MIME[ref.kind], state.files.read)
+
+    if ref.kind != "relationships":
+        return whole
+
+    return _without_rejected_edges(
+        whole,
+        manifest,
+        print_root,
+        ref.fqn,
+        file_path,
+        state.files.read,
+    )
 
 
 def _page_query(uri: str) -> tuple[str, str, str | None]:
@@ -421,7 +441,7 @@ def _enumerate_connection(conn: ConnectionConfig, read: ArtifactReader) -> list[
     `manifest_annotations` is the one conditional kind, human-authored and often absent.
     """
 
-    print_root = conn.output / conn.name
+    print_root = conn.print_root
     out: list[ResourceEntry] = [
         ResourceEntry(
             uri=f"dbprint://{conn.name}/manifest",
@@ -437,8 +457,9 @@ def _enumerate_connection(conn: ConnectionConfig, read: ArtifactReader) -> list[
             uri=f"dbprint://{conn.name}/diff",
             name=f"{conn.name} diff",
             description=(
-                f"What changed between the last two runs for connection {conn.name}. "
-                f"get_diff returns it filtered by table or kind"
+                f"What changed between the last two runs for connection {conn.name}, without "
+                f"events about an edge a human rejected. get_diff returns it filtered by table or "
+                f"kind"
             ),
             mime_type=_KIND_MIME["diff"],
         ),
@@ -463,7 +484,9 @@ def _enumerate_connection(conn: ConnectionConfig, read: ArtifactReader) -> list[
             ),
         )
 
-    manifest = _load_manifest_or_none(print_root, read)
+    # An unreadable manifest withholds this connection's tables, never another's listing; its
+    # manifest URI stays, and reading it names the error.
+    manifest = read_manifest(print_root, read).manifest
 
     if manifest is None:
         return out
@@ -523,6 +546,172 @@ def _read_text(path: Path, mime_type: str, read: ArtifactReader) -> ReadResult:
     return ReadResult(content=text, mime_type=mime_type, version=version)
 
 
+def _without_rejected_edges(
+    whole: ReadResult,
+    manifest: dict[str, Any],
+    print_root: Path,
+    fqn: str,
+    path: Path,
+    read: ArtifactReader,
+) -> ReadResult:
+    """`relationships.yaml` less the edges a human rejected, versioned over the files deciding it.
+
+    Verbatim, with the file's own version, when nothing is withheld (MCP.md 3.4).
+    """
+
+    raw = read(path)
+
+    if not isinstance(raw, dict):
+        return whole
+
+    entry = walkable_tables(manifest)[fqn]
+    own_name = declared_artifacts(entry).get("relationships_annotations")
+    own_path = table_directory(print_root, fqn, entry) / own_name if own_name else None
+    incoming, consulted = incoming_rejections(manifest, print_root, fqn, raw, read)
+    shown = withhold_rejected(raw, _own_rejections(own_path, read), incoming, fqn)
+
+    if shown is raw:
+        return whole
+
+    decided_by = [path, *([own_path] if own_path else []), *consulted]
+
+    return ReadResult(
+        content=dump_yaml(shown),
+        mime_type=whole.mime_type,
+        version=paging.files_digest(decided_by),
+    )
+
+
+def diff_without_rejected(
+    data: dict[str, Any],
+    manifest: dict[str, Any] | None,
+    print_root: Path,
+    read: ArtifactReader,
+) -> tuple[dict[str, Any], tuple[Path, ...]]:
+    """`diff.yaml` less its relationship events about a human-rejected edge (SPEC 2.7.2).
+
+    `summary.relationships_changed` counts the events kept; the files read to decide are returned.
+    """
+
+    changes = [c for c in (data.get("changes") or []) if isinstance(c, dict)]
+    tables = walkable_tables(manifest) if manifest else {}
+    verdicts: dict[str, tuple[dict[tuple[Any, ...], Any], set[tuple[Any, ...]]]] = {}
+    consulted: list[Path] = []
+    kept: list[dict[str, Any]] = []
+
+    for change in changes:
+        source = change.get("source_table")
+
+        if not str(change.get("kind", "")).startswith("relationship_") or source not in tables:
+            kept.append(change)
+            continue
+
+        if source not in verdicts:
+            verdicts[source] = _source_verdicts(print_root, source, tables[source], consulted, read)
+
+        rejected, declared = verdicts[source]
+        key = (
+            tuple(change.get("source_column") or ()),
+            change.get("target_table"),
+            tuple(change.get("target_column") or ()),
+        )
+
+        if key not in rejected or key in declared:
+            kept.append(change)
+
+    shown = {**data, "changes": kept}
+    summary = data.get("summary")
+    changed = summary.get("relationships_changed") if isinstance(summary, dict) else None
+
+    if len(kept) < len(changes) and isinstance(summary, dict) and isinstance(changed, int):
+        shown["summary"] = {
+            **summary,
+            "relationships_changed": changed - (len(changes) - len(kept)),
+        }
+
+    return shown, tuple(consulted)
+
+
+def _diff_without_rejected_events(
+    whole: ReadResult,
+    print_root: Path,
+    path: Path,
+    read: ArtifactReader,
+) -> ReadResult:
+    raw = read(path)
+
+    if not isinstance(raw, dict):
+        return whole
+
+    manifest = read_manifest(print_root, read).manifest
+    shown, consulted = diff_without_rejected(raw, manifest, print_root, read)
+
+    if len(shown["changes"]) == len([c for c in (raw.get("changes") or []) if isinstance(c, dict)]):
+        return whole
+
+    return ReadResult(
+        content=dump_yaml(shown),
+        mime_type=whole.mime_type,
+        version=paging.files_digest([path, *consulted]),
+    )
+
+
+def _source_verdicts(
+    print_root: Path,
+    source: str,
+    entry: dict[str, Any],
+    consulted: list[Path],
+    read: ArtifactReader,
+) -> tuple[dict[tuple[Any, ...], Any], set[tuple[Any, ...]]]:
+    table_dir = table_directory(print_root, source, entry)
+    artifacts = declared_artifacts(entry)
+    rejected: dict[tuple[Any, ...], Any] = {}
+    declared: set[tuple[Any, ...]] = set()
+
+    if "relationships_annotations" in artifacts:
+        path = table_dir / artifacts["relationships_annotations"]
+        consulted.append(path)
+        rejected = _own_rejections(path, read)
+
+    if rejected and "relationships" in artifacts:
+        path = table_dir / artifacts["relationships"]
+        consulted.append(path)
+        edges = (parsed_mapping(path, read) or {}).get("refers_to") or []
+        declared = {
+            edge_key(e) for e in edges if isinstance(e, dict) and edge_detection(e) == "declared"
+        }
+
+    return rejected, declared
+
+
+def parsed_mapping(path: Path, read: ArtifactReader) -> dict[str, Any] | None:
+    """A YAML artifact as a mapping; None when it is absent, unparseable or not a mapping."""
+
+    if not path.is_file():
+        return None
+
+    try:
+        data = read(path)
+    except yaml.YAMLError:
+        return None
+
+    return data if isinstance(data, dict) else None
+
+
+def _own_rejections(path: Path | None, read: ArtifactReader) -> dict[tuple[Any, ...], Any]:
+    if path is None or not path.is_file():
+        return {}
+
+    try:
+        data = read(path)
+    except yaml.YAMLError:
+        return {}
+
+    entries = data.get("refers_to") if isinstance(data, dict) else None
+
+    return rejected_edges(entries if isinstance(entries, list) else None)
+
+
 def _read_unchanged(path: Path) -> tuple[str, str]:
     # The version must name the text it is served with, so a rewrite during the read retries.
     for _ in range(2):
@@ -536,19 +725,4 @@ def _read_unchanged(path: Path) -> tuple[str, str]:
 
 
 def _load_manifest_or_none(print_root: Path, read: ArtifactReader) -> dict | None:
-    manifest_path = print_root / "manifest.yaml"
-
-    if not manifest_path.is_file():
-        return None
-
-    try:
-        data = read(manifest_path)
-    except yaml.YAMLError as exc:
-        raise errors.yaml_parse_error(str(manifest_path), str(exc)) from exc
-
-    reason = manifest_shape_error(data)
-
-    if reason is not None:
-        raise errors.malformed_manifest(str(manifest_path), reason)
-
-    return data if isinstance(data, dict) else None
+    return errors.manifest_or_error(read_manifest(print_root, read))

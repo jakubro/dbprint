@@ -29,6 +29,7 @@ from dbprint.assertions import (
 )
 from dbprint.config import ConfigError, ConnectionConfig, selectors
 from dbprint.config.duration import DurationError, parse_duration
+from dbprint.config.resolution import ConnectionResolutionError, resolve
 from dbprint.conformance import Issue, ValidationProgress, ValidationTick, validate_print
 from dbprint.engine import (
     EXIT_ASSERTION,
@@ -44,18 +45,14 @@ from dbprint.engine import (
     TableResult,
     thresholds,
 )
-from dbprint.engine.baseline import (
-    declared_artifacts,
-    failed_tables,
-    manifest_shape_error,
-    walkable_tables,
-)
+from dbprint.engine.baseline import failed_tables, read_manifest
 from dbprint.engine.carried import CommittedPrint, redaction_mismatches
 from dbprint.engine.freshness import evaluate
 from dbprint.engine.result import DiffResult
 from dbprint.spec import artifact_yaml
+from dbprint.spec.artifacts import declared_artifacts, walkable_tables
 from dbprint.spec.drift import DATA_CHANGE_KINDS
-from dbprint.spec.fqn import split as split_fqn
+from dbprint.spec.fqn import directory as fqn_directory
 from ..engine_setup import ConnectionSetupError, build_engine
 from ..options import project_option, refuse_if_remote, resolve_project
 from ..rendering import (
@@ -69,7 +66,6 @@ from ..rendering.check_data import CheckResult, NotRun, OnlineDisposition, rende
 from ..rendering.check_tty import render_human
 from ..rendering.errors import emit_error
 from ..rendering.progress import ConnectionSummary, ProgressRenderer
-from ..resolution import ConnectionResolutionError, resolve
 from ..run_log import close_run_log, log_run_header, log_run_summary, open_run_log
 
 
@@ -286,8 +282,9 @@ def _check_one(
 
     default_max_age_days = override if override is not None else conn_config.max_age_days
 
-    print_root = _print_root(conn_config)
-    manifest_present = (print_root / "manifest.yaml").is_file()
+    print_root = conn_config.print_root
+    read = read_manifest(print_root)
+    manifest_present = read.state != "absent"
 
     if not manifest_present:
         result = CheckResult(
@@ -318,7 +315,7 @@ def _check_one(
     redaction_issues = _redaction_issues(conn_config, print_root)
     issues = tuple(sorted(issues + redaction_issues))
 
-    manifest = _load_manifest(print_root)
+    manifest = read.manifest
 
     # Resolved regardless of --max-age: a table narrowed two ways is a scope error
     # independent of freshness; the override only changes what the refusal costs.
@@ -605,7 +602,7 @@ def _load_committed_statistics(
 
     for i, (fqn, entry) in enumerate(tables.items(), start=1):
         try:
-            entry_path = entry.get("path") or "/".join(split_fqn(fqn))
+            entry_path = entry.get("path") or fqn_directory(fqn)
             artifacts = declared_artifacts(entry)
 
             if "statistics" not in artifacts:
@@ -802,27 +799,6 @@ def _not_run(connection_name: str, cause: str) -> tuple[NotRun, ...]:
     """One connection-wide cause as a not-run entry; nothing was read, so no table to name."""
 
     return (NotRun(subject=connection_name, cause=cause),)
-
-
-def _load_manifest(print_root: Path) -> dict[str, Any] | None:
-    path = print_root / "manifest.yaml"
-
-    if not path.is_file():
-        return None
-
-    try:
-        data = artifact_yaml.load(path.read_text(encoding="utf-8"))
-    except yaml.YAMLError:
-        return None
-
-    if manifest_shape_error(data) is not None:
-        return None
-
-    return data if isinstance(data, dict) else None
-
-
-def _print_root(conn: ConnectionConfig) -> Path:
-    return conn.output / conn.name
 
 
 def _assertions_progress_adapter(

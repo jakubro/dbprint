@@ -6,27 +6,14 @@ from typing import Any
 
 from dbprint.adapters import ClickhouseAdapter
 from dbprint.adapters.clickhouse import ddl as ddl_module
-
-
-class _Recorder:
-    def __init__(self, cursor: Any) -> None:
-        self._cursor = cursor
-        self.statements: list[str] = []
-
-    def execute(self, sql: str, params: Any = None) -> Any:
-        self.statements.append(" ".join(sql.split()))
-
-        return self._cursor.execute(sql, params)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._cursor, name)
+from tests.adapters._clickhouse import Recorder
 
 
 def _ddl(cursor: Any) -> tuple[str, list[str]]:
     cursor.execute(
         "CREATE TABLE seedbank.narrow (id UInt64) ENGINE = MySQL('h:3306', 'db', 't', 'u', 'pw')",
     )
-    recorder = _Recorder(cursor)
+    recorder = Recorder(cursor)
     adapter = ClickhouseAdapter(
         {"host": "chdb", "database": "seedbank"},
         cursor_factory=lambda _p: recorder,

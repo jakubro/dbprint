@@ -64,6 +64,6 @@ class DuckdbAdapter(SqlAdapter):
 
     def list_tables(self, include: list[str], exclude: list[str]) -> list[TableMeta]:
         selected = introspect_module.list_tables(self._cursor, include, exclude)
-        self._identities.register(selected)
+        listed = self._register(selected)
 
-        return [meta for meta, _ in selected]
+        return listed

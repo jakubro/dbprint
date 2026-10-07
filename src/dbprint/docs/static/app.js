@@ -4,6 +4,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll("table[data-enhance]").forEach(enhanceTable);
   initFilter();
   initTabs();
+  initPurposePicker();
   initSidebar();
   initCharts();
   document.querySelector(".sidebar .nav-current")?.scrollIntoView({ block: "center" });
@@ -52,6 +53,21 @@ function initTabs() {
   });
 
   activateTab("overview");
+}
+
+// Scoped to the Context panel: `activateTab` toggles every [data-tab-panel] on the page.
+function initPurposePicker() {
+  const panel = document.querySelector('[data-tab-panel="context"]');
+  if (!panel) return;
+
+  for (const btn of panel.querySelectorAll(".purpose-btn")) {
+    btn.addEventListener("click", () => {
+      for (const b of panel.querySelectorAll(".purpose-btn")) b.classList.toggle("active", b === btn);
+      for (const p of panel.querySelectorAll("[data-purpose-panel]")) {
+        p.hidden = p.dataset.purposePanel !== btn.dataset.purpose;
+      }
+    });
+  }
 }
 
 // Priority tiers, most- to least-inclusive.

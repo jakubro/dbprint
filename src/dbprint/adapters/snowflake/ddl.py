@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from .connection import DIALECT, Cursor, exec_query
 from ..identifiers import Identity, quote
+from ..sql_layout import trimmed_lines
 
 
 # GET_DDL names an event table's kind on its own; `TABLE` covers tables, external and hybrid ones.
@@ -52,7 +53,4 @@ def extract_ddl(cursor: Cursor, identity: Identity) -> str:
 def normalize(raw: str) -> str:
     """Strip trailing whitespace per line and ensure terminal newline."""
 
-    lines = [line.rstrip() for line in raw.splitlines()]
-    text = "\n".join(lines).strip("\n")
-
-    return text + "\n" if text else ""
+    return trimmed_lines(raw)

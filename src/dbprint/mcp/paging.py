@@ -196,6 +196,44 @@ def text_page(
     return pages[index] + marker(call.cursor(index + 1))
 
 
+def legend_text_page(
+    call: Call,
+    blocks: Sequence[tuple[str, Sequence[frozenset[str]]]],
+    cursor: str | None,
+    marker: Callable[[str], str],
+    legend: Callable[[frozenset[str]], str],
+) -> str:
+    """`text_page` with a legend per page: the terms of that page's lines.
+
+    After block one on page one, leading every later page; pages leave room for the whole legend.
+    """
+
+    texts = [text for text, _ in blocks]
+    full = legend(frozenset().union(*(terms for _, line_terms in blocks for terms in line_terms)))
+    reserve = len(full) + 2 if full else 0
+    pages = _document_pages(texts, PAGE_CHARACTERS - len(marker(call.cursor(0))) - reserve)
+    index = call.position(cursor)
+
+    if index >= len(pages) or (cursor is not None and index == 0):
+        raise errors.foreign_cursor(call.tool)
+
+    start = sum(len(page) for page in pages[:index])
+    terms = _terms_between(blocks, start, start + len(pages[index]))
+    page_legend = legend(terms)
+    text = pages[index]
+
+    if page_legend and index == 0:
+        head = min(len(texts[0]), len(text))
+        text = f"{text[:head]}\n\n{page_legend}{text[head:]}"
+    elif page_legend:
+        text = f"{page_legend}\n\n{text}"
+
+    if index == len(pages) - 1:
+        return text
+
+    return text + marker(call.cursor(index + 1))
+
+
 def line_pages(
     text: str,
     bound: int = PAGE_CHARACTERS,
@@ -320,6 +358,28 @@ def _document_pages(blocks: Sequence[str], bound: int) -> list[str]:
         pages.append(current)
 
     return pages
+
+
+def _terms_between(
+    blocks: Sequence[tuple[str, Sequence[frozenset[str]]]],
+    start: int,
+    end: int,
+) -> frozenset[str]:
+    """The terms of every line the document's characters `start`..`end` touch."""
+
+    found: set[str] = set()
+    offset = 0
+
+    for text, line_terms in blocks:
+        for number, line in enumerate(text.split("\n")):
+            if number < len(line_terms) and offset < end and offset + len(line) > start:
+                found |= line_terms[number]
+
+            offset += len(line) + 1
+
+        offset += 1
+
+    return frozenset(found)
 
 
 def _chunks(text: str, budget: int) -> list[str]:

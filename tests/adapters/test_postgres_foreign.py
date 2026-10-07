@@ -2,20 +2,19 @@
 
 from __future__ import annotations
 
-import secrets
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, LiteralString, cast
 
-import psycopg
 import pytest
 import yaml
 from click.testing import CliRunner
-from psycopg import sql
 
 from dbprint.cli.main import main
-from tests.conftest import PostgresCluster
-from tests.live._harness import assert_conformant, write_project
+from dbprint.config.connections import env_var_name
+from tests._cli import write_project
+from tests._engine_run import assert_conformant
+from tests.conftest import PostgresCluster, fresh_database, pg_connect
 
 
 _SETUP = (
@@ -34,56 +33,38 @@ _SETUP = (
 def fdw_db(postgres_cluster: PostgresCluster) -> Iterator[dict[str, str]]:
     """A loopback `postgres_fdw` server into its own database, and a foreign table over it."""
 
-    database = f"fdw_{secrets.token_hex(4)}"
-    creds = {
-        "host": "127.0.0.1",
-        "port": str(postgres_cluster.port),
-        "database": "postgres",
-        "user": postgres_cluster.superuser,
-        "password": "",
-    }
-
-    with _admin(creds) as conn:
+    with pg_connect(postgres_cluster.creds()) as conn:
         available = conn.execute(
             "SELECT 1 FROM pg_available_extensions WHERE name = 'postgres_fdw'",
         ).fetchone()
 
-        if available is None:
-            pytest.skip("postgres_fdw is not installed on the suite's Postgres")
+    if available is None:
+        pytest.skip("postgres_fdw is not installed on the suite's Postgres")
 
-        conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database)))
+    with fresh_database(postgres_cluster, "fdw") as creds:
+        with pg_connect(creds) as conn:
+            for statement in (
+                *_SETUP,
+                (
+                    f"CREATE SERVER loop FOREIGN DATA WRAPPER postgres_fdw OPTIONS "
+                    f"(host '127.0.0.1', port '{postgres_cluster.port}', dbname '{creds['database']}')"
+                ),
+                f"CREATE USER MAPPING FOR {postgres_cluster.superuser} SERVER loop",
+                (
+                    "CREATE FOREIGN TABLE seedbank.remote_storage_log (id int NOT NULL, herbarium_id int, "
+                    "logged_at timestamptz) SERVER loop "
+                    "OPTIONS (schema_name 'seedbank', table_name 'storage_log')"
+                ),
+                "COMMENT ON FOREIGN TABLE seedbank.remote_storage_log IS 'storage log kept on the loop server'",
+                "CREATE VIEW seedbank.remote_storage_log_v AS SELECT * FROM seedbank.remote_storage_log",
+                (
+                    "CREATE FOREIGN TABLE seedbank.field_survey_remote PARTITION OF seedbank.field_survey "
+                    "FOR VALUES IN ('b') SERVER loop OPTIONS (schema_name 'seedbank', table_name 'field_survey_src')"
+                ),
+            ):
+                conn.execute(cast(LiteralString, statement))
 
-    creds = {**creds, "database": database}
-
-    with _admin(creds) as conn:
-        for statement in (
-            *_SETUP,
-            (
-                f"CREATE SERVER loop FOREIGN DATA WRAPPER postgres_fdw OPTIONS "
-                f"(host '127.0.0.1', port '{postgres_cluster.port}', dbname '{database}')"
-            ),
-            f"CREATE USER MAPPING FOR {postgres_cluster.superuser} SERVER loop",
-            (
-                "CREATE FOREIGN TABLE seedbank.remote_storage_log (id int NOT NULL, herbarium_id int, "
-                "logged_at timestamptz) SERVER loop "
-                "OPTIONS (schema_name 'seedbank', table_name 'storage_log')"
-            ),
-            "COMMENT ON FOREIGN TABLE seedbank.remote_storage_log IS 'storage log kept on the loop server'",
-            "CREATE VIEW seedbank.remote_storage_log_v AS SELECT * FROM seedbank.remote_storage_log",
-            (
-                "CREATE FOREIGN TABLE seedbank.field_survey_remote PARTITION OF seedbank.field_survey "
-                "FOR VALUES IN ('b') SERVER loop OPTIONS (schema_name 'seedbank', table_name 'field_survey_src')"
-            ),
-        ):
-            conn.execute(cast(LiteralString, statement))
-
-    try:
         yield creds
-    finally:
-        with _admin({**creds, "database": "postgres"}) as conn:
-            conn.execute(
-                sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(database)),
-            )
 
 
 def test_a_foreign_table_no_rule_opts_in_is_printed_from_the_catalog(
@@ -175,7 +156,7 @@ def test_an_analyzed_large_foreign_table_draws_no_tablesample(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with _admin(fdw_db) as conn:
+    with pg_connect(fdw_db) as conn:
         conn.execute(
             "INSERT INTO seedbank.storage_log SELECT g, g % 7, now() FROM generate_series(51, 30000) g",
         )
@@ -225,7 +206,7 @@ def _generate(
     monkeypatch.chdir(project)
 
     for key, value in creds.items():
-        monkeypatch.setenv(f"DBPRINT_FDW_{key.upper()}", value)
+        monkeypatch.setenv(env_var_name("fdw", key), value)
 
     return CliRunner().invoke(main, ["generate", "--no-tui"]), project / "prints" / "fdw"
 
@@ -241,7 +222,7 @@ def _artifact(prints: Path, manifest: dict[str, Any], fqn: str, name: str) -> di
 
 
 def _seq_scans(creds: dict[str, str]) -> int:
-    with _admin(creds) as conn:
+    with pg_connect(creds) as conn:
         conn.execute("SELECT pg_stat_clear_snapshot()")
         row = conn.execute(
             "SELECT seq_scan FROM pg_stat_user_tables "
@@ -251,14 +232,3 @@ def _seq_scans(creds: dict[str, str]) -> int:
     assert row is not None
 
     return int(row[0])
-
-
-def _admin(creds: dict[str, str]) -> psycopg.Connection:
-    return psycopg.connect(
-        host=creds["host"],
-        port=int(creds["port"]),
-        dbname=creds["database"],
-        user=creds["user"],
-        password=creds["password"],
-        autocommit=True,
-    )

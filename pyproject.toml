@@ -90,6 +90,7 @@ docs = [
   "inflect>=7.0",
   "jinja2>=3.1",
   "markupsafe>=3.0",
+  "waitress>=3.0",
 ]
 
 [project.scripts]

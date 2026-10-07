@@ -12,6 +12,8 @@ import yaml
 
 from dbprint.adapters import BigqueryAdapter
 from dbprint.spec.sketch import low64_md5
+from tests._cli import credential_env, generate
+from tests._engine_run import assert_conformant
 from tests.live import _harness as harness
 
 
@@ -52,12 +54,7 @@ def _apply_fixtures(creds: dict[str, str]) -> None:
 
 
 def _credential_env(creds: dict[str, str]) -> dict[str, str]:
-    upper = CONN_NAME.upper()
-
-    return {
-        f"DBPRINT_{upper}_PROJECT": creds["project"],
-        f"DBPRINT_{upper}_DATASET": creds["dataset"],
-    }
+    return credential_env(CONN_NAME, {key: creds[key] for key in ("project", "dataset")})
 
 
 def test_bigquery_live_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -66,7 +63,7 @@ def test_bigquery_live_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     creds = _live_creds()
     _apply_fixtures(creds)
 
-    print_dir = harness.generate(
+    print_dir = generate(
         tmp_path,
         monkeypatch,
         CONN_NAME,
@@ -76,7 +73,7 @@ def test_bigquery_live_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 
     assert (print_dir / "manifest.yaml").is_file()
 
-    harness.assert_conformant(print_dir)
+    assert_conformant(print_dir)
 
     manifest = yaml.safe_load((print_dir / "manifest.yaml").read_text())
     dataset = creds["dataset"]

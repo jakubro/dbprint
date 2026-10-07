@@ -40,7 +40,6 @@ from ..base import (
     PhaseA,
     PhaseB,
     Range,
-    RowCountMethod,
     TableCounts,
     TableScope,
     TopN,
@@ -105,7 +104,7 @@ def compute_base(
     if not columns:
         return TableCounts(row_count=0, rows_scanned=0), PhaseA({})
 
-    source = _table_source(identity, scope)
+    source = table_source(identity, scope)
     rows_scanned, phase_a = run_phase_a(
         columns,
         phase_a_cost,
@@ -114,12 +113,13 @@ def compute_base(
         partial(_recount, cursor, identity, source),
         declines=lambda col: _is_unsupported(col.classified_type),
     )
-    row_count, row_count_method = _table_row_count(
-        cursor,
-        project,
-        identity,
+    row_count, row_count_method = statements.table_row_count(
+        partial(exec_query, cursor),
+        DIALECT,
+        identity.quoted(),
         rows_scanned,
         scope,
+        lambda: row_count_hint(cursor, project, identity),
     )
 
     return TableCounts(row_count, rows_scanned, row_count_method), phase_a
@@ -156,7 +156,7 @@ def compute_columns(
                     c,
                     base[c.name].null_count,
                     0.0,
-                    partial(_fetch_spatial, cursor, identity, _table_source(identity, scope)),
+                    partial(_fetch_spatial, cursor, identity, table_source(identity, scope)),
                 )
                 if is_spatial_type(c.classified_type)
                 else empty_column_stats(
@@ -168,7 +168,7 @@ def compute_columns(
             },
         )
 
-    source = source or _table_source(identity, scope)
+    source = source or table_source(identity, scope)
     pre_by_col = {
         col.name: pre_classify(
             col,
@@ -218,9 +218,7 @@ def compute_columns(
 
 
 def table_source(identity: Identity, scope: TableScope | None) -> str:
-    """The FROM expression a table's statistics read, which a descent derives its parts from."""
-
-    return _table_source(identity, scope)
+    return _source(identity.quoted(), scope)
 
 
 def profile_part(
@@ -331,7 +329,7 @@ def compute_null_patterns(
     return statements.null_patterns(
         partial(exec_query, cursor),
         DIALECT,
-        _table_source(identity, scope),
+        table_source(identity, scope),
         columns,
         [identity.source_column(col.name) for col in columns],
         config,
@@ -353,7 +351,7 @@ def probe_grain(
     return statements.grain_pairs(
         partial(exec_query, cursor),
         DIALECT,
-        _table_source(identity, scope),
+        table_source(identity, scope),
         counts,
         candidates,
         {col.name: identity.source_column(col.name) for col in columns},
@@ -380,7 +378,7 @@ def probe_timeline(
     return statements.timeline(
         partial(exec_query, cursor),
         DIALECT,
-        _table_source(identity, scope),
+        table_source(identity, scope),
         cn,
         f"{truncate}({cn}, {_TIMELINE_DATE_PARTS[unit]})",
         "bkt.bucket_start",
@@ -415,7 +413,7 @@ def compute_populated_windows(
     if not subject_columns:
         return {}
 
-    source = _table_source(identity, scope)
+    source = table_source(identity, scope)
     anchor_cn = identity.source_column(anchor_column)
 
     agg_exprs = []
@@ -448,7 +446,7 @@ def probe_dependencies(
     return statements.dependency_strengths(
         partial(exec_query, cursor),
         DIALECT,
-        _table_source(identity, scope),
+        table_source(identity, scope),
         base,
         candidates,
         {col.name: identity.source_column(col.name) for col in columns},
@@ -505,10 +503,6 @@ def _sample_expr(identity: Identity, scope: TableScope) -> str:
     )
 
 
-def _table_source(identity: Identity, scope: TableScope | None) -> str:
-    return _source(identity.quoted(), scope)
-
-
 def _source(quoted_fqn: str, scope: TableScope | None, seed: int | None = None) -> str:
     """Table reference every statistics query selects FROM - a `sample` scope with no materialized
     copy never reaches here, `orchestrator._materialize_scope` having refused the table first.
@@ -522,30 +516,6 @@ def _source(quoted_fqn: str, scope: TableScope | None, seed: int | None = None) 
         return f"{scope.materialized} {SOURCE_ALIAS}"
     else:
         return derived(f"SELECT * FROM {quoted_fqn} WHERE ({scope.filter})", SOURCE_ALIAS)
-
-
-def _table_row_count(
-    cursor: Cursor,
-    project: str,
-    identity: Identity,
-    rows_scanned: int,
-    scope: TableScope | None,
-) -> tuple[int, RowCountMethod]:
-    """Rows in the table and how they were obtained (SPEC 2.2.1) - a narrowed read takes the
-    catalog estimate where one is available, and counts exactly where none is.
-    """
-
-    if scope is None or not scope.narrows:
-        return rows_scanned, "exact"
-
-    estimate = None if scope.count_exactly else row_count_hint(cursor, project, identity)
-
-    if estimate is not None:
-        return estimate, "approximate"
-
-    row = exec_query(cursor, f"SELECT COUNT(1) FROM {identity.quoted()} {SOURCE_ALIAS}").fetchone()
-
-    return (int(row[0]) if row and row[0] is not None else rows_scanned), "exact"
 
 
 def _null_counts(

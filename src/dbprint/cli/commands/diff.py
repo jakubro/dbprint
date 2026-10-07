@@ -15,6 +15,7 @@ import rich_click as click
 from rich.console import Console
 
 from dbprint.config import ConfigError, ConnectionConfig
+from dbprint.config.resolution import ConnectionResolutionError, resolve
 from dbprint.engine import (
     EXIT_CONNECTION,
     EXIT_GENERIC,
@@ -26,6 +27,7 @@ from dbprint.engine import (
     TableResult,
 )
 from dbprint.engine.result import DiffResult
+from dbprint.spec.artifacts import MANIFEST_FILENAME
 from ..engine_setup import ConnectionSetupError, build_engine
 from ..options import project_option, refuse_if_remote, resolve_project
 from ..rendering import (
@@ -39,7 +41,6 @@ from ..rendering.diff_data import DiffRenderOptions, render_data, render_human_t
 from ..rendering.diff_tty import render_human as render_human_tty
 from ..rendering.errors import connection_error_text, emit_error, no_tables_matched_text
 from ..rendering.progress import ConnectionSummary
-from ..resolution import ConnectionResolutionError, resolve
 from ..run_log import close_run_log, log_run_header, log_run_summary, open_run_log
 
 
@@ -195,7 +196,7 @@ def diff_command(
                         if not _baseline_present(conn_config):
                             deferred.append(
                                 f"No committed prints at "
-                                f"{conn_config.output / conn_config.name}/. "
+                                f"{conn_config.print_root}/. "
                                 f"Run `dbprint generate {conn_config.name}` first.",
                             )
                             overall_exit = max(overall_exit, EXIT_GENERIC)
@@ -390,7 +391,7 @@ def _options_for(pair: _ConnectionDiff, threshold: float | None) -> DiffRenderOp
 
 
 def _baseline_present(conn_config: ConnectionConfig) -> bool:
-    return (conn_config.output / conn_config.name / "manifest.yaml").is_file()
+    return (conn_config.print_root / MANIFEST_FILENAME).is_file()
 
 
 def _run_one(

@@ -7,9 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import yaml
-
 from dbprint.conformance import validate_print
+from tests._engine_run import artifact
 from tests.conftest import normalize_print_tree
 from tests.fixtures import unmeasured_print
 
@@ -27,7 +26,7 @@ LOST = (
 
 
 def _statistics() -> dict:
-    return yaml.safe_load((COMMITTED / "seedbank" / "accession" / "statistics.yaml").read_text())
+    return artifact(COMMITTED, "seedbank.accession")
 
 
 class TestTheCommittedPrintIsWhatTheProducerWrites:

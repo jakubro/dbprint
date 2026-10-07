@@ -88,7 +88,7 @@ def test_the_scope_line_names_the_narrowing() -> None:
 
     assert filtered is not None
     assert echo_only is not None
-    assert scope_line(filtered) == "Scanned: 900 of 1000 rows (90%), filter `id <= 900`"
+    assert scope_line(filtered) == "Scanned: 900 of 1000 rows (90%); filtered by `id <= 900`"
     assert scope_line(echo_only) == "Scanned: 40 rows"
 
 
@@ -142,11 +142,11 @@ def test_a_columns_own_echo_wins_over_the_files() -> None:
 @pytest.mark.parametrize(
     ("statistics", "expected"),
     [
-        ({"scope": {"sample": 0.5}}, "Scanned: part of the table, sample 0.5"),
+        ({"scope": {"sample": 0.5}}, "Scanned: part of the table; sampled"),
         ({"row_count": 0, "scope": {"rows_scanned": 4}}, "Scanned: 4 rows"),
         (
             {"row_count": 8, "scope": {"rows_scanned": 4, "filter": "a > 1"}},
-            "Scanned: 4 of 8 rows (50%), filter `a > 1`",
+            "Scanned: 4 of 8 rows (50%); filtered by `a > 1`",
         ),
         (
             {"row_count": 8, "scope": {"rows_scanned": 4, "filter": "  "}},

@@ -17,11 +17,12 @@ from pathlib import Path
 
 import pytest
 
+from tests._scripts import REPO_ROOT
 
-REPO = Path(__file__).resolve().parents[1]
-SOURCES = sorted((REPO / "src/dbprint").rglob("*.py"))
 
-sys.path.insert(0, str(REPO))
+SOURCES = sorted((REPO_ROOT / "src/dbprint").rglob("*.py"))
+
+sys.path.insert(0, str(REPO_ROOT))
 from hatch_build import PACKAGED, SITE_ORIGIN, rewrite_links
 
 
@@ -37,7 +38,7 @@ def all_mappings() -> dict[str, str]:
     static `force-include` entries and `hatch_build.PACKAGED`, which the static table omits.
     """
 
-    config = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
+    config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     static = config["tool"]["hatch"]["build"]["targets"]["wheel"].get("force-include", {})
 
     return {**static, **PACKAGED}
@@ -46,7 +47,7 @@ def all_mappings() -> dict[str, str]:
 def force_included() -> dict[str, Path]:
     """Map each force-included document's basename to the repo file it is included from."""
 
-    return {Path(source).name: REPO / source for source in all_mappings()}
+    return {Path(source).name: REPO_ROOT / source for source in all_mappings()}
 
 
 def cited_documents() -> set[str]:
@@ -88,7 +89,7 @@ def test_each_document_lands_in_a_real_package(document: str, source: Path) -> N
 
     mapping = all_mappings()
     target = next(v for k, v in mapping.items() if Path(k).name == document)
-    package = REPO / "src" / Path(target).parent
+    package = REPO_ROOT / "src" / Path(target).parent
 
     assert (package / "__init__.py").is_file()
 
@@ -98,7 +99,7 @@ def _built_wheel(tmp_path: Path, env: dict[str, str] | None = None) -> zipfile.Z
 
     subprocess.run(
         ["uv", "build", "--wheel", "--out-dir", str(tmp_path)],
-        cwd=REPO,
+        cwd=REPO_ROOT,
         check=True,
         capture_output=True,
         env=env,
@@ -150,7 +151,7 @@ def test_packaged_body_differs_from_source_only_in_link_targets(
 
     wheel = _built_wheel(tmp_path)
     packaged = wheel.read(target).decode("utf-8")
-    original = (REPO / source).read_text(encoding="utf-8")
+    original = (REPO_ROOT / source).read_text(encoding="utf-8")
 
     assert _LINK_RE.sub("LINK", packaged) == _LINK_RE.sub("LINK", original)
 
@@ -168,7 +169,7 @@ def test_packaged_document_survives_a_non_utf8_default_encoding(
     env = {**os.environ, "LC_ALL": "C", "LANG": "C", "PYTHONUTF8": "0"}
     wheel = _built_wheel(tmp_path, env=env)
     packaged = wheel.read(target).decode("utf-8")
-    original = (REPO / source).read_text(encoding="utf-8")
+    original = (REPO_ROOT / source).read_text(encoding="utf-8")
 
     assert _LINK_RE.sub("LINK", packaged) == _LINK_RE.sub("LINK", original)
 
@@ -267,9 +268,9 @@ def test_python_rewrite_agrees_with_the_real_site_plugin(text: str, doc_relpath:
 
     payload = json.dumps({"text": text, "docRelpath": doc_relpath})
     result = subprocess.run(
-        [node, str(REPO / "site" / "scripts" / "rewrite-link-check.mjs")],
+        [node, str(REPO_ROOT / "site" / "scripts" / "rewrite-link-check.mjs")],
         input=payload,
-        cwd=REPO / "site",
+        cwd=REPO_ROOT / "site",
         capture_output=True,
         text=True,
         check=True,
@@ -289,7 +290,7 @@ def test_url_constants_match_astro_config() -> None:
 
     from hatch_build import REF, REPOSITORY, SITE_BASE, SITE_ORIGIN
 
-    config = (REPO / "site/astro.config.mjs").read_text(encoding="utf-8")
+    config = (REPO_ROOT / "site/astro.config.mjs").read_text(encoding="utf-8")
 
     assert f'site: "{SITE_ORIGIN}"' in config
     assert f'const BASE = "{SITE_BASE}"' in config

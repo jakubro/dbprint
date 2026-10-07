@@ -6,14 +6,14 @@ import logging
 from pathlib import Path
 
 import pytest
-import yaml
 
-from dbprint.adapters import ColumnMeta, ColumnStats, CommentsMeta, MockAdapter, MockTable
+from dbprint.adapters import ColumnMeta, ColumnStats, MockAdapter, MockTable
 from dbprint.adapters.base import PhaseA, TableCounts, TableScope, run_phase_b
 from dbprint.adapters.errors import QueryFailed
 from dbprint.config import ConnectionConfig, StatisticsConfig
-from dbprint.conformance import validate_print
 from dbprint.engine import Engine, GenerateResult
+from tests._engine_run import artifact, conformance_errors
+from tests._prints import columns, mock_table
 
 
 class _TimesOut(MockAdapter):
@@ -67,14 +67,14 @@ class TestATimedOutColumnStatistic:
         with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
             result = Engine(_ColumnTimesOut({"s.a": _table("a")}), conn, tmp_path).generate()
 
-        column = yaml.safe_load((tmp_path / "w" / "s" / "a" / "statistics.yaml").read_text())
+        column = artifact(tmp_path / "w", "s.a")
         warned = [r for r in caplog.records if "s.a" in r.getMessage()]
 
         assert [t.status for t in result.tables] == ["ok"]
         assert column["columns"]["id"]["unmeasured"]
         assert [r.levelno for r in warned] == [logging.WARNING]
         assert "timed out after 10m" in warned[0].getMessage()
-        assert [i.code for i in validate_print(tmp_path / "w") if i.severity == "error"] == []
+        assert [i.code for i in conformance_errors(tmp_path / "w")] == []
 
 
 def _generate(tmp_path: Path, statement_timeout: int | None) -> GenerateResult:
@@ -90,15 +90,10 @@ def _generate(tmp_path: Path, statement_timeout: int | None) -> GenerateResult:
 
 
 def _table(name: str) -> MockTable:
-    return MockTable(
-        type="table",
-        namespace_path=("s", name),
-        ddl=f"CREATE TABLE s.{name} (id int);\n",
-        columns=[ColumnMeta(name="id", sql_type="int", nullable=False, default=None, ordinal=1)],
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={
+    return mock_table(
+        f"s.{name}",
+        columns(("id", "int")),
+        {
             "id": ColumnStats(
                 sql_type="int",
                 nullable=False,
@@ -109,6 +104,6 @@ def _table(name: str) -> MockTable:
                 cardinality_method="exact",
             ),
         },
-        samples={},
+        ddl=f"CREATE TABLE s.{name} (id int);\n",
         row_count=1,
     )

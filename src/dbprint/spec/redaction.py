@@ -12,6 +12,7 @@ from types import MappingProxyType
 from typing import Any, Literal
 
 from .rounding import number_text
+from .temporal_age import STALE_CEILING_DAYS
 
 
 Primitive = Literal["mask", "drop", "hash"]
@@ -87,9 +88,9 @@ MASK_PLACEHOLDER = "[redacted]"
 
 _HASH_LENGTH = 16
 
-# 90 is the format's own `dormant` boundary (SPEC 2.2.4), so the coarsened integer
-# discloses nothing the freshness bucket does not already carry.
-REDACTED_DAY_COUNT_GRANULARITY = 90
+# The format's own `dormant` boundary (SPEC 2.2.4), so the coarsened integer discloses
+# nothing the freshness bucket does not already carry.
+REDACTED_DAY_COUNT_GRANULARITY = STALE_CEILING_DAYS
 
 
 def is_redacted(column: Mapping[str, Any]) -> bool:

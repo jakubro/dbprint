@@ -9,16 +9,15 @@ regardless of selectors: a partition is a fragment of its parent's logical table
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, cast
+from functools import partial
+from typing import TYPE_CHECKING
 
-from dbprint.config.selectors import expand
 from dbprint.spec.fqn import join as join_fqn
-from .connection import exec_query
+from .connection import DIALECT, exec_query
 from .. import pg_catalog
 from ..base import (
     ColumnMeta,
     CommentsMeta,
-    FkAction,
     ForeignKeyMeta,
     IndexMeta,
     PhysicalLayout,
@@ -27,7 +26,8 @@ from ..base import (
     TableType,
     UniqueKeyMeta,
 )
-from ..identifiers import Identity, column_meta, enforce_table_identifiers, fold, table_meta
+from ..identifiers import Identity, column_meta, fold, table_meta
+from ..sql_layout import split_top_level
 
 
 if TYPE_CHECKING:
@@ -40,14 +40,6 @@ _RELKIND_TO_TYPE: dict[str, TableType] = {
     "v": "view",
     "m": "matview",
     "f": "table",
-}
-
-_FK_ACTIONS = {
-    "a": "NO ACTION",
-    "r": "RESTRICT",
-    "c": "CASCADE",
-    "n": "SET NULL",
-    "d": "SET DEFAULT",
 }
 
 _Candidate = tuple[TableMeta, tuple[str, str, str]]
@@ -109,26 +101,6 @@ def relations(conn: psycopg.Connection, database: str) -> list[_Candidate]:
         )
         for schema, name, kind in rows
     ]
-
-
-def select_tables(
-    candidates: list[_Candidate],
-    include: list[str],
-    exclude: list[str],
-) -> list[_Candidate]:
-    """Filter `candidates` by selectors, refusing SPEC 1.5 violations across every database."""
-
-    in_scope = set(
-        expand(
-            [meta.fqn for meta, _ in candidates],
-            config_include=include,
-            config_exclude=exclude,
-        ),
-    )
-    selected = [entry for entry in candidates if entry[0].fqn in in_scope]
-    enforce_table_identifiers(selected)
-
-    return selected
 
 
 def columns(conn: psycopg.Connection, identity: Identity) -> list[ColumnMeta]:
@@ -241,40 +213,7 @@ def default_collation(conn: psycopg.Connection) -> str:
 def relationships(conn: psycopg.Connection, identity: Identity) -> list[ForeignKeyMeta]:
     """Declared outgoing FKs; one entry per constraint (composite as arrays)."""
 
-    rows = exec_query(
-        conn,
-        pg_catalog.FOREIGN_KEYS,
-        identity.addressed,
-    ).fetchall()
-
-    out: list[ForeignKeyMeta] = []
-
-    for (
-        name,
-        src_attnums,
-        dst_attnums,
-        dst_schema,
-        dst_table,
-        on_del,
-        on_upd,
-        src_relid,
-        dst_relid,
-    ) in rows:
-        src_cols = _attnums_to_names(conn, src_relid, src_attnums)
-        dst_cols = _attnums_to_names(conn, dst_relid, dst_attnums)
-        out.append(
-            ForeignKeyMeta(
-                column=tuple(src_cols),
-                # A constraint references a relation in its own database only.
-                target_table=join_fqn((fold(identity.parts[0]), fold(dst_schema), fold(dst_table))),
-                target_column=tuple(dst_cols),
-                on_delete=cast(FkAction, _FK_ACTIONS[on_del]),
-                on_update=cast(FkAction, _FK_ACTIONS[on_upd]),
-                constraint_name=name,
-            ),
-        )
-
-    return out
+    return pg_catalog.relationships(partial(exec_query, conn), identity, on_unknown=None)
 
 
 def indexes(conn: psycopg.Connection, identity: Identity) -> list[IndexMeta]:
@@ -326,7 +265,7 @@ def indexes(conn: psycopg.Connection, identity: Identity) -> list[IndexMeta]:
     out: list[IndexMeta] = []
 
     for index_name, attnums, is_unique, index_type, table_relid in rows:
-        cols = _attnums_to_names(conn, table_relid, list(attnums))
+        cols = pg_catalog.attnums_to_names(partial(exec_query, conn), table_relid, list(attnums))
         out.append(
             IndexMeta(
                 name=index_name,
@@ -454,7 +393,9 @@ def unique_keys(conn: psycopg.Connection, identity: Identity) -> list[UniqueKeyM
 
     return [
         UniqueKeyMeta(
-            columns=tuple(_attnums_to_names(conn, relid, list(conkey))),
+            columns=tuple(
+                pg_catalog.attnums_to_names(partial(exec_query, conn), relid, list(conkey)),
+            ),
             primary=contype == "p",
         )
         for conkey, relid, contype, _name in rows
@@ -502,7 +443,9 @@ def _parse_partkeydef(value: str) -> PhysicalLayout:
 
     return PhysicalLayout(
         mechanism="partition",
-        keys=tuple(_partition_key(part.strip()) for part in _split_top_level_commas(inner)),
+        keys=tuple(
+            _partition_key(part.strip()) for part in split_top_level(inner, DIALECT.quote_char)
+        ),
     )
 
 
@@ -513,30 +456,6 @@ def _partition_key(expression: str) -> PhysicalLayoutKey:
         expression=expression,
         column=fold(match.group(1)) if match else None,
     )
-
-
-def _split_top_level_commas(text: str) -> list[str]:
-    """Split on commas outside parentheses - a partition expression may nest a function call."""
-
-    parts: list[str] = []
-    depth = 0
-    current: list[str] = []
-
-    for ch in text:
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-
-        if ch == "," and depth == 0:
-            parts.append("".join(current))
-            current = []
-        else:
-            current.append(ch)
-
-    parts.append("".join(current))
-
-    return parts
 
 
 def view_dependencies(conn: psycopg.Connection, database: str) -> dict[str, tuple[str, ...]]:
@@ -611,36 +530,6 @@ def reltuples_estimate(conn: psycopg.Connection, identity: Identity) -> float:
     ).fetchone()
 
     return float(row[0]) if row else -1.0
-
-
-def _attnums_to_names(conn: psycopg.Connection, relid: int, attnums: list[int]) -> list[str]:
-    """Resolve a list of attnums for one relation into lowercased column names, preserving order.
-
-    Lowercased to agree with the `columns` map key (SPEC 2.2.1); no artifact these feed
-    quotes the name back into a live statement, so no physical spelling is preserved.
-    """
-
-    if not attnums:
-        return []
-
-    rows = exec_query(
-        conn,
-        """
-        SELECT
-          att.attnum,
-          att.attname
-        FROM
-          pg_attribute att
-        WHERE
-          att.attrelid = %s
-          AND att.attnum = ANY(%s)
-          AND NOT att.attisdropped
-        """,
-        (relid, list(attnums)),
-    ).fetchall()
-    name_by_attnum = {attnum: fold(attname) for attnum, attname in rows}
-
-    return [name_by_attnum[a] for a in attnums if a in name_by_attnum]
 
 
 # The built-in name classification reads for each user-definable family; a composite is declined.

@@ -15,7 +15,6 @@ from typing import Any, LiteralString, cast
 from unittest.mock import patch
 
 import duckdb
-import psycopg
 import pytest
 import yaml
 
@@ -24,11 +23,12 @@ from dbprint.adapters.base import BaseStats, ColumnStats, run_phase_a, run_phase
 from dbprint.cli.adapter_registry import ADAPTERS
 from dbprint.config import StatisticsConfig
 from dbprint.config.project import ConnectionConfig
-from dbprint.conformance import validate_print
 from dbprint.engine import Engine, GenerateRequest
+from tests._curator import conn_config, curator_fixture
+from tests._engine_run import artifact, conformance_errors
+from tests.adapters._type_spellings import DUCKDB_DECLARATIONS, POSTGRES_SKIPPED
 from tests.adapters.conftest import _adapter_factory_for
-from tests.adapters.test_type_spellings import _DUCKDB_DECLARATIONS, _POSTGRES_SKIPPED
-from tests.engine.test_orchestrator import _conn_config, _curator_fixture
+from tests.conftest import pg_connect
 
 
 _ADAPTERS_ROOT = Path(importlib.import_module("dbprint.adapters").__file__ or "").parent
@@ -184,13 +184,7 @@ def test_a_money_and_a_json_column_are_measured_through_their_comparable_forms(
 ) -> None:
     """`money` has no AVG and `json` no equality, so both are read through a cast."""
 
-    with psycopg.connect(
-        host=postgres_test_db["host"],
-        port=int(postgres_test_db["port"]),
-        dbname=postgres_test_db["database"],
-        user=postgres_test_db["user"],
-        autocommit=True,
-    ) as conn:
+    with pg_connect(postgres_test_db) as conn:
         conn.execute("CREATE TABLE seedbank.type_probe (id int, price money, doc json)")
         conn.execute(
             "INSERT INTO seedbank.type_probe VALUES "
@@ -301,7 +295,7 @@ class _SampleFailing(MockAdapter):
 
 class TestTheEngineContainsAColumn:
     def _columns(self, tmp_path: Path, adapter: MockAdapter) -> dict[str, Any]:
-        Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
+        Engine(adapter, conn_config(tmp_path), tmp_path).generate()
         path = tmp_path / "primary" / "public" / "curator" / "statistics.yaml"
 
         return yaml.safe_load(path.read_text())["columns"]
@@ -311,10 +305,10 @@ class TestTheEngineContainsAColumn:
         tmp_path: Path,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        clean = self._columns(tmp_path / "clean", MockAdapter(_curator_fixture()))
+        clean = self._columns(tmp_path / "clean", MockAdapter(curator_fixture()))
 
         with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
-            degraded = self._columns(tmp_path / "degraded", _SampleFailing(_curator_fixture()))
+            degraded = self._columns(tmp_path / "degraded", _SampleFailing(curator_fixture()))
 
         column = degraded["herbarium_id"]
 
@@ -344,8 +338,8 @@ class TestTheEngineContainsAColumn:
                     failures=(RuntimeError("x"),),
                 )
 
-        clean = self._columns(tmp_path / "clean", MockAdapter(_curator_fixture()))
-        degraded = self._columns(tmp_path / "degraded", _PhaseBFailing(_curator_fixture()))
+        clean = self._columns(tmp_path / "clean", MockAdapter(curator_fixture()))
+        degraded = self._columns(tmp_path / "degraded", _PhaseBFailing(curator_fixture()))
 
         assert degraded["herbarium_id"]["classification"] == clean["herbarium_id"]["classification"]
         assert degraded["herbarium_id"]["cardinality"] == clean["herbarium_id"]["cardinality"]
@@ -357,26 +351,26 @@ class TestAnUndrawnSampleIsNotAFinding:
     """SPEC 2.2.4: a failed draw names the verdicts it owed, so no reader takes it for "none"."""
 
     def _run(self, tmp_path: Path, adapter: MockAdapter) -> tuple[dict[str, Any], list[Any]]:
-        Engine(adapter, _conn_config(tmp_path), tmp_path).generate(GenerateRequest(force=True))
+        Engine(adapter, conn_config(tmp_path), tmp_path).generate(GenerateRequest(force=True))
         prints = tmp_path / "primary"
-        stats = yaml.safe_load((prints / "public" / "curator" / "statistics.yaml").read_text())
+        stats = artifact(prints, "public.curator")
         changes = yaml.safe_load((prints / "diff.yaml").read_text())["changes"]
 
         return stats["columns"]["id"], changes
 
     def test_the_column_names_both_verdicts_and_the_print_validates(self, tmp_path: Path) -> None:
-        column, _ = self._run(tmp_path, _SampleFailing(_curator_fixture(), failing="id"))
+        column, _ = self._run(tmp_path, _SampleFailing(curator_fixture(), failing="id"))
 
         assert {"inferred.looks_like", "inferred.epoch_unit"} <= set(column["unmeasured"])
-        assert [i for i in validate_print(tmp_path / "primary") if i.severity == "error"] == []
+        assert conformance_errors(tmp_path / "primary") == []
 
     def test_neither_the_failed_run_nor_the_next_reports_the_verdict_as_changed(
         self,
         tmp_path: Path,
     ) -> None:
-        baseline, _ = self._run(tmp_path, MockAdapter(_curator_fixture()))
-        _, failed = self._run(tmp_path, _SampleFailing(_curator_fixture(), failing="id"))
-        _, healed = self._run(tmp_path, MockAdapter(_curator_fixture()))
+        baseline, _ = self._run(tmp_path, MockAdapter(curator_fixture()))
+        _, failed = self._run(tmp_path, _SampleFailing(curator_fixture(), failing="id"))
+        _, healed = self._run(tmp_path, MockAdapter(curator_fixture()))
 
         assert baseline["inferred"]["looks_like"] == "uuid"
         assert [c for c in [*failed, *healed] if c.get("stat") == "inferred.looks_like"] == []
@@ -389,7 +383,7 @@ def test_every_duckdb_type_leaves_its_table_profiled(tmp_path: Path) -> None:
         "SELECT DISTINCT logical_type FROM duckdb_types() "
         "WHERE database_name = 'system' AND logical_type NOT IN ('NULL', 'TYPE', 'INVALID')",
     ).fetchall()
-    declarations = [_DUCKDB_DECLARATIONS.get(name, name) for (name,) in logical]
+    declarations = [DUCKDB_DECLARATIONS.get(name, name) for (name,) in logical]
     columns = ", ".join(f"c{i} {decl}" for i, decl in enumerate(declarations))
     con.execute(f"CREATE TABLE sweep (id INTEGER, {columns})")
     con.execute("INSERT INTO sweep (id) SELECT i FROM range(3) t(i)")
@@ -407,14 +401,7 @@ def test_every_postgres_base_type_leaves_its_table_profiled(
 ) -> None:
     creds = postgres_test_db
 
-    with psycopg.connect(
-        host=creds["host"],
-        port=int(creds["port"]),
-        dbname=creds["database"],
-        user=creds["user"],
-        password=creds["password"],
-        autocommit=True,
-    ) as conn:
+    with pg_connect(creds) as conn:
         rows = conn.execute(
             """
             SELECT pg_catalog.format_type(t.oid, NULL)
@@ -424,14 +411,14 @@ def test_every_postgres_base_type_leaves_its_table_profiled(
               AND t.typarray <> 0
             """,
         ).fetchall()
-        types = [name for (name,) in rows if name not in _POSTGRES_SKIPPED]
+        types = [name for (name,) in rows if name not in POSTGRES_SKIPPED]
         declared = ['"char"' if name == "char" else name for name in types]
         columns = ", ".join(f"c{i} {decl}" for i, decl in enumerate(declared))
         conn.execute(cast(LiteralString, f"CREATE TABLE public.sweep (id integer, {columns})"))
         conn.execute("INSERT INTO public.sweep (id) SELECT i FROM generate_series(1, 3) i")
 
-    conn_config = ConnectionConfig(name="garden", adapter="postgres", output=tmp_path / "prints")
-    result = Engine(PostgresAdapter(creds), conn_config, tmp_path).generate()
+    config = ConnectionConfig(name="garden", adapter="postgres", output=tmp_path / "prints")
+    result = Engine(PostgresAdapter(creds), config, tmp_path).generate()
 
     assert [(t.fqn, t.error) for t in result.tables if t.status != "ok"] == []
 

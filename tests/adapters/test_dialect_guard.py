@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import contextlib
 import itertools
-import re
 from collections import Counter
 from collections.abc import Callable, Iterator
 from types import ModuleType
@@ -22,51 +21,29 @@ import pytest
 
 from dbprint.adapters import Adapter, StatisticsConfig
 from dbprint.adapters import base as base_module
+from dbprint.adapters import driver as adapter_driver
 from dbprint.adapters.base import TableScope
 from dbprint.adapters.bigquery import DIALECT as BIGQUERY_DIALECT
-from dbprint.adapters.bigquery import stats as bigquery_stats
 from dbprint.adapters.clickhouse import DIALECT as CLICKHOUSE_DIALECT
-from dbprint.adapters.clickhouse import stats as clickhouse_stats
 from dbprint.adapters.databricks import DIALECT as DATABRICKS_DIALECT
-from dbprint.adapters.databricks import stats as databricks_stats
-from dbprint.adapters.dialect import VENDOR_SUPPORT, Dialect, Vendor
+from dbprint.adapters.dialect import Dialect, Vendor
 from dbprint.adapters.duckdb import DIALECT as DUCKDB_DIALECT
-from dbprint.adapters.duckdb import stats as duckdb_stats
 from dbprint.adapters.mysql import DIALECT as MYSQL_DIALECT
-from dbprint.adapters.mysql import stats as mysql_stats
 from dbprint.adapters.postgres import DIALECT as POSTGRES_DIALECT
-from dbprint.adapters.postgres import stats as postgres_stats
 from dbprint.adapters.redshift import DIALECT as REDSHIFT_DIALECT
-from dbprint.adapters.redshift import stats as redshift_stats
 from dbprint.adapters.snowflake import DIALECT as SNOWFLAKE_DIALECT
-from dbprint.adapters.snowflake import stats as snowflake_stats
 from dbprint.spec.classification import is_string_like_type, is_temporal_type
 from dbprint.spec.sketch import sketch_kind
+from tests.adapters._dialects import (
+    DIALECTS,
+    STATS_MODULES,
+    Recorder,
+    foreign_fragments,
+    install_recorder,
+)
 from tests.adapters._sql_style import alias_violations, violations
 from tests.adapters.conftest import _render_params as render_params
 
-
-DIALECTS: dict[str, Dialect] = {
-    "postgres": POSTGRES_DIALECT,
-    "mysql": MYSQL_DIALECT,
-    "snowflake": SNOWFLAKE_DIALECT,
-    "duckdb": DUCKDB_DIALECT,
-    "clickhouse": CLICKHOUSE_DIALECT,
-    "redshift": REDSHIFT_DIALECT,
-    "databricks": DATABRICKS_DIALECT,
-    "bigquery": BIGQUERY_DIALECT,
-}
-
-STATS_MODULES: dict[str, ModuleType] = {
-    "postgres": postgres_stats,
-    "mysql": mysql_stats,
-    "snowflake": snowflake_stats,
-    "duckdb": duckdb_stats,
-    "clickhouse": clickhouse_stats,
-    "redshift": redshift_stats,
-    "databricks": databricks_stats,
-    "bigquery": bigquery_stats,
-}
 
 # Statistics helpers that run for one pre-classification each, owning SQL no other branch emits.
 BRANCH_HELPERS = (
@@ -125,39 +102,6 @@ NARROW_TABLES = ["*.curator", "*.herbarium"]
 SENTINEL_FILTER = "lower('x') = 'x'"
 
 
-def _foreign_fragments(statement: str, vendor: Vendor) -> list[str]:
-    """Fragments in `statement` that `vendor`'s engine does not accept."""
-
-    flat = " ".join(statement.lower().split())
-
-    return sorted(
-        fragment
-        for fragment, accepted_by in VENDOR_SUPPORT.items()
-        if re.search(r"(?<![a-z_])" + re.escape(fragment), flat) and vendor not in accepted_by
-    )
-
-
-class Recorder:
-    """Every statement one adapter emitted, in order."""
-
-    def __init__(self) -> None:
-        self.statements: list[str] = []
-        self.bound: list[tuple[str, Any]] = []
-        self.calls: list[tuple[str, Any]] = []
-
-    def record(self, sql: str, params: Any) -> None:
-        self.statements.append(sql)
-        self.calls.append((sql, params))
-
-        if params is not None:
-            self.bound.append((sql, params))
-
-    def flattened(self) -> list[str]:
-        """Statements with whitespace collapsed and case folded."""
-
-        return [" ".join(s.lower().split()) for s in self.statements]
-
-
 @pytest.fixture
 def sweep(
     sql_adapter_factory: tuple[str, Callable[[], Adapter]],
@@ -197,7 +141,7 @@ class Sweep:
         self.adapter = adapter
         self.branch_counts = branch_counts
         self.classifications = classifications
-        self.recorder = _install_recorder(adapter)
+        self.recorder = install_recorder(adapter)
 
     @property
     def dialect(self) -> Dialect:
@@ -301,7 +245,12 @@ class Sweep:
 
             for column in columns:
                 if is_string_like_type(column.classified_type):
-                    self.adapter.compute_normalized_cardinality(fqn, column.name, read)
+                    self.adapter.compute_normalized_cardinality(
+                        fqn,
+                        column.name,
+                        column.classified_type,
+                        read,
+                    )
 
                 self.adapter.sample_values(fqn, column.name, n=5, scope=read)
 
@@ -359,9 +308,9 @@ class TestDialectConformance:
     def test_no_statement_carries_foreign_vendor_syntax(self, sweep: Sweep) -> None:
         recorder = sweep.run(wide=True)
         offenders = [
-            (statement, _foreign_fragments(statement, sweep.dialect.vendor))
+            (statement, foreign_fragments(statement, sweep.dialect.vendor))
             for statement in recorder.statements
-            if _foreign_fragments(statement, sweep.dialect.vendor)
+            if foreign_fragments(statement, sweep.dialect.vendor)
         ]
 
         assert not offenders, (
@@ -521,7 +470,7 @@ class TestGuardIsNotVacuous:
         vendor: Vendor,
         expected: str,
     ) -> None:
-        assert expected in _foreign_fragments(statement, vendor)
+        assert expected in foreign_fragments(statement, vendor)
 
     @pytest.mark.parametrize(
         ("statement", "vendor"),
@@ -535,7 +484,7 @@ class TestGuardIsNotVacuous:
         ],
     )
     def test_native_statement_is_clean(self, statement: str, vendor: Vendor) -> None:
-        assert _foreign_fragments(statement, vendor) == []
+        assert foreign_fragments(statement, vendor) == []
 
 
 class TestDeclaredParamstyleMatchesDriver:
@@ -547,7 +496,7 @@ class TestDeclaredParamstyleMatchesDriver:
     ) -> None:
         from dbprint.adapters.snowflake import connection as snowflake_connection
 
-        captured = _capture_connect_kwargs(monkeypatch, snowflake_connection, "snowflake.connector")
+        captured = _capture_connect_kwargs(monkeypatch, "snowflake.connector")
         snowflake_connection._default_cursor_factory(
             snowflake_connection.ConnectionParams(
                 account="a",
@@ -599,7 +548,7 @@ class TestDeclaredParamstyleMatchesDriver:
         import importlib
 
         module = importlib.import_module(module_path)
-        captured = _capture_connect_kwargs(monkeypatch, module, driver)
+        captured = _capture_connect_kwargs(monkeypatch, driver)
         monkeypatch.setattr(module, "ensure_pg_dump_available", lambda: None, raising=False)
         connection = module.Connection(
             module.ConnectionParams(host="h", port=1, database="d", user="u", password="p"),
@@ -624,7 +573,7 @@ class TestDeclaredParamstyleMatchesDriver:
 
         from dbprint.adapters.duckdb import connection as duckdb_connection
 
-        captured = _capture_connect_kwargs(monkeypatch, duckdb_connection, "duckdb")
+        captured = _capture_connect_kwargs(monkeypatch, "duckdb")
         connection = duckdb_connection.Connection(
             duckdb_connection.ConnectionParams(database=":memory:"),
         )
@@ -654,7 +603,7 @@ class TestDeclaredParamstyleMatchesDriver:
 
         from dbprint.adapters.databricks import connection as databricks_connection
 
-        captured = _capture_connect_kwargs(monkeypatch, databricks_connection, "databricks.sql")
+        captured = _capture_connect_kwargs(monkeypatch, "databricks.sql")
         connection = databricks_connection.Connection(
             databricks_connection.ConnectionParams(
                 server_hostname="h",
@@ -673,43 +622,6 @@ class TestDeclaredParamstyleMatchesDriver:
             "from the connector's native-mode default and would no longer describe what it binds."
         )
         assert DATABRICKS_DIALECT.paramstyle == "qmark"
-
-
-def _install_recorder(adapter: Any) -> Recorder:
-    """Wrap the adapter's live cursor so every emitted statement is captured.
-
-    Reaches into the connection object because the cursor is absent from the Adapter surface.
-    """
-
-    recorder = Recorder()
-    connection = adapter._connection
-
-    for attribute in ("_conn", "_cursor"):
-        target = getattr(connection, attribute, None)
-
-        if target is not None:
-            setattr(connection, attribute, _RecordingProxy(target, recorder))
-
-    return recorder
-
-
-class _RecordingProxy:
-    """Forward everything to the wrapped cursor/connection; record `execute`."""
-
-    def __init__(self, target: Any, recorder: Recorder) -> None:
-        self._target = target
-        self._recorder = recorder
-
-    def execute(self, sql: str, params: Any = None) -> Any:
-        self._recorder.record(sql, params)
-
-        if params is None:
-            return self._target.execute(sql)
-
-        return self._target.execute(sql, params)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._target, name)
 
 
 def _install_branch_spies(
@@ -757,7 +669,6 @@ def _install_classification_spy(monkeypatch: pytest.MonkeyPatch, module: ModuleT
 
 def _capture_connect_kwargs(
     monkeypatch: pytest.MonkeyPatch,
-    module: ModuleType,
     driver_name: str,
 ) -> dict[str, Any]:
     """Swap the lazily-imported driver for a stub that records `connect` kwargs."""
@@ -795,6 +706,6 @@ def _capture_connect_kwargs(
 
         return _StubDriver
 
-    monkeypatch.setattr(module.importlib, "import_module", fake_import)
+    monkeypatch.setattr(adapter_driver.importlib, "import_module", fake_import)
 
     return captured

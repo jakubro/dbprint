@@ -1,8 +1,6 @@
-"""Two-phase batched per-table statistics computation. See ARCHITECTURE.md 2.
+"""Two-phase batched statistics (ARCHITECTURE.md 2), approximate past `base.APPROXIMATE_THRESHOLD`.
 
-Phase B pre-classifies each column to batch its queries by classification group, keeping the
-per-table query count small; the engine re-applies SPEC 3.2 independently, and the adapter
-NEVER stamps `classification`. Approximate methods activate above `APPROXIMATE_THRESHOLD`.
+Phase B pre-classifies only to batch queries; the engine re-applies SPEC 3.2, never the adapter.
 """
 
 from __future__ import annotations
@@ -50,13 +48,13 @@ from ..base import (
     PhaseB,
     Range,
     RecordReads,
-    RowCountMethod,
     TableCounts,
     TableScope,
     TopN,
     ValueCount,
     ValueList,
     VectorReading,
+    counts_approximately,
     empty_base_stats,
     is_string_like,
     key_literal,
@@ -66,6 +64,7 @@ from ..base import (
     numeric_block_from_row,
     phase_a_cost,
     profile_over,
+    row_count_or_none,
     run_phase_a,
     unrepresentable_fields,
     whole_temporal_block,
@@ -77,9 +76,6 @@ from ..statements import column_alias
 
 if TYPE_CHECKING:
     import psycopg
-
-
-APPROXIMATE_THRESHOLD = 1_000_000
 
 
 _UNSUPPORTED_TYPES = (
@@ -153,12 +149,12 @@ def compute_base(
     if not columns:
         return TableCounts(row_count=0, rows_scanned=0), PhaseA({})
 
-    source = _table_source(identity, scope)
+    source = table_source(identity, scope)
     narrows = scope is not None and scope.narrows
 
     reltuples = reltuples_estimate(conn, identity)
     # The planner's n_distinct describes the whole table, so a narrowed read counts instead.
-    approximate = reltuples > APPROXIMATE_THRESHOLD and not narrows
+    approximate = counts_approximately(reltuples, narrows)
     composite = composite_columns(conn, identity)
 
     rows_scanned, phase_a = run_phase_a(
@@ -176,12 +172,13 @@ def compute_base(
         partial(_recount, conn, source) if approximate else None,
         declines=lambda col: _is_unsupported(col.classified_type) or col.name in composite,
     )
-    row_count, row_count_method = _table_row_count(
-        conn,
+    row_count, row_count_method = statements.table_row_count(
+        partial(exec_query, conn),
+        DIALECT,
         identity.quoted(),
         rows_scanned,
-        reltuples,
         scope,
+        lambda: row_count_or_none(reltuples),
     )
 
     return TableCounts(row_count, rows_scanned, row_count_method), phase_a
@@ -203,7 +200,7 @@ def compute_columns(
 ) -> PhaseB:
     """Phase B: the classification-specific statistics, keyed by column name."""
 
-    source = source or _table_source(identity, scope)
+    source = source or table_source(identity, scope)
     reads = ColumnReads(
         value_list=partial(_fetch_value_list, conn, source),
         numeric_block=partial(_fetch_numeric_block, conn, source),
@@ -226,9 +223,11 @@ def compute_columns(
 
 
 def table_source(identity: Identity, scope: TableScope | None) -> str:
-    """The FROM expression a table's statistics read, which a descent derives its parts from."""
+    """The FROM expression every phase reads: a materialized scope's one copied draw, else a
+    sample whose seed re-derives from the table's own name, so every phase builds the same text.
+    """
 
-    return _table_source(identity, scope)
+    return source(identity.quoted(), scope, statements.table_seed(identity))
 
 
 def profile_part(
@@ -436,7 +435,7 @@ def compute_null_patterns(
     return statements.null_patterns(
         partial(exec_query, conn),
         DIALECT,
-        _table_source(identity, scope),
+        table_source(identity, scope),
         columns,
         [_null_tested(col) for col in columns],
         config,
@@ -458,7 +457,7 @@ def probe_grain(
     return statements.grain_pairs(
         partial(exec_query, conn),
         DIALECT,
-        _table_source(identity, scope),
+        table_source(identity, scope),
         counts,
         candidates,
         {col.name: _operand(col) for col in columns},
@@ -484,7 +483,7 @@ def probe_timeline(
     return statements.timeline(
         partial(exec_query, conn),
         DIALECT,
-        _table_source(identity, scope),
+        table_source(identity, scope),
         cn,
         _timeline_bucket_expr(cn, col.classified_type, unit),
         render_domain("bkt.bucket_start", col.classified_type),
@@ -520,7 +519,7 @@ def compute_populated_windows(
 
     return statements.populated_windows(
         partial(exec_query, conn),
-        _table_source(identity, scope),
+        table_source(identity, scope),
         source_column(anchor, DIALECT),
         {subject: source_column(by_name[subject], DIALECT) for subject in subject_columns},
         lambda expr: render_domain(expr, anchor.classified_type),
@@ -543,7 +542,7 @@ def probe_dependencies(
     return statements.dependency_strengths(
         partial(exec_query, conn),
         DIALECT,
-        _table_source(identity, scope),
+        table_source(identity, scope),
         base,
         candidates,
         {col.name: _operand(col) for col in columns},
@@ -558,7 +557,7 @@ def materialize(conn: psycopg.Connection, identity: Identity, scope: TableScope)
     """
 
     name = materialized_name(identity.fqn)
-    drawn = _source(identity.quoted(), scope, statements.table_seed(identity))
+    drawn = source(identity.quoted(), scope, statements.table_seed(identity))
     exec_query(
         conn,
         f"CREATE TEMPORARY TABLE {quote(name, DIALECT)} AS SELECT * FROM {drawn}",
@@ -576,17 +575,7 @@ def release(conn: psycopg.Connection, scope: TableScope) -> None:
     exec_query(conn, f"DROP TABLE IF EXISTS {quote(scope.materialized, DIALECT)}")
 
 
-def _table_source(identity: Identity, scope: TableScope | None) -> str:
-    """The FROM expression every phase reads.
-
-    A materialized scope names one copied draw; unmaterialized, the seed re-derives from
-    the table's own name, so every phase builds the same text.
-    """
-
-    return _source(identity.quoted(), scope, statements.table_seed(identity))
-
-
-def _source(quoted_fqn: str, scope: TableScope | None, seed: int | None = None) -> str:
+def source(quoted_fqn: str, scope: TableScope | None, seed: int | None = None) -> str:
     """Table reference every statistics query selects FROM. See ARCHITECTURE.md 2.
 
     A materialized scope is already the drawn rows and reads as a plain name. TABLESAMPLE binds
@@ -606,31 +595,6 @@ def _source(quoted_fqn: str, scope: TableScope | None, seed: int | None = None) 
         return f"{quoted_fqn} {SOURCE_ALIAS} TABLESAMPLE BERNOULLI({rate}){repeatable}"
     else:
         return derived(f"SELECT * FROM {quoted_fqn} WHERE {scope.filter}", SOURCE_ALIAS)
-
-
-def _table_row_count(
-    conn: psycopg.Connection,
-    quoted_fqn: str,
-    rows_scanned: int,
-    reltuples: float,
-    scope: TableScope | None,
-) -> tuple[int, RowCountMethod]:
-    """Rows in the table and how they were obtained, per SPEC 2.2.1.
-
-    A narrowed read takes the planner estimate; a never-analyzed table has none and counts
-    exactly, since the scanned figure would report a filter matching nothing as an empty
-    table (SPEC 2.2.7). An estimate below the scanned count still stands (SPEC 2.2.8).
-    """
-
-    if scope is None or not scope.narrows:
-        return rows_scanned, "exact"
-
-    if reltuples >= 0 and not scope.count_exactly:
-        return int(reltuples), "approximate"
-
-    row = exec_query(conn, f"SELECT COUNT(1) FROM {quoted_fqn} {SOURCE_ALIAS}").fetchone()
-
-    return (int(row[0]) if row and row[0] is not None else rows_scanned), "exact"
 
 
 def _null_counts(

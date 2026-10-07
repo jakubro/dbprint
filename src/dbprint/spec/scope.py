@@ -132,7 +132,7 @@ def coverage_statement(coverage: float, scope: ScanScope | None) -> str:
 def scope_line(scope: ScanScope) -> str:
     """The `Scanned:` line: rows read, their share of `row_count`, and how the read was narrowed.
 
-    The share is taken against `row_count`, since `sample` records what was asked for, not what came.
+    Its share is of `row_count`: `sample` is what was asked for, not what came, so is not printed.
     """
 
     if scope.rows_scanned is None:
@@ -166,9 +166,9 @@ def _is_int(value: object) -> bool:
 
 def _narrowing_suffix(scope: ScanScope) -> str:
     if scope.sample is not None:
-        return f", sample {spell_number(scope.sample)}"
+        return "; sampled"
 
     if scope.filter is not None and scope.filter.strip():
-        return f", filter `{scope.filter}`"
+        return f"; filtered by `{scope.filter}`"
 
     return ""

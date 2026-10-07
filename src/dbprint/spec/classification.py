@@ -54,6 +54,15 @@ def compute_cardinality_ratio(cardinality: int, rows_scanned: int) -> float:
     return _floored(round(cardinality / rows_scanned, 6), cardinality)
 
 
+def compute_fanout_avg(row_count: int, null_count: int, cardinality: int) -> float:
+    """The published `observed.fanout_avg` (SPEC 2.3.10): rows per distinct key among keyed rows.
+
+    The numerator never falls below `cardinality`, since each distinct key has at least one row.
+    """
+
+    return round(max(row_count - null_count, cardinality) / cardinality, 6)
+
+
 def is_candidate_key(cardinality: int, ratio: float) -> bool:
     """Whether an already-rounded ratio clears the SPEC 4.2 candidate-key threshold.
 
@@ -181,6 +190,34 @@ _NUMERIC_TYPES = (
     "bfloat16",
     "decfloat",
 )
+_INTEGER_TYPES = (
+    "smallint",
+    "integer",
+    "bigint",
+    "int",
+    "tinyint",
+    "mediumint",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "int128",
+    "int256",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+    "uint128",
+    "uint256",
+    "hugeint",
+    "uhugeint",
+    "ubigint",
+    "uinteger",
+    "usmallint",
+    "utinyint",
+)
+_SCALED_DECIMAL_TYPES = ("decimal", "numeric", "number", "dec", "fixed")
+_SCALE_ONLY_DECIMAL_TYPES = ("decimal32", "decimal64", "decimal128", "decimal256")
 _CHARACTER_TYPES = (
     "varchar",
     "text",
@@ -559,6 +596,31 @@ def is_floating_type(sql_type: str) -> bool:
     """Whether `sql_type` holds binary floating-point values, whose exact values pool no domain."""
 
     return _matches(base_type(sql_type), _FLOATING_TYPES)
+
+
+def is_integer_type(sql_type: str) -> bool:
+    """Whether `sql_type` can hold only whole numbers - an integer family, or a decimal of scale 0.
+
+    A bare `decimal`/`numeric`/`number` is not: Postgres leaves its scale open, duckdb sets 3.
+    """
+
+    lowered = sql_type.lower()
+
+    while (unwrapped := _unwrapped(lowered)) is not None:
+        lowered = unwrapped[1]
+
+    base = base_type(lowered)
+
+    if base in _INTEGER_TYPES:
+        return True
+
+    group = re.search(r"\(([^()]*)\)", lowered)
+    arguments = [a.strip() for a in group.group(1).split(",")] if group else []
+
+    if base in _SCALED_DECIMAL_TYPES:
+        return len(arguments) == 1 or (len(arguments) == 2 and arguments[1] == "0")
+
+    return base in _SCALE_ONLY_DECIMAL_TYPES and arguments == ["0"]
 
 
 def is_array_type(sql_type: str) -> bool:

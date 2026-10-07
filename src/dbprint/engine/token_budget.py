@@ -6,6 +6,7 @@ rather than closing the door behind it. Token counts are `len(text) // 4`. Pure:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 
@@ -16,13 +17,20 @@ CHARS_PER_TOKEN = 4  # universal approximation; no tokenizer dep
 class Section:
     """A named, ordered section of rendered text plus its token cost.
 
-    `pinned` decides the order a section is offered in, never whether the budget applies to it.
+    `pinned` orders the offer, never exempts it; `line_terms` aligns with `text.splitlines()`.
     """
 
     name: str
     text: str
     tokens: int
     pinned: bool = False
+    line_terms: tuple[frozenset[str], ...] = ()
+
+    @property
+    def terms(self) -> frozenset[str]:
+        """Every term key the section's lines print."""
+
+        return frozenset().union(*self.line_terms)
 
 
 @dataclass(frozen=True)
@@ -45,10 +53,22 @@ def tokens_of(text: str) -> int:
     return max(1, len(text) // CHARS_PER_TOKEN)
 
 
-def make_section(name: str, text: str, *, pinned: bool = False) -> Section:
+def make_section(
+    name: str,
+    text: str,
+    *,
+    pinned: bool = False,
+    line_terms: Sequence[frozenset[str]] = (),
+) -> Section:
     """Build a Section, measuring its token cost from the text."""
 
-    return Section(name=name, text=text, tokens=tokens_of(text), pinned=pinned)
+    return Section(
+        name=name,
+        text=text,
+        tokens=tokens_of(text),
+        pinned=pinned,
+        line_terms=tuple(line_terms),
+    )
 
 
 def select(sections: list[Section], budget: int | None) -> Selection:

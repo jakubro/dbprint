@@ -7,16 +7,15 @@ The catalog stores a quoted `CREATE`'s case, so reads past enumeration bind `Ide
 from __future__ import annotations
 
 from collections.abc import Sequence
+from functools import partial
 from typing import TYPE_CHECKING
 
-from dbprint.config.selectors import expand
 from dbprint.spec.fqn import join as join_fqn
 from .connection import exec_query
 from .. import pg_catalog
 from ..base import (
     ColumnMeta,
     CommentsMeta,
-    FkAction,
     ForeignKeyMeta,
     IndexMeta,
     PhysicalLayout,
@@ -25,7 +24,7 @@ from ..base import (
     TableType,
     UniqueKeyMeta,
 )
-from ..identifiers import Identity, column_meta, enforce_table_identifiers, fold, table_meta
+from ..identifiers import Identity, column_meta, fold, select_tables, table_meta
 from ..sql_layout import listed
 
 
@@ -36,16 +35,6 @@ if TYPE_CHECKING:
 _TABLE_TYPE_MAP: dict[str, TableType] = {
     "TABLE": "table",
     "VIEW": "view",
-}
-
-# `pg_constraint.confdeltype`/`confupdtype` codes - Redshift's own FK grammar has no
-# referential-action clause, so a real cluster's rows are expected to always read 'a'.
-_FK_ACTIONS: dict[str, FkAction] = {
-    "a": "NO ACTION",
-    "r": "RESTRICT",
-    "c": "CASCADE",
-    "n": "SET NULL",
-    "d": "SET DEFAULT",
 }
 
 _Candidate = tuple[TableMeta, tuple[str, str, str]]
@@ -110,15 +99,7 @@ def list_tables(
         (table_meta(physical, "table", external=True), physical)
         for physical in _external_tables(cursor, databases)
     ]
-    in_scope = set(
-        expand(
-            [meta.fqn for meta, _ in candidates],
-            config_include=include,
-            config_exclude=exclude,
-        ),
-    )
-    selected = [entry for entry in candidates if entry[0].fqn in in_scope]
-    enforce_table_identifiers(selected)
+    selected = select_tables(candidates, include, exclude)
 
     return selected
 
@@ -250,38 +231,7 @@ def relationships(cursor: Cursor, identity: Identity) -> list[ForeignKeyMeta]:
     shape, so one composite key's rows would need reassembling across them.
     """
 
-    rows = exec_query(
-        cursor,
-        pg_catalog.FOREIGN_KEYS,
-        identity.addressed,
-    ).fetchall()
-
-    out: list[ForeignKeyMeta] = []
-
-    for (
-        name,
-        src_attnums,
-        dst_attnums,
-        dst_schema,
-        dst_table,
-        on_del,
-        on_upd,
-        src_relid,
-        dst_relid,
-    ) in rows:
-        out.append(
-            ForeignKeyMeta(
-                column=tuple(_attnums_to_names(cursor, src_relid, list(src_attnums))),
-                # `confrelid` is a local oid, so a target is always in the source's own database.
-                target_table=join_fqn((fold(identity.parts[0]), fold(dst_schema), fold(dst_table))),
-                target_column=tuple(_attnums_to_names(cursor, dst_relid, list(dst_attnums))),
-                on_delete=_FK_ACTIONS.get(str(on_del), "NO ACTION"),
-                on_update=_FK_ACTIONS.get(str(on_upd), "NO ACTION"),
-                constraint_name=name,
-            ),
-        )
-
-    return out
+    return pg_catalog.relationships(partial(exec_query, cursor), identity, on_unknown="NO ACTION")
 
 
 def indexes(cursor: Cursor, identity: Identity) -> list[IndexMeta]:
@@ -321,7 +271,9 @@ def unique_keys(cursor: Cursor, identity: Identity) -> list[UniqueKeyMeta]:
 
     return [
         UniqueKeyMeta(
-            columns=tuple(_attnums_to_names(cursor, relid, list(conkey))),
+            columns=tuple(
+                pg_catalog.attnums_to_names(partial(exec_query, cursor), relid, list(conkey)),
+            ),
             primary=contype == "p",
         )
         for conkey, relid, contype, _name in rows
@@ -519,39 +471,6 @@ def table_rows_estimate(cursor: Cursor, identity: Identity) -> int:
     """Alias kept for `looks_like.py`'s naming parity with the other adapters."""
 
     return estimate_row_count(cursor, identity)
-
-
-def _attnums_to_names(cursor: Cursor, relid: int, attnums: list[int]) -> list[str]:
-    """Resolve attnums for one relation into lowercased column names, order preserved - lowercase
-    agrees with the `columns` map key (SPEC 2.2.1), and nothing quotes these into a statement.
-    """
-
-    if not attnums:
-        return []
-
-    # An explicit `IN` list, not `= ANY(<array>)`: AWS lists array constructors among the
-    # PostgreSQL features Redshift does not support. Every bound value is an int from the catalog.
-    placeholders = listed(["%s"] * len(attnums), 12)
-    rows = exec_query(
-        cursor,
-        f"""
-        SELECT
-          att.attnum,
-          att.attname
-        FROM
-          pg_attribute att
-        WHERE
-          att.attrelid = %s
-          AND att.attnum IN (
-            {placeholders}
-          )
-          AND NOT att.attisdropped
-        """,
-        (relid, *attnums),
-    ).fetchall()
-    name_by_attnum = {int(attnum): fold(str(attname)) for attnum, attname in rows}
-
-    return [name_by_attnum[a] for a in attnums if a in name_by_attnum]
 
 
 def _external_tables(cursor: Cursor, databases: Sequence[str]) -> list[tuple[str, str, str]]:

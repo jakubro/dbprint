@@ -4,28 +4,15 @@ cell - a comparison against the module, never a restatement that can silently dr
 
 from __future__ import annotations
 
-import importlib.util
 import re
-from pathlib import Path
 
 import pytest
 
 from dbprint.spec.statistics_matrix import FORBIDDEN_FIELDS, REQUIRED_FIELDS
+from tests._scripts import load_script
 
 
-def _load_generator():
-    """Import scripts/gen_statistics_matrix.py so the test shares the generator's render path."""
-
-    path = Path(__file__).resolve().parents[2] / "scripts" / "gen_statistics_matrix.py"
-    spec = importlib.util.spec_from_file_location("gen_statistics_matrix", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    return module
-
-
-gen = _load_generator()
+gen = load_script("gen_statistics_matrix")
 
 # SPEC 2.2.3's base fields, typed out rather than read off the generator so its own set cannot cancel out.
 _BASE_8 = frozenset(

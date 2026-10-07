@@ -411,7 +411,9 @@ def _observed_print(
     target_files: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[Issue]]:
     source_column = (
-        source if source is not None else {"cardinality": 4, "sketch": {"values": _CHILD}}
+        source
+        if source is not None
+        else {"cardinality": 4, "null_count": 0, "sketch": {"values": _CHILD}}
     )
     target_column = (
         target if target is not None else {"cardinality": 3, "sketch": {"values": _PARENT}}
@@ -454,10 +456,30 @@ class TestObservedArithmeticAgainstAnExhaustiveChild:
         assert _observed_print(tmp_path, {**_EXACT, "fanout_avg": 2.5})[1] == [
             _mismatch(
                 "relationships.observed-fanout-mismatch",
-                "fanout_avg=2.5 does not match row_count/cardinality=2.0 from the referencing "
-                "column's own statistics.",
+                "fanout_avg=2.5 does not match (row_count - null_count)/cardinality=2.0 from "
+                "the referencing column's own statistics.",
             ),
         ]
+
+    def test_a_fanout_counting_null_referencing_rows_does_not_recompute(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        source = {"cardinality": 4, "null_count": 2, "sketch": {"values": _CHILD}}
+        issues = _observed_print(tmp_path, dict(_EXACT), source=source)[1]
+
+        assert issues == [
+            _mismatch(
+                "relationships.observed-fanout-mismatch",
+                "fanout_avg=2.0 does not match (row_count - null_count)/cardinality=1.5 from "
+                "the referencing column's own statistics.",
+            ),
+        ]
+
+    def test_a_fanout_floored_at_one_row_per_key_recomputes(self, tmp_path: Path) -> None:
+        source = {"cardinality": 4, "null_count": 6, "sketch": {"values": _CHILD}}
+
+        assert _observed_print(tmp_path, {**_EXACT, "fanout_avg": 1.0}, source=source)[1] == []
 
     def test_a_coverage_that_does_not_recompute(self, tmp_path: Path) -> None:
         assert _observed_print(tmp_path, {**_EXACT, "target_coverage": 0.5})[1] == [
@@ -688,7 +710,7 @@ class TestObservedArithmeticIsSkippedWithoutBothEndpoints:
             ),
         )
         (tmp_path / "statistics.yaml").write_text(
-            yaml.safe_dump({"row_count": 8, "columns": {"a": {"cardinality": 4}}}),
+            yaml.safe_dump({"row_count": 8, "columns": {"a": {"cardinality": 4, "null_count": 0}}}),
         )
         artifacts = {"relationships": "relationships.yaml", "statistics": "statistics.yaml"}
         manifest = {"tables": {"s.t": {"artifacts": artifacts}}}

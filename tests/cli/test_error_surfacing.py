@@ -14,11 +14,13 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
-from dbprint.adapters import ColumnMeta, ColumnStats, CommentsMeta, Inferred, MockAdapter, MockTable
+from dbprint.adapters import ColumnStats, Inferred, MockAdapter, MockTable
 from dbprint.cli.main import main
+from tests._cli import AUTO_PROJECT_YAML, credential_env, patch_registry
 from tests._prints import (
     SHAPE_PROBE_COLUMNS,
     VAULT_COLUMNS,
+    columns,
     exact_stats,
     mock_table,
     unmeasured_stats,
@@ -26,27 +28,17 @@ from tests._prints import (
 )
 
 
-PROJECT_YAML = """\
-defaults:
-  max_age_days: 7
-  statistics: {}
-  diff: {}
-connections:
-  primary:
-    adapter: postgres
-    auto: true
-    output: prints
-"""
-
 _PASSWORD = "topsecret-pw"
 
-_CREDS = {
-    "DBPRINT_PRIMARY_HOST": "badhost",
-    "DBPRINT_PRIMARY_PORT": "5432",
-    "DBPRINT_PRIMARY_DATABASE": "db",
-    "DBPRINT_PRIMARY_USER": "u",
-    "DBPRINT_PRIMARY_PASSWORD": _PASSWORD,
-}
+_CREDS = credential_env(
+    credentials={
+        "host": "badhost",
+        "port": "5432",
+        "database": "db",
+        "user": "u",
+        "password": _PASSWORD,
+    },
+)
 
 
 class _ConnectFails(MockAdapter):
@@ -75,7 +67,7 @@ class _Healthy(MockAdapter):
 
 @pytest.fixture
 def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    (tmp_path / ".dbprint.yaml").write_text(PROJECT_YAML)
+    (tmp_path / ".dbprint.yaml").write_text(AUTO_PROJECT_YAML)
     monkeypatch.chdir(tmp_path)
 
     for k, v in _CREDS.items():
@@ -84,7 +76,7 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-_UNPARSEABLE_PROJECT_YAML = PROJECT_YAML.replace("  primary:", "  production:")
+_UNPARSEABLE_PROJECT_YAML = AUTO_PROJECT_YAML.replace("  primary:", "  production:")
 
 
 @pytest.fixture
@@ -114,7 +106,7 @@ def unparseable_credentials(
 
 
 def _registry(adapter: type[MockAdapter]) -> AbstractContextManager[None]:
-    return patch.dict("dbprint.cli.adapter_registry.ADAPTERS", {"postgres": adapter}, clear=True)
+    return patch_registry({"postgres": adapter})
 
 
 def _write_manifest(project_dir: Path, body: str) -> None:
@@ -155,7 +147,7 @@ class TestGenerateErrors:
         runner = CliRunner()
 
         # Empty registry -> get_adapter_class('postgres') raises the unknown-adapter error.
-        with patch.dict("dbprint.cli.adapter_registry.ADAPTERS", {}, clear=True):
+        with patch_registry({}):
             result = runner.invoke(main, ["generate", "--no-tui"])
 
         assert result.exit_code == 4
@@ -175,7 +167,7 @@ class TestGenerateErrors:
 def _storage_reading_table() -> MockTable:
     """`seedbank.storage_reading` - the print's real, currently-empty partitioned table."""
 
-    columns = [
+    spec = [
         ("reading_id", "bigint"),
         ("vault_id", "integer"),
         ("shelf_code", "character varying(8)"),
@@ -183,27 +175,10 @@ def _storage_reading_table() -> MockTable:
         ("temperature_c", "numeric(4,1)"),
     ]
 
-    return MockTable(
-        type="table",
-        namespace_path=("seedbank", "storage_reading"),
-        ddl=(
-            "CREATE TABLE seedbank.storage_reading (\n"
-            "    reading_id bigint NOT NULL,\n"
-            "    vault_id integer NOT NULL,\n"
-            "    shelf_code character varying(8) NOT NULL,\n"
-            "    reading_date date NOT NULL,\n"
-            "    temperature_c numeric(4,1) NOT NULL\n"
-            ")\n"
-            "PARTITION BY RANGE (reading_date);\n"
-        ),
-        columns=[
-            ColumnMeta(name=name, sql_type=sql_type, nullable=False, default=None, ordinal=i)
-            for i, (name, sql_type) in enumerate(columns, start=1)
-        ],
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={
+    return mock_table(
+        "seedbank.storage_reading",
+        columns(*spec),
+        {
             name: ColumnStats(
                 sql_type=sql_type,
                 nullable=False,
@@ -213,9 +188,16 @@ def _storage_reading_table() -> MockTable:
                 cardinality_ratio=0.0,
                 cardinality_method="exact",
             )
-            for name, sql_type in columns
+            for name, sql_type in spec
         },
-        samples={},
+        ddl="CREATE TABLE seedbank.storage_reading (\n"
+        "    reading_id bigint NOT NULL,\n"
+        "    vault_id integer NOT NULL,\n"
+        "    shelf_code character varying(8) NOT NULL,\n"
+        "    reading_date date NOT NULL,\n"
+        "    temperature_c numeric(4,1) NOT NULL\n"
+        ")\n"
+        "PARTITION BY RANGE (reading_date);\n",
         row_count=0,
     )
 

@@ -30,7 +30,6 @@ from dbprint.adapters import (
     Length,
     MockAdapter,
     MockTable,
-    NullPattern,
     NullPatterns,
     PhysicalLayout,
     PhysicalLayoutKey,
@@ -42,7 +41,7 @@ from dbprint.adapters import (
     ValueCount,
 )
 from dbprint.adapters.base import SkippedNamespace
-from dbprint.config.project import ConnectionConfig, DiffConfig, RedactRule, RuleConfig
+from dbprint.config.project import ConnectionConfig, RedactRule, RuleConfig
 from dbprint.conformance import validate_print
 from dbprint.engine import (
     EXIT_CONNECTION,
@@ -59,141 +58,10 @@ from dbprint.engine import (
 from dbprint.engine.carried import CommittedPrint
 from dbprint.spec.sketch import K as SPEC_SKETCH_K
 from dbprint.spec.sketch import canonical_form, decode_sketch, low64_md5
-from tests._prints import columns, exact_stats, mock_table
+from tests._curator import conn_config, curator_fixture, referencing_fixture
+from tests._engine_run import artifact, conformance_errors, manifest
+from tests._prints import columns, mock_table
 from tests.conftest import normalize_instants
-
-
-def _conn_config(
-    tmp_path: Path,
-    *,
-    include=("*",),
-    exclude=(),
-    max_age_days=7,
-    enumeration_threshold: int | None = None,
-) -> ConnectionConfig:
-    statistics = (
-        StatisticsConfig()
-        if enumeration_threshold is None
-        else StatisticsConfig(enumeration_threshold=enumeration_threshold)
-    )
-
-    return ConnectionConfig(
-        name="primary",
-        adapter="postgres",
-        auto=False,
-        output=tmp_path,
-        include=include,
-        exclude=exclude,
-        max_age_days=max_age_days,
-        statistics=statistics,
-        diff=DiffConfig(),
-    )
-
-
-def _curator_fixture() -> dict[str, MockTable]:
-    return _referencing_fixture(
-        "public.curator",
-        "herbarium_id",
-        "public.herbarium",
-        ddl="CREATE TABLE public.curator (id uuid PRIMARY KEY);\n",
-        relationships=[
-            ForeignKeyMeta(
-                column=("herbarium_id",),
-                target_table="public.herbarium",
-                target_column=("id",),
-                on_delete="CASCADE",
-                on_update="NO ACTION",
-                constraint_name="curator_herbarium_fk",
-            ),
-        ],
-    )
-
-
-def _referencing_fixture(
-    child: str,
-    fk_column: str,
-    parent: str,
-    *,
-    ddl: str,
-    relationships: list[ForeignKeyMeta],
-    parent_keys: tuple[UniqueKeyMeta, ...] = (),
-) -> dict[str, MockTable]:
-    uuids = [f"00000000-0000-7000-8000-{i:012d}" for i in range(20)]
-    uuid_length = Length(min=36, max=36, avg=36.0, p95=36.0)
-
-    return {
-        child: mock_table(
-            child,
-            columns(("id", "uuid"), (fk_column, "uuid", True)),
-            {
-                # A fully-unique uuid classifies text (SPEC 4.2), which SPEC 2.2.3 marks R;
-                # 20 of 100 distinct values, each count 1, is long_tail.
-                "id": exact_stats(
-                    "uuid",
-                    100,
-                    1.0,
-                    values=tuple(ValueCount(value=u, count=1) for u in uuids),
-                    values_coverage=0.2,
-                    distribution="long_tail",
-                    empty_count=0,
-                    length=uuid_length,
-                    inferred=Inferred(candidate_key=True),
-                ),
-                # The referencing column classifies foreign_key_candidate, for which SPEC 2.2.3
-                # marks these three fields required.
-                fk_column: exact_stats(
-                    "uuid",
-                    20,
-                    0.2,
-                    nullable=True,
-                    null_count=10,
-                    null_rate=0.1,
-                    values=(
-                        ValueCount(value="00000000-0000-7000-8000-000000000001", count=9),
-                        ValueCount(value="00000000-0000-7000-8000-000000000002", count=8),
-                    ),
-                    values_coverage=0.188889,
-                    distribution="uniform",
-                    length=uuid_length,
-                ),
-            },
-            ddl=ddl,
-            relationships=relationships,
-            # A census is owed wherever a column carries a null (SPEC 2.2.10), and is stated
-            # rather than derived: per-column counts cannot say which nulls share a row.
-            null_patterns=NullPatterns(
-                patterns=(
-                    NullPattern(columns=(), count=90),
-                    NullPattern(columns=(fk_column,), count=10),
-                ),
-                coverage=1.0,
-            ),
-            samples={"id": uuids},
-            row_count=100,
-        ),
-        parent: mock_table(
-            parent,
-            columns(("id", "uuid")),
-            {
-                # cardinality 20 is at or below enumeration_threshold(50) and top_n_values(20),
-                # so the column classifies categorical with an exhaustive value list.
-                "id": exact_stats(
-                    "uuid",
-                    20,
-                    1.0,
-                    values=tuple(ValueCount(value=u, count=1) for u in uuids),
-                    values_coverage=1.0,
-                    distribution="uniform",
-                    length=uuid_length,
-                    inferred=Inferred(candidate_key=True),
-                ),
-            },
-            ddl=f"CREATE TABLE {parent} (id uuid PRIMARY KEY);\n",
-            samples={"id": uuids},
-            row_count=20,
-            unique_keys=list(parent_keys),
-        ),
-    }
 
 
 def _numeric_looks_like_fixture() -> dict[str, MockTable]:
@@ -202,17 +70,10 @@ def _numeric_looks_like_fixture() -> dict[str, MockTable]:
     """
 
     return {
-        "fixture.probe_target": MockTable(
-            type="table",
-            namespace_path=("fixture", "probe_target"),
-            ddl="CREATE TABLE fixture.probe_target (id integer PRIMARY KEY);\n",
-            columns=[
-                ColumnMeta(name="id", sql_type="integer", nullable=False, default=None, ordinal=1),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+        "fixture.probe_target": mock_table(
+            "fixture.probe_target",
+            columns(("id", "integer")),
+            {
                 "id": ColumnStats(
                     sql_type="integer",
                     nullable=False,
@@ -227,71 +88,20 @@ def _numeric_looks_like_fixture() -> dict[str, MockTable]:
                     inferred=Inferred(candidate_key=True),
                 ),
             },
+            ddl="CREATE TABLE fixture.probe_target (id integer PRIMARY KEY);\n",
             samples={"id": [str(1000 + i) for i in range(20)]},
             row_count=20,
         ),
-        "fixture.type_probe": MockTable(
-            type="table",
-            namespace_path=("fixture", "type_probe"),
-            ddl=(
-                "CREATE TABLE fixture.type_probe (\n"
-                "    target_id integer NOT NULL,\n"
-                "    status_code integer NOT NULL,\n"
-                "    serial_label character varying(20) NOT NULL,\n"
-                "    device_imei bigint NOT NULL,\n"
-                "    partial_code integer NOT NULL\n"
-                ");\n"
+        "fixture.type_probe": mock_table(
+            "fixture.type_probe",
+            columns(
+                ("target_id", "integer"),
+                ("status_code", "integer"),
+                ("serial_label", "character varying(20)"),
+                ("device_imei", "bigint"),
+                ("partial_code", "integer"),
             ),
-            columns=[
-                ColumnMeta(
-                    name="target_id",
-                    sql_type="integer",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-                ColumnMeta(
-                    name="status_code",
-                    sql_type="integer",
-                    nullable=False,
-                    default=None,
-                    ordinal=2,
-                ),
-                ColumnMeta(
-                    name="serial_label",
-                    sql_type="character varying(20)",
-                    nullable=False,
-                    default=None,
-                    ordinal=3,
-                ),
-                ColumnMeta(
-                    name="device_imei",
-                    sql_type="bigint",
-                    nullable=False,
-                    default=None,
-                    ordinal=4,
-                ),
-                ColumnMeta(
-                    name="partial_code",
-                    sql_type="integer",
-                    nullable=False,
-                    default=None,
-                    ordinal=5,
-                ),
-            ],
-            relationships=[
-                ForeignKeyMeta(
-                    column=("target_id",),
-                    target_table="fixture.probe_target",
-                    target_column=("id",),
-                    on_delete="CASCADE",
-                    on_update="NO ACTION",
-                    constraint_name="type_probe_target_fk",
-                ),
-            ],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+            {
                 # Declared FK -> foreign_key_candidate. Digit-shaped samples would otherwise
                 # publish numeric_string on a column whose own type already says "integer".
                 "target_id": ColumnStats(
@@ -368,6 +178,23 @@ def _numeric_looks_like_fixture() -> dict[str, MockTable]:
                     distribution="uniform",
                 ),
             },
+            ddl="CREATE TABLE fixture.type_probe (\n"
+            "    target_id integer NOT NULL,\n"
+            "    status_code integer NOT NULL,\n"
+            "    serial_label character varying(20) NOT NULL,\n"
+            "    device_imei bigint NOT NULL,\n"
+            "    partial_code integer NOT NULL\n"
+            ");\n",
+            relationships=[
+                ForeignKeyMeta(
+                    column=("target_id",),
+                    target_table="fixture.probe_target",
+                    target_column=("id",),
+                    on_delete="CASCADE",
+                    on_update="NO ACTION",
+                    constraint_name="type_probe_target_fk",
+                ),
+            ],
             samples={
                 "target_id": [str(1000 + i) for i in range(20)],
                 "status_code": ["1", "2", "3"] * 20,
@@ -383,7 +210,7 @@ def _numeric_looks_like_fixture() -> dict[str, MockTable]:
 
 def _build_engine(tmp_path: Path, fixture: dict[str, MockTable]) -> Engine:
     adapter = MockAdapter(fixture)
-    conn = _conn_config(tmp_path)
+    conn = conn_config(tmp_path)
 
     return Engine(adapter, conn, tmp_path)
 
@@ -437,7 +264,7 @@ def _changes_by_kind(diff_path: Path) -> dict[str, list[dict[str, Any]]]:
 def _drifted_curator_fixture() -> dict[str, MockTable]:
     """The curator table one migration on: a new FK column, a retyped one, moved nulls."""
 
-    fixture = _curator_fixture()
+    fixture = curator_fixture()
     curator = fixture["public.curator"]
     fixture["public.curator"] = replace(
         curator,
@@ -495,7 +322,7 @@ def _drifted_curator_fixture() -> dict[str, MockTable]:
 def _narrowed_curator_fixture() -> dict[str, MockTable]:
     """The curator table with `herbarium_id` and the foreign key it carried both gone."""
 
-    fixture = _curator_fixture()
+    fixture = curator_fixture()
     curator = fixture["public.curator"]
     fixture["public.curator"] = replace(
         curator,
@@ -525,22 +352,21 @@ def _empty_table_fixture() -> dict[str, MockTable]:
     """Empty table covering every value-shape branch at cardinality 0: categorical, FK, boolean."""
 
     return {
-        "public.empty_t": MockTable(
-            type="table",
-            namespace_path=("public", "empty_t"),
+        "public.empty_t": mock_table(
+            "public.empty_t",
+            columns(
+                ("id", "uuid"),
+                ("herbarium_id", "uuid", True),
+                ("status", "text", True),
+                ("flag", "boolean", True),
+            ),
+            {
+                "id": _bare_empty_stats("uuid", nullable=False),
+                "herbarium_id": _bare_empty_stats("uuid"),
+                "status": _bare_empty_stats("text"),
+                "flag": _bare_empty_stats("boolean"),
+            },
             ddl="CREATE TABLE public.empty_t (id uuid, herbarium_id uuid, status text, flag boolean);\n",
-            columns=[
-                ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1),
-                ColumnMeta(
-                    name="herbarium_id",
-                    sql_type="uuid",
-                    nullable=True,
-                    default=None,
-                    ordinal=2,
-                ),
-                ColumnMeta(name="status", sql_type="text", nullable=True, default=None, ordinal=3),
-                ColumnMeta(name="flag", sql_type="boolean", nullable=True, default=None, ordinal=4),
-            ],
             relationships=[
                 ForeignKeyMeta(
                     column=("herbarium_id",),
@@ -551,15 +377,6 @@ def _empty_table_fixture() -> dict[str, MockTable]:
                     constraint_name="empty_herbarium_fk",
                 ),
             ],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
-                "id": _bare_empty_stats("uuid", nullable=False),
-                "herbarium_id": _bare_empty_stats("uuid"),
-                "status": _bare_empty_stats("text"),
-                "flag": _bare_empty_stats("boolean"),
-            },
-            samples={},
             row_count=0,
         ),
     }
@@ -573,7 +390,7 @@ class TestEmptyTableConformance:
         assert result.summary.failed == 0
 
         print_dir = tmp_path / "primary"
-        errors = [i for i in validate_print(print_dir) if i.severity == "error"]
+        errors = conformance_errors(print_dir)
         assert errors == [], "Conformance violations:\n" + "\n".join(
             f"  {e.code} at {e.path}: {e.detail}" for e in errors
         )
@@ -601,7 +418,7 @@ class TestEmptyTableConformance:
 
 class TestHappyPath:
     def test_first_run_creates_artifacts(self, tmp_path: Path) -> None:
-        engine = _build_engine(tmp_path, _curator_fixture())
+        engine = _build_engine(tmp_path, curator_fixture())
         result = engine.generate()
 
         assert result.summary.ok == 2
@@ -618,7 +435,7 @@ class TestHappyPath:
         assert "public.herbarium" in manifest["tables"]
 
     def test_first_run_diff_lists_all_tables_added(self, tmp_path: Path) -> None:
-        engine = _build_engine(tmp_path, _curator_fixture())
+        engine = _build_engine(tmp_path, curator_fixture())
         engine.generate()
         diff = yaml.safe_load((tmp_path / "primary" / "diff.yaml").read_text())
         kinds = {c["kind"] for c in diff["changes"]}
@@ -640,7 +457,7 @@ class TestGeneratePathDiff:
     ) -> dict[str, list[dict[str, Any]]]:
         """Commit the base print, re-profile `fixture`, and read the diff that run wrote."""
 
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         _build_engine(tmp_path, fixture).generate(GenerateRequest(force=True))
 
         return _changes_by_kind(tmp_path / "primary" / "diff.yaml")
@@ -684,13 +501,13 @@ class TestGeneratePathDiff:
     def test_an_unchanged_database_reports_nothing(self, tmp_path: Path) -> None:
         """The control: a run must report what moved, not manufacture events."""
 
-        assert self._regenerate(tmp_path, _curator_fixture()) == {}
+        assert self._regenerate(tmp_path, curator_fixture()) == {}
 
     def test_a_table_skipped_as_fresh_is_not_a_change(self, tmp_path: Path) -> None:
         """A skipped table is not rewritten, so its committed print is already the baseline."""
 
-        _build_engine(tmp_path, _curator_fixture()).generate()
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         diff = yaml.safe_load((tmp_path / "primary" / "diff.yaml").read_text())
 
         assert diff["changes"] == []
@@ -701,8 +518,8 @@ class TestGeneratePathDiff:
     ) -> None:
         """It compared equal to itself, which is no evidence about the database."""
 
-        _build_engine(tmp_path, _curator_fixture()).generate()
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         summary = yaml.safe_load((tmp_path / "primary" / "diff.yaml").read_text())["summary"]
 
         assert summary["unevaluated_tables"] == 2
@@ -711,11 +528,9 @@ class TestGeneratePathDiff:
 
 class TestRelationshipGraph:
     def test_referenced_by_populated_second_pass(self, tmp_path: Path) -> None:
-        engine = _build_engine(tmp_path, _curator_fixture())
+        engine = _build_engine(tmp_path, curator_fixture())
         engine.generate()
-        herbarium = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "herbarium" / "relationships.yaml").read_text(),
-        )
+        herbarium = artifact(tmp_path / "primary", "public.herbarium", "relationships")
         assert herbarium["referenced_by"][0]["referencer_table"] == "public.curator"
         assert herbarium["referenced_by"][0]["referencer_column"] == ["herbarium_id"]
 
@@ -724,37 +539,29 @@ class TestClassification:
     def test_a_unique_uuid_column_classifies_text(self, tmp_path: Path) -> None:
         """Uniqueness is not a classification (SPEC 4.2) - a unique uuid stays text."""
 
-        engine = _build_engine(tmp_path, _curator_fixture())
+        engine = _build_engine(tmp_path, curator_fixture())
         engine.generate()
-        stats = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "curator" / "statistics.yaml").read_text(),
-        )
+        stats = artifact(tmp_path / "primary", "public.curator")
         assert stats["columns"]["id"]["classification"] == "text"
 
     def test_looks_like_uuid_detected(self, tmp_path: Path) -> None:
-        engine = _build_engine(tmp_path, _curator_fixture())
+        engine = _build_engine(tmp_path, curator_fixture())
         engine.generate()
-        stats = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "curator" / "statistics.yaml").read_text(),
-        )
+        stats = artifact(tmp_path / "primary", "public.curator")
         assert stats["columns"]["id"]["inferred"]["looks_like"] == "uuid"
 
     def test_a_genuinely_unique_column_carries_no_exception_marker(self, tmp_path: Path) -> None:
-        engine = _build_engine(tmp_path, _curator_fixture())
+        engine = _build_engine(tmp_path, curator_fixture())
         engine.generate()
-        stats = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "curator" / "statistics.yaml").read_text(),
-        )
+        stats = artifact(tmp_path / "primary", "public.curator")
         assert "candidate_key_exception" not in stats["columns"]["id"]["inferred"]
 
     def test_looks_like_carries_its_own_evidence(self, tmp_path: Path) -> None:
         """A published verdict is beside the draw size and how much of it agreed."""
 
-        engine = _build_engine(tmp_path, _curator_fixture())
+        engine = _build_engine(tmp_path, curator_fixture())
         engine.generate()
-        stats = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "curator" / "statistics.yaml").read_text(),
-        )
+        stats = artifact(tmp_path / "primary", "public.curator")
         inferred = stats["columns"]["id"]["inferred"]
 
         assert inferred["sampled"] > 0
@@ -766,9 +573,7 @@ class TestClassification:
 
         engine = _build_engine(tmp_path, _near_unique_fixture())
         engine.generate()
-        stats = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "curator" / "statistics.yaml").read_text(),
-        )
+        stats = artifact(tmp_path / "primary", "public.curator")
 
         assert stats["columns"]["id"]["classification"] == "text"
         assert (
@@ -782,9 +587,7 @@ class TestNumericStringSuppressedOnNumericType:
 
     def test_a_numeric_fk_source_carries_no_looks_like(self, tmp_path: Path) -> None:
         _build_engine(tmp_path, _numeric_looks_like_fixture()).generate()
-        stats = yaml.safe_load(
-            (tmp_path / "primary" / "fixture" / "type_probe" / "statistics.yaml").read_text(),
-        )
+        stats = artifact(tmp_path / "primary", "fixture.type_probe")
         inferred = stats["columns"]["target_id"].get("inferred") or {}
 
         assert stats["columns"]["target_id"]["classification"] == "foreign_key_candidate"
@@ -794,9 +597,7 @@ class TestNumericStringSuppressedOnNumericType:
 
     def test_a_numeric_categorical_column_carries_no_looks_like(self, tmp_path: Path) -> None:
         _build_engine(tmp_path, _numeric_looks_like_fixture()).generate()
-        stats = yaml.safe_load(
-            (tmp_path / "primary" / "fixture" / "type_probe" / "statistics.yaml").read_text(),
-        )
+        stats = artifact(tmp_path / "primary", "fixture.type_probe")
         inferred = stats["columns"]["status_code"].get("inferred") or {}
 
         assert stats["columns"]["status_code"]["classification"] == "categorical"
@@ -813,9 +614,7 @@ class TestNumericStringSuppressedOnNumericType:
         """
 
         _build_engine(tmp_path, _numeric_looks_like_fixture()).generate()
-        stats = yaml.safe_load(
-            (tmp_path / "primary" / "fixture" / "type_probe" / "statistics.yaml").read_text(),
-        )
+        stats = artifact(tmp_path / "primary", "fixture.type_probe")
         inferred = stats["columns"]["partial_code"].get("inferred") or {}
 
         assert stats["columns"]["partial_code"]["classification"] == "categorical"
@@ -830,9 +629,7 @@ class TestNumericStringSuppressedOnNumericType:
         """The control case: the exclusion is type-aware, not classification-aware alone."""
 
         _build_engine(tmp_path, _numeric_looks_like_fixture()).generate()
-        stats = yaml.safe_load(
-            (tmp_path / "primary" / "fixture" / "type_probe" / "statistics.yaml").read_text(),
-        )
+        stats = artifact(tmp_path / "primary", "fixture.type_probe")
 
         assert stats["columns"]["serial_label"]["classification"] == "text"
         assert stats["columns"]["serial_label"]["inferred"]["looks_like"] == "numeric_string"
@@ -844,9 +641,7 @@ class TestNumericStringSuppressedOnNumericType:
         """Suppression, not fall-through: `imei` already outranks `numeric_string`."""
 
         _build_engine(tmp_path, _numeric_looks_like_fixture()).generate()
-        stats = yaml.safe_load(
-            (tmp_path / "primary" / "fixture" / "type_probe" / "statistics.yaml").read_text(),
-        )
+        stats = artifact(tmp_path / "primary", "fixture.type_probe")
 
         assert stats["columns"]["device_imei"]["classification"] == "categorical"
         assert stats["columns"]["device_imei"]["inferred"]["looks_like"] == "imei"
@@ -855,8 +650,7 @@ class TestNumericStringSuppressedOnNumericType:
         """Absence of `looks_like` on a numeric column is licensed, not a conformance finding."""
 
         _build_engine(tmp_path, _numeric_looks_like_fixture()).generate()
-        issues = validate_print(tmp_path / "primary")
-        errors = [i for i in issues if i.severity == "error"]
+        errors = conformance_errors(tmp_path / "primary")
         assert errors == [], "Conformance violations:\n" + "\n".join(str(e) for e in errors)
 
 
@@ -867,17 +661,13 @@ class TestUnsupportedFallthroughFollowsMeasurement:
         result = _build_engine(tmp_path, _unnamed_type_fixture()).generate()
         assert result.summary.failed == 0
 
-        stats = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "viability_check" / "statistics.yaml").read_text(),
-        )
+        stats = artifact(tmp_path / "primary", "public.viability_check")
         assert stats["columns"]["viability_pct"]["classification"] == "numeric"
         assert "cardinality" in stats["columns"]["viability_pct"]
 
     def test_a_measured_column_of_an_unnamed_type_is_text(self, tmp_path: Path) -> None:
         _build_engine(tmp_path, _unnamed_type_fixture()).generate()
-        stats = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "viability_check" / "statistics.yaml").read_text(),
-        )
+        stats = artifact(tmp_path / "primary", "public.viability_check")
         assert stats["columns"]["address"]["classification"] == "text"
         assert "values" in stats["columns"]["address"]
 
@@ -886,16 +676,13 @@ class TestUnsupportedFallthroughFollowsMeasurement:
         tmp_path: Path,
     ) -> None:
         _build_engine(tmp_path, _unnamed_type_fixture()).generate()
-        stats = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "viability_check" / "statistics.yaml").read_text(),
-        )
+        stats = artifact(tmp_path / "primary", "public.viability_check")
         assert stats["columns"]["location"]["classification"] == "unsupported"
         assert "cardinality" not in stats["columns"]["location"]
 
     def test_the_print_conforms(self, tmp_path: Path) -> None:
         _build_engine(tmp_path, _unnamed_type_fixture()).generate()
-        issues = validate_print(tmp_path / "primary")
-        errors = [i for i in issues if i.severity == "error"]
+        errors = conformance_errors(tmp_path / "primary")
         assert errors == [], "Conformance violations:\n" + "\n".join(
             f"  {e.code} at {e.path}: {e.detail}" for e in errors
         )
@@ -909,40 +696,14 @@ def _unnamed_type_fixture() -> dict[str, MockTable]:
     """
 
     return {
-        "public.viability_check": MockTable(
-            type="table",
-            namespace_path=("public", "viability_check"),
-            ddl=(
-                "CREATE TABLE public.viability_check (viability_pct bigint unsigned, address inet, "
-                "location inet);\n"
+        "public.viability_check": mock_table(
+            "public.viability_check",
+            columns(
+                ("viability_pct", "bigint unsigned"),
+                ("address", "inet"),
+                ("location", "inet", True),
             ),
-            columns=[
-                ColumnMeta(
-                    name="viability_pct",
-                    sql_type="bigint unsigned",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-                ColumnMeta(
-                    name="address",
-                    sql_type="inet",
-                    nullable=False,
-                    default=None,
-                    ordinal=2,
-                ),
-                ColumnMeta(
-                    name="location",
-                    sql_type="inet",
-                    nullable=True,
-                    default=None,
-                    ordinal=3,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+            {
                 "viability_pct": ColumnStats(
                     sql_type="bigint unsigned",
                     nullable=False,
@@ -986,7 +747,8 @@ def _unnamed_type_fixture() -> dict[str, MockTable]:
                     cardinality_method=None,
                 ),
             },
-            samples={},
+            ddl="CREATE TABLE public.viability_check (viability_pct bigint unsigned, address inet, "
+            "location inet);\n",
             row_count=100,
         ),
     }
@@ -999,17 +761,10 @@ def _near_unique_fixture() -> dict[str, MockTable]:
     """
 
     return {
-        "public.curator": MockTable(
-            type="table",
-            namespace_path=("public", "curator"),
-            ddl="CREATE TABLE public.curator (id uuid PRIMARY KEY);\n",
-            columns=[
-                ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+        "public.curator": mock_table(
+            "public.curator",
+            columns(("id", "uuid")),
+            {
                 "id": ColumnStats(
                     sql_type="uuid",
                     nullable=False,
@@ -1020,6 +775,7 @@ def _near_unique_fixture() -> dict[str, MockTable]:
                     cardinality_method="exact",
                 ),
             },
+            ddl="CREATE TABLE public.curator (id uuid PRIMARY KEY);\n",
             samples={"id": [f"00000000-0000-7000-8000-{i:012d}" for i in range(20)]},
             row_count=10000,
         ),
@@ -1060,58 +816,17 @@ def _epoch_fixture() -> dict[str, MockTable]:
     ]
 
     return {
-        "public.viability_check": MockTable(
-            type="table",
-            namespace_path=("public", "viability_check"),
-            ddl="CREATE TABLE public.viability_check (epoch_seconds bigint);\n",
-            columns=[
-                ColumnMeta(
-                    name="epoch_seconds",
-                    sql_type="bigint",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-                ColumnMeta(
-                    name="epoch_millis",
-                    sql_type="bigint",
-                    nullable=False,
-                    default=None,
-                    ordinal=2,
-                ),
-                ColumnMeta(
-                    name="ordinary_count",
-                    sql_type="bigint",
-                    nullable=False,
-                    default=None,
-                    ordinal=3,
-                ),
-                ColumnMeta(
-                    name="epoch_text",
-                    sql_type="varchar",
-                    nullable=False,
-                    default=None,
-                    ordinal=4,
-                ),
-                ColumnMeta(
-                    name="epoch_dropped",
-                    sql_type="bigint",
-                    nullable=False,
-                    default=None,
-                    ordinal=5,
-                ),
-                ColumnMeta(
-                    name="no_shape",
-                    sql_type="varchar",
-                    nullable=False,
-                    default=None,
-                    ordinal=6,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+        "public.viability_check": mock_table(
+            "public.viability_check",
+            columns(
+                ("epoch_seconds", "bigint"),
+                ("epoch_millis", "bigint"),
+                ("ordinary_count", "bigint"),
+                ("epoch_text", "varchar"),
+                ("epoch_dropped", "bigint"),
+                ("no_shape", "varchar"),
+            ),
+            {
                 "epoch_seconds": _numeric_stats(1704067200, 1786492800),
                 "epoch_millis": _numeric_stats(1704067200000, 1786492800000),
                 "ordinary_count": _numeric_stats(0, 5000),
@@ -1149,6 +864,7 @@ def _epoch_fixture() -> dict[str, MockTable]:
                     length=Length(min=15, max=16, avg=15.666667, p95=16.0),
                 ),
             },
+            ddl="CREATE TABLE public.viability_check (epoch_seconds bigint);\n",
             samples={
                 "epoch_text": epoch_text_samples,
                 "no_shape": [f"noshape-value-{i}" for i in range(30)],
@@ -1189,55 +905,17 @@ def _misfiled_datum_fixture() -> dict[str, MockTable]:
         )
 
     return {
-        "public.misfiled_datum": MockTable(
-            type="table",
-            namespace_path=("public", "misfiled_datum"),
-            ddl=(
-                "CREATE TABLE public.misfiled_datum (pan bigint, accession_number numeric, "
-                "occurred_at bigint, date_of_birth date, viability_pct numeric, owner numeric);\n"
+        "public.misfiled_datum": mock_table(
+            "public.misfiled_datum",
+            columns(
+                ("pan", "bigint"),
+                ("accession_number", "numeric"),
+                ("occurred_at", "bigint"),
+                ("date_of_birth", "date"),
+                ("viability_pct", "numeric"),
+                ("owner", "numeric"),
             ),
-            columns=[
-                ColumnMeta(name="pan", sql_type="bigint", nullable=False, default=None, ordinal=1),
-                ColumnMeta(
-                    name="accession_number",
-                    sql_type="numeric",
-                    nullable=False,
-                    default=None,
-                    ordinal=2,
-                ),
-                ColumnMeta(
-                    name="occurred_at",
-                    sql_type="bigint",
-                    nullable=False,
-                    default=None,
-                    ordinal=3,
-                ),
-                ColumnMeta(
-                    name="date_of_birth",
-                    sql_type="date",
-                    nullable=False,
-                    default=None,
-                    ordinal=4,
-                ),
-                ColumnMeta(
-                    name="viability_pct",
-                    sql_type="numeric",
-                    nullable=False,
-                    default=None,
-                    ordinal=5,
-                ),
-                ColumnMeta(
-                    name="owner",
-                    sql_type="numeric",
-                    nullable=False,
-                    default=None,
-                    ordinal=6,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+            {
                 "pan": _numeric("bigint", 4111111111111111, 5500005555555559),
                 "accession_number": _numeric("numeric", 100000000, 999999999),
                 "occurred_at": _numeric("bigint", 1704067200, 1786492800),
@@ -1261,6 +939,8 @@ def _misfiled_datum_fixture() -> dict[str, MockTable]:
                 "viability_pct": _numeric("numeric", 1999, 24500),
                 "owner": _numeric("numeric", 1, 3),
             },
+            ddl="CREATE TABLE public.misfiled_datum (pan bigint, accession_number numeric, "
+            "occurred_at bigint, date_of_birth date, viability_pct numeric, owner numeric);\n",
             samples={
                 "pan": ["4111111111111111", "5500005555555559"],
                 "accession_number": ["123456789", "987654321"],
@@ -1299,11 +979,9 @@ class TestNumericAndTemporalStayUnsampled:
 
     def _generate(self, tmp_path: Path) -> tuple[dict[str, Any], list[str]]:
         adapter = _CountingSampleAdapter(_misfiled_datum_fixture())
-        conn = _conn_config(tmp_path)
+        conn = conn_config(tmp_path)
         Engine(adapter, conn, tmp_path).generate()
-        payload = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "misfiled_datum" / "statistics.yaml").read_text(),
-        )
+        payload = artifact(tmp_path / "primary", "public.misfiled_datum")
 
         return payload["columns"], adapter.sampled_columns
 
@@ -1337,8 +1015,8 @@ class TestNumericAndTemporalStayUnsampled:
         tmp_path: Path,
     ) -> None:
         adapter = _CountingSampleAdapter(_misfiled_datum_fixture())
-        Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
-        errors = [i for i in validate_print(tmp_path / "primary") if i.severity == "error"]
+        Engine(adapter, conn_config(tmp_path), tmp_path).generate()
+        errors = conformance_errors(tmp_path / "primary")
 
         assert errors == []
 
@@ -1347,12 +1025,10 @@ class TestEpochUnit:
     """SPEC 4.5: an integer that is an instant says so, on either evidence rule."""
 
     def _stats(self, tmp_path: Path, conn=None) -> dict[str, Any]:
-        conn = conn or _conn_config(tmp_path)
+        conn = conn or conn_config(tmp_path)
         Engine(MockAdapter(_epoch_fixture()), conn, tmp_path).generate()
 
-        return yaml.safe_load(
-            (tmp_path / "primary" / "public" / "viability_check" / "statistics.yaml").read_text(),
-        )["columns"]
+        return artifact(tmp_path / "primary", "public.viability_check")["columns"]
 
     def test_epoch_seconds_bounds_rule(self, tmp_path: Path) -> None:
         stats = self._stats(tmp_path)
@@ -1399,7 +1075,7 @@ class TestEpochUnit:
 
     def test_a_dropped_epoch_column_still_reports_its_unit(self, tmp_path: Path) -> None:
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             redact=(RedactRule(columns=("*.epoch_dropped",), with_="drop"),),
         )
         stats = self._stats(tmp_path, conn)
@@ -1428,8 +1104,8 @@ class TestZeroColumnInvariant:
         self,
         tmp_path: Path,
     ) -> None:
-        conn = _conn_config(tmp_path)
-        engine = Engine(_NoColumnsAdapter(_curator_fixture()), conn, tmp_path)
+        conn = conn_config(tmp_path)
+        engine = Engine(_NoColumnsAdapter(curator_fixture()), conn, tmp_path)
 
         result = engine.generate()
 
@@ -1454,8 +1130,8 @@ class TestColumnCaseCollision:
 
     @pytest.mark.parametrize("infer", [False, True], ids=["no-pre-pass", "pre-pass"])
     def test_the_table_is_refused_and_the_run_continues(self, tmp_path: Path, infer: bool) -> None:
-        fixture = self._colliding(_curator_fixture(), "public.curator")
-        conn = replace(_conn_config(tmp_path), infer_relationships=infer)
+        fixture = self._colliding(curator_fixture(), "public.curator")
+        conn = replace(conn_config(tmp_path), infer_relationships=infer)
 
         result = Engine(MockAdapter(fixture), conn, tmp_path).generate()
 
@@ -1469,19 +1145,19 @@ class TestColumnCaseCollision:
         assert not (tmp_path / "primary" / "public" / "curator" / "statistics.yaml").exists()
 
     def test_nothing_else_to_profile_is_a_total_failure(self, tmp_path: Path) -> None:
-        fixture = self._colliding(_curator_fixture(), "public.curator")
+        fixture = self._colliding(curator_fixture(), "public.curator")
         fixture = self._colliding(fixture, "public.herbarium")
 
-        result = Engine(MockAdapter(fixture), _conn_config(tmp_path), tmp_path).generate()
+        result = Engine(MockAdapter(fixture), conn_config(tmp_path), tmp_path).generate()
 
         assert result.exit_code == EXIT_TOTAL_FAILURE
 
 
 class TestFaultIsolation:
     def test_one_table_failure_does_not_block_others(self, tmp_path: Path) -> None:
-        fixture = _curator_fixture()
+        fixture = curator_fixture()
         broken_adapter = _CuratorDdlFailingAdapter(fixture)
-        conn = _conn_config(tmp_path)
+        conn = conn_config(tmp_path)
         engine = Engine(broken_adapter, conn, tmp_path)
         result = engine.generate()
 
@@ -1494,13 +1170,13 @@ class TestFaultIsolation:
         """Rules that settle one table with a filter and a sample say nothing about the rest."""
 
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             rules=(
                 RuleConfig(include=("public.curator",), filter="id IS NOT NULL"),
                 RuleConfig(include=("public.curator",), sample=0.5),
             ),
         )
-        result = Engine(MockAdapter(_curator_fixture()), conn, tmp_path).generate()
+        result = Engine(MockAdapter(curator_fixture()), conn, tmp_path).generate()
 
         statuses = {t.fqn: t.status for t in result.tables}
         assert statuses == {"public.curator": "failed", "public.herbarium": "ok"}
@@ -1534,11 +1210,11 @@ class TestSampleFallbackCoherence:
         tmp_path: Path,
     ) -> None:
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             materialize_sample=False,
             rules=(RuleConfig(include=("public.curator",), sample=0.5),),
         )
-        result = Engine(_IncoherentSampleAdapter(_curator_fixture()), conn, tmp_path).generate()
+        result = Engine(_IncoherentSampleAdapter(curator_fixture()), conn, tmp_path).generate()
 
         assert {t.fqn: t.status for t in result.tables} == {
             "public.curator": "failed",
@@ -1550,10 +1226,10 @@ class TestSampleFallbackCoherence:
 
     def test_a_refused_write_names_the_underlying_cause(self, tmp_path: Path) -> None:
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             rules=(RuleConfig(include=("public.curator",), sample=0.5),),
         )
-        result = Engine(_RefusingMaterializeAdapter(_curator_fixture()), conn, tmp_path).generate()
+        result = Engine(_RefusingMaterializeAdapter(curator_fixture()), conn, tmp_path).generate()
 
         assert {t.fqn: t.status for t in result.tables} == {
             "public.curator": "failed",
@@ -1568,21 +1244,21 @@ class TestSampleFallbackCoherence:
         tmp_path: Path,
     ) -> None:
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             materialize_sample=False,
             rules=(RuleConfig(include=("public.curator",), sample=0.5),),
         )
-        result = Engine(MockAdapter(_curator_fixture()), conn, tmp_path).generate()
+        result = Engine(MockAdapter(curator_fixture()), conn, tmp_path).generate()
 
         assert {t.status for t in result.tables} == {"ok"}
 
     def test_a_filter_scope_is_unaffected_on_an_incoherent_adapter(self, tmp_path: Path) -> None:
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             materialize_sample=False,
             rules=(RuleConfig(include=("public.curator",), filter="id IS NOT NULL"),),
         )
-        result = Engine(_IncoherentSampleAdapter(_curator_fixture()), conn, tmp_path).generate()
+        result = Engine(_IncoherentSampleAdapter(curator_fixture()), conn, tmp_path).generate()
 
         assert {t.status for t in result.tables} == {"ok"}
 
@@ -1590,8 +1266,8 @@ class TestSampleFallbackCoherence:
         self,
         tmp_path: Path,
     ) -> None:
-        conn = replace(_conn_config(tmp_path), materialize_sample=False)
-        result = Engine(_IncoherentSampleAdapter(_curator_fixture()), conn, tmp_path).generate()
+        conn = replace(conn_config(tmp_path), materialize_sample=False)
+        result = Engine(_IncoherentSampleAdapter(curator_fixture()), conn, tmp_path).generate()
 
         assert {t.status for t in result.tables} == {"ok"}
 
@@ -1601,9 +1277,7 @@ class TestClassifierFaultIsolation:
 
     @staticmethod
     def _stats(tmp_path: Path, table: str) -> dict[str, Any]:
-        return yaml.safe_load(
-            (tmp_path / "primary" / "public" / table / "statistics.yaml").read_text(),
-        )
+        return artifact(tmp_path / "primary", f"public.{table}")
 
     def test_a_raising_looks_like_detector_still_completes_the_table(
         self,
@@ -1615,7 +1289,7 @@ class TestClassifierFaultIsolation:
             "detect_with_evidence",
             lambda values: (_ for _ in ()).throw(ValueError("hostile value")),
         )
-        result = _build_engine(tmp_path, _curator_fixture()).generate()
+        result = _build_engine(tmp_path, curator_fixture()).generate()
 
         statuses = {t.fqn: t.status for t in result.tables}
         assert statuses == {"public.curator": "ok", "public.herbarium": "ok"}
@@ -1638,7 +1312,7 @@ class TestClassifierFaultIsolation:
                 ValueError("hostile value"),
             ),
         )
-        result = _build_engine(tmp_path, _curator_fixture()).generate()
+        result = _build_engine(tmp_path, curator_fixture()).generate()
 
         statuses = {t.fqn: t.status for t in result.tables}
         assert statuses == {"public.curator": "ok", "public.herbarium": "ok"}
@@ -1656,17 +1330,10 @@ class TestClassifierFaultIsolation:
             "bounds_epoch_unit",
             lambda lo, hi: (_ for _ in ()).throw(ValueError("hostile value")),
         )
-        epoch_seconds = MockTable(
-            type="table",
-            namespace_path=("public", "t"),
-            ddl="CREATE TABLE public.t (ts bigint);\n",
-            columns=[
-                ColumnMeta(name="ts", sql_type="bigint", nullable=False, default=None, ordinal=1),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+        epoch_seconds = mock_table(
+            "public.t",
+            columns(("ts", "bigint")),
+            {
                 "ts": ColumnStats(
                     sql_type="bigint",
                     nullable=False,
@@ -1678,7 +1345,7 @@ class TestClassifierFaultIsolation:
                     range=Range(min=1704067200, max=1786492800),
                 ),
             },
-            samples={},
+            ddl="CREATE TABLE public.t (ts bigint);\n",
             row_count=100,
         )
 
@@ -1692,39 +1359,39 @@ class TestClassifierFaultIsolation:
 
 class TestFreshness:
     def test_skip_when_within_max_age(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
 
         # Both tables are within the default max_age_days=7.
-        result = _build_engine(tmp_path, _curator_fixture()).generate()
+        result = _build_engine(tmp_path, curator_fixture()).generate()
         statuses = {t.status for t in result.tables}
         assert statuses == {"skipped"}
 
     def test_force_bypasses_freshness(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
-        result = _build_engine(tmp_path, _curator_fixture()).generate(GenerateRequest(force=True))
+        _build_engine(tmp_path, curator_fixture()).generate()
+        result = _build_engine(tmp_path, curator_fixture()).generate(GenerateRequest(force=True))
         assert all(t.status == "ok" for t in result.tables)
 
     def test_a_baseline_from_another_release_is_re_extracted(self, tmp_path: Path) -> None:
         """A rule tightened between releases must not survive as a carried-forward file."""
 
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         manifest = tmp_path / "primary" / "manifest.yaml"
         data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
         data["dbprint_version"] = "0.0.1-from-another-release"
         manifest.write_text(yaml.safe_dump(data), encoding="utf-8")
 
-        result = _build_engine(tmp_path, _curator_fixture()).generate()
+        result = _build_engine(tmp_path, curator_fixture()).generate()
 
         assert all(t.status == "ok" for t in result.tables)
 
     def test_a_baseline_recording_no_version_is_re_extracted(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         manifest = tmp_path / "primary" / "manifest.yaml"
         data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
         del data["dbprint_version"]
         manifest.write_text(yaml.safe_dump(data), encoding="utf-8")
 
-        result = _build_engine(tmp_path, _curator_fixture()).generate()
+        result = _build_engine(tmp_path, curator_fixture()).generate()
 
         assert all(t.status == "ok" for t in result.tables)
 
@@ -1745,16 +1412,16 @@ class TestPerTableFreshnessSkip:
         manifest.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
     def test_one_table_reprofiles_while_the_other_skips(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         manifest = tmp_path / "primary" / "manifest.yaml"
         self._age_manifest(manifest, days=3.0)
 
         # curator is past its own 1 day; herbarium is well inside the 30.
         conn = replace(
-            _conn_config(tmp_path, max_age_days=30),
+            conn_config(tmp_path, max_age_days=30),
             rules=(RuleConfig(include=("public.curator",), max_age_days=1),),
         )
-        result = Engine(MockAdapter(_curator_fixture()), conn, tmp_path).generate()
+        result = Engine(MockAdapter(curator_fixture()), conn, tmp_path).generate()
 
         assert {t.fqn: t.status for t in result.tables} == {
             "public.curator": "ok",
@@ -1762,14 +1429,14 @@ class TestPerTableFreshnessSkip:
         }
 
     def test_force_still_reprofiles_both(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         self._age_manifest(tmp_path / "primary" / "manifest.yaml", days=3.0)
 
         conn = replace(
-            _conn_config(tmp_path, max_age_days=30),
+            conn_config(tmp_path, max_age_days=30),
             rules=(RuleConfig(include=("public.curator",), max_age_days=1),),
         )
-        result = Engine(MockAdapter(_curator_fixture()), conn, tmp_path).generate(
+        result = Engine(MockAdapter(curator_fixture()), conn, tmp_path).generate(
             GenerateRequest(force=True),
         )
 
@@ -1800,7 +1467,7 @@ class _EstimateFailingAdapter(MockAdapter):
 def _sized_fixture(curator: int | None, herbarium: int | None) -> dict[str, MockTable]:
     """The standard fixture with catalog estimates attached, `None` meaning unavailable."""
 
-    fixture = _curator_fixture()
+    fixture = curator_fixture()
     fixture["public.curator"] = replace(fixture["public.curator"], row_count_estimate=curator)
     fixture["public.herbarium"] = replace(
         fixture["public.herbarium"],
@@ -1813,7 +1480,7 @@ def _sized_fixture(curator: int | None, herbarium: int | None) -> dict[str, Mock
 def _incoherent_coverage_fixture() -> dict[str, MockTable]:
     """`herbarium_id`'s value list count exceeds its own non-null row total; coverage reads 1.0."""
 
-    fixture = _curator_fixture()
+    fixture = curator_fixture()
     curator = fixture["public.curator"]
     herbarium_id = curator.stats["herbarium_id"]
     fixture["public.curator"] = replace(
@@ -1842,7 +1509,7 @@ class TestIncoherentCoverageDetection:
         with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
             Engine(
                 MockAdapter(_incoherent_coverage_fixture()),
-                _conn_config(tmp_path),
+                conn_config(tmp_path),
                 tmp_path,
             ).generate()
 
@@ -1854,7 +1521,7 @@ class TestIncoherentCoverageDetection:
 
         incoherent = Engine(
             MockAdapter(_incoherent_coverage_fixture()),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         ).generate()
 
@@ -1865,7 +1532,7 @@ class TestIncoherentCoverageDetection:
 
         Engine(
             MockAdapter(_incoherent_coverage_fixture()),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         ).generate()
 
@@ -1889,7 +1556,7 @@ class TestIncoherentCoverageDetection:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
-            _build_engine(tmp_path, _curator_fixture()).generate()
+            _build_engine(tmp_path, curator_fixture()).generate()
 
         assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
 
@@ -1898,7 +1565,7 @@ class TestIncoherentCoverageDetection:
 
         Engine(
             MockAdapter(_incoherent_coverage_fixture()),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         ).generate()
 
@@ -1916,7 +1583,7 @@ class TestIncoherentCoverageDetection:
     def test_a_coherent_fixture_marks_only_its_exhaustive_columns(self, tmp_path: Path) -> None:
         """`bounded` never fires; a truncated list stays absent; an exhaustive one is `measured`."""
 
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
 
         curator = yaml.safe_load((tmp_path / "primary/public/curator/statistics.yaml").read_text())
         herbarium = yaml.safe_load(
@@ -1935,9 +1602,7 @@ class TestForbiddenFieldGate:
 
     def test_a_forbidden_field_is_dropped(self, tmp_path: Path) -> None:
         _build_engine(tmp_path, _drifted_numeric_fixture()).generate()
-        col = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "drifted" / "statistics.yaml").read_text(),
-        )["columns"]["viability_pct"]
+        col = artifact(tmp_path / "primary", "public.drifted")["columns"]["viability_pct"]
 
         assert col["classification"] == "numeric"
         # `values` itself is legitimate on `numeric` (SPEC 2.2.3) and survives untouched;
@@ -1961,7 +1626,7 @@ class TestForbiddenFieldGate:
         """The gate is what makes it conform - the fields it removes are what would not."""
 
         _build_engine(tmp_path, _drifted_numeric_fixture()).generate()
-        errors = [i for i in validate_print(tmp_path / "primary") if i.severity == "error"]
+        errors = conformance_errors(tmp_path / "primary")
         assert errors == [], "Conformance violations:\n" + "\n".join(
             f"  {e.code} at {e.path}: {e.detail}" for e in errors
         )
@@ -1973,23 +1638,10 @@ def _drifted_numeric_fixture() -> dict[str, MockTable]:
     """
 
     return {
-        "public.drifted": MockTable(
-            type="table",
-            namespace_path=("public", "drifted"),
-            ddl="CREATE TABLE public.drifted (viability_pct numeric);\n",
-            columns=[
-                ColumnMeta(
-                    name="viability_pct",
-                    sql_type="numeric",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+        "public.drifted": mock_table(
+            "public.drifted",
+            columns(("viability_pct", "numeric")),
+            {
                 "viability_pct": ColumnStats(
                     sql_type="numeric",
                     nullable=False,
@@ -2011,7 +1663,7 @@ def _drifted_numeric_fixture() -> dict[str, MockTable]:
                     values_coverage=1.0,
                 ),
             },
-            samples={},
+            ddl="CREATE TABLE public.drifted (viability_pct numeric);\n",
             row_count=100,
         ),
     }
@@ -2022,15 +1674,13 @@ class TestSizeConditionedRules:
 
     @staticmethod
     def _scope_of(tmp_path: Path, table: str) -> dict[str, Any] | None:
-        stats = yaml.safe_load(
-            (tmp_path / "primary" / "public" / table / "statistics.yaml").read_text(),
-        )
+        stats = artifact(tmp_path / "primary", f"public.{table}")
 
         return stats.get("scope")
 
     def test_only_the_table_over_the_bar_is_narrowed(self, tmp_path: Path) -> None:
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             rules=(RuleConfig(min_rows=100_000, sample=0.01),),
         )
         Engine(
@@ -2046,7 +1696,7 @@ class TestSizeConditionedRules:
         """Sampling degrades the artifact, so an unknown size is not assumed to clear the bar."""
 
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             rules=(RuleConfig(min_rows=100_000, sample=0.01),),
         )
         Engine(
@@ -2065,7 +1715,7 @@ class TestSizeConditionedRules:
         """Declining to narrow a table the config named must not look like a non-match."""
 
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             rules=(RuleConfig(min_rows=100_000, sample=0.01),),
         )
 
@@ -2087,7 +1737,7 @@ class TestSizeConditionedRules:
         """Views carry no catalog count; warning about every one buries the tables that matter."""
 
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             rules=(RuleConfig(include=("public.curator",), min_rows=100_000, sample=0.01),),
         )
 
@@ -2107,7 +1757,7 @@ class TestSizeConditionedRules:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             rules=(RuleConfig(min_rows=100_000, sample=0.01),),
         )
 
@@ -2122,7 +1772,7 @@ class TestSizeConditionedRules:
 
     def test_no_estimate_is_read_when_no_rule_carries_one(self, tmp_path: Path) -> None:
         adapter = _EstimateCountingAdapter(_sized_fixture(curator=280_421, herbarium=1000))
-        conn = replace(_conn_config(tmp_path), rules=(RuleConfig(sample=0.01),))
+        conn = replace(conn_config(tmp_path), rules=(RuleConfig(sample=0.01),))
         Engine(adapter, conn, tmp_path).generate()
 
         assert adapter.estimate_calls == []
@@ -2133,7 +1783,7 @@ class TestSizeConditionedRules:
     ) -> None:
         adapter = _EstimateCountingAdapter(_sized_fixture(curator=280_421, herbarium=1000))
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             rules=(RuleConfig(min_rows=100_000, sample=0.01),),
         )
         Engine(adapter, conn, tmp_path).generate()
@@ -2149,11 +1799,11 @@ class TestSizeConditionedRules:
         Both are three days old against a threshold of 30; only `curator` clears the size bar.
         """
 
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         TestPerTableFreshnessSkip._age_manifest(tmp_path / "primary" / "manifest.yaml", days=3.0)
 
         conn = replace(
-            _conn_config(tmp_path, max_age_days=30),
+            conn_config(tmp_path, max_age_days=30),
             rules=(RuleConfig(min_rows=100_000, max_age_days=1),),
         )
         result = Engine(
@@ -2171,7 +1821,7 @@ class TestSizeConditionedRules:
         """The pre-flight sits outside the guard around extraction, so it carries its own."""
 
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             rules=(RuleConfig(min_rows=100_000, sample=0.01),),
         )
         result = Engine(
@@ -2187,7 +1837,7 @@ class TestSizeConditionedRules:
 
     def test_a_failed_estimate_names_the_operation(self, tmp_path: Path) -> None:
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             rules=(RuleConfig(min_rows=100_000, sample=0.01),),
         )
         result = Engine(
@@ -2211,7 +1861,7 @@ class TestSizeConditionedRules:
         fixture = _sized_fixture(curator=50_000, herbarium=1000)
         fixture["public.curator"] = replace(fixture["public.curator"], row_count=200_000)
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             rules=(RuleConfig(min_rows=100_000, statistics={"top_n_values": 5}),),
         )
         Engine(MockAdapter(fixture), conn, tmp_path).generate()
@@ -2226,14 +1876,12 @@ class TestMaxRowsScannedCeiling:
 
     @staticmethod
     def _scope_of(tmp_path: Path, table: str) -> dict[str, Any] | None:
-        stats = yaml.safe_load(
-            (tmp_path / "primary" / "public" / table / "statistics.yaml").read_text(),
-        )
+        stats = artifact(tmp_path / "primary", f"public.{table}")
 
         return stats.get("scope")
 
     def test_only_the_table_over_the_ceiling_is_narrowed(self, tmp_path: Path) -> None:
-        conn = replace(_conn_config(tmp_path), max_rows_scanned=100_000)
+        conn = replace(conn_config(tmp_path), max_rows_scanned=100_000)
         Engine(
             MockAdapter(_sized_fixture(curator=280_421, herbarium=1000)),
             conn,
@@ -2244,7 +1892,7 @@ class TestMaxRowsScannedCeiling:
         assert self._scope_of(tmp_path, "herbarium") is None
 
     def test_an_unavailable_estimate_takes_the_unnarrowed_path(self, tmp_path: Path) -> None:
-        conn = replace(_conn_config(tmp_path), max_rows_scanned=100_000)
+        conn = replace(conn_config(tmp_path), max_rows_scanned=100_000)
         Engine(
             MockAdapter(_sized_fixture(curator=None, herbarium=None)),
             conn,
@@ -2258,7 +1906,7 @@ class TestMaxRowsScannedCeiling:
         tmp_path: Path,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        conn = replace(_conn_config(tmp_path), max_rows_scanned=100_000)
+        conn = replace(conn_config(tmp_path), max_rows_scanned=100_000)
 
         with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
             Engine(
@@ -2278,7 +1926,7 @@ class TestMaxRowsScannedCeiling:
         """The predicate already narrows, so the ceiling stands down rather than colliding."""
 
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             max_rows_scanned=100_000,
             rules=(RuleConfig(include=("public.curator",), filter="id IS NOT NULL"),),
         )
@@ -2299,7 +1947,7 @@ class TestMaxRowsScannedCeiling:
 
     def test_no_estimate_is_read_when_no_ceiling_or_min_rows_is_set(self, tmp_path: Path) -> None:
         adapter = _EstimateCountingAdapter(_sized_fixture(curator=280_421, herbarium=1000))
-        Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
+        Engine(adapter, conn_config(tmp_path), tmp_path).generate()
 
         assert adapter.estimate_calls == []
 
@@ -2311,7 +1959,7 @@ class TestMaxRowsScannedCeiling:
 
         fixture = _with_a_view(_sized_fixture(curator=280_421, herbarium=1000))
         adapter = _EstimateCountingAdapter(fixture)
-        conn = replace(_conn_config(tmp_path), max_rows_scanned=100_000)
+        conn = replace(conn_config(tmp_path), max_rows_scanned=100_000)
         Engine(adapter, conn, tmp_path).generate()
 
         assert "public.active_curators_v" not in adapter.estimate_calls
@@ -2322,7 +1970,7 @@ class TestMaxRowsScannedCeiling:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         fixture = _with_a_view(_sized_fixture(curator=None, herbarium=1000))
-        conn = replace(_conn_config(tmp_path), max_rows_scanned=100_000)
+        conn = replace(conn_config(tmp_path), max_rows_scanned=100_000)
 
         with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
             Engine(MockAdapter(fixture), conn, tmp_path).generate()
@@ -2332,18 +1980,12 @@ class TestMaxRowsScannedCeiling:
 
     @staticmethod
     def _with_a_matview(fixture: dict[str, MockTable]) -> dict[str, MockTable]:
-        fixture["public.germination_by_taxon_mv"] = MockTable(
+        fixture["public.germination_by_taxon_mv"] = mock_table(
+            "public.germination_by_taxon_mv",
+            columns(("id", "uuid")),
+            {},
             type="matview",
-            namespace_path=("public", "germination_by_taxon_mv"),
             ddl="CREATE MATERIALIZED VIEW public.germination_by_taxon_mv AS SELECT 1;\n",
-            columns=[
-                ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={},
-            samples={},
             row_count_estimate=None,
         )
 
@@ -2357,7 +1999,7 @@ class TestMaxRowsScannedCeiling:
         """A matview can carry an estimate, so an absent one is a state that can change."""
 
         fixture = self._with_a_matview(_sized_fixture(curator=280_421, herbarium=1000))
-        conn = replace(_conn_config(tmp_path), max_rows_scanned=100_000)
+        conn = replace(conn_config(tmp_path), max_rows_scanned=100_000)
 
         with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
             Engine(MockAdapter(fixture), conn, tmp_path).generate()
@@ -2371,13 +2013,13 @@ class TestMaxRowsScannedCeiling:
         """The view's file is unaffected by the read it no longer takes."""
 
         without_ceiling = _with_a_view(_sized_fixture(curator=280_421, herbarium=1000))
-        Engine(MockAdapter(without_ceiling), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(without_ceiling), conn_config(tmp_path), tmp_path).generate()
         baseline = tmp_path / "primary" / "public" / "active_curators_v" / "statistics.yaml"
         baseline_text = normalize_instants(baseline.read_text())
 
         shutil.rmtree(tmp_path / "primary")
         with_ceiling = _with_a_view(_sized_fixture(curator=280_421, herbarium=1000))
-        conn = replace(_conn_config(tmp_path), max_rows_scanned=100_000)
+        conn = replace(conn_config(tmp_path), max_rows_scanned=100_000)
         Engine(MockAdapter(with_ceiling), conn, tmp_path).generate()
 
         assert normalize_instants(baseline.read_text()) == baseline_text
@@ -2390,10 +2032,10 @@ class TestRecordedFreshnessThreshold:
 
     def test_each_entry_records_what_its_own_rules_resolved(self, tmp_path: Path) -> None:
         conn = replace(
-            _conn_config(tmp_path, max_age_days=7),
+            conn_config(tmp_path, max_age_days=7),
             rules=(RuleConfig(include=("public.curator",), max_age_days=30),),
         )
-        Engine(MockAdapter(_curator_fixture()), conn, tmp_path).generate()
+        Engine(MockAdapter(curator_fixture()), conn, tmp_path).generate()
 
         assert _thresholds(tmp_path / "primary" / "manifest.yaml") == {
             "public.curator": 30,
@@ -2403,7 +2045,7 @@ class TestRecordedFreshnessThreshold:
     def test_a_view_records_it_like_a_table(self, tmp_path: Path) -> None:
         """A threshold resolves by name, so a view has one whether or not it has statistics."""
 
-        engine = _build_engine(tmp_path, _with_a_view(_curator_fixture()))
+        engine = _build_engine(tmp_path, _with_a_view(curator_fixture()))
         engine.generate()
 
         assert _thresholds(tmp_path / "primary" / "manifest.yaml")["public.active_curators_v"] == 7
@@ -2411,14 +2053,14 @@ class TestRecordedFreshnessThreshold:
     def test_a_skipped_table_records_the_freshly_resolved_threshold(self, tmp_path: Path) -> None:
         """The skip read the new number, so the entry advertising the old one would disagree."""
 
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         manifest = tmp_path / "primary" / "manifest.yaml"
         profiled_before = _profiled_at(manifest)
 
         assert _thresholds(manifest) == {"public.curator": 7, "public.herbarium": 7}
 
-        raised = replace(_conn_config(tmp_path), rules=(RuleConfig(max_age_days=30),))
-        result = Engine(MockAdapter(_curator_fixture()), raised, tmp_path).generate()
+        raised = replace(conn_config(tmp_path), rules=(RuleConfig(max_age_days=30),))
+        result = Engine(MockAdapter(curator_fixture()), raised, tmp_path).generate()
 
         assert {t.status for t in result.tables} == {"skipped"}
         assert _thresholds(manifest) == {"public.curator": 30, "public.herbarium": 30}
@@ -2427,13 +2069,13 @@ class TestRecordedFreshnessThreshold:
     def test_a_failed_table_records_it_too(self, tmp_path: Path) -> None:
         """It was judged stale under this number - that is what the entry states."""
 
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         manifest = tmp_path / "primary" / "manifest.yaml"
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             rules=(RuleConfig(include=("public.curator",), max_age_days=30),),
         )
-        result = Engine(_CuratorDdlFailingAdapter(_curator_fixture()), conn, tmp_path).generate(
+        result = Engine(_CuratorDdlFailingAdapter(curator_fixture()), conn, tmp_path).generate(
             GenerateRequest(force=True),
         )
 
@@ -2446,11 +2088,11 @@ class TestRecordedFreshnessThreshold:
     ) -> None:
         """This run never evaluated it, so it has nothing truer to say about it."""
 
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         manifest = tmp_path / "primary" / "manifest.yaml"
 
-        narrowed = replace(_conn_config(tmp_path), rules=(RuleConfig(max_age_days=30),))
-        Engine(MockAdapter(_curator_fixture()), narrowed, tmp_path).generate(
+        narrowed = replace(conn_config(tmp_path), rules=(RuleConfig(max_age_days=30),))
+        Engine(MockAdapter(curator_fixture()), narrowed, tmp_path).generate(
             GenerateRequest(force=True, cli_include=("public.curator",)),
         )
 
@@ -2524,15 +2166,10 @@ class TestCatalogOnlyViewStatistics:
 
     @staticmethod
     def _view_fixture() -> dict[str, MockTable]:
-        fixture = _curator_fixture()
-        fixture["public.active_curators_v"] = MockTable(
-            type="view",
-            namespace_path=("public", "active_curators_v"),
-            ddl=(
-                "CREATE VIEW public.active_curators_v AS SELECT id, herbarium_id, "
-                "display_name, matures_at FROM public.curator;\n"
-            ),
-            columns=[
+        fixture = curator_fixture()
+        fixture["public.active_curators_v"] = mock_table(
+            "public.active_curators_v",
+            (
                 ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1),
                 ColumnMeta(
                     name="herbarium_id",
@@ -2556,7 +2193,11 @@ class TestCatalogOnlyViewStatistics:
                     default=None,
                     ordinal=4,
                 ),
-            ],
+            ),
+            {},
+            type="view",
+            ddl="CREATE VIEW public.active_curators_v AS SELECT id, herbarium_id, "
+            "display_name, matures_at FROM public.curator;\n",
             relationships=[
                 ForeignKeyMeta(
                     column=("herbarium_id",),
@@ -2567,10 +2208,6 @@ class TestCatalogOnlyViewStatistics:
                     constraint_name="active_curators_v_herbarium_fk",
                 ),
             ],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={},
-            samples={},
         )
 
         return fixture
@@ -2582,7 +2219,7 @@ class TestCatalogOnlyViewStatistics:
 
     def test_the_marker_and_column_classifications(self, tmp_path: Path) -> None:
         adapter = _NoQueryAgainstTheViewAdapter(self._view_fixture(), "public.active_curators_v")
-        Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
+        Engine(adapter, conn_config(tmp_path), tmp_path).generate()
 
         statistics = self._statistics(tmp_path)
 
@@ -2600,7 +2237,7 @@ class TestCatalogOnlyViewStatistics:
 
     def test_no_column_carries_a_measured_field(self, tmp_path: Path) -> None:
         adapter = _NoQueryAgainstTheViewAdapter(self._view_fixture(), "public.active_curators_v")
-        Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
+        Engine(adapter, conn_config(tmp_path), tmp_path).generate()
 
         allowed = {"sql_type", "nullable", "classification", "physical_name", "collation"}
 
@@ -2619,15 +2256,14 @@ class TestCatalogOnlyViewStatistics:
     def test_conformant(self, tmp_path: Path) -> None:
         _build_engine(tmp_path, self._view_fixture()).generate()
 
-        issues = validate_print(tmp_path / "primary")
-        errors = [i for i in issues if i.severity == "error"]
+        errors = conformance_errors(tmp_path / "primary")
 
         assert errors == []
 
     def _engine(self, tmp_path: Path) -> Engine:
         adapter = _NoQueryAgainstTheViewAdapter(self._view_fixture(), "public.active_curators_v")
 
-        return Engine(adapter, _conn_config(tmp_path), tmp_path)
+        return Engine(adapter, conn_config(tmp_path), tmp_path)
 
     def test_second_run_reports_no_change_for_the_view(self, tmp_path: Path) -> None:
         self._engine(tmp_path).generate()
@@ -2648,19 +2284,13 @@ class TestAViewsRelationshipsAreAlwaysDeclared:
 
     @staticmethod
     def _edgeless_view_fixture() -> dict[str, MockTable]:
-        fixture = _curator_fixture()
-        fixture["public.active_curators_v"] = MockTable(
+        fixture = curator_fixture()
+        fixture["public.active_curators_v"] = mock_table(
+            "public.active_curators_v",
+            columns(("id", "uuid")),
+            {},
             type="view",
-            namespace_path=("public", "active_curators_v"),
             ddl="CREATE VIEW public.active_curators_v AS SELECT id FROM public.curator;\n",
-            columns=[
-                ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={},
-            samples={},
         )
 
         return fixture
@@ -2709,17 +2339,17 @@ class TestTablesNotReExtracted:
     """
 
     def test_two_consecutive_runs_leave_the_manifest_byte_identical(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         manifest = tmp_path / "primary" / "manifest.yaml"
         before = manifest.read_text()
 
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
 
         assert manifest.read_text() == before
 
     def test_skip_only_run_reports_no_removals(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
-        result = _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
+        result = _build_engine(tmp_path, curator_fixture()).generate()
 
         assert result.diff_summary.tables_removed == 0
         diff = yaml.safe_load((tmp_path / "primary" / "diff.yaml").read_text())
@@ -2728,19 +2358,19 @@ class TestTablesNotReExtracted:
     def test_skip_only_run_exits_ok(self, tmp_path: Path) -> None:
         """A run that skipped every matched table as already-current is success, not staleness."""
 
-        _build_engine(tmp_path, _curator_fixture()).generate()
-        result = _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
+        result = _build_engine(tmp_path, curator_fixture()).generate()
 
         assert result.summary.skipped == 2
         assert result.summary.ok == 0
         assert result.exit_code == EXIT_OK
 
     def test_skipped_table_keeps_its_original_profiled_at(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         manifest = tmp_path / "primary" / "manifest.yaml"
         before = _profiled_at(manifest)
 
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
 
         # Advancing it renews freshness off a read that never happened, so it never reprofiles.
         assert _profiled_at(manifest) == before
@@ -2749,12 +2379,12 @@ class TestTablesNotReExtracted:
         self,
         tmp_path: Path,
     ) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         manifest = tmp_path / "primary" / "manifest.yaml"
         _age_manifest_entry(manifest, "public.curator", "2020-01-01T00:00:00Z")
         untouched = _profiled_at(manifest)["public.herbarium"]
 
-        result = _build_engine(tmp_path, _curator_fixture()).generate()
+        result = _build_engine(tmp_path, curator_fixture()).generate()
 
         statuses = {t.fqn: t.status for t in result.tables}
         assert statuses == {"public.curator": "ok", "public.herbarium": "skipped"}
@@ -2765,13 +2395,13 @@ class TestTablesNotReExtracted:
         assert after["public.herbarium"] == untouched
 
     def test_failed_table_keeps_its_manifest_entry(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         manifest = tmp_path / "primary" / "manifest.yaml"
         before = _profiled_at(manifest)
 
         engine = Engine(
-            _CuratorDdlFailingAdapter(_curator_fixture()),
-            _conn_config(tmp_path),
+            _CuratorDdlFailingAdapter(curator_fixture()),
+            conn_config(tmp_path),
             tmp_path,
         )
         result = engine.generate(GenerateRequest(force=True))
@@ -2782,11 +2412,11 @@ class TestTablesNotReExtracted:
         assert after["public.curator"] == before["public.curator"]
 
     def test_selector_narrowed_run_keeps_out_of_scope_entries(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         manifest = tmp_path / "primary" / "manifest.yaml"
         before = _profiled_at(manifest)
 
-        engine = Engine(MockAdapter(_curator_fixture()), _conn_config(tmp_path), tmp_path)
+        engine = Engine(MockAdapter(curator_fixture()), conn_config(tmp_path), tmp_path)
         result = engine.generate(GenerateRequest(force=True, cli_include=("public.curator",)))
 
         assert result.diff_summary.tables_removed == 0
@@ -2795,9 +2425,9 @@ class TestTablesNotReExtracted:
         assert after["public.herbarium"] == before["public.herbarium"]
 
     def test_table_dropped_from_the_target_is_still_reported_removed(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
 
-        shrunk = _curator_fixture()
+        shrunk = curator_fixture()
         del shrunk["public.herbarium"]
         result = _build_engine(tmp_path, shrunk).generate()
 
@@ -2814,13 +2444,13 @@ class TestIncomingEdgesSurviveAPartialRun:
     HERBARIUM = ("primary", "public", "herbarium", "relationships.yaml")
 
     def test_failed_referencer_keeps_its_incoming_edge(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         rel = tmp_path.joinpath(*self.HERBARIUM)
         assert _referencers(rel) == ["public.curator"]
 
         engine = Engine(
-            _CuratorDdlFailingAdapter(_curator_fixture()),
-            _conn_config(tmp_path),
+            _CuratorDdlFailingAdapter(curator_fixture()),
+            conn_config(tmp_path),
             tmp_path,
         )
         result = engine.generate(GenerateRequest(force=True))
@@ -2829,43 +2459,43 @@ class TestIncomingEdgesSurviveAPartialRun:
         assert _referencers(rel) == ["public.curator"]
 
     def test_skipped_referencer_keeps_its_incoming_edge(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         manifest = tmp_path / "primary" / "manifest.yaml"
 
         # Only herbarium goes stale, so curator is skipped and contributes nothing to the graph.
         _age_manifest_entry(manifest, "public.herbarium", "2020-01-01T00:00:00Z")
-        result = _build_engine(tmp_path, _curator_fixture()).generate()
+        result = _build_engine(tmp_path, curator_fixture()).generate()
 
         statuses = {t.fqn: t.status for t in result.tables}
         assert statuses == {"public.curator": "skipped", "public.herbarium": "ok"}
         assert _referencers(tmp_path.joinpath(*self.HERBARIUM)) == ["public.curator"]
 
     def test_removed_referencer_loses_its_incoming_edge(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
 
-        shrunk = _curator_fixture()
+        shrunk = curator_fixture()
         del shrunk["public.curator"]
         _build_engine(tmp_path, shrunk).generate(GenerateRequest(force=True))
 
         assert _referencers(tmp_path.joinpath(*self.HERBARIUM)) == []
 
     def test_clean_run_resolves_edges_without_duplicating_them(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
-        _build_engine(tmp_path, _curator_fixture()).generate(GenerateRequest(force=True))
+        _build_engine(tmp_path, curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate(GenerateRequest(force=True))
 
         assert _referencers(tmp_path.joinpath(*self.HERBARIUM)) == ["public.curator"]
 
     def test_partly_failed_run_does_not_break_reciprocity(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
 
         engine = Engine(
-            _CuratorDdlFailingAdapter(_curator_fixture()),
-            _conn_config(tmp_path),
+            _CuratorDdlFailingAdapter(curator_fixture()),
+            conn_config(tmp_path),
             tmp_path,
         )
         engine.generate(GenerateRequest(force=True))
 
-        errors = [i for i in validate_print(tmp_path / "primary") if i.severity == "error"]
+        errors = conformance_errors(tmp_path / "primary")
         assert errors == [], "Conformance violations:\n" + "\n".join(
             f"  {e.code} at {e.path}: {e.detail}" for e in errors
         )
@@ -2886,7 +2516,7 @@ class TestCarriedEntryRequiresItsPrintOnDisk:
 
     @staticmethod
     def _manifest_tables(tmp_path: Path) -> dict[str, Any]:
-        return yaml.safe_load((tmp_path / "primary" / "manifest.yaml").read_text())["tables"]
+        return manifest(tmp_path / "primary")["tables"]
 
     def test_excluded_table_with_its_print_intact_is_carried_unchanged(
         self,
@@ -2894,8 +2524,8 @@ class TestCarriedEntryRequiresItsPrintOnDisk:
     ) -> None:
         """An out-of-scope referencer whose print exists keeps its incoming edge."""
 
-        _build_engine(tmp_path, _curator_fixture()).generate()
-        Engine(MockAdapter(_curator_fixture()), _conn_config(tmp_path), tmp_path).generate(
+        _build_engine(tmp_path, curator_fixture()).generate()
+        Engine(MockAdapter(curator_fixture()), conn_config(tmp_path), tmp_path).generate(
             self.EXCLUDE_CURATOR,
         )
 
@@ -2908,18 +2538,18 @@ class TestCarriedEntryRequiresItsPrintOnDisk:
         tmp_path: Path,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         carried = Engine(
-            MockAdapter(_curator_fixture()),
-            _conn_config(tmp_path),
+            MockAdapter(curator_fixture()),
+            conn_config(tmp_path),
             tmp_path,
         ).generate(self.EXCLUDE_CURATOR)
         shutil.rmtree(tmp_path.joinpath(*self.CURATOR_DIR))
 
         with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
             dropped = Engine(
-                MockAdapter(_curator_fixture()),
-                _conn_config(tmp_path),
+                MockAdapter(curator_fixture()),
+                conn_config(tmp_path),
                 tmp_path,
             ).generate(self.EXCLUDE_CURATOR)
 
@@ -2930,7 +2560,7 @@ class TestCarriedEntryRequiresItsPrintOnDisk:
         assert [c for c in diff["changes"] if c["kind"] == "table_removed"] == []
         assert dropped.exit_code == carried.exit_code
 
-        errors = [i for i in validate_print(tmp_path / "primary") if i.severity == "error"]
+        errors = conformance_errors(tmp_path / "primary")
         assert errors == [], "Conformance violations:\n" + "\n".join(
             f"  {e.code} at {e.path}: {e.detail}" for e in errors
         )
@@ -2938,13 +2568,13 @@ class TestCarriedEntryRequiresItsPrintOnDisk:
     def test_excluded_table_missing_one_artifact_is_dropped(self, tmp_path: Path) -> None:
         """The manifest cannot claim an artifact that is not there."""
 
-        _build_engine(tmp_path, _curator_fixture()).generate()
-        Engine(MockAdapter(_curator_fixture()), _conn_config(tmp_path), tmp_path).generate(
+        _build_engine(tmp_path, curator_fixture()).generate()
+        Engine(MockAdapter(curator_fixture()), conn_config(tmp_path), tmp_path).generate(
             self.EXCLUDE_CURATOR,
         )
         (tmp_path.joinpath(*self.CURATOR_DIR) / "ddl.sql").unlink()
 
-        Engine(MockAdapter(_curator_fixture()), _conn_config(tmp_path), tmp_path).generate(
+        Engine(MockAdapter(curator_fixture()), conn_config(tmp_path), tmp_path).generate(
             self.EXCLUDE_CURATOR,
         )
 
@@ -2956,19 +2586,19 @@ class TestCarriedEntryRequiresItsPrintOnDisk:
         and `manifest.yaml`'s entry (SPEC 2.5) - both compare through `normalize_instants`.
         """
 
-        _build_engine(tmp_path, _curator_fixture()).generate()
-        Engine(MockAdapter(_curator_fixture()), _conn_config(tmp_path), tmp_path).generate(
+        _build_engine(tmp_path, curator_fixture()).generate()
+        Engine(MockAdapter(curator_fixture()), conn_config(tmp_path), tmp_path).generate(
             self.EXCLUDE_CURATOR,
         )
         shutil.rmtree(tmp_path.joinpath(*self.CURATOR_DIR))
-        Engine(MockAdapter(_curator_fixture()), _conn_config(tmp_path), tmp_path).generate(
+        Engine(MockAdapter(curator_fixture()), conn_config(tmp_path), tmp_path).generate(
             self.EXCLUDE_CURATOR,
         )
         manifest = tmp_path / "primary" / "manifest.yaml"
         relationships = tmp_path.joinpath(*self.HERBARIUM)
         manifest_before, relationships_before = manifest.read_text(), relationships.read_text()
 
-        Engine(MockAdapter(_curator_fixture()), _conn_config(tmp_path), tmp_path).generate(
+        Engine(MockAdapter(curator_fixture()), conn_config(tmp_path), tmp_path).generate(
             self.EXCLUDE_CURATOR,
         )
 
@@ -2981,16 +2611,16 @@ class TestCarriedEntryRequiresItsPrintOnDisk:
         self,
         tmp_path: Path,
     ) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
-        Engine(MockAdapter(_curator_fixture()), _conn_config(tmp_path), tmp_path).generate(
+        _build_engine(tmp_path, curator_fixture()).generate()
+        Engine(MockAdapter(curator_fixture()), conn_config(tmp_path), tmp_path).generate(
             self.EXCLUDE_CURATOR,
         )
         shutil.rmtree(tmp_path.joinpath(*self.CURATOR_DIR))
-        Engine(MockAdapter(_curator_fixture()), _conn_config(tmp_path), tmp_path).generate(
+        Engine(MockAdapter(curator_fixture()), conn_config(tmp_path), tmp_path).generate(
             self.EXCLUDE_CURATOR,
         )
 
-        _build_engine(tmp_path, _curator_fixture()).generate(GenerateRequest(force=True))
+        _build_engine(tmp_path, curator_fixture()).generate(GenerateRequest(force=True))
 
         assert "public.curator" in self._manifest_tables(tmp_path)
         assert _referencers(tmp_path.joinpath(*self.HERBARIUM)) == ["public.curator"]
@@ -2998,7 +2628,7 @@ class TestCarriedEntryRequiresItsPrintOnDisk:
 
 class TestDryRun:
     def test_dry_run_writes_nothing(self, tmp_path: Path) -> None:
-        engine = _build_engine(tmp_path, _curator_fixture())
+        engine = _build_engine(tmp_path, curator_fixture())
         result = engine.generate(GenerateRequest(dry_run=True))
         assert result.summary.ok == 2
         prints_dir = tmp_path / "primary"
@@ -3009,13 +2639,13 @@ class TestDryRun:
 
 class TestExitCodes:
     def test_exit_ok_on_clean_run_no_drift(self, tmp_path: Path) -> None:
-        engine = _build_engine(tmp_path, _curator_fixture())
+        engine = _build_engine(tmp_path, curator_fixture())
         engine.generate()
-        result = _build_engine(tmp_path, _curator_fixture()).generate(GenerateRequest(force=True))
+        result = _build_engine(tmp_path, curator_fixture()).generate(GenerateRequest(force=True))
         assert result.exit_code == EXIT_OK
 
     def test_exit_drift_first_run(self, tmp_path: Path) -> None:
-        result = _build_engine(tmp_path, _curator_fixture()).generate()
+        result = _build_engine(tmp_path, curator_fixture()).generate()
         assert result.exit_code == EXIT_DRIFT
 
 
@@ -3028,7 +2658,7 @@ class _AllDdlFailingAdapter(MockAdapter):
 
 class TestTotalFailure:
     def test_all_tables_failing_exits_distinct_from_partial(self, tmp_path: Path) -> None:
-        engine = Engine(_AllDdlFailingAdapter(_curator_fixture()), _conn_config(tmp_path), tmp_path)
+        engine = Engine(_AllDdlFailingAdapter(curator_fixture()), conn_config(tmp_path), tmp_path)
         result = engine.generate()
 
         assert result.summary.ok == 0
@@ -3041,15 +2671,15 @@ class TestTotalFailure:
         # Prime a baseline covering herbarium only: next run it is fresh and skipped,
         # while curator has no entry, is extracted, and fails.
         primed = Engine(
-            MockAdapter(_curator_fixture()),
-            _conn_config(tmp_path, include=("public.herbarium",)),
+            MockAdapter(curator_fixture()),
+            conn_config(tmp_path, include=("public.herbarium",)),
             tmp_path,
         )
         primed.generate()
 
         engine = Engine(
-            _CuratorDdlFailingAdapter(_curator_fixture()),
-            _conn_config(tmp_path),
+            _CuratorDdlFailingAdapter(curator_fixture()),
+            conn_config(tmp_path),
             tmp_path,
         )
         result = engine.generate()
@@ -3060,8 +2690,8 @@ class TestTotalFailure:
         assert result.exit_code == EXIT_PARTIAL
 
     def test_zero_matched_tables_is_not_total_failure(self, tmp_path: Path) -> None:
-        conn = _conn_config(tmp_path, include=("nope.*",))
-        result = Engine(MockAdapter(_curator_fixture()), conn, tmp_path).generate()
+        conn = conn_config(tmp_path, include=("nope.*",))
+        result = Engine(MockAdapter(curator_fixture()), conn, tmp_path).generate()
 
         assert result.tables == ()
         assert result.exit_code == EXIT_OK
@@ -3069,7 +2699,7 @@ class TestTotalFailure:
 
 class TestFailFast:
     def test_abort_leaves_later_tables_unattempted(self, tmp_path: Path) -> None:
-        engine = Engine(_AllDdlFailingAdapter(_curator_fixture()), _conn_config(tmp_path), tmp_path)
+        engine = Engine(_AllDdlFailingAdapter(curator_fixture()), conn_config(tmp_path), tmp_path)
         result = engine.generate(GenerateRequest(fail_fast=True))
 
         assert len(result.tables) == 1
@@ -3077,19 +2707,19 @@ class TestFailFast:
         assert result.exit_code == EXIT_TOTAL_FAILURE
 
     def test_abort_leaves_the_previous_manifest_untouched(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         manifest = tmp_path / "primary" / "manifest.yaml"
         before = manifest.read_text()
 
-        engine = Engine(_AllDdlFailingAdapter(_curator_fixture()), _conn_config(tmp_path), tmp_path)
+        engine = Engine(_AllDdlFailingAdapter(curator_fixture()), conn_config(tmp_path), tmp_path)
         engine.generate(GenerateRequest(fail_fast=True, force=True))
 
         assert manifest.read_text() == before
 
     def test_clean_run_is_unchanged_by_the_flag(self, tmp_path: Path) -> None:
         # Separate roots: a second run against the same one would see a baseline and lose drift.
-        plain = _build_engine(tmp_path / "plain", _curator_fixture()).generate()
-        fast = _build_engine(tmp_path / "fast", _curator_fixture()).generate(
+        plain = _build_engine(tmp_path / "plain", curator_fixture()).generate()
+        fast = _build_engine(tmp_path / "fast", curator_fixture()).generate(
             GenerateRequest(fail_fast=True),
         )
 
@@ -3099,7 +2729,7 @@ class TestFailFast:
         assert fast.not_attempted == 0
 
     def test_default_run_still_attempts_every_table(self, tmp_path: Path) -> None:
-        engine = Engine(_AllDdlFailingAdapter(_curator_fixture()), _conn_config(tmp_path), tmp_path)
+        engine = Engine(_AllDdlFailingAdapter(curator_fixture()), conn_config(tmp_path), tmp_path)
         result = engine.generate()
 
         assert len(result.tables) == 2
@@ -3108,7 +2738,7 @@ class TestFailFast:
     def test_failure_on_the_last_table_is_not_a_truncated_run(self, tmp_path: Path) -> None:
         """No table was left unattempted, so the flag changed nothing observable."""
 
-        fixture = _curator_fixture()
+        fixture = curator_fixture()
 
         # The test needs the table the loop reaches last, and `list_tables` preserves
         # fixture order rather than sorting, so ask the adapter for its own ordering.
@@ -3124,7 +2754,7 @@ class TestFailFast:
 
                 return super().extract_ddl(fqn)
 
-        engine = Engine(_LastFails(fixture), _conn_config(tmp_path), tmp_path)
+        engine = Engine(_LastFails(fixture), conn_config(tmp_path), tmp_path)
         result = engine.generate(GenerateRequest(fail_fast=True))
 
         assert result.not_attempted == 0
@@ -3136,11 +2766,11 @@ class TestFailFast:
         would strip real `referenced_by` entries from prints the manifest still points at.
         """
 
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         relationships = tmp_path / "primary" / "public" / "herbarium" / "relationships.yaml"
         before = relationships.read_text()
 
-        engine = Engine(_AllDdlFailingAdapter(_curator_fixture()), _conn_config(tmp_path), tmp_path)
+        engine = Engine(_AllDdlFailingAdapter(curator_fixture()), conn_config(tmp_path), tmp_path)
         result = engine.generate(GenerateRequest(fail_fast=True, force=True))
 
         assert result.not_attempted == 1
@@ -3149,9 +2779,9 @@ class TestFailFast:
     def test_diff_path_ignores_fail_fast(self, tmp_path: Path) -> None:
         """compute_diff shares the pipeline; its fault tolerance must not shift."""
 
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
 
-        engine = Engine(_AllDdlFailingAdapter(_curator_fixture()), _conn_config(tmp_path), tmp_path)
+        engine = Engine(_AllDdlFailingAdapter(curator_fixture()), conn_config(tmp_path), tmp_path)
         result = engine.compute_diff()
 
         assert len(result.failed_tables) == 2
@@ -3159,9 +2789,9 @@ class TestFailFast:
 
 class TestSelectors:
     def test_exclude_filters_tables(self, tmp_path: Path) -> None:
-        fixture = _curator_fixture()
+        fixture = curator_fixture()
         adapter = MockAdapter(fixture)
-        conn = _conn_config(tmp_path, exclude=("public.herbarium",))
+        conn = conn_config(tmp_path, exclude=("public.herbarium",))
         engine = Engine(adapter, conn, tmp_path)
         result = engine.generate()
         fqns = {t.fqn for t in result.tables}
@@ -3173,10 +2803,10 @@ class TestSelectors:
     ) -> None:
         """`--include '*'` is documented as unable to widen a run, so the two runs agree."""
 
-        narrow = replace(_conn_config(tmp_path), include=("public.curator",))
-        Engine(MockAdapter(_curator_fixture()), narrow, tmp_path).generate()
+        narrow = replace(conn_config(tmp_path), include=("public.curator",))
+        Engine(MockAdapter(curator_fixture()), narrow, tmp_path).generate()
 
-        flagged = Engine(MockAdapter(_curator_fixture()), narrow, tmp_path).generate(
+        flagged = Engine(MockAdapter(curator_fixture()), narrow, tmp_path).generate(
             GenerateRequest(force=True, cli_include=("*",)),
         )
 
@@ -3186,11 +2816,11 @@ class TestSelectors:
         self,
         tmp_path: Path,
     ) -> None:
-        wide = _conn_config(tmp_path)
-        Engine(MockAdapter(_curator_fixture()), wide, tmp_path).generate()
+        wide = conn_config(tmp_path)
+        Engine(MockAdapter(curator_fixture()), wide, tmp_path).generate()
 
         narrow = replace(wide, include=("public.curator",))
-        Engine(MockAdapter(_curator_fixture()), narrow, tmp_path).generate(
+        Engine(MockAdapter(curator_fixture()), narrow, tmp_path).generate(
             GenerateRequest(force=True, cli_include=("*",)),
         )
 
@@ -3203,8 +2833,8 @@ class TestSelectors:
     def test_both_artifacts_record_the_configured_scope(self, tmp_path: Path) -> None:
         """A recorded pattern the run could not have reached is a scope it never scanned."""
 
-        narrow = replace(_conn_config(tmp_path), include=("public.curator",))
-        Engine(MockAdapter(_curator_fixture()), narrow, tmp_path).generate(
+        narrow = replace(conn_config(tmp_path), include=("public.curator",))
+        Engine(MockAdapter(curator_fixture()), narrow, tmp_path).generate(
             GenerateRequest(cli_include=("*",)),
         )
 
@@ -3218,18 +2848,11 @@ class TestSelectors:
 def _added_table_fixture() -> dict[str, MockTable]:
     """Variant adding a brand-new `public.curation_event` table to the baseline two."""
 
-    base = _curator_fixture()
-    base["public.curation_event"] = MockTable(
-        type="table",
-        namespace_path=("public", "curation_event"),
-        ddl="CREATE TABLE public.curation_event (id uuid PRIMARY KEY);\n",
-        columns=[
-            ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1),
-        ],
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={
+    base = curator_fixture()
+    base["public.curation_event"] = mock_table(
+        "public.curation_event",
+        columns(("id", "uuid")),
+        {
             "id": ColumnStats(
                 sql_type="uuid",
                 nullable=False,
@@ -3241,6 +2864,7 @@ def _added_table_fixture() -> dict[str, MockTable]:
                 inferred=Inferred(candidate_key=True),
             ),
         },
+        ddl="CREATE TABLE public.curation_event (id uuid PRIMARY KEY);\n",
         samples={"id": [f"00000000-0000-7000-8000-{i:012d}" for i in range(5)]},
         row_count=5,
     )
@@ -3251,7 +2875,7 @@ def _added_table_fixture() -> dict[str, MockTable]:
 def _curator_with_email_column_fixture() -> dict[str, MockTable]:
     """Variant adding an `email` column to public.curator on top of the baseline."""
 
-    base = _curator_fixture()
+    base = curator_fixture()
     curator = base["public.curator"]
     new_columns = list(curator.columns) + [
         ColumnMeta(name="email", sql_type="varchar", nullable=True, default=None, ordinal=3),
@@ -3285,7 +2909,7 @@ def _curator_with_email_column_fixture() -> dict[str, MockTable]:
 def _curator_with_herbarium_id_int_fixture() -> dict[str, MockTable]:
     """Variant changing herbarium_id's sql_type from uuid -> bigint on public.curator."""
 
-    base = _curator_fixture()
+    base = curator_fixture()
     curator = base["public.curator"]
     new_columns = [
         c
@@ -3328,7 +2952,7 @@ def _curator_with_herbarium_id_int_fixture() -> dict[str, MockTable]:
 def _curator_without_herbarium_id_fixture() -> dict[str, MockTable]:
     """Variant dropping the `herbarium_id` column (and its FK) from public.curator."""
 
-    base = _curator_fixture()
+    base = curator_fixture()
     curator = base["public.curator"]
     new_columns = [c for c in curator.columns if c.name != "herbarium_id"]
     new_stats = {name: s for name, s in curator.stats.items() if name != "herbarium_id"}
@@ -3351,7 +2975,7 @@ def _curator_without_herbarium_id_fixture() -> dict[str, MockTable]:
 def _curator_herbarium_id_not_null_fixture() -> dict[str, MockTable]:
     """Variant flipping herbarium_id from nullable to NOT NULL on public.curator."""
 
-    base = _curator_fixture()
+    base = curator_fixture()
     curator = base["public.curator"]
     new_columns = [
         c
@@ -3395,7 +3019,7 @@ def _curator_herbarium_id_not_null_fixture() -> dict[str, MockTable]:
 def _curator_with_defaulted_col_fixture() -> dict[str, MockTable]:
     """Variant adding an `is_active boolean DEFAULT true` column to public.curator."""
 
-    base = _curator_fixture()
+    base = curator_fixture()
     curator = base["public.curator"]
     new_columns = list(curator.columns) + [
         ColumnMeta(name="is_active", sql_type="boolean", nullable=False, default="true", ordinal=3),
@@ -3429,7 +3053,7 @@ def _curator_with_defaulted_col_fixture() -> dict[str, MockTable]:
 def _curator_with_moved_herbarium_id_stats_fixture() -> dict[str, MockTable]:
     """Variant where herbarium_id's distinct count moved - the data changed, the schema did not."""
 
-    base = _curator_fixture()
+    base = curator_fixture()
     curator = base["public.curator"]
     moved = replace(curator.stats["herbarium_id"], cardinality=35, cardinality_ratio=0.35)
     base["public.curator"] = replace(curator, stats={**curator.stats, "herbarium_id": moved})
@@ -3440,7 +3064,7 @@ def _curator_with_moved_herbarium_id_stats_fixture() -> dict[str, MockTable]:
 def _curator_with_a_declared_grain_key_fixture() -> dict[str, MockTable]:
     """Variant declaring `id` a unique key that the baseline fixture leaves undeclared."""
 
-    base = _curator_fixture()
+    base = curator_fixture()
     curator = base["public.curator"]
     base["public.curator"] = replace(
         curator,
@@ -3453,7 +3077,7 @@ def _curator_with_a_declared_grain_key_fixture() -> dict[str, MockTable]:
 def _curator_with_a_physical_layout_fixture() -> dict[str, MockTable]:
     """Variant declaring a clustering key that the baseline fixture leaves unclustered."""
 
-    base = _curator_fixture()
+    base = curator_fixture()
     curator = base["public.curator"]
     base["public.curator"] = replace(
         curator,
@@ -3469,7 +3093,7 @@ def _curator_with_a_physical_layout_fixture() -> dict[str, MockTable]:
 def _curator_with_reshuffled_herbarium_id_values_fixture() -> dict[str, MockTable]:
     """Variant trading a row between two of herbarium_id's value entries; sum and coverage hold."""
 
-    base = _curator_fixture()
+    base = curator_fixture()
     curator = base["public.curator"]
     reshuffled = replace(
         curator.stats["herbarium_id"],
@@ -3490,30 +3114,13 @@ def _driver_typed_fixture() -> dict[str, MockTable]:
     """
 
     return {
-        "public.specimen_loan": MockTable(
-            type="table",
-            namespace_path=("public", "specimen_loan"),
-            ddl="CREATE TABLE public.specimen_loan (withdrawn_at timestamptz, viability_pct numeric(12, 2));\n",
-            columns=[
-                ColumnMeta(
-                    name="withdrawn_at",
-                    sql_type="timestamp with time zone",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-                ColumnMeta(
-                    name="viability_pct",
-                    sql_type="numeric(12, 2)",
-                    nullable=False,
-                    default=None,
-                    ordinal=2,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+        "public.specimen_loan": mock_table(
+            "public.specimen_loan",
+            columns(
+                ("withdrawn_at", "timestamp with time zone"),
+                ("viability_pct", "numeric(12, 2)"),
+            ),
+            {
                 "withdrawn_at": ColumnStats(
                     sql_type="timestamp with time zone",
                     nullable=False,
@@ -3556,7 +3163,7 @@ def _driver_typed_fixture() -> dict[str, MockTable]:
                     quantized_count=0,
                 ),
             },
-            samples={},
+            ddl="CREATE TABLE public.specimen_loan (withdrawn_at timestamptz, viability_pct numeric(12, 2));\n",
             row_count=100,
         ),
     }
@@ -3566,23 +3173,10 @@ def _unsupported_column_fixture() -> dict[str, MockTable]:
     """A `bytea` column, which SPEC 2.2.3 leaves without the cardinality trio."""
 
     return {
-        "public.blobs": MockTable(
-            type="table",
-            namespace_path=("public", "blobs"),
-            ddl="CREATE TABLE public.blobs (payload bytea);\n",
-            columns=[
-                ColumnMeta(
-                    name="payload",
-                    sql_type="bytea",
-                    nullable=True,
-                    default=None,
-                    ordinal=1,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+        "public.blobs": mock_table(
+            "public.blobs",
+            columns(("payload", "bytea", True)),
+            {
                 "payload": ColumnStats(
                     sql_type="bytea",
                     nullable=True,
@@ -3593,7 +3187,7 @@ def _unsupported_column_fixture() -> dict[str, MockTable]:
                     cardinality_method=None,
                 ),
             },
-            samples={},
+            ddl="CREATE TABLE public.blobs (payload bytea);\n",
             row_count=100,
         ),
     }
@@ -3603,23 +3197,10 @@ def _nan_bound_fixture() -> dict[str, MockTable]:
     """A `double precision` column whose bounds are NaN, which a real one may hold."""
 
     return {
-        "public.viability_check": MockTable(
-            type="table",
-            namespace_path=("public", "viability_check"),
-            ddl="CREATE TABLE public.viability_check (value double precision);\n",
-            columns=[
-                ColumnMeta(
-                    name="value",
-                    sql_type="double precision",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+        "public.viability_check": mock_table(
+            "public.viability_check",
+            columns(("value", "double precision")),
+            {
                 "value": ColumnStats(
                     sql_type="double precision",
                     nullable=False,
@@ -3638,7 +3219,7 @@ def _nan_bound_fixture() -> dict[str, MockTable]:
                     quantized_count=0,
                 ),
             },
-            samples={},
+            ddl="CREATE TABLE public.viability_check (value double precision);\n",
             row_count=100,
         ),
     }
@@ -3647,7 +3228,7 @@ def _nan_bound_fixture() -> dict[str, MockTable]:
 def _curator_with_shaped_herbarium_id_samples_fixture() -> dict[str, MockTable]:
     """Variant whose herbarium_id sample carries a shape, so `looks_like` starts matching."""
 
-    base = _curator_fixture()
+    base = curator_fixture()
     curator = base["public.curator"]
     base["public.curator"] = replace(
         curator,
@@ -3662,7 +3243,7 @@ def _curator_with_shaped_herbarium_id_samples_fixture() -> dict[str, MockTable]:
 
 class TestComputeDiff:
     def test_drift_state_table_added_event(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         result = _build_engine(tmp_path, _added_table_fixture()).compute_diff()
         assert result.exit_code == 0
         added = [c for c in result.diff["changes"] if c["kind"] == "table_added"]
@@ -3671,14 +3252,14 @@ class TestComputeDiff:
     def test_drift_state_column_added_on_existing_table(self, tmp_path: Path) -> None:
         """Exercises the baseline.hydrate path synthesising columns from statistics.yaml."""
 
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         result = _build_engine(tmp_path, _curator_with_email_column_fixture()).compute_diff()
         assert result.exit_code == 0
         added = [c for c in result.diff["changes"] if c["kind"] == "column_added"]
         assert any(c["table"] == "public.curator" and c["column"] == "email" for c in added)
 
     def test_drift_state_column_type_changed_on_existing_table(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         result = _build_engine(tmp_path, _curator_with_herbarium_id_int_fixture()).compute_diff()
         assert result.exit_code == 0
         type_changes = [c for c in result.diff["changes"] if c["kind"] == "column_type_changed"]
@@ -3692,7 +3273,7 @@ class TestComputeDiff:
         assert herbarium_id_changes[0]["after"] == "bigint"
 
     def test_drift_state_column_removed_on_existing_table(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         result = _build_engine(tmp_path, _curator_without_herbarium_id_fixture()).compute_diff()
         assert result.exit_code == 0
         removed = [c for c in result.diff["changes"] if c["kind"] == "column_removed"]
@@ -3701,7 +3282,7 @@ class TestComputeDiff:
         )
 
     def test_drift_state_column_nullable_changed_on_existing_table(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         result = _build_engine(tmp_path, _curator_herbarium_id_not_null_fixture()).compute_diff()
         assert result.exit_code == 0
         nullable_changes = [
@@ -3726,7 +3307,7 @@ class TestComputeDiff:
         assert "column_default_changed" not in kinds
 
     def test_compute_diff_does_not_write_disk(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         manifest = tmp_path / "primary" / "manifest.yaml"
         diff_file = tmp_path / "primary" / "diff.yaml"
         manifest_mtime = manifest.stat().st_mtime_ns
@@ -3741,7 +3322,7 @@ class TestComputeDiff:
         assert not any(p.suffix == ".tmp" for p in (tmp_path / "primary").rglob("*"))
 
     def test_no_baseline_returns_exit_one(self, tmp_path: Path) -> None:
-        result = _build_engine(tmp_path, _curator_fixture()).compute_diff()
+        result = _build_engine(tmp_path, curator_fixture()).compute_diff()
         assert result.exit_code == 1
         assert result.diff["changes"] == []
         assert result.target_scanned_tables == 0
@@ -3751,7 +3332,7 @@ class TestComputeDiff:
         (SPEC 2.6.8).
         """
 
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         result = _build_engine(tmp_path, _added_table_fixture()).compute_diff(
             DiffRequest(cli_include=("public.curator",)),
         )
@@ -3761,23 +3342,23 @@ class TestComputeDiff:
         assert removed == []
 
     def test_connection_error_exit_four(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
 
         class _Failing(MockAdapter):
             def connect(self) -> None:
                 raise RuntimeError("db unreachable")
 
-        adapter = _Failing(_curator_fixture())
-        engine = Engine(adapter, _conn_config(tmp_path), tmp_path)
+        adapter = _Failing(curator_fixture())
+        engine = Engine(adapter, conn_config(tmp_path), tmp_path)
         result = engine.compute_diff()
         assert result.exit_code == 4
         assert result.failed_tables == ("db unreachable",)
 
     def test_partial_extraction_exit_five(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
 
         broken_adapter = _CuratorDdlFailingAdapter(_added_table_fixture())
-        engine = Engine(broken_adapter, _conn_config(tmp_path), tmp_path)
+        engine = Engine(broken_adapter, conn_config(tmp_path), tmp_path)
         result = engine.compute_diff()
         assert result.exit_code == 5
         assert "public.curator" in result.failed_tables
@@ -3794,7 +3375,7 @@ class TestStatisticDrift:
         self,
         tmp_path: Path,
     ) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         result = _build_engine(
             tmp_path,
             _curator_with_moved_herbarium_id_stats_fixture(),
@@ -3821,8 +3402,8 @@ class TestStatisticDrift:
     ) -> None:
         """`cardinality_ratio` is scan-normalised, so a `scope` block cannot suppress it."""
 
-        sampled = replace(_conn_config(tmp_path), rules=(RuleConfig(sample=0.5),))
-        Engine(MockAdapter(_curator_fixture()), sampled, tmp_path).generate()
+        sampled = replace(conn_config(tmp_path), rules=(RuleConfig(sample=0.5),))
+        Engine(MockAdapter(curator_fixture()), sampled, tmp_path).generate()
         result = Engine(
             MockAdapter(_curator_with_moved_herbarium_id_stats_fixture()),
             sampled,
@@ -3839,8 +3420,8 @@ class TestStatisticDrift:
     def test_an_unmoved_read_reports_no_statistics_at_all(self, tmp_path: Path) -> None:
         """The round-trip guard: serialization alone must not look like drift."""
 
-        _build_engine(tmp_path, _curator_fixture()).generate()
-        result = _build_engine(tmp_path, _curator_fixture()).compute_diff()
+        _build_engine(tmp_path, curator_fixture()).generate()
+        result = _build_engine(tmp_path, curator_fixture()).compute_diff()
 
         assert result.exit_code == 0
         assert result.diff["changes"] == []
@@ -3909,7 +3490,7 @@ class TestStatisticDrift:
     def test_a_value_list_moving_alone_is_reported(self, tmp_path: Path) -> None:
         """`values` is back in the compared projection; a count trade fires `stat: values`."""
 
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         result = _build_engine(
             tmp_path,
             _curator_with_reshuffled_herbarium_id_values_fixture(),
@@ -3933,7 +3514,7 @@ class TestStatisticDrift:
         assert "delta" not in moved[0]
 
     def test_a_new_shape_claim_is_reported(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         result = _build_engine(
             tmp_path,
             _curator_with_shaped_herbarium_id_samples_fixture(),
@@ -3951,19 +3532,19 @@ class TestStatisticDrift:
         tmp_path: Path,
     ) -> None:
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             redact=(RedactRule(columns=("*.herbarium_id",), with_="hash"),),
             redaction_salt="pepper",
         )
-        Engine(MockAdapter(_curator_fixture()), conn, tmp_path).generate()
-        result = Engine(MockAdapter(_curator_fixture()), conn, tmp_path).compute_diff()
+        Engine(MockAdapter(curator_fixture()), conn, tmp_path).generate()
+        result = Engine(MockAdapter(curator_fixture()), conn, tmp_path).compute_diff()
 
         assert result.diff["changes"] == []
 
     def test_an_unreadable_baseline_file_reports_no_statistics(self, tmp_path: Path) -> None:
         """A statistics.yaml that will not parse leaves that table's stats unknown."""
 
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         (tmp_path / "primary" / "public" / "curator" / "statistics.yaml").write_text("{[:\n")
         result = _build_engine(
             tmp_path,
@@ -3983,7 +3564,7 @@ class TestGrainAndPhysicalLayoutDrift:
     """The full round trip: a declared change reaches the diff through a committed print."""
 
     def test_a_declared_grain_key_gained_is_reported(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         result = _build_engine(
             tmp_path,
             _curator_with_a_declared_grain_key_fixture(),
@@ -3998,7 +3579,7 @@ class TestGrainAndPhysicalLayoutDrift:
         assert change["after"]["keys"] == [{"columns": ["id"], "detection": "declared"}]
 
     def test_a_physical_layout_gained_is_reported(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         result = _build_engine(tmp_path, _curator_with_a_physical_layout_fixture()).compute_diff()
         change = next(
             c
@@ -4026,12 +3607,8 @@ class TestFreshnessIsDerivedOnceFromTheRunsOwnInstant:
 
         _build_engine(tmp_path, fixture).generate(GenerateRequest(force=True))
 
-        first = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "first" / "statistics.yaml").read_text(),
-        )["columns"]["seen_at"]["freshness"]
-        second = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "second" / "statistics.yaml").read_text(),
-        )["columns"]["seen_at"]["freshness"]
+        first = artifact(tmp_path / "primary", "public.first")["columns"]["seen_at"]["freshness"]
+        second = artifact(tmp_path / "primary", "public.second")["columns"]["seen_at"]["freshness"]
 
         assert first == second
 
@@ -4041,9 +3618,9 @@ class TestFreshnessIsDerivedOnceFromTheRunsOwnInstant:
 
         _build_engine(tmp_path, fixture).generate(GenerateRequest(force=True))
 
-        freshness = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "first" / "statistics.yaml").read_text(),
-        )["columns"]["seen_at"]["freshness"]
+        freshness = artifact(tmp_path / "primary", "public.first")["columns"]["seen_at"][
+            "freshness"
+        ]
 
         assert freshness == {"max_age_days": 0, "classification": "live"}
 
@@ -4054,9 +3631,9 @@ class TestFreshnessIsDerivedOnceFromTheRunsOwnInstant:
 
         _build_engine(tmp_path, fixture).generate(GenerateRequest(force=True))
 
-        freshness = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "first" / "statistics.yaml").read_text(),
-        )["columns"]["seen_at"]["freshness"]
+        freshness = artifact(tmp_path / "primary", "public.first")["columns"]["seen_at"][
+            "freshness"
+        ]
 
         assert freshness["max_age_days"] == 91
         assert freshness["classification"] == "dormant"
@@ -4066,23 +3643,10 @@ def _shared_bound_fixture(bound: datetime) -> dict[str, MockTable]:
     """Two tables, each one temporal column whose newest value is the same instant."""
 
     def _table(name: str) -> MockTable:
-        return MockTable(
-            type="table",
-            namespace_path=("public", name),
-            ddl=f"CREATE TABLE public.{name} (seen_at timestamptz);\n",
-            columns=[
-                ColumnMeta(
-                    name="seen_at",
-                    sql_type="timestamp with time zone",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+        return mock_table(
+            f"public.{name}",
+            columns(("seen_at", "timestamp with time zone")),
+            {
                 "seen_at": ColumnStats(
                     sql_type="timestamp with time zone",
                     nullable=False,
@@ -4096,7 +3660,7 @@ def _shared_bound_fixture(bound: datetime) -> dict[str, MockTable]:
                     distribution="uniform",
                 ),
             },
-            samples={},
+            ddl=f"CREATE TABLE public.{name} (seen_at timestamptz);\n",
             row_count=100,
         )
 
@@ -4150,7 +3714,7 @@ def _inferrable_fixture(*, declared: bool = False, target_key: bool = True) -> d
         ),
     ]
 
-    return _referencing_fixture(
+    return referencing_fixture(
         "public.specimen_loan",
         "curator_id",
         "public.curator",
@@ -4165,24 +3729,20 @@ class TestInferredForeignKeys:
 
     @staticmethod
     def _refers_to(tmp_path: Path, table: str) -> list[dict[str, Any]]:
-        data = yaml.safe_load(
-            (tmp_path / "primary" / "public" / table / "relationships.yaml").read_text(),
-        )
+        data = artifact(tmp_path / "primary", f"public.{table}", "relationships")
 
         return data["refers_to"]
 
     @staticmethod
     def _referenced_by(tmp_path: Path, table: str) -> list[dict[str, Any]]:
-        data = yaml.safe_load(
-            (tmp_path / "primary" / "public" / table / "relationships.yaml").read_text(),
-        )
+        data = artifact(tmp_path / "primary", f"public.{table}", "relationships")
 
         return data["referenced_by"]
 
     def test_an_undeclared_pair_produces_an_inferred_edge(self, tmp_path: Path) -> None:
         Engine(
             MockAdapter(_inferrable_fixture()),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         ).generate()
         edges = self._refers_to(tmp_path, "specimen_loan")
@@ -4196,7 +3756,7 @@ class TestInferredForeignKeys:
 
         Engine(
             MockAdapter(_inferrable_fixture()),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         ).generate()
         incoming = self._referenced_by(tmp_path, "curator")
@@ -4209,7 +3769,7 @@ class TestInferredForeignKeys:
         """The same pair with a real constraint yields one edge, marked declared."""
 
         fixture = _inferrable_fixture(declared=True)
-        Engine(MockAdapter(fixture), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(fixture), conn_config(tmp_path), tmp_path).generate()
         edges = self._refers_to(tmp_path, "specimen_loan")
 
         assert [(e["target_table"], e["detection"]) for e in edges] == [
@@ -4233,17 +3793,15 @@ class TestInferredForeignKeys:
 
         Engine(
             MockAdapter(_inferrable_fixture()),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         ).generate()
-        stats = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "specimen_loan" / "statistics.yaml").read_text(),
-        )
+        stats = artifact(tmp_path / "primary", "public.specimen_loan")
 
         assert stats["columns"]["curator_id"]["classification"] == "foreign_key_candidate"
 
     def test_the_kill_switch_leaves_the_graph_declared_only(self, tmp_path: Path) -> None:
-        conn = replace(_conn_config(tmp_path), infer_relationships=False)
+        conn = replace(conn_config(tmp_path), infer_relationships=False)
         Engine(MockAdapter(_inferrable_fixture()), conn, tmp_path).generate()
 
         assert self._refers_to(tmp_path, "specimen_loan") == []
@@ -4252,17 +3810,17 @@ class TestInferredForeignKeys:
         """The fixture's herbarium declares no key unless the test gives it one."""
 
         fixture = _inferrable_fixture(target_key=False)
-        Engine(MockAdapter(fixture), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(fixture), conn_config(tmp_path), tmp_path).generate()
 
         assert self._refers_to(tmp_path, "specimen_loan") == []
 
     def test_a_print_with_inferred_edges_conforms(self, tmp_path: Path) -> None:
         Engine(
             MockAdapter(_inferrable_fixture()),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         ).generate()
-        issues = [i for i in validate_print(tmp_path / "primary") if i.severity == "error"]
+        issues = conformance_errors(tmp_path / "primary")
 
         assert issues == []
 
@@ -4271,7 +3829,7 @@ class TestInferredForeignKeys:
 
         Engine(
             MockAdapter(_inferrable_fixture()),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         ).generate()
         first = self._refers_to(tmp_path, "specimen_loan")
@@ -4279,7 +3837,7 @@ class TestInferredForeignKeys:
         # specimen_loan is past its own 1-day threshold; curator stays inside the connection's 30.
         TestPerTableFreshnessSkip._age_manifest(tmp_path / "primary" / "manifest.yaml", days=3.0)
         conn = replace(
-            _conn_config(tmp_path, max_age_days=30),
+            conn_config(tmp_path, max_age_days=30),
             rules=(RuleConfig(include=("public.specimen_loan",), max_age_days=1),),
         )
         result = Engine(MockAdapter(_inferrable_fixture()), conn, tmp_path).generate()
@@ -4296,12 +3854,12 @@ class TestInferredForeignKeys:
     ) -> None:
         """The universe is the committed print's table set, not one flag's ask."""
 
-        Engine(MockAdapter(_inferrable_fixture()), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(_inferrable_fixture()), conn_config(tmp_path), tmp_path).generate()
         first = self._refers_to(tmp_path, "specimen_loan")
 
         Engine(
             MockAdapter(_inferrable_fixture()),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         ).generate(GenerateRequest(force=True, cli_include=("public.specimen_loan",)))
 
@@ -4311,17 +3869,15 @@ class TestInferredForeignKeys:
         self,
         tmp_path: Path,
     ) -> None:
-        Engine(MockAdapter(_inferrable_fixture()), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(_inferrable_fixture()), conn_config(tmp_path), tmp_path).generate()
 
         Engine(
             MockAdapter(_inferrable_fixture()),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         ).generate(GenerateRequest(force=True, cli_include=("public.specimen_loan",)))
 
-        stats = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "specimen_loan" / "statistics.yaml").read_text(),
-        )
+        stats = artifact(tmp_path / "primary", "public.specimen_loan")
         assert stats["columns"]["curator_id"]["classification"] == "foreign_key_candidate"
 
     def test_a_cli_exclude_narrowing_the_target_still_infers_the_edge(
@@ -4330,12 +3886,12 @@ class TestInferredForeignKeys:
     ) -> None:
         """`--exclude` narrows the same list through the same call as `--include`."""
 
-        Engine(MockAdapter(_inferrable_fixture()), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(_inferrable_fixture()), conn_config(tmp_path), tmp_path).generate()
         first = self._refers_to(tmp_path, "specimen_loan")
 
         Engine(
             MockAdapter(_inferrable_fixture()),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         ).generate(GenerateRequest(force=True, cli_exclude=("public.curator",)))
 
@@ -4347,16 +3903,16 @@ class TestInferredForeignKeys:
     ) -> None:
         """No edge lost, no phantom `relationship_removed`, no conformance violation."""
 
-        Engine(MockAdapter(_inferrable_fixture()), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(_inferrable_fixture()), conn_config(tmp_path), tmp_path).generate()
 
         result = Engine(
             MockAdapter(_inferrable_fixture()),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         ).generate(GenerateRequest(force=True, cli_include=("public.specimen_loan",)))
 
         assert result.exit_code == EXIT_OK
-        errors = [i for i in validate_print(tmp_path / "primary") if i.severity == "error"]
+        errors = conformance_errors(tmp_path / "primary")
         assert errors == []
 
     def test_narrowing_to_the_target_still_preserves_its_incoming_edge(
@@ -4367,11 +3923,11 @@ class TestInferredForeignKeys:
         rule only walks `referenced_by`, so an emptied list passes unnoticed there.
         """
 
-        Engine(MockAdapter(_inferrable_fixture()), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(_inferrable_fixture()), conn_config(tmp_path), tmp_path).generate()
 
         Engine(
             MockAdapter(_inferrable_fixture()),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         ).generate(GenerateRequest(force=True, cli_include=("public.curator",)))
 
@@ -4382,7 +3938,7 @@ class TestInferredForeignKeys:
                 "referencer_column": ["curator_id"],
                 "detection": "inferred",
                 "observed": {
-                    "fanout_avg": 5.0,
+                    "fanout_avg": 4.5,
                     "fanout_max": 9,
                     "target_coverage": 1.0,
                     "coherent": True,
@@ -4392,26 +3948,26 @@ class TestInferredForeignKeys:
         ]
 
     def test_narrowing_to_the_target_leaves_a_conformant_print(self, tmp_path: Path) -> None:
-        Engine(MockAdapter(_inferrable_fixture()), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(_inferrable_fixture()), conn_config(tmp_path), tmp_path).generate()
 
         Engine(
             MockAdapter(_inferrable_fixture()),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         ).generate(GenerateRequest(force=True, cli_include=("public.curator",)))
 
-        errors = [i for i in validate_print(tmp_path / "primary") if i.severity == "error"]
+        errors = conformance_errors(tmp_path / "primary")
         assert errors == []
 
     def test_both_ends_narrowed_in_matches_a_full_run(self, tmp_path: Path) -> None:
         """A selector wide enough to cover both tables changes nothing about the graph."""
 
-        Engine(MockAdapter(_inferrable_fixture()), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(_inferrable_fixture()), conn_config(tmp_path), tmp_path).generate()
         full = self._refers_to(tmp_path, "specimen_loan")
 
         Engine(
             MockAdapter(_inferrable_fixture()),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         ).generate(GenerateRequest(force=True, cli_include=("public.*",)))
 
@@ -4422,7 +3978,7 @@ class TestInferredForeignKeys:
 
         Engine(
             MockAdapter(_inferrable_fixture()),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         ).generate(GenerateRequest(cli_include=("public.specimen_loan",)))
 
@@ -4495,16 +4051,12 @@ def _observed_fixture() -> dict[str, MockTable]:
         relationships: list[ForeignKeyMeta],
         row_count: int,
     ) -> MockTable:
-        return MockTable(
-            type="table",
-            namespace_path=("public", name),
+        return mock_table(
+            f"public.{name}",
+            tuple(columns),
+            stats,
             ddl=f"CREATE TABLE public.{name} (id int PRIMARY KEY);\n",
-            columns=columns,
             relationships=relationships,
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats=stats,
-            samples={},
             row_count=row_count,
         )
 
@@ -4521,23 +4073,14 @@ def _observed_fixture() -> dict[str, MockTable]:
     return {
         "public.parent": table(
             "parent",
-            [ColumnMeta(name="id", sql_type="integer", nullable=False, default=None, ordinal=1)],
+            list(columns(("id", "integer"))),
             {"id": _candidate_key_column(10)},
             [],
             row_count=10,
         ),
         "public.child": table(
             "child",
-            [
-                ColumnMeta(name="id", sql_type="integer", nullable=False, default=None, ordinal=1),
-                ColumnMeta(
-                    name="parent_id",
-                    sql_type="integer",
-                    nullable=True,
-                    default=None,
-                    ordinal=2,
-                ),
-            ],
+            list(columns(("id", "integer"), ("parent_id", "integer", True))),
             {
                 "id": _candidate_key_column(40),
                 # 4 of 10 parents (coverage 0.4), 40 rows / 4 keys (fanout_avg 10.0), top 15.
@@ -4548,16 +4091,7 @@ def _observed_fixture() -> dict[str, MockTable]:
         ),
         "public.orphan": table(
             "orphan",
-            [
-                ColumnMeta(name="id", sql_type="integer", nullable=False, default=None, ordinal=1),
-                ColumnMeta(
-                    name="bad_parent_id",
-                    sql_type="integer",
-                    nullable=True,
-                    default=None,
-                    ordinal=2,
-                ),
-            ],
+            list(columns(("id", "integer"), ("bad_parent_id", "integer", True))),
             {
                 "id": _candidate_key_column(15),
                 # 15 distinct values against a 10-row parent: what `coherent: false` is for.
@@ -4568,10 +4102,7 @@ def _observed_fixture() -> dict[str, MockTable]:
         ),
         "public.composite_child": table(
             "composite_child",
-            [
-                ColumnMeta(name="a", sql_type="integer", nullable=False, default=None, ordinal=1),
-                ColumnMeta(name="b", sql_type="integer", nullable=False, default=None, ordinal=2),
-            ],
+            list(columns(("a", "integer"), ("b", "integer"))),
             {
                 "a": _candidate_key_column(5),
                 "b": _candidate_key_column(5),
@@ -4596,32 +4127,15 @@ def _widened_candidates_fixture() -> dict[str, MockTable]:
 
     above_k = SPEC_SKETCH_K + 1
 
-    wide = MockTable(
-        type="table",
-        namespace_path=("public", "wide"),
-        ddl="CREATE TABLE public.wide (id int PRIMARY KEY);\n",
-        columns=[
-            ColumnMeta(name="id", sql_type="integer", nullable=False, default=None, ordinal=1),
-            ColumnMeta(
-                name="accession_number",
-                sql_type="integer",
-                nullable=False,
-                default=None,
-                ordinal=2,
-            ),
-            ColumnMeta(name="rank", sql_type="integer", nullable=False, default=None, ordinal=3),
-            ColumnMeta(
-                name="recorded_by",
-                sql_type="integer",
-                nullable=False,
-                default=None,
-                ordinal=4,
-            ),
-        ],
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={
+    wide = mock_table(
+        "public.wide",
+        columns(
+            ("id", "integer"),
+            ("accession_number", "integer"),
+            ("rank", "integer"),
+            ("recorded_by", "integer"),
+        ),
+        {
             "id": _candidate_key_column(3),
             # Declared UNIQUE, not the primary key; ratio stays short of SPEC 4.2's
             # candidate_key threshold - isolates the declared-unique bullet alone.
@@ -4633,19 +4147,21 @@ def _widened_candidates_fixture() -> dict[str, MockTable]:
             # bullets apply; the control for `sketch_all_columns`.
             "recorded_by": _sketch_probe_column(above_k, 0.4),
         },
-        samples={},
+        ddl="CREATE TABLE public.wide (id int PRIMARY KEY);\n",
         row_count=above_k * 2,
         unique_keys=[UniqueKeyMeta(columns=("accession_number",), primary=False)],
     )
 
-    composite_probe = MockTable(
-        type="table",
-        namespace_path=("public", "composite_probe"),
+    composite_probe = mock_table(
+        "public.composite_probe",
+        columns(("cohort", "integer"), ("plot", "integer")),
+        {
+            # Composite members: cardinality and ratio clear none of the widened bullets, and a
+            # composite edge never seeds a sketch (SPEC 2.2.14).
+            "cohort": _sketch_probe_column(above_k, 0.3),
+            "plot": _sketch_probe_column(above_k, 0.6),
+        },
         ddl="CREATE TABLE public.composite_probe (cohort int, plot int);\n",
-        columns=[
-            ColumnMeta(name="cohort", sql_type="integer", nullable=False, default=None, ordinal=1),
-            ColumnMeta(name="plot", sql_type="integer", nullable=False, default=None, ordinal=2),
-        ],
         relationships=[
             ForeignKeyMeta(
                 column=("cohort", "plot"),
@@ -4656,15 +4172,6 @@ def _widened_candidates_fixture() -> dict[str, MockTable]:
                 constraint_name="composite_probe_wide_fk",
             ),
         ],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={
-            # Composite members: cardinality and ratio clear none of the widened bullets, and a
-            # composite edge never seeds a sketch (SPEC 2.2.14).
-            "cohort": _sketch_probe_column(above_k, 0.3),
-            "plot": _sketch_probe_column(above_k, 0.6),
-        },
-        samples={},
         row_count=above_k * 2,
     )
 
@@ -4677,33 +4184,10 @@ def _overlap_fixture() -> dict[str, MockTable]:
     """
 
     def table(name: str, values: tuple[int, ...]) -> MockTable:
-        return MockTable(
-            type="table",
-            namespace_path=("public", name),
-            ddl=f"CREATE TABLE public.{name} (id int PRIMARY KEY, parent_id int);\n",
-            columns=[
-                ColumnMeta(name="id", sql_type="integer", nullable=False, default=None, ordinal=1),
-                ColumnMeta(
-                    name="parent_id",
-                    sql_type="integer",
-                    nullable=True,
-                    default=None,
-                    ordinal=2,
-                ),
-            ],
-            relationships=[
-                ForeignKeyMeta(
-                    column=("parent_id",),
-                    target_table="public.parent",
-                    target_column=("id",),
-                    on_delete="CASCADE",
-                    on_update="NO ACTION",
-                    constraint_name=f"{name}_parent_fk",
-                ),
-            ],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+        return mock_table(
+            f"public.{name}",
+            columns(("id", "integer"), ("parent_id", "integer", True)),
+            {
                 "id": _candidate_key_column(len(values)),
                 "parent_id": ColumnStats(
                     sql_type="integer",
@@ -4718,22 +4202,25 @@ def _overlap_fixture() -> dict[str, MockTable]:
                     distribution="uniform",
                 ),
             },
-            samples={},
+            ddl=f"CREATE TABLE public.{name} (id int PRIMARY KEY, parent_id int);\n",
+            relationships=[
+                ForeignKeyMeta(
+                    column=("parent_id",),
+                    target_table="public.parent",
+                    target_column=("id",),
+                    on_delete="CASCADE",
+                    on_update="NO ACTION",
+                    constraint_name=f"{name}_parent_fk",
+                ),
+            ],
             row_count=len(values),
         )
 
-    parent = MockTable(
-        type="table",
-        namespace_path=("public", "parent"),
+    parent = mock_table(
+        "public.parent",
+        columns(("id", "integer")),
+        {"id": _candidate_key_column(10)},
         ddl="CREATE TABLE public.parent (id int PRIMARY KEY);\n",
-        columns=[
-            ColumnMeta(name="id", sql_type="integer", nullable=False, default=None, ordinal=1),
-        ],
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={"id": _candidate_key_column(10)},
-        samples={},
         row_count=10,
     )
 
@@ -4758,48 +4245,18 @@ def _truncated_parent_fixture() -> dict[str, MockTable]:
     # dropped (unanswerable) - so the answerable count lands below the child's sketch length.
     child_values = (*retained[:4], dropped[0])
 
-    big_parent = MockTable(
-        type="table",
-        namespace_path=("public", "big_parent"),
+    big_parent = mock_table(
+        "public.big_parent",
+        columns(("id", "integer")),
+        {"id": _candidate_key_column(len(pool))},
         ddl="CREATE TABLE public.big_parent (id int PRIMARY KEY);\n",
-        columns=[
-            ColumnMeta(name="id", sql_type="integer", nullable=False, default=None, ordinal=1),
-        ],
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={"id": _candidate_key_column(len(pool))},
-        samples={},
         row_count=len(pool),
     )
 
-    big_child = MockTable(
-        type="table",
-        namespace_path=("public", "big_child"),
-        ddl="CREATE TABLE public.big_child (id int PRIMARY KEY, parent_id int);\n",
-        columns=[
-            ColumnMeta(name="id", sql_type="integer", nullable=False, default=None, ordinal=1),
-            ColumnMeta(
-                name="parent_id",
-                sql_type="integer",
-                nullable=True,
-                default=None,
-                ordinal=2,
-            ),
-        ],
-        relationships=[
-            ForeignKeyMeta(
-                column=("parent_id",),
-                target_table="public.big_parent",
-                target_column=("id",),
-                on_delete="CASCADE",
-                on_update="NO ACTION",
-                constraint_name="big_child_parent_fk",
-            ),
-        ],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={
+    big_child = mock_table(
+        "public.big_child",
+        columns(("id", "integer"), ("parent_id", "integer", True)),
+        {
             "id": _candidate_key_column(len(child_values)),
             "parent_id": ColumnStats(
                 sql_type="integer",
@@ -4814,7 +4271,17 @@ def _truncated_parent_fixture() -> dict[str, MockTable]:
                 distribution="uniform",
             ),
         },
-        samples={},
+        ddl="CREATE TABLE public.big_child (id int PRIMARY KEY, parent_id int);\n",
+        relationships=[
+            ForeignKeyMeta(
+                column=("parent_id",),
+                target_table="public.big_parent",
+                target_column=("id",),
+                on_delete="CASCADE",
+                on_update="NO ACTION",
+                constraint_name="big_child_parent_fk",
+            ),
+        ],
         row_count=len(child_values),
     )
 
@@ -4826,21 +4293,19 @@ class TestMeasuredOverlap:
 
     @staticmethod
     def _refers_to(tmp_path: Path, table: str) -> dict[str, Any]:
-        data = yaml.safe_load(
-            (tmp_path / "primary" / "public" / table / "relationships.yaml").read_text(),
-        )
+        data = artifact(tmp_path / "primary", f"public.{table}", "relationships")
 
         return data["refers_to"][0]
 
     def test_a_disjoint_edge_measures_zero_overlap(self, tmp_path: Path) -> None:
-        Engine(MockAdapter(_overlap_fixture()), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(_overlap_fixture()), conn_config(tmp_path), tmp_path).generate()
         observed = self._refers_to(tmp_path, "disjoint_child")["observed"]
 
         assert observed["containment"] == 0.0
         assert observed["target_coverage"] == 0.0
 
     def test_a_partial_edge_measures_the_true_share_on_each_side(self, tmp_path: Path) -> None:
-        Engine(MockAdapter(_overlap_fixture()), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(_overlap_fixture()), conn_config(tmp_path), tmp_path).generate()
         observed = self._refers_to(tmp_path, "partial_child")["observed"]
 
         # 3 of the child's 5 values are in the parent: containment = 3/5.
@@ -4849,12 +4314,12 @@ class TestMeasuredOverlap:
         assert observed["target_coverage"] == 0.3
 
     def test_repeated_generation_is_byte_identical(self, tmp_path: Path) -> None:
-        Engine(MockAdapter(_overlap_fixture()), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(_overlap_fixture()), conn_config(tmp_path), tmp_path).generate()
         first = self._refers_to(tmp_path, "partial_child")["observed"]
 
         Engine(
             MockAdapter(_overlap_fixture()),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         ).generate(GenerateRequest(force=True))
         second = self._refers_to(tmp_path, "partial_child")["observed"]
@@ -4871,15 +4336,15 @@ class TestMeasuredOverlap:
         fixture["public.child"] = replace(fixture["public.child"], rows_scanned=20)
         fixture["public.parent"] = replace(fixture["public.parent"], rows_scanned=5)
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             rules=(RuleConfig(include=("public.child", "public.parent"), sample=0.5),),
         )
         Engine(MockAdapter(fixture), conn, tmp_path).generate()
 
         observed = self._refers_to(tmp_path, "child")["observed"]
-        mirror = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "parent" / "relationships.yaml").read_text(),
-        )["referenced_by"][0]["observed"]
+        mirror = artifact(tmp_path / "primary", "public.parent", "relationships")["referenced_by"][
+            0
+        ]["observed"]
 
         assert observed == {"scope_compatible": False}
         assert mirror == {"scope_compatible": False}
@@ -4894,18 +4359,14 @@ class TestMeasuredOverlap:
         # so its fixture needs only the values `_candidate_key_column` already supplies.
         Engine(
             MockAdapter(_truncated_parent_fixture()),
-            _conn_config(tmp_path, enumeration_threshold=2000),
+            conn_config(tmp_path, enumeration_threshold=2000),
             tmp_path,
         ).generate()
 
         assert validate_print(tmp_path / "primary") == []
 
-        child_stats = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "big_child" / "statistics.yaml").read_text(),
-        )
-        parent_stats = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "big_parent" / "statistics.yaml").read_text(),
-        )
+        child_stats = artifact(tmp_path / "primary", "public.big_child")
+        parent_stats = artifact(tmp_path / "primary", "public.big_parent")
         child_sketch = decode_sketch(child_stats["columns"]["parent_id"]["sketch"]["values"])
         parent_sketch = decode_sketch(parent_stats["columns"]["id"]["sketch"]["values"])
 
@@ -4927,14 +4388,12 @@ class TestObservedBlock:
 
     @staticmethod
     def _refers_to(tmp_path: Path, table: str) -> list[dict[str, Any]]:
-        data = yaml.safe_load(
-            (tmp_path / "primary" / "public" / table / "relationships.yaml").read_text(),
-        )
+        data = artifact(tmp_path / "primary", f"public.{table}", "relationships")
 
         return data["refers_to"]
 
     def test_a_many_to_one_edge_states_its_fanout_and_coverage(self, tmp_path: Path) -> None:
-        Engine(MockAdapter(_observed_fixture()), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(_observed_fixture()), conn_config(tmp_path), tmp_path).generate()
         edge = self._refers_to(tmp_path, "child")[0]
 
         assert edge["observed"] == {
@@ -4958,7 +4417,7 @@ class TestObservedBlock:
                 "parent_id": _candidate_key_column(10),
             },
         )
-        Engine(MockAdapter(fixture), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(fixture), conn_config(tmp_path), tmp_path).generate()
         edge = self._refers_to(tmp_path, "child")[0]
 
         assert edge["observed"]["fanout_avg"] == 1.0
@@ -4969,13 +4428,13 @@ class TestObservedBlock:
         self,
         tmp_path: Path,
     ) -> None:
-        Engine(MockAdapter(_observed_fixture()), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(_observed_fixture()), conn_config(tmp_path), tmp_path).generate()
         edge = self._refers_to(tmp_path, "orphan")[0]
 
         assert edge["observed"]["coherent"] is False
 
     def test_a_composite_edge_carries_no_observed_block(self, tmp_path: Path) -> None:
-        Engine(MockAdapter(_observed_fixture()), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(_observed_fixture()), conn_config(tmp_path), tmp_path).generate()
         edge = self._refers_to(tmp_path, "composite_child")[0]
 
         assert "observed" not in edge
@@ -4984,7 +4443,7 @@ class TestObservedBlock:
         fixture = _observed_fixture()
         fixture["public.child"] = replace(fixture["public.child"], rows_scanned=20)
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             rules=(RuleConfig(include=("public.child",), sample=0.5),),
         )
         Engine(MockAdapter(fixture), conn, tmp_path).generate()
@@ -4998,10 +4457,8 @@ class TestObservedBlock:
     ) -> None:
         """The same edge, read from the other table's file, states identical numbers."""
 
-        Engine(MockAdapter(_observed_fixture()), _conn_config(tmp_path), tmp_path).generate()
-        data = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "parent" / "relationships.yaml").read_text(),
-        )
+        Engine(MockAdapter(_observed_fixture()), conn_config(tmp_path), tmp_path).generate()
+        data = artifact(tmp_path / "primary", "public.parent", "relationships")
         incoming = next(e for e in data["referenced_by"] if e["referencer_table"] == "public.child")
 
         assert incoming["observed"] == self._refers_to(tmp_path, "child")[0]["observed"]
@@ -5012,12 +4469,10 @@ class TestKeySketch:
 
     @staticmethod
     def _stats(tmp_path: Path, table: str) -> dict[str, Any]:
-        return yaml.safe_load(
-            (tmp_path / "primary" / "public" / table / "statistics.yaml").read_text(),
-        )
+        return artifact(tmp_path / "primary", f"public.{table}")
 
     def test_the_referencing_column_carries_a_sketch(self, tmp_path: Path) -> None:
-        Engine(MockAdapter(_observed_fixture()), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(_observed_fixture()), conn_config(tmp_path), tmp_path).generate()
         col = self._stats(tmp_path, "child")["columns"]["parent_id"]
 
         assert col["sketch"]["method"] == "kmv_md5_lo64"
@@ -5026,7 +4481,7 @@ class TestKeySketch:
     def test_the_referenced_column_also_carries_a_sketch(self, tmp_path: Path) -> None:
         """The parent side of the same edge - a different table's own file."""
 
-        Engine(MockAdapter(_observed_fixture()), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(_observed_fixture()), conn_config(tmp_path), tmp_path).generate()
         col = self._stats(tmp_path, "parent")["columns"]["id"]
 
         assert col["sketch"]["method"] == "kmv_md5_lo64"
@@ -5037,7 +4492,7 @@ class TestKeySketch:
     ) -> None:
         """A composite FK seeds no endpoint; the widened set sketches `a`/`b` anyway (2.2.14)."""
 
-        Engine(MockAdapter(_observed_fixture()), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(_observed_fixture()), conn_config(tmp_path), tmp_path).generate()
         columns = self._stats(tmp_path, "composite_child")["columns"]
 
         assert columns["a"]["sketch"]["method"] == "kmv_md5_lo64"
@@ -5049,14 +4504,14 @@ class TestKeySketch:
     ) -> None:
         """`child.id` names no edge; small cardinality and measured `candidate_key` widen it in."""
 
-        Engine(MockAdapter(_observed_fixture()), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(_observed_fixture()), conn_config(tmp_path), tmp_path).generate()
 
         col = self._stats(tmp_path, "child")["columns"]["id"]
         assert col["sketch"]["method"] == "kmv_md5_lo64"
 
     def test_a_redacted_join_key_carries_no_sketch(self, tmp_path: Path) -> None:
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             redact=(RedactRule(columns=("*.parent_id",), with_="hash"),),
             redaction_salt="pepper",
         )
@@ -5068,7 +4523,7 @@ class TestKeySketch:
         fixture = _observed_fixture()
         fixture["public.child"] = replace(fixture["public.child"], rows_scanned=20)
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             rules=(RuleConfig(include=("public.child",), sample=0.5),),
         )
         Engine(MockAdapter(fixture), conn, tmp_path).generate()
@@ -5078,12 +4533,12 @@ class TestKeySketch:
     def test_repeated_generation_is_byte_identical(self, tmp_path: Path) -> None:
         """SPEC 2.2.14: unkeyed and deterministic - two runs, same bytes."""
 
-        Engine(MockAdapter(_observed_fixture()), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(_observed_fixture()), conn_config(tmp_path), tmp_path).generate()
         first = self._stats(tmp_path, "child")["columns"]["parent_id"]["sketch"]
 
         Engine(
             MockAdapter(_observed_fixture()),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         ).generate(GenerateRequest(force=True))
         second = self._stats(tmp_path, "child")["columns"]["parent_id"]["sketch"]
@@ -5096,13 +4551,11 @@ class TestWidenedSketchCandidates:
 
     @staticmethod
     def _stats(tmp_path: Path, table: str) -> dict[str, Any]:
-        return yaml.safe_load(
-            (tmp_path / "primary" / "public" / table / "statistics.yaml").read_text(),
-        )
+        return artifact(tmp_path / "primary", f"public.{table}")
 
     @staticmethod
     def _conn(tmp_path: Path, *, sketch_all_columns: bool = False) -> ConnectionConfig:
-        conn = _conn_config(tmp_path, enumeration_threshold=SPEC_SKETCH_K + 10)
+        conn = conn_config(tmp_path, enumeration_threshold=SPEC_SKETCH_K + 10)
 
         return replace(conn, sketch_all_columns=sketch_all_columns) if sketch_all_columns else conn
 
@@ -5218,13 +4671,11 @@ class TestKeySketchFaultIsolation:
 
     @staticmethod
     def _stats(tmp_path: Path, table: str) -> dict[str, Any]:
-        return yaml.safe_load(
-            (tmp_path / "primary" / "public" / table / "statistics.yaml").read_text(),
-        )
+        return artifact(tmp_path / "primary", f"public.{table}")
 
     def test_the_failing_column_carries_no_sketch(self, tmp_path: Path) -> None:
         adapter = _KeySketchFailingAdapter(_observed_fixture(), failing_column="parent_id")
-        result = Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
+        result = Engine(adapter, conn_config(tmp_path), tmp_path).generate()
 
         assert "sketch" not in self._stats(tmp_path, "child")["columns"]["parent_id"]
         assert [(f.table, f.column) for f in result.sketch_failures] == [
@@ -5234,13 +4685,13 @@ class TestKeySketchFaultIsolation:
 
     def test_every_other_column_still_gets_its_sketch(self, tmp_path: Path) -> None:
         adapter = _KeySketchFailingAdapter(_observed_fixture(), failing_column="parent_id")
-        Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
+        Engine(adapter, conn_config(tmp_path), tmp_path).generate()
 
         assert "sketch" in self._stats(tmp_path, "parent")["columns"]["id"]
 
     def test_every_artifact_is_still_written(self, tmp_path: Path) -> None:
         adapter = _KeySketchFailingAdapter(_observed_fixture(), failing_column="parent_id")
-        Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
+        Engine(adapter, conn_config(tmp_path), tmp_path).generate()
         prints = tmp_path / "primary"
 
         assert (prints / "manifest.yaml").is_file()
@@ -5251,14 +4702,14 @@ class TestKeySketchFaultIsolation:
 
     def test_the_exit_code_is_partial_not_generic(self, tmp_path: Path) -> None:
         adapter = _KeySketchFailingAdapter(_observed_fixture(), failing_column="parent_id")
-        result = Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
+        result = Engine(adapter, conn_config(tmp_path), tmp_path).generate()
 
         assert result.exit_code == EXIT_PARTIAL
 
     def test_a_successful_run_carries_no_sketch_failures(self, tmp_path: Path) -> None:
         result = Engine(
             MockAdapter(_observed_fixture()),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         ).generate()
 
@@ -5269,7 +4720,7 @@ class TestKeySketchFaultIsolation:
         """Every join-key participant in the fixture fails; none aborts a sibling."""
 
         adapter = _KeySketchFailingAdapter(_observed_fixture(), fail_every_column=True)
-        result = Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
+        result = Engine(adapter, conn_config(tmp_path), tmp_path).generate()
 
         assert "sketch" not in self._stats(tmp_path, "child")["columns"]["parent_id"]
         assert "sketch" not in self._stats(tmp_path, "parent")["columns"]["id"]
@@ -5279,7 +4730,7 @@ class TestKeySketchFaultIsolation:
 
     def test_a_keyerror_is_caught_the_same_as_a_query_failure(self, tmp_path: Path) -> None:
         adapter = _KeySketchKeyErrorAdapter(_observed_fixture())
-        result = Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
+        result = Engine(adapter, conn_config(tmp_path), tmp_path).generate()
 
         assert "sketch" not in self._stats(tmp_path, "child")["columns"]["parent_id"]
         assert any(f.column == "parent_id" for f in result.sketch_failures)
@@ -5305,39 +4756,20 @@ def _folded_fixture() -> dict[str, MockTable]:
             distribution="uniform",
         )
 
-    parent = MockTable(
-        type="table",
-        namespace_path=("public", "parent"),
+    parent = mock_table(
+        "public.parent",
+        columns(("code", "text"), ("id", "text")),
+        {"code": col(10, 10), "id": col(6, 6)},
         ddl="CREATE TABLE public.parent (code text PRIMARY KEY, id text);\n",
-        columns=[
-            ColumnMeta(name="code", sql_type="text", nullable=False, default=None, ordinal=1),
-            ColumnMeta(name="id", sql_type="text", nullable=False, default=None, ordinal=2),
-        ],
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        # `id`'s cardinality stays below `row_count` so its ratio misses the SPEC 4.2
-        # candidate-key threshold - it must NOT enter the join-key population by accident.
-        stats={"code": col(10, 10), "id": col(6, 6)},
-        samples={},
         row_count=10,
         unique_keys=[UniqueKeyMeta(columns=("code",), primary=True)],
         normalized_cardinalities={"code": 8},
     )
-    child = MockTable(
-        type="table",
-        namespace_path=("public", "child"),
+    child = mock_table(
+        "public.child",
+        columns(("id", "text"), ("parent_code", "text", True)),
+        {"id": col(15, 15), "parent_code": col(10, 7)},
         ddl="CREATE TABLE public.child (id text, parent_code text);\n",
-        columns=[
-            ColumnMeta(name="id", sql_type="text", nullable=False, default=None, ordinal=1),
-            ColumnMeta(
-                name="parent_code",
-                sql_type="text",
-                nullable=True,
-                default=None,
-                ordinal=2,
-            ),
-        ],
         relationships=[
             ForeignKeyMeta(
                 column=("parent_code",),
@@ -5348,11 +4780,6 @@ def _folded_fixture() -> dict[str, MockTable]:
                 constraint_name="parent_code_fk",
             ),
         ],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        # `id`'s cardinality stays below `row_count` for the same reason as `parent.id`.
-        stats={"id": col(15, 15), "parent_code": col(10, 7)},
-        samples={},
         row_count=40,
         normalized_cardinalities={"parent_code": 7},
     )
@@ -5367,12 +4794,10 @@ class TestNormalizedCardinality:
 
     @staticmethod
     def _stats(tmp_path: Path, table: str) -> dict[str, Any]:
-        return yaml.safe_load(
-            (tmp_path / "primary" / "public" / table / "statistics.yaml").read_text(),
-        )
+        return artifact(tmp_path / "primary", f"public.{table}")
 
     def test_the_referencing_column_carries_it(self, tmp_path: Path) -> None:
-        Engine(MockAdapter(_folded_fixture()), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(_folded_fixture()), conn_config(tmp_path), tmp_path).generate()
         col = self._stats(tmp_path, "child")["columns"]["parent_code"]
 
         assert col["normalized_cardinality"] == 7
@@ -5380,7 +4805,7 @@ class TestNormalizedCardinality:
     def test_the_referenced_column_also_carries_it(self, tmp_path: Path) -> None:
         """The parent side of the same edge - also a declared unique key, either way eligible."""
 
-        Engine(MockAdapter(_folded_fixture()), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(_folded_fixture()), conn_config(tmp_path), tmp_path).generate()
         col = self._stats(tmp_path, "parent")["columns"]["code"]
 
         assert col["normalized_cardinality"] == 8
@@ -5388,7 +4813,7 @@ class TestNormalizedCardinality:
     def test_a_plain_column_outside_the_population_carries_no_field(self, tmp_path: Path) -> None:
         """`id` on either table names no edge, no unique key, no candidate key."""
 
-        Engine(MockAdapter(_folded_fixture()), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(_folded_fixture()), conn_config(tmp_path), tmp_path).generate()
 
         assert "normalized_cardinality" not in self._stats(tmp_path, "child")["columns"]["id"]
         assert "normalized_cardinality" not in self._stats(tmp_path, "parent")["columns"]["id"]
@@ -5397,7 +4822,7 @@ class TestNormalizedCardinality:
         """How many spellings merge under case-folding is a fact about the values (SPEC 2.2.9)."""
 
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             redact=(RedactRule(columns=("*.parent_code",), with_="hash"),),
             redaction_salt="pepper",
         )
@@ -5413,7 +4838,7 @@ class TestNormalizedCardinality:
         fixture = _folded_fixture()
         fixture["public.child"] = replace(fixture["public.child"], rows_scanned=20)
         conn = replace(
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             rules=(RuleConfig(include=("public.child",), sample=0.5),),
         )
         Engine(MockAdapter(fixture), conn, tmp_path).generate()
@@ -5425,15 +4850,13 @@ class TestNormalizedCardinality:
     def test_a_non_string_typed_join_key_carries_no_field(self, tmp_path: Path) -> None:
         """`_observed_fixture`'s integer FK: the type gate excludes it, unlike `sketch`."""
 
-        Engine(MockAdapter(_observed_fixture()), _conn_config(tmp_path), tmp_path).generate()
-        col = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "child" / "statistics.yaml").read_text(),
-        )["columns"]["parent_id"]
+        Engine(MockAdapter(_observed_fixture()), conn_config(tmp_path), tmp_path).generate()
+        col = artifact(tmp_path / "primary", "public.child")["columns"]["parent_id"]
 
         assert "normalized_cardinality" not in col
 
     def test_never_exceeds_cardinality(self, tmp_path: Path) -> None:
-        Engine(MockAdapter(_folded_fixture()), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(_folded_fixture()), conn_config(tmp_path), tmp_path).generate()
         col = self._stats(tmp_path, "child")["columns"]["parent_code"]
 
         assert col["normalized_cardinality"] <= col["cardinality"]
@@ -5450,12 +4873,13 @@ class _NormalizedCardinalityFailingAdapter(MockAdapter):
         self,
         fqn: str,
         column: str,
+        sql_type: str,
         scope: Any = None,
     ) -> int:
         if column == self._failing_column:
             raise RuntimeError("simulated normalization query timeout")
 
-        return super().compute_normalized_cardinality(fqn, column, scope)
+        return super().compute_normalized_cardinality(fqn, column, sql_type, scope)
 
 
 class TestATableTakingWritesBetweenTwoReads:
@@ -5463,13 +4887,11 @@ class TestATableTakingWritesBetweenTwoReads:
 
     @staticmethod
     def _stats(tmp_path: Path, table: str) -> dict[str, Any]:
-        return yaml.safe_load(
-            (tmp_path / "primary" / "public" / table / "statistics.yaml").read_text(),
-        )
+        return artifact(tmp_path / "primary", f"public.{table}")
 
     def test_the_artifact_carries_the_later_larger_count(self, tmp_path: Path) -> None:
         adapter = MockAdapter(_folded_fixture(), responses={"compute_normalized_cardinality": [99]})
-        Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
+        Engine(adapter, conn_config(tmp_path), tmp_path).generate()
         col = self._stats(tmp_path, "child")["columns"]["parent_code"]
 
         assert col["normalized_cardinality"] == 99
@@ -5477,7 +4899,7 @@ class TestATableTakingWritesBetweenTwoReads:
 
     def test_conformance_reports_it_as_a_warning_not_an_error(self, tmp_path: Path) -> None:
         adapter = MockAdapter(_folded_fixture(), responses={"compute_normalized_cardinality": [99]})
-        Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
+        Engine(adapter, conn_config(tmp_path), tmp_path).generate()
         issues = validate_print(tmp_path / "primary")
         excess = [i for i in issues if i.code == "stats.normalized-cardinality-exceeds-cardinality"]
 
@@ -5485,7 +4907,7 @@ class TestATableTakingWritesBetweenTwoReads:
 
     def test_an_exhausted_script_falls_back_to_the_fixture(self, tmp_path: Path) -> None:
         adapter = MockAdapter(_folded_fixture(), responses={"compute_normalized_cardinality": [99]})
-        Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
+        Engine(adapter, conn_config(tmp_path), tmp_path).generate()
         parent = self._stats(tmp_path, "parent")["columns"]["code"]
 
         assert parent["normalized_cardinality"] == 8
@@ -5496,16 +4918,14 @@ class TestNormalizedCardinalityFaultIsolation:
 
     @staticmethod
     def _stats(tmp_path: Path, table: str) -> dict[str, Any]:
-        return yaml.safe_load(
-            (tmp_path / "primary" / "public" / table / "statistics.yaml").read_text(),
-        )
+        return artifact(tmp_path / "primary", f"public.{table}")
 
     def test_the_failing_column_carries_no_field(self, tmp_path: Path) -> None:
         adapter = _NormalizedCardinalityFailingAdapter(
             _folded_fixture(),
             failing_column="parent_code",
         )
-        result = Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
+        result = Engine(adapter, conn_config(tmp_path), tmp_path).generate()
 
         assert (
             "normalized_cardinality" not in self._stats(tmp_path, "child")["columns"]["parent_code"]
@@ -5517,7 +4937,7 @@ class TestNormalizedCardinalityFaultIsolation:
             _folded_fixture(),
             failing_column="parent_code",
         )
-        Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
+        Engine(adapter, conn_config(tmp_path), tmp_path).generate()
 
         assert self._stats(tmp_path, "parent")["columns"]["code"]["normalized_cardinality"] == 8
 
@@ -5526,7 +4946,7 @@ class TestNormalizedCardinalityFaultIsolation:
             _folded_fixture(),
             failing_column="parent_code",
         )
-        Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
+        Engine(adapter, conn_config(tmp_path), tmp_path).generate()
         prints = tmp_path / "primary"
 
         assert (prints / "manifest.yaml").is_file()
@@ -5551,7 +4971,7 @@ class TestTheInferenceUniverse:
 
         engine = Engine(
             _KeyReadFailingAdapter(_ambiguous_fixture(), "b.curator"),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         )
         engine.generate()
@@ -5569,7 +4989,7 @@ class TestTheInferenceUniverse:
 
         engine = Engine(
             _KeyReadFailingAdapter(_locally_shadowed_fixture(), "fixture.curator"),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         )
         engine.generate()
@@ -5584,7 +5004,7 @@ class TestTheInferenceUniverse:
 
         Engine(
             MockAdapter(_view_source_fixture()),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         ).generate()
         outgoing = self._relationships(tmp_path, "public", "specimen_loan_v")["refers_to"]
@@ -5609,7 +5029,7 @@ class TestTheInferenceUniverse:
         with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
             Engine(
                 _KeyReadFailingAdapter(_ambiguous_fixture(), "b.curator"),
-                _conn_config(tmp_path),
+                conn_config(tmp_path),
                 tmp_path,
             ).generate()
 
@@ -5626,10 +5046,10 @@ class TestTheInferenceUniverse:
         """It keeps its place in the universe and can never satisfy the type check."""
 
         healthy, failed = tmp_path / "healthy", tmp_path / "failed"
-        Engine(MockAdapter(_single_target_fixture()), _conn_config(healthy), healthy).generate()
+        Engine(MockAdapter(_single_target_fixture()), conn_config(healthy), healthy).generate()
         Engine(
             _ColumnReadFailingAdapter(_single_target_fixture(), "b.curator"),
-            _conn_config(failed),
+            conn_config(failed),
             failed,
         ).generate()
 
@@ -5646,7 +5066,7 @@ class TestTheInferenceUniverse:
 
         fixture = _inferrable_fixture()
         fixture["public.curator"] = replace(fixture["public.curator"], type="view")
-        Engine(MockAdapter(fixture), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(fixture), conn_config(tmp_path), tmp_path).generate()
 
         assert self._relationships(tmp_path, "public", "specimen_loan")["refers_to"] == []
 
@@ -5655,21 +5075,21 @@ class TestCatalogReadsPerRun:
     """One column read per object per run - the pre-pass's list is what extraction profiles."""
 
     def test_a_full_run_reads_each_objects_columns_once(self, tmp_path: Path) -> None:
-        adapter = _ColumnCountingAdapter(_curator_fixture())
-        Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
+        adapter = _ColumnCountingAdapter(curator_fixture())
+        Engine(adapter, conn_config(tmp_path), tmp_path).generate()
 
         assert adapter.column_reads == {"public.curator": 1, "public.herbarium": 1}
 
     def test_a_skipped_table_is_covered_by_one_read_like_any_other(self, tmp_path: Path) -> None:
         """The pre-pass still spans the whole scope, and still at one read each."""
 
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         TestPerTableFreshnessSkip._age_manifest(tmp_path / "primary" / "manifest.yaml", days=3.0)
         conn = replace(
-            _conn_config(tmp_path, max_age_days=30),
+            conn_config(tmp_path, max_age_days=30),
             rules=(RuleConfig(include=("public.curator",), max_age_days=1),),
         )
-        adapter = _ColumnCountingAdapter(_curator_fixture())
+        adapter = _ColumnCountingAdapter(curator_fixture())
         result = Engine(adapter, conn, tmp_path).generate()
 
         assert {t.fqn: t.status for t in result.tables} == {
@@ -5681,8 +5101,8 @@ class TestCatalogReadsPerRun:
     def test_inference_off_leaves_extraction_as_the_only_reader(self, tmp_path: Path) -> None:
         """No pre-pass runs, so each profiled table is read where it always was."""
 
-        conn = replace(_conn_config(tmp_path), infer_relationships=False)
-        adapter = _ColumnCountingAdapter(_curator_fixture())
+        conn = replace(conn_config(tmp_path), infer_relationships=False)
+        adapter = _ColumnCountingAdapter(curator_fixture())
         Engine(adapter, conn, tmp_path).generate()
 
         assert adapter.column_reads == {"public.curator": 1, "public.herbarium": 1}
@@ -5690,8 +5110,8 @@ class TestCatalogReadsPerRun:
     def test_an_object_the_pre_pass_could_not_read_is_asked_again(self, tmp_path: Path) -> None:
         """An empty pre-pass entry is not an answer, so the catalog decides - and fails alone."""
 
-        adapter = _ColumnCountingAdapter(_curator_fixture(), failing_fqn="public.curator")
-        result = Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
+        adapter = _ColumnCountingAdapter(curator_fixture(), failing_fqn="public.curator")
+        result = Engine(adapter, conn_config(tmp_path), tmp_path).generate()
 
         assert {t.fqn: t.status for t in result.tables} == {
             "public.curator": "failed",
@@ -5819,20 +5239,20 @@ class TestWrongShapeBaselineArtifacts:
         self,
         tmp_path: Path,
     ) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         stats = tmp_path / "primary" / "public" / "curator" / "statistics.yaml"
         stats.write_text("- a\n- b\n")
 
-        result = _build_engine(tmp_path, _curator_fixture()).generate(GenerateRequest(force=True))
+        result = _build_engine(tmp_path, curator_fixture()).generate(GenerateRequest(force=True))
 
         assert result.summary.failed == 0
         assert result.summary.ok == 2
 
     def test_the_corrupt_artifact_is_rewritten_valid(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         stats = tmp_path / "primary" / "public" / "curator" / "statistics.yaml"
         stats.write_text("- a\n- b\n")
-        _build_engine(tmp_path, _curator_fixture()).generate(GenerateRequest(force=True))
+        _build_engine(tmp_path, curator_fixture()).generate(GenerateRequest(force=True))
 
         assert isinstance(yaml.safe_load(stats.read_text()), dict)
 
@@ -5840,18 +5260,18 @@ class TestWrongShapeBaselineArtifacts:
         self,
         tmp_path: Path,
     ) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         (tmp_path / "primary" / "public" / "curator" / "relationships.yaml").write_text("nope\n")
 
-        result = _build_engine(tmp_path, _curator_fixture()).generate(GenerateRequest(force=True))
+        result = _build_engine(tmp_path, curator_fixture()).generate(GenerateRequest(force=True))
 
         assert result.summary.failed == 0
 
     def test_a_manifest_holding_a_sequence_runs_as_a_first_run(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         (tmp_path / "primary" / "manifest.yaml").write_text("- one\n- two\n")
 
-        result = _build_engine(tmp_path, _curator_fixture()).generate()
+        result = _build_engine(tmp_path, curator_fixture()).generate()
 
         assert result.summary.failed == 0
         assert result.summary.ok == 2
@@ -5860,10 +5280,10 @@ class TestWrongShapeBaselineArtifacts:
         self,
         tmp_path: Path,
     ) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         (tmp_path / "primary" / "manifest.yaml").write_text("format_version: 1\ntables:\n")
 
-        result = _build_engine(tmp_path, _curator_fixture()).generate()
+        result = _build_engine(tmp_path, curator_fixture()).generate()
 
         assert result.summary.failed == 0
         assert result.summary.ok == 2
@@ -5873,12 +5293,12 @@ class TestWrongShapeBaselineArtifacts:
         tmp_path: Path,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         stats = tmp_path / "primary" / "public" / "curator" / "statistics.yaml"
         stats.write_text("- a\n- b\n")
 
         with caplog.at_level(logging.WARNING):
-            _build_engine(tmp_path, _curator_fixture()).generate(GenerateRequest(force=True))
+            _build_engine(tmp_path, curator_fixture()).generate(GenerateRequest(force=True))
 
         assert str(stats) in caplog.text
 
@@ -5890,7 +5310,7 @@ def _restated_curator_fixture() -> dict[str, MockTable]:
     threshold would be a grain signal, not the data movement this isolates.
     """
 
-    fixture = _curator_fixture()
+    fixture = curator_fixture()
     curator = fixture["public.curator"]
     fixture["public.curator"] = replace(
         curator,
@@ -5919,17 +5339,10 @@ def _row_count_only_fixture(row_count: int) -> dict[str, MockTable]:
     """
 
     return {
-        "public.curation_event": MockTable(
-            type="table",
-            namespace_path=("public", "curation_event"),
-            ddl="CREATE TABLE public.curation_event (kind text);\n",
-            columns=[
-                ColumnMeta(name="kind", sql_type="text", nullable=False, default=None, ordinal=1),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+        "public.curation_event": mock_table(
+            "public.curation_event",
+            columns(("kind", "text")),
+            {
                 "kind": ColumnStats(
                     sql_type="text",
                     nullable=False,
@@ -5940,6 +5353,7 @@ def _row_count_only_fixture(row_count: int) -> dict[str, MockTable]:
                     cardinality_method="exact",
                 ),
             },
+            ddl="CREATE TABLE public.curation_event (kind text);\n",
             samples={"kind": ["a", "b", "c"]},
             row_count=row_count,
         ),
@@ -5951,7 +5365,7 @@ class TestExitCodeSeparatesDataFromShape:
 
     @staticmethod
     def _baseline(tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
 
     def test_data_movement_alone_exits_ok(self, tmp_path: Path) -> None:
         self._baseline(tmp_path)
@@ -6013,7 +5427,7 @@ class TestExitCodeSeparatesDataFromShape:
         self._baseline(tmp_path)
         engine = Engine(
             _PartiallyFailingAdapter(_restated_curator_fixture()),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         )
 
@@ -6066,8 +5480,8 @@ class TestStatementTraceContext:
     """The engine sets connection/fqn/phase so exec_query's own trace can read them."""
 
     def test_each_table_sees_its_own_fqn_and_the_extract_ddl_phase(self, tmp_path: Path) -> None:
-        adapter = _TraceContextRecordingAdapter(_curator_fixture())
-        engine = Engine(adapter, _conn_config(tmp_path), tmp_path)
+        adapter = _TraceContextRecordingAdapter(curator_fixture())
+        engine = Engine(adapter, conn_config(tmp_path), tmp_path)
         engine.generate()
 
         assert adapter.seen == {
@@ -6078,8 +5492,8 @@ class TestStatementTraceContext:
     def test_the_catalog_pre_pass_tags_its_own_operation_too(self, tmp_path: Path) -> None:
         """`_build_inventory` runs ahead of the per-table loop, on the same tag-setting seam."""
 
-        adapter = _TraceContextRecordingAdapter(_curator_fixture())
-        engine = Engine(adapter, _conn_config(tmp_path), tmp_path)
+        adapter = _TraceContextRecordingAdapter(curator_fixture())
+        engine = Engine(adapter, conn_config(tmp_path), tmp_path)
         engine.generate()
 
         assert adapter.seen_columns == {
@@ -6092,8 +5506,8 @@ class TestStatementTraceContext:
         }
 
     def test_tags_are_cleared_once_the_run_completes(self, tmp_path: Path) -> None:
-        adapter = _TraceContextRecordingAdapter(_curator_fixture())
-        engine = Engine(adapter, _conn_config(tmp_path), tmp_path)
+        adapter = _TraceContextRecordingAdapter(curator_fixture())
+        engine = Engine(adapter, conn_config(tmp_path), tmp_path)
         engine.generate()
 
         assert orchestrator.trace_context.connection.get() == ""
@@ -6108,18 +5522,10 @@ def _grain_search_fixture() -> dict[str, MockTable]:
     """
 
     return {
-        "public.herbarium": MockTable(
-            type="table",
-            namespace_path=("public", "herbarium"),
-            ddl="CREATE TABLE public.herbarium (a integer NOT NULL, b integer NOT NULL);\n",
-            columns=[
-                ColumnMeta(name="a", sql_type="integer", nullable=False, default=None, ordinal=1),
-                ColumnMeta(name="b", sql_type="integer", nullable=False, default=None, ordinal=2),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+        "public.herbarium": mock_table(
+            "public.herbarium",
+            columns(("a", "integer"), ("b", "integer")),
+            {
                 name: ColumnStats(
                     sql_type="integer",
                     nullable=False,
@@ -6134,7 +5540,7 @@ def _grain_search_fixture() -> dict[str, MockTable]:
                 )
                 for name in ("a", "b")
             },
-            samples={},
+            ddl="CREATE TABLE public.herbarium (a integer NOT NULL, b integer NOT NULL);\n",
             row_count=100,
             unique_keys=[UniqueKeyMeta(columns=("a",))],
         ),
@@ -6210,8 +5616,8 @@ class TestCatalogReadDegrade:
         """
 
         result = Engine(
-            _RelationshipsFailingAdapter(_curator_fixture()),
-            _conn_config(tmp_path),
+            _RelationshipsFailingAdapter(curator_fixture()),
+            conn_config(tmp_path),
             tmp_path,
         ).generate()
 
@@ -6225,11 +5631,11 @@ class TestCatalogReadDegrade:
         manifest must not declare a file this run did not write.
         """
 
-        fixture = _curator_fixture()
+        fixture = curator_fixture()
         fixture["public.herbarium"] = replace(fixture["public.herbarium"], type="view")
         result = Engine(
             _RelationshipsFailingAdapter(fixture),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         ).generate()
 
@@ -6247,8 +5653,8 @@ class TestCatalogReadDegrade:
         tmp_path: Path,
     ) -> None:
         result = Engine(
-            _IndexesFailingAdapter(_curator_fixture()),
-            _conn_config(tmp_path),
+            _IndexesFailingAdapter(curator_fixture()),
+            conn_config(tmp_path),
             tmp_path,
         ).generate()
 
@@ -6261,8 +5667,8 @@ class TestCatalogReadDegrade:
         tmp_path: Path,
     ) -> None:
         result = Engine(
-            _CommentsFailingAdapter(_curator_fixture()),
-            _conn_config(tmp_path),
+            _CommentsFailingAdapter(curator_fixture()),
+            conn_config(tmp_path),
             tmp_path,
         ).generate()
 
@@ -6270,28 +5676,24 @@ class TestCatalogReadDegrade:
 
     def test_a_failed_physical_layout_read_leaves_the_table_profiled(self, tmp_path: Path) -> None:
         result = Engine(
-            _PhysicalLayoutFailingAdapter(_curator_fixture()),
-            _conn_config(tmp_path),
+            _PhysicalLayoutFailingAdapter(curator_fixture()),
+            conn_config(tmp_path),
             tmp_path,
         ).generate()
 
         assert next(t for t in result.tables if t.fqn == "public.herbarium").status == "ok"
-        stats = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "herbarium" / "statistics.yaml").read_text(),
-        )
+        stats = artifact(tmp_path / "primary", "public.herbarium")
         assert "physical_layout" not in stats
 
     def test_a_failed_null_pattern_scan_leaves_the_table_profiled(self, tmp_path: Path) -> None:
         result = Engine(
-            _NullPatternsFailingAdapter(_curator_fixture()),
-            _conn_config(tmp_path),
+            _NullPatternsFailingAdapter(curator_fixture()),
+            conn_config(tmp_path),
             tmp_path,
         ).generate()
 
         assert next(t for t in result.tables if t.fqn == "public.herbarium").status == "ok"
-        stats = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "herbarium" / "statistics.yaml").read_text(),
-        )
+        stats = artifact(tmp_path / "primary", "public.herbarium")
         assert "null_patterns" not in stats
 
     def test_a_failed_unique_key_read_loses_the_declared_key_but_not_the_table(
@@ -6300,14 +5702,12 @@ class TestCatalogReadDegrade:
     ) -> None:
         result = Engine(
             _KeyReadFailingAdapter(_grain_search_fixture(), "public.herbarium"),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         ).generate()
 
         assert next(t for t in result.tables if t.fqn == "public.herbarium").status == "ok"
-        stats = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "herbarium" / "statistics.yaml").read_text(),
-        )
+        stats = artifact(tmp_path / "primary", "public.herbarium")
         keys = stats["grain"]["keys"]
 
         assert not any(k["detection"] == "declared" for k in keys)
@@ -6322,14 +5722,12 @@ class TestCatalogReadDegrade:
 
         result = Engine(
             _KeyReadFailingAdapter(_grain_search_fixture(), "public.herbarium"),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         ).generate()
 
         assert next(t for t in result.tables if t.fqn == "public.herbarium").status == "ok"
-        stats = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "herbarium" / "statistics.yaml").read_text(),
-        )
+        stats = artifact(tmp_path / "primary", "public.herbarium")
 
         assert stats["grain"]["search"]["exhausted"] is False
 
@@ -6338,14 +5736,12 @@ class TestCatalogReadDegrade:
 
         result = Engine(
             MockAdapter(_grain_search_fixture()),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         ).generate()
 
         assert next(t for t in result.tables if t.fqn == "public.herbarium").status == "ok"
-        stats = yaml.safe_load(
-            (tmp_path / "primary" / "public" / "herbarium" / "statistics.yaml").read_text(),
-        )
+        stats = artifact(tmp_path / "primary", "public.herbarium")
         keys = stats["grain"]["keys"]
 
         assert any(k["detection"] == "declared" and k["columns"] == ["a"] for k in keys)
@@ -6363,14 +5759,14 @@ class TestListingSharingNothingWithTheBaseline:
 
     @staticmethod
     def _printed(tmp_path: Path) -> dict[str, bytes]:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
 
         return TestListingSharingNothingWithTheBaseline._tree(tmp_path)
 
     @pytest.mark.parametrize("entry", ["generate", "dry_run", "compute_diff"])
     @pytest.mark.parametrize(
         "listing",
-        [{}, {"public.bed": _curator_fixture()["public.curator"]}],
+        [{}, {"public.bed": curator_fixture()["public.curator"]}],
         ids=["empty", "other_tables"],
     )
     def test_is_refused_with_exit_4_and_nothing_written(
@@ -6380,7 +5776,7 @@ class TestListingSharingNothingWithTheBaseline:
         listing: dict[str, MockTable],
     ) -> None:
         before = self._printed(tmp_path)
-        engine = Engine(MockAdapter(listing), _conn_config(tmp_path), tmp_path)
+        engine = Engine(MockAdapter(listing), conn_config(tmp_path), tmp_path)
 
         if entry == "compute_diff":
             result = engine.compute_diff()
@@ -6396,7 +5792,7 @@ class TestListingSharingNothingWithTheBaseline:
 
     def test_the_confirmation_records_the_total_removal(self, tmp_path: Path) -> None:
         self._printed(tmp_path)
-        result = Engine(MockAdapter({}), _conn_config(tmp_path), tmp_path).generate(
+        result = Engine(MockAdapter({}), conn_config(tmp_path), tmp_path).generate(
             GenerateRequest(force=True, confirm_all_removed=True),
         )
         manifest = yaml.safe_load((tmp_path / "primary" / "manifest.yaml").read_text())
@@ -6412,20 +5808,20 @@ class TestListingSharingNothingWithTheBaseline:
         ]
 
     def test_a_first_run_over_an_empty_target_is_not_refused(self, tmp_path: Path) -> None:
-        result = Engine(MockAdapter({}), _conn_config(tmp_path), tmp_path).generate()
+        result = Engine(MockAdapter({}), conn_config(tmp_path), tmp_path).generate()
 
         assert result.exit_code == EXIT_OK
 
     def test_a_baseline_wholly_outside_the_scope_is_not_refused(self, tmp_path: Path) -> None:
         self._printed(tmp_path)
-        conn = _conn_config(tmp_path, include=("other.*",))
+        conn = conn_config(tmp_path, include=("other.*",))
         result = Engine(MockAdapter({}), conn, tmp_path).generate(GenerateRequest(force=True))
 
         assert result.exit_code == EXIT_OK
 
     def test_a_cli_selector_matching_nothing_is_not_refused(self, tmp_path: Path) -> None:
         before = self._printed(tmp_path)
-        result = _build_engine(tmp_path, _curator_fixture()).generate(
+        result = _build_engine(tmp_path, curator_fixture()).generate(
             GenerateRequest(force=True, cli_include=("no.such.*",)),
         )
 
@@ -6434,8 +5830,8 @@ class TestListingSharingNothingWithTheBaseline:
 
     def test_a_partial_disappearance_is_still_recorded(self, tmp_path: Path) -> None:
         self._printed(tmp_path)
-        remaining = {"public.curator": _curator_fixture()["public.curator"]}
-        result = Engine(MockAdapter(remaining), _conn_config(tmp_path), tmp_path).generate(
+        remaining = {"public.curator": curator_fixture()["public.curator"]}
+        result = Engine(MockAdapter(remaining), conn_config(tmp_path), tmp_path).generate(
             GenerateRequest(force=True),
         )
         removed = _changes_by_kind(tmp_path / "primary" / "diff.yaml")["table_removed"]
@@ -6459,20 +5855,20 @@ class TestARemovedTableLeavesNoProducerFileBehind:
 
     @staticmethod
     def _printed(tmp_path: Path) -> Path:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
 
         return tmp_path / "primary"
 
     @staticmethod
     def _without_herbarium() -> dict[str, MockTable]:
-        return {"public.curator": _curator_fixture()["public.curator"]}
+        return {"public.curator": curator_fixture()["public.curator"]}
 
     def test_a_dropped_table_loses_its_directory_and_check_is_clean(self, tmp_path: Path) -> None:
         root = self._printed(tmp_path)
-        Engine(MockAdapter(self._without_herbarium()), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(self._without_herbarium()), conn_config(tmp_path), tmp_path).generate()
 
         assert not (root / "public" / "herbarium").exists()
-        assert [i.code for i in validate_print(root) if i.severity == "error"] == []
+        assert [i.code for i in conformance_errors(root)] == []
 
     def test_user_files_are_kept_byte_identical_and_named(
         self,
@@ -6487,7 +5883,7 @@ class TestARemovedTableLeavesNoProducerFileBehind:
         with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
             Engine(
                 MockAdapter(self._without_herbarium()),
-                _conn_config(tmp_path),
+                conn_config(tmp_path),
                 tmp_path,
             ).generate()
 
@@ -6505,22 +5901,22 @@ class TestARemovedTableLeavesNoProducerFileBehind:
     def test_an_orphan_from_an_earlier_producer_is_healed(self, tmp_path: Path) -> None:
         root = self._printed(tmp_path)
         shutil.copytree(root / "public" / "curator", root / "public" / "legacy_curator")
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
 
         assert not (root / "public" / "legacy_curator").exists()
         assert (root / "public" / "curator" / "ddl.sql").is_file()
 
     def test_an_emptied_schema_directory_goes_with_its_last_table(self, tmp_path: Path) -> None:
-        fixture = _curator_fixture()
+        fixture = curator_fixture()
         fixture["garden.herbarium"] = replace(
             fixture.pop("public.herbarium"),
             namespace_path=("garden", "herbarium"),
         )
         fixture["public.curator"] = replace(fixture["public.curator"], relationships=[])
         root = tmp_path / "primary"
-        Engine(MockAdapter(fixture), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(fixture), conn_config(tmp_path), tmp_path).generate()
         del fixture["garden.herbarium"]
-        Engine(MockAdapter(fixture), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(fixture), conn_config(tmp_path), tmp_path).generate()
 
         assert not (root / "garden").exists()
         assert (root / "public" / "curator").is_dir()
@@ -6529,14 +5925,14 @@ class TestARemovedTableLeavesNoProducerFileBehind:
         self,
         tmp_path: Path,
     ) -> None:
-        fixture = _curator_fixture()
+        fixture = curator_fixture()
         fixture["garden.herbarium"] = replace(
             fixture.pop("public.herbarium"),
             namespace_path=("garden", "herbarium"),
         )
         fixture["public.curator"] = replace(fixture["public.curator"], relationships=[])
         root = tmp_path / "primary"
-        Engine(MockAdapter(fixture), _conn_config(tmp_path), tmp_path).generate()
+        Engine(MockAdapter(fixture), conn_config(tmp_path), tmp_path).generate()
         before = (root / "garden" / "herbarium" / "ddl.sql").read_bytes()
 
         class _GardenUnlistable(MockAdapter):
@@ -6544,7 +5940,7 @@ class TestARemovedTableLeavesNoProducerFileBehind:
                 return (SkippedNamespace(name="garden", cause="permission denied"),)
 
         listed = {"public.curator": fixture["public.curator"]}
-        result = Engine(_GardenUnlistable(listed), _conn_config(tmp_path), tmp_path).generate(
+        result = Engine(_GardenUnlistable(listed), conn_config(tmp_path), tmp_path).generate(
             GenerateRequest(force=True),
         )
         manifest = yaml.safe_load((root / "manifest.yaml").read_text())
@@ -6558,7 +5954,7 @@ class TestARemovedTableLeavesNoProducerFileBehind:
         self._printed(tmp_path)
         result = Engine(
             MockAdapter(self._without_herbarium()),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         ).generate()
 
@@ -6566,7 +5962,7 @@ class TestARemovedTableLeavesNoProducerFileBehind:
 
     def test_an_untouched_fresh_table_is_still_skipped(self, tmp_path: Path) -> None:
         self._printed(tmp_path)
-        result = _build_engine(tmp_path, _curator_fixture()).generate()
+        result = _build_engine(tmp_path, curator_fixture()).generate()
 
         assert {t.status for t in result.tables} == {"skipped"}
 
@@ -6594,7 +5990,7 @@ class TestARemovedTableLeavesNoProducerFileBehind:
         root = self._printed(tmp_path)
         engine = Engine(
             MockAdapter(self._without_herbarium()),
-            _conn_config(tmp_path, exclude=exclude),
+            conn_config(tmp_path, exclude=exclude),
             tmp_path,
         )
 
@@ -6609,10 +6005,10 @@ class TestARemovedTableLeavesNoProducerFileBehind:
         root = self._printed(tmp_path)
         listing = self._without_herbarium()
         listing["public.vault"] = replace(
-            _curator_fixture()["public.herbarium"],
+            curator_fixture()["public.herbarium"],
             namespace_path=("public", "vault"),
         )
-        engine = Engine(_OneTableFailingAdapter(listing), _conn_config(tmp_path), tmp_path)
+        engine = Engine(_OneTableFailingAdapter(listing), conn_config(tmp_path), tmp_path)
         result = engine.generate(GenerateRequest(force=True, fail_fast=True))
 
         assert result.not_attempted == 1
@@ -6626,7 +6022,7 @@ class TestARemovedTableLeavesNoProducerFileBehind:
         root = self._printed(tmp_path)
         engine = Engine(
             _OneTableFailingAdapter(self._without_herbarium()),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         )
         engine.generate(GenerateRequest(force=True))
@@ -6637,7 +6033,7 @@ class TestARemovedTableLeavesNoProducerFileBehind:
     def test_a_carried_entry_dropped_for_a_missing_artifact_is_swept(self, tmp_path: Path) -> None:
         root = self._printed(tmp_path)
         (root / "public" / "herbarium" / "statistics.yaml").unlink()
-        conn = _conn_config(tmp_path, exclude=("public.herbarium",))
+        conn = conn_config(tmp_path, exclude=("public.herbarium",))
         Engine(MockAdapter(self._without_herbarium()), conn, tmp_path).generate()
 
         assert not (root / "public" / "herbarium").exists()
@@ -6693,11 +6089,11 @@ class TestARunEndingBeforeItsCommitLeavesThePrintAsItWas:
         root = tmp_path / "primary"
 
         assert TestARunEndingBeforeItsCommitLeavesThePrintAsItWas._tree(root) == before
-        assert [i.code for i in validate_print(root) if i.severity == "error"] == []
+        assert [i.code for i in conformance_errors(root)] == []
 
         result = Engine(
             MockAdapter(_drifted_curator_fixture()),
-            _conn_config(tmp_path),
+            conn_config(tmp_path),
             tmp_path,
         ).generate(
             GenerateRequest(force=True),
@@ -6710,7 +6106,7 @@ class TestARunEndingBeforeItsCommitLeavesThePrintAsItWas:
         )
 
     def _printed(self, tmp_path: Path) -> dict[str, bytes]:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
 
         return self._tree(tmp_path / "primary")
 
@@ -6727,7 +6123,7 @@ class TestARunEndingBeforeItsCommitLeavesThePrintAsItWas:
             real(stage, *args)
 
         with patch.object(orchestrator.RunStage, "write", counted):
-            Engine(adapter, _conn_config(tmp_path), tmp_path).generate(GenerateRequest(force=True))
+            Engine(adapter, conn_config(tmp_path), tmp_path).generate(GenerateRequest(force=True))
 
         return adapter.calls, writes[0]
 
@@ -6745,7 +6141,7 @@ class TestARunEndingBeforeItsCommitLeavesThePrintAsItWas:
             adapter = _Tripwire(_drifted_curator_fixture(), trip_at=index)
 
             with pytest.raises(KeyboardInterrupt):
-                Engine(adapter, _conn_config(root), root).generate(GenerateRequest(force=True))
+                Engine(adapter, conn_config(root), root).generate(GenerateRequest(force=True))
 
             self._assert_untouched_and_recoverable(root, before)
 
@@ -6773,7 +6169,7 @@ class TestARunEndingBeforeItsCommitLeavesThePrintAsItWas:
                 real(stage, *args)
 
             with patch.object(orchestrator.RunStage, "write", failing), pytest.raises(OSError):
-                Engine(MockAdapter(_drifted_curator_fixture()), _conn_config(root), root).generate(
+                Engine(MockAdapter(_drifted_curator_fixture()), conn_config(root), root).generate(
                     GenerateRequest(force=True),
                 )
 
@@ -6795,7 +6191,7 @@ class TestARunEndingBeforeItsCommitLeavesThePrintAsItWas:
             extra["public.herbarium"],
             namespace_path=("public", "vault"),
         )
-        Engine(_Failing(extra), _conn_config(tmp_path), tmp_path).generate(
+        Engine(_Failing(extra), conn_config(tmp_path), tmp_path).generate(
             GenerateRequest(force=True, fail_fast=True),
         )
 
@@ -6810,7 +6206,7 @@ class TestARunEndingBeforeItsCommitLeavesThePrintAsItWas:
         adapter = _Tripwire(_drifted_curator_fixture())
 
         try:
-            result = Engine(adapter, _conn_config(tmp_path), tmp_path).generate(
+            result = Engine(adapter, conn_config(tmp_path), tmp_path).generate(
                 GenerateRequest(force=True),
             )
         finally:
@@ -6830,7 +6226,7 @@ class TestAnEdgeWithACarriedEndpointMatchesAFullRun:
         out = {}
 
         for name in ("curator", "herbarium"):
-            data = yaml.safe_load((root / "public" / name / "relationships.yaml").read_text())
+            data = artifact(root, f"public.{name}", "relationships")
             out[name] = (data["refers_to"], data["referenced_by"])
 
         return out
@@ -6839,7 +6235,7 @@ class TestAnEdgeWithACarriedEndpointMatchesAFullRun:
         narrowed, full = tmp_path / "narrowed", tmp_path / "full"
 
         for root in (narrowed, full):
-            _build_engine(root, _curator_fixture()).generate()
+            _build_engine(root, curator_fixture()).generate()
 
             if strip_sketch:
                 path = root / "primary" / "public" / "herbarium" / "statistics.yaml"
@@ -6847,10 +6243,10 @@ class TestAnEdgeWithACarriedEndpointMatchesAFullRun:
                 data["columns"]["id"].pop("sketch", None)
                 path.write_text(yaml.safe_dump(data, sort_keys=False))
 
-        _build_engine(narrowed, _curator_fixture()).generate(
+        _build_engine(narrowed, curator_fixture()).generate(
             GenerateRequest(force=True, cli_include=("public.curator",)),
         )
-        _build_engine(full, _curator_fixture()).generate(
+        _build_engine(full, curator_fixture()).generate(
             GenerateRequest(force=True, cli_include=("public.curator",))
             if strip_sketch
             else GenerateRequest(force=True),
@@ -6867,10 +6263,10 @@ class TestAnEdgeWithACarriedEndpointMatchesAFullRun:
         ] == []
 
     def test_a_carried_file_is_untouched_when_nothing_changed(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         path = tmp_path / "primary" / "public" / "herbarium" / "relationships.yaml"
         before = path.read_bytes()
-        _build_engine(tmp_path, _curator_fixture()).generate(
+        _build_engine(tmp_path, curator_fixture()).generate(
             GenerateRequest(force=True, cli_include=("public.curator",)),
         )
 
@@ -6915,9 +6311,9 @@ class TestAnEdgeWithACarriedEndpointMatchesAFullRun:
         assert path.read_bytes() == before
 
     def test_two_carried_tables_are_never_compared(self, tmp_path: Path) -> None:
-        _build_engine(tmp_path, _curator_fixture()).generate()
+        _build_engine(tmp_path, curator_fixture()).generate()
         committed = CommittedPrint.load(tmp_path / "primary")
-        engine = _build_engine(tmp_path, _curator_fixture())
+        engine = _build_engine(tmp_path, curator_fixture())
 
         assert engine._add_value_derived_edges({}, committed.tables) == {}
 

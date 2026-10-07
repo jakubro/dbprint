@@ -8,7 +8,8 @@ from typing import Any
 
 import yaml
 
-from dbprint.spec.classification import compute_cardinality_ratio
+from dbprint.spec.artifacts import declared_artifacts, walkable_tables
+from dbprint.spec.classification import compute_cardinality_ratio, compute_fanout_avg
 from dbprint.spec.sketch import K as SKETCH_K
 from dbprint.spec.sketch import (
     answerable_count,
@@ -17,7 +18,6 @@ from dbprint.spec.sketch import (
     estimate_intersection,
 )
 from .issue import Issue
-from .layout import declared_artifacts, walkable_tables
 from .progress import TableSink
 from .schema_validation import relationships_schema
 from .yaml_utils import load_yaml
@@ -447,6 +447,7 @@ def _check_observed_entry(
         return []
 
     src_cardinality = src_col.get("cardinality")
+    src_null_count = src_col.get("null_count")
     src_row_count = source_stats.get("row_count")
     tgt_cardinality = tgt_col.get("cardinality")
 
@@ -460,17 +461,21 @@ def _check_observed_entry(
         return []
 
     issues: list[Issue] = []
-    expected_fanout = round(src_row_count / src_cardinality, 6)
 
-    if observed.get("fanout_avg") != expected_fanout:
+    if not isinstance(src_null_count, int):
+        expected_fanout = None
+    else:
+        expected_fanout = compute_fanout_avg(src_row_count, src_null_count, src_cardinality)
+
+    if expected_fanout is not None and observed.get("fanout_avg") != expected_fanout:
         issues.append(
             Issue(
                 where,
                 "relationships.observed-fanout-mismatch",
                 "error",
                 f"fanout_avg={observed.get('fanout_avg')!r} does not match "
-                f"row_count/cardinality={expected_fanout!r} from the referencing column's "
-                "own statistics.",
+                f"(row_count - null_count)/cardinality={expected_fanout!r} from the "
+                "referencing column's own statistics.",
                 "§2.3.10",
             ),
         )

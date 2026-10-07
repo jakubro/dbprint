@@ -1,77 +1,162 @@
 """Per-classification "Notes" cell templates for `dbprint context`.
 
 Pure: no I/O, no side effects. SPEC 2.2.2 mandates `classification` on every column dict.
+A cell is facts joined by `; `, each `label: value` or a bare flag; a list joins by `, `.
 """
 
 from __future__ import annotations
 
+import re
+from collections.abc import Iterable
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
 from dbprint.spec.absence import Absence, column_value, read_column_field
-from dbprint.spec.classification import is_binary_type
-from dbprint.spec.scope import ScanScope, list_is_complete, qualify
+from dbprint.spec.classification import is_binary_type, is_integer_type
+from dbprint.spec.scope import ScanScope, list_is_complete, qualify, rows_scanned
 from dbprint.spec.value_text import spell_number, spell_percent
-from .yaml_dumper import spell_value
+from .context_terms import percentile_key
+from .value_list import grouped_values, value_key
+from .yaml_dumper import spell_literal
 
 
-TEXT_TOP_VALUES_LIMIT = 2  # values shown once a text column's list is not exhaustive
-NULL_RATE_DISPLAY_THRESHOLD = 0.01  # suffix shows only when null_rate >= this
+FACT_SEPARATOR = "; "
+LIST_SEPARATOR = ", "
+NOTES_TOP_VALUES_LIMIT = 5  # entries a truncated list shows in the Notes; a spelling group is one
 UNIT_NORM_TOLERANCE = 0.001  # both norm bounds this close to 1 read as unit-normalized
+
+_PERCENTILE_FIELD_RE = re.compile(r"^p(\d+)$")
+_DETECTION_RE = re.compile(r"\((declared|inferred|measured)\)$")
+
+
+@dataclass(frozen=True)
+class Rendered:
+    """Rendered text and the keys (`context_terms.TERMS`) of every label it prints."""
+
+    text: str
+    terms: frozenset[str] = frozenset()
+
+
+def join_facts(facts: Iterable[Rendered], separator: str = "; ") -> Rendered:
+    """Facts joined by `separator`, their terms combined; an empty fact is dropped."""
+
+    kept = [fact for fact in facts if fact.text]
+
+    return Rendered(
+        separator.join(fact.text for fact in kept),
+        frozenset().union(*(fact.terms for fact in kept)),
+    )
 
 
 def synthesize(
     column_stats: dict[str, Any],
-    fk_target: str | None = None,
+    fk_targets: list[str] | None = None,
     *,
     hints_only: bool = False,
     statistics_params: dict[str, Any] | None = None,
     scope: ScanScope | None = None,
-) -> str:
-    """Return the Notes cell for one column.
+    row_count: int | None = None,
+) -> Rendered:
+    """Return the Notes cell for one column and the term keys its labels use.
 
-    `hints_only` keeps only the FK target and suffixes; `scope` qualifies every claim one unread row could falsify.
+    `hints_only` keeps the FK edges and suffixes; `row_count` is the fallback share population.
     """
 
     classification = column_value(column_stats, "classification") or "unsupported"
     params = statistics_params or {}
 
-    if hints_only:
-        base = _fk_note(classification, fk_target)
-    else:
-        redaction = _redaction_primitive(column_stats)
-        base = _base_template(classification, column_stats, fk_target, redaction, params, scope)
-
-    suffix = (
-        _candidate_key_suffix(column_stats, scope)
-        + _physical_layout_key_suffix(column_stats)
-        + _looks_like_suffix(column_stats, params)
-        + _sensitivity_suffix(column_stats)
-        + _epoch_unit_suffix(column_stats)
-    )
+    facts = _fk_note(classification, fk_targets)
 
     if not hints_only:
-        suffix += (
-            _unmeasured_suffix(column_stats)
-            + _unrepresentable_suffix(column_stats)
-            + _null_rate_suffix(column_stats)
-            + _coverage_method_suffix(column_stats)
-            + _populated_suffix(column_stats)
+        redaction = _redaction_primitive(column_stats)
+        total = _non_null(column_stats, row_count, scope)
+        rows = _non_null_rows(column_stats, row_count, scope)
+        facts += _base_template(
+            classification,
+            column_stats,
+            redaction,
+            params,
+            scope,
+            total,
+            rows,
         )
 
-    result = base + suffix
+    facts = [
+        *facts,
+        *_candidate_key_suffix(column_stats, scope),
+        *_physical_layout_key_suffix(column_stats),
+        *_looks_like_suffix(column_stats, params),
+        *_sensitivity_suffix(column_stats),
+        *_epoch_unit_suffix(column_stats),
+    ]
 
-    return result.removeprefix(", ") if hints_only else result
+    if not hints_only:
+        facts += [
+            *_unmeasured_suffix(column_stats),
+            *_unrepresentable_suffix(column_stats),
+            *_null_suffix(column_stats, scope),
+            *_coverage_method_suffix(column_stats),
+            *_populated_suffix(column_stats),
+        ]
+
+    return join_facts(facts)
+
+
+def enum_word(value: str) -> str:
+    """An artifact enum value as the word a reader sees: `long_tail` reads `long tail`."""
+
+    return value.replace("_", " ")
+
+
+def percentile_label(field: str) -> str:
+    """A percentile's label, `P50` for `p50` and `P1` for `p01`; any other name unchanged."""
+
+    match = _PERCENTILE_FIELD_RE.match(field)
+
+    return f"P{int(match.group(1))}" if match else field
+
+
+def null_share(stats: dict[str, Any], scope: ScanScope | None) -> str | None:
+    """`0.4%`, `none` or `none over the rows scanned`; None for a NOT NULL column with no nulls.
+
+    Decided on the count, since SPEC 2.2.6 lifts a non-zero rate off 0.
+    """
+
+    null_count = column_value(stats, "null_count")
+    null_rate = column_value(stats, "null_rate")
+
+    if not _is_number(null_count) or not _is_number(null_rate):
+        return None
+
+    if null_count == 0:
+        return qualify("none", scope) if column_value(stats, "nullable") is True else None
+
+    return spell_percent(null_rate)
+
+
+def _fact(text: str, *keys: str) -> Rendered:
+    return Rendered(text, frozenset(keys))
+
+
+def _qualified(fact: Rendered, scope: ScanScope | None) -> Rendered:
+    """`qualify` on a fact, recording the clause's term when it applies."""
+
+    if scope is None:
+        return fact
+
+    return Rendered(qualify(fact.text, scope), fact.terms | {"over_the_rows_scanned"})
 
 
 def _base_template(
     classification: str,
     stats: dict[str, Any],
-    fk_target: str | None,
     redaction: str | None,
     params: dict[str, Any],
     scope: ScanScope | None,
-) -> str:
+    total: int | None,
+    rows: int | None,
+) -> list[Rendered]:
     """Dispatch on classification; the branches that render literals also read the marker.
 
     Read once here, not inside each helper: a branch that forgets to consult it renders a
@@ -83,30 +168,47 @@ def _base_template(
         return _boolean_notes(stats, redaction)
 
     if classification == "categorical":
-        return _categorical_notes(stats, redaction, params, scope)
+        return _categorical_notes(stats, redaction, params, scope, total)
 
     if classification == "foreign_key_candidate":
-        note = _fk_note(classification, fk_target, column_value(stats, "distribution"))
+        entries = _value_entries(stats)
+        redacted = [_redacted_label(redaction)] if redaction is not None else []
 
-        return note + _length_suffix(stats)
+        if entries and list_is_complete(stats):
+            values = [_complete_values(stats, entries, scope, total, redaction)]
+        elif entries:
+            values = [_truncated_values(stats, entries, total, redaction)]
+        else:
+            values = []
+
+        return [
+            *redacted,
+            *values,
+            *_distribution_suffix(stats, total, redaction),
+            *_length_suffix(stats),
+        ]
 
     if classification == "temporal":
-        return _temporal_notes(stats, redaction, scope)
+        return _temporal_notes(stats, redaction, scope, total, rows)
 
     if classification == "numeric":
-        return _numeric_notes(stats, redaction)
+        return _numeric_notes(stats, redaction, total, rows)
 
     if classification == "text":
-        return _text_notes(stats, redaction, params, scope)
+        return _text_notes(stats, redaction, params, scope, total, rows)
 
     if classification == "json":
-        return "json" + _types_suffix(stats) + _parts_suffix(stats)
+        return [_fact("json", "classification:json"), *_types_suffix(stats), *_parts_suffix(stats)]
 
     if classification == "composite":
-        return "composite" + _parts_suffix(stats) + _empty_arrays_suffix(stats)
+        return [
+            _fact("composite", "classification:composite"),
+            *_parts_suffix(stats),
+            *_census(stats, rows, (("empty_count", "empty arrays", "empty_arrays"),)),
+        ]
 
     if classification == "binary":
-        return "binary" + _length_suffix(stats)
+        return [_fact("binary", "classification:binary"), *_length_suffix(stats)]
 
     if classification == "spatial":
         return _spatial_notes(stats)
@@ -115,29 +217,28 @@ def _base_template(
         return _vector_notes(stats)
 
     # unsupported and any future fallback
-    return column_value(stats, "sql_type") or "unsupported"
+    return [_fact(column_value(stats, "sql_type") or "unsupported")]
 
 
-def _fk_note(
-    classification: str,
-    fk_target: str | None,
-    distribution: str | None = None,
-) -> str:
-    """The FK branch (SPEC 2.3).
+def _fk_note(classification: str, fk_targets: list[str] | None) -> list[Rendered]:
+    """Every edge the column references, surest first, on any classification (SPEC 2.3).
 
-    `distribution` is the one word the full template adds beside the target; a caller that
-    renders its own badge passes none, so the fact is never stated twice.
+    A foreign-key candidate with no edge reads as the bare candidate flag.
     """
 
-    if classification != "foreign_key_candidate":
-        return ""
+    if not fk_targets:
+        return (
+            [_fact("FK candidate", "fk_candidate")]
+            if classification == "foreign_key_candidate"
+            else []
+        )
 
-    base = f"FK -> {fk_target}" if fk_target else "FK candidate"
+    detections = {f"detection:{m[1]}" for t in fk_targets if (m := _DETECTION_RE.search(t))}
 
-    return f"{base}, {distribution}" if distribution else base
+    return [_fact("FK: " + LIST_SEPARATOR.join(fk_targets), "fk", *detections)]
 
 
-def _boolean_notes(stats: dict[str, Any], redaction: str | None) -> str:
+def _boolean_notes(stats: dict[str, Any], redaction: str | None) -> list[Rendered]:
     """True/false split, or the two group sizes when the labels were withheld.
 
     Every redaction primitive breaks the pair lookup while leaving counts intact, and
@@ -145,20 +246,16 @@ def _boolean_notes(stats: dict[str, Any], redaction: str | None) -> str:
     """
 
     if redaction is not None:
-        sizes = " / ".join(str(count) for _, count in _value_entries(stats))
-
-        return (
-            f"{_redacted_label(redaction)}, counts {sizes}" if sizes else _redacted_label(redaction)
-        )
+        return [_redacted_label(redaction), *_withheld_values(_value_entries(stats))]
 
     if read_column_field(stats, "values").state is not Absence.PRESENT:
-        return "boolean"
+        return [_fact("boolean", "classification:boolean")]
 
     counts = _value_counts(stats)
     n_true = counts.get(True, counts.get("true", 0))
     n_false = counts.get(False, counts.get("false", 0))
 
-    return f"{n_true} true / {n_false} false"
+    return [_fact(f"true: {n_true}", "true"), _fact(f"false: {n_false}", "false")]
 
 
 def _categorical_notes(
@@ -166,89 +263,83 @@ def _categorical_notes(
     redaction: str | None = None,
     params: dict[str, Any] | None = None,
     scope: ScanScope | None = None,
-) -> str:
-    cardinality = column_value(stats, "cardinality")
-    distinct = _distinct(stats, "categorical")
+    total: int | None = None,
+) -> list[Rendered]:
     entries = _value_entries(stats)
-    distribution = _distribution_suffix(stats)
-    length = _length_suffix(stats)
+    complete = list_is_complete(stats)
+    distribution = _distribution_suffix(stats, total, redaction)
+    redacted = [_redacted_label(redaction)] if redaction is not None else []
 
-    # The distinct count is a measurement, not a label, so redaction drops only the values.
-    if redaction is not None:
-        return f"{distinct}, {_redacted_label(redaction)}{distribution}{length}"
+    if complete and (entries or read_column_field(stats, "values").state is Absence.PRESENT):
+        values = _complete_values(stats, entries, scope, total, redaction)
 
-    if list_is_complete(stats):
-        distinct = qualify(distinct, scope)
+        return [*redacted, values, *distribution, *_length_suffix(stats)]
 
     if not entries:
-        return f"{distinct}{distribution}{length}"
+        return [*redacted, *_distinct(stats), *distribution, *_length_suffix(stats)]
 
-    if list_is_complete(stats):
-        return f"{distinct}: " + _exhaustive_keys(stats, entries) + distribution + length
+    values = _truncated_values(stats, entries, total, redaction)
 
-    total = _non_null_total(stats, entries)
-    parts = [
-        f"{spell_value(value)} ({spell_percent(count / total)}{_spelling_suffix(spellings)})"
-        for value, count, spellings in _grouped_entries(stats, entries)[:3]
-    ]
-
-    return (
-        f"{distinct}: "
-        + ", ".join(parts)
-        + ("..." if cardinality is None else f"... ({cardinality} total)")
-        + distribution
-        + _top_n_values_suffix(params)
-        + length
-    )
+    return [*redacted, values, *distribution, *_length_suffix(stats)]
 
 
 def _temporal_notes(
     stats: dict[str, Any],
     redaction: str | None = None,
     scope: ScanScope | None = None,
-) -> str:
+    total: int | None = None,
+    rows: int | None = None,
+) -> list[Rendered]:
     percentiles = column_value(stats, "percentiles") or {}
     rng = column_value(stats, "range") or {}
     freshness = column_value(stats, "freshness") or {}
-    p01 = percentiles.get("p01") or rng.get("min")
-    p99 = percentiles.get("p99") or rng.get("max")
+    low, high = rng.get("min"), rng.get("max")
+    p01, p99 = percentiles.get("p01"), percentiles.get("p99")
     span = rng.get("span_days")
     freshness_class = freshness.get("classification")
 
-    bits = []
+    facts: list[Rendered] = []
 
     # Bounds carry the substitution; span_days/freshness are derived arithmetic, coarsened
     # rather than substituted (SPEC 2.2.9).
     if redaction is not None:
-        bits.append(_redacted_label(redaction))
+        facts.append(_redacted_label(redaction))
 
         if span is not None:
-            bits.append(f"{span} day span")
-    elif p01 is not None and p99 is not None:
-        if span is not None:
-            bits.append(f"range {p01} -> {p99} ({span} days)")
-        else:
-            bits.append(f"range {p01} -> {p99}")
+            facts.append(_fact(f"span: {span} days", "span"))
+    else:
+        if low is not None and high is not None:
+            days = f" ({span} days)" if span is not None else ""
+            facts.append(
+                _fact(f"range: {spell_literal(low)} -> {spell_literal(high)}{days}", "range"),
+            )
 
-    census = _degenerate_census_suffix(stats)
+        if p01 is not None and p99 is not None and (p01, p99) != (low, high):
+            band = f"{spell_literal(p01)} -> {spell_literal(p99)}"
+            facts.append(_fact(f"P1-P99: {band}", "percentile_band"))
 
-    if census:
-        bits.append(census)
-
-    distribution = column_value(stats, "distribution")
-
-    if distribution:
-        bits.append(distribution)
-        bits.append(_dominant_value_suffix(stats, distribution, redaction))
+    facts += _sampled_values(stats, total, redaction)
+    facts += _census(stats, rows, (("quantized_count", "at midnight", "at_midnight"),))
+    facts += _distribution_suffix(stats, total, redaction)
 
     # No bucket means "not measured", so a column with no `freshness` block gets no verdict.
     if freshness_class:
-        bits.append(qualify(f"freshness {freshness_class}", scope))
+        freshness_fact = _fact(
+            f"freshness: {enum_word(freshness_class)}",
+            "freshness",
+            f"freshness:{freshness_class}",
+        )
+        facts.append(_qualified(freshness_fact, scope))
 
-    return ", ".join(bit for bit in bits if bit) if bits else "temporal"
+    return facts or [_fact("temporal", "classification:temporal")]
 
 
-def _numeric_notes(stats: dict[str, Any], redaction: str | None = None) -> str:
+def _numeric_notes(
+    stats: dict[str, Any],
+    redaction: str | None = None,
+    total: int | None = None,
+    rows: int | None = None,
+) -> list[Rendered]:
     """Range, median, mean and shape - under redaction only the count profile remains, so
     `distribution` stays and the bounds, mean and degenerate counts are absent (SPEC 2.2.9).
     """
@@ -258,40 +349,41 @@ def _numeric_notes(stats: dict[str, Any], redaction: str | None = None) -> str:
     mn, mx = rng.get("min"), rng.get("max")
     p50 = percentiles.get("p50")
     mean = column_value(stats, "mean")
-    distribution = column_value(stats, "distribution")
-    census = _degenerate_census_suffix(stats)
+    sql_type = column_value(stats, "sql_type")
+    whole = isinstance(sql_type, str) and is_integer_type(sql_type)
+    census = _census(
+        stats,
+        rows,
+        (
+            ("zero_count", "zeros", "zeros"),
+            ("negative_count", "negatives", "negatives"),
+            *([] if whole else [("quantized_count", "whole numbers", "whole_numbers")]),
+        ),
+    )
+    distribution = _distribution_suffix(stats, total, redaction)
 
     if redaction is not None:
-        bits = [_redacted_label(redaction)]
+        facts = [_redacted_label(redaction)]
 
         if mean is not None:
-            bits.append(f"mean={_statistic(mean)}")
+            facts.append(_fact(f"mean: {_statistic(mean)}", "mean"))
 
-        bits.append(census)
+        return [*facts, *_sampled_values(stats, total, redaction), *census, *distribution]
 
-        if distribution:
-            bits.append(distribution)
-
-        return ", ".join(bit for bit in bits if bit)
-
-    bits = []
+    facts = []
 
     if mn is not None and mx is not None:
-        bits.append(f"range {_statistic(mn)}..{_statistic(mx)}")
+        facts.append(_fact(f"range: {_statistic(mn)} -> {_statistic(mx)}", "range"))
 
     if p50 is not None:
-        bits.append(f"p50={_statistic(p50)}")
+        facts.append(_fact(f"P50: {_statistic(p50)}", "percentile:50"))
 
     if mean is not None:
-        bits.append(f"mean={_statistic(mean)}")
+        facts.append(_fact(f"mean: {_statistic(mean)}", "mean"))
 
-    bits.append(census)
+    facts += [*_sampled_values(stats, total, redaction), *census, *distribution]
 
-    if distribution:
-        bits.append(distribution)
-        bits.append(_dominant_value_suffix(stats, distribution, redaction))
-
-    return ", ".join(bit for bit in bits if bit) if bits else "numeric"
+    return facts or [_fact("numeric", "classification:numeric")]
 
 
 def _text_notes(
@@ -299,206 +391,240 @@ def _text_notes(
     redaction: str | None = None,
     params: dict[str, Any] | None = None,
     scope: ScanScope | None = None,
-) -> str:
+    total: int | None = None,
+    rows: int | None = None,
+) -> list[Rendered]:
     """Top values and shape; `empty_count` needs no value list, so it reaches a prose column too."""
 
     entries = _value_entries(stats)
-    distribution = _distribution_suffix(stats)
-    census = _degenerate_census_suffix(stats)
-    census_suffix = f", {census}" if census else ""
+    distribution = _distribution_suffix(stats, total, redaction)
+    census = _census(stats, rows, (("empty_count", "empty strings", "empty_strings"),))
     length = _length_suffix(stats)
 
     if not entries:
-        return f"text{distribution}{census_suffix}{length}"
-
-    if redaction is not None:
-        counts = ", ".join(str(count) for _, count in entries[:TEXT_TOP_VALUES_LIMIT])
-
-        return f"{_redacted_label(redaction)}, top counts {counts}{distribution}{census_suffix}{length}"
+        return [_fact("text", "classification:text"), *distribution, *census, *length]
 
     if list_is_complete(stats):
-        return (
-            f"{qualify(_distinct(stats, 'text'), scope)}: "
-            + _exhaustive_keys(stats, entries)
-            + distribution
-            + census_suffix
-            + length
-        )
+        values = _complete_values(stats, entries, scope, total, redaction)
+        redacted = [_redacted_label(redaction)] if redaction is not None else []
 
-    parts = [
-        f"{spell_value(value)} ({count}{_spelling_suffix(spellings)})"
-        for value, count, spellings in _grouped_entries(stats, entries)[:TEXT_TOP_VALUES_LIMIT]
+        return [*redacted, values, *distribution, *census, *length]
+
+    values = _truncated_values(stats, entries, total, redaction)
+    redacted = [_redacted_label(redaction)] if redaction is not None else []
+
+    return [*redacted, values, *distribution, *census, *length]
+
+
+def _distinct(stats: dict[str, Any]) -> list[Rendered]:
+    cardinality = column_value(stats, "cardinality")
+
+    return [] if cardinality is None else [_fact(f"distinct: {cardinality}", "distinct")]
+
+
+def _sampled_values(
+    stats: dict[str, Any],
+    total: int | None,
+    redaction: str | None,
+) -> list[Rendered]:
+    """A numeric or temporal column's frequency list, wherever it is not the whole domain."""
+
+    entries = _value_entries(stats)
+
+    if not entries or list_is_complete(stats):
+        return []
+
+    return [_truncated_values(stats, entries, total, redaction)]
+
+
+def _truncated_values(
+    stats: dict[str, Any],
+    entries: list[tuple[Any, int]],
+    total: int | None,
+    redaction: str | None,
+) -> Rendered:
+    """The most frequent categories with their shares and the share they cover together.
+
+    No figure counts or mentions an entry the list does not show.
+    """
+
+    shown = _grouped_entries(stats, entries)[:NOTES_TOP_VALUES_LIMIT]
+    share_of = total or sum(count for _, count in entries) or 1
+    items = [
+        f"{'withheld' if redaction is not None else spell_literal(value)} "
+        f"({spell_percent(count / share_of)}{_spelling_suffix(spellings)})"
+        for value, count, spellings in shown
     ]
+    covered = spell_percent(sum(count for _, count, _ in shown) / share_of)
+    keys = ("values_top", "withheld") if redaction is not None else ("values_top",)
 
-    return (
-        "top: "
-        + ", ".join(parts)
-        + distribution
-        + _top_n_values_suffix(params)
-        + census_suffix
-        + length
+    return _fact(
+        f"values (top {len(shown)}, covering {covered}): {LIST_SEPARATOR.join(items)}",
+        *keys,
     )
 
 
-def _distinct(stats: dict[str, Any], fallback: str) -> str:
-    cardinality = column_value(stats, "cardinality")
-
-    return fallback if cardinality is None else f"{cardinality} distinct"
-
-
-def _top_n_values_suffix(params: dict[str, Any] | None) -> str:
-    """The configured `top_n_values` limit, beside a value list truncated at it (SPEC 2.5)."""
-
-    top_n = (params or {}).get("top_n_values")
-
-    if isinstance(top_n, int) and not isinstance(top_n, bool):
-        return f" (top {top_n} configured)"
-
-    return ""
-
-
-def _distribution_suffix(stats: dict[str, Any]) -> str:
+def _distribution_suffix(
+    stats: dict[str, Any],
+    total: int | None,
+    redaction: str | None,
+) -> list[Rendered]:
     """The shape verdict (SPEC 2.2.5), schema-required on every classification that has it.
 
-    Survives every redaction primitive - a measurement over shape, not a bound on a value.
+    Survives redaction; a dominant value is named with its share, as `withheld` when redacted.
     """
 
     distribution = column_value(stats, "distribution")
 
-    return f", {distribution}" if distribution else ""
+    if not distribution:
+        return []
+
+    text = f"distribution: {enum_word(distribution)}"
+    grouped = _grouped_entries(stats, _value_entries(stats))
+
+    if distribution == "dominant_value" and grouped:
+        value, count, _ = grouped[0]
+        shown = "withheld" if redaction is not None else spell_literal(value)
+        share = f" ({spell_percent(count / total)})" if total else ""
+        text += f" {shown}{share}"
+
+    return [_fact(text, "distribution", f"distribution:{distribution}")]
 
 
-def _dominant_value_suffix(
+def _complete_values(
     stats: dict[str, Any],
-    distribution: str,
-    redaction: str | None,
-) -> str:
-    """Names the value behind a `dominant_value` verdict, from the column's own `values` - silent
-    on every other distribution, and on a redacted column, whose literal is withheld.
+    entries: list[tuple[Any, int]],
+    scope: ScanScope | None,
+    total: int | None,
+    redaction: str | None = None,
+) -> Rendered:
+    """A complete list, each category with its share of the non-null scanned rows."""
+
+    key = "values_complete" if scope is None else "values_complete_scanned"
+    label = "values (complete)" if scope is None else "values (complete over the rows scanned)"
+    share_of = total or sum(count for _, count in entries) or 1
+    items = []
+
+    for value, count, spellings in _grouped_entries(stats, entries):
+        shown = "withheld" if redaction is not None else spell_literal(value)
+        items.append(f"{shown} ({spell_percent(count / share_of)}{_spelling_suffix(spellings)})")
+
+    keys = (key, "withheld") if redaction is not None and items else (key,)
+
+    return _fact(f"{label}: {LIST_SEPARATOR.join(items) or 'none'}", *keys)
+
+
+def _census(
+    stats: dict[str, Any],
+    rows: int | None,
+    members: tuple[tuple[str, str, str], ...],
+) -> list[Rendered]:
+    """Each census member present and non-zero, as its share of the non-null scanned rows.
+
+    The bare count stands where no population is readable.
     """
 
-    if distribution != "dominant_value" or redaction is not None:
-        return ""
+    facts = []
 
-    entries = _value_entries(stats)
+    for field, label, key in members:
+        count = column_value(stats, field)
 
-    return f"top {spell_value(entries[0][0])}" if entries else ""
+        if isinstance(count, int) and not isinstance(count, bool) and count:
+            share = spell_percent(count / rows) if rows else spell_number(count)
+            facts.append(_fact(f"{label}: {share}", key))
 
-
-def _degenerate_census_suffix(stats: dict[str, Any]) -> str:
-    """The zero/negative/empty/quantized census, silent on any member absent or measured zero."""
-
-    bits = []
-    zero = column_value(stats, "zero_count")
-    negative = column_value(stats, "negative_count")
-    empty = column_value(stats, "empty_count")
-    quantized = column_value(stats, "quantized_count")
-
-    if zero:
-        bits.append(f"{zero} zero")
-
-    if negative:
-        bits.append(f"{negative} negative")
-
-    if empty:
-        bits.append(f"{empty} empty")
-
-    if quantized:
-        bits.append(f"{quantized} quantized")
-
-    return ", ".join(bits)
+    return facts
 
 
-def _empty_arrays_suffix(stats: dict[str, Any]) -> str:
-    empty = column_value(stats, "empty_count")
-
-    return f", {spell_number(empty)} empty" if isinstance(empty, int) and empty else ""
-
-
-def _types_suffix(stats: dict[str, Any]) -> str:
+def _types_suffix(stats: dict[str, Any]) -> list[Rendered]:
     types = column_value(stats, "types")
 
     if not isinstance(types, dict) or not types:
-        return ""
+        return []
 
-    return " (" + ", ".join(f"{name} {spell_number(n)}" for name, n in types.items()) + ")"
+    return [_fact(f"{name}: {spell_number(n)}") for name, n in types.items()]
 
 
-def _parts_suffix(stats: dict[str, Any]) -> str:
+def _parts_suffix(stats: dict[str, Any]) -> list[Rendered]:
     found = column_value(stats, "parts_found")
     parts = column_value(stats, "parts")
 
     if not isinstance(found, int):
-        return ""
+        return []
 
     listed = len(parts) if isinstance(parts, dict) else 0
 
     if listed == found:
-        return f", {spell_number(found)} parts"
+        return [_fact(f"parts: {spell_number(found)}", "parts")]
 
-    return f", {spell_number(listed)} of {spell_number(found)} parts listed"
+    return [_fact(f"parts: {spell_number(listed)} of {spell_number(found)} profiled", "parts")]
 
 
-def _vector_notes(stats: dict[str, Any]) -> str:
+def _vector_notes(stats: dict[str, Any]) -> list[Rendered]:
     dimension = column_value(stats, "dimension")
     norm = column_value(stats, "norm")
     zero_count = column_value(stats, "zero_count")
-    note = "vector"
+    facts = [_fact("vector", "classification:vector")]
 
     if isinstance(dimension, dict):
         lo, hi = dimension["min"], dimension["max"]
-        note += f", dimension {lo}" if lo == hi else f", mixed dimension {lo}-{hi}"
+        facts.append(
+            _fact(f"dimension: {lo}", "dimension")
+            if lo == hi
+            else _fact(f"mixed dimension: {lo} -> {hi}", "mixed_dimension"),
+        )
 
     if isinstance(norm, dict) and all(
         abs(norm[bound] - 1) <= UNIT_NORM_TOLERANCE for bound in ("min", "max")
     ):
-        note += ", unit-normalized: inner product ranks as cosine"
+        facts.append(_fact("unit-normalized", "unit_normalized"))
 
     if isinstance(zero_count, int) and zero_count:
-        note += f", {spell_number(zero_count)} zero vectors"
+        facts.append(_fact(f"zero vectors: {spell_number(zero_count)}", "zero_vectors"))
 
-    return note
+    return facts
 
 
-def _spatial_notes(stats: dict[str, Any]) -> str:
+def _spatial_notes(stats: dict[str, Any]) -> list[Rendered]:
     geometry = column_value(stats, "geometry")
-    note = "spatial"
+    facts = [_fact("spatial", "classification:spatial")]
 
     if isinstance(geometry, dict):
-        kinds = ", ".join(f"{k['kind']} {spell_number(k['count'])}" for k in geometry["kinds"])
-        note += f": {kinds}" if kinds else ""
+        facts += [_fact(f"{k['kind']}: {spell_number(k['count'])}") for k in geometry["kinds"]]
 
         if srids := geometry.get("srids"):
-            note += "; srid " + ", ".join(str(s["srid"]) for s in srids)
+            srid = LIST_SEPARATOR.join(str(s["srid"]) for s in srids)
+            facts.append(_fact(f"srid: {srid}", "srid"))
 
     extent = column_value(stats, "extent")
 
     if isinstance(extent, dict):
-        note += (
-            f"; extent x {_statistic(extent['min_x'])}..{_statistic(extent['max_x'])}, "
-            f"y {_statistic(extent['min_y'])}..{_statistic(extent['max_y'])}"
-        )
+        x = f"{_statistic(extent['min_x'])} -> {_statistic(extent['max_x'])}"
+        y = f"{_statistic(extent['min_y'])} -> {_statistic(extent['max_y'])}"
+        facts += [_fact(f"extent x: {x}", "extent_x"), _fact(f"extent y: {y}", "extent_y")]
 
-    return note
+    return facts
 
 
-def _length_suffix(stats: dict[str, Any]) -> str:
+def _length_suffix(stats: dict[str, Any]) -> list[Rendered]:
     """The length span (SPEC 2.2.4) - bytes on a binary type - silent wherever none is carried."""
 
     length = column_value(stats, "length")
 
     if not isinstance(length, dict):
-        return ""
+        return []
 
     mn, mx, avg = length.get("min"), length.get("max"), length.get("avg")
 
     if mn is None or mx is None or avg is None:
-        return ""
+        return []
 
     sql_type = column_value(stats, "sql_type")
     unit = " bytes" if isinstance(sql_type, str) and is_binary_type(sql_type) else ""
 
-    return f", length {_statistic(mn)}..{_statistic(mx)}{unit} (avg {_statistic(avg)})"
+    span = f"{_statistic(mn)} -> {_statistic(mx)}{unit} (avg {_statistic(avg)})"
+
+    return [_fact(f"length: {span}", "length")]
 
 
 def _redaction_primitive(stats: dict[str, Any]) -> str | None:
@@ -513,36 +639,53 @@ def _redaction_primitive(stats: dict[str, Any]) -> str | None:
     return marker if isinstance(marker, str) and marker else None
 
 
-def _redacted_label(primitive: str) -> str:
+def _redacted_label(primitive: str) -> Rendered:
     """How a withheld cell announces itself, naming the primitive the artifact declares."""
 
-    return f"redacted ({primitive})"
+    return _fact(f"redacted: {primitive}", "redacted", f"redaction:{primitive}")
 
 
-def _candidate_key_suffix(stats: dict[str, Any], scope: ScanScope | None = None) -> str:
+def _withheld_values(entries: list[tuple[Any, int]]) -> list[Rendered]:
+    if not entries:
+        return []
+
+    listed = LIST_SEPARATOR.join(f"withheld ({count})" for _, count in entries)
+
+    return [_fact(f"values: {listed}", "values", "withheld")]
+
+
+def _candidate_key_suffix(stats: dict[str, Any], scope: ScanScope | None = None) -> list[Rendered]:
     """A suffix, not a branch: `inferred.candidate_key` (SPEC 4.2) rides every classification.
 
     Names the exception when the ratio falls short of 1.0, so the cell does not overclaim.
     """
 
     if not column_value(stats, "inferred.candidate_key"):
-        return ""
+        return []
 
     exception = column_value(stats, "inferred.candidate_key_exception")
 
     if exception is not None:
-        return qualify(f", candidate key ({exception.replace('_', ' ')})", scope)
+        fact = _fact(
+            f"candidate key ({enum_word(exception)})",
+            "candidate_key",
+            f"candidate_key_exception:{exception}",
+        )
 
-    return qualify(", candidate key", scope)
+        return [_qualified(fact, scope)]
+
+    return [_qualified(_fact("candidate key", "candidate_key"), scope)]
 
 
-def _physical_layout_key_suffix(stats: dict[str, Any]) -> str:
+def _physical_layout_key_suffix(stats: dict[str, Any]) -> list[Rendered]:
     """A suffix, not a branch: the marker is orthogonal to every classification above."""
 
-    return ", cluster/partition key" if column_value(stats, "physical_layout_key") else ""
+    marked = column_value(stats, "physical_layout_key")
+
+    return [_fact("cluster/partition key", "cluster_partition_key")] if marked else []
 
 
-def _populated_suffix(stats: dict[str, Any]) -> str:
+def _populated_suffix(stats: dict[str, Any]) -> list[Rendered]:
     """A suffix: the window the data itself shows this column non-null, dated against the
     table's own anchor column (SPEC 2.2.4) - never a claim about when the schema changed.
     """
@@ -550,14 +693,20 @@ def _populated_suffix(stats: dict[str, Any]) -> str:
     populated = column_value(stats, "populated")
 
     if not isinstance(populated, dict):
-        return ""
+        return []
 
     start, end = populated.get("from"), populated.get("to")
 
-    return f", populated {start} to {end}" if start and end else ""
+    if not (start and end):
+        return []
+
+    return [_fact(f"populated: {spell_literal(start)} -> {spell_literal(end)}", "populated")]
 
 
-def _looks_like_suffix(stats: dict[str, Any], params: dict[str, Any] | None = None) -> str:
+def _looks_like_suffix(
+    stats: dict[str, Any],
+    params: dict[str, Any] | None = None,
+) -> list[Rendered]:
     """A suffix: the detected shape (SPEC 4.1), present only where SPEC 4.1.5 samples for it -
     absent a verdict, `_looks_like_candidate_suffix` covers the near-miss instead.
     """
@@ -567,6 +716,8 @@ def _looks_like_suffix(stats: dict[str, Any], params: dict[str, Any] | None = No
     if not pattern:
         return _looks_like_candidate_suffix(stats)
 
+    word = enum_word(pattern)
+    keys = ("looks_like", f"looks_like:{pattern}")
     sampled = column_value(stats, "inferred.sampled")
     matched = column_value(stats, "inferred.matched")
     has_evidence = (
@@ -579,18 +730,18 @@ def _looks_like_suffix(stats: dict[str, Any], params: dict[str, Any] | None = No
     has_configured = isinstance(sample_size, int) and not isinstance(sample_size, bool)
 
     if has_evidence and has_configured:
-        return f", looks like {pattern} ({matched} of {sampled} sampled, {sample_size} configured)"
+        evidence = f" ({matched} of {sampled} sampled, {sample_size} configured)"
+    elif has_evidence:
+        evidence = f" ({matched} of {sampled} sampled)"
+    elif has_configured:
+        evidence = f" (drawn {sample_size})"
+    else:
+        evidence = ""
 
-    if has_evidence:
-        return f", looks like {pattern} ({matched} of {sampled} sampled)"
-
-    if has_configured:
-        return f", looks like {pattern} (drawn {sample_size})"
-
-    return f", looks like {pattern}"
+    return [_fact(f"looks like: {word}{evidence}", *keys)]
 
 
-def _looks_like_candidate_suffix(stats: dict[str, Any]) -> str:
+def _looks_like_candidate_suffix(stats: dict[str, Any]) -> list[Rendered]:
     """`looks_like`'s near-miss (SPEC 4.1.3): the best-scoring pattern below the verdict bar,
     worded "near" so it cannot read as the verdict, with the share named against the sample.
     """
@@ -599,28 +750,33 @@ def _looks_like_candidate_suffix(stats: dict[str, Any]) -> str:
     share = column_value(stats, "inferred.looks_like_candidate_share")
 
     if not candidate or not isinstance(share, (int, float)) or isinstance(share, bool):
-        return ""
+        return []
 
-    return f", near {candidate} ({spell_percent(share)} of sampled values, no verdict)"
+    text = f"near: {enum_word(candidate)} ({spell_percent(share)} of sampled values, no verdict)"
+
+    return [_fact(text, "near", f"looks_like:{candidate}")]
 
 
-def _sensitivity_suffix(stats: dict[str, Any]) -> str:
+def _sensitivity_suffix(stats: dict[str, Any]) -> list[Rendered]:
     """A suffix, a detection and never a verdict: SPEC 4.4 gates redaction, it does not rule."""
 
     category = column_value(stats, "inferred.sensitivity")
 
-    return f", {category} detected" if category else ""
+    if not category:
+        return []
+
+    return [_fact(f"detected: {enum_word(category)}", "detected", f"sensitivity:{category}")]
 
 
-def _epoch_unit_suffix(stats: dict[str, Any]) -> str:
+def _epoch_unit_suffix(stats: dict[str, Any]) -> list[Rendered]:
     """A suffix: an integer storing a Unix epoch instant rather than a plain quantity (SPEC 4.5)."""
 
     unit = column_value(stats, "inferred.epoch_unit")
 
-    return f", epoch ({unit})" if unit else ""
+    return [_fact(f"epoch: {enum_word(unit)}", "epoch", f"epoch_unit:{unit}")] if unit else []
 
 
-def _unmeasured_suffix(stats: dict[str, Any]) -> str:
+def _unmeasured_suffix(stats: dict[str, Any]) -> list[Rendered]:
     """A suffix: which required field this run attempted and could not obtain (SPEC 2.2.4).
 
     Leads the suffix chain, since it says the fields it names are unknown rather than absent -
@@ -629,107 +785,120 @@ def _unmeasured_suffix(stats: dict[str, Any]) -> str:
 
     fields = column_value(stats, "unmeasured")
 
-    return f", unmeasured: {', '.join(fields)}" if fields else ""
+    return [_field_list("unmeasured", fields)] if fields else []
 
 
-def _unrepresentable_suffix(stats: dict[str, Any]) -> str:
+def _unrepresentable_suffix(stats: dict[str, Any]) -> list[Rendered]:
     """A suffix: which emitted bound falls outside the representable calendar range (SPEC 2.2.4)."""
 
     fields = column_value(stats, "unrepresentable")
 
-    return f", unrepresentable: {', '.join(fields)}" if fields else ""
+    return [_field_list("unrepresentable", fields)] if fields else []
 
 
-def _null_rate_suffix(stats: dict[str, Any]) -> str:
-    """The observed null share, or a bare `nullable` marker when the rate falls under display.
+def _field_list(key: str, fields: list[Any]) -> Rendered:
+    listed = LIST_SEPARATOR.join(percentile_label(str(field)) for field in fields)
+    percentiles = (percentile_key(str(field)) for field in fields)
 
-    A sub-threshold rate is suppressed; the schema's own nullability is not, or the column
-    would read identically to a `NOT NULL` one.
-    """
-
-    null_rate = column_value(stats, "null_rate") or 0.0
-
-    if not isinstance(null_rate, (int, float)) or isinstance(null_rate, bool):
-        return ""
-
-    if null_rate < NULL_RATE_DISPLAY_THRESHOLD:
-        return ", nullable" if column_value(stats, "nullable") else ""
-
-    return f", {spell_percent(null_rate)} null"
+    return _fact(f"{key}: {listed}", key, *(p for p in percentiles if p))
 
 
-def _coverage_method_suffix(stats: dict[str, Any]) -> str:
+def _null_suffix(stats: dict[str, Any], scope: ScanScope | None) -> list[Rendered]:
+    share = null_share(stats, scope)
+
+    if share is None:
+        return []
+
+    return [
+        _fact(
+            f"nulls: {share}",
+            "nulls",
+            *(["over_the_rows_scanned"] if scope and share.startswith("none") else []),
+        ),
+    ]
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool)
+
+
+def _coverage_method_suffix(stats: dict[str, Any]) -> list[Rendered]:
     """A suffix: `bounded` means the coverage figure itself is a clamp, not a raw measurement.
 
     Silent on `measured`, exactly as `cardinality_method` stays silent on `exact` (SPEC 2.2.4).
     """
 
-    return (
-        ", coverage bounded" if column_value(stats, "values_coverage_method") == "bounded" else ""
-    )
+    bounded = column_value(stats, "values_coverage_method") == "bounded"
+
+    return [_fact("coverage bounded", "coverage_bounded")] if bounded else []
 
 
-def _non_null_total(stats: dict[str, Any], entries: list[tuple[Any, int]]) -> int:
-    """Non-null rows the shares are taken against.
+def _non_null_rows(
+    stats: dict[str, Any],
+    row_count: int | None,
+    scope: ScanScope | None,
+) -> int | None:
+    """A part's occurrences, the rows scanned, else the table's row count, less the nulls.
 
-    Listed counts add up to the column only when the list is exhaustive, so a truncated one
-    recovers the total through its coverage instead.
+    None where none of them is readable.
     """
 
-    listed = sum(count for _, count in entries)
+    occurrences = column_value(stats, "occurrences")
+    population = occurrences if isinstance(occurrences, int) else rows_scanned(stats, scope)
+    population = population if isinstance(population, int) else row_count
+    nulls = column_value(stats, "null_count")
+
+    if not isinstance(population, int) or isinstance(population, bool):
+        return None
+
+    return population - (nulls if isinstance(nulls, int) else 0)
+
+
+def _non_null(stats: dict[str, Any], row_count: int | None, scope: ScanScope | None) -> int | None:
+    """Non-null rows a share is taken against, or None where nothing states them.
+
+    A complete list's sum (SPEC 2.2.5), a truncated one's sum over its coverage, else `_non_null_rows`.
+    """
+
+    listed = sum(count for _, count in _value_entries(stats))
     coverage = column_value(stats, "values_coverage")
+
+    if list_is_complete(stats):
+        return listed
 
     if isinstance(coverage, (int, float)) and not isinstance(coverage, bool) and 0 < coverage < 1:
         return max(round(listed / coverage), listed)
 
-    return listed or 1
+    return _non_null_rows(stats, row_count, scope)
 
 
 def _grouped_entries(
     stats: dict[str, Any],
     entries: list[tuple[Any, int]],
 ) -> list[tuple[Any, int, int]]:
-    """`(value, total, spellings)` per category - a spelling group reading as the one value it is.
+    """`(value, total, spellings)` per category, members folded into their canonical (SPEC 2.2.4).
 
-    Members fold into their canonical entry (SPEC 2.2.4), so a reader counting categories is
-    not counting spellings; an ungrouped value reports one spelling.
+    An ungrouped value, or one whose canonical is not listed, counts one spelling.
     """
 
-    members: dict[str, list[int]] = {}
-    grouped_away: set[str] = set()
-
-    for raw in column_value(stats, "values") or []:
-        if isinstance(raw, dict) and raw.get("spelling_of") is not None:
-            members.setdefault(str(raw["spelling_of"]), []).append(int(raw.get("count") or 0))
-            grouped_away.add(str(raw.get("value")))
-
+    groups = grouped_values(column_value(stats, "values") or [])
+    members = {value_key(entry.get("value")): spellings for entry, spellings in groups}
+    grouped_away = {value_key(m.get("value")) for _, spellings in groups for m in spellings}
     out = []
 
     for value, count in entries:
-        if str(value) in grouped_away:
+        if value_key(value) in grouped_away:
             continue
 
-        counts = members.get(str(value)) or []
-        out.append((value, count + sum(counts), len(counts) + 1))
+        spellings = members.get(value_key(value)) or []
+        total = count + sum(int(m.get("count") or 0) for m in spellings)
+        out.append((value, total, len(spellings) + 1))
 
     return out
 
 
 def _spelling_suffix(spellings: int) -> str:
     return f", {spellings} spellings" if spellings > 1 else ""
-
-
-def _exhaustive_keys(stats: dict[str, Any], entries: list[tuple[Any, int]]) -> str:
-    """The whole domain, one key per category."""
-
-    keys = [
-        spell_value(value)
-        if spellings == 1
-        else f"{spell_value(value)} ({total}{_spelling_suffix(spellings)})"
-        for value, total, spellings in _grouped_entries(stats, entries)
-    ]
-
-    return " / ".join(keys)
 
 
 def _value_entries(stats: dict[str, Any]) -> list[tuple[Any, int]]:
@@ -761,4 +930,4 @@ def _statistic(value: Any) -> str:
     if isinstance(value, int | float | Decimal) and not isinstance(value, bool):
         return spell_number(value)
 
-    return spell_value(value)
+    return spell_literal(value)

@@ -14,16 +14,16 @@ from dbprint.adapters.base import PhysicalLayout, PhysicalLayoutKey, UniqueKeyMe
 from dbprint.adapters.mock import MockAdapter, MockTable
 from dbprint.config import ConnectionConfig
 from dbprint.config.project import RuleConfig
-from dbprint.conformance import validate_print
 from dbprint.engine import Engine
-from tests.engine.test_orchestrator import _conn_config, _curator_fixture
+from tests._curator import conn_config, curator_fixture
+from tests._engine_run import conformance_errors
 
 
 VIEW = "public.curator"
 
 
 def _view_fixture(**changes: Any) -> dict[str, MockTable]:
-    fixture = _curator_fixture()
+    fixture = curator_fixture()
     fixture[VIEW] = replace(
         fixture[VIEW],
         type="view",
@@ -61,7 +61,7 @@ class _HookRecorder(MockAdapter):
 
 
 def _opted_in(tmp_path: Path, *rules: RuleConfig, **changes: Any) -> ConnectionConfig:
-    return replace(_conn_config(tmp_path), rules=rules, **changes)
+    return replace(conn_config(tmp_path), rules=rules, **changes)
 
 
 def _statistics(tmp_path: Path) -> dict[str, Any]:
@@ -73,12 +73,12 @@ def _manifest_entry(tmp_path: Path) -> dict[str, Any]:
 
 
 def _errors(tmp_path: Path) -> list[Any]:
-    return [i for i in validate_print(tmp_path / "primary") if i.severity == "error"]
+    return conformance_errors(tmp_path / "primary")
 
 
 def test_a_view_no_rule_opts_in_is_described_without_a_query(tmp_path: Path) -> None:
     adapter = _HookRecorder(_view_fixture())
-    Engine(adapter, _conn_config(tmp_path), tmp_path).generate()
+    Engine(adapter, conn_config(tmp_path), tmp_path).generate()
 
     assert _statistics(tmp_path)["catalog_only"] is True
     assert VIEW not in adapter.statistics
@@ -203,7 +203,7 @@ class _FailingRead(MockAdapter):
 
 
 def test_a_failed_read_fails_the_view_and_keeps_its_committed_file(tmp_path: Path) -> None:
-    Engine(MockAdapter(_view_fixture()), _conn_config(tmp_path), tmp_path).generate()
+    Engine(MockAdapter(_view_fixture()), conn_config(tmp_path), tmp_path).generate()
     committed = (tmp_path / "primary/public/curator/statistics.yaml").read_text()
     conn = _opted_in(tmp_path, RuleConfig(include=(VIEW,), read_rows=True))
     result = Engine(_FailingRead(_view_fixture()), conn, tmp_path).generate()

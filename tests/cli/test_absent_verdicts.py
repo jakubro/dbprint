@@ -10,6 +10,7 @@ import pytest
 from click.testing import CliRunner
 
 from dbprint.cli.main import main
+from dbprint.config.connections import env_var_name
 
 
 _PROJECT = """\
@@ -39,7 +40,7 @@ def test_a_broken_key_and_pattern_fail_the_check(
     con.close()
     (tmp_path / ".dbprint.yaml").write_text(_PROJECT)
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("DBPRINT_GARDEN_DATABASE", str(database))
+    monkeypatch.setenv(env_var_name("garden", "database"), str(database))
 
     generated = CliRunner().invoke(main, ["generate", "-q"])
     result = CliRunner().invoke(main, ["check", "-q", "--format", "json", *mode])

@@ -20,8 +20,8 @@ from dbprint.engine import Engine, GenerateRequest
 from dbprint.mcp import ServedConnections, dispatch
 from dbprint.mcp import resources as mcp_resources
 from dbprint.mcp.errors import McpError
-from tests.engine.test_failed_tables import _Failing
-from tests.engine.test_orchestrator import _conn_config, _curator_fixture
+from tests._curator import conn_config, curator_fixture
+from tests._failing import Failing
 
 
 NEVER = "public.extra"
@@ -40,8 +40,8 @@ connections:
 @pytest.fixture(scope="module")
 def project(tmp_path_factory: pytest.TempPathFactory) -> Path:
     root = tmp_path_factory.mktemp("failed_tables")
-    fixture = _curator_fixture()
-    conn = _conn_config(root / "prints")
+    fixture = curator_fixture()
+    conn = conn_config(root / "prints")
     Engine(MockAdapter(fixture), conn, root).generate()
 
     extra = replace(fixture[CARRIED], namespace_path=("public", "extra"))
@@ -53,7 +53,7 @@ def project(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return root
 
 
-class _Both(_Failing):
+class _Both(Failing):
     def __init__(self, fixture: dict[str, MockTable]) -> None:
         super().__init__(fixture, CARRIED, "extraction")
 
@@ -77,7 +77,7 @@ def _cli(project: Path, *args: str) -> tuple[int, str]:
 
 
 def _state(project: Path) -> ServedConnections:
-    conn = replace(_conn_config(project / "prints"), name="primary")
+    conn = replace(conn_config(project / "prints"), name="primary")
 
     return ServedConnections(served={"primary": conn}, default="primary")
 
@@ -176,7 +176,7 @@ def test_the_mcp_context_of_the_carried_one_carries_the_phrase(project: Path) ->
 
 def test_the_docs_site_names_both(project: Path) -> None:
     client = web.create_app(
-        [replace(_conn_config(project / "prints"), name="primary")],
+        [replace(conn_config(project / "prints"), name="primary")],
     ).test_client()
     index = client.get("/").data.decode()
     page = client.get(f"/t/primary/{CARRIED}").data.decode()

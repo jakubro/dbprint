@@ -19,18 +19,18 @@ from dbprint.adapters.base import TableMeta
 from dbprint.config import ConnectionConfig, StatisticsConfig, TableSettings
 from dbprint.spec import artifact_yaml
 from dbprint.spec.absence import Absence, block_value, column_value, read_table_block
+from dbprint.spec.artifacts import declared_artifacts, walkable_tables
 from dbprint.spec.fqn import split as split_fqn
 from dbprint.spec.parts import display
+from dbprint.spec.statistics_matrix import forbids
 from . import diff as diff_module
 from .baseline import (
-    declared_artifacts,
     failed_tables,
     load_baseline_manifest,
     missing_artifacts,
-    walkable_tables,
 )
 from .catalog_only import described_without_query
-from .freshness import age_days, parse_profiled_at
+from .freshness import age_days, is_stale, parse_profiled_at
 from .manifest_builder import ManifestTableEntry, profiling_params_dict, statistics_params_dict
 from .relationship_graph import IncomingFk, edge_detection
 from .result import TableResult
@@ -48,10 +48,6 @@ Disposition = Literal[
     "removed",
     "missing_artifact",
 ]
-
-# Classifications whose SPEC 2.2.3 row carries no cell value and forbids the `redacted`
-# marker itself, so a rule covering such a column resolves to no primitive.
-_NO_CELL_VALUE_CLASSIFICATIONS = frozenset({"json", "composite", "vector", "unsupported"})
 
 
 @dataclass(frozen=True)
@@ -332,7 +328,7 @@ def freshness(
     if age is None:
         return FreshnessVerdict(fresh=False, reason="profiled_at unreadable")
 
-    if age >= settings.max_age_days:
+    if is_stale(age, settings.max_age_days):
         return FreshnessVerdict(
             fresh=False,
             reason=f"{age:.1f} days old, max_age_days {settings.max_age_days}",
@@ -403,7 +399,8 @@ def resolved_redaction(
 ) -> str | None:
     """The primitive a column is published under: its covering rule, none without a cell value."""
 
-    if classification in _NO_CELL_VALUE_CLASSIFICATIONS:
+    # A row forbidding the marker itself carries no cell value, so no rule resolves a primitive.
+    if forbids(classification, "redacted"):
         return None
 
     return conn.redaction_for(qualified, sensitivity, looks_like)
@@ -421,7 +418,7 @@ def resolved_part_redaction(
     Each pair is `(sensitivity, looks_like)`; a part with no cell value resolves none.
     """
 
-    if classification in _NO_CELL_VALUE_CLASSIFICATIONS:
+    if forbids(classification, "redacted"):
         return None
 
     return conn.redaction_for_part(qualified, *column_inferred, *part_inferred)

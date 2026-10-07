@@ -6,29 +6,16 @@ docs/CLI.md drifts from freshly-rendered --help.
 
 from __future__ import annotations
 
-import importlib.util
 import re
-from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
 from dbprint.cli.main import main
+from tests._scripts import load_script
 
 
-def _load_generator():
-    """Import scripts/gen_cli_docs.py so the test shares the generator's render path."""
-
-    path = Path(__file__).resolve().parents[2] / "scripts" / "gen_cli_docs.py"
-    spec = importlib.util.spec_from_file_location("gen_cli_docs", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    return module
-
-
-gen = _load_generator()
+gen = load_script("gen_cli_docs")
 
 COMMANDS = ("init", "generate", "diff", "list", "check", "context", "serve")
 CONNECTION_COMMANDS = (

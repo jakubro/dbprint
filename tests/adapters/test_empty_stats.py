@@ -11,7 +11,7 @@ from dbprint.adapters import ColumnMeta
 from dbprint.adapters.base import BaseStats, PhaseB, TableCounts
 from dbprint.adapters.identifiers import Identity
 from dbprint.config import StatisticsConfig
-from tests.adapters.test_dialect_guard import DIALECTS, STATS_MODULES
+from tests.adapters._dialects import DIALECTS, STATS_MODULES
 
 
 def _empty_table(vendor: str, *, supported: bool) -> PhaseB:

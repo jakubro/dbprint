@@ -8,13 +8,11 @@ import json
 from collections.abc import Sequence
 from typing import Any, cast
 
-from dbprint.config.selectors import expand
 from dbprint.spec.fqn import join as join_fqn
 from .connection import DIALECT, Cursor, exec_query
 from ..base import (
     ColumnMeta,
     CommentsMeta,
-    FkAction,
     ForeignKeyMeta,
     IndexMeta,
     PhysicalLayout,
@@ -28,10 +26,10 @@ from ..errors import QueryFailed
 from ..identifiers import (
     Identity,
     column_meta,
-    enforce_table_identifiers,
     fold,
     quote,
     quote_path,
+    select_tables,
     table_meta,
 )
 
@@ -54,14 +52,6 @@ _TABLE_TYPE_MAP: dict[str, TableType] = {
     "EXTERNAL_SHALLOW_CLONE": "table",
     "VIEW": "view",
     "MATERIALIZED_VIEW": "matview",
-}
-
-_FK_ACTIONS: dict[str, FkAction] = {
-    "NO ACTION": "NO ACTION",
-    "CASCADE": "CASCADE",
-    "SET NULL": "SET NULL",
-    "SET DEFAULT": "SET DEFAULT",
-    "RESTRICT": "RESTRICT",
 }
 
 _SYSTEM_SCHEMAS = ("information_schema",)
@@ -131,15 +121,7 @@ def list_tables(
 
             skipped.append(SkippedNamespace(name=catalog, cause=str(exc)))
 
-    in_scope = set(
-        expand(
-            [meta.fqn for meta, _ in candidates],
-            config_include=include,
-            config_exclude=exclude,
-        ),
-    )
-    selected = [entry for entry in candidates if entry[0].fqn in in_scope]
-    enforce_table_identifiers(selected)
+    selected = select_tables(candidates, include, exclude)
 
     return selected, tuple(skipped)
 

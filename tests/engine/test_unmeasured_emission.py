@@ -11,13 +11,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml
 
 from dbprint.adapters import (
     BaseStats,
     ColumnMeta,
     ColumnStats,
-    CommentsMeta,
     Frequencies,
     MockAdapter,
     MockTable,
@@ -26,10 +24,11 @@ from dbprint.adapters import (
 )
 from dbprint.adapters.base import PhaseA, TableCounts
 from dbprint.config import ConnectionConfig
-from dbprint.conformance import validate_print
 from dbprint.conformance.schema_validation import check_statistics
 from dbprint.conformance.statistics import check
 from dbprint.engine import Engine
+from tests._engine_run import artifact, conformance_errors
+from tests._prints import columns, mock_table
 
 
 _LOST = ("distribution", "frequencies", "values")
@@ -146,8 +145,8 @@ class TestAColumnPhaseACouldNotMeasure:
         _generate_degraded(tmp_path)
         errors = [
             i
-            for i in validate_print(tmp_path / "w")
-            if i.severity == "error" and not i.path.endswith("columns.logged_at")
+            for i in conformance_errors(tmp_path / "w")
+            if not i.path.endswith("columns.logged_at")
         ]
 
         assert errors == []
@@ -208,9 +207,7 @@ def _generate_degraded(
         sketch_all_columns=sketch_all_columns,
     )
     Engine(adapter, conn, tmp_path).generate()
-    payload = yaml.safe_load(
-        (tmp_path / "w" / "seedbank" / "accession" / "statistics.yaml").read_text(),
-    )
+    payload = artifact(tmp_path / "w", "seedbank.accession")
 
     return payload, adapter
 
@@ -224,9 +221,7 @@ def _generate(tmp_path: Path, column: ColumnStats) -> dict[str, Any]:
     )
     Engine(MockAdapter(_fixture(column)), conn, tmp_path).generate()
 
-    return yaml.safe_load(
-        (tmp_path / "w" / "seedbank" / "accession" / "statistics.yaml").read_text(),
-    )
+    return artifact(tmp_path / "w", "seedbank.accession")
 
 
 def _column(payload: dict[str, Any]) -> dict[str, Any]:
@@ -267,24 +262,11 @@ def _degraded(*, unmeasured: tuple[str, ...]) -> ColumnStats:
 
 def _fixture(column: ColumnStats) -> dict[str, MockTable]:
     return {
-        "seedbank.accession": MockTable(
-            type="table",
-            namespace_path=("seedbank", "accession"),
+        "seedbank.accession": mock_table(
+            "seedbank.accession",
+            columns(("logged_at", "timestamp")),
+            {"logged_at": column},
             ddl="CREATE TABLE seedbank.accession (logged_at timestamp);\n",
-            columns=[
-                ColumnMeta(
-                    name="logged_at",
-                    sql_type="timestamp",
-                    nullable=False,
-                    default=None,
-                    ordinal=1,
-                ),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={"logged_at": column},
-            samples={},
             row_count=400,
         ),
     }

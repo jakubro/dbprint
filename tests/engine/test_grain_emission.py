@@ -14,9 +14,7 @@ from typing import Any
 import yaml
 
 from dbprint.adapters import (
-    ColumnMeta,
     ColumnStats,
-    CommentsMeta,
     MockAdapter,
     MockTable,
     UniqueKeyMeta,
@@ -24,6 +22,8 @@ from dbprint.adapters import (
 from dbprint.config import ConnectionConfig, RuleConfig
 from dbprint.engine import Engine, GenerateRequest
 from dbprint.engine.context_assembler import AssemblyOptions, assemble
+from tests._engine_run import artifact
+from tests._prints import columns, mock_table
 
 
 class TestDeclaredKeys:
@@ -323,7 +323,7 @@ def _generate(
     )
     Engine(MockAdapter(fixture), conn, tmp_path).generate()
 
-    return yaml.safe_load((tmp_path / "w" / "public" / "wide" / "statistics.yaml").read_text())
+    return artifact(tmp_path / "w", "public.wide")
 
 
 def _context(
@@ -394,25 +394,16 @@ def _fixture(
     if near_unique_column is not None:
         cardinalities[near_unique_column] = row_count - 1
 
-    columns = [
-        ColumnMeta(name=name, sql_type="text", nullable=False, default=None, ordinal=i)
-        for i, name in enumerate(names, start=1)
-    ]
     stats = {
         name: _column(cardinalities[name], null_count=(1 if name == "e" else 0)) for name in names
     }
 
     return {
-        "public.wide": MockTable(
-            type="table",
-            namespace_path=("public", "wide"),
+        "public.wide": mock_table(
+            "public.wide",
+            columns(*((name, "text") for name in names)),
+            stats,
             ddl="CREATE TABLE public.wide (placeholder text);\n",
-            columns=columns,
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats=stats,
-            samples={},
             unique_keys=unique_keys,
             measured_unique_pairs=frozenset(measured_pairs),
             row_count=row_count,

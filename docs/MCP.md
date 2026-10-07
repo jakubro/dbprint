@@ -75,7 +75,7 @@ At MCP handshake the server MUST advertise:
 }
 ```
 
-MCP's `InitializeResult` carries no `description` field — `serverInfo` is name/version only, and free-text server description travels as the top-level `instructions` string instead. `instructions` is delivered unprompted on every connect and opens with the routing: which tool answers which task — writing SQL, resolving a filter value's spelling, locating a column, listing tables and their freshness, what changed since the previous run, what a field or `spec_ref` means, the raw manifest — naming all seven tools, and that the tools, not the print's files, are the route, since a file read directly carries none of the interpretation the tools apply. The rules for reading an answer follow: which population a number describes (`scope`), that `inferred` fields and inferred or measured relationships are guesses, and that an absent field is not zero. The whole text stays under 2,048 characters, the length at which Claude Code truncates a server's instructions by default. Some clients ignore `instructions` entirely, so every tool description below stands alone rather than depending on it having been read: each states the task it answers, when to prefer it, and which sibling answers a neighbouring task.
+MCP's `InitializeResult` carries no `description` field — `serverInfo` is name/version only, and free-text server description travels as the top-level `instructions` string instead. `instructions` is delivered unprompted on every connect and opens with the routing: which tool answers which task — writing SQL, resolving a filter value's spelling, locating a column, listing tables and their freshness, what changed since the previous run, what a field or `spec_ref` means, how to read a json/yaml field, the raw manifest — naming all seven tools, and that the tools, not the print's files, are the route, since a file read directly carries none of the interpretation the tools apply. The rules for reading an answer follow: which population a number describes (`scope`), that `inferred` fields and inferred or measured relationships are guesses, and that an absent field is not zero. The whole text stays under 2,048 characters, the length at which Claude Code truncates a server's instructions by default. Some clients ignore `instructions` entirely, so every tool description below stands alone rather than depending on it having been read: each states the task it answers, when to prefer it, and which sibling answers a neighbouring task.
 
 `version` MUST equal the installed dbprint package version (`importlib.metadata.version("dbprint")`).
 
@@ -120,12 +120,12 @@ The server MUST expose the following resources for every served connection:
 | URI pattern | mimeType | Source file |
 |---|---|---|
 | `dbprint://<connection>/manifest` | `application/yaml` | `prints/<connection>/manifest.yaml` |
-| `dbprint://<connection>/diff` | `application/yaml` | `prints/<connection>/diff.yaml` |
+| `dbprint://<connection>/diff` | `application/yaml` | `prints/<connection>/diff.yaml`, without its events about an edge a human rejected (§3.4) |
 | `dbprint://<connection>/reading` | `text/markdown` | `prints/<connection>/reading.md` |
 | `dbprint://<connection>/manifest_annotations` | `application/yaml` | `prints/<connection>/manifest.annotations.yaml` (present only when authored) |
 | `dbprint://<connection>/<table>/ddl` | `application/sql` | per-table `ddl.sql` |
 | `dbprint://<connection>/<table>/statistics` | `application/yaml` | per-table `statistics.yaml` |
-| `dbprint://<connection>/<table>/relationships` | `application/yaml` | per-table `relationships.yaml` |
+| `dbprint://<connection>/<table>/relationships` | `application/yaml` | per-table `relationships.yaml`, without the edges a human rejected (§3.4) |
 | `dbprint://<connection>/<table>/description` | `text/markdown` | per-table `description.md` (present only when authored) |
 | `dbprint://<connection>/<table>/statistics_annotations` | `application/yaml` | per-table `statistics.annotations.yaml` (present only when authored) |
 | `dbprint://<connection>/<table>/relationships_annotations` | `application/yaml` | per-table `relationships.annotations.yaml` (present only when authored) |
@@ -147,7 +147,7 @@ The server MUST also expose these two server-global resources, one per document,
 
 - `manifest`, `diff` and `reading` resources for each connection (exactly 3 per connection).
 - `manifest_annotations` is listed ONLY when `manifest.annotations.yaml` is present at the connection root (§2.7.3 of the format spec).
-- Per-table resources for every table in each connection's `manifest.yaml` `tables` map.
+- Per-table resources for every table in each connection's `manifest.yaml` `tables` map that a reader can follow; an entry that is not a mapping, or whose `path` is not a string, lists nothing. A connection whose manifest cannot be read lists no per-table resources and keeps its `manifest` resource, whose read names the error; every other connection lists as usual.
 - `description`, `statistics_annotations` and `relationships_annotations` resources are listed ONLY when the corresponding per-table file (`description.md` / `statistics.annotations.yaml` / `relationships.annotations.yaml`) is present.
 - The two reference resources are listed exactly once each — server-global, never once per connection, and present even when the resolved connection set is empty.
 
@@ -160,6 +160,7 @@ Resource entries returned by `resources/list` include `uri`, `name` (human-reada
 `resources/read` returns the file content with the matching mimeType. Behaviors:
 
 - The server MUST serve the file as it is on disk at the time of the call; see §7.1 for the freshness contract.
+- The `relationships` and `diff` resources are the exceptions: an edge a human rejected in `relationships.annotations.yaml` — the referencing table's own file decides it, from either side — is withheld from both `refers_to` and `referenced_by`, and `diff` drops every relationship event about it, with `summary.relationships_changed` counting the events kept, exactly as `get_diff` (§4.5) does; the rest is served as YAML. The pages concatenate to that served text, and `version` covers every annotation file that decided it, so a verdict edited between two pages invalidates the later read. A file no rejection touches is served byte for byte.
 - A file whose text, serialized as a JSON string, passes 20,000 characters is read a page at a time. Pages break at line boundaries, and a line longer than a page at a character boundary; the pages' text concatenated in order is the file byte for byte. Every read carries `_meta: {"page": <n>, "pages": <m>, "version": "<v>"}` beside its text, where `version` identifies the file as it was read. Page `n` past the first is read as `<uri>?page=<n>&version=<v>`, with the `version` page 1 reported.
 - A `page` that is not a whole number from 1 to the resource's page count MUST return `-32602 InvalidParams` naming the valid range. A page past the first asked for without `version` MUST return `-32602 InvalidParams`, and so MUST a `version` the file has moved past since it was read — a rewritten file never answers an old page number with new text.
 - Reading a missing `description.md` or `statistics.annotations.yaml` MUST return JSON-RPC error `-32602 InvalidParams` with detail explaining the resource is optional and not authored for this table.
@@ -172,20 +173,22 @@ Resource entries returned by `resources/list` include `uri`, `name` (human-reada
 
 ### 4.1 `get_table_context`
 
-Returns an assembled context fragment for one table, formatted for direct insertion into an LLM prompt — the tool to read before writing SQL against a table (`purpose: query`) or answering a question about its data (`purpose: profile`). Nothing is dropped to fit a client: a context larger than a page is paged (§4.8), section by section.
+Returns an assembled context fragment for one table, formatted for direct insertion into an LLM prompt — the tool to read before writing SQL against a table (`purpose: query`) or answering a question about its data (`purpose: profile`). Nothing is dropped to fit a client: a context larger than a page is paged (§4.8), section by section. Under `profile` the Markdown Notes summarise a value list that is not the column's whole domain as its 5 most frequent values, each with its share of the non-null scanned rows and the share the five cover together; json and yaml carry the list whole.
 
 `purpose` selects what the fragment is for, and is the first thing a caller decides:
 
 | `purpose` | Sections | For |
 |---|---|---|
-| `profile` (default) | Header, DDL, Description, Annotations, Cardinality table, Relationships | Describing the data: what was measured and how much of it |
-| `query` | Header (identity + scope), DDL, Joins, Data dictionary, Column values | Writing SQL against the table: what the columns mean, what they join to, and which literals they hold |
+| `profile` (default) | Header, Terms, DDL, Description, Annotations, Cardinality table, Relationships | Describing the data: what was measured and how much of it |
+| `query` | Header (identity + scope), Terms, DDL, Joins, Data dictionary, Column values | Writing SQL against the table: what the columns mean, what they join to, and which literals they hold |
 
-Under `query` the fragment carries no statistics, no null patterns and no physical layout. The join paths are the `## Joins` list: every edge in `relationships.yaml`, one line each as `<column> -> <table>.<column> (<detection>)` or `<column> <- <table>.<column> (<detection>)`, so an edge the print inferred or measured on a table whose catalog declares no key is still listed — and nothing measured about an edge (fan-out, coverage, referential actions) is included. An edge a human rejected in `relationships.annotations.yaml` carries the rejection marker. The section is absent on a table with no edge.
+The Markdown reply opens, right after its header, with `## Terms`: one `- <label>: <definition>` line for every label, flag and enum word the reply prints and no other, each naming where json/yaml carries it — `long tail` names `distribution: long_tail`, `P50` names `percentiles.p50` — and the `search_columns` filter that takes it, where one does. `format: "json"` and `"yaml"` carry no legend.
 
-The value table is what an exact-match predicate is written from, and it carries only the lists a predicate can be written from: a column whose `values_coverage` is `1.0` is rendered in full, one `<value> (<count>)` entry per value, with the coverage cell stating that the list is the column's whole domain; a column with a coverage below `1.0` shows its five most frequent values (a spelling group counting as one), with the coverage cell stating, as a percentage, the share of the column those five cover and that they are a sample. A column with no `values_coverage` — `numeric` and `temporal`, whose list is a frequency sample and never a domain (SPEC 2.2.3) — has no row. A value carrying a note in `statistics.annotations.yaml` renders it inline (`<value> (<count>) = <note>`); a redacted column publishes its counts and no literal; a scoped table's exhaustive list says so over the rows scanned, never over the table. A value is spelled so it reads back as itself: a number or boolean bare, a string holding whitespace single-quoted, and one holding a line break, control or invisible character double-quoted with YAML escapes, always on one line — `NULL` is a genuine null, `'NULL'` the stored string. Every number in the markdown is spelled as `statistics.yaml` spells it — positional, never in exponent form, counts as plain digits — and a share strictly between 0 and 1 never rounds onto `0%` or `100%`.
+Under `query` the fragment carries no statistics beyond the null shares, no null patterns and no physical layout. The join paths are the `## Joins` list: every edge in `relationships.yaml` except one a human rejected, one line each as `<column> -> <table>.<column> (<detection>)` or `<column> <- <table>.<column> (<detection>)`, so an edge the print inferred or measured on a table whose catalog declares no key is still listed — and nothing measured about an edge (fan-out, coverage, referential actions) is included. A `->` line whose referencing column is a single column appends that column's null share as `; nulls: <share>`. An edge a human rejected in `relationships.annotations.yaml` is not listed, and a join `description.md` describes only in prose is not an edge. A table with no edge renders `## Joins` and `none found`, followed by ` (not a join target, no declared-unique column)` when `eligible_target` is `false`; the section is absent only when `relationships.yaml` was not read or `include_relationships` is false.
 
-On a table whose `statistics.yaml` carries `scope` (SPEC 2.2.8), the `format: "json"`/`"yaml"` object carries that block verbatim as `scope`, beside `row_count`, at its top level under both purposes, so `include_stats: false`, which drops the statistics object, never drops the population it describes. Under `profile` Markdown, every claim a single unread row could falsify — a complete value list, a candidate key, a freshness verdict — carries `over the rows scanned` in its own Notes cell.
+The value table is what an exact-match predicate is written from, and it carries only the lists a predicate can be written from: a column whose `values_coverage` is `1.0` is rendered in full, one `<value> (<count>)` entry per value, with the coverage cell stating that the list is the column's whole domain; a column with a coverage below `1.0` shows its five most frequent values (a spelling group counting as one), with the coverage cell stating, as a percentage, the share of the column those five cover and that they are a sample. A column with no `values_coverage` — `numeric` and `temporal`, whose list is a frequency sample and never a domain (SPEC 2.2.3) — has no row. A value carrying a note in `statistics.annotations.yaml` renders it inline (`<value> (<count>) = <note>`); a redacted column publishes its counts and no literal; a scoped table's exhaustive list says so over the rows scanned, never over the table. Every DDL-nullable column states its null share exactly once — `0.4%`, or `none` (`none over the rows scanned` on a scoped table) when the rows read hold no null: in the table's `Nulls` cell when it has a row, on its Joins line when one names it alone, and otherwise on one `Nulls: <column> (<share>), ...` line closing the `## Column values` section, which holds that line alone when no column has a row. A NOT NULL column states nothing — an empty `Nulls` cell where it has a row. A value is spelled so it reads back as itself: every string and timestamp is an SQL literal, single-quoted with an embedded `'` doubled; a number, a boolean and `NULL` are bare; and a string holding a line break, control or invisible character is double-quoted with YAML escapes, always on one line — `NULL` is a genuine null, `'NULL'` the stored string. List entries are separated by `, ` and the facts of a Notes cell or a line by `; `. Every number in the markdown is spelled as `statistics.yaml` spells it — positional, never in exponent form, counts as plain digits — and a share strictly between 0 and 1 never rounds onto `0%` or `100%`.
+
+On a table whose `statistics.yaml` carries `scope` (SPEC 2.2.8), the `format: "json"`/`"yaml"` object carries that block verbatim as `scope`, beside `row_count`, at its top level under both purposes, so `include_stats: false`, which drops the statistics object, never drops the population it describes. Under `profile` Markdown, every claim a single unread row could falsify — a complete value list, a candidate key, a freshness verdict, `nulls: none` — carries `over the rows scanned` in its own Notes cell.
 
 `include_ddl`, `include_description`, `include_annotations` and `include_relationships` narrow the `query` selection the way they narrow `profile` — `include_relationships` governs the Joins list; `include_stats` has nothing to drop there.
 
@@ -198,8 +201,8 @@ On a table whose `statistics.yaml` carries `scope` (SPEC 2.2.8), the `format: "j
     "properties": {
       "table": { "type": "string", "minLength": 1, "description": "Dotted fully-qualified table name, as list_tables and search_columns return it" },
       "connection": { "type": "string", "description": "Connection name from .dbprint.yaml; omit it to use the server's default connection" },
-      "purpose": { "type": "string", "enum": ["profile", "query"], "default": "profile", "description": "query before writing SQL: DDL, the Joins list, data dictionary and the value lists with counts and coverage, with no other statistics. profile (default) to describe the data: statistics, relationships, notes" },
-      "format": { "type": "string", "enum": ["md", "json", "yaml"], "default": "md", "description": "md renders the chosen purpose as Markdown - under `profile`, a per-column Notes summary rather than the raw statistics fields json and yaml carry. All three omit each column's sketch payload; the verbatim statistics.yaml, sketch included, is reachable as the dbprint://<connection>/<table>/statistics resource." },
+      "purpose": { "type": "string", "enum": ["profile", "query"], "default": "profile", "description": "query before writing SQL: DDL, the Joins list, data dictionary and the value lists with counts and coverage, and each nullable column's null share, with no other statistics. profile (default) to describe the data: statistics, relationships, notes" },
+      "format": { "type": "string", "enum": ["md", "json", "yaml"], "default": "md", "description": "md renders the chosen purpose as Markdown - under `profile`, a per-column Notes summary rather than the raw statistics fields json and yaml carry. All three omit each column's sketch payload; the verbatim statistics.yaml, sketch included, is reachable as the dbprint://<connection>/<table>/statistics resource. get_reference document: guide explains each json/yaml field." },
       "include_stats": { "type": "boolean", "default": true, "description": "Include the Cardinality table (md) or statistics object (json/yaml); no effect under `query`, which carries neither" },
       "include_relationships": { "type": "boolean", "default": true, "description": "Include the Relationships section (md) or relationships object (json/yaml); under `query`, the Joins list" },
       "include_description": { "type": "boolean", "default": true, "description": "Include the table's description.md, when authored" },
@@ -214,12 +217,12 @@ On a table whose `statistics.yaml` carries `scope` (SPEC 2.2.8), the `format: "j
 Return:
 
 - `format: "md"` -> a markdown string carrying the chosen purpose's sections.
-- `format: "json"` -> a structured object. Under `profile`: `table`, `ddl`, `description`, `annotations`, `statistics`, `relationships`, `relationship_annotations`. Under `query`: `table`, `ddl`, `values` (per column: the `entries` the Markdown shows with counts and notes, the column's `coverage`, the same coverage statement the Markdown renders, and for a sampled list `shown_coverage` — the share the shown entries cover), `joins` (`refers_to` and `referenced_by`, each edge as its columns, its table and its `detection`, plus `rejected` where a human overruled it), `dictionary` (column -> note) and `description`.
+- `format: "json"` -> a structured object. Under `profile`: `table`, `ddl`, `description`, `annotations`, `statistics`, `relationships`, `relationship_annotations` — the annotation file less the verdict entries of the edges it withholds. Under `query`: `table`, `ddl`, `values` (per column: the `entries` the Markdown shows with counts and notes, the column's `coverage`, the same coverage statement the Markdown renders, and for a sampled list `shown_coverage` — the share the shown entries cover), `joins` (`refers_to` and `referenced_by`, each edge as its columns, its table and its `detection`; both lists empty on a table with no edge, the key absent when `relationships.yaml` was not read), `nulls` (`<column>: <null_rate>`), `dictionary` (column -> note) and `description`. `null_rate` is the raw rate `statistics.yaml` writes; it rides on each `values` block and each single-column `refers_to` edge, and `nulls` holds every other nullable column, so a NOT NULL column appears in none.
 - `format: "yaml"` -> the same structured object emitted as YAML.
 
-Paged per §4.8, section by section in priority order, the table's identity first: under `profile` the order the sections are listed above, and under `query` DDL, then the value table, then the Joins list, then the data dictionary. A page holds whole sections until the next would cross the bound; a section larger than a page continues on the next at a row boundary — a Markdown line, or one column's entry in json/yaml — and a single row larger than a page at a character boundary in Markdown, or as parts (§4.8) in json/yaml.
+Paged per §4.8, section by section in priority order, the table's identity first and its legend just below it: under `profile` the order the sections are listed above, and under `query` DDL, then the value table, then the Joins list, then the data dictionary. A page holds whole sections until the next would cross the bound; a section larger than a page continues on the next at a row boundary — a Markdown line, or one column's entry in json/yaml — and a single row larger than a page at a character boundary in Markdown, or as parts (§4.8) in json/yaml.
 
-- `format: "md"` — every page but the last ends with the line `<!-- next_cursor: <cursor> -->`, preceded by a newline; with that newline and line removed, the pages concatenate to the whole fragment.
+- `format: "md"` — every page but the last ends with the line `<!-- next_cursor: <cursor> -->`, preceded by a newline. Each page carries its own legend, defining only the terms of the lines it holds — after the identity on the first page, at the top of every later one, and none on a page that prints no term; with that line and each page's legend removed, the pages concatenate to the whole fragment less its legend.
 - `format: "json"` — the cursor is the `next_cursor` key. The identity fields ride the first page; merging the pages key by key, `statistics.columns` and the per-column `values`, `annotations` and `dictionary` maps included, yields the whole object.
 - `format: "yaml"` — each page is a YAML document of that page's json object, and every page but the last ends with the comment line `# next_cursor: <cursor>`.
 
@@ -365,9 +368,11 @@ Return: the parsed diff dict per [SPEC §2.6](format/v1/SPEC.md#26-diffyaml). Th
 
 **The schema guarantees none of those fields.** `$defs/Change` requires `kind` alone and no variant declares a table field, so these are producer facts: an event carrying none of the three is simply not matched by a `table` filter.
 
+**A relationship event about an edge a human rejected is withheld** before either filter runs: one whose `source_column`, `target_table` and `target_column` match a `verdict: rejected` entry in the source table's `relationships.annotations.yaml`, unless that table's current `relationships.yaml` declares the edge. `summary.relationships_changed` counts the events returned; `diff.yaml` on disk is unchanged.
+
 ### 4.6 `get_reference`
 
-Returns a slice of the format spec or the assertion DSL spec, addressed by section number. Depends on no connection and no print; `connection` is not a parameter. What one print's tables hold comes from `get_table_context` and `list_tables`.
+Returns a slice of the format spec or the assertion DSL spec, addressed by section number, or of the packaged reading guide, addressed by heading text. The guide is the installed dbprint version's own copy, not a print's `reading.md`, which the `dbprint://<connection>/reading` resource serves. Depends on no connection and no print; `connection` is not a parameter. What one print's tables hold comes from `get_table_context` and `list_tables`.
 
 ```json
 {
@@ -376,8 +381,8 @@ Returns a slice of the format spec or the assertion DSL spec, addressed by secti
     "type": "object",
     "additionalProperties": false,
     "properties": {
-      "document": { "type": "string", "enum": ["assertions", "spec"], "description": "Which specification - the format spec, or the assertion DSL" },
-      "section": { "type": "string", "minLength": 1, "description": "A section number in the document's own scheme (e.g. '3', '2.2.4'), or a spec_ref citation copied verbatim from a finding ('\u00a72.2.4', 'ASSERTIONS.md \u00a71.4') - any heading depth. Omit for the table of contents." },
+      "document": { "type": "string", "enum": ["assertions", "guide", "spec"], "description": "Which document - the format spec, the assertion DSL, or the reading guide (how to read each json/yaml field)" },
+      "section": { "type": "string", "minLength": 1, "description": "A section number in the document's own scheme (e.g. '3', '2.2.4'), or a spec_ref citation copied verbatim from a finding ('\u00a72.2.4', 'ASSERTIONS.md \u00a71.4') - any heading depth. Omit for the table of contents. For guide, a heading's text (e.g. 'Vocabulary'), matched case-insensitively." },
       "cursor": { "type": "string", "minLength": 1, "description": "`next_cursor` from this call's previous page; omit for the first page" }
     },
     "required": ["document"]
@@ -391,8 +396,9 @@ Return: a markdown string, paged per §4.8 the way `get_table_context`'s Markdow
 - Without `section`, the document's heading tree instead of the whole document.
 - `section` MUST accept the document's own bare numbering scheme (`"3"`, `"2.2.4"`) AND a `spec_ref` citation copied verbatim from a finding (`"§2.2.4"`, `"ASSERTIONS.md §1.4"`, per conformance/issue.py's own convention) — a caller never strips the citation prefix by hand.
 - `section` naming a number no heading in that document carries MUST fail (`isError: true`, §8.2), detail naming the section numbers that document actually has.
+- For `guide`, `section` is a heading's text, matched case-insensitively with whitespace collapsed; the guide's headings carry no numbers. A heading with subsections lists its direct ones under `Subsections, each read by its own heading:`, each read by passing its title. A text no heading carries MUST fail, detail naming the guide's headings.
 
-`document` is a closed enum of exactly two values; a third document is a decision for a future revision of this spec, not an extension point a server infers.
+`document` is a closed enum of exactly three values; a fourth document is a decision for a future revision of this spec, not an extension point a server infers.
 
 ---
 
@@ -582,8 +588,9 @@ Every call is checked against the tool's own advertised `inputSchema` before the
 | `cursor` that no reply issued | `` "cursor 'x' is not one this server issued. Pass back a reply's `next_cursor` unchanged, or call again without `cursor` for the first page." `` |
 | `cursor` issued by another tool, or by the same tool under other arguments | `` "this cursor was not issued by list_tables with these arguments. Repeat the call that returned it with the same arguments, or call again without `cursor`." `` |
 | `cursor` whose print files changed on disk since it was issued | `` "the print changed on disk since this cursor was issued, so list_tables cannot resume where it left off. Call again without `cursor` to start over." `` |
-| `get_reference` called with `document` outside its declared enum | `"document 'readme' must be one of ['assertions', 'spec']."` |
+| `get_reference` called with `document` outside its declared enum | `"document 'readme' must be one of ['assertions', 'guide', 'spec']."` |
 | `get_reference` called with a `section` no heading in that document carries | `"section '9.9' not found in spec. Available: ['0', '0.1', '0.2', ...]"` |
+| `get_reference` called with `document: guide` and a `section` no guide heading carries | `"section 'No such heading' not found in guide. Available: ['Fields that are easy to misread', ...]"` |
 
 ### 8.3 Error responses are not exceptions
 

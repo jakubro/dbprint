@@ -5,23 +5,10 @@ Golden: the committed file must equal a fresh build, so schema and doc cannot dr
 
 from __future__ import annotations
 
-import importlib.util
-from pathlib import Path
+from tests._scripts import load_script
 
 
-def _load_generator():
-    """Import scripts/gen_mcp_docs.py so the test shares the generator's render path."""
-
-    path = Path(__file__).resolve().parents[2] / "scripts" / "gen_mcp_docs.py"
-    spec = importlib.util.spec_from_file_location("gen_mcp_docs", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    return module
-
-
-gen = _load_generator()
+gen = load_script("gen_mcp_docs")
 
 
 def test_committed_doc_matches_a_fresh_build() -> None:

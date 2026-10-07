@@ -106,10 +106,10 @@ class BigqueryAdapter(SqlAdapter):
             exclude,
         )
         self._ddl_cache.update({fqn: ddl_module.normalize(ddl) for fqn, ddl in ddl_by_fqn.items()})
-        self._identities.register(selected)
+        listed = self._register(selected)
         self._external = frozenset(meta.fqn for meta, _ in selected if meta.external)
 
-        return [meta for meta, _ in selected]
+        return listed
 
     def skipped_namespaces(self) -> tuple[SkippedNamespace, ...]:
         return self._skipped

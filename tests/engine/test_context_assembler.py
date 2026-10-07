@@ -16,10 +16,12 @@ from dbprint.engine.context_assembler import (
     _escape_cell,
     _markdown_catalog_only_columns,
     _markdown_null_patterns,
-    _markdown_relationships,
     _render_table_markdown,
     _stripped_statistics,
     fk_target_map,
+)
+from dbprint.engine.context_assembler import (
+    _markdown_relationships as _relationship_lines,
 )
 
 
@@ -140,8 +142,8 @@ class TestMarkdown:
         assert "## DDL" in result.text
         assert "## Description" in result.text
         assert "## Cardinality & key columns" in result.text
-        assert ", candidate key" in result.text
-        assert "p50=42" in result.text
+        assert "; candidate key" in result.text
+        assert "P50: 42" in result.text
 
     def test_no_ddl_omits_ddl_section(self, tmp_path: Path) -> None:
         print_root = _seed_print(tmp_path)
@@ -432,7 +434,7 @@ class TestProvenance:
         assert "- Default collation: en_US.utf8" in result.text
         assert "- Redaction configured: 2 rules" in result.text
         assert "- Selectors applied to this print: include herbarium.public.*" in result.text
-        assert "- Percentiles configured: p5, p25, p75, p95" in result.text
+        assert "- Percentiles configured: P5, P25, P75, P95" in result.text
 
     def test_single_table_render_carries_no_provenance_block(self, tmp_path: Path) -> None:
         """It gets its own adapter line instead."""
@@ -612,25 +614,22 @@ class TestScopeQualifier:
 
         assert "Scanned: 400000 of 4000000 rows (10%)" in _render_scoped(root)
 
-    def test_a_sampled_read_names_the_fraction_that_was_asked_for(self, tmp_path: Path) -> None:
-        root = _seed_scoped_print(tmp_path, {"rows_scanned": 400_000, "sample": 0.1})
+    def test_a_sampled_read_says_sampled_and_never_the_fraction_asked_for(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        root = _seed_scoped_print(tmp_path, {"rows_scanned": 520_000, "sample": 0.1234567890123456})
+        text = _render_scoped(root)
 
-        assert "sample 0.1" in _render_scoped(root)
-
-    def test_a_precise_fraction_is_spelled_as_the_artifact_spells_it(self, tmp_path: Path) -> None:
-        root = _seed_scoped_print(
-            tmp_path,
-            {"rows_scanned": 1_000_000, "sample": 0.1234567890123456},
-        )
-
-        assert "sample 0.1234567890123456" in _render_scoped(root)
+        assert "Scanned: 520000 of 4000000 rows (13%); sampled\n" in text
+        assert "0.123" not in text
 
     def test_a_filtered_read_carries_the_predicate_verbatim(self, tmp_path: Path) -> None:
         predicate = "created_at >= '2024-01-01'"
         root = _seed_scoped_print(tmp_path, {"rows_scanned": 400_000, "filter": predicate})
         text = _render_scoped(root)
 
-        assert f"filter `{predicate}`" in text
+        assert f"Scanned: 400000 of 4000000 rows (10%); filtered by `{predicate}`" in text
         assert "sample" not in text
 
     def test_an_unscoped_table_carries_no_scanned_set_line(self, tmp_path: Path) -> None:
@@ -816,6 +815,10 @@ class TestTimelineCoverageQualifier:
         assert "every scanned row" in _render_scoped(root)
 
 
+def _markdown_relationships(a: TableArtifacts) -> str:
+    return "\n".join(line.text for line in _relationship_lines(a))
+
+
 class TestRelationshipsMarkdown:
     """Every rendered edge states its `detection` (SPEC 2.3); `on_delete=` never on a guess."""
 
@@ -856,7 +859,7 @@ class TestRelationshipsMarkdown:
         }
         line = _markdown_relationships(self._artifacts(relationships))
 
-        assert "-> public.a.id (via a_id, declared, on_delete=CASCADE)" in line
+        assert "- -> public.a.id (declared); via: a_id; on delete: CASCADE" in line
 
     def test_an_inferred_refers_to_edge_states_its_detection_and_no_action(self) -> None:
         relationships = {
@@ -872,8 +875,8 @@ class TestRelationshipsMarkdown:
         }
         line = _markdown_relationships(self._artifacts(relationships))
 
-        assert "-> public.a.id (via a_id, inferred)" in line
-        assert "on_delete" not in line
+        assert "- -> public.a.id (inferred); via: a_id" in line
+        assert "on delete" not in line
 
     def test_a_declared_referenced_by_edge_states_its_detection_and_action(self) -> None:
         relationships = {
@@ -890,7 +893,7 @@ class TestRelationshipsMarkdown:
         }
         line = _markdown_relationships(self._artifacts(relationships))
 
-        assert "<- public.b.a_id (declared, on_delete=RESTRICT)" in line
+        assert "- <- public.b.a_id (declared); on delete: RESTRICT" in line
 
     def test_an_inferred_referenced_by_edge_states_its_detection_and_no_action(self) -> None:
         relationships = {
@@ -988,6 +991,37 @@ class TestObservedRendering:
             statistics_params_override=None,
         )
 
+    def test_every_distinct_value_compared_reads_exact(self) -> None:
+        observed = {
+            "fanout_avg": 1.0,
+            "target_coverage": 1.0,
+            "containment": 1.0,
+            "answerable_count": 40,
+        }
+        a = self._artifacts(self._refers_to(observed))
+        a.statistics = {"columns": {"a_id": {"cardinality": 40}}}
+
+        assert "; contained: 100% of referencing values (exact)" in _markdown_relationships(a)
+
+    def test_an_incoming_edge_decides_exactness_by_the_referencers_column(self) -> None:
+        observed = {
+            "fanout_avg": 1.0,
+            "target_coverage": 1.0,
+            "containment": 1.0,
+            "answerable_count": 40,
+        }
+        edge = {
+            "column": ["id"],
+            "referencer_table": "public.b",
+            "referencer_column": ["a_id"],
+            "detection": "declared",
+            "observed": observed,
+        }
+        a = self._artifacts({"refers_to": [], "referenced_by": [edge]})
+        a.incoming_cardinalities = {("public.b", "a_id"): 40}
+
+        assert "; contained: 100% of referencing values (exact)" in _markdown_relationships(a)
+
     def _refers_to(self, observed: dict[str, Any] | None) -> dict[str, Any]:
         entry: dict[str, Any] = {
             "column": ["a_id"],
@@ -1011,13 +1045,13 @@ class TestObservedRendering:
         }
         line = _markdown_relationships(self._artifacts(self._refers_to(observed)))
 
-        assert "observed: fanout avg 10.0 (max 15), covers 40% of target" in line
+        assert "\n  fanout avg: 10.0; fanout max: 15; covers: 40% of target values" in line
 
     def test_an_absent_fanout_max_renders_no_max_clause(self) -> None:
         observed = {"fanout_avg": 1.0, "target_coverage": 1.0, "scope_compatible": True}
         line = _markdown_relationships(self._artifacts(self._refers_to(observed)))
 
-        assert "observed: fanout avg 1.0, covers 100% of target" in line
+        assert "\n  fanout avg: 1.0; covers: 100% of target values" in line
         assert "max" not in line
 
     def test_an_incoherent_edge_carries_a_visible_marker(self) -> None:
@@ -1029,7 +1063,7 @@ class TestObservedRendering:
         }
         line = _markdown_relationships(self._artifacts(self._refers_to(observed)))
 
-        assert "**[INCOHERENT: referencing cardinality exceeds the target's]**" in line
+        assert line.endswith("; incoherent (more distinct referencing values than target values)")
 
     def test_scope_incompatible_states_the_scopes_were_compared(self) -> None:
         """Distinct from `no_observed_block_renders_nothing_extra` below: this edge WAS
@@ -1039,7 +1073,7 @@ class TestObservedRendering:
             self._artifacts(self._refers_to({"scope_compatible": False})),
         )
 
-        assert "observed: scopes not comparable" in line
+        assert "\n  not measured (one side was read in part)" in line
         assert "covers" not in line
 
     def test_no_observed_block_renders_nothing_extra(self) -> None:
@@ -1057,7 +1091,7 @@ class TestObservedRendering:
         }
         line = _markdown_relationships(self._artifacts(self._refers_to(observed)))
 
-        assert "60% of the referencing values are contained (42 answerable)" in line
+        assert "; contained: 60% of referencing values (\u00b115.4%, 42 compared)" in line
 
     def test_containment_with_no_answerable_count_renders_the_ratio_alone(self) -> None:
         observed = {
@@ -1068,7 +1102,7 @@ class TestObservedRendering:
         }
         line = _markdown_relationships(self._artifacts(self._refers_to(observed)))
 
-        assert "60% of the referencing values are contained" in line
+        assert "; contained: 60% of referencing values" in line
         assert "answerable" not in line
 
 
@@ -1094,18 +1128,135 @@ class TestNullPatternsMarkdown:
             statistics_params_override=None,
         )
 
-    def test_measured_coverage_carries_no_hedge(self) -> None:
-        a = self._artifacts({"patterns": [], "coverage": 0.972, "coverage_method": "measured"})
-        line = _markdown_null_patterns(a)
+    @staticmethod
+    def _text(null_patterns: dict[str, Any], row_count: int | None = 1000) -> str:
+        a = TestNullPatternsMarkdown._artifacts(null_patterns)
+        assert a.statistics is not None
+        a.statistics["row_count"] = row_count
 
-        assert "Observed over 97.2% of scanned rows." in line
-        assert "bounded" not in line
+        return "\n".join(line.text for line in _markdown_null_patterns(a))
 
-    def test_bounded_coverage_states_the_clamp(self) -> None:
-        a = self._artifacts({"patterns": [], "coverage": 0.972, "coverage_method": "bounded"})
-        line = _markdown_null_patterns(a)
+    @staticmethod
+    def _patterns(counts: list[int]) -> list[dict[str, Any]]:
+        return [{"columns": [f"c{i}"], "count": n} for i, n in enumerate(counts)]
 
-        assert "Observed over 97.2% of scanned rows (bounded)." in line
+    def test_rows_are_shares_and_the_footer_covers_only_the_rows_shown(self) -> None:
+        counts = [229, 228, 115, 114, 58, 57, 38, 38, 29, 28, 15, 14, 8, 7, 1, 1]
+        text = self._text({"patterns": self._patterns(counts), "coverage": 0.98})
+
+        assert "| 22.9% | c0 |" in text
+        assert "| 3.8% | c7 |" in text
+        assert "c8" not in text
+        assert "further" not in text
+        assert text.endswith("\n\nShown combinations cover 87.7% of scanned rows.")
+
+    def test_every_row_listed_and_shown_reads_every_scanned_row(self) -> None:
+        text = self._text({"patterns": self._patterns([600, 300, 100]), "coverage": 1.0})
+
+        assert text.endswith("Shown combinations cover every scanned row.")
+
+    def test_a_bounded_census_keeps_its_hedge(self) -> None:
+        null_patterns = {
+            "patterns": self._patterns([600, 300]),
+            "coverage": 0.9,
+            "coverage_method": "bounded",
+        }
+
+        assert self._text(null_patterns).endswith("cover 90% of scanned rows (bounded).")
+
+    def test_an_overrun_is_clamped_to_every_scanned_row(self) -> None:
+        null_patterns = {
+            "patterns": self._patterns([700, 400]),
+            "coverage": 0.999999,
+            "coverage_method": "bounded",
+        }
+
+        assert self._text(null_patterns).endswith("cover every scanned row (bounded).")
+
+    def test_with_no_denominator_rows_keep_their_counts_and_no_footer(self) -> None:
+        text = self._text({"patterns": self._patterns([6, 3]), "coverage": 0}, row_count=None)
+
+        assert "| 6 | c0 |" in text
+        assert "Shown combinations" not in text
+
+
+class TestAPartsPresenceNamesItsPopulation:
+    @staticmethod
+    def _presences() -> list[str]:
+        from dbprint.engine.context_assembler import _markdown_parts
+
+        parts = {
+            ".site": {"classification": "json", "occurrences": 60, "null_count": 0},
+            ".site.cohort": {"classification": "text", "occurrences": 40, "null_count": 0},
+            ".readings": {"classification": "composite", "occurrences": 60, "null_count": 0},
+            ".readings[*]": {"classification": "json", "occurrences": 140, "null_count": 0},
+            ".readings[*].depth": {"classification": "numeric", "occurrences": 80, "null_count": 0},
+        }
+        a = TestRelationshipsMarkdown._artifacts({})
+        a.statistics = {
+            "row_count": 100,
+            "columns": {"field_log": {"classification": "json", "null_count": 20, "parts": parts}},
+        }
+
+        return [
+            line.text.rsplit("; ", 1)[-1].rstrip(" |")
+            for line in _markdown_parts(a, AssemblyOptions())
+            if "present:" in line.text
+        ]
+
+    def test_a_top_level_member_is_a_share_of_rows(self) -> None:
+        assert "present: 60% of rows" in self._presences()
+
+    def test_a_nested_member_names_its_parent_and_its_row_share(self) -> None:
+        assert "present: 66.7% of field_log.site (40% of rows)" in self._presences()
+
+    def test_a_member_under_an_array_states_no_row_share(self) -> None:
+        assert "present: 57.1% of field_log.readings[*]" in self._presences()
+
+
+class TestRelationshipsAreRanked:
+    def test_outgoing_and_incoming_lines_run_declared_inferred_measured(self) -> None:
+        relationships = {
+            "refers_to": [
+                {
+                    "column": ["a"],
+                    "target_table": "m",
+                    "target_column": ["id"],
+                    "detection": "measured",
+                },
+                {
+                    "column": ["a"],
+                    "target_table": "d",
+                    "target_column": ["id"],
+                    "detection": "declared",
+                },
+            ],
+            "referenced_by": [
+                {
+                    "column": ["id"],
+                    "referencer_table": "r",
+                    "referencer_column": ["x"],
+                    "detection": "inferred",
+                },
+                {
+                    "column": ["id"],
+                    "referencer_table": "s",
+                    "referencer_column": ["y"],
+                    "detection": "declared",
+                },
+            ],
+        }
+        lines = _markdown_relationships(
+            TestRelationshipsMarkdown._artifacts(relationships),
+        ).splitlines()
+
+        assert lines == [
+            "## Relationships",
+            "- -> d.id (declared); via: a",
+            "- -> m.id (measured); via: a",
+            "- <- s.y (declared)",
+            "- <- r.x (inferred)",
+        ]
 
 
 class TestFkTargetMap:
@@ -1124,7 +1275,7 @@ class TestFkTargetMap:
         }
 
         assert fk_target_map(relationships) == {
-            "herbarium_id": "public.herbarium.id (declared)",
+            "herbarium_id": ["public.herbarium.id (declared)"],
         }
 
     def test_inferred_edge(self) -> None:
@@ -1140,7 +1291,7 @@ class TestFkTargetMap:
         }
 
         assert fk_target_map(relationships) == {
-            "herbarium_id": "public.herbarium.id (inferred)",
+            "herbarium_id": ["public.herbarium.id (inferred)"],
         }
 
     def test_missing_detection_defaults_to_inferred(self) -> None:
@@ -1150,9 +1301,9 @@ class TestFkTargetMap:
             ],
         }
 
-        assert fk_target_map(relationships)["cultivar_id"] == "t.id (inferred)"
+        assert fk_target_map(relationships)["cultivar_id"] == ["t.id (inferred)"]
 
-    def test_composite_edge_joins_columns(self) -> None:
+    def test_a_composite_edge_is_listed_under_each_member(self) -> None:
         relationships = {
             "refers_to": [
                 {
@@ -1164,7 +1315,67 @@ class TestFkTargetMap:
             ],
         }
 
-        assert fk_target_map(relationships)["a,b"] == "t.(x,y) (declared)"
+        assert fk_target_map(relationships) == {
+            "a": ["(a, b) -> t.(x, y) (declared)"],
+            "b": ["(a, b) -> t.(x, y) (declared)"],
+        }
+
+    def test_every_edge_ranks_declared_before_inferred_before_measured(self) -> None:
+        relationships = {
+            "refers_to": [
+                {
+                    "column": ["a"],
+                    "target_table": "m",
+                    "target_column": ["id"],
+                    "detection": "measured",
+                },
+                {
+                    "column": ["a"],
+                    "target_table": "i",
+                    "target_column": ["id"],
+                    "detection": "inferred",
+                },
+                {
+                    "column": ["a"],
+                    "target_table": "d",
+                    "target_column": ["id"],
+                    "detection": "declared",
+                },
+                {
+                    "column": ["a"],
+                    "target_table": "n",
+                    "target_column": ["id"],
+                    "detection": "measured",
+                },
+            ],
+        }
+
+        assert fk_target_map(relationships) == {
+            "a": ["d.id (declared)", "i.id (inferred)", "m.id (measured)", "n.id (measured)"],
+        }
+
+    def test_a_rejected_edge_is_left_out(self) -> None:
+        relationships = {
+            "refers_to": [
+                {
+                    "column": ["a"],
+                    "target_table": "i",
+                    "target_column": ["id"],
+                    "detection": "inferred",
+                },
+                {
+                    "column": ["a"],
+                    "target_table": "m",
+                    "target_column": ["id"],
+                    "detection": "measured",
+                },
+            ],
+        }
+        verdicts = [
+            {"column": ["a"], "target_table": "i", "target_column": ["id"], "verdict": "rejected"},
+        ]
+
+        assert fk_target_map(relationships, verdicts) == {"a": ["m.id (measured)"]}
 
     def test_absent_relationships_map_to_nothing(self) -> None:
         assert fk_target_map(None) == {}
@@ -1181,46 +1392,6 @@ INFERRED_EDGE_RELATIONSHIPS: dict[str, object] = {
     ],
     "referenced_by": [],
 }
-
-
-class TestRejectedEdges:
-    """A human `verdict: rejected` marks the edge without removing it (SPEC 2.7.2)."""
-
-    def test_a_rejected_edge_is_marked(self) -> None:
-        annotations = [
-            {
-                "column": ["garden_id"],
-                "target_table": "public.garden",
-                "target_column": ["garden_code"],
-                "verdict": "rejected",
-                "note": "garden_id names a code, not a key into garden",
-            },
-        ]
-        line = TestRelationshipsMarkdown._artifacts(INFERRED_EDGE_RELATIONSHIPS, annotations)
-        rendered = _markdown_relationships(line)
-
-        assert "REJECTED" in rendered
-        assert "garden_id names a code, not a key into garden" in rendered
-
-    def test_an_unannotated_edge_carries_no_marker(self) -> None:
-        artifacts = TestRelationshipsMarkdown._artifacts(INFERRED_EDGE_RELATIONSHIPS)
-        rendered = _markdown_relationships(artifacts)
-
-        assert "REJECTED" not in rendered
-
-    def test_a_verdict_on_a_different_edge_does_not_mark_this_one(self) -> None:
-        annotations = [
-            {
-                "column": ["other_id"],
-                "target_table": "public.other",
-                "target_column": ["id"],
-                "verdict": "rejected",
-            },
-        ]
-        line = TestRelationshipsMarkdown._artifacts(INFERRED_EDGE_RELATIONSHIPS, annotations)
-        rendered = _markdown_relationships(line)
-
-        assert "REJECTED" not in rendered
 
 
 class TestStructured:
@@ -2051,7 +2222,8 @@ class TestAnnotations:
             AssemblyOptions(),
         )
 
-        assert result["relationship_annotations"][0]["verdict"] == "rejected"
+        assert "relationship_annotations" not in result
+        assert result["relationships"]["refers_to"] == []
 
 
 def _seed_print_with_value_note(tmp_path: Path) -> Path:
@@ -2258,7 +2430,7 @@ class TestARedactedColumnReadsAsRedacted:
         )
         row = _row_for(result.text, "rank")
 
-        assert "trainee / certified / senior" in row
+        assert "values (complete): 'trainee' (60%), 'certified' (30%), 'senior' (10%)" in row
         assert "redacted" not in row
 
 
@@ -2280,7 +2452,7 @@ class TestQueryPurpose:
 
         assert "## Column values" in text
         assert _row_for(text, "rank").startswith(
-            "| rank | trainee (60) / certified (30) / senior (10) |",
+            "| rank | 'trainee' (60), 'certified' (30), 'senior' (10) |",
         )
 
     def test_an_exhaustive_list_states_the_whole_domain(self, tmp_path: Path) -> None:
@@ -2323,7 +2495,7 @@ class TestQueryPurpose:
         manifest = yaml.safe_load((print_root / "manifest.yaml").read_text())
         text = _query(print_root, "herbarium.public.collector", manifest)
 
-        assert "trainee (60) = not yet field-certified" in _row_for(text, "rank")
+        assert "'trainee' (60) = 'not yet field-certified'" in _row_for(text, "rank")
 
     def test_a_redacted_column_publishes_counts_and_no_literal(self, tmp_path: Path) -> None:
         """SPEC 2.2.9: the counts are real under redaction; the values are withheld."""
@@ -2331,7 +2503,7 @@ class TestQueryPurpose:
         text = _query(_seed_redacted_print(tmp_path), "herbarium.public.collector", MANIFEST)
         row = _row_for(text, "status")
 
-        assert "values withheld (drop), counts 60 / 30 / 10" in row
+        assert "redacted: drop; values: withheld (60), withheld (30), withheld (10)" in row
 
     def test_a_scoped_table_states_the_domain_over_the_rows_scanned(self, tmp_path: Path) -> None:
         """SPEC 2.2.4: under `scope`, an exhaustive list is exhaustive over what was scanned."""
@@ -2409,7 +2581,7 @@ class TestSpellingGroupRendering:
         )
         row = _row_for(text.split("## Column values", 1)[-1], "rank")
 
-        assert "certified (30) {certified 25, Certified 5}" in row
+        assert "'certified' (30) {'certified' (25), 'Certified' (5)}" in row
         assert "| Certified |" not in text
 
     def test_the_notes_summary_marks_the_group(self, tmp_path: Path) -> None:
@@ -2422,8 +2594,8 @@ class TestSpellingGroupRendering:
         )
         row = _row_for(result.text, "rank")
 
-        assert "certified (30, 2 spellings)" in row
-        assert "/ Certified" not in row
+        assert "'certified' (30%, 2 spellings)" in row
+        assert "'Certified'" not in row
 
     def test_the_structured_payload_carries_the_link(self, tmp_path: Path) -> None:
         payload = assemble_structured_context(
@@ -2508,7 +2680,10 @@ class TestTheQueryValueTableShowsWhatAPredicateCanUse:
         )
         row = _row_for(text.split("## Column values", 1)[-1], "institution")
 
-        assert "Kew (40) {Kew 30, KEW 10} / Leiden (20) / Geneva (5) / Meise (5) / Paris (5)" in row
+        assert (
+            "'Kew' (40) {'Kew' (30), 'KEW' (10)}, 'Leiden' (20), 'Geneva' (5), 'Meise' (5), "
+            "'Paris' (5)"
+        ) in row
         assert "Uppsala" not in row
         assert "75% - a sample of the most frequent values" in row
 
@@ -2538,7 +2713,7 @@ class TestTheQueryValueTableShowsWhatAPredicateCanUse:
 
         row = _row_for(_query(print_root, "herbarium.public.collector", MANIFEST), "rank")
 
-        assert "trainee (60) / Senior (10)" in row
+        assert "'trainee' (60), 'Senior' (10)" in row
 
     def test_the_structured_payload_shows_the_same_five_and_their_share(
         self,
@@ -2601,14 +2776,14 @@ EDGES_OF_EVERY_DETECTION: dict[str, object] = {
 
 
 class TestTheQueryJoinsList:
-    """Every edge the print knows, the surest first, and nothing measured about any of them."""
+    """Every unrejected edge, the surest first, and nothing measured about the edge itself."""
 
     def test_edges_render_declared_first_with_their_detection(self) -> None:
         from dbprint.engine.context_assembler import _markdown_joins
 
-        rendered = _markdown_joins(TestRelationshipsMarkdown._artifacts(EDGES_OF_EVERY_DETECTION))
+        lines = _markdown_joins(TestRelationshipsMarkdown._artifacts(EDGES_OF_EVERY_DETECTION))
 
-        assert rendered.splitlines() == [
+        assert [line.text for line in lines] == [
             "## Joins",
             "- (site_id, plot_no) -> public.field_site.(site_id, plot_no) (declared)",
             "- garden_id -> public.garden.garden_code (inferred)",
@@ -2616,43 +2791,49 @@ class TestTheQueryJoinsList:
             "- collector_id <- public.accession.collector_id (inferred)",
         ]
 
-    def test_a_rejected_edge_carries_the_marker(self) -> None:
+    def test_a_table_with_no_edge_says_none_found(self) -> None:
         from dbprint.engine.context_assembler import _markdown_joins
 
-        annotations = [
-            {
-                "column": ["garden_id"],
-                "target_table": "public.garden",
-                "target_column": ["garden_code"],
-                "verdict": "rejected",
-                "note": "garden_id names a code, not a key into garden",
-            },
+        lines = _markdown_joins(TestRelationshipsMarkdown._artifacts({"eligible_target": True}))
+
+        assert [line.text for line in lines] == ["## Joins", "none found"]
+
+    def test_an_ineligible_target_with_no_edge_gives_the_reason(self) -> None:
+        from dbprint.engine.context_assembler import _markdown_joins
+
+        lines = _markdown_joins(TestRelationshipsMarkdown._artifacts({"eligible_target": False}))
+
+        assert [line.text for line in lines] == [
+            "## Joins",
+            "none found (not a join target, no declared-unique column)",
         ]
-        rendered = _markdown_joins(
-            TestRelationshipsMarkdown._artifacts(EDGES_OF_EVERY_DETECTION, annotations),
-        )
 
-        assert "[REJECTED by human annotation: garden_id names a code" in rendered
-
-    def test_a_table_with_no_edge_has_no_section(self, tmp_path: Path) -> None:
+    def test_a_seeded_table_with_no_edge_renders_the_section(self, tmp_path: Path) -> None:
         text = _query(_seed_print(tmp_path), "herbarium.public.collector", MANIFEST)
 
-        assert "## Joins" not in text
+        assert "## Joins\nnone found" in text
 
-    def test_the_structured_payload_carries_the_edges_and_a_rejection(self) -> None:
+    def test_unread_relationships_render_no_section_and_no_structured_key(self) -> None:
+        from dbprint.engine.context_assembler import _markdown_joins, _query_candidates
+
+        artifacts = TestRelationshipsMarkdown._artifacts({})
+        artifacts.relationships = None
+
+        assert _markdown_joins(artifacts) == []
+        assert "joins" not in dict(_query_candidates(artifacts, AssemblyOptions(purpose="query")))
+
+    def test_the_structured_payload_of_a_table_with_no_edge_has_both_lists_empty(self) -> None:
+        from dbprint.engine.context_assembler import _query_candidates
+
+        artifacts = TestRelationshipsMarkdown._artifacts({"eligible_target": False})
+        candidates = dict(_query_candidates(artifacts, AssemblyOptions(purpose="query")))
+
+        assert candidates["joins"] == {"refers_to": [], "referenced_by": []}
+
+    def test_the_structured_payload_carries_each_edge_and_its_detection(self) -> None:
         from dbprint.engine.context_assembler import _structured_joins
 
-        annotations = [
-            {
-                "column": ["garden_id"],
-                "target_table": "public.garden",
-                "target_column": ["garden_code"],
-                "verdict": "rejected",
-            },
-        ]
-        joins = _structured_joins(
-            TestRelationshipsMarkdown._artifacts(EDGES_OF_EVERY_DETECTION, annotations),
-        )
+        joins = _structured_joins(TestRelationshipsMarkdown._artifacts(EDGES_OF_EVERY_DETECTION))
 
         assert joins["refers_to"][0] == {
             "column": ["site_id", "plot_no"],
@@ -2660,7 +2841,12 @@ class TestTheQueryJoinsList:
             "target_column": ["site_id", "plot_no"],
             "detection": "declared",
         }
-        assert joins["refers_to"][1]["rejected"] is True
+        assert joins["refers_to"][1] == {
+            "column": ["garden_id"],
+            "target_table": "public.garden",
+            "target_column": ["garden_code"],
+            "detection": "inferred",
+        }
         assert "observed" not in joins["refers_to"][2]
         assert joins["referenced_by"] == [
             {
@@ -2670,6 +2856,138 @@ class TestTheQueryJoinsList:
                 "detection": "inferred",
             },
         ]
+
+
+def _nullable(null_count: int, null_rate: float, **extra: Any) -> dict[str, Any]:
+    return {"nullable": True, "null_count": null_count, "null_rate": null_rate, **extra}
+
+
+def _listed(*values: str) -> dict[str, Any]:
+    return {"values": [{"value": v, "count": 10} for v in values], "values_coverage": 1.0}
+
+
+NULL_SHARE_COLUMNS: dict[str, Any] = {
+    "id": {"nullable": False, "null_count": 0, "null_rate": 0.0},
+    "garden_id": _nullable(8, 0.004),
+    "rank": _nullable(0, 0.0, **_listed("genus", "species")),
+    "condition": _nullable(100, 0.05, **_listed("dry", "moist")),
+    "viability": {"nullable": False, "null_count": 0, "null_rate": 0.0, **_listed("high", "low")},
+    "site_id": _nullable(400, 0.2),
+    "plot_no": _nullable(0, 0.0),
+    "withdrawn_at": _nullable(1000, 0.5),
+}
+
+
+def _null_share_artifacts(
+    relationships: dict[str, Any] = EDGES_OF_EVERY_DETECTION,
+    scope: dict[str, Any] | None = None,
+) -> TableArtifacts:
+    a = TestRelationshipsMarkdown._artifacts(relationships)
+    a.statistics = {"row_count": 2000, "columns": NULL_SHARE_COLUMNS}
+
+    if scope:
+        a.statistics["scope"] = scope
+
+    return a
+
+
+class TestTheQueryPurposeStatesEachNullShareOnce:
+    """A nullable column's share sits on its value row, its Joins line, or the `Nulls:` line."""
+
+    def test_a_lone_referencing_column_states_its_share_on_its_joins_line(self) -> None:
+        from dbprint.engine.context_assembler import _markdown_joins
+
+        lines = [line.text for line in _markdown_joins(_null_share_artifacts())]
+
+        assert "- garden_id -> public.garden.garden_code (inferred); nulls: 0.4%" in lines
+        assert "- (site_id, plot_no) -> public.field_site.(site_id, plot_no) (declared)" in lines
+        assert "- collector_id <- public.accession.collector_id (inferred)" in lines
+
+    def test_a_value_row_carries_its_share_and_a_not_null_one_an_empty_cell(self) -> None:
+        from dbprint.engine.context_assembler import _markdown_column_values
+
+        lines = [
+            line.text for line in _markdown_column_values(_null_share_artifacts(), {"garden_id"})
+        ]
+
+        assert "| Column | Values (count) | Coverage | Nulls |" in lines
+        assert _row_for("\n".join(lines), "rank").endswith("| none |")
+        assert _row_for("\n".join(lines), "condition").endswith("| 5% |")
+        assert _row_for("\n".join(lines), "viability").endswith("|  |")
+
+    def test_every_other_nullable_column_lands_on_the_nulls_line(self) -> None:
+        from dbprint.engine.context_assembler import _markdown_column_values
+
+        lines = [
+            line.text for line in _markdown_column_values(_null_share_artifacts(), {"garden_id"})
+        ]
+
+        assert lines[-1] == "Nulls: site_id (20%), plot_no (none), withdrawn_at (50%)"
+
+    def test_with_no_joins_section_the_referencing_column_moves_to_the_nulls_line(self) -> None:
+        from dbprint.engine.context_assembler import _query_sections
+
+        sections = _query_sections(
+            _null_share_artifacts(),
+            AssemblyOptions(purpose="query", include_relationships=False),
+            None,
+        )
+        values = next(s for s in sections if s.name == "values")
+
+        assert values.text.splitlines()[-1].startswith("Nulls: garden_id (0.4%), site_id (20%)")
+
+    def test_a_scoped_table_qualifies_none(self) -> None:
+        from dbprint.engine.context_assembler import _markdown_column_values
+
+        artifacts = _null_share_artifacts(scope={"rows_scanned": 1000, "sample": 0.5})
+        lines = [line.text for line in _markdown_column_values(artifacts, set())]
+
+        assert _row_for("\n".join(lines), "rank").endswith("| none over the rows scanned |")
+        assert "plot_no (none over the rows scanned)" in lines[-1]
+
+    def test_without_value_rows_the_section_holds_the_nulls_line_alone(self) -> None:
+        from dbprint.engine.context_assembler import _markdown_column_values
+
+        artifacts = _null_share_artifacts({})
+        artifacts.statistics = {"row_count": 10, "columns": {"plot_no": _nullable(1, 0.1)}}
+
+        assert [line.text for line in _markdown_column_values(artifacts, set())] == [
+            "## Column values",
+            "",
+            "Nulls: plot_no (10%)",
+        ]
+
+    def test_a_table_with_no_nullable_column_states_no_share(self) -> None:
+        from dbprint.engine.context_assembler import _markdown_column_values
+
+        artifacts = _null_share_artifacts({})
+        artifacts.statistics = {
+            "row_count": 10,
+            "columns": {
+                "viability": NULL_SHARE_COLUMNS["viability"],
+                "id": NULL_SHARE_COLUMNS["id"],
+            },
+        }
+        lines = [line.text for line in _markdown_column_values(artifacts, set())]
+
+        assert not any(line.startswith("Nulls:") for line in lines)
+        assert _row_for("\n".join(lines), "viability").endswith("|  |")
+
+    def test_the_structured_payload_carries_the_raw_rates_by_the_same_rules(self) -> None:
+        from dbprint.engine.context_assembler import _query_candidates
+
+        candidates = dict(
+            _query_candidates(_null_share_artifacts(), AssemblyOptions(purpose="query")),
+        )
+        garden = next(e for e in candidates["joins"]["refers_to"] if e["column"] == ["garden_id"])
+        composite = candidates["joins"]["refers_to"][0]
+
+        assert candidates["values"]["rank"]["null_rate"] == 0.0
+        assert candidates["values"]["condition"]["null_rate"] == 0.05
+        assert "null_rate" not in candidates["values"]["viability"]
+        assert garden["null_rate"] == 0.004
+        assert "null_rate" not in composite
+        assert candidates["nulls"] == {"site_id": 0.2, "plot_no": 0.0, "withdrawn_at": 0.5}
 
 
 def _seed_print_with_edges(tmp_path: Path) -> Path:
@@ -2747,7 +3065,8 @@ class TestDatabaseContentCannotReshapeTheTableQuotingIt:
 
     def test_a_pipe_in_a_column_name_does_not_split_the_null_pattern_row(self) -> None:
         artifacts = _artifacts_with_null_patterns(["a|b", "plain"])
-        rows = [l for l in _markdown_null_patterns(artifacts).splitlines() if l.startswith("| ")]
+        lines = [line.text for line in _markdown_null_patterns(artifacts)]
+        rows = [l for l in lines if l.startswith("| ")]
         body_rows = [r for r in rows if not set(r) <= set("|- ")]
 
         assert body_rows
@@ -2781,15 +3100,14 @@ class TestLostTableBlocks:
 
     @staticmethod
     def _render(statistics: dict[str, Any]) -> str:
-        text, _, _ = _render_table_markdown(
+        return _render_table_markdown(
             _bare_artifacts(statistics),
             AssemblyOptions(),
             None,
             {},
             None,
-        )
-
-        return text
+            with_legend=True,
+        ).text
 
 
 def _unescaped_cells(row: str) -> list[str]:
@@ -2834,3 +3152,242 @@ def _bare_artifacts(statistics: dict[str, Any]) -> TableArtifacts:
         corrupted={},
         statistics_params_override=None,
     )
+
+
+def _seed_rejected_edge_into_collector(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
+    """`accession` rejects its inferred edge into `collector`; only `accession` authors that."""
+
+    print_root = _seed_print(tmp_path)
+    manifest: dict[str, Any] = copy.deepcopy(MANIFEST)
+    collector_dir = print_root / "herbarium" / "public" / "collector"
+    (collector_dir / "relationships.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "format_version": 1,
+                "table": "herbarium.public.collector",
+                "referenced_by": [
+                    {
+                        "column": ["collector_id"],
+                        "referencer_table": "herbarium.public.accession",
+                        "referencer_column": ["collector_id"],
+                        "detection": "inferred",
+                    },
+                ],
+            },
+        ),
+    )
+    accession_dir = print_root / "herbarium" / "public" / "accession"
+    accession_dir.mkdir(parents=True)
+    (accession_dir / "ddl.sql").write_text("CREATE TABLE accession (collector_id uuid);\n")
+    (accession_dir / "relationships.annotations.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "format_version": 1,
+                "refers_to": [
+                    {
+                        "column": ["collector_id"],
+                        "target_table": "herbarium.public.collector",
+                        "target_column": ["collector_id"],
+                        "verdict": "rejected",
+                        "note": "a batch number, not a collector",
+                    },
+                ],
+            },
+        ),
+    )
+    manifest["tables"]["herbarium.public.accession"] = {
+        "type": "table",
+        "path": "herbarium/public/accession",
+        "artifacts": {
+            "ddl": "ddl.sql",
+            "relationships_annotations": "relationships.annotations.yaml",
+        },
+        "columns": 1,
+        "profiled_at": "2026-06-09T00:00:00Z",
+    }
+
+    return print_root, manifest
+
+
+class TestARejectedEdgeIsWithheld:
+    """A rejected edge reaches no agent surface, from either side (SPEC 2.7.2)."""
+
+    def test_the_referencing_table_drops_its_own_rejected_edge_and_names_no_fk(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        print_root, manifest = _seed_rejected_edge_into_collector(tmp_path)
+        accession_dir = print_root / "herbarium" / "public" / "accession"
+        (accession_dir / "relationships.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "format_version": 1,
+                    "table": "herbarium.public.accession",
+                    "refers_to": [
+                        {
+                            "column": ["collector_id"],
+                            "target_table": "herbarium.public.collector",
+                            "target_column": ["collector_id"],
+                            "detection": "inferred",
+                        },
+                    ],
+                },
+            ),
+        )
+        (accession_dir / "statistics.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "format_version": 1,
+                    "table": "herbarium.public.accession",
+                    "row_count": 40,
+                    "columns": {
+                        "collector_id": {
+                            "sql_type": "uuid",
+                            "nullable": False,
+                            "null_count": 0,
+                            "null_rate": 0.0,
+                            "cardinality": 40,
+                            "cardinality_ratio": 1.0,
+                            "classification": "foreign_key_candidate",
+                        },
+                    },
+                },
+            ),
+        )
+        manifest["tables"]["herbarium.public.accession"]["artifacts"].update(
+            {"relationships": "relationships.yaml", "statistics": "statistics.yaml"},
+        )
+        text = assemble_context(
+            manifest,
+            print_root,
+            ["herbarium.public.accession"],
+            AssemblyOptions(),
+            "primary",
+        ).text
+
+        assert "herbarium.public.collector" not in text
+        assert "REJECTED" not in text
+        assert "FK candidate" in _row_for(text, "collector_id")
+
+        (accession_dir / "relationships.annotations.yaml").write_text("format_version: 1\n")
+        unrejected = assemble_context(
+            manifest,
+            print_root,
+            ["herbarium.public.accession"],
+            AssemblyOptions(),
+            "primary",
+        ).text
+
+        assert "FK: herbarium.public.collector.collector_id" in _row_for(unrejected, "collector_id")
+
+    def test_the_referenced_table_drops_the_edge_its_referencer_rejected(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        print_root, manifest = _seed_rejected_edge_into_collector(tmp_path)
+        text = assemble_context(
+            manifest,
+            print_root,
+            ["herbarium.public.collector"],
+            AssemblyOptions(),
+            "primary",
+        ).text
+
+        assert "herbarium.public.accession" not in text
+        assert "REJECTED" not in text
+        assert "## Relationships\n- (none)" in text
+
+    def test_the_query_joins_drop_the_incoming_edge(self, tmp_path: Path) -> None:
+        print_root, manifest = _seed_rejected_edge_into_collector(tmp_path)
+        text = _query(print_root, "herbarium.public.collector", manifest)
+
+        assert "herbarium.public.accession" not in text
+        assert "## Joins\nnone found" in text
+
+    def test_the_structured_joins_drop_the_incoming_edge(self, tmp_path: Path) -> None:
+        print_root, manifest = _seed_rejected_edge_into_collector(tmp_path)
+        payload = assemble_structured_context(
+            manifest,
+            print_root,
+            "herbarium.public.collector",
+            AssemblyOptions(purpose="query"),
+        )
+
+        assert payload["joins"] == {"refers_to": [], "referenced_by": []}
+
+    def test_an_edge_the_referencer_did_not_reject_is_kept(self, tmp_path: Path) -> None:
+        print_root, manifest = _seed_rejected_edge_into_collector(tmp_path)
+        (print_root / "herbarium/public/accession/relationships.annotations.yaml").write_text(
+            "format_version: 1\nrefers_to: []\n",
+        )
+        text = _query(print_root, "herbarium.public.collector", manifest)
+
+        assert "- collector_id <- herbarium.public.accession.collector_id (inferred)" in text
+
+    def test_a_verdict_on_a_declared_edge_withholds_nothing(self, tmp_path: Path) -> None:
+        print_root, manifest = _seed_rejected_edge_into_collector(tmp_path)
+        collector = print_root / "herbarium/public/collector/relationships.yaml"
+        data = yaml.safe_load(collector.read_text())
+        data["referenced_by"][0]["detection"] = "declared"
+        collector.write_text(yaml.safe_dump(data))
+        text = _query(print_root, "herbarium.public.collector", manifest)
+
+        assert "- collector_id <- herbarium.public.accession.collector_id (declared)" in text
+
+    def test_the_rejected_edges_verdict_leaves_and_every_other_entry_stays(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        print_root, manifest = _seed_rejected_edge_into_collector(tmp_path)
+        accession = print_root / "herbarium/public/accession"
+        manifest["tables"]["herbarium.public.accession"]["artifacts"]["relationships"] = (
+            "relationships.yaml"
+        )
+        (accession / "relationships.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "format_version": 1,
+                    "table": "herbarium.public.accession",
+                    "refers_to": [
+                        {
+                            "column": ["collector_id"],
+                            "target_table": "herbarium.public.collector",
+                            "target_column": ["collector_id"],
+                            "detection": "inferred",
+                        },
+                    ],
+                },
+            ),
+        )
+        annotations = accession / "relationships.annotations.yaml"
+        data = yaml.safe_load(annotations.read_text())
+        data["refers_to"].append(
+            {"column": ["vault_id"], "target_table": "herbarium.public.vault", "note": "kept"},
+        )
+        annotations.write_text(yaml.safe_dump(data))
+        payload = assemble_structured_context(
+            manifest,
+            print_root,
+            "herbarium.public.accession",
+            AssemblyOptions(),
+        )
+
+        assert payload["relationships"]["refers_to"] == []
+        assert payload["relationship_annotations"] == [
+            {"column": ["vault_id"], "target_table": "herbarium.public.vault", "note": "kept"},
+        ]
+
+
+def test_a_manifest_whose_statistics_params_is_not_a_mapping_still_renders(tmp_path: Path) -> None:
+    print_root = _seed_print(tmp_path)
+    manifest: dict[str, Any] = {**copy.deepcopy(MANIFEST), "statistics_params": "default"}
+
+    text = assemble_context(
+        manifest,
+        print_root,
+        ["herbarium.public.collector"],
+        AssemblyOptions(),
+        "primary",
+    ).text
+
+    assert "# Table: herbarium.public.collector" in text

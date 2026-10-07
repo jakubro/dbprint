@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests._cli import credential_env, generate
+from tests._engine_run import assert_conformant
 from tests.live import _harness as harness
 
 
@@ -69,14 +71,10 @@ def _apply_fixtures(creds: dict[str, str]) -> None:
 
 
 def _credential_env(creds: dict[str, str]) -> dict[str, str]:
-    upper = CONN_NAME.upper()
-
-    return {
-        f"DBPRINT_{upper}_SERVER_HOSTNAME": creds["server_hostname"],
-        f"DBPRINT_{upper}_HTTP_PATH": creds["http_path"],
-        f"DBPRINT_{upper}_ACCESS_TOKEN": creds["access_token"],
-        f"DBPRINT_{upper}_CATALOG": creds["catalog"],
-    }
+    return credential_env(
+        CONN_NAME,
+        {key: creds[key] for key in ("server_hostname", "http_path", "access_token", "catalog")},
+    )
 
 
 def test_databricks_live_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -85,7 +83,7 @@ def test_databricks_live_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     creds = _live_creds()
     _apply_fixtures(creds)
 
-    print_dir = harness.generate(
+    print_dir = generate(
         tmp_path,
         monkeypatch,
         CONN_NAME,
@@ -95,7 +93,7 @@ def test_databricks_live_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
     assert (print_dir / "manifest.yaml").is_file()
 
-    harness.assert_conformant(print_dir)
+    assert_conformant(print_dir)
 
     manifest = yaml.safe_load((print_dir / "manifest.yaml").read_text())
     schema = creds["schema"]

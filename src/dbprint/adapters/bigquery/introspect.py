@@ -9,7 +9,6 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from dbprint.config.selectors import expand
 from dbprint.spec.fqn import join as join_fqn
 from .connection import DIALECT, exec_query
 from ..base import (
@@ -25,7 +24,7 @@ from ..base import (
     UniqueKeyMeta,
 )
 from ..errors import QueryFailed
-from ..identifiers import Identity, column_meta, enforce_table_identifiers, fold, quote, table_meta
+from ..identifiers import Identity, column_meta, fold, quote, select_tables, table_meta
 
 
 if TYPE_CHECKING:
@@ -101,9 +100,8 @@ def list_tables(
         if ddl:
             ddl_by_fqn[meta.fqn] = str(ddl)
 
-    selected_fqns = expand([meta.fqn for meta, _ in candidates], include, exclude)
-    selected = [entry for entry in candidates if entry[0].fqn in selected_fqns]
-    enforce_table_identifiers(selected)
+    selected = select_tables(candidates, include, exclude)
+    selected_fqns = {meta.fqn for meta, _ in selected}
 
     return (
         selected,

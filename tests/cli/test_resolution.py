@@ -6,27 +6,16 @@ from pathlib import Path
 
 import pytest
 
-from dbprint.cli.resolution import ConnectionResolutionError, resolve
 from dbprint.config import (
     ConnectionConfig,
-    DiffConfig,
     ProjectConfig,
-    StatisticsConfig,
 )
+from dbprint.config.resolution import ConnectionResolutionError, resolve
+from tests._prints import connection_config
 
 
 def _conn(name: str, *, auto: bool = False) -> ConnectionConfig:
-    return ConnectionConfig(
-        name=name,
-        adapter="postgres",
-        auto=auto,
-        output=Path("/tmp/prints"),
-        include=("*",),
-        exclude=(),
-        max_age_days=7,
-        statistics=StatisticsConfig(),
-        diff=DiffConfig(),
-    )
+    return connection_config(name=name, output=Path("/tmp/prints"), auto=auto)
 
 
 def _project(connections: dict[str, ConnectionConfig]) -> ProjectConfig:

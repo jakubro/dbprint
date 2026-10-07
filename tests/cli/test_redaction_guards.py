@@ -5,15 +5,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
 
 from dbprint.adapters import (
-    ColumnMeta,
     ColumnStats,
-    CommentsMeta,
     Frequencies,
     Length,
     MockAdapter,
@@ -22,7 +19,10 @@ from dbprint.adapters import (
     ValueCount,
 )
 from dbprint.cli.main import main
+from dbprint.config.connections import env_var_name
 from dbprint.spec.classification import has_day_resolution, is_string_like_type
+from tests._cli import credential_env, patch_registry
+from tests._prints import columns, mock_table
 
 
 EXIT_OK = 0
@@ -204,47 +204,21 @@ def _collector_fixture() -> dict[str, MockTable]:
     """
 
     return {
-        "seedbank.collector": MockTable(
-            type="table",
-            namespace_path=("seedbank", "collector"),
-            ddl=(
-                "CREATE TABLE seedbank.collector (\n"
-                "    collector_id uuid NOT NULL,\n"
-                "    full_name character varying(120) NOT NULL,\n"
-                "    email character varying(320) NOT NULL,\n"
-                "    phone character varying(24) NOT NULL,\n"
-                "    institution character varying(120) NOT NULL,\n"
-                "    institution_email character varying(320) NOT NULL,\n"
-                "    street_address character varying(200) NOT NULL,\n"
-                "    postal_code character varying(12) NOT NULL,\n"
-                "    country_code character(2) NOT NULL,\n"
-                "    hired_on date NOT NULL\n"
-                ");\n\n"
-                "ALTER TABLE ONLY seedbank.collector\n"
-                "    ADD CONSTRAINT collector_pkey PRIMARY KEY (collector_id);\n"
+        "seedbank.collector": mock_table(
+            "seedbank.collector",
+            columns(
+                ("collector_id", "uuid"),
+                ("full_name", "character varying(120)"),
+                ("email", "character varying(320)"),
+                ("phone", "character varying(24)"),
+                ("institution", "character varying(120)"),
+                ("institution_email", "character varying(320)"),
+                ("street_address", "character varying(200)"),
+                ("postal_code", "character varying(12)"),
+                ("country_code", "character(2)"),
+                ("hired_on", "date"),
             ),
-            columns=[
-                ColumnMeta(name=name, sql_type=sql_type, nullable=False, default=None, ordinal=i)
-                for i, (name, sql_type) in enumerate(
-                    [
-                        ("collector_id", "uuid"),
-                        ("full_name", "character varying(120)"),
-                        ("email", "character varying(320)"),
-                        ("phone", "character varying(24)"),
-                        ("institution", "character varying(120)"),
-                        ("institution_email", "character varying(320)"),
-                        ("street_address", "character varying(200)"),
-                        ("postal_code", "character varying(12)"),
-                        ("country_code", "character(2)"),
-                        ("hired_on", "date"),
-                    ],
-                    start=1,
-                )
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+            {
                 "collector_id": _pair_column(
                     "uuid",
                     (
@@ -271,6 +245,20 @@ def _collector_fixture() -> dict[str, MockTable]:
                 "country_code": _pair_column("character(2)", ("US", "CA")),
                 "hired_on": _temporal_column("date"),
             },
+            ddl="CREATE TABLE seedbank.collector (\n"
+            "    collector_id uuid NOT NULL,\n"
+            "    full_name character varying(120) NOT NULL,\n"
+            "    email character varying(320) NOT NULL,\n"
+            "    phone character varying(24) NOT NULL,\n"
+            "    institution character varying(120) NOT NULL,\n"
+            "    institution_email character varying(320) NOT NULL,\n"
+            "    street_address character varying(200) NOT NULL,\n"
+            "    postal_code character varying(12) NOT NULL,\n"
+            "    country_code character(2) NOT NULL,\n"
+            "    hired_on date NOT NULL\n"
+            ");\n\n"
+            "ALTER TABLE ONLY seedbank.collector\n"
+            "    ADD CONSTRAINT collector_pkey PRIMARY KEY (collector_id);\n",
             samples={"email": ["a@example.com", "b@example.com", "c@example.com"]},
             row_count=200,
         ),
@@ -284,7 +272,7 @@ def _accession_fixture() -> dict[str, MockTable]:
     other fourteen are filler in the table's real shape.
     """
 
-    columns = [
+    spec = [
         ("accession_id", "bigint"),
         ("accession_code", "character varying(24)"),
         ("taxon_id", "integer"),
@@ -341,34 +329,24 @@ def _accession_fixture() -> dict[str, MockTable]:
     }
 
     return {
-        "seedbank.accession": MockTable(
-            type="table",
-            namespace_path=("seedbank", "accession"),
-            ddl=(
-                "CREATE TABLE seedbank.accession (\n"
-                + ",\n".join(
-                    f"    {name} {sql_type}"
-                    + ("" if name in ("traits", "storage_temperature_c") else " NOT NULL")
-                    for name, sql_type in columns
-                )
-                + "\n);\n\n"
-                "ALTER TABLE ONLY seedbank.accession\n"
-                "    ADD CONSTRAINT accession_pkey PRIMARY KEY (accession_id);\n"
+        "seedbank.accession": mock_table(
+            "seedbank.accession",
+            columns(
+                *(
+                    (name, sql_type, name in ("traits", "storage_temperature_c"))
+                    for name, sql_type in spec
+                ),
             ),
-            columns=[
-                ColumnMeta(
-                    name=name,
-                    sql_type=sql_type,
-                    nullable=name in ("traits", "storage_temperature_c"),
-                    default=None,
-                    ordinal=i,
-                )
-                for i, (name, sql_type) in enumerate(columns, start=1)
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats=stats,
+            stats,
+            ddl="CREATE TABLE seedbank.accession (\n"
+            + ",\n".join(
+                f"    {name} {sql_type}"
+                + ("" if name in ("traits", "storage_temperature_c") else " NOT NULL")
+                for name, sql_type in spec
+            )
+            + "\n);\n\n"
+            "ALTER TABLE ONLY seedbank.accession\n"
+            "    ADD CONSTRAINT accession_pkey PRIMARY KEY (accession_id);\n",
             samples={"provenance_country": ["AU", "CA", "DE", "FR", "GB"]},
             row_count=200,
         ),
@@ -390,27 +368,17 @@ class _AccessionAdapter(MockAdapter):
 
 
 def _patch_registry(adapter: type[MockAdapter] = _CollectorAdapter):
-    return patch.dict(
-        "dbprint.cli.adapter_registry.ADAPTERS",
-        {"postgres": adapter},
-        clear=True,
-    )
+    return patch_registry({"postgres": adapter})
 
 
 def _credentials(monkeypatch: pytest.MonkeyPatch, *, salt: str | None = None) -> None:
-    for key, value in {
-        "DBPRINT_PRIMARY_HOST": "h",
-        "DBPRINT_PRIMARY_PORT": "5432",
-        "DBPRINT_PRIMARY_DATABASE": "d",
-        "DBPRINT_PRIMARY_USER": "u",
-        "DBPRINT_PRIMARY_PASSWORD": "p",
-    }.items():
+    for key, value in credential_env().items():
         monkeypatch.setenv(key, value)
 
-    monkeypatch.delenv("DBPRINT_PRIMARY_REDACTION_SALT", raising=False)
+    monkeypatch.delenv(env_var_name("primary", "redaction_salt"), raising=False)
 
     if salt is not None:
-        monkeypatch.setenv("DBPRINT_PRIMARY_REDACTION_SALT", salt)
+        monkeypatch.setenv(env_var_name("primary", "redaction_salt"), salt)
 
 
 def _run(

@@ -10,9 +10,8 @@ import re
 from collections.abc import Sequence
 from typing import Any
 
-from dbprint.config.selectors import expand
 from dbprint.spec.classification import base_type, is_nullable_type, top_level_arguments
-from .connection import Cursor, exec_query
+from .connection import DIALECT, Cursor, exec_query
 from ..base import (
     ColumnMeta,
     CommentsMeta,
@@ -27,7 +26,8 @@ from ..base import (
     UniqueKeyMeta,
 )
 from ..errors import QueryFailed
-from ..identifiers import Identity, column_meta, enforce_table_identifiers, fold, table_meta
+from ..identifiers import Identity, column_meta, fold, select_tables, table_meta
+from ..sql_layout import split_top_level
 
 
 # The connection's default comparison collation (SPEC 2.2.2) - ClickHouse has no server-side
@@ -156,15 +156,7 @@ def list_tables(
         candidates.append((meta, physical))
         samplable[meta.fqn] = bool(sampling_key)
 
-    in_scope = set(
-        expand(
-            [meta.fqn for meta, _ in candidates],
-            config_include=include,
-            config_exclude=exclude,
-        ),
-    )
-    selected = [entry for entry in candidates if entry[0].fqn in in_scope]
-    enforce_table_identifiers(selected)
+    selected = select_tables(candidates, include, exclude)
 
     return selected, {meta.fqn: samplable[meta.fqn] for meta, _ in selected}, tuple(skipped)
 
@@ -308,9 +300,16 @@ def physical_layout(cursor: Cursor, identity: Identity) -> PhysicalLayout | None
     if not row or not row[0]:
         return None
 
+    parts = split_top_level(str(row[0]), DIALECT.quote_char)
+
+    # A tuple key reads `(a, b)`: its members are the keys, not the one parenthesised group.
+    if len(parts) == 1 and parts[0].startswith("(") and parts[0].endswith(")"):
+        members = split_top_level(parts[0][1:-1], DIALECT.quote_char)
+        parts = members if len(members) > 1 else parts
+
     return PhysicalLayout(
         mechanism="partition",
-        keys=tuple(_partition_key(part.strip()) for part in str(row[0]).split(",")),
+        keys=tuple(_partition_key(part.strip()) for part in parts),
     )
 
 

@@ -8,18 +8,19 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import psycopg
 import pytest
 import yaml
 
 from dbprint.adapters import Adapter, AdapterType, PostgresAdapter
 from dbprint.adapters.postgres.stats import _UNSUPPORTED_TYPES as POSTGRES_UNSUPPORTED
 from dbprint.adapters.snowflake.stats import _UNSUPPORTED_TYPES as SNOWFLAKE_UNSUPPORTED
-from dbprint.config.project import ConnectionConfig, DiffConfig, StatisticsConfig
-from dbprint.conformance import validate_print
+from dbprint.config.project import StatisticsConfig
 from dbprint.engine import Engine
 from dbprint.spec.classification import _UNSUPPORTED_TYPES as SPEC_UNSUPPORTED
 from dbprint.spec.classification import classify
+from tests._engine_run import conformance_errors
+from tests._prints import connection_config
+from tests.conftest import pg_connect
 
 
 # Types each adapter declines to profile that the format's own unsupported list does not name.
@@ -170,14 +171,7 @@ def _seed_postgres(creds: dict[str, str]) -> None:
     classify them `spatial` by name, not `unsupported`.
     """
 
-    with psycopg.connect(
-        host=creds["host"],
-        port=int(creds["port"]),
-        dbname=creds["database"],
-        user=creds["user"],
-        password="",
-        autocommit=True,
-    ) as conn:
+    with pg_connect(creds) as conn:
         conn.execute("CREATE TABLE public.shapes (spot point, frame box, label text)")
         conn.execute(
             "INSERT INTO public.shapes SELECT point(i, i), box(point(0, 0), point(i, i)), "
@@ -191,17 +185,7 @@ def _generate(
     tmp_path: Path,
     include: str,
 ) -> dict[str, Any]:
-    conn_config = ConnectionConfig(
-        name="primary",
-        adapter=name,
-        auto=True,
-        output=tmp_path,
-        include=(include,),
-        exclude=(),
-        max_age_days=7,
-        statistics=StatisticsConfig(),
-        diff=DiffConfig(),
-    )
+    conn_config = connection_config(adapter=name, output=tmp_path, auto=True, include=(include,))
 
     try:
         Engine(adapter, conn_config, tmp_path).generate()
@@ -216,6 +200,6 @@ def _generate(
 
 
 def _assert_conformant(tmp_path: Path) -> None:
-    errors = [i for i in validate_print(tmp_path / "primary") if i.severity == "error"]
+    errors = conformance_errors(tmp_path / "primary")
 
     assert errors == [], "\n".join(f"  {e.code} at {e.path}: {e.detail}" for e in errors)

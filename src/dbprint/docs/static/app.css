@@ -77,6 +77,13 @@ th[data-sort] { cursor: pointer; user-select: none; }
 .md p { margin: .4rem 0; }
 .md ul, .md ol { margin: .3rem 0; padding-left: 1.4rem; }
 
+.purpose-picker { display: flex; gap: .25rem; margin-bottom: .75rem; }
+.purpose-btn { font: inherit; background: none; border: 1px solid #8883; border-radius: 4px; padding: .2rem .7rem; cursor: pointer; color: #777; }
+.purpose-btn.active { color: #000; border-color: #4a90d9; font-weight: 600; }
+.context-markdown { margin-bottom: .75rem; }
+.context-markdown pre { white-space: pre-wrap; }
+.context-fragment h1 { font-size: 1.05em; }
+
 .hedge { font-size: .85rem; color: #555; margin: .5rem 0; padding: .5rem .75rem; background: #4a90d90d; border-left: 3px solid #4a90d966; border-radius: 2px; }
 .hedge-block { margin: 1rem 0; }
 .hedge-block table { margin-top: .3rem; }

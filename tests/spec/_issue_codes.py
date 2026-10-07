@@ -7,12 +7,12 @@ from __future__ import annotations
 
 import ast
 import types
-from pathlib import Path
 
 from dbprint.conformance.schema_validation import _FORWARD_COMPAT_ENUM_FIELDS, _classify
+from tests._scripts import REPO_ROOT
 
 
-CONFORMANCE_DIR = Path(__file__).resolve().parents[2] / "src/dbprint/conformance"
+CONFORMANCE_DIR = REPO_ROOT / "src/dbprint/conformance"
 
 # SPEC 6.3's own single-letter severity column, keyed by the Issue.severity string it means.
 SEVERITY_MAP = {"error": "E", "warning": "W"}

@@ -10,9 +10,8 @@ from pathlib import Path
 import yaml
 
 from dbprint import __version__
+from tests._scripts import REPO_ROOT
 
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # `diff.yaml` records the producer of the baseline it compared against, `manifest.yaml` its own.
 ARTIFACT_NAMES = ("manifest.yaml", "diff.yaml")

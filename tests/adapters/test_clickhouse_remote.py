@@ -11,9 +11,9 @@ import yaml
 from dbprint.adapters import ClickhouseAdapter
 from dbprint.adapters.clickhouse import introspect
 from dbprint.config.project import ConnectionConfig
-from dbprint.conformance import validate_print
 from dbprint.engine import Engine
-from tests.adapters.test_clickhouse_secrets import _Recorder
+from tests._engine_run import conformance_errors
+from tests.adapters._clickhouse import Recorder
 
 
 _REMOTE = {
@@ -65,14 +65,14 @@ def test_remote_tables_are_printed_from_the_catalog_and_none_fails(
 
     assert not manifest.get("failed_tables")
     assert [s for s in recorder.statements if _reads_remote(s)] == []
-    assert [i for i in validate_print(tmp_path / "primary") if i.severity == "error"] == []
+    assert conformance_errors(tmp_path / "primary") == []
 
 
-def _seeded(cursor: Any) -> _Recorder:
+def _seeded(cursor: Any) -> Recorder:
     for name, engine in (*_STORED.items(), *_REMOTE.items()):
         cursor.execute(f"CREATE TABLE seedbank.{name} (id UInt64) ENGINE = {engine}")
 
-    return _Recorder(cursor)
+    return Recorder(cursor)
 
 
 def _generate(cursor: Any, tmp_path: Path) -> None:

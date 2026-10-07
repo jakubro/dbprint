@@ -43,7 +43,7 @@ def sample_distinct(
     quoted = identity.quoted()
     cn = identity.source_column(column)
     seed = statements.table_seed(identity)
-    scoped = stats._source(quoted, scope, seed)
+    scoped = stats.table_source(identity, scope)
     # TABLESAMPLE refuses a foreign table, so its values are always read directly.
     estimate = (
         -1.0 if foreign else statements.scoped_estimate(reltuples_estimate(conn, identity), scope)
@@ -76,7 +76,7 @@ def _sub_drawn_source(
     """
 
     if scope is not None and scope.materialized is not None:
-        drawn = stats._source(
+        drawn = stats.source(
             quote(scope.materialized, DIALECT),
             TableScope(sample=min(1.0, fraction)),
             seed,
@@ -85,11 +85,11 @@ def _sub_drawn_source(
         return drawn, ""
 
     if scope is not None and scope.filter:
-        return stats._source(quoted_fqn, scope, seed), f" AND RANDOM() < {fraction}"
+        return stats.source(quoted_fqn, scope, seed), f" AND RANDOM() < {fraction}"
 
     composed = fraction * scope.sample if scope is not None and scope.sample else fraction
 
-    return stats._source(quoted_fqn, TableScope(sample=min(1.0, composed)), seed), ""
+    return stats.source(quoted_fqn, TableScope(sample=min(1.0, composed)), seed), ""
 
 
 def _distinct(

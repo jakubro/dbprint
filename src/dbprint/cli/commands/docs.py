@@ -12,15 +12,16 @@ from types import ModuleType
 import rich_click as click
 
 from dbprint.config import ConnectionConfig
+from dbprint.config.resolution import ConnectionResolutionError
+from dbprint.config.resolution import resolve as resolve_connections
 from dbprint.engine import EXIT_GENERIC, EXIT_OK
 from ..options import keep_fresh, project_option, resolve_project
-from ..resolution import ConnectionResolutionError
-from ..resolution import resolve as resolve_connections
 
 
 _DEFAULT_PORT = 8765
 _DEFAULT_OUTPUT = Path("dbprint-docs")
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+_INSTALL_HINT = "Install dbprint[docs] to use the docs command."
 
 
 @click.group(name="docs")
@@ -73,7 +74,8 @@ def serve_command(
     **Exit codes:**
 
     - `0`: clean shutdown
-    - `1`: missing `[docs]` extra, a non-loopback `--host`, or an unresolved connection
+    - `1`: missing `[docs]` extra, a non-loopback `--host`, a port already in use, or an
+      unresolved connection
 
     **Examples:**
 
@@ -88,8 +90,18 @@ def serve_command(
     docs_pkg = _import_docs(ctx)
     connections = _resolve(ctx, connection, project, select_all)
     keep_fresh(project)
+    url = f"http://[{host}]:{port}" if ":" in host else f"http://{host}:{port}"
 
-    docs_pkg.serve(connections, host, port)
+    try:
+        docs_pkg.serve(connections, host, port, lambda: click.echo(f"Serving on {url}"))
+    except KeyboardInterrupt:
+        return
+    except ImportError:
+        click.echo(_INSTALL_HINT, err=True)
+        ctx.exit(EXIT_GENERIC)
+    except OSError as exc:
+        click.echo(f"Cannot serve on {url}: {exc.strerror or exc}.", err=True)
+        ctx.exit(EXIT_GENERIC)
 
 
 @docs_group.command(name="build")
@@ -169,7 +181,7 @@ def _import_docs(ctx: click.Context) -> ModuleType:
     try:
         from dbprint import docs as docs_pkg
     except ImportError:
-        click.echo("Install dbprint[docs] to use the docs command.", err=True)
+        click.echo(_INSTALL_HINT, err=True)
         ctx.exit(EXIT_GENERIC)
 
     return docs_pkg

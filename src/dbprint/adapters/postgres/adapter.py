@@ -10,7 +10,6 @@ from dataclasses import replace
 from typing import Any, ClassVar, LiteralString, cast
 
 from dbprint.config import selectors
-from dbprint.spec.classification import is_string_like_type
 from . import connection as connection_module
 from . import ddl as ddl_module
 from . import introspect as introspect_module
@@ -31,8 +30,9 @@ from ..base import (
     row_count_or_none,
 )
 from ..dialect import Dialect
+from ..driver import ServerParams
 from ..errors import QueryFailed
-from ..identifiers import Identity, IdentityRegistry
+from ..identifiers import IdentityRegistry, select_tables
 
 
 # The database a connection with no `database` connects to first, to enumerate the others.
@@ -46,8 +46,7 @@ class PostgresAdapter(PerDatabaseSqlAdapter):
     """
 
     KNOWN_TYPES: ClassVar[tuple[str, ...]] = stats_module.KNOWN_TYPES
-    REQUIRED_KEYS: ClassVar[tuple[str, ...]] = ("host", "port", "user", "password")
-    OPTIONAL_KEYS: ClassVar[tuple[str, ...]] = ("database",)
+    SERVER_PARAMS: ClassVar[type[ServerParams]] = ConnectionParams
     # BERNOULLI decides membership per row by hashing (block, offset, seed) - an
     # unmaterialized `sample` scope still reads the same rows on every statement.
     SAMPLE_FALLBACK_COHERENT: ClassVar[bool] = True
@@ -75,7 +74,6 @@ class PostgresAdapter(PerDatabaseSqlAdapter):
         # A session is bound to one database, so each database a table lives in gets its own,
         # opened on first use and held for the run: a materialized sample outlives extraction.
         self._start_sessions(self._params.database or ENTRY_DATABASE)
-        self._collations: dict[str, str] = {}
         self._identities = IdentityRegistry(DIALECT)
         self._skipped: tuple[SkippedNamespace, ...] = ()
         self._selected_databases: tuple[str, ...] = ()
@@ -96,13 +94,13 @@ class PostgresAdapter(PerDatabaseSqlAdapter):
             except (PostgresConnectionError, QueryFailed) as exc:
                 skipped.append(SkippedNamespace(name=database, cause=str(exc)))
 
-        selected = introspect_module.select_tables(candidates, include, exclude)
-        self._identities.register(selected)
+        selected = select_tables(candidates, include, exclude)
+        listed = self._register(selected)
         self._skipped = tuple(skipped)
         self._selected_databases = tuple(sorted({physical[0] for _, physical in selected}))
         self._foreign = frozenset(meta.fqn for meta, _ in selected if meta.external)
 
-        return [meta for meta, _ in selected]
+        return listed
 
     def skipped_namespaces(self) -> tuple[SkippedNamespace, ...]:
         return self._skipped
@@ -116,19 +114,8 @@ class PostgresAdapter(PerDatabaseSqlAdapter):
         identity = self._identity(fqn)
         columns = introspect_module.columns(self._handle(fqn), identity)
         self._identities.attach(fqn, columns)
-        own = self._collation(identity.parts[0])
 
-        # The manifest states the entry database's collation; a table compared under another
-        # database's default says so on each string column, or it would inherit the wrong one.
-        if own == self._collation(self._entry_database):
-            return columns
-
-        return [
-            replace(c, collation=own)
-            if c.collation is None and is_string_like_type(c.sql_type)
-            else c
-            for c in columns
-        ]
+        return self._with_database_collation(identity, columns)
 
     def default_collation(self) -> str:
         return introspect_module.default_collation(self._psycopg)
@@ -226,25 +213,8 @@ class PostgresAdapter(PerDatabaseSqlAdapter):
     def _handle(self, fqn: str) -> Any:
         return self._session(self._identity(fqn).parts[0]).psycopg_connection
 
-    def _collation(self, database: str) -> str:
-        if database not in self._collations:
-            conn = self._session(database).psycopg_connection
-            self._collations[database] = introspect_module.default_collation(conn)
-
-        return self._collations[database]
-
-    def _read_identity(self, fqn: str) -> Identity:
-        """The identity carrying its columns, read from the catalog if not yet introspected."""
-
-        identity = self._identity(fqn)
-
-        if identity.columns:
-            return identity
-
-        return self._identities.attach(
-            fqn,
-            introspect_module.columns(self._handle(fqn), identity),
-        )
+    def _session_handle(self, session: Connection) -> Any:
+        return session.psycopg_connection
 
     @property
     def _psycopg(self):

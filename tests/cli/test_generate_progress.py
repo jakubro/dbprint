@@ -31,6 +31,7 @@ from dbprint.cli.rendering.progress import (
 from dbprint.engine import DiffSummary, GenerateResult, ProgressEvent, SummaryCounts, TableResult
 from dbprint.engine.orchestrator import _ProgressEmitter
 from dbprint.engine.result import ProgressPhase, ProgressStatus
+from tests._cli import AUTO_PROJECT_YAML, credential_env, patch_registry
 from tests._prints import uuid_id_table
 
 
@@ -53,18 +54,6 @@ _ZERO_DIFF = DiffSummary(
     unchanged_tables=0,
     unevaluated_tables=0,
 )
-
-PROJECT_YAML = """\
-defaults:
-  max_age_days: 7
-  statistics: {}
-  diff: {}
-connections:
-  primary:
-    adapter: postgres
-    auto: true
-    output: prints
-"""
 
 
 def _result(
@@ -1242,16 +1231,6 @@ def _two_table_fixture() -> dict[str, MockTable]:
     return {"public.a": uuid_id_table("public.a"), "public.b": uuid_id_table("public.b")}
 
 
-def _credential_env() -> dict[str, str]:
-    return {
-        "DBPRINT_PRIMARY_HOST": "h",
-        "DBPRINT_PRIMARY_PORT": "5432",
-        "DBPRINT_PRIMARY_DATABASE": "d",
-        "DBPRINT_PRIMARY_USER": "u",
-        "DBPRINT_PRIMARY_PASSWORD": "p",
-    }
-
-
 class TestProgressIsOnStderr:
     """`generate`'s progress is on stderr, matching `check` and `diff` - stdout carries no
     payload of its own.
@@ -1262,17 +1241,13 @@ class TestProgressIsOnStderr:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        (tmp_path / ".dbprint.yaml").write_text(PROJECT_YAML)
+        (tmp_path / ".dbprint.yaml").write_text(AUTO_PROJECT_YAML)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
-        with patch.dict(
-            "dbprint.cli.adapter_registry.ADAPTERS",
-            {"postgres": _MockPostgresAdapter},
-            clear=True,
-        ):
+        with patch_registry({"postgres": _MockPostgresAdapter}):
             result = CliRunner().invoke(main, ["generate", "--no-tui"])
 
         assert result.stdout == ""
@@ -1284,17 +1259,13 @@ class TestProgressIsOnStderr:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        (tmp_path / ".dbprint.yaml").write_text(PROJECT_YAML)
+        (tmp_path / ".dbprint.yaml").write_text(AUTO_PROJECT_YAML)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
-        with patch.dict(
-            "dbprint.cli.adapter_registry.ADAPTERS",
-            {"postgres": _MockPostgresAdapter},
-            clear=True,
-        ):
+        with patch_registry({"postgres": _MockPostgresAdapter}):
             result = CliRunner().invoke(main, ["generate", "--tui"])
 
         assert "warning: --tui requested but stderr does not support the live view" in (
@@ -1312,10 +1283,10 @@ class TestRefusedTuiIsStated:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        (tmp_path / ".dbprint.yaml").write_text(PROJECT_YAML)
+        (tmp_path / ".dbprint.yaml").write_text(AUTO_PROJECT_YAML)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         # `TTY_COMPATIBLE=1` makes Rich report a real terminal without a pty; `TERM=dumb` then
@@ -1323,11 +1294,7 @@ class TestRefusedTuiIsStated:
         monkeypatch.setenv("TTY_COMPATIBLE", "1")
         monkeypatch.setenv("TERM", "dumb")
 
-        with patch.dict(
-            "dbprint.cli.adapter_registry.ADAPTERS",
-            {"postgres": _MockPostgresAdapter},
-            clear=True,
-        ):
+        with patch_registry({"postgres": _MockPostgresAdapter}):
             result = CliRunner().invoke(main, ["generate", "--tui"])
 
         assert "warning: --tui requested but stderr does not support the live view" in (
@@ -1341,19 +1308,15 @@ class TestPipedStreamingThroughCli:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        (tmp_path / ".dbprint.yaml").write_text(PROJECT_YAML)
+        (tmp_path / ".dbprint.yaml").write_text(AUTO_PROJECT_YAML)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         runner = CliRunner()
 
-        with patch.dict(
-            "dbprint.cli.adapter_registry.ADAPTERS",
-            {"postgres": _MockPostgresAdapter},
-            clear=True,
-        ):
+        with patch_registry({"postgres": _MockPostgresAdapter}):
             result = runner.invoke(main, ["generate", "--no-tui"])
 
         out = result.output
@@ -1369,19 +1332,15 @@ class TestPipedStreamingThroughCli:
     ) -> None:
         """Deferring stderr writes for the live renderer must not touch the streaming path."""
 
-        (tmp_path / ".dbprint.yaml").write_text(PROJECT_YAML)
+        (tmp_path / ".dbprint.yaml").write_text(AUTO_PROJECT_YAML)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         runner = CliRunner()
 
-        with patch.dict(
-            "dbprint.cli.adapter_registry.ADAPTERS",
-            {"postgres": _StatisticsFailAdapter},
-            clear=True,
-        ):
+        with patch_registry({"postgres": _StatisticsFailAdapter}):
             result = runner.invoke(main, ["generate", "--no-tui"])
 
         assert "1 table failed: RuntimeError: boom" in result.output
@@ -1396,17 +1355,13 @@ class TestQuiet:
         # see the first's committed prints and skip re-profiling on freshness, not on quiet.
         project_root = tmp_path / name
         project_root.mkdir()
-        (project_root / ".dbprint.yaml").write_text(PROJECT_YAML)
+        (project_root / ".dbprint.yaml").write_text(AUTO_PROJECT_YAML)
         monkeypatch.chdir(project_root)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
-        with patch.dict(
-            "dbprint.cli.adapter_registry.ADAPTERS",
-            {"postgres": _MockPostgresAdapter},
-            clear=True,
-        ):
+        with patch_registry({"postgres": _MockPostgresAdapter}):
             return CliRunner().invoke(main, ["generate", *args])
 
     @pytest.mark.parametrize("flag", ["--quiet", "-q"])
@@ -1445,17 +1400,13 @@ class TestQuiet:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        (tmp_path / ".dbprint.yaml").write_text(PROJECT_YAML)
+        (tmp_path / ".dbprint.yaml").write_text(AUTO_PROJECT_YAML)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
-        with patch.dict(
-            "dbprint.cli.adapter_registry.ADAPTERS",
-            {"postgres": _StatisticsFailAdapter},
-            clear=True,
-        ):
+        with patch_registry({"postgres": _StatisticsFailAdapter}):
             result = CliRunner().invoke(main, ["generate", "--no-tui", "--quiet"])
 
         assert result.stdout == ""
@@ -1477,10 +1428,10 @@ class TestFlushWarningsCalledPerConnection:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         second = "  secondary:\n    adapter: postgres\n    auto: true\n    output: prints\n"
-        (tmp_path / ".dbprint.yaml").write_text(PROJECT_YAML + second)
+        (tmp_path / ".dbprint.yaml").write_text(AUTO_PROJECT_YAML + second)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
             monkeypatch.setenv(k.replace("PRIMARY", "SECONDARY"), v)
 
@@ -1491,11 +1442,7 @@ class TestFlushWarningsCalledPerConnection:
             lambda **kwargs: LiveProgressRenderer(console),
         )
 
-        with patch.dict(
-            "dbprint.cli.adapter_registry.ADAPTERS",
-            {"postgres": _WarnsOnConnect},
-            clear=True,
-        ):
+        with patch_registry({"postgres": _WarnsOnConnect}):
             CliRunner().invoke(main, ["generate"])
 
         out = buf.getvalue()

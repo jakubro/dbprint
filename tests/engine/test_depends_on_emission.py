@@ -9,25 +9,21 @@ from typing import Any
 
 import yaml
 
-from dbprint.adapters import ColumnMeta, CommentsMeta, MockAdapter, MockTable, TableType
+from dbprint.adapters import MockAdapter, MockTable, TableType
 from dbprint.config import ConnectionConfig
 from dbprint.engine import Engine
 from dbprint.engine.context_assembler import AssemblyOptions, assemble
+from tests._engine_run import artifact
+from tests._prints import columns, mock_table
 
 
 def _table(namespace_path: tuple[str, str], ddl: str, table_type: TableType = "table") -> MockTable:
-    return MockTable(
-        type=table_type,
-        namespace_path=namespace_path,
+    return mock_table(
+        ".".join(namespace_path),
+        columns(("id", "integer")),
+        {},
         ddl=ddl,
-        columns=[
-            ColumnMeta(name="id", sql_type="integer", nullable=False, default=None, ordinal=1),
-        ],
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={},
-        samples={},
+        type=table_type,
     )
 
 
@@ -66,7 +62,7 @@ def _generate(tmp_path: Path, dependencies: dict[str, tuple[str, ...]] | None) -
 
 
 def _statistics(root: Path, schema: str, name: str) -> dict[str, Any]:
-    return yaml.safe_load((root / schema / name / "statistics.yaml").read_text())
+    return artifact(root, f"{schema}.{name}")
 
 
 class TestPresence:

@@ -5,18 +5,37 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 
 @dataclass(frozen=True)
 class StaleEntry:
-    """One manifest entry whose `profiled_at` exceeds the threshold applied to it.
+    """One manifest entry whose age has reached the threshold applied to it.
 
     `max_age_days` carries that threshold, which is resolved per table.
     """
 
     fqn: str
     age_days: float
+    max_age_days: float
+
+    @property
+    def measured(self) -> bool:
+        """Whether the age was read off a `profiled_at`; an unmeasurable one is infinite."""
+
+        return self.age_days != float("inf")
+
+
+@dataclass(frozen=True)
+class TableFreshness:
+    """One table's freshness as every surface states it; `age_days` is None exactly when `dormant`.
+
+    `dormant` is an age no reader can measure - no entry or no readable `profiled_at` - and is stale.
+    """
+
+    fqn: str
+    verdict: Literal["live", "stale", "dormant"]
+    age_days: float | None
     max_age_days: float
 
 
@@ -27,11 +46,9 @@ def evaluate(
     *,
     threshold_for: Callable[[str], float] | None = None,
 ) -> list[StaleEntry]:
-    """Return entries from the manifest whose `profiled_at` is older than their threshold.
+    """Return the manifest entries whose age at `now` (default: UTC now) has reached their threshold.
 
-    `threshold_for` resolves the threshold per table, `max_age_days` applies when it is
-    absent, and `now` defaults to `datetime.now(UTC)`. An entry that is not a mapping or has
-    no parseable `profiled_at` is stale at infinite age rather than an error.
+    `threshold_for` resolves it per table, else `max_age_days`; an unreadable entry ages infinitely.
     """
 
     current = now or datetime.now(UTC)
@@ -45,10 +62,42 @@ def evaluate(
             out.append(StaleEntry(fqn=fqn, age_days=float("inf"), max_age_days=threshold))
             continue
 
-        if age > threshold:
+        if is_stale(age, threshold):
             out.append(StaleEntry(fqn=fqn, age_days=age, max_age_days=threshold))
 
     out.sort(key=lambda s: (-s.age_days if s.age_days != float("inf") else float("-inf"), s.fqn))
+
+    return out
+
+
+def is_stale(age_days: float, max_age_days: float) -> bool:
+    """Whether a print this many days old has reached its threshold (CONFIG.md `max_age_days`)."""
+
+    return age_days >= max_age_days
+
+
+def classify(
+    manifest: dict[str, Any],
+    now: datetime,
+    *,
+    threshold_for: Callable[[str], float],
+) -> dict[str, TableFreshness]:
+    """Every manifest entry's verdict against its own threshold, keyed by table name."""
+
+    stale = {s.fqn: s for s in evaluate(manifest, 0.0, now, threshold_for=threshold_for)}
+    out: dict[str, TableFreshness] = {}
+
+    for fqn, entry in (manifest.get("tables") or {}).items():
+        threshold = threshold_for(fqn)
+        stale_entry = stale.get(fqn)
+
+        if stale_entry is None:
+            age = age_days(entry.get("profiled_at"), now) if isinstance(entry, dict) else None
+            out[fqn] = TableFreshness(fqn, "live", age, threshold)
+        elif not stale_entry.measured:
+            out[fqn] = TableFreshness(fqn, "dormant", None, threshold)
+        else:
+            out[fqn] = TableFreshness(fqn, "stale", stale_entry.age_days, threshold)
 
     return out
 

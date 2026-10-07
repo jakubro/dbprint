@@ -12,14 +12,8 @@ import yaml
 from click.testing import CliRunner
 
 from dbprint.cli.main import main
+from tests._cli import PROJECT_YAML
 
-
-PROJECT_YAML = """\
-connections:
-  primary:
-    adapter: postgres
-    output: prints
-"""
 
 PRODUCTION_PROJECT_YAML = """\
 connections:
@@ -804,12 +798,12 @@ class TestWrongShapeManifest:
         assert "aaa_good\ttable_count\t1" in result.stdout
         assert "zzz_broken\ttable_count" not in result.stdout
 
-    def test_a_table_entry_that_is_not_a_mapping_costs_the_connection(
+    def test_a_table_entry_that_is_not_a_mapping_drops_only_itself(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """An entry with no bucket would leave the totals short of `table_count`."""
+        """Every surface skips an entry no reader can follow; the rest of the connection lists."""
 
         _setup_project(tmp_path)
         manifest_path = _write_manifest(tmp_path, "public.curator")
@@ -819,9 +813,24 @@ class TestWrongShapeManifest:
         monkeypatch.chdir(tmp_path)
         result = CliRunner().invoke(main, ["list", "--no-tui"])
 
+        assert result.exit_code == 0
+        assert "primary\ttable_count\t1" in result.stdout
+
+
+class TestAnEmptyManifest:
+    def test_is_unusable_not_an_empty_print(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _setup_project(tmp_path)
+        manifest_path = _write_manifest(tmp_path, "public.curator")
+        manifest_path.write_text("")
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(main, ["list", "--no-tui"])
+
         assert result.exit_code == 1
-        assert "public.herbarium" in result.stderr
-        assert "primary\ttable_count" not in result.stdout
+        assert "the file is empty" in result.stderr
 
 
 class TestADroppedConnectionIsReported:

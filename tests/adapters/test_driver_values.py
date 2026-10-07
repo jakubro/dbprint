@@ -29,6 +29,7 @@ from dbprint.adapters import StatisticsConfig
 from dbprint.engine.yaml_dumper import dump_yaml
 from dbprint.spec.rounding import UnrepresentableValue, measured_value
 from tests.adapters.conftest import SQL_PARAMS, _adapter_factory_for, _mysql_exec_many
+from tests.conftest import pg_connect
 
 
 _SCALARS = (type(None), bool, int, float, Decimal, str)
@@ -263,14 +264,7 @@ def _seed_postgres(request: pytest.FixtureRequest) -> tuple[str, dict[str, str]]
     types = [sql_type for sql_type, _ in _POSTGRES_TYPES.values()]
     rows = _rows(*(values for _, values in _POSTGRES_TYPES.values()))
 
-    with psycopg.connect(
-        host=creds["host"],
-        port=int(creds["port"]),
-        dbname=creds["database"],
-        user=creds["user"],
-        password="",
-        autocommit=True,
-    ) as conn:
+    with pg_connect(creds) as conn:
         conn.execute(cast(LiteralString, f"CREATE TABLE seedbank.spelled (id integer, {columns})"))
         conn.execute(
             cast(

@@ -10,9 +10,9 @@ import yaml
 
 from dbprint.adapters import MockAdapter
 from dbprint.config.project import ConnectionConfig, RedactRule, RuleConfig
-from dbprint.conformance import validate_print
 from dbprint.engine import EXIT_PARTIAL, Engine, GenerateRequest, GenerateResult
-from tests.engine.test_orchestrator import _conn_config, _curator_fixture
+from tests._curator import conn_config, curator_fixture
+from tests._engine_run import conformance_errors
 
 
 CURATOR = "public.curator"
@@ -21,7 +21,7 @@ MASK_HERBARIUM_ID = RedactRule(columns=("public.curator.herbarium_id",), with_="
 
 
 def _generate(conn: ConnectionConfig, tmp_path: Path, **request: Any) -> GenerateResult:
-    return Engine(MockAdapter(_curator_fixture()), conn, tmp_path).generate(
+    return Engine(MockAdapter(curator_fixture()), conn, tmp_path).generate(
         GenerateRequest(**request),
     )
 
@@ -42,7 +42,7 @@ def _column(tmp_path: Path, column: str) -> dict[str, Any]:
 
 class TestRedactionChanges:
     def test_a_rule_added_re_reads_only_the_table_it_covers(self, tmp_path: Path) -> None:
-        conn = _conn_config(tmp_path)
+        conn = conn_config(tmp_path)
         _generate(conn, tmp_path)
 
         result = _generate(replace(conn, redact=(MASK_HERBARIUM_ID,)), tmp_path)
@@ -51,7 +51,7 @@ class TestRedactionChanges:
         assert _column(tmp_path, "herbarium_id")["redacted"] == "mask"
 
     def test_a_rule_removed_re_reads_the_table(self, tmp_path: Path) -> None:
-        conn = replace(_conn_config(tmp_path), redact=(MASK_HERBARIUM_ID,))
+        conn = replace(conn_config(tmp_path), redact=(MASK_HERBARIUM_ID,))
         _generate(conn, tmp_path)
 
         result = _generate(replace(conn, redact=()), tmp_path)
@@ -60,7 +60,7 @@ class TestRedactionChanges:
         assert "redacted" not in _column(tmp_path, "herbarium_id")
 
     def test_nothing_changed_skips_everything(self, tmp_path: Path) -> None:
-        conn = replace(_conn_config(tmp_path), redact=(MASK_HERBARIUM_ID,))
+        conn = replace(conn_config(tmp_path), redact=(MASK_HERBARIUM_ID,))
         _generate(conn, tmp_path)
 
         assert set(_statuses(_generate(conn, tmp_path)).values()) == {"skipped"}
@@ -69,7 +69,7 @@ class TestRedactionChanges:
         """The recompute reads `inferred` back from the file, so `drop` must not remove it."""
 
         drop = RedactRule(columns=("public.curator.id",), with_="drop")
-        conn = replace(_conn_config(tmp_path), redact=(drop,))
+        conn = replace(conn_config(tmp_path), redact=(drop,))
         _generate(conn, tmp_path)
 
         assert _column(tmp_path, "id")["inferred"]["candidate_key"] is True
@@ -81,7 +81,7 @@ class TestStatisticsAndScopeChanges:
         self,
         tmp_path: Path,
     ) -> None:
-        conn = _conn_config(tmp_path)
+        conn = conn_config(tmp_path)
         _generate(conn, tmp_path)
         rule = RuleConfig(include=(CURATOR,), statistics={"top_n_values": 5})
 
@@ -90,7 +90,7 @@ class TestStatisticsAndScopeChanges:
         assert _statuses(result) == {CURATOR: "ok", HERBARIUM: "skipped"}
 
     def test_a_filter_added_re_reads_the_table_it_governs(self, tmp_path: Path) -> None:
-        conn = _conn_config(tmp_path)
+        conn = conn_config(tmp_path)
         _generate(conn, tmp_path)
         rule = RuleConfig(include=(HERBARIUM,), filter="id IS NOT NULL")
 
@@ -104,7 +104,7 @@ class TestCeiling:
         self,
         tmp_path: Path,
     ) -> None:
-        conn = replace(_conn_config(tmp_path), max_rows_scanned=1000)
+        conn = replace(conn_config(tmp_path), max_rows_scanned=1000)
         _generate(conn, tmp_path)
 
         assert _manifest(tmp_path)["tables"][CURATOR]["max_rows_scanned"] == 1000
@@ -116,20 +116,20 @@ class TestCeiling:
         assert _manifest(tmp_path)["tables"][CURATOR]["max_rows_scanned"] == 2000
 
     def test_no_ceiling_records_no_key(self, tmp_path: Path) -> None:
-        _generate(_conn_config(tmp_path), tmp_path)
+        _generate(conn_config(tmp_path), tmp_path)
 
         assert "max_rows_scanned" not in _manifest(tmp_path)["tables"][CURATOR]
 
 
 class TestProfilingSwitches:
     def test_the_switches_are_recorded(self, tmp_path: Path) -> None:
-        _generate(replace(_conn_config(tmp_path), compute_timeline=False), tmp_path)
+        _generate(replace(conn_config(tmp_path), compute_timeline=False), tmp_path)
 
         assert _manifest(tmp_path)["profiling_params"]["compute_timeline"] is False
 
     def test_a_switch_re_reads_only_the_tables_it_can_change(self, tmp_path: Path) -> None:
         rule = RuleConfig(include=(HERBARIUM,), filter="id IS NOT NULL")
-        conn = replace(_conn_config(tmp_path), rules=(rule,))
+        conn = replace(conn_config(tmp_path), rules=(rule,))
         _generate(conn, tmp_path)
 
         result = _generate(replace(conn, compute_timeline=False), tmp_path)
@@ -137,10 +137,10 @@ class TestProfilingSwitches:
         assert _statuses(result) == {CURATOR: "ok", HERBARIUM: "skipped"}
 
     def test_the_inference_switch_re_reads_a_view_too(self, tmp_path: Path) -> None:
-        fixture = _curator_fixture()
+        fixture = curator_fixture()
         view = replace(fixture[CURATOR], type="view", namespace_path=("public", "seed_ledger"))
         fixture["public.seed_ledger"] = view
-        conn = _conn_config(tmp_path)
+        conn = conn_config(tmp_path)
         Engine(MockAdapter(fixture), conn, tmp_path).generate(GenerateRequest())
 
         flipped = replace(conn, infer_relationships=not conn.infer_relationships)
@@ -151,7 +151,7 @@ class TestProfilingSwitches:
 
 class TestATableThisRunDoesNotRead:
     def test_an_out_of_scope_table_now_covered_fails_the_run(self, tmp_path: Path) -> None:
-        conn = _conn_config(tmp_path)
+        conn = conn_config(tmp_path)
         _generate(conn, tmp_path)
         before = _manifest(tmp_path)["tables"][CURATOR]
         path = tmp_path / "primary" / "public" / "curator" / "statistics.yaml"
@@ -175,7 +175,7 @@ class TestATableThisRunDoesNotRead:
         self,
         tmp_path: Path,
     ) -> None:
-        conn = _conn_config(tmp_path)
+        conn = conn_config(tmp_path)
         _generate(conn, tmp_path)
         changed = replace(conn, statistics=replace(conn.statistics, top_n_values=40))
 
@@ -184,4 +184,4 @@ class TestATableThisRunDoesNotRead:
 
         assert _manifest(tmp_path)["statistics_params"]["top_n_values"] == 40
         assert entry["statistics_params"] == {"top_n_values": 20}
-        assert not [i for i in validate_print(tmp_path / "primary") if i.severity == "error"]
+        assert not conformance_errors(tmp_path / "primary")

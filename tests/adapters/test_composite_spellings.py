@@ -17,9 +17,9 @@ from dbprint.adapters.clickhouse import ClickhouseAdapter
 from dbprint.adapters.databricks import DatabricksAdapter
 from dbprint.adapters.duckdb import DuckdbAdapter
 from dbprint.config.project import ConnectionConfig, RedactRule, StatisticsConfig
-from dbprint.conformance import validate_print
 from dbprint.engine import Engine
-from tests.adapters.test_distribution_shapes import _DATABRICKS_CREDS
+from tests._engine_run import conformance_errors
+from tests.adapters._credentials import DATABRICKS_CREDS
 
 
 _COMPOSITES: dict[str, tuple[str, list[str], str]] = {
@@ -102,9 +102,7 @@ def test_emails_inside_a_nested_struct_never_reach_the_print(tmp_path: Path) -> 
     assert columns["field_notes"]["parts"][".email"]["redacted"] == "drop"
     assert columns["plot"]["classification"] != "unsupported"
     assert "@example.invalid" not in path.read_text()
-    assert [
-        i for i in validate_print(tmp_path / "prints" / "garden") if i.severity == "error"
-    ] == []
+    assert conformance_errors(tmp_path / "prints" / "garden") == []
 
 
 def _adapter(
@@ -123,7 +121,7 @@ def _adapter(
         )
     else:
         cursor = request.getfixturevalue("databricks_test_schema")
-        adapter = DatabricksAdapter(_DATABRICKS_CREDS, cursor_factory=lambda _params: cursor)
+        adapter = DatabricksAdapter(DATABRICKS_CREDS, cursor_factory=lambda _params: cursor)
 
     for statement in (create, *inserts):
         cursor.execute(statement)

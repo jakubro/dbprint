@@ -104,7 +104,7 @@ class TestTheCensusIsSkippedWhenItWouldSayNothing:
     ) -> None:
         """SPEC 2.2.10 reads an absent block as "no nulls", so the scan is not issued."""
 
-        from tests.adapters.test_dialect_guard import _install_recorder
+        from tests.adapters._dialects import install_recorder
 
         vendor, factory = sql_adapter_factory
         adapter = factory()
@@ -119,7 +119,7 @@ class TestTheCensusIsSkippedWhenItWouldSayNothing:
                 f"{vendor}: the fixture's herbarium table grew a null; pick another table"
             )
 
-            recorder = _install_recorder(adapter)
+            recorder = install_recorder(adapter)
             census = adapter.compute_null_patterns(table.fqn, columns, CONFIG, counts, base)
             issued = list(recorder.flattened())
         finally:
@@ -142,7 +142,7 @@ class TestAWidthBeyondTheFunctionArgumentLimit:
         self,
         sql_adapter_factory: tuple[str, Callable[[], Adapter]],
     ) -> None:
-        from tests.adapters.test_dialect_guard import _install_recorder
+        from tests.adapters._dialects import install_recorder
 
         vendor, factory = sql_adapter_factory
         adapter = factory()
@@ -164,7 +164,7 @@ class TestAWidthBeyondTheFunctionArgumentLimit:
             columns = adapter.introspect_columns(table.fqn)
             counts, phase_a = adapter.compute_base_statistics(table.fqn, columns, CONFIG)
             base = phase_a.stats
-            recorder = _install_recorder(adapter)
+            recorder = install_recorder(adapter)
             census = adapter.compute_null_patterns(table.fqn, columns, CONFIG, counts, base)
             issued = list(recorder.flattened())
         finally:
@@ -183,7 +183,7 @@ class TestOneStatementPerTable:
     ) -> None:
         """The cost argument the measurement rests on, asserted rather than assumed."""
 
-        from tests.adapters.test_dialect_guard import _install_recorder
+        from tests.adapters._dialects import install_recorder
 
         vendor, factory = sql_adapter_factory
         adapter = factory()
@@ -193,7 +193,7 @@ class TestOneStatementPerTable:
             columns = adapter.introspect_columns(table.fqn)
             counts, phase_a = adapter.compute_base_statistics(table.fqn, columns, CONFIG)
             base = phase_a.stats
-            recorder = _install_recorder(adapter)
+            recorder = install_recorder(adapter)
             adapter.compute_null_patterns(table.fqn, columns, CONFIG, counts, base)
             issued = list(recorder.flattened())
         finally:
@@ -210,7 +210,7 @@ class TestOneStatementPerTable:
         population than the `null_count` they check. Databricks has no local temp table (measured).
         """
 
-        from tests.adapters.test_dialect_guard import _install_recorder
+        from tests.adapters._dialects import install_recorder
 
         vendor, factory = sql_adapter_factory
 
@@ -228,7 +228,7 @@ class TestOneStatementPerTable:
 
             counts, phase_a = adapter.compute_base_statistics(table.fqn, columns, CONFIG, scope)
             base = phase_a.stats
-            recorder = _install_recorder(adapter)
+            recorder = install_recorder(adapter)
             census = adapter.compute_null_patterns(table.fqn, columns, CONFIG, counts, base, scope)
             issued = list(recorder.flattened())
             adapter.release_scope(table.fqn, scope)

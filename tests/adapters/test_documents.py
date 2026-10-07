@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -20,10 +21,11 @@ from dbprint.config.project import ConnectionConfig, RedactRule
 from dbprint.conformance import validate_print
 from dbprint.engine import Engine
 from dbprint.engine import diff as diff_module
+from tests._engine_run import conformance_errors
+from tests.adapters._composites import generate, parts_of, psql, snowflake
+from tests.adapters._credentials import DATABRICKS_CREDS
+from tests.adapters._dialects import STATS_MODULES, foreign_fragments
 from tests.adapters._sql_style import alias_violations, layout_violations, violations
-from tests.adapters.test_arrays import _generate, _parts_of, _psql
-from tests.adapters.test_dialect_guard import STATS_MODULES, _foreign_fragments
-from tests.adapters.test_distribution_shapes import _DATABRICKS_CREDS
 
 
 _SALT = "document-test-salt"
@@ -103,6 +105,38 @@ class TestDuckdb:
         assert payload["types"]["OBJECT"] == 3
         assert "parts" not in payload
 
+    def test_an_all_null_column_publishes_no_type_mix(self, tmp_path: Path) -> None:
+        payload = _duckdb_documents(tmp_path, [None, None])
+
+        assert payload["null_count"] == 2
+        assert "types" not in payload
+
+    def test_a_zero_row_table_publishes_no_type_mix(self, tmp_path: Path) -> None:
+        assert "types" not in _duckdb_documents(tmp_path, [])
+
+    def test_a_prose_member_withholds_its_value_list(self, tmp_path: Path) -> None:
+        sentences = (
+            "The packet arrived damp and was dried for two days before sowing. ",
+            "Germination was slow in the cold frame, so the tray moved indoors. ",
+            "Several seedlings damped off after watering; the rest were potted on. ",
+        )
+        rows = [
+            json.dumps(
+                {
+                    "notes": f"Batch {i}: {sentences[i % 3]}{sentences[(i + 1) % 3]}",
+                    "grade": "abcd"[i % 4],
+                },
+            )
+            for i in range(60)
+        ]
+        parts = _duckdb_documents(tmp_path, list(rows))["parts"]
+
+        assert parts[".notes"]["inferred"]["looks_like"] == "prose"
+        assert {"values", "values_coverage", "distribution", "unmeasured"} & set(
+            parts[".notes"],
+        ) == set()
+        assert parts[".grade"]["values_coverage"] == 1.0
+
     def test_a_column_rule_withholds_the_key_names_and_marks_the_elements(
         self,
         tmp_path: Path,
@@ -146,7 +180,7 @@ def test_a_postgres_document_reads_its_own_type_names(
     postgres_test_db: dict[str, str],
     tmp_path: Path,
 ) -> None:
-    with _psql(postgres_test_db) as conn:
+    with psql(postgres_test_db) as conn:
         conn.execute("CREATE TABLE public.order_event (event_no integer, payload jsonb, raw json)")
 
         for number, event in enumerate(_EVENTS):
@@ -155,7 +189,7 @@ def test_a_postgres_document_reads_its_own_type_names(
                 (number, event, '{"a": 1, "a": 2}' if number == 0 else None),
             )
 
-    columns = _generate(PostgresAdapter(postgres_test_db), "postgres", tmp_path, "*.order_event")
+    columns = generate(PostgresAdapter(postgres_test_db), "postgres", tmp_path, "*.order_event")
     payload = columns["payload"]
 
     assert payload["types"] == {"object": 3, "array": 1, "null": 1, "string": 1}
@@ -171,13 +205,13 @@ def test_postgres_profiles_a_jsonpath_as_text_and_keeps_xml_declined(
     postgres_test_db: dict[str, str],
     tmp_path: Path,
 ) -> None:
-    with _psql(postgres_test_db) as conn:
+    with psql(postgres_test_db) as conn:
         conn.execute("CREATE TABLE public.rule (rule_no integer, expr jsonpath, body xml)")
         conn.execute(
             "INSERT INTO public.rule VALUES (1, '$.a ? (@ > 1)', '<a/>'), (2, '$.b', '<b/>')",
         )
 
-    columns = _generate(PostgresAdapter(postgres_test_db), "postgres", tmp_path, "*.rule")
+    columns = generate(PostgresAdapter(postgres_test_db), "postgres", tmp_path, "*.rule")
 
     assert columns["expr"]["classification"] == "categorical"
     assert {v["value"] for v in columns["expr"]["values"]} == {'$."a"?(@ > 1)', '$."b"'}
@@ -200,7 +234,7 @@ def test_a_clickhouse_document_treats_a_null_as_absent(
         {"host": "chdb", "database": "seedbank"},
         cursor_factory=lambda _params: cursor,
     )
-    payload = _generate(adapter, "clickhouse", tmp_path, "*.order_event")["payload"]
+    payload = generate(adapter, "clickhouse", tmp_path, "*.order_event")["payload"]
 
     assert payload["types"] == {"Object": 3}
     assert ".a" not in payload["parts"]
@@ -220,7 +254,7 @@ def test_a_bigquery_document_is_descended(bigquery_test_dataset: Any) -> None:
         {"project": "dbprint-test", "dataset": dataset},
         cursor_factory=lambda _params: cursor,
     )
-    parts = {p.path: p for p in _parts_of(adapter, "order_event", "payload").parts}
+    parts = {p.path: p for p in parts_of(adapter, "order_event", "payload").parts}
 
     assert parts["[keys]"].occurrences == 3
     assert parts[".status"].stats.sql_type == "string"
@@ -235,12 +269,35 @@ def test_a_databricks_variant_is_descended(databricks_test_schema: Any) -> None:
         'UNION ALL SELECT 2, parse_json(\'{"status": null, "amt": 2}\') '
         "UNION ALL SELECT 3, parse_json('[1, 2]')",
     )
-    adapter = DatabricksAdapter(_DATABRICKS_CREDS, cursor_factory=lambda _params: cursor)
-    parts = {p.path: p for p in _parts_of(adapter, "order_event", "payload").parts}
+    adapter = DatabricksAdapter(DATABRICKS_CREDS, cursor_factory=lambda _params: cursor)
+    parts = {p.path: p for p in parts_of(adapter, "order_event", "payload").parts}
 
     assert (parts[".status"].occurrences, parts[".status"].stats.null_count) == (2, 1)
     assert parts[".status"].stats.sql_type == "STRING"
     assert parts["[*]"].occurrences == 2
+
+
+def test_a_snowflake_variant_and_object_are_descended() -> None:
+    setup = (
+        "CREATE TABLE seedbank.order_event (event_no INTEGER, payload JSON, attrs JSON)",
+        """INSERT INTO seedbank.order_event VALUES
+        (1, '{"status": "new", "lines": [{"sku": "a"}]}', '{"colour": "red"}'),
+        (2, '{"status": null}', '{"colour": "blue", "size": 3}'),
+        (3, '[1, 2]', NULL)""",
+    )
+    payload = parts_of(snowflake(*setup), "order_event", "payload").parts
+    attrs = parts_of(
+        snowflake(*setup, column_types={"attrs": "OBJECT"}),
+        "order_event",
+        "attrs",
+    ).parts
+    payload, attrs = ({p.path: p for p in parts} for parts in (payload, attrs))
+
+    assert (payload[".status"].occurrences, payload[".status"].stats.null_count) == (2, 1)
+    assert payload[".status"].stats.sql_type == "VARCHAR"
+    assert payload[".lines[*].sku"].occurrences == 1
+    assert payload["[*]"].occurrences == 2
+    assert (attrs[".colour"].occurrences, attrs[".size"].occurrences) == (2, 1)
 
 
 @pytest.mark.parametrize(
@@ -268,7 +325,7 @@ def test_the_document_reads_speak_their_own_dialect(vendor: Vendor, sql_type: st
     ]
 
     for statement in statements:
-        assert _foreign_fragments(statement, vendor) == []
+        assert foreign_fragments(statement, vendor) == []
         assert violations(statement, vendor) + alias_violations(statement, vendor) == []
         assert layout_violations(statement, vendor) == []
 
@@ -305,7 +362,7 @@ def _duckdb_documents(
         statistics=statistics or StatisticsConfig(),
     )
     Engine(DuckdbAdapter({"database": str(database)}), conn, tmp_path).generate()
-    errors = [i for i in validate_print(tmp_path / "prints" / "garden") if i.severity == "error"]
+    errors = conformance_errors(tmp_path / "prints" / "garden")
 
     assert errors == [], errors
 

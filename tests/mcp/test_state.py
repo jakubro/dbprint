@@ -5,18 +5,12 @@ from __future__ import annotations
 import pytest
 
 from dbprint.config import ConnectionConfig, ProjectConfig
-from dbprint.config.project import DiffConfig, StatisticsConfig
 from dbprint.mcp import McpError, ServedConnections, build_state
+from tests._prints import connection_config
 
 
 def _conn(name: str, *, auto: bool = False) -> ConnectionConfig:
-    return ConnectionConfig(
-        name=name,
-        adapter="postgres",
-        auto=auto,
-        statistics=StatisticsConfig(),
-        diff=DiffConfig(),
-    )
+    return connection_config(name=name, auto=auto)
 
 
 def _project(*conns: ConnectionConfig) -> ProjectConfig:

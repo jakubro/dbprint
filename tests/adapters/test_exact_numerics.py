@@ -25,6 +25,7 @@ from dbprint.engine import Engine, GenerateRequest
 from dbprint.engine.yaml_dumper import dump_yaml
 from dbprint.spec import rounding
 from tests.adapters.conftest import SQL_PARAMS, _adapter_factory_for, _mysql_exec_many
+from tests.conftest import pg_connect
 
 
 _VENDORS_WITH_STATS = sorted(
@@ -280,18 +281,10 @@ def _seed_snowflake(request: pytest.FixtureRequest, types: dict[str, str]) -> No
 
 
 def _seed_postgres(request: pytest.FixtureRequest, types: dict[str, str]) -> None:
-    import psycopg
 
     creds = request.getfixturevalue("postgres_test_db")
 
-    with psycopg.connect(
-        host=creds["host"],
-        port=int(creds["port"]),
-        dbname=creds["database"],
-        user=creds["user"],
-        password="",
-        autocommit=True,
-    ) as conn:
+    with pg_connect(creds) as conn:
         conn.execute(cast(LiteralString, _create(types, "seedbank.lot")))
         conn.execute(cast(LiteralString, _insert(types, "seedbank.lot")))
         conn.execute("ANALYZE")

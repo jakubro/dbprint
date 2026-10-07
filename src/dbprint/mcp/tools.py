@@ -20,19 +20,27 @@ from dbprint.engine import (
     AssemblyOptions,
     Purpose,
     context_sections,
+    context_terms,
     structured_context_sections,
     thresholds,
     value_resolution,
 )
 from dbprint.engine.baseline import (
-    declared_artifacts,
     failed_tables,
-    manifest_shape_error,
+    read_manifest,
     table_directory,
+)
+from dbprint.engine.context_assembler import incoming_rejections
+from dbprint.engine.freshness import classify
+from dbprint.engine.table_readings import live_annotations
+from dbprint.engine.value_list import value_notes
+from dbprint.spec.absence import Absence, column_value, read_column_field
+from dbprint.spec.artifacts import (
+    DIFF_FILENAME,
+    MANIFEST_FILENAME,
+    declared_artifacts,
     walkable_tables,
 )
-from dbprint.engine.freshness import age_days, evaluate
-from dbprint.spec.absence import Absence, column_value, read_column_field
 from dbprint.spec.classification import Classification
 from dbprint.spec.looks_like import LooksLike
 from dbprint.spec.parts import display
@@ -41,6 +49,7 @@ from dbprint.spec.scope import ScanScope, list_is_complete, reply_scope, rows_sc
 from dbprint.spec.sensitivity import Sensitivity
 from . import errors, paging, reference
 from .reference import ReferenceDocument
+from .resources import diff_without_rejected, parsed_mapping
 from .state import ServedConnections
 
 
@@ -92,16 +101,21 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
         name="get_table_context",
         description=(
             "Read one table. Call it before writing SQL against a table, with "
-            "`purpose: query`: DDL, the Joins list (every edge the print knows, declared "
-            "or not, with its detection), a data dictionary, and the value lists a "
-            "predicate is written from, with their counts and coverage. Call it with the "
-            "default `purpose: profile` to describe the data - statistics such as null "
+            "`purpose: query`: DDL, the Joins list (every edge relationships.yaml carries - "
+            "declared, inferred or measured - except edges a human rejected; a join described "
+            "only in the table's description is not in it), a data dictionary, the value "
+            "lists a predicate is written from, with their counts and coverage, and each "
+            "nullable column's null share. Call it with the default `purpose: profile` to "
+            "describe the data - statistics such as null "
             "rates, cardinality and ranges, relationships, the description and notes. "
             "Use search_columns or list_tables first when the table is not yet known, "
-            "and resolve_value to check how one phrase is spelled in one column. Paged, "
-            "nothing dropped: md and yaml end every page but the last with a "
-            "`next_cursor` line, json carries it as a key; for json/yaml a `_corrupted` "
-            "field names any declared artifact that failed to parse."
+            "and resolve_value to check how one phrase is spelled in one column. Paged: md "
+            "and yaml end every page but the last with a `next_cursor` line, json carries "
+            "it as a key; a section too long for one page continues on the next, never "
+            "dropped. Under `profile`, md Notes summarise each column - a long value list "
+            "shows its 5 most frequent values - while json and yaml carry the statistics "
+            "whole; for json/yaml a `_corrupted` field names any declared artifact that "
+            "failed to parse."
         ),
         input_schema={
             "type": "object",
@@ -128,7 +142,8 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                     "default": "profile",
                     "description": (
                         "query before writing SQL: DDL, the Joins list, data dictionary and "
-                        "the value lists with counts and coverage, with no other statistics. "
+                        "the value lists with counts and coverage, and each nullable column's "
+                        "null share, with no other statistics. "
                         "profile (default) to describe the data: statistics, relationships, "
                         "notes"
                     ),
@@ -142,7 +157,8 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                         "per-column Notes summary rather than the raw statistics fields "
                         "json and yaml carry. All three omit each column's sketch payload; "
                         "the verbatim statistics.yaml, sketch included, is reachable as the "
-                        "dbprint://<connection>/<table>/statistics resource."
+                        "dbprint://<connection>/<table>/statistics resource. get_reference "
+                        "document: guide explains each json/yaml field."
                     ),
                 },
                 "include_stats": {
@@ -454,11 +470,13 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
         name="get_reference",
         description=(
             "Look up the dbprint format specification or the assertion DSL "
-            "specification by section number: what a print's field means, or what a "
-            "finding's spec_ref (e.g. '§2.2.4') refers to. A section returns its own "
-            "text and lists its direct subsections, each read by its own number; omit "
-            "section for the heading tree. Paged like get_table_context's md. Depends on no connection or "
-            "print; what one print's tables hold is get_table_context's and list_tables' answer."
+            "specification by section number, or the reading guide by heading: what a "
+            "print's field means, or what a finding's spec_ref (e.g. '§2.2.4') refers to. "
+            "A section returns its own text and lists its direct subsections, each read "
+            "by its own number or heading; omit section for the heading tree. The guide "
+            "is the one this dbprint version ships, not a print's own reading.md. Paged "
+            "like get_table_context's md. Depends on no connection or print; what one "
+            "print's tables hold is get_table_context's and list_tables' answer."
         ),
         input_schema={
             "type": "object",
@@ -466,8 +484,11 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
             "properties": {
                 "document": {
                     "type": "string",
-                    "enum": ["assertions", "spec"],
-                    "description": "Which specification - the format spec, or the assertion DSL",
+                    "enum": ["assertions", "guide", "spec"],
+                    "description": (
+                        "Which document - the format spec, the assertion DSL, or the reading "
+                        "guide (how to read each json/yaml field)"
+                    ),
                 },
                 "section": {
                     "type": "string",
@@ -476,7 +497,8 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                         "A section number in the document's own scheme (e.g. '3', '2.2.4'), or "
                         "a spec_ref citation copied verbatim from a finding ('§2.2.4', "
                         "'ASSERTIONS.md §1.4') - any heading depth. Omit for the table of "
-                        "contents."
+                        "contents. For guide, a heading's text (e.g. 'Vocabulary'), matched "
+                        "case-insensitively."
                     ),
                 },
                 "cursor": _CURSOR_PROPERTY,
@@ -621,11 +643,25 @@ def _tool_get_table_context(
         include_stats=bool(arguments.get("include_stats", True)),
         include_relationships=bool(arguments.get("include_relationships", True)),
     )
-    print_root = _print_root(conn)
+    print_root = conn.print_root
     table_dir = table_directory(print_root, table, entry)
+    artifacts = declared_artifacts(entry)
+    relationships = (
+        parsed_mapping(table_dir / artifacts["relationships"], state.files.read)
+        if "relationships" in artifacts
+        else None
+    )
+    _, referencers = incoming_rejections(
+        manifest,
+        print_root,
+        table,
+        relationships,
+        state.files.read,
+    )
     files = (
-        print_root / "manifest.yaml",
-        *(table_dir / name for name in declared_artifacts(entry).values()),
+        print_root / MANIFEST_FILENAME,
+        *(table_dir / name for name in artifacts.values()),
+        *referencers,
     )
     call = paging.Call("get_table_context", arguments, files)
 
@@ -635,11 +671,12 @@ def _tool_get_table_context(
     if options.format == "md":
         sections = context_sections(manifest, print_root, table, options, read=state.files.read)
 
-        return paging.text_page(
+        return paging.legend_text_page(
             call,
-            [text for _, text in sections],
+            [(text, line_terms) for _, text, line_terms in sections],
             arguments.get("cursor"),
             _markdown_marker,
+            context_terms.legend,
         )
 
     header, candidates = structured_context_sections(
@@ -707,7 +744,7 @@ def _tool_list_tables(state: ServedConnections, arguments: dict[str, Any]) -> di
     pattern = str(arguments.get("pattern") or "*")
     detail = bool(arguments.get("detail", False))
     manifest = _load_manifest(state, conn) or {}
-    entries = manifest.get("tables") or {}
+    entries = walkable_tables(manifest)
     # fnmatch.fnmatchcase never raises for a string pattern - no parse error to catch.
     matched = sorted(fqn for fqn in entries if fnmatch.fnmatchcase(fqn, pattern))
     failed = [fqn for fqn in failed_tables(manifest) if fnmatch.fnmatchcase(fqn, pattern)]
@@ -743,7 +780,7 @@ def _tool_list_tables(state: ServedConnections, arguments: dict[str, Any]) -> di
 
         return _paged(reply, total=len(matched), next_cursor=next_cursor)
 
-    call = paging.Call("list_tables", arguments, (_print_root(conn) / "manifest.yaml",))
+    call = paging.Call("list_tables", arguments, (conn.print_root / MANIFEST_FILENAME,))
     head = {"failed_tables": failed} if failed else {}
 
     return _page(call, items, render, arguments, head=head)
@@ -759,33 +796,19 @@ def _freshness(
     now = datetime.now(UTC)
     tables = manifest.get("tables") or {}
     judged = {fqn: entry for fqn, entry in tables.items() if fqn not in resolved.refused}
-    stale = {
-        entry.fqn: entry
-        for entry in evaluate(
-            {**manifest, "tables": judged},
-            0.0,
-            now,
-            threshold_for=resolved.threshold_for,
-        )
-    }
     verdicts: dict[str, dict[str, Any]] = {
         fqn: {"threshold_error": cause} for fqn, cause in resolved.refused.items()
     }
 
-    for fqn, entry in judged.items():
-        stale_entry = stale.get(fqn)
-
-        if stale_entry is None:
-            verdict, age = "live", age_days(entry.get("profiled_at"), now)
-        elif stale_entry.age_days == float("inf"):
-            verdict, age = "dormant", None
-        else:
-            verdict, age = "stale", stale_entry.age_days
-
-        threshold = resolved.resolved[fqn]
+    for fqn, judged_table in classify(
+        {**manifest, "tables": judged},
+        now,
+        threshold_for=resolved.threshold_for,
+    ).items():
+        threshold = judged_table.max_age_days
         verdicts[fqn] = {
-            "freshness": verdict,
-            "age_days": None if age is None else round(age, 2),
+            "freshness": judged_table.verdict,
+            "age_days": None if judged_table.age_days is None else round(judged_table.age_days, 2),
             "max_age_days": int(threshold) if threshold.is_integer() else threshold,
         }
 
@@ -927,8 +950,8 @@ def _tool_search_columns(state: ServedConnections, arguments: dict[str, Any]) ->
     filters = _column_filters(arguments)
     conn = state.resolve(arguments.get("connection"))
     manifest = _load_manifest(state, conn) or {}
-    print_root = _print_root(conn)
-    files = [print_root / "manifest.yaml"]
+    print_root = conn.print_root
+    files = [print_root / MANIFEST_FILENAME]
 
     matches: list[dict[str, Any]] = []
     unreadable: list[str] = []
@@ -949,13 +972,9 @@ def _tool_search_columns(state: ServedConnections, arguments: dict[str, Any]) ->
         if stats_error is not None or annotation_error is not None:
             unreadable.append(fqn)
 
-        if "statistics" in artifacts:
-            # statistics is the column list; a stale annotation key (SPEC 2.7) is not a column.
-            column_names = set(stats_columns)
-        else:
-            # Every object type declares statistics (SPEC 2.2.15) in a conformant print;
-            # this is a fallback for an older or malformed manifest that omits it.
-            column_names = set(annotation_columns)
+        column_names = set(stats_columns) | set(
+            live_annotations(annotation_columns, statistics or None),
+        )
 
         for col_name in sorted(column_names):
             col = stats_columns.get(col_name) or {}
@@ -1068,9 +1087,9 @@ def _tool_resolve_value(state: ServedConnections, arguments: dict[str, Any]) -> 
         raise _absent_table(table, conn.name, manifest)
 
     artifacts = declared_artifacts(entry)
-    table_dir = table_directory(_print_root(conn), table, entry)
+    table_dir = table_directory(conn.print_root, table, entry)
 
-    files = (_print_root(conn) / "manifest.yaml",)
+    files = (conn.print_root / MANIFEST_FILENAME,)
 
     if "statistics" not in artifacts:
         reply = {
@@ -1140,7 +1159,7 @@ def _tool_resolve_value(state: ServedConnections, arguments: dict[str, Any]) -> 
     resolution = value_resolution.resolve(
         text,
         entries,
-        _column_value_notes(annotation_columns.get(column)),
+        value_notes(annotation_columns.get(column)),
         coverage=column_value(col, "values_coverage"),
         complete=list_is_complete(col),
         scope=scope,
@@ -1178,32 +1197,14 @@ def _paged_resolution(
     return _page(call, items, render, arguments)
 
 
-def _column_value_notes(annotation: Any) -> dict[str, str]:
-    """A column's per-value notes (SPEC 2.7.1), keyed by the value's string form."""
-
-    if not isinstance(annotation, dict):
-        return {}
-
-    entries = annotation.get("values")
-
-    if not isinstance(entries, list):
-        return {}
-
-    return {
-        str(entry.get("value")): " ".join(entry["note"].split())
-        for entry in entries
-        if isinstance(entry, dict) and isinstance(entry.get("note"), str) and entry["note"].strip()
-    }
-
-
 def _tool_get_manifest(state: ServedConnections, arguments: dict[str, Any]) -> dict[str, Any]:
     conn = state.resolve(arguments.get("connection"))
     manifest = _load_manifest(state, conn)
 
     if manifest is None:
         raise errors.manifest_references_missing_file(
-            "manifest.yaml",
-            str(_print_root(conn) / "manifest.yaml"),
+            MANIFEST_FILENAME,
+            str(conn.print_root / MANIFEST_FILENAME),
         )
 
     pattern = arguments.get("pattern")
@@ -1227,7 +1228,11 @@ def _tool_get_manifest(state: ServedConnections, arguments: dict[str, Any]) -> d
 
         return _paged(reply, total=len(matched), next_cursor=next_cursor)
 
-    call = paging.Call("get_manifest", arguments, (_print_root(conn) / "manifest.yaml",))
+    call = paging.Call(
+        "get_manifest",
+        arguments,
+        (conn.print_root / MANIFEST_FILENAME,),
+    )
     head = {**header, **({"failed_tables": failed} if failed else {})}
 
     return _page(call, matched, render, arguments, head=head)
@@ -1235,7 +1240,7 @@ def _tool_get_manifest(state: ServedConnections, arguments: dict[str, Any]) -> d
 
 def _tool_get_diff(state: ServedConnections, arguments: dict[str, Any]) -> dict[str, Any]:
     conn = state.resolve(arguments.get("connection"))
-    diff_path = _print_root(conn) / "diff.yaml"
+    diff_path = conn.print_root / DIFF_FILENAME
 
     if not diff_path.is_file():
         raise errors.no_diff_available(str(diff_path))
@@ -1248,9 +1253,10 @@ def _tool_get_diff(state: ServedConnections, arguments: dict[str, Any]) -> dict[
     if not isinstance(data, dict):
         return {}
 
-    changes = [c for c in (data.get("changes") or []) if isinstance(c, dict)]
-    matched = [c for c in changes if _change_matches(c, arguments)]
-    header = {key: value for key, value in data.items() if key != "changes"}
+    manifest = read_manifest(conn.print_root, state.files.read).manifest
+    shown, decided_by = diff_without_rejected(data, manifest, conn.print_root, state.files.read)
+    matched = [c for c in shown["changes"] if _change_matches(c, arguments)]
+    header = {key: value for key, value in shown.items() if key != "changes"}
 
     def render(units: Sequence[Any], first: bool, next_cursor: str | None) -> dict[str, Any]:
         del first
@@ -1259,7 +1265,7 @@ def _tool_get_diff(state: ServedConnections, arguments: dict[str, Any]) -> dict[
 
         return _paged(reply, total=len(matched), next_cursor=next_cursor)
 
-    call = paging.Call("get_diff", arguments, (diff_path,))
+    call = paging.Call("get_diff", arguments, (diff_path, *decided_by))
 
     return _page(call, list(enumerate(matched)), render, arguments, head=header)
 
@@ -1280,27 +1286,42 @@ def _change_matches(change: dict[str, Any], arguments: dict[str, Any]) -> bool:
 
 
 def _tool_get_reference(arguments: dict[str, Any]) -> str:
-    """No `connection` - the two reference documents depend on no connection or print."""
+    """No `connection` - the three reference documents depend on no connection or print."""
 
-    document_ = cast(ReferenceDocument, arguments["document"])
     section_number = arguments.get("section")
     call = paging.Call("get_reference", arguments, ())
 
-    if section_number is None:
-        text = reference.heading_tree(document_)
+    document_ = arguments["document"]
+
+    if document_ == "guide":
+        text = _guide_reference(section_number)
+    elif section_number is None:
+        text = reference.heading_tree(cast(ReferenceDocument, document_))
     else:
-        result = reference.section(document_, section_number)
+        result = reference.section(cast(ReferenceDocument, document_), section_number)
 
         if result is None:
             raise errors.unknown_section(
                 document_,
                 section_number,
-                reference.section_numbers(document_),
+                reference.section_numbers(cast(ReferenceDocument, document_)),
             )
 
         text = result
 
     return paging.text_page(call, [text], arguments.get("cursor"), _markdown_marker)
+
+
+def _guide_reference(heading: str | None) -> str:
+    if heading is None:
+        return reference.guide_heading_tree()
+
+    found = reference.guide_section(heading)
+
+    if found is None:
+        raise errors.unknown_section("guide", heading, reference.guide_headings())
+
+    return found
 
 
 # Helpers.
@@ -1344,27 +1365,8 @@ def _paged(reply: dict[str, Any], *, total: int, next_cursor: str | None) -> dic
     return reply
 
 
-def _print_root(conn: ConnectionConfig) -> Path:
-    return conn.output / conn.name
-
-
 def _load_manifest(state: ServedConnections, conn: ConnectionConfig) -> dict[str, Any] | None:
-    manifest_path = _print_root(conn) / "manifest.yaml"
-
-    if not manifest_path.is_file():
-        return None
-
-    try:
-        data = state.files.read(manifest_path)
-    except yaml.YAMLError as exc:
-        raise errors.yaml_parse_error(str(manifest_path), str(exc)) from exc
-
-    reason = manifest_shape_error(data)
-
-    if reason is not None:
-        raise errors.malformed_manifest(str(manifest_path), reason)
-
-    return data if isinstance(data, dict) else None
+    return errors.manifest_or_error(read_manifest(conn.print_root, state.files.read))
 
 
 def _load_statistics(

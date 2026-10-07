@@ -6,21 +6,18 @@ from pathlib import Path
 
 import yaml
 
+from dbprint.spec.artifacts import (
+    ARTIFACT_FILENAMES,
+    CANONICAL_ARTIFACTS,
+    MANIFEST_FILENAME,
+    declared_artifacts,
+    walkable_tables,
+)
+from dbprint.spec.fqn import directory_segments
 from dbprint.spec.fqn import split as split_fqn
 from .issue import Issue
-from .layout import CANONICAL_ARTIFACTS, declared_artifacts, walkable_tables
 from .progress import TableSink
 from .yaml_utils import load_yaml
-
-
-_ARTIFACT_FILENAMES = {
-    "ddl": "ddl.sql",
-    "statistics": "statistics.yaml",
-    "relationships": "relationships.yaml",
-    "description": "description.md",
-    "statistics_annotations": "statistics.annotations.yaml",
-    "relationships_annotations": "relationships.annotations.yaml",
-}
 
 
 def check_manifest_annotations_presence(print_root: Path, manifest_data: dict) -> list[Issue]:
@@ -36,7 +33,7 @@ def check_manifest_annotations_presence(print_root: Path, manifest_data: dict) -
 
     return [
         Issue(
-            "manifest.yaml",
+            MANIFEST_FILENAME,
             "manifest.missing-artifact",
             "error",
             f"Manifest claims {filename} but file does not exist.",
@@ -67,7 +64,7 @@ def check(
         tbl_path_str = tbl_entry.get("path", "")
         tbl_dir = print_root / tbl_path_str
 
-        if tbl_path_str and split_fqn(tbl_fqn) != tuple(tbl_path_str.split("/")):
+        if tbl_path_str and split_fqn(tbl_fqn) != directory_segments(tbl_path_str):
             issues.append(
                 Issue(
                     f"manifest.yaml::tables.{tbl_fqn}.path",
@@ -79,10 +76,10 @@ def check(
             )
         artifacts = declared_artifacts(tbl_entry)
         declared_files[tbl_dir.resolve()] = {
-            _ARTIFACT_FILENAMES[key] for key in artifacts if key in _ARTIFACT_FILENAMES
+            ARTIFACT_FILENAMES[key] for key in artifacts if key in ARTIFACT_FILENAMES
         }
 
-        for key, filename in _ARTIFACT_FILENAMES.items():
+        for key, filename in ARTIFACT_FILENAMES.items():
             if key not in artifacts:
                 continue
 

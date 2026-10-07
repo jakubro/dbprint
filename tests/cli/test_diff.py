@@ -6,7 +6,6 @@ import json
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 import yaml
@@ -19,6 +18,7 @@ from dbprint.adapters import (
 )
 from dbprint.cli import run_log
 from dbprint.cli.main import main
+from tests._cli import AUTO_PROJECT_YAML, credential_env, patch_registry
 from tests._prints import (
     SHAPE_PROBE_COLUMNS,
     VAULT_COLUMNS,
@@ -27,19 +27,6 @@ from tests._prints import (
     unmeasured_stats,
 )
 from tests.conftest import normalize_instants
-
-
-PROJECT_YAML = """\
-defaults:
-  max_age_days: 7
-  statistics: {}
-  diff: {}
-connections:
-  primary:
-    adapter: postgres
-    auto: true
-    output: prints
-"""
 
 
 def _base_fixture() -> dict[str, MockTable]:
@@ -119,25 +106,11 @@ class _MockPostgresAdapterMovedStatistics(MockAdapter):
 
 
 def _setup_project(tmp_path: Path) -> None:
-    (tmp_path / ".dbprint.yaml").write_text(PROJECT_YAML)
-
-
-def _credential_env() -> dict[str, str]:
-    return {
-        "DBPRINT_PRIMARY_HOST": "h",
-        "DBPRINT_PRIMARY_PORT": "5432",
-        "DBPRINT_PRIMARY_DATABASE": "d",
-        "DBPRINT_PRIMARY_USER": "u",
-        "DBPRINT_PRIMARY_PASSWORD": "p",
-    }
+    (tmp_path / ".dbprint.yaml").write_text(AUTO_PROJECT_YAML)
 
 
 def _patch_registry(adapter_class: type) -> Any:
-    return patch.dict(
-        "dbprint.cli.adapter_registry.ADAPTERS",
-        {"postgres": adapter_class},
-        clear=True,
-    )
+    return patch_registry({"postgres": adapter_class})
 
 
 class TestNoBaseline:
@@ -149,7 +122,7 @@ class TestNoBaseline:
         _setup_project(tmp_path)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         runner = CliRunner()
@@ -167,11 +140,11 @@ class TestNoBaseline:
     ) -> None:
         """The message names the connection's real `output`, not a hardcoded `prints/`."""
 
-        project_yaml = PROJECT_YAML.replace("output: prints", "output: warehouse_prints")
+        project_yaml = AUTO_PROJECT_YAML.replace("output: prints", "output: warehouse_prints")
         (tmp_path / ".dbprint.yaml").write_text(project_yaml)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         runner = CliRunner()
@@ -190,7 +163,7 @@ class TestCleanState:
         _setup_project(tmp_path)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         runner = CliRunner()
@@ -215,7 +188,7 @@ class TestRefusedTuiIsStated:
         _setup_project(tmp_path)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         # `TTY_COMPATIBLE=1` makes Rich report a real terminal without a pty; `TERM=dumb` then
@@ -245,7 +218,7 @@ class TestEmptySelectorMatch:
         _setup_project(tmp_path)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         runner = CliRunner()
@@ -269,7 +242,7 @@ class TestDriftState:
         _setup_project(tmp_path)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         runner = CliRunner()
@@ -296,7 +269,7 @@ class TestNoDiskWritesOnDiff:
         _setup_project(tmp_path)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         runner = CliRunner()
@@ -321,7 +294,7 @@ class TestFormats:
         _setup_project(tmp_path)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         runner = CliRunner()
@@ -348,7 +321,7 @@ class TestOutputFile:
         _setup_project(tmp_path)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         out_path = tmp_path / "diff.txt"
@@ -370,7 +343,7 @@ class TestProgress:
         _setup_project(tmp_path)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
     def test_default_run_streams_progress_to_stderr_clean_stdout(
@@ -433,7 +406,7 @@ class TestUnreadableBaseline:
         _setup_project(tmp_path)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         runner = CliRunner()
@@ -487,7 +460,7 @@ def _diff_against_moved_statistics(
     (tmp_path / ".dbprint.yaml").write_text(project_yaml)
     monkeypatch.chdir(tmp_path)
 
-    for k, v in _credential_env().items():
+    for k, v in credential_env().items():
         monkeypatch.setenv(k, v)
 
     runner = CliRunner()
@@ -625,7 +598,7 @@ class TestConfiguredThreshold:
         monkeypatch.chdir(tmp_path)
 
         for name in ("COARSE", "FINE"):
-            for key, value in _credential_env().items():
+            for key, value in credential_env().items():
                 monkeypatch.setenv(key.replace("PRIMARY", name), value)
 
         runner = CliRunner()
@@ -655,7 +628,7 @@ class TestRunLog:
         _setup_project(tmp_path)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         runner = CliRunner()
@@ -681,7 +654,7 @@ class TestRunLog:
         _setup_project(tmp_path)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         runner = CliRunner()

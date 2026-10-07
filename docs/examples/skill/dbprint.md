@@ -25,7 +25,7 @@ The tools below are the print's MCP surface. Where they are not connected, `dbpr
 | How a phrase in the question is actually spelled in a column | `resolve_value` (every stored spelling of it — a column holding several needs all of them in the predicate — a value whose note defines the phrase, or the nearest listed values) |
 | Which statistics moved on the last run, and so which numbers are stable | `get_diff` |
 | Whether the print's statistics are stale | `list_tables` with `detail: true` (each table's `freshness`: `live`, `stale` or `dormant`); in a shell, `dbprint check --max-age 7d` (offline; one unit, `Nd`/`Nh`/`Nm`/`Ns`, never `1d12h`; exit 2 = stale) |
-| What a field in the print actually means | `get_reference`, and the `dbprint://<connection>/reading` resource |
+| What a field in the print actually means | `get_reference` (`document: guide` for how to read a json/yaml field), and the `dbprint://<connection>/reading` resource |
 
 **A reply may be one page of several.** A `list_tables` or `search_columns` reply, like every tool's, carries `next_cursor` while more remains: pass it back as `cursor`, with the same arguments, until a reply carries none — a table or column missing from the first page is not missing from the print.
 

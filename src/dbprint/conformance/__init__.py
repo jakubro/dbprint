@@ -7,6 +7,7 @@ from typing import Literal
 
 import yaml
 
+from dbprint.spec.artifacts import DIFF_FILENAME, MANIFEST_ANNOTATIONS_FILENAME, MANIFEST_FILENAME
 from . import (
     column_annotations,
     ddl,
@@ -47,8 +48,8 @@ def validate_print(
     if manifest_data is None:
         return sorted(issues)
 
-    issues.extend(format_version.check(manifest_data, "manifest.yaml"))
-    issues.extend(schema_validation.check_manifest(manifest_data, "manifest.yaml"))
+    issues.extend(format_version.check(manifest_data, MANIFEST_FILENAME))
+    issues.extend(schema_validation.check_manifest(manifest_data, MANIFEST_FILENAME))
 
     tables = layout.walkable_tables(manifest_data)
     total = len(tables)
@@ -164,10 +165,10 @@ def validate_print(
                 ),
             )
 
-    manifest_annotations_path = print_root / "manifest.annotations.yaml"
+    manifest_annotations_path = print_root / MANIFEST_ANNOTATIONS_FILENAME
 
     if manifest_annotations_path.is_file():
-        rel = "manifest.annotations.yaml"
+        rel = MANIFEST_ANNOTATIONS_FILENAME
 
         try:
             manifest_annotations_data = load_yaml(manifest_annotations_path)
@@ -179,10 +180,10 @@ def validate_print(
                 schema_validation.check_manifest_annotations(manifest_annotations_data, rel),
             )
 
-    diff_path = print_root / "diff.yaml"
+    diff_path = print_root / DIFF_FILENAME
 
     if diff_path.is_file():
-        rel = "diff.yaml"
+        rel = DIFF_FILENAME
 
         try:
             diff_data = load_yaml(diff_path)

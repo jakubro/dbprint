@@ -12,7 +12,6 @@ from dbprint.adapters import (
     BaseStats,
     ColumnMeta,
     ColumnStats,
-    CommentsMeta,
     Inferred,
     MockAdapter,
     MockTable,
@@ -22,39 +21,21 @@ from dbprint.adapters import (
     ValueCount,
 )
 from dbprint.adapters.base import ColumnProgress, PhaseB
-from dbprint.config.project import ConnectionConfig, DiffConfig
+from dbprint.config.project import ConnectionConfig
 from dbprint.engine import DiffRequest, Engine, GenerateRequest, ProgressEvent
 from dbprint.spec.sketch import SketchKind
-from tests._prints import VAULT_COLUMNS, columns, exact_stats, mock_table
+from tests._prints import VAULT_COLUMNS, columns, connection_config, exact_stats, mock_table
 
 
 def _conn_config(tmp_path: Path) -> ConnectionConfig:
-    return ConnectionConfig(
-        name="primary",
-        adapter="postgres",
-        auto=False,
-        output=tmp_path,
-        include=("*",),
-        exclude=(),
-        max_age_days=7,
-        statistics=StatisticsConfig(),
-        diff=DiffConfig(),
-    )
+    return connection_config(output=tmp_path)
 
 
 def _table(schema: str, name: str) -> MockTable:
-    return MockTable(
-        type="table",
-        namespace_path=(schema, name),
-        ddl=f"CREATE TABLE {schema}.{name} (id uuid PRIMARY KEY, status text);\n",
-        columns=[
-            ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1),
-            ColumnMeta(name="status", sql_type="text", nullable=True, default=None, ordinal=2),
-        ],
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={
+    return mock_table(
+        f"{schema}.{name}",
+        columns(("id", "uuid"), ("status", "text", True)),
+        {
             "id": ColumnStats(
                 sql_type="uuid",
                 nullable=False,
@@ -82,6 +63,7 @@ def _table(schema: str, name: str) -> MockTable:
                 distribution="uniform",
             ),
         },
+        ddl=f"CREATE TABLE {schema}.{name} (id uuid PRIMARY KEY, status text);\n",
         samples={"id": [f"00000000-0000-7000-8000-{i:012d}" for i in range(20)], "status": ["a"]},
         row_count=100,
     )
@@ -333,23 +315,10 @@ class TestSketchPass:
         """A high-cardinality, non-key, non-FK column is not sketch-eligible at all."""
 
         fixture = {
-            "public.wide": MockTable(
-                type="table",
-                namespace_path=("public", "wide"),
-                ddl="CREATE TABLE public.wide (payload text);\n",
-                columns=[
-                    ColumnMeta(
-                        name="payload",
-                        sql_type="text",
-                        nullable=True,
-                        default=None,
-                        ordinal=1,
-                    ),
-                ],
-                relationships=[],
-                indexes=[],
-                comments=CommentsMeta(table=None, columns={}),
-                stats={
+            "public.wide": mock_table(
+                "public.wide",
+                columns(("payload", "text", True)),
+                {
                     "payload": ColumnStats(
                         sql_type="text",
                         nullable=True,
@@ -362,6 +331,7 @@ class TestSketchPass:
                         cardinality_method="exact",
                     ),
                 },
+                ddl="CREATE TABLE public.wide (payload text);\n",
                 samples={"payload": ["x"]},
                 row_count=5000,
             ),

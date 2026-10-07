@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import logging
 import re
 from datetime import datetime, timedelta
@@ -14,6 +15,7 @@ import pytest
 import yaml
 
 from dbprint.adapters import ColumnMeta, ColumnStats, SnowflakeAdapter, TableScope
+from dbprint.adapters import base as adapters_base
 from dbprint.adapters.base import PhaseB
 from dbprint.adapters.errors import QueryFailed
 from dbprint.adapters.identifiers import IdentifierRejected, Identity, UnknownTable
@@ -26,22 +28,15 @@ from dbprint.adapters.snowflake.connection import (
     _default_cursor_factory,
     _load_private_key,
 )
-from dbprint.config.project import ConnectionConfig, DiffConfig, RuleConfig, StatisticsConfig
+from dbprint.config.project import RuleConfig
 from dbprint.engine import Engine
+from tests._prints import connection_config
+from tests.adapters._credentials import SNOWFLAKE_CREDS
 from tests.adapters.conftest import SnowflakeDialectShim, StubCursor
 
 
-CREDS: dict[str, str] = {
-    "account": "test-account",
-    "user": "test-user",
-    "password": "test-password",
-    "warehouse": "test-warehouse",
-    "database": "memory",
-    "role": "test-role",
-}
-
 # Credential set without auth material - callers add password or private_key_file.
-_BASE: dict[str, str] = {k: v for k, v in CREDS.items() if k != "password"}
+_BASE: dict[str, str] = {k: v for k, v in SNOWFLAKE_CREDS.items() if k != "password"}
 
 
 def _write_rsa_key(path: Path, *, passphrase: str | None = None) -> Path:
@@ -97,7 +92,7 @@ def fresh_duckdb() -> duckdb.DuckDBPyConnection:
 
 def _build_adapter(duckdb_conn: duckdb.DuckDBPyConnection) -> SnowflakeAdapter:
     shim = SnowflakeDialectShim(duckdb_conn)
-    a = SnowflakeAdapter(CREDS, cursor_factory=lambda _: shim)
+    a = SnowflakeAdapter(SNOWFLAKE_CREDS, cursor_factory=lambda _: shim)
     a.connect()
 
     return a
@@ -105,19 +100,19 @@ def _build_adapter(duckdb_conn: duckdb.DuckDBPyConnection) -> SnowflakeAdapter:
 
 class TestConnectionParams:
     def test_missing_credential_key_raises(self) -> None:
-        incomplete = {k: v for k, v in CREDS.items() if k != "warehouse"}
+        incomplete = {k: v for k, v in SNOWFLAKE_CREDS.items() if k != "warehouse"}
 
         with pytest.raises(SnowflakeConnectionError, match="warehouse"):
             ConnectionParams.from_credentials(incomplete)
 
     def test_optional_schema_supported(self) -> None:
-        params = ConnectionParams.from_credentials({**CREDS, "schema": "SEEDBANK"})
+        params = ConnectionParams.from_credentials({**SNOWFLAKE_CREDS, "schema": "SEEDBANK"})
         assert params.schema == "SEEDBANK"
 
     def test_default_factory_without_extra_raises(self) -> None:
         """Import fails without the [snowflake] extra (not installed in dev; tests use duckdb)."""
 
-        adapter = SnowflakeAdapter(CREDS)
+        adapter = SnowflakeAdapter(SNOWFLAKE_CREDS)
 
         with pytest.raises(SnowflakeConnectionError, match=r"dbprint\[snowflake\]"):
             adapter.connect()
@@ -146,7 +141,7 @@ class TestKeyPairAuth:
     ) -> None:
         captured: dict[str, object] = {}
         monkeypatch.setattr(
-            connection_module.importlib,
+            importlib,
             "import_module",
             lambda _name: _FakeConnector(captured),
         )
@@ -165,7 +160,7 @@ class TestKeyPairAuth:
         key_path = _write_rsa_key(tmp_path / "rsa.pem")
         captured: dict[str, object] = {}
         monkeypatch.setattr(
-            connection_module.importlib,
+            importlib,
             "import_module",
             lambda _name: _FakeConnector(captured),
         )
@@ -187,7 +182,7 @@ class TestKeyPairAuth:
         key_path = _write_rsa_key(tmp_path / "rsa.pem", passphrase="secret")
         captured: dict[str, object] = {}
         monkeypatch.setattr(
-            connection_module.importlib,
+            importlib,
             "import_module",
             lambda _name: _FakeConnector(captured),
         )
@@ -286,7 +281,7 @@ class TestTimeOnlyColumns:
             "FROM range(80) t(i)",
         )
         recorder = _RecordingShim(fresh_duckdb)
-        adapter = SnowflakeAdapter(CREDS, cursor_factory=lambda _: recorder)
+        adapter = SnowflakeAdapter(SNOWFLAKE_CREDS, cursor_factory=lambda _: recorder)
         adapter.connect()
         adapter.list_tables(include=["*"], exclude=[])
         cols = adapter.introspect_columns("memory.seedbank.field_watch")
@@ -399,7 +394,7 @@ class TestEmittedDialect:
         from dbprint.config import StatisticsConfig
 
         recorder = _RecordingShim(con)
-        adapter = SnowflakeAdapter(CREDS, cursor_factory=lambda _: recorder)
+        adapter = SnowflakeAdapter(SNOWFLAKE_CREDS, cursor_factory=lambda _: recorder)
         adapter.connect()
 
         for table in adapter.list_tables(include=["*"], exclude=[]):
@@ -665,7 +660,7 @@ class TestImportedKeys:
     ) -> None:
         self._fk_schema(fresh_duckdb)
         recorder = _RecordingShim(fresh_duckdb)
-        adapter = SnowflakeAdapter(CREDS, cursor_factory=lambda _: recorder)
+        adapter = SnowflakeAdapter(SNOWFLAKE_CREDS, cursor_factory=lambda _: recorder)
         adapter.connect()
 
         for table in adapter.list_tables(include=["*"], exclude=[]):
@@ -785,7 +780,7 @@ class TestPhysicalIdentifierCase:
 
         _seed_wide(fresh_duckdb)
         recorder = _RecordingShim(fresh_duckdb)
-        adapter = SnowflakeAdapter(CREDS, cursor_factory=lambda _: recorder)
+        adapter = SnowflakeAdapter(SNOWFLAKE_CREDS, cursor_factory=lambda _: recorder)
         adapter.connect()
         adapter.list_tables(include=["*"], exclude=[])
         adapter.introspect_columns("memory.seedbank.curation_event")
@@ -810,7 +805,7 @@ class TestPhysicalIdentifierCase:
 
         _seed_wide(fresh_duckdb)
         recorder = _RecordingShim(fresh_duckdb)
-        adapter = SnowflakeAdapter(CREDS, cursor_factory=lambda _: recorder)
+        adapter = SnowflakeAdapter(SNOWFLAKE_CREDS, cursor_factory=lambda _: recorder)
         adapter.connect()
         adapter.list_tables(include=["*"], exclude=[])
         adapter.introspect_columns("memory.seedbank.curation_event")
@@ -854,11 +849,40 @@ class TestPhysicalIdentifierCase:
             ("MEMORY", "SEEDBANK", "Curator", "BASE TABLE"),
             ("MEMORY", "SEEDBANK", "CURATOR", "BASE TABLE"),
         ]
-        adapter = SnowflakeAdapter(CREDS, cursor_factory=lambda _: StubCursor(rows))
+        adapter = SnowflakeAdapter(SNOWFLAKE_CREDS, cursor_factory=lambda _: StubCursor(rows))
         adapter.connect()
 
         with pytest.raises(IdentifierRejected, match="case-collides-with"):
             adapter.list_tables(include=["*"], exclude=[])
+
+    @pytest.mark.parametrize(
+        ("defined", "read"),
+        [("v", '"v"'), ('"v"', "v"), ('"V"', '"v"')],
+    )
+    def test_a_derived_column_read_in_another_case_is_refused(
+        self,
+        defined: str,
+        read: str,
+    ) -> None:
+        shim = SnowflakeDialectShim(duckdb.connect(":memory:"))
+
+        with pytest.raises(AssertionError, match=f"invalid identifier src.{read}"):
+            shim.execute(f"SELECT src.{read} FROM (SELECT 1 AS {defined}) src")
+
+    @pytest.mark.parametrize(
+        ("defined", "read"),
+        [("v", "v"), ("v", '"V"'), ('"v"', '"v"')],
+    )
+    def test_a_derived_column_read_as_snowflake_resolves_it_runs(
+        self,
+        defined: str,
+        read: str,
+    ) -> None:
+        shim = SnowflakeDialectShim(duckdb.connect(":memory:"))
+
+        assert shim.execute(f"SELECT src.{read} FROM (SELECT 1 AS {defined}) src").fetchall() == [
+            (1,),
+        ]
 
 
 class TestCollation:
@@ -884,7 +908,7 @@ class TestPhysicalLayout:
         cluster_by: dict[str, str],
     ) -> SnowflakeAdapter:
         shim = SnowflakeDialectShim(con, cluster_by=cluster_by)
-        a = SnowflakeAdapter(CREDS, cursor_factory=lambda _: shim)
+        a = SnowflakeAdapter(SNOWFLAKE_CREDS, cursor_factory=lambda _: shim)
         a.connect()
 
         return a
@@ -958,7 +982,7 @@ class TestViewDependencies:
 
     def _adapter(self, con: duckdb.DuckDBPyConnection) -> SnowflakeAdapter:
         shim = SnowflakeDialectShim(con)
-        a = SnowflakeAdapter(CREDS, cursor_factory=lambda _: shim)
+        a = SnowflakeAdapter(SNOWFLAKE_CREDS, cursor_factory=lambda _: shim)
         a.connect()
         # Dependencies are read in the namespaces the listing selected from.
         a.list_tables(include=["*"], exclude=[])
@@ -1114,7 +1138,7 @@ class TestNumericPercentileTyping:
     ) -> None:
         _seed_numeric(fresh_duckdb, rows=200, distinct=60, sql_type="DECIMAL(20,6)")
         recorder = _RecordingShim(fresh_duckdb)
-        adapter = SnowflakeAdapter(CREDS, cursor_factory=lambda _: recorder)
+        adapter = SnowflakeAdapter(SNOWFLAKE_CREDS, cursor_factory=lambda _: recorder)
         adapter.connect()
         adapter.list_tables(include=["*"], exclude=[])
         columns = adapter.introspect_columns("memory.seedbank.specimen_batch")
@@ -1271,16 +1295,15 @@ class TestApproximateCardinality:
         con: duckdb.DuckDBPyConnection,
         threshold: int,
     ) -> tuple[list[str], PhaseB]:
-        from dbprint.adapters.snowflake import stats as sf_stats
         from dbprint.config import StatisticsConfig
 
         recorder = _RecordingShim(con)
-        adapter = SnowflakeAdapter(CREDS, cursor_factory=lambda _: recorder)
+        adapter = SnowflakeAdapter(SNOWFLAKE_CREDS, cursor_factory=lambda _: recorder)
         adapter.connect()
         adapter.list_tables(include=["*"], exclude=[])
         columns = adapter.introspect_columns("memory.seedbank.curation_event")
 
-        with patch.object(sf_stats, "APPROXIMATE_THRESHOLD", threshold):
+        with patch.object(adapters_base, "APPROXIMATE_THRESHOLD", threshold):
             _, stats = adapter.compute_statistics(
                 "memory.seedbank.curation_event",
                 columns,
@@ -1504,7 +1527,7 @@ class TestTableKinds:
         con.execute("CREATE TABLE seedbank.curation_event (id INTEGER)")
         con.execute("CREATE TABLE seedbank.field_log (id INTEGER)")
         shim = _RecordingShim(con, table_types)
-        adapter = SnowflakeAdapter(CREDS, cursor_factory=lambda _: shim)
+        adapter = SnowflakeAdapter(SNOWFLAKE_CREDS, cursor_factory=lambda _: shim)
         adapter.connect()
 
         return adapter, shim
@@ -1568,17 +1591,14 @@ class TestTableKinds:
             "CREATE TABLE seedbank.field_log AS SELECT range AS id FROM range(200)",
         )
         adapter = SnowflakeAdapter(
-            CREDS,
+            SNOWFLAKE_CREDS,
             cursor_factory=lambda _: SnowflakeDialectShim(fresh_duckdb),
         )
         adapter.connect()
-        config = ConnectionConfig(
-            name="primary",
+        config = connection_config(
             adapter="snowflake",
             output=tmp_path,
             rules=(RuleConfig(include=("*.field_log",), sample=0.5),),
-            statistics=StatisticsConfig(),
-            diff=DiffConfig(),
         )
 
         try:

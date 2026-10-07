@@ -10,6 +10,7 @@ import yaml
 from click.testing import CliRunner
 
 from dbprint.cli.main import main
+from dbprint.config.connections import env_var_name
 
 
 _PROJECT = """\
@@ -36,7 +37,7 @@ def excluded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     )
     con.execute("CREATE TABLE bed AS SELECT i AS id FROM range(10) r(i)")
     con.close()
-    monkeypatch.setenv("DBPRINT_GARDEN_DATABASE", str(database))
+    monkeypatch.setenv(env_var_name("garden", "database"), str(database))
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".dbprint.yaml").write_text(_PROJECT)
     assert CliRunner().invoke(main, ["generate", "-q"]).exit_code in (0, 3)

@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import rich_click as click
 
+from dbprint.config.resolution import ConnectionResolutionError
+from dbprint.config.resolution import resolve as resolve_connections
 from dbprint.engine import EXIT_GENERIC
 from ..options import keep_fresh, project_option, resolve_project
-from ..resolution import ConnectionResolutionError
-from ..resolution import resolve as resolve_connections
 
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})

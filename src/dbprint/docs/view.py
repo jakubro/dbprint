@@ -13,10 +13,20 @@ from typing import Any
 
 import inflect
 
-from dbprint.engine import notes_synthesis
+from dbprint.engine import AssemblyOptions, assemble_context, notes_synthesis
 from dbprint.engine.baseline import unmeasured_block_message
 from dbprint.engine.context_assembler import external_line, fk_target_map
-from dbprint.engine.relationship_graph import edge_detection
+from dbprint.engine.relationship_graph import edge_detection, edge_key, incoming_key, rejected_edges
+from dbprint.engine.table_readings import (
+    connection_statistics_params,
+    effective_statistics_params,
+    grain_reading,
+    live_annotations,
+    physical_layout,
+    saturation,
+    scanned_row_share,
+)
+from dbprint.engine.value_list import grouped_values, value_key, value_notes
 from dbprint.engine.yaml_dumper import spell_value
 from dbprint.spec.absence import Absence, block_value, column_value, read_table_block
 from dbprint.spec.parts import display
@@ -33,6 +43,8 @@ from . import catalogue, diagram
 
 
 _INFLECT = inflect.engine()
+
+_CURRENCY_TOKENS = frozenset({"created", "updated", "modified"})
 
 
 _BUCKET_LABELS: dict[str, str] = {
@@ -109,7 +121,7 @@ def build_schema_view(conn: catalogue.PrintConnection, schema: str) -> dict[str,
             if r.get("target_table") in tables:
                 n_edges += 1
 
-    return {"tables": tables, "n_edges": n_edges}
+    return {"tables": tables, "n_edges": n_edges, "context": context_view(conn, sorted(tables))}
 
 
 def build_table_view(
@@ -134,33 +146,33 @@ def build_table_view(
     targets = _plural_aliases(targets)
 
     null_patterns = null_patterns_view(statistics) if statistics else None
-    annotations = annotation_view(artifacts.statistics_annotations, columns)
-    # Connection-level default, overridden per table (SPEC 2.5) - the same two-level merge
-    # `engine.context_assembler` applies, so the docs page and `context` cannot diverge.
-    connection_params = conn.manifest.get("statistics_params")
-    table_params = artifacts.entry.get("statistics_params")
-    statistics_params = {
-        **(connection_params if isinstance(connection_params, dict) else {}),
-        **(table_params if isinstance(table_params, dict) else {}),
-    }
+    annotated = (artifacts.statistics_annotations or {}).get("columns")
+    annotations = live_annotations(annotated if isinstance(annotated, dict) else None, statistics)
+    statistics_params = effective_statistics_params(
+        connection_statistics_params(conn.manifest),
+        artifacts.entry.get("statistics_params"),
+    )
     column_rows = [
         column_view(
             name,
             col,
-            row_count,
+            _measured_row_count(statistics),
             relationships,
             annotations,
             targets,
             null_patterns,
             statistics_params,
             scope,
+            (artifacts.relationships_annotations or {}).get("refers_to"),
         )
         for name, col in columns.items()
     ]
 
     skyline_coverage = None
+    # A zero-row read has no cardinality or completeness to plot; every ratio would default.
+    no_rows = not catalog_only and _scanned_rows(statistics, row_count, scope) == 0
 
-    if catalog_only:
+    if catalog_only or no_rows:
         skyline = []
     else:
         heights = skyline_heights(columns) if columns else {}
@@ -184,6 +196,7 @@ def build_table_view(
     return {
         "fqn": artifacts.fqn,
         "entry": artifacts.entry,
+        "context": context_view(conn, [artifacts.fqn]),
         "adapter": conn.manifest.get("adapter"),
         "unprofiled_notice": catalogue.unprofiled_note(conn, artifacts.fqn),
         "missing_artifacts_notice": missing_artifacts_notice(artifacts.missing),
@@ -208,11 +221,20 @@ def build_table_view(
         "cardinality": cardinality_view(columns, row_count, scope)
         if columns and not catalog_only
         else None,
-        "completeness": completeness_view(columns) if columns and not catalog_only else None,
+        "completeness": (
+            completeness_view(columns) if columns and not catalog_only and not no_rows else None
+        ),
+        "no_rows": no_rows,
         "skyline": skyline,
         "skyline_legend": skyline_legend(),
         "skyline_coverage": skyline_coverage,
         "columns": column_rows,
+        # A note whose column no statistics row renders - none read, or none readable.
+        "unlisted_annotations": [
+            (name, entry["note"])
+            for name, entry in annotations.items()
+            if name not in columns and isinstance(entry.get("note"), str) and entry["note"].strip()
+        ],
         "relationships": rows,
         "diagram": diagram.build(
             artifacts.fqn,
@@ -223,6 +245,22 @@ def build_table_view(
         ),
         "description": linkify(artifacts.description, targets),
         "ddl": artifacts.ddl,
+    }
+
+
+def context_view(conn: catalogue.PrintConnection, tables: list[str]) -> dict[str, str]:
+    """Per purpose, the Markdown `dbprint context` prints for `tables` with no other flag."""
+
+    return {
+        purpose: assemble_context(
+            conn.manifest,
+            conn.root,
+            tables,
+            AssemblyOptions(purpose=purpose),
+            connection_name=conn.name,
+        ).text.rstrip()
+        + "\n"
+        for purpose in ("profile", "query")
     }
 
 
@@ -296,44 +334,14 @@ def grain_view(
     tagged `detection: annotated` - it adds a fact, never replaces the measurement.
     """
 
-    block = block_value(statistics, "grain")
-
-    if not isinstance(block, dict) and not statistics_annotations:
+    if not isinstance(block_value(statistics, "grain"), dict) and not statistics_annotations:
         return None
 
-    keys = [k for k in (block.get("keys") or []) if isinstance(k, dict)] if block else []
-    keys = keys + _annotated_grain_keys(statistics_annotations)
-    search = block.get("search") if block else None
-    exhausted = search.get("exhausted") if isinstance(search, dict) else None
+    grain = (statistics_annotations or {}).get("grain")
+    reading = grain_reading(statistics, grain if isinstance(grain, dict) else None)
 
     # Not "keys": Jinja resolves `.keys` to the dict's bound method before trying item access.
-    return {"key_list": keys, "search_ran": search is not None, "exhausted": exhausted}
-
-
-def _annotated_grain_keys(statistics_annotations: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """Human-authored grain keys as `{columns, detection, note}`, `note` omitted when absent."""
-
-    grain = (statistics_annotations or {}).get("grain")
-    keys = grain.get("keys") if isinstance(grain, dict) else None
-
-    if not isinstance(keys, list):
-        return []
-
-    result = []
-
-    for key in keys:
-        if not isinstance(key, dict):
-            continue
-
-        entry = {"columns": key.get("columns") or [], "detection": "annotated"}
-        note = key.get("note")
-
-        if isinstance(note, str) and note.strip():
-            entry["note"] = note
-
-        result.append(entry)
-
-    return result
+    return {"key_list": reading.keys, "state": reading.state}
 
 
 def null_patterns_view(statistics: dict[str, Any]) -> dict[str, Any] | None:
@@ -347,7 +355,7 @@ def null_patterns_view(statistics: dict[str, Any]) -> dict[str, Any] | None:
     patterns = [p for p in (block.get("patterns") or []) if isinstance(p, dict)]
 
     return {
-        "coverage": block.get("coverage"),
+        "coverage_words": scanned_row_share(block.get("coverage")),
         "coverage_method": block.get("coverage_method"),
         "patterns": patterns,
     }
@@ -380,15 +388,13 @@ def null_companions(null_patterns: dict[str, Any] | None, column: str) -> list[s
 def physical_layout_view(statistics: dict[str, Any]) -> dict[str, Any] | None:
     """The declared clustering/partitioning key (SPEC 2.2.11) - a schema fact, never a claim."""
 
-    block = block_value(statistics, "physical_layout")
+    layout = physical_layout(statistics)
 
-    if not isinstance(block, dict):
+    if layout is None:
         return None
 
-    keys = [k for k in (block.get("keys") or []) if isinstance(k, dict)]
-
     # Not "keys": Jinja resolves `.keys` to the dict's bound method before trying item access.
-    return {"mechanism": block.get("mechanism"), "key_list": keys}
+    return {"mechanism": layout.mechanism, "key_list": layout.keys}
 
 
 def merging_view(statistics: dict[str, Any]) -> dict[str, Any] | None:
@@ -444,7 +450,7 @@ def timeline_view(statistics: dict[str, Any]) -> dict[str, Any] | None:
         "column": block.get("column"),
         "unit": block.get("unit"),
         "buckets": buckets,
-        "coverage": block.get("coverage"),
+        "coverage_words": scanned_row_share(block.get("coverage")),
     }
 
 
@@ -513,7 +519,10 @@ def summary_cards(
     relationships: dict[str, Any] | None,
     scope: ScanScope | None = None,
 ) -> dict[str, Any]:
-    """Cross-column summary figures (sensitivity, redaction, freshness, connections)."""
+    """Cross-column summary figures (sensitivity, redaction, freshness, connections).
+
+    "data through" reads only a column whose name says it records a creation or an update.
+    """
 
     freshest: dict[str, Any] | None = None
     freshest_value: float | None = None
@@ -521,7 +530,11 @@ def summary_cards(
     for col, s in columns.items():
         rng, fresh = column_value(s, "range"), column_value(s, "freshness")
 
-        if not rng or not fresh:
+        if (
+            not rng
+            or not fresh
+            or not _CURRENCY_TOKENS & _name_segments(column_value(s, "physical_name") or col)
+        ):
             continue
 
         try:
@@ -687,13 +700,7 @@ def cardinality_cell(
     if cardinality is None:
         return None
 
-    scanned = rows_scanned(col, scope)
-    saturates = False
-
-    if scope is not None:
-        saturates = bool(scanned) and cardinality == scanned
-    elif row_count:
-        saturates = cardinality == row_count
+    saturates = saturation(col, row_count, scope)
 
     return {
         "value": cardinality,
@@ -714,15 +721,20 @@ def values_view(col: dict[str, Any], scope: ScanScope | None = None) -> dict[str
     if values is None and coverage is None:
         return None
 
-    entries = [e for e in (values or []) if isinstance(e, dict)]
-    top = max((e.get("count", 0) for e in entries), default=0)
+    # One bar per category, its spellings folded in (SPEC 2.2.4), as `dbprint context` reads it.
+    groups = [
+        (entry, spellings, entry.get("count", 0) + sum(m.get("count", 0) for m in spellings))
+        for entry, spellings in grouped_values(values or [])
+    ]
+    top = max((total for _, _, total in groups), default=0)
     bars = [
         {
             "value": spell_value(e["value"]) if "value" in e else "(value withheld)",
-            "count": e.get("count", 0),
-            "pct": round(e.get("count", 0) / top * 100, 2) if top else 0.0,
+            "count": total,
+            "pct": round(total / top * 100, 2) if top else 0.0,
+            "spellings": [spell_value(m["value"]) for m in spellings if "value" in m],
         }
-        for e in entries
+        for e, spellings, total in groups
     ]
 
     return {
@@ -776,31 +788,6 @@ def sketch_available(col: dict[str, Any]) -> bool:
     return isinstance(column_value(col, "sketch"), dict)
 
 
-def annotation_view(
-    statistics_annotations: dict[str, Any] | None,
-    known_columns: dict[str, Any],
-) -> dict[str, dict[str, Any]]:
-    """Per-column human notes, filtered to columns this table's statistics still carries.
-
-    A key naming an absent column is stale (SPEC 2.7.1); a table with no `statistics` has
-    no list to check against, so every key stands.
-    """
-
-    columns = (statistics_annotations or {}).get("columns")
-
-    if not isinstance(columns, dict):
-        return {}
-
-    if not known_columns:
-        return {name: entry for name, entry in columns.items() if isinstance(entry, dict)}
-
-    return {
-        name: entry
-        for name, entry in columns.items()
-        if isinstance(entry, dict) and name in known_columns
-    }
-
-
 def column_view(
     name: str,
     col: dict[str, Any],
@@ -811,16 +798,18 @@ def column_view(
     null_patterns: dict[str, Any] | None = None,
     statistics_params: dict[str, Any] | None = None,
     scope: ScanScope | None = None,
+    relationship_annotations: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Everything the table page needs to render one column's row and expanded detail. `notes`
     reuses `engine.notes_synthesis.synthesize` in `hints_only` mode, shaped by `statistics_params`.
     """
 
-    fk_target = fk_target_map(relationships).get(name)
+    fk_targets = fk_target_map(relationships, relationship_annotations).get(name)
     annotation = annotations.get(name)
     note_md = annotation.get("note") if annotation else None
     claims = (annotation or {}).get("claims")
     values_notes = (annotation or {}).get("values")
+    notes = value_notes(annotation)
 
     return {
         "name": name,
@@ -844,11 +833,11 @@ def column_view(
         "unmeasured": tuple(column_value(col, "unmeasured") or ()),
         "notes": notes_synthesis.synthesize(
             col,
-            fk_target,
+            fk_targets,
             hints_only=True,
             statistics_params=statistics_params,
             scope=scope,
-        ),
+        ).text,
         # Not "values": Jinja resolves `.values` to the dict's bound method before item access.
         "value_list": values_view(col, scope),
         "range": range_view(col, scope),
@@ -857,9 +846,9 @@ def column_view(
         "annotation_note": linkify(note_md, targets),
         "annotation_claims": sorted(claims.items()) if isinstance(claims, dict) else [],
         "annotation_values": [
-            (spell_value(v.get("value")), v.get("note"))
+            (spell_value(v.get("value")), notes[value_key(v.get("value"))])
             for v in (values_notes or [])
-            if isinstance(v, dict)
+            if isinstance(v, dict) and value_key(v.get("value")) in notes
         ],
     }
 
@@ -876,7 +865,7 @@ def parts_view(name: str, col: dict[str, Any]) -> list[dict[str, Any]]:
         {
             "label": display(name, path),
             "classification": column_value(block, "classification") or "unsupported",
-            "notes": notes_synthesis.synthesize(block, None, hints_only=False),
+            "notes": notes_synthesis.synthesize(block, None, hints_only=False).text,
         }
         for path, block in parts.items()
         if isinstance(block, dict)
@@ -895,12 +884,12 @@ def relationship_rows(
 
     refers_to = (relationships or {}).get("refers_to") or []
     referenced_by = (relationships or {}).get("referenced_by") or []
-    rejected = _rejected_edges(relationship_annotations)
+    rejected = rejected_edges((relationship_annotations or {}).get("refers_to"))
 
     out_rows = []
 
     for entry in refers_to:
-        rejection = rejected.get(_edge_key(entry))
+        rejection = rejected.get(edge_key(entry))
         out_rows.append(
             {
                 "column": entry.get("column") or [],
@@ -999,28 +988,6 @@ def _plural_variants(name: str) -> list[str]:
     return [plural] if plural and plural != name else []
 
 
-def _rejected_edges(
-    relationship_annotations: dict[str, Any] | None,
-) -> dict[tuple[Any, ...], dict[str, Any]]:
-    """Rejected `refers_to` entries from `relationships.annotations.yaml`, keyed by address."""
-
-    entries = (relationship_annotations or {}).get("refers_to") or []
-
-    return {
-        _edge_key(e): e for e in entries if isinstance(e, dict) and e.get("verdict") == "rejected"
-    }
-
-
-def _edge_key(entry: dict[str, Any]) -> tuple[Any, ...]:
-    """The (column, target_table, target_column) triplet an edge is addressed by."""
-
-    return (
-        tuple(entry.get("column") or ()),
-        entry.get("target_table"),
-        tuple(entry.get("target_column") or ()),
-    )
-
-
 def _incoming_rejection(
     conn: catalogue.PrintConnection,
     this_fqn: str,
@@ -1040,14 +1007,11 @@ def _incoming_rejection(
     if referencer_artifacts is None:
         return None
 
-    rejected = _rejected_edges(referencer_artifacts.relationships_annotations)
-    key = (
-        tuple(entry.get("referencer_column") or ()),
-        this_fqn,
-        tuple(entry.get("column") or ()),
+    rejected = rejected_edges(
+        (referencer_artifacts.relationships_annotations or {}).get("refers_to"),
     )
 
-    return rejected.get(key)
+    return rejected.get(incoming_key(entry, this_fqn))
 
 
 def _observed_view(entry: dict[str, Any]) -> dict[str, Any] | None:
@@ -1121,6 +1085,23 @@ def _as_number(value: Any) -> float:
     return datetime.fromisoformat(value).timestamp()
 
 
+def _scanned_rows(
+    statistics: dict[str, Any] | None,
+    row_count: Any,
+    scope: ScanScope | None,
+) -> Any:
+    if not statistics:
+        return None
+
+    return scope.rows_scanned if scope is not None else row_count
+
+
+def _measured_row_count(statistics: dict[str, Any] | None) -> Any:
+    reading = read_table_block(statistics or {}, "row_count")
+
+    return reading.value if reading.state is Absence.PRESENT else None
+
+
 def _row_count(statistics: dict[str, Any] | None, entry: dict[str, Any]) -> Any:
     reading = read_table_block(statistics or {}, "row_count")
 
@@ -1138,3 +1119,7 @@ def _coverage_text(col: dict[str, Any], coverage: Any, scope: ScanScope | None) 
     text = f"{spell_percent(coverage)} covered"
 
     return qualify(text, scope) if list_is_complete(col) else text
+
+
+def _name_segments(name: str) -> set[str]:
+    return set(re.split(r"[^a-z0-9]+", re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name).lower()))

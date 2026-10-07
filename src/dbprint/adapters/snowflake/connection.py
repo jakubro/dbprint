@@ -7,7 +7,6 @@ connector lazily, so an injected duckdb cursor never pays the import cost.
 
 from __future__ import annotations
 
-import importlib
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -118,13 +117,12 @@ def exec_query(cursor: Cursor, sql: str, params: Any = None) -> Cursor:
 def _default_cursor_factory(params: ConnectionParams) -> Any:
     """Build a real snowflake-connector cursor; raises if the extra is missing."""
 
-    try:
-        connector = importlib.import_module("snowflake.connector")
-    except ImportError as exc:
-        raise SnowflakeConnectionError(
-            "snowflake-connector-python is not installed. Install dbprint with the "
-            "[snowflake] extra: `pip install dbprint[snowflake]`.",
-        ) from exc
+    connector = driver.import_extra(
+        "snowflake.connector",
+        "snowflake-connector-python",
+        "snowflake",
+        SnowflakeConnectionError,
+    )
 
     connect_kwargs: dict[str, Any] = {
         "account": params.account,

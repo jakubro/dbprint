@@ -18,8 +18,6 @@ from psycopg import sql
 
 from dbprint.adapters import (
     ClickhouseAdapter,
-    ColumnMeta,
-    CommentsMeta,
     DatabricksAdapter,
     MockAdapter,
     MockTable,
@@ -36,6 +34,7 @@ from dbprint.adapters.redshift.connection import RedshiftConnectionError
 from dbprint.adapters.snowflake import introspect as snowflake_introspect
 from dbprint.config import ConnectionConfig
 from dbprint.engine import Engine
+from tests._prints import columns, mock_table
 from tests.adapters.conftest import (
     RecordedResponseCursor,
     RedshiftDialectShim,
@@ -43,7 +42,7 @@ from tests.adapters.conftest import (
     _mysql_admin_exec,
     _mysql_exec_many,
 )
-from tests.conftest import MysqlCluster, PostgresCluster
+from tests.conftest import MysqlCluster, PostgresCluster, pg_connect
 
 
 class TestMysql:
@@ -98,12 +97,12 @@ class TestPostgres:
         a, b = (f"ns_{secrets.token_hex(3)}" for _ in range(2))
         admin = postgres_cluster
 
-        with _pg(admin, "postgres") as conn:
+        with pg_connect(admin.creds()) as conn:
             for name in (a, b):
                 conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
 
         for name, table in ((a, "orchard"), (b, "grove")):
-            with _pg(admin, name) as conn:
+            with pg_connect(admin.creds(name)) as conn:
                 conn.execute(
                     sql.SQL("CREATE TABLE public.{} (id int, tag text)").format(
                         sql.Identifier(table),
@@ -127,7 +126,7 @@ class TestPostgres:
         finally:
             adapter.close()
 
-            with _pg(admin, "postgres") as conn:
+            with pg_connect(admin.creds()) as conn:
                 for name in (a, b):
                     conn.execute(
                         sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)),
@@ -145,18 +144,18 @@ class TestPostgresFollowThrough:
     def three(self, postgres_cluster: PostgresCluster) -> Iterator[tuple[str, ...]]:
         names = tuple(f"ns_{secrets.token_hex(3)}" for _ in range(3))
 
-        with _pg(postgres_cluster, "postgres") as conn:
+        with pg_connect(postgres_cluster.creds()) as conn:
             for name in names:
                 conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
 
         for name in names:
-            with _pg(postgres_cluster, name) as conn:
+            with pg_connect(postgres_cluster.creds(name)) as conn:
                 conn.execute("CREATE TABLE public.bed (id int)")
                 conn.execute("CREATE VIEW public.bed_view AS SELECT id FROM public.bed")
 
         yield names
 
-        with _pg(postgres_cluster, "postgres") as conn:
+        with pg_connect(postgres_cluster.creds()) as conn:
             for name in names:
                 conn.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
 
@@ -202,7 +201,7 @@ class TestPostgresFollowThrough:
             adapter.list_tables(include=[f"{three[0]}.*"], exclude=[])
             adapter.introspect_view_dependencies()
 
-            with _pg(postgres_cluster, "postgres") as conn:
+            with pg_connect(postgres_cluster.creds()) as conn:
                 rows = conn.execute(
                     "SELECT DISTINCT datname FROM pg_stat_activity WHERE datname = ANY(%s)",
                     (list(three),),
@@ -540,10 +539,10 @@ def _redshift_stand_ins(
     for name, table in tables.items():
         real = f"rs_{name}_{secrets.token_hex(3)}"
 
-        with _pg(admin, "postgres") as conn:
+        with pg_connect(admin.creds()) as conn:
             conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(real)))
 
-        conn = _pg(admin, real)
+        conn = pg_connect(admin.creds(real))
         conn.execute(
             sql.SQL("CREATE TABLE public.{} (id int, tag text)").format(
                 sql.Identifier(table),
@@ -555,27 +554,12 @@ def _redshift_stand_ins(
 
 
 def _table() -> MockTable:
-    return MockTable(
-        type="table",
-        namespace_path=("s", "t"),
+    return mock_table(
+        "s.t",
+        columns(("id", "int")),
+        {},
         ddl="CREATE TABLE s.t (id int);\n",
-        columns=[ColumnMeta(name="id", sql_type="int", nullable=False, default=None, ordinal=1)],
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={},
-        samples={},
         row_count=0,
-    )
-
-
-def _pg(cluster: PostgresCluster, dbname: str) -> psycopg.Connection:
-    return psycopg.connect(
-        host="127.0.0.1",
-        port=cluster.port,
-        user="postgres",
-        dbname=dbname,
-        autocommit=True,
     )
 
 

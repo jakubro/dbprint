@@ -20,8 +20,9 @@ from dbprint.adapters.duckdb import stats as duckdb_stats
 from dbprint.config.project import ConnectionConfig, RedactRule
 from dbprint.conformance import validate_print
 from dbprint.engine import Engine
-from tests.adapters.test_arrays import _generate, _psql
-from tests.adapters.test_mysql import _build as build_mysql
+from tests._engine_run import conformance_errors
+from tests.adapters._composites import generate, psql
+from tests.adapters._mysql import build_mysql
 
 
 _VALUE_FIELDS = ("cardinality", "cardinality_ratio", "values", "sketch", "distribution")
@@ -191,7 +192,7 @@ def test_postgis_reads_geometry_and_geography_in_their_own_srid(
 ) -> None:
     del postgis
 
-    with _psql(postgres_test_db) as conn:
+    with psql(postgres_test_db) as conn:
         conn.execute("CREATE EXTENSION postgis")
         conn.execute(
             "CREATE TABLE public.site (site_id integer, pin geometry(Point, 3857), "
@@ -203,7 +204,7 @@ def test_postgis_reads_geometry_and_geography_in_their_own_srid(
             "FROM generate_series(1, 30) i",
         )
 
-    columns = _generate(PostgresAdapter(postgres_test_db), "postgres", tmp_path, "*.site")
+    columns = generate(PostgresAdapter(postgres_test_db), "postgres", tmp_path, "*.site")
 
     assert columns["pin"]["classification"] == "spatial"
     assert columns["pin"]["geometry"]["srids"] == [{"srid": 3857, "count": 30}]
@@ -247,7 +248,7 @@ def test_mysql_reads_its_spatial_types_with_a_planar_extent(
     finally:
         conn.close()
 
-    columns = _generate(build_mysql(mysql_test_db), "mysql", tmp_path, "*.plot")
+    columns = generate(build_mysql(mysql_test_db), "mysql", tmp_path, "*.plot")
 
     assert columns["corner"]["classification"] == "spatial"
     assert columns["corner"]["geometry"]["kinds"] == [{"kind": "point", "count": 40}]
@@ -276,7 +277,7 @@ def test_clickhouse_reads_every_geo_type_without_a_reference_system(
         {"host": "chdb", "database": "seedbank"},
         cursor_factory=lambda _params: cursor,
     )
-    columns = _generate(adapter, "clickhouse", tmp_path, "*.plot")
+    columns = generate(adapter, "clickhouse", tmp_path, "*.plot")
 
     assert columns["corner"]["geometry"] == {
         "kinds": [{"kind": "point", "count": 30}],
@@ -323,7 +324,7 @@ def _duckdb_columns(
         path.parent.name: path for path in (tmp_path / "prints" / "garden").rglob("statistics.yaml")
     }
     path = written[table] if table is not None else next(iter(written.values()))
-    errors = [i for i in validate_print(tmp_path / "prints" / "garden") if i.severity == "error"]
+    errors = conformance_errors(tmp_path / "prints" / "garden")
 
     assert errors == [], errors
 

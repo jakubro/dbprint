@@ -11,13 +11,13 @@ import pathlib
 from collections.abc import Callable
 from typing import Any
 
-import psycopg
 import pytest
 
 from dbprint.adapters import Adapter, PostgresAdapter, StatisticsConfig
 from dbprint.adapters.base import temporal_block_unmeasured
 from dbprint.cli.adapter_registry import ADAPTERS
-from tests.adapters.test_dialect_guard import STATS_MODULES
+from tests.adapters._dialects import STATS_MODULES
+from tests.conftest import pg_connect
 
 
 _ADAPTERS_WITH_STATS = sorted(
@@ -298,14 +298,7 @@ def _seed_date_probe(creds: dict[str, str]) -> None:
     Below it the column pre-classifies `categorical` and never reaches the temporal branch.
     """
 
-    with psycopg.connect(
-        host=creds["host"],
-        port=int(creds["port"]),
-        dbname=creds["database"],
-        user=creds["user"],
-        password=creds["password"],
-        autocommit=True,
-    ) as conn:
+    with pg_connect(creds) as conn:
         conn.execute("CREATE SCHEMA IF NOT EXISTS fixture")
         conn.execute("CREATE TABLE fixture.date_probe (a date NOT NULL)")
         conn.execute(

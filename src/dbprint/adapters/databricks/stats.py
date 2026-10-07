@@ -48,7 +48,6 @@ from ..base import (
     PhaseA,
     PhaseB,
     Range,
-    RowCountMethod,
     TableCounts,
     TableScope,
     TopN,
@@ -69,7 +68,7 @@ from ..base import (
     unrepresentable_fields,
     whole_temporal_block,
 )
-from ..identifiers import SOURCE_ALIAS, Identity, qualified, quote
+from ..identifiers import SOURCE_ALIAS, Identity, quote, source_column
 from ..sql_layout import call, derived, indented, select_from
 from ..statements import column_alias
 
@@ -119,7 +118,7 @@ def compute_base(
         return TableCounts(row_count=0, rows_scanned=0), PhaseA({})
 
     quoted = identity.quoted()
-    source = _table_source(identity, scope)
+    source = table_source(identity, scope)
     rows_scanned, phase_a = run_phase_a(
         columns,
         phase_a_cost,
@@ -127,7 +126,14 @@ def compute_base(
         partial(_null_counts, cursor, source),
         declines=lambda col: _is_unsupported(col.classified_type),
     )
-    row_count, row_count_method = _table_row_count(cursor, identity, quoted, rows_scanned, scope)
+    row_count, row_count_method = statements.table_row_count(
+        partial(exec_query, cursor),
+        DIALECT,
+        quoted,
+        rows_scanned,
+        scope,
+        lambda: estimate_row_count(cursor, identity),
+    )
 
     return TableCounts(row_count, rows_scanned, row_count_method), phase_a
 
@@ -148,7 +154,7 @@ def compute_columns(
 ) -> PhaseB:
     """Phase B: the classification-specific statistics, keyed by column name."""
 
-    source = source or _table_source(identity, scope)
+    source = source or table_source(identity, scope)
     reads = ColumnReads(
         value_list=partial(_fetch_value_list, cursor, source),
         numeric_block=partial(_fetch_numeric_block, cursor, source),
@@ -171,9 +177,7 @@ def compute_columns(
 
 
 def table_source(identity: Identity, scope: TableScope | None) -> str:
-    """The FROM expression a table's statistics read, which a descent derives its parts from."""
-
-    return _table_source(identity, scope)
+    return _source(identity.quoted(), scope, statements.table_seed(identity))
 
 
 def profile_part(
@@ -292,9 +296,9 @@ def compute_null_patterns(
     return statements.null_patterns(
         partial(exec_query, cursor),
         DIALECT,
-        _table_source(identity, scope),
+        table_source(identity, scope),
         columns,
-        [_qualified(col.name) for col in columns],
+        [source_column(col, DIALECT) for col in columns],
         config,
         counts,
         base,
@@ -314,10 +318,13 @@ def probe_grain(
     return statements.grain_pairs(
         partial(exec_query, cursor),
         DIALECT,
-        _table_source(identity, scope),
+        table_source(identity, scope),
         counts,
         candidates,
-        {col.name: render_operand(_qualified(col.name), col.classified_type) for col in columns},
+        {
+            col.name: render_operand(source_column(col, DIALECT), col.classified_type)
+            for col in columns
+        },
     )
 
 
@@ -335,13 +342,13 @@ def probe_timeline(
     del counts
 
     col = {c.name: c for c in columns}[column]
-    cn = render_operand(_qualified(col.name), col.classified_type)
+    cn = render_operand(source_column(col, DIALECT), col.classified_type)
     spark_unit = {"day": "DAY", "week": "WEEK", "month": "MONTH"}[unit]
 
     return statements.timeline(
         partial(exec_query, cursor),
         DIALECT,
-        _table_source(identity, scope),
+        table_source(identity, scope),
         cn,
         call("DATE_TRUNC", f"'{spark_unit}'", utc_instant(cn, col.classified_type)),
         render_domain("bkt.bucket_start", col.classified_type, already_utc=True),
@@ -366,9 +373,9 @@ def compute_populated_windows(
 
     return statements.populated_windows(
         partial(exec_query, cursor),
-        _table_source(identity, scope),
-        _qualified(anchor.name),
-        {subject: _qualified(by_name[subject].name) for subject in subject_columns},
+        table_source(identity, scope),
+        source_column(anchor, DIALECT),
+        {subject: source_column(by_name[subject], DIALECT) for subject in subject_columns},
         lambda expr: render_domain(expr, anchor.classified_type),
     )
 
@@ -389,10 +396,13 @@ def probe_dependencies(
     return statements.dependency_strengths(
         partial(exec_query, cursor),
         DIALECT,
-        _table_source(identity, scope),
+        table_source(identity, scope),
         base,
         candidates,
-        {col.name: render_operand(_qualified(col.name), col.classified_type) for col in columns},
+        {
+            col.name: render_operand(source_column(col, DIALECT), col.classified_type)
+            for col in columns
+        },
     )
 
 
@@ -430,10 +440,6 @@ def _sample_expr(identity: Identity, scope: TableScope) -> str:
     return f"(SELECT * FROM {quoted} TABLESAMPLE ({scope.sample * 100} PERCENT)) {SOURCE_ALIAS}"
 
 
-def _table_source(identity: Identity, scope: TableScope | None) -> str:
-    return _source(identity.quoted(), scope, statements.table_seed(identity))
-
-
 def _source(quoted_fqn: str, scope: TableScope | None, seed: int | None = None) -> str:
     """Table reference every statistics query selects FROM - `TABLESAMPLE ... REPEATABLE` is
     coherent on this engine (measured), so an unmaterialized scope still reads stably.
@@ -452,34 +458,6 @@ def _source(quoted_fqn: str, scope: TableScope | None, seed: int | None = None) 
         return derived(f"SELECT * FROM {quoted_fqn} WHERE ({scope.filter})", SOURCE_ALIAS)
 
 
-def _table_row_count(
-    cursor: Cursor,
-    identity: Identity,
-    quoted_fqn: str,
-    rows_scanned: int,
-    scope: TableScope | None,
-) -> tuple[int, RowCountMethod]:
-    """Rows in the table and how they were obtained (SPEC 2.2.1) - a narrowed read takes the
-    catalog estimate, counting exactly where none exists so an empty match is not an empty table.
-    """
-
-    if scope is None or not scope.narrows:
-        return rows_scanned, "exact"
-
-    estimate = None if scope.count_exactly else estimate_row_count(cursor, identity)
-
-    if estimate is not None:
-        return estimate, "approximate"
-
-    row = exec_query(cursor, f"SELECT COUNT(1) FROM {quoted_fqn} {SOURCE_ALIAS}").fetchone()
-
-    return (int(row[0]) if row and row[0] is not None else rows_scanned), "exact"
-
-
-def _qualified(name: str) -> str:
-    return qualified(quote(name, DIALECT))
-
-
 def _null_counts(
     cursor: Cursor,
     source: str,
@@ -490,7 +468,7 @@ def _null_counts(
         DIALECT,
         source,
         columns,
-        lambda col: render_operand(_qualified(col.name), col.classified_type),
+        lambda col: render_operand(source_column(col, DIALECT), col.classified_type),
     )
 
 
@@ -504,7 +482,7 @@ def _phase_a_statement(
     select_parts: list[str] = ["COUNT(1) AS row_count"]
 
     for col in columns:
-        cn = render_operand(_qualified(col.name), col.classified_type)
+        cn = render_operand(source_column(col, DIALECT), col.classified_type)
         a = column_alias(col.name)
         select_parts.append(f"COUNT(1) - COUNT({cn}) AS null_{a}")
 
@@ -592,7 +570,7 @@ def _fetch_value_list(
     non_null: int,
     config: StatisticsConfig,
 ) -> ValueList:
-    cn = render_operand(_qualified(col.name), col.classified_type)
+    cn = render_operand(source_column(col, DIALECT), col.classified_type)
     select_expr = cn
 
     if is_binary_type(col.classified_type):
@@ -618,7 +596,7 @@ def _fetch_spatial(
     source: str,
     col: ColumnMeta,
 ) -> tuple[Geometry, Extent | None]:
-    cn = _qualified(col.name)
+    cn = source_column(col, DIALECT)
     # The extent and validity accessors take GEOMETRY only, so a GEOGRAPHY reads through its WKB.
     g = cn if base_type(col.classified_type) == "geometry" else f"ST_GEOMFROMWKB(ST_ASBINARY({cn}))"
 
@@ -652,7 +630,7 @@ def _fetch_numeric_block(
     *,
     values: bool = True,
 ) -> NumericBlock:
-    cn = render_operand(_qualified(col.name), col.classified_type)
+    cn = render_operand(source_column(col, DIALECT), col.classified_type)
     levels = ", ".join(str(p / 100.0) for p in config.percentiles)
     select_parts = [
         f"MIN({cn}) AS mn",
@@ -696,7 +674,7 @@ def _fetch_temporal_block(
     tuple[ValueCount, ...],
     int | None,
 ]:
-    cn = render_operand(_qualified(col.name), col.classified_type)
+    cn = render_operand(source_column(col, DIALECT), col.classified_type)
     keys = config.percentiles
     day_aligned = temporal_shape(col.classified_type) != "date"
     # Rendered SQL-side, not via Python's `.isoformat()`: PySpark collects a naive local
@@ -784,7 +762,7 @@ def _fetch_temporal_block(
 
 
 def _fetch_length_p95(cursor: Cursor, source: str, col: ColumnMeta) -> float | None:
-    cn = render_operand(_qualified(col.name), col.classified_type)
+    cn = render_operand(source_column(col, DIALECT), col.classified_type)
     _, length_expr = _length_exprs(cn, col.classified_type)
     row = exec_query(
         cursor,

@@ -91,11 +91,11 @@ class SnowflakeAdapter(SqlAdapter):
             include,
             exclude,
         )
-        self._identities.register(selected)
+        listed = self._register(selected)
         self._skipped = skipped
         self._selected_databases = tuple(sorted({physical[0] for _, physical in selected}))
 
-        return [meta for meta, _ in selected]
+        return listed
 
     def skipped_namespaces(self) -> tuple[SkippedNamespace, ...]:
         return self._skipped

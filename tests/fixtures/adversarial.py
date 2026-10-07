@@ -12,16 +12,14 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from unittest.mock import patch
+from typing import Any
 
 import pytest
 import yaml
 from click.testing import CliRunner
 
 from dbprint.adapters import (
-    ColumnMeta,
     ColumnStats,
-    CommentsMeta,
     ForeignKeyMeta,
     Frequencies,
     Inferred,
@@ -39,7 +37,10 @@ from dbprint.adapters import (
 _UUID_LENGTH = Length(min=36, max=36, avg=36.0, p95=36.0)
 from dbprint.cli.main import main
 from dbprint.config import ConnectionConfig
-from dbprint.conformance import validate_print
+from dbprint.spec.artifacts import MANIFEST_FILENAME
+from tests._cli import credential_env, patch_registry
+from tests._engine_run import conformance_errors
+from tests._prints import columns, mock_table
 
 
 CONN_NAME = "primary"
@@ -55,7 +56,9 @@ FUTURE_DATED_COLUMN = "matures_at"
 FUTURE_DATED_RANGE_MAX = "2099-01-01T00:00:00"
 SCOPED_KEY_COLUMN = "id"
 SCOPED_COMPLETE_LIST_COLUMN = "stage"
-SCOPED_LATEST_COLUMN = "sown_at"
+SCOPED_LATEST_COLUMN = "updated_at"
+# Its P1/P99 sit inside its min/max, so labelling them the range would hide both tails.
+PERCENTILE_INSIDE_RANGE_COLUMN = "updated_at"
 TRUNCATED_FK_COLUMN = "cultivar_id"
 TRUNCATED_FK_COVERAGE = 0.4
 FK_TARGET_TABLE = "public.cultivar"
@@ -73,8 +76,20 @@ DELIMITER_TABLE = "public.curation_event"
 DELIMITER_COLUMN = "condition"
 DELIMITER_VALUE = "fair|poor"
 LINE_BREAK_VALUE = "sound\nbut small"
+# Carries the Markdown grammar's own fact, list and label separators, and a quote to double.
+GRAMMAR_VALUE = "sub; species, wild: collector's"
 SPELLING_COLUMN = "remark"
+ORPHAN_SPELLING_TABLE = "public.cultivar"
+ORPHAN_SPELLING_COLUMN = "id"
+ORPHAN_SPELLING_VALUE = "orphan-spelling"
+GRAIN_NO_OUTCOME_TABLE = "public.batch"
 EXTREME_TABLE = "public.gauge"
+# Declared, inferred-and-rejected and measured edges, listed worst-first on disk.
+SEVERAL_EDGES_TABLE = "public.gauge"
+SEVERAL_EDGES_COLUMN = "sparse"
+REJECTED_EDGE_TARGET = "public.batch"
+UNREADABLE_PROFILED_TABLE = "public.wide_lookup"
+UNREADABLE_PROFILED_AT = "not-a-date"
 EXTREME_ROW_COUNT = 10_000
 # Every float statistic of `wide`/`tiny` sits where `str(float)` switches to exponent form.
 EXTREME_WIDE_P50 = 18446744073709548000.0
@@ -89,13 +104,7 @@ SPELLING_VALUES = (
     "seed coat intact and no visible damage under magnification after the second germination trial",
 )
 
-_CREDENTIAL_ENV = {
-    "DBPRINT_PRIMARY_HOST": "h",
-    "DBPRINT_PRIMARY_PORT": "5432",
-    "DBPRINT_PRIMARY_DATABASE": "d",
-    "DBPRINT_PRIMARY_USER": "u",
-    "DBPRINT_PRIMARY_PASSWORD": "p",
-}
+_CREDENTIAL_ENV = credential_env()
 
 PROJECT_YAML = """\
 connections:
@@ -115,53 +124,17 @@ connections:
 
 
 def _fixture_tables() -> dict[str, MockTable]:
-    sowing_trial = MockTable(
-        type="table",
-        namespace_path=("public", "sowing_trial"),
-        ddl=(
-            "CREATE TABLE public.sowing_trial (id uuid PRIMARY KEY, cultivar_id uuid, "
-            "email text, matures_at timestamp with time zone, stage text, "
-            "sown_at timestamp with time zone);\n"
+    sowing_trial = mock_table(
+        "public.sowing_trial",
+        columns(
+            ("id", "uuid"),
+            ("cultivar_id", "uuid"),
+            ("email", "text"),
+            ("matures_at", "timestamp with time zone"),
+            ("stage", "text"),
+            ("updated_at", "timestamp with time zone"),
         ),
-        columns=[
-            ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1),
-            ColumnMeta(
-                name="cultivar_id",
-                sql_type="uuid",
-                nullable=False,
-                default=None,
-                ordinal=2,
-            ),
-            ColumnMeta(name="email", sql_type="text", nullable=False, default=None, ordinal=3),
-            ColumnMeta(
-                name="matures_at",
-                sql_type="timestamp with time zone",
-                nullable=False,
-                default=None,
-                ordinal=4,
-            ),
-            ColumnMeta(name="stage", sql_type="text", nullable=False, default=None, ordinal=5),
-            ColumnMeta(
-                name="sown_at",
-                sql_type="timestamp with time zone",
-                nullable=False,
-                default=None,
-                ordinal=6,
-            ),
-        ],
-        relationships=[
-            ForeignKeyMeta(
-                column=("cultivar_id",),
-                target_table=FK_TARGET_TABLE,
-                target_column=("id",),
-                on_delete="NO ACTION",
-                on_update="NO ACTION",
-                constraint_name="sowing_trial_cultivar_fk",
-            ),
-        ],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={
+        {
             "id": ColumnStats(
                 sql_type="uuid",
                 nullable=False,
@@ -246,7 +219,7 @@ def _fixture_tables() -> dict[str, MockTable]:
                 empty_count=0,
                 length=Length(min=4, max=9, avg=6.0, p95=9.0),
             ),
-            "sown_at": ColumnStats(
+            "updated_at": ColumnStats(
                 sql_type="timestamp with time zone",
                 nullable=False,
                 null_count=0,
@@ -258,24 +231,32 @@ def _fixture_tables() -> dict[str, MockTable]:
                 distribution="uniform",
                 frequencies=Frequencies(top=1, bottom=1, listed=5, total=SCOPED_ROWS_SCANNED),
                 range=Range(min="2010-03-01", max="2014-03-01", span_days=1461),
-                percentiles={"p50": "2012-03-01"},
+                percentiles={"p01": "2010-04-01", "p50": "2012-03-01", "p99": "2014-02-01"},
                 quantized_count=SCOPED_ROWS_SCANNED,
             ),
         },
+        ddl="CREATE TABLE public.sowing_trial (id uuid PRIMARY KEY, cultivar_id uuid, "
+        "email text, matures_at timestamp with time zone, stage text, "
+        "updated_at timestamp with time zone);\n",
+        relationships=[
+            ForeignKeyMeta(
+                column=("cultivar_id",),
+                target_table=FK_TARGET_TABLE,
+                target_column=("id",),
+                on_delete="NO ACTION",
+                on_update="NO ACTION",
+                constraint_name="sowing_trial_cultivar_fk",
+            ),
+        ],
         samples={"id": [f"00000000-0000-7000-8000-{i:012d}" for i in range(20)]},
         row_count=SCOPED_ROW_COUNT,
         rows_scanned=SCOPED_ROWS_SCANNED,
     )
 
-    cultivar = MockTable(
-        type="table",
-        namespace_path=("public", "cultivar"),
-        ddl="CREATE TABLE public.cultivar (id uuid PRIMARY KEY);\n",
-        columns=[ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1)],
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={
+    cultivar = mock_table(
+        "public.cultivar",
+        columns(("id", "uuid")),
+        {
             "id": ColumnStats(
                 sql_type="uuid",
                 nullable=False,
@@ -294,19 +275,15 @@ def _fixture_tables() -> dict[str, MockTable]:
                 inferred=Inferred(candidate_key=True),
             ),
         },
+        ddl="CREATE TABLE public.cultivar (id uuid PRIMARY KEY);\n",
         samples={"id": [f"00000000-0000-7000-8000-{i:012d}" for i in range(5)]},
         row_count=5,
     )
 
-    batch = MockTable(
-        type="table",
-        namespace_path=("public", "batch"),
-        ddl="CREATE TABLE public.batch (id uuid PRIMARY KEY);\n",
-        columns=[ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1)],
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={
+    batch = mock_table(
+        "public.batch",
+        columns(("id", "uuid")),
+        {
             "id": ColumnStats(
                 sql_type="uuid",
                 nullable=False,
@@ -325,52 +302,33 @@ def _fixture_tables() -> dict[str, MockTable]:
                 inferred=Inferred(candidate_key=True),
             ),
         },
+        ddl="CREATE TABLE public.batch (id uuid PRIMARY KEY);\n",
         samples={"id": [f"00000000-0000-7000-8000-{i:012d}" for i in range(5)]},
         row_count=APPROXIMATE_ROW_COUNT,
         row_count_method="approximate",
     )
 
-    active_curators = MockTable(
+    active_curators = mock_table(
+        "public.active_curators",
+        columns(("id", "uuid")),
+        {},
         type="view",
-        namespace_path=("public", "active_curators"),
         ddl="CREATE VIEW public.active_curators AS SELECT id FROM public.sowing_trial;\n",
-        columns=[ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1)],
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={},
-        samples={},
     )
 
-    empty_scan = MockTable(
-        type="table",
-        namespace_path=("public", "empty_scan"),
+    empty_scan = mock_table(
+        "public.empty_scan",
+        columns(("rank", "text", True)),
+        {},
         ddl="CREATE TABLE public.empty_scan (rank text);\n",
-        columns=[
-            ColumnMeta(name="rank", sql_type="text", nullable=True, default=None, ordinal=1),
-        ],
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={},
-        samples={},
         row_count=500,
         rows_scanned=0,
     )
 
-    wide_lookup = MockTable(
-        type="table",
-        namespace_path=("public", "wide_lookup"),
-        ddl="CREATE TABLE public.wide_lookup (a text, b text, c text);\n",
-        columns=[
-            ColumnMeta(name="a", sql_type="text", nullable=False, default=None, ordinal=1),
-            ColumnMeta(name="b", sql_type="text", nullable=False, default=None, ordinal=2),
-            ColumnMeta(name="c", sql_type="text", nullable=False, default=None, ordinal=3),
-        ],
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={
+    wide_lookup = mock_table(
+        "public.wide_lookup",
+        columns(("a", "text"), ("b", "text"), ("c", "text")),
+        {
             name: ColumnStats(
                 sql_type="text",
                 nullable=False,
@@ -387,21 +345,14 @@ def _fixture_tables() -> dict[str, MockTable]:
             )
             for name in ("a", "b", "c")
         },
-        samples={},
+        ddl="CREATE TABLE public.wide_lookup (a text, b text, c text);\n",
         row_count=100,
     )
 
-    dropped_statistics = MockTable(
-        type="table",
-        namespace_path=("public", "dropped_statistics"),
-        ddl="CREATE TABLE public.dropped_statistics (id uuid PRIMARY KEY);\n",
-        columns=[
-            ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1),
-        ],
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={
+    dropped_statistics = mock_table(
+        "public.dropped_statistics",
+        columns(("id", "uuid")),
+        {
             "id": ColumnStats(
                 sql_type="uuid",
                 nullable=False,
@@ -420,26 +371,15 @@ def _fixture_tables() -> dict[str, MockTable]:
                 inferred=Inferred(candidate_key=True),
             ),
         },
+        ddl="CREATE TABLE public.dropped_statistics (id uuid PRIMARY KEY);\n",
         samples={"id": [f"00000000-0000-7000-8000-{i:012d}" for i in range(3)]},
         row_count=3,
     )
 
-    curation_event = MockTable(
-        type="table",
-        namespace_path=("public", "curation_event"),
-        ddl=(
-            "CREATE TABLE public.curation_event (id uuid PRIMARY KEY, condition text, "
-            "remark text);\n"
-        ),
-        columns=[
-            ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1),
-            ColumnMeta(name="condition", sql_type="text", nullable=False, default=None, ordinal=2),
-            ColumnMeta(name="remark", sql_type="text", nullable=False, default=None, ordinal=3),
-        ],
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={
+    curation_event = mock_table(
+        "public.curation_event",
+        columns(("id", "uuid"), ("condition", "text"), ("remark", "text")),
+        {
             "id": ColumnStats(
                 sql_type="uuid",
                 nullable=False,
@@ -462,17 +402,18 @@ def _fixture_tables() -> dict[str, MockTable]:
                 nullable=False,
                 null_count=0,
                 null_rate=0.0,
-                cardinality=2,
-                cardinality_ratio=0.02,
+                cardinality=3,
+                cardinality_ratio=0.03,
                 cardinality_method="exact",
                 values=(
-                    ValueCount(value=DELIMITER_VALUE, count=50),
-                    ValueCount(value=LINE_BREAK_VALUE, count=50),
+                    ValueCount(value=DELIMITER_VALUE, count=34),
+                    ValueCount(value=LINE_BREAK_VALUE, count=33),
+                    ValueCount(value=GRAMMAR_VALUE, count=33),
                 ),
                 values_coverage=1.0,
                 distribution="uniform",
                 empty_count=0,
-                length=Length(min=9, max=15, avg=12.0, p95=15.0),
+                length=Length(min=9, max=31, avg=18.24, p95=31.0),
             ),
             "remark": ColumnStats(
                 sql_type="text",
@@ -492,39 +433,24 @@ def _fixture_tables() -> dict[str, MockTable]:
                 length=Length(min=0, max=93, avg=32.01, p95=93.0),
             ),
         },
-        samples={"condition": [DELIMITER_VALUE, LINE_BREAK_VALUE], "remark": list(SPELLING_VALUES)},
+        ddl="CREATE TABLE public.curation_event (id uuid PRIMARY KEY, condition text, "
+        "remark text);\n",
+        samples={
+            "condition": [DELIMITER_VALUE, LINE_BREAK_VALUE, GRAMMAR_VALUE],
+            "remark": list(SPELLING_VALUES),
+        },
         row_count=100,
     )
 
-    gauge = MockTable(
-        type="table",
-        namespace_path=("public", "gauge"),
-        ddl=(
-            "CREATE TABLE public.gauge (wide double precision, tiny double precision, "
-            "sparse integer, status text);\n"
+    gauge = mock_table(
+        "public.gauge",
+        columns(
+            ("wide", "double precision"),
+            ("tiny", "double precision"),
+            ("sparse", "integer", True),
+            ("status", "text"),
         ),
-        columns=[
-            ColumnMeta(
-                name="wide",
-                sql_type="double precision",
-                nullable=False,
-                default=None,
-                ordinal=1,
-            ),
-            ColumnMeta(
-                name="tiny",
-                sql_type="double precision",
-                nullable=False,
-                default=None,
-                ordinal=2,
-            ),
-            ColumnMeta(name="sparse", sql_type="integer", nullable=True, default=None, ordinal=3),
-            ColumnMeta(name="status", sql_type="text", nullable=False, default=None, ordinal=4),
-        ],
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={
+        {
             "wide": ColumnStats(
                 sql_type="double precision",
                 nullable=False,
@@ -594,7 +520,8 @@ def _fixture_tables() -> dict[str, MockTable]:
                 length=Length(min=2, max=4, avg=2.0006, p95=2.0),
             ),
         },
-        samples={},
+        ddl="CREATE TABLE public.gauge (wide double precision, tiny double precision, "
+        "sparse integer, status text);\n",
         null_patterns=NullPatterns(
             patterns=(NullPattern(columns=("sparse",), count=9996),),
             coverage=EXTREME_NULL_RATE,
@@ -645,6 +572,64 @@ def _inject_incomplete_grain_search(print_root: Path) -> None:
     path.write_text(yaml.safe_dump(statistics))
 
 
+def _inject_reader_only_states(print_root: Path) -> None:
+    """Inject, after the gate, an orphan spelling (SPEC 2.2.4), a grain search with no outcome
+    (SPEC 2.2.12) and an unreadable `profiled_at` - shapes the validator refuses.
+    """
+
+    path = print_root / "public" / "cultivar" / "statistics.yaml"
+    statistics = yaml.safe_load(path.read_text())
+    statistics["columns"][ORPHAN_SPELLING_COLUMN]["values"].append(
+        {"value": ORPHAN_SPELLING_VALUE, "count": 1, "spelling_of": "Orphan-Spelling"},
+    )
+    path.write_text(yaml.safe_dump(statistics))
+    path = print_root / "public" / "batch" / "statistics.yaml"
+    statistics = yaml.safe_load(path.read_text())
+    statistics["grain"] = {"keys": [], "search": {}}
+    path.write_text(yaml.safe_dump(statistics))
+    path = print_root / "public" / "wide_lookup" / "statistics.yaml"
+    statistics = yaml.safe_load(path.read_text())
+    statistics["profiled_at"] = UNREADABLE_PROFILED_AT
+    path.write_text(yaml.safe_dump(statistics))
+    path = print_root / MANIFEST_FILENAME
+    manifest = yaml.safe_load(path.read_text())
+    manifest["tables"][UNREADABLE_PROFILED_TABLE]["profiled_at"] = UNREADABLE_PROFILED_AT
+    manifest["tables"][SEVERAL_EDGES_TABLE]["artifacts"]["relationships_annotations"] = (
+        "relationships.annotations.yaml"
+    )
+    path.write_text(yaml.safe_dump(manifest))
+    _inject_several_edges(print_root / "public" / "gauge")
+
+
+def _inject_several_edges(table_dir: Path) -> None:
+    """Give one column three edges, measured first and declared last, and reject the inferred one.
+
+    Reciprocity forbids these shapes, hence after the gate.
+    """
+
+    def edge(target: str, column: str, detection: str) -> dict[str, Any]:
+        return {
+            "column": [SEVERAL_EDGES_COLUMN],
+            "target_table": target,
+            "target_column": [column],
+            "detection": detection,
+        }
+
+    path = table_dir / "relationships.yaml"
+    relationships = yaml.safe_load(path.read_text())
+    relationships["refers_to"] = [
+        edge("public.wide_lookup", "a", "measured"),
+        edge(REJECTED_EDGE_TARGET, "id", "inferred"),
+        {**edge(FK_TARGET_TABLE, "id", "declared"), "on_delete": "NO ACTION"},
+    ]
+    path.write_text(yaml.safe_dump(relationships, sort_keys=False))
+    rejection = {**edge(REJECTED_EDGE_TARGET, "id", "inferred"), "verdict": "rejected"}
+    del rejection["detection"]
+    (table_dir / "relationships.annotations.yaml").write_text(
+        yaml.safe_dump({"format_version": 1, "refers_to": [rejection]}, sort_keys=False),
+    )
+
+
 def _drop_declared_statistics(print_root: Path) -> None:
     """Delete a declared `statistics.yaml` (SPEC 2.5) - a manifest promise disk no longer keeps.
 
@@ -671,11 +656,7 @@ def build(project_dir: Path) -> AdversarialPrint:
     os.chdir(project_dir)
 
     try:
-        with patch.dict(
-            "dbprint.cli.adapter_registry.ADAPTERS",
-            {"postgres": _MockPostgresAdapter},
-            clear=True,
-        ):
+        with patch_registry({"postgres": _MockPostgresAdapter}):
             first = runner.invoke(main, ["generate", "--no-tui"])
             assert first.exit_code == 3, first.output
 
@@ -687,11 +668,11 @@ def build(project_dir: Path) -> AdversarialPrint:
     print_root = project_dir / "prints" / CONN_NAME
     _inject_incomplete_grain_search(print_root)
 
-    issues = validate_print(print_root)
-    errors = [i for i in issues if i.severity == "error"]
+    errors = conformance_errors(print_root)
     assert not errors, f"adversarial fixture is not conformant: {errors}"
 
     _drop_declared_statistics(print_root)
+    _inject_reader_only_states(print_root)
 
     conn = ConnectionConfig(
         name=CONN_NAME,

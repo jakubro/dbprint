@@ -6,10 +6,9 @@ is an unguarded mirror of the same rows, so comparing against it checks copy aga
 
 from __future__ import annotations
 
-import re
-
 import pytest
 
+from tests.spec._absence_table import absence_table_fields
 from tests.spec._spec_markdown import matrix as _matrix
 from tests.spec._spec_markdown import section as _section
 from tests.spec._spec_markdown import table_rows as _table_rows
@@ -17,16 +16,6 @@ from tests.spec._spec_markdown import table_rows as _table_rows
 
 # The only verdict leaving no absence to interpret; every conditional form allows omission.
 _ALWAYS_REQUIRED = "R"
-
-_BACKTICKED = re.compile(r"`([^`]+)`")
-
-
-def _absence_table_fields() -> list[str]:
-    """Every field named in the first column of SPEC 7.2, in document order."""
-
-    rows = _table_rows(_section("### 7.2 Absent per-column fields", "### 7.3"))
-
-    return [field for cells in rows[1:] for field in _BACKTICKED.findall(cells[0])]
 
 
 def test_the_matrix_still_parses() -> None:
@@ -46,7 +35,7 @@ def test_every_omittable_field_is_listed() -> None:
         if any(verdict != _ALWAYS_REQUIRED for verdict in verdicts)
     }
 
-    assert omittable - set(_absence_table_fields()) == set()
+    assert omittable - set(absence_table_fields()) == set()
 
 
 def test_no_always_required_field_is_listed() -> None:
@@ -58,17 +47,17 @@ def test_no_always_required_field_is_listed() -> None:
         if all(verdict == _ALWAYS_REQUIRED for verdict in verdicts)
     }
 
-    assert always_required & set(_absence_table_fields()) == set()
+    assert always_required & set(absence_table_fields()) == set()
 
 
 def test_the_absence_table_invents_no_field() -> None:
-    assert set(_absence_table_fields()) - set(_matrix()) == set()
+    assert set(absence_table_fields()) - set(_matrix()) == set()
 
 
 def test_no_field_is_listed_twice() -> None:
     """Two rows for one field would let a reader stop at whichever they met first."""
 
-    listed = _absence_table_fields()
+    listed = absence_table_fields()
 
     assert sorted(listed) == sorted(set(listed))
 

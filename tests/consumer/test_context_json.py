@@ -26,18 +26,26 @@ from tests.fixtures.adversarial import (
     EXTREME_TINY_MEAN,
     EXTREME_WIDE_P50,
     FUTURE_DATED_COLUMN,
+    GRAIN_NO_OUTCOME_TABLE,
     INCOMPLETE_GRAIN_TABLE,
     LINE_BREAK_VALUE,
     NEVER_DECLARED_KIND,
+    ORPHAN_SPELLING_COLUMN,
+    ORPHAN_SPELLING_TABLE,
+    ORPHAN_SPELLING_VALUE,
+    PERCENTILE_INSIDE_RANGE_COLUMN,
     REDACTED_COLUMN,
     SCOPED_COMPLETE_LIST_COLUMN,
     SCOPED_KEY_COLUMN,
     SCOPED_LATEST_COLUMN,
     SCOPED_TABLE,
+    SEVERAL_EDGES_TABLE,
     SPELLING_COLUMN,
     SPELLING_VALUES,
     TRUNCATED_FK_COLUMN,
     UNEVALUATED_TABLE,
+    UNREADABLE_PROFILED_AT,
+    UNREADABLE_PROFILED_TABLE,
     AdversarialPrint,
 )
 
@@ -50,6 +58,11 @@ COVERS = frozenset(
         "truncated_fk_values",
         "unevaluated_diff_table",
         "empty_columns_map",
+        "column_with_several_edges",
+        "orphan_spelling",
+        "percentile_inside_range",
+        "grain_search_without_outcome",
+        "unreadable_profiled_at",
         "approximate_row_count",
         "incomplete_grain_search",
         "catalog_only_table",
@@ -235,3 +248,46 @@ def test_a_share_near_a_boundary_is_carried_unrounded(adversarial_print: Adversa
 
     assert statistics["columns"]["sparse"]["null_rate"] == EXTREME_NULL_RATE
     assert statistics["null_patterns"]["coverage"] == EXTREME_NULL_RATE
+
+
+def test_an_orphan_spelling_stays_its_own_value(adversarial_print: AdversarialPrint) -> None:
+    values = _statistics(adversarial_print, ORPHAN_SPELLING_TABLE)["columns"][
+        ORPHAN_SPELLING_COLUMN
+    ]
+
+    assert ORPHAN_SPELLING_VALUE in [entry["value"] for entry in values["values"]]
+
+
+def test_a_grain_search_without_outcome_carries_no_outcome(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    grain = _statistics(adversarial_print, GRAIN_NO_OUTCOME_TABLE)["grain"]
+
+    assert grain == {"keys": [], "search": {}}
+
+
+def test_an_unreadable_profiled_at_is_carried_as_written(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    assert _statistics(adversarial_print, UNREADABLE_PROFILED_TABLE)["profiled_at"] == (
+        UNREADABLE_PROFILED_AT
+    )
+
+
+def test_range_and_percentiles_are_carried_as_written(adversarial_print: AdversarialPrint) -> None:
+    column = _statistics(adversarial_print, SCOPED_TABLE)["columns"][PERCENTILE_INSIDE_RANGE_COLUMN]
+
+    assert (column["range"]["min"], column["range"]["max"]) == ("2010-03-01", "2014-03-01")
+    assert (column["percentiles"]["p01"], column["percentiles"]["p99"]) == (
+        "2010-04-01",
+        "2014-02-01",
+    )
+
+
+def test_a_columns_edges_are_carried_less_the_rejected_one(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    payload = _payload(adversarial_print, SEVERAL_EDGES_TABLE)
+    targets = [e["target_table"] for e in payload["relationships"]["refers_to"]]
+
+    assert sorted(targets) == ["public.cultivar", "public.wide_lookup"]

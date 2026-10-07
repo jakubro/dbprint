@@ -13,15 +13,14 @@ import yaml
 
 from dbprint.config import ConnectionConfig
 from dbprint.engine.baseline import (
-    declared_artifacts,
     failed_tables,
-    manifest_shape_error,
     missing_artifacts,
+    read_manifest,
     table_directory,
     unprofiled_message,
-    walkable_tables,
 )
 from dbprint.spec import artifact_yaml
+from dbprint.spec.artifacts import declared_artifacts, walkable_tables
 from dbprint.spec.fqn import join as join_fqn
 from dbprint.spec.fqn import split as split_fqn
 
@@ -69,10 +68,10 @@ def load_connections(connections: list[ConnectionConfig]) -> list[PrintConnectio
     loaded = []
 
     for conn in connections:
-        root = conn.output / conn.name
-        manifest = _read_yaml_mapping(root / "manifest.yaml")
+        root = conn.print_root
+        manifest = read_manifest(root).manifest
 
-        if manifest is None or manifest_shape_error(manifest) is not None:
+        if manifest is None:
             continue
 
         loaded.append(

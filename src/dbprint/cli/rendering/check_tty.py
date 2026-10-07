@@ -72,10 +72,10 @@ def _render_one(result: CheckResult, stream: TextIO) -> None:
 
         stream.write("\n")
 
-    # An unmeasurable age (unparseable `profiled_at`) is not exceedance - `evaluate` records
-    # both as a `StaleEntry`, but only a finite age actually exceeded its threshold.
-    measured_stale = [s for s in result.stale_entries if s.age_days != float("inf")]
-    unmeasurable = [s for s in result.stale_entries if s.age_days == float("inf")]
+    # An unmeasurable age (unparseable `profiled_at`) is not exceedance, but it is not fresh:
+    # it fails the gate under its own heading.
+    measured_stale = [s for s in result.stale_entries if s.measured]
+    unmeasurable = [s for s in result.stale_entries if not s.measured]
 
     # Unconditional: a conformance error must not silence the freshness verdict.
     if measured_stale:
@@ -92,13 +92,13 @@ def _render_one(result: CheckResult, stream: TextIO) -> None:
             stream.write(f"    ... {len(measured_stale) - 10} more\n")
 
         stream.write("  Run `dbprint generate` to refresh.\n")
-    else:
+    elif not unmeasurable:
         # An all-clear over an incomplete set would overclaim, so the wording narrows.
         judged = "every print that was judged" if result.not_run else "every print"
         stream.write(f"  OK: {judged} is within its max-age threshold\n")
 
     if unmeasurable:
-        stream.write(f"  NOTE: {len(unmeasurable)} print(s) have an unmeasurable age\n")
+        stream.write(f"  FAIL: {len(unmeasurable)} print(s) have an unmeasurable age\n")
         stream.writelines(f"    {stale.fqn}\n" for stale in unmeasurable[:10])
 
         if len(unmeasurable) > 10:

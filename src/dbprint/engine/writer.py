@@ -8,12 +8,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-
-DESCRIPTION_FILENAME = "description.md"
-STATISTICS_ANNOTATIONS_FILENAME = "statistics.annotations.yaml"
-RELATIONSHIPS_ANNOTATIONS_FILENAME = "relationships.annotations.yaml"
-MANIFEST_ANNOTATIONS_FILENAME = "manifest.annotations.yaml"
-PRODUCER_ARTIFACTS = ("ddl.sql", "statistics.yaml", "relationships.yaml")
+from dbprint.spec.artifacts import USER_ARTIFACTS
 
 
 class WriterError(RuntimeError):
@@ -59,12 +54,7 @@ def write_atomic(tbl_dir: Path, artifacts: dict[str, str | bytes]) -> None:
 def validate_artifact_name(name: str) -> None:
     """Raise `WriterError` for a name naming user content or not a bare file name."""
 
-    if name in (
-        DESCRIPTION_FILENAME,
-        STATISTICS_ANNOTATIONS_FILENAME,
-        RELATIONSHIPS_ANNOTATIONS_FILENAME,
-        MANIFEST_ANNOTATIONS_FILENAME,
-    ):
+    if name in USER_ARTIFACTS:
         raise WriterError(f"writer must not touch {name} — user content")
 
     if "/" in name or "\\" in name or name in (".", ".."):

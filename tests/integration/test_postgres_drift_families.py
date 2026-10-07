@@ -5,12 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import LiteralString, cast
 
-import psycopg
 import pytest
 import yaml
 from click.testing import CliRunner
 
 from dbprint.cli.main import main
+from dbprint.config.connections import env_var_name
+from tests.conftest import pg_connect
 
 
 _CONN = "drift_conn"
@@ -24,20 +25,13 @@ def _project(tmp_path: Path, creds: dict[str, str], monkeypatch: pytest.MonkeyPa
     monkeypatch.chdir(tmp_path)
 
     for key in ("host", "port", "database", "user", "password"):
-        monkeypatch.setenv(f"DBPRINT_{_CONN.upper()}_{key.upper()}", str(creds[key] or ""))
+        monkeypatch.setenv(env_var_name(_CONN, key), str(creds[key] or ""))
 
     return tmp_path
 
 
 def _sql(creds: dict[str, str], *statements: str) -> None:
-    with psycopg.connect(
-        host=creds["host"],
-        port=int(creds["port"]),
-        dbname=creds["database"],
-        user=creds["user"],
-        password=creds["password"],
-        autocommit=True,
-    ) as conn:
+    with pg_connect(creds) as conn:
         for statement in statements:
             conn.execute(cast(LiteralString, statement))
 

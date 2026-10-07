@@ -204,6 +204,26 @@ LIVE_ONLY_SHAPE_KINDS = frozenset(
 DATA_CHANGE_KINDS = frozenset(
     k for r in FIELD_RULES.values() if isinstance(r, Data) for k in r.kinds
 )
+# Each `summary` counter and the change kinds it counts (SPEC 2.6.4), in the order a diff writes them.
+SUMMARY_COUNTERS: dict[str, frozenset[str]] = {
+    "tables_added": frozenset({"table_added"}),
+    "tables_removed": frozenset({"table_removed"}),
+    "columns_added": frozenset({"column_added"}),
+    "columns_removed": frozenset({"column_removed"}),
+    "columns_type_changed": frozenset({"column_type_changed"}),
+    "columns_nullable_changed": frozenset({"column_nullable_changed"}),
+    "columns_default_changed": frozenset({"column_default_changed"}),
+    "statistics_drifted": frozenset({"statistic_changed"}),
+    "relationships_changed": frozenset(
+        {"relationship_added", "relationship_removed", "relationship_modified"},
+    ),
+    "indexes_changed": frozenset({"index_added", "index_removed", "index_modified"}),
+    "comments_changed": frozenset({"comment_changed"}),
+}
+
+# `statistic_changed` statistics that carry no `delta` / `delta_pct` (SPEC 2.6.6).
+NON_NUMERIC_STATS = frozenset({"classification", "distribution", "values", "cardinality_method"})
+
 SHAPE_CHANGE_KINDS = (
     frozenset(k for r in FIELD_RULES.values() if isinstance(r, Shape) for k in r.kinds)
     | LIVE_ONLY_SHAPE_KINDS

@@ -8,10 +8,6 @@ from __future__ import annotations
 import importlib.resources
 
 
-READING_GUIDE_FILENAME = (
-    "reading.md"  # lowercase: SPEC 1.5.1's path-segment allowlist is case-sensitive
-)
-
 READING_GUIDE_TEXT = (
     importlib.resources.files("dbprint.engine")
     .joinpath("reading_guide.md")

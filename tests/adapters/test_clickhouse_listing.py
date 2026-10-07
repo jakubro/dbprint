@@ -92,3 +92,27 @@ def test_stream_null_window_and_random_tables_are_left_out(
     assert not {"seedbank.field_round", "seedbank.wide", "seedbank.batch"} & listed
     assert "seedbank.field_log_v" not in listed
     assert not {fqn for fqn in listed if ".inner" in fqn}
+
+
+def test_a_partition_key_calling_a_two_argument_function_is_one_key(
+    clickhouse_native_connection: Any,
+) -> None:
+    cursor = clickhouse_native_connection
+    cursor.execute(
+        "CREATE TABLE seedbank.field_round (id UInt32, d Date) "
+        "ENGINE = MergeTree PARTITION BY (intDiv(id, 1000), d) ORDER BY id",
+    )
+    adapter = ClickhouseAdapter(
+        {"host": "chdb", "database": "seedbank"},
+        cursor_factory=lambda _p: cursor,
+    )
+    adapter.connect()
+
+    try:
+        adapter.list_tables(["*"], [])
+        layout = adapter.introspect_physical_layout("seedbank.field_round")
+    finally:
+        adapter.close()
+
+    assert layout is not None
+    assert [key.column for key in layout.keys] == [None, "d"]

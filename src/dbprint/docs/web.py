@@ -21,6 +21,17 @@ from . import catalogue, view
 
 
 NBSP = chr(0xA0)
+_CONTEXT_INERT_PATTERNS = (
+    "html",
+    "reference",
+    "link",
+    "image_link",
+    "image_reference",
+    "short_reference",
+    "short_image_ref",
+    "autolink",
+    "automail",
+)
 
 
 def create_app(connections: list[ConnectionConfig]) -> Flask:
@@ -99,6 +110,7 @@ def _sidebar_context(connections: list[catalogue.PrintConnection]) -> dict[str, 
 
 def _register_filters(app: Flask) -> None:
     app.add_template_filter(_render_markdown, "md")
+    app.add_template_filter(_render_context, "context_md")
     app.add_template_filter(_non_breaking, "nbsp")
     app.add_template_filter(_number, "number")
     app.add_template_filter(_percent, "percent")
@@ -110,6 +122,21 @@ def _render_markdown(text: str | None) -> Markup | str:
     """Render Markdown text as safe HTML."""
 
     return Markup(markdown.markdown(text, extensions=["tables", "fenced_code"])) if text else ""
+
+
+def _render_context(text: str) -> Markup:
+    """Render a context fragment as HTML, its line breaks kept, raw HTML and links shown as text.
+
+    The fragment quotes database values: a stored `<script>` or `[x](javascript:...)` stays text.
+    """
+
+    renderer = markdown.Markdown(extensions=["tables", "fenced_code", "nl2br"])
+    renderer.preprocessors.deregister("html_block")
+
+    for pattern in _CONTEXT_INERT_PATTERNS:
+        renderer.inlinePatterns.deregister(pattern)
+
+    return Markup(renderer.convert(text))
 
 
 def _non_breaking(text: str | None) -> str | None:

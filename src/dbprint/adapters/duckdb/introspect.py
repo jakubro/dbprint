@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import re
 
-from dbprint.config.selectors import expand
 from dbprint.spec.fqn import join as join_fqn
 from .connection import Cursor, exec_query
 from ..base import (
@@ -18,7 +17,7 @@ from ..base import (
     TableMeta,
     UniqueKeyMeta,
 )
-from ..identifiers import Identity, column_meta, enforce_table_identifiers, fold, table_meta
+from ..identifiers import Identity, column_meta, fold, select_tables, table_meta
 
 
 _Candidate = tuple[TableMeta, tuple[str, str, str]]
@@ -55,15 +54,7 @@ def list_tables(cursor: Cursor, include: list[str], exclude: list[str]) -> list[
             physical = (database, schema, name)
             candidates.append((table_meta(physical, table_type), physical))
 
-    in_scope = set(
-        expand(
-            [meta.fqn for meta, _ in candidates],
-            config_include=include,
-            config_exclude=exclude,
-        ),
-    )
-    selected = [entry for entry in candidates if entry[0].fqn in in_scope]
-    enforce_table_identifiers(selected)
+    selected = select_tables(candidates, include, exclude)
 
     return selected
 

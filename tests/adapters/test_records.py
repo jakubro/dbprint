@@ -14,10 +14,10 @@ from dbprint.adapters.dialect import Vendor
 from dbprint.adapters.sql_layout import select_from
 from dbprint.config import StatisticsConfig
 from dbprint.config.project import RedactRule
+from tests.adapters._composites import duckdb_print, generate, parts_of, psql
+from tests.adapters._credentials import DATABRICKS_CREDS
+from tests.adapters._dialects import STATS_MODULES, foreign_fragments
 from tests.adapters._sql_style import alias_violations, layout_violations, violations
-from tests.adapters.test_arrays import _duckdb, _generate, _parts_of, _psql
-from tests.adapters.test_dialect_guard import STATS_MODULES, _foreign_fragments
-from tests.adapters.test_distribution_shapes import _DATABRICKS_CREDS
 
 
 _PLOT = (
@@ -40,7 +40,7 @@ class TestDuckdb:
         self,
         tmp_path: Path,
     ) -> None:
-        plot = _duckdb(tmp_path, *_PLOT)["grower"]["plot"]
+        plot = duckdb_print(tmp_path, *_PLOT)["grower"]["plot"]
         parts = plot["parts"]
 
         assert plot["classification"] == "composite"
@@ -55,7 +55,7 @@ class TestDuckdb:
         assert parts['["row label"]']["cardinality"] == 4
 
     def test_a_union_counts_each_member_where_its_tag_names_it(self, tmp_path: Path) -> None:
-        fee = _duckdb(
+        fee = duckdb_print(
             tmp_path,
             f"CREATE TABLE levy (levy_no INTEGER, fee {_FEE})",
             f"INSERT INTO levy SELECT i, CASE WHEN i % 10 = 0 THEN NULL WHEN i % 3 = 0 "
@@ -74,14 +74,14 @@ class TestDuckdb:
         self,
         tmp_path: Path,
     ) -> None:
-        plot = _duckdb(tmp_path, *_PLOT, statistics=StatisticsConfig(max_part_depth=1))
+        plot = duckdb_print(tmp_path, *_PLOT, statistics=StatisticsConfig(max_part_depth=1))
         parts = plot["grower"]["plot"]["parts"]
 
         assert set(parts) == {".town", ".code", '["row label"]', ".spot"}
         assert parts[".spot"]["occurrences"] == 90
 
     def test_a_field_no_instance_holds_is_not_a_part(self, tmp_path: Path) -> None:
-        plot = _duckdb(
+        plot = duckdb_print(
             tmp_path,
             'CREATE TABLE grower (grower_no INTEGER, plot STRUCT(town VARCHAR, "row ""b"" label" VARCHAR, '
             "spot STRUCT(x DOUBLE)))",
@@ -93,13 +93,13 @@ class TestDuckdb:
         assert plot["parts_found"] == 3
 
     def test_descent_off_leaves_the_record_unsupported(self, tmp_path: Path) -> None:
-        plot = _duckdb(tmp_path, *_PLOT, statistics=StatisticsConfig(max_parts=0))
+        plot = duckdb_print(tmp_path, *_PLOT, statistics=StatisticsConfig(max_parts=0))
 
         assert plot["grower"]["plot"]["classification"] == "unsupported"
         assert "parts" not in plot["grower"]["plot"]
 
     def test_an_email_member_is_caught_by_a_looks_like_rule(self, tmp_path: Path) -> None:
-        contact = _duckdb(
+        contact = duckdb_print(
             tmp_path,
             "CREATE TABLE grower (grower_no INTEGER, contact STRUCT(mail VARCHAR, alias VARCHAR))",
             "INSERT INTO grower SELECT i, {'mail': 'g' || i || '@example.invalid', 'alias': 'a'} "
@@ -119,14 +119,14 @@ def test_a_postgres_composite_counts_an_all_null_value_as_held(
     postgres_test_db: dict[str, str],
     tmp_path: Path,
 ) -> None:
-    with _psql(postgres_test_db) as conn:
+    with psql(postgres_test_db) as conn:
         conn.execute("CREATE TYPE public.site_t AS (town text, code text)")
         conn.execute("CREATE TABLE public.lot (lot_no integer, site public.site_t)")
         conn.execute(
             "INSERT INTO public.lot VALUES (1, ROW('north', 'c1')), (2, ROW(NULL, NULL)), (3, NULL)",
         )
 
-    site = _generate(PostgresAdapter(postgres_test_db), "postgres", tmp_path, "*.lot")["site"]
+    site = generate(PostgresAdapter(postgres_test_db), "postgres", tmp_path, "*.lot")["site"]
 
     assert site["classification"] == "composite"
     assert site["null_count"] == 1
@@ -155,7 +155,7 @@ def test_clickhouse_tuples_and_unions_are_descended(
         {"host": "chdb", "database": "seedbank"},
         cursor_factory=lambda _params: cursor,
     )
-    columns = _generate(adapter, "clickhouse", tmp_path, "*.lot")
+    columns = generate(adapter, "clickhouse", tmp_path, "*.lot")
 
     assert set(columns["site"]["parts"]) == {".town", ".code"}
     assert columns["site"]["parts"][".code"]["null_count"] == 55
@@ -182,7 +182,7 @@ def test_a_clickhouse_nested_column_is_an_array_of_records(
         {"host": "chdb", "database": "seedbank"},
         cursor_factory=lambda _params: cursor,
     )
-    lines = _generate(adapter, "clickhouse", tmp_path, "*.lot")["lines"]
+    lines = generate(adapter, "clickhouse", tmp_path, "*.lot")["lines"]
 
     assert lines["classification"] == "composite"
     assert {"[*]", "[*].sku", "[*].qty"} <= set(lines["parts"])
@@ -202,7 +202,7 @@ def test_a_bigquery_struct_is_descended(bigquery_test_dataset: Any) -> None:
         {"project": "dbprint-test", "dataset": dataset},
         cursor_factory=lambda _params: cursor,
     )
-    site = _parts_of(adapter, "lot", "site")
+    site = parts_of(adapter, "lot", "site")
 
     assert {p.path: p.occurrences for p in site.parts} == {".town": 2, ".code": 2}
 
@@ -216,8 +216,8 @@ def test_a_databricks_struct_is_descended(databricks_test_schema: Any) -> None:
         "INSERT INTO lot VALUES (1, named_struct('town', 'north', 'code', 'c1')), "
         "(2, named_struct('town', 'south', 'code', NULL)), (3, NULL)",
     )
-    adapter = DatabricksAdapter(_DATABRICKS_CREDS, cursor_factory=lambda _params: cursor)
-    site = _parts_of(adapter, "lot", "site")
+    adapter = DatabricksAdapter(DATABRICKS_CREDS, cursor_factory=lambda _params: cursor)
+    site = parts_of(adapter, "lot", "site")
 
     assert {p.path: p.occurrences for p in site.parts} == {".town": 2, ".code": 2}
 
@@ -245,6 +245,6 @@ def test_the_record_reads_speak_their_own_dialect(
     node = PartSource("", sql_type, "src_table src", "src.site")
     statement = select_from(["COUNT(1)"], module.RECORDS.source(node, member))
 
-    assert _foreign_fragments(statement, vendor) == []
+    assert foreign_fragments(statement, vendor) == []
     assert violations(statement, vendor) + alias_violations(statement, vendor) == []
     assert layout_violations(statement, vendor) == []

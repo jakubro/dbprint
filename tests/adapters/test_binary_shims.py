@@ -10,9 +10,9 @@ import pytest
 from dbprint.adapters import RedshiftAdapter, SnowflakeAdapter
 from dbprint.adapters.dialect import Vendor
 from dbprint.adapters.sql_layout import select_from
+from tests.adapters._composites import generate
+from tests.adapters._dialects import STATS_MODULES, foreign_fragments
 from tests.adapters._sql_style import alias_violations, layout_violations, violations
-from tests.adapters.test_arrays import _generate
-from tests.adapters.test_dialect_guard import STATS_MODULES, _foreign_fragments
 
 
 def test_redshift_publishes_binary_values_as_lowercase_hex(
@@ -26,7 +26,7 @@ def test_redshift_publishes_binary_values_as_lowercase_hex(
         {"host": "redshift", "database": "seedbank", "user": "test", "password": "test"},
         cursor_factory=lambda _p: shim,
     )
-    tag = _generate(adapter, "redshift", tmp_path, "*.badge")["tag"]
+    tag = generate(adapter, "redshift", tmp_path, "*.badge")["tag"]
 
     assert {v["value"] for v in tag["values"]} == {"0aff", "01"}
 
@@ -49,7 +49,7 @@ def test_snowflake_publishes_binary_values_as_lowercase_hex(
         },
         cursor_factory=lambda _p: shim,
     )
-    tag = _generate(adapter, "snowflake", tmp_path, "*.badge")["tag"]
+    tag = generate(adapter, "snowflake", tmp_path, "*.badge")["tag"]
 
     assert {v["value"] for v in tag["values"]} == {"0aff", "01"}
 
@@ -62,6 +62,6 @@ def test_the_binary_hex_read_speaks_its_own_dialect(vendor: Vendor) -> None:
     rendering = STATS_MODULES[vendor].render_binary
     statement = select_from([f"{rendering('src.tag')} AS v"], "src_table src")
 
-    assert _foreign_fragments(statement, vendor) == []
+    assert foreign_fragments(statement, vendor) == []
     assert violations(statement, vendor) + alias_violations(statement, vendor) == []
     assert layout_violations(statement, vendor) == []

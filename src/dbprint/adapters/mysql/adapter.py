@@ -27,6 +27,7 @@ from ..base import (
     row_count_or_none,
 )
 from ..dialect import Dialect
+from ..driver import ServerParams
 from ..identifiers import IdentityRegistry
 
 
@@ -37,8 +38,7 @@ class MysqlAdapter(SqlAdapter):
     """
 
     KNOWN_TYPES: ClassVar[tuple[str, ...]] = stats_module.KNOWN_TYPES
-    REQUIRED_KEYS: ClassVar[tuple[str, ...]] = ("host", "port", "user", "password")
-    OPTIONAL_KEYS: ClassVar[tuple[str, ...]] = ("database",)
+    SERVER_PARAMS: ClassVar[type[ServerParams]] = ConnectionParams
     # RAND(seed) is undocumented across multiple references in one statement, so a
     # `sample` scope with no copy must be refused rather than measured over drifting rows.
     SAMPLE_FALLBACK_COHERENT: ClassVar[bool] = False
@@ -74,9 +74,9 @@ class MysqlAdapter(SqlAdapter):
             include,
             exclude,
         )
-        self._identities.register(selected)
+        listed = self._register(selected)
 
-        return [meta for meta, _ in selected]
+        return listed
 
     def compute_base_statistics(
         self,

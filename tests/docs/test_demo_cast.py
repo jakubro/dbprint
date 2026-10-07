@@ -5,17 +5,15 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
-from pathlib import Path
 from typing import Any
 
 import pytest
 
+from tests._scripts import REPO_ROOT, load_script
 from tests.conftest import PostgresCluster
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 CAST = REPO_ROOT / "site/public/demo.cast"
 
 # What the recording claims to run. A frame carries one keystroke, so the commands are read off
@@ -80,8 +78,11 @@ class TestTheRecordingShowsWhatItClaims:
 
         screen = _screen()
 
-        assert "3 distinct: arid / temperate / tropical, uniform" in screen
-        assert "4% null" in screen
+        assert (
+            "values (complete): 'arid' (33.3%), 'temperate' (33.3%), 'tropical' (33.3%); "
+            "distribution: uniform" in screen
+        )
+        assert "nulls: 4%" in screen
 
 
 class TestGeneratorAgreement:
@@ -91,7 +92,7 @@ class TestGeneratorAgreement:
         self,
         postgres_cluster: PostgresCluster,
     ) -> None:
-        generator = _load_generator()
+        generator = load_script("gen_demo_cast")
         credentials = {
             "host": "127.0.0.1",
             "port": str(postgres_cluster.port),
@@ -104,18 +105,3 @@ class TestGeneratorAgreement:
         assert generator.build_cast(credentials) == CAST.read_text(), (
             "the committed recording is not what the CLI emits; run `just demo`"
         )
-
-
-def _load_generator() -> Any:
-    """Import `scripts/gen_demo_cast.py` by path; `scripts/` carries no `__init__.py`."""
-
-    path = REPO_ROOT / "scripts" / "gen_demo_cast.py"
-    spec = importlib.util.spec_from_file_location("gen_demo_cast", path)
-
-    if spec is None or spec.loader is None:
-        pytest.fail(f"could not load {path}")
-
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    return module

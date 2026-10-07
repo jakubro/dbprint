@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from pathlib import Path
 
 import pytest
 
+from tests._scripts import REPO_ROOT
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 
 EM_DASH = chr(0x2014)
 

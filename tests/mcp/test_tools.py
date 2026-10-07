@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -336,11 +337,38 @@ class TestEveryListReplyIsPaged:
             options=AssemblyOptions(purpose=purpose),
         ).text
         document = _mcp_pages.joined(text_pages)
+        whole = _mcp_pages.without_legend(unbudgeted)
 
         assert len(text_pages) > 1
         assert all(len(page) <= 20_000 for page in text_pages)
         assert "truncated" not in document
-        assert sorted(document.split("\n\n")) == sorted(unbudgeted.split("\n\n"))
+        assert sorted(document.split("\n\n")) == sorted(whole.split("\n\n"))
+
+    def test_each_page_defines_only_the_terms_its_lines_print(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        self._wide_ddl(primary_conn)
+        arguments = {"table": "arboretum.fixture.shape_probe"}
+        text_pages = _mcp_pages.pages(_state_for(primary_conn), "get_table_context", arguments)
+
+        for number, page in enumerate(text_pages):
+            body = _mcp_pages.without_legend(page, first=number == 0)
+            found = re.search(r"## Terms\n\n((?:- [^\n]*\n?)*)", page)
+            labels = [
+                line[2:].split(": ", 1)[0] for line in (found[1] if found else "").splitlines()
+            ]
+
+            assert body != page or not found, number
+            figures = re.sub(
+                r"values \(top \d+, covering [^)]+\)",
+                "values (top N, covering X)",
+                body,
+            )
+
+            assert [label for label in labels if label not in figures] == [], number
+
+        assert "## Terms" in text_pages[0]
 
     def test_a_profile_context_concatenates_to_the_unbudgeted_rendering(
         self,
@@ -358,7 +386,7 @@ class TestEveryListReplyIsPaged:
             options=AssemblyOptions(),
         ).text
 
-        assert _mcp_pages.joined(text_pages) == unbudgeted
+        assert _mcp_pages.joined(text_pages) == _mcp_pages.without_legend(unbudgeted)
 
     @pytest.mark.parametrize("fmt", ["json", "yaml"])
     def test_a_structured_context_pages_merge_to_the_unbudgeted_object(
@@ -1571,6 +1599,60 @@ class TestGetDiff:
         assert result["format_version"] == 1
         assert result["target"]["source"] == "live_database"
 
+    def test_a_relationship_event_about_a_rejected_edge_is_withheld(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        root = primary_conn.output / primary_conn.name
+        trial = "arboretum.seedbank.germination_trial"
+        manifest_path = root / "manifest.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text())
+        manifest["tables"][trial]["artifacts"]["relationships_annotations"] = (
+            "relationships.annotations.yaml"
+        )
+        manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+        edge = {
+            "source_table": trial,
+            "source_column": ["collector_id"],
+            "target_table": "arboretum.seedbank.collector",
+            "target_column": ["collector_id"],
+        }
+        (root / "arboretum/seedbank/germination_trial/relationships.annotations.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "format_version": 1,
+                    "refers_to": [
+                        {
+                            "column": edge["source_column"],
+                            "target_table": edge["target_table"],
+                            "target_column": edge["target_column"],
+                            "verdict": "rejected",
+                        },
+                    ],
+                },
+            ),
+        )
+        diff = yaml.safe_load((root / "diff.yaml").read_text())
+        diff["changes"] = [
+            {"kind": "relationship_added", **edge, "detection": "inferred"},
+            {
+                "kind": "relationship_added",
+                **edge,
+                "source_column": ["taxon_id"],
+                "target_table": "arboretum.seedbank.taxon",
+                "target_column": ["taxon_id"],
+                "detection": "inferred",
+            },
+        ]
+        diff["summary"] = {**diff.get("summary", {}), "relationships_changed": 2}
+        (root / "diff.yaml").write_text(yaml.safe_dump(diff, sort_keys=False))
+
+        result = _dict_result(_state_for(primary_conn), "get_diff", {})
+
+        assert [c["source_column"] for c in result["changes"]] == [["taxon_id"]]
+        assert result["summary"]["relationships_changed"] == 1
+        assert result["total"] == 1
+
 
 class TestToolDefinitions:
     def test_tool_names_match_definitions(self) -> None:
@@ -1616,7 +1698,7 @@ class TestRedactedColumnParity:
         row = next(line for line in result.splitlines() if line.startswith("| email |"))
 
         assert "NULL" not in row
-        assert "redacted (mask)" in row
+        assert "redacted: mask" in row
 
 
 class TestGetReference:
@@ -1717,6 +1799,42 @@ class TestGetReference:
         assert len(text_pages) > 1
         assert all(len(page) <= 20_000 for page in text_pages)
         assert _mcp_pages.joined(text_pages) == f"## 1. One\n\n{body}"
+
+
+class TestGetReferenceServesTheGuide:
+    """`document: guide` answers from the installed guide, with no connection served."""
+
+    _EMPTY_STATE = ServedConnections(served={}, default=None)
+
+    def test_no_section_returns_the_heading_tree(self) -> None:
+        tree = dispatch(self._EMPTY_STATE, "get_reference", {"document": "guide"})
+
+        assert isinstance(tree, str)
+        assert "- Reading a dbprint print" in tree
+        assert "  - Vocabulary" in tree
+
+    def test_a_heading_returns_its_text(self) -> None:
+        text = dispatch(
+            self._EMPTY_STATE,
+            "get_reference",
+            {"document": "guide", "section": "VOCABULARY"},
+        )
+
+        assert isinstance(text, str)
+        assert text.startswith("## Vocabulary")
+        assert "## Fields that are easy to misread" not in text
+
+    def test_an_unknown_heading_fails_naming_the_headings(self) -> None:
+        with pytest.raises(McpError) as excinfo:
+            dispatch(
+                self._EMPTY_STATE,
+                "get_reference",
+                {"document": "guide", "section": "No such heading"},
+            )
+
+        message = str(excinfo.value)
+        assert "'No such heading' not found in guide" in message
+        assert "'Vocabulary'" in message
 
 
 class TestResolveValueReadsTheStatisticsItWasPromised:
@@ -1916,7 +2034,7 @@ class TestAScopedFileIsReadAsScopedWhicheverSignalItCarries:
 
         assert [m["column"] for m in matches if "scope" in m] == ["id"]
         assert isinstance(md, str)
-        assert "2 distinct over the rows scanned: open / closed" in md
+        assert "values (complete over the rows scanned): 'open' (50%), 'closed' (50%)" in md
         assert "candidate key over the rows scanned" in md
 
     def test_an_empty_scan_is_unavailable_and_lists_nothing(
@@ -1941,7 +2059,7 @@ class TestAScopedFileIsReadAsScopedWhicheverSignalItCarries:
         assert "domain" not in reply
         assert "no rows" in reply["reason"]
         assert isinstance(md, str)
-        assert "0 distinct over the rows scanned" in md
+        assert "values (complete over the rows scanned): none" in md
 
     def test_an_unscoped_file_carries_no_scope(self, scoped_conn: ConnectionConfig) -> None:
         self._scope(scoped_conn, block=False, echo=False)
@@ -1950,3 +2068,65 @@ class TestAScopedFileIsReadAsScopedWhicheverSignalItCarries:
 
         assert (reply["match"], reply["exhaustive"]) == ("none", True)
         assert "scope" not in reply
+
+
+class TestAnUnwalkableManifestEntry:
+    """One entry that is not a mapping drops its own table and nothing else, in both modes."""
+
+    @staticmethod
+    def _corrupt_one(conn: ConnectionConfig) -> tuple[str, list[str]]:
+        path = conn.output / conn.name / "manifest.yaml"
+        manifest = yaml.safe_load(path.read_text())
+        broken, *rest = sorted(manifest["tables"])
+        manifest["tables"][broken] = "garbage"
+        path.write_text(yaml.safe_dump(manifest))
+
+        return broken, rest
+
+    @pytest.mark.parametrize("detail", [True, False])
+    def test_the_other_tables_are_listed(
+        self,
+        primary_conn: ConnectionConfig,
+        detail: bool,
+    ) -> None:
+        broken, rest = self._corrupt_one(primary_conn)
+        reply = _dict_result(_state_for(primary_conn), "list_tables", {"detail": detail})
+        listed = [t["table"] if detail else t for t in reply["tables"]]
+
+        assert broken not in listed
+        assert listed == rest
+
+    def test_a_context_request_for_the_unwalkable_table_names_it_unknown(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        broken, _ = self._corrupt_one(primary_conn)
+
+        with pytest.raises(McpError):
+            dispatch(_state_for(primary_conn), "get_table_context", {"table": broken})
+
+
+class TestAnnotationsWithoutReadableStatistics:
+    def test_search_finds_an_annotated_column_when_statistics_are_corrupt(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        table_dir = primary_conn.output / primary_conn.name / "arboretum" / "seedbank" / "collector"
+        manifest_path = primary_conn.output / primary_conn.name / "manifest.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text())
+        manifest["tables"]["arboretum.seedbank.collector"]["artifacts"][
+            "statistics_annotations"
+        ] = "statistics.annotations.yaml"
+        manifest_path.write_text(yaml.safe_dump(manifest))
+        (table_dir / "statistics.annotations.yaml").write_text(
+            yaml.safe_dump(
+                {"format_version": 1, "columns": {"email": {"note": "a field station address"}}},
+            ),
+        )
+        (table_dir / "statistics.yaml").write_text("not: valid: yaml: [")
+
+        reply = _dict_result(_state_for(primary_conn), "search_columns", {"text": "field station"})
+
+        assert [(m["table"], m["column"]) for m in reply["matches"]] == [
+            ("arboretum.seedbank.collector", "email"),
+        ]

@@ -16,11 +16,11 @@ import yaml
 
 from dbprint.conformance import Issue, validate_print
 from dbprint.conformance.schema_validation import check_relationships
+from tests._engine_run import conformance_errors
+from tests._scripts import REPO_ROOT
 
 
-EXAMPLE = (
-    Path(__file__).resolve().parents[2] / "docs/format/v1/examples/production/prints/production"
-)
+EXAMPLE = REPO_ROOT / "docs/format/v1/examples/production/prints/production"
 
 
 @pytest.fixture
@@ -389,7 +389,7 @@ def test_manifest_max_age_days_zero_is_conformant(print_dir: Path) -> None:
     data["tables"]["arboretum.seedbank.accession"]["max_age_days"] = 0
     _write_yaml_file(target, data)
 
-    assert [i for i in validate_print(print_dir) if i.severity == "error"] == []
+    assert conformance_errors(print_dir) == []
 
 
 def test_manifest_without_a_recorded_threshold_is_conformant(print_dir: Path) -> None:
@@ -401,7 +401,7 @@ def test_manifest_without_a_recorded_threshold_is_conformant(print_dir: Path) ->
 
     _write_yaml_file(target, data)
 
-    assert [i for i in validate_print(print_dir) if i.severity == "error"] == []
+    assert conformance_errors(print_dir) == []
 
 
 def test_manifest_missing_statistics_params_errors(print_dir: Path) -> None:
@@ -562,11 +562,15 @@ def test_stats_vector_bounds_inverted(print_dir: Path) -> None:
 
 
 def test_stats_types_sum_mismatch(print_dir: Path) -> None:
+    """Warning - `types` is counted in its own statement against a table taking writes."""
+
     target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
     data["columns"]["traits"]["types"]["object"] += 1
     _write_yaml_file(target, data)
-    assert "stats.types-sum-mismatch" in _codes(validate_print(print_dir))
+    issues = validate_print(print_dir)
+
+    assert next(i for i in issues if i.code == "stats.types-sum-mismatch").severity == "warning"
 
 
 def test_stats_types_sum_mismatch_on_a_part(print_dir: Path) -> None:
@@ -579,7 +583,9 @@ def test_stats_types_sum_mismatch_on_a_part(print_dir: Path) -> None:
         del data["columns"]["traits"]["parts"][".habitat"][field]
 
     _write_yaml_file(target, data)
-    assert "stats.types-sum-mismatch" in _codes(validate_print(print_dir))
+    issues = validate_print(print_dir)
+
+    assert next(i for i in issues if i.code == "stats.types-sum-mismatch").severity == "warning"
 
 
 def test_stats_values_sum_mismatch(print_dir: Path) -> None:
@@ -1237,6 +1243,27 @@ def test_stats_null_patterns_sum_exceeds_rows_scanned_under_measured_is_unchange
     assert "stats.null-patterns-sum-exceeds-rows-scanned" in codes
 
 
+def _truncate_census(data: dict) -> None:
+    data["null_patterns"]["coverage"] = 0.999999
+    data["null_patterns"].pop("coverage_method")
+
+
+def test_stats_null_patterns_sum_exceeds_rows_scanned_on_a_truncated_list(
+    print_dir: Path,
+) -> None:
+    """A capped list can only overrun through writes between the two reads (SPEC 2.2.10)."""
+
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
+    data = _load_yaml_file(target)
+    data["null_patterns"]["patterns"][0]["count"] = data["row_count"] + 1
+    _truncate_census(data)
+    _write_yaml_file(target, data)
+    codes = _codes(validate_print(print_dir))
+
+    assert "stats.null-patterns-sum-exceeds-rows-scanned" not in codes
+    assert "stats.null-patterns-sum-exceeds-rows-scanned-bounded" in codes
+
+
 def test_stats_null_patterns_coverage_mismatch(print_dir: Path) -> None:
     target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
     data = _load_yaml_file(target)
@@ -1307,6 +1334,21 @@ def test_stats_null_patterns_reconciliation_mismatch_with_no_method_field_is_unc
 
     assert "stats.null-patterns-reconciliation-mismatch-bounded" not in codes
     assert "stats.null-patterns-reconciliation-mismatch" in codes
+
+
+def test_stats_null_patterns_reconciliation_overcount_on_a_truncated_list(
+    print_dir: Path,
+) -> None:
+    target = print_dir / "arboretum/seedbank/accession/statistics.yaml"
+    data = _load_yaml_file(target)
+    column = data["null_patterns"]["patterns"][0]["columns"][0]
+    data["columns"][column]["null_count"] -= 1
+    _truncate_census(data)
+    _write_yaml_file(target, data)
+    codes = _codes(validate_print(print_dir))
+
+    assert "stats.null-patterns-reconciliation-mismatch" not in codes
+    assert "stats.null-patterns-reconciliation-mismatch-bounded" in codes
 
 
 def test_stats_physical_layout_unknown_column(print_dir: Path) -> None:
@@ -1938,7 +1980,7 @@ def test_relationships_measured_detection_is_schema_valid(print_dir: Path) -> No
     measured = [e for e in data["refers_to"] if e.get("detection") == "measured"]
     assert measured, "reference example expected to carry a measured edge"
 
-    errors = [i for i in validate_print(print_dir) if i.severity == "error"]
+    errors = conformance_errors(print_dir)
     assert errors == []
 
 
@@ -2016,7 +2058,16 @@ def test_diff_comment_target_column_mismatch(print_dir: Path) -> None:
     assert "diff.comment-target-column-mismatch" in _codes(validate_print(print_dir))
 
 
-def test_diff_statistic_changed_delta_on_non_numeric(print_dir: Path) -> None:
+@pytest.mark.parametrize(
+    ("stat", "before", "after"),
+    [("distribution", "uniform", "imbalanced"), ("cardinality_method", "exact", "approximate")],
+)
+def test_diff_statistic_changed_delta_on_non_numeric(
+    print_dir: Path,
+    stat: str,
+    before: str,
+    after: str,
+) -> None:
     target = print_dir / "diff.yaml"
     data = _load_yaml_file(target)
     data["changes"].append(
@@ -2024,9 +2075,9 @@ def test_diff_statistic_changed_delta_on_non_numeric(print_dir: Path) -> None:
             "kind": "statistic_changed",
             "table": "a",
             "column": "x",
-            "stat": "distribution",
-            "before": "uniform",
-            "after": "imbalanced",
+            "stat": stat,
+            "before": before,
+            "after": after,
             "delta": 1,
         },
     )
@@ -2531,7 +2582,7 @@ def test_annotations_stale_key_does_not_fail_the_run(print_dir: Path) -> None:
     data["columns"]["not_a_real_column"] = {"note": "stale key"}
     _write_yaml_file(target, data)
 
-    assert [i for i in validate_print(print_dir) if i.severity == "error"] == []
+    assert conformance_errors(print_dir) == []
 
 
 def test_annotations_stale_key_check_reaches_a_view(print_dir: Path) -> None:
@@ -2622,7 +2673,7 @@ def test_annotations_claims_never_gate_conformance(print_dir: Path) -> None:
     data["columns"]["taxon_id"] = {"claims": {"null_rate": 0.5, "not_a_real_stat": 1}}
     _write_yaml_file(target, data)
 
-    assert [i for i in validate_print(print_dir) if i.severity == "error"] == []
+    assert conformance_errors(print_dir) == []
 
 
 def test_annotations_root_closed_rejects_an_unknown_key(print_dir: Path) -> None:
@@ -2645,7 +2696,7 @@ def test_annotations_grain_states_a_human_authored_key(print_dir: Path) -> None:
     codes = _codes(validate_print(print_dir))
 
     assert "annotations.grain-unknown-column" not in codes
-    assert [i for i in validate_print(print_dir) if i.severity == "error"] == []
+    assert conformance_errors(print_dir) == []
 
 
 def test_annotations_grain_unknown_column(print_dir: Path) -> None:
@@ -2680,7 +2731,7 @@ def test_annotations_grain_never_gates_conformance(print_dir: Path) -> None:
     data["grain"] = {"keys": [{"columns": ["not_a_real_column"]}]}
     _write_yaml_file(target, data)
 
-    assert [i for i in validate_print(print_dir) if i.severity == "error"] == []
+    assert conformance_errors(print_dir) == []
 
 
 # --- Relationship annotations (SPEC 2.7.2) ---------------------------
@@ -2841,7 +2892,7 @@ def test_relationship_annotations_never_gates_conformance(print_dir: Path) -> No
         },
     )
 
-    assert [i for i in validate_print(print_dir) if i.severity == "error"] == []
+    assert conformance_errors(print_dir) == []
 
 
 def test_relationship_annotations_root_closed_rejects_an_unknown_key(print_dir: Path) -> None:
@@ -3028,7 +3079,7 @@ def test_relationship_annotations_claims_never_gate_conformance(print_dir: Path)
         },
     )
 
-    assert [i for i in validate_print(print_dir) if i.severity == "error"] == []
+    assert conformance_errors(print_dir) == []
 
 
 # --- Path-valued relationship endpoints (SPEC 2.3.9) -------------------
@@ -3095,7 +3146,7 @@ def test_path_endpoint_authored_via_relationship_annotations_validates(print_dir
         },
     )
 
-    assert [i for i in validate_print(print_dir) if i.severity == "error"] == []
+    assert conformance_errors(print_dir) == []
 
 
 def test_composite_path_authored_via_relationship_annotations_is_rejected(print_dir: Path) -> None:
@@ -3192,7 +3243,7 @@ def test_value_notes_never_gate_conformance(print_dir: Path) -> None:
     data["columns"]["vault_id"] = {"values": [{"value": 99, "note": "stale"}]}
     _write_yaml_file(target, data)
 
-    assert [i for i in validate_print(print_dir) if i.severity == "error"] == []
+    assert conformance_errors(print_dir) == []
 
 
 class TestWrongShapeManifest:

@@ -13,12 +13,13 @@ import threading
 from pathlib import Path
 from typing import IO, Any
 
+from dbprint.spec.artifacts import MANIFEST_FILENAME
 from .writer import validate_artifact_name, write_atomic
 
 
 STAGE_DIRNAME = ".dbprint-run"
 _MARKER = ".commit"
-_MANIFEST = "manifest.yaml"
+_MANIFEST = MANIFEST_FILENAME
 
 _LOG = logging.getLogger(__name__)
 

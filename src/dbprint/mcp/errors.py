@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
-from dbprint.engine.baseline import unprofiled_message
+from dbprint.engine.baseline import ManifestRead, unprofiled_message
 
 
 JsonRpcCode = Literal[
@@ -274,3 +274,14 @@ def unknown_section(document: str, section: str, available: list[str]) -> McpErr
         -32602,
         f"section {section!r} not found in {document}. Available: {sorted(available)}",
     )
+
+
+def manifest_or_error(read: ManifestRead) -> dict[str, Any] | None:
+    """A readable manifest, None when there is none, else the typed error naming why."""
+
+    if read.state == "unparseable":
+        raise yaml_parse_error(str(read.path), read.reason or "")
+    elif read.state == "malformed":
+        raise malformed_manifest(str(read.path), read.reason or "")
+    else:
+        return read.manifest

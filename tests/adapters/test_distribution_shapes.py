@@ -25,6 +25,8 @@ from dbprint.adapters import (
     StatisticsConfig,
 )
 from dbprint.spec.temporal_age import parse_instant
+from tests.adapters._credentials import DATABRICKS_CREDS
+from tests.conftest import pg_connect
 
 
 # Small enough that the columns clear `enumeration_threshold` for the numeric/temporal branches.
@@ -41,12 +43,6 @@ VENDORS = [
     "bigquery",
 ]
 
-_DATABRICKS_CREDS = {
-    "server_hostname": "local",
-    "http_path": "local",
-    "access_token": "local",
-    "catalog": "spark_catalog",
-}
 
 _BIGQUERY_PROJECT = "dbprint-test"
 
@@ -84,16 +80,8 @@ def _value_rows(counts: list[int]) -> str:
 
 
 def _seed_postgres(creds: dict[str, str], counts: list[int]) -> None:
-    import psycopg
 
-    with psycopg.connect(
-        host=creds["host"],
-        port=int(creds["port"]),
-        dbname=creds["database"],
-        user=creds["user"],
-        password="",
-        autocommit=True,
-    ) as conn:
+    with pg_connect(creds) as conn:
         conn.execute("CREATE TABLE public.shaped (n int, t timestamp)")
         # Assembled at runtime so LiteralString does not apply; the values come from SHAPES.
         conn.execute(
@@ -102,16 +90,8 @@ def _seed_postgres(creds: dict[str, str], counts: list[int]) -> None:
 
 
 def _seed_postgres_sql(creds: dict[str, str], statement: str) -> None:
-    import psycopg
 
-    with psycopg.connect(
-        host=creds["host"],
-        port=int(creds["port"]),
-        dbname=creds["database"],
-        user=creds["user"],
-        password="",
-        autocommit=True,
-    ) as conn:
+    with pg_connect(creds) as conn:
         conn.execute(cast(LiteralString, statement))
 
 
@@ -270,7 +250,7 @@ def _adapter(
         cursor = request.getfixturevalue("databricks_test_schema")
         _seed_databricks(cursor, counts)
         seed(cursor.execute, "huge", " USING DELTA")
-        adapter = DatabricksAdapter(_DATABRICKS_CREDS, cursor_factory=lambda _params: cursor)
+        adapter = DatabricksAdapter(DATABRICKS_CREDS, cursor_factory=lambda _params: cursor)
     elif vendor == "bigquery":
         bq_cursor, dataset = request.getfixturevalue("bigquery_test_dataset")
         _seed_bigquery(bq_cursor, dataset, counts)
@@ -297,14 +277,14 @@ def _profile(adapter: Adapter) -> dict:
 
 
 def _profile_counted(request: pytest.FixtureRequest, rows: list[int]) -> tuple[ColumnStats, int]:
-    from tests.adapters.test_dialect_guard import _install_recorder
+    from tests.adapters._dialects import install_recorder
 
     con = request.getfixturevalue("duckdb_native_connection")
     con.execute("CREATE TABLE lone (n INTEGER)")
     con.execute(f"INSERT INTO lone (n) VALUES {', '.join(f'({b})' for b in rows)}")
     adapter = DuckdbAdapter({"database": ":memory:"}, cursor_factory=lambda _params: con)
     adapter.connect()
-    recorder = _install_recorder(adapter)
+    recorder = install_recorder(adapter)
 
     try:
         table = next(iter(adapter.list_tables(include=["*.lone"], exclude=[])))
@@ -561,7 +541,6 @@ class TestExactIntegerTotals:
         self,
         postgres_test_db: dict[str, str],
     ) -> None:
-        import psycopg
 
         creds = postgres_test_db
         # Five DISTINCT values (cardinality must clear `enumeration_threshold`, or the column
@@ -570,14 +549,7 @@ class TestExactIntegerTotals:
         values = [base + i for i in range(5)]
         exact_total = sum(values)
 
-        with psycopg.connect(
-            host=creds["host"],
-            port=int(creds["port"]),
-            dbname=creds["database"],
-            user=creds["user"],
-            password="",
-            autocommit=True,
-        ) as conn:
+        with pg_connect(creds) as conn:
             conn.execute("CREATE TABLE public.big (n bigint)")
             rows = ", ".join(f"({v})" for v in values)
             conn.execute(cast(LiteralString, f"INSERT INTO public.big (n) VALUES {rows}"))
@@ -810,14 +782,14 @@ class TestDegenerateCensus:
     ) -> None:
         """The batched Phase A statement already runs once per table; the census rides it."""
 
-        from tests.adapters.test_dialect_guard import _install_recorder
+        from tests.adapters._dialects import install_recorder
 
         con = request.getfixturevalue("duckdb_native_connection")
         con.execute("CREATE TABLE census (amount INTEGER, note VARCHAR)")
         con.execute("INSERT INTO census (amount, note) VALUES (-1, ''), (0, 'a'), (2, 'b')")
         adapter = DuckdbAdapter({"database": ":memory:"}, cursor_factory=lambda _params: con)
         adapter.connect()
-        recorder = _install_recorder(adapter)
+        recorder = install_recorder(adapter)
 
         try:
             table = next(iter(adapter.list_tables(include=["*.census"], exclude=[])))
@@ -843,16 +815,8 @@ _QUANTIZED_TEMPORAL_VALUES = (
 
 
 def _seed_quantized_postgres(creds: dict[str, str]) -> None:
-    import psycopg
 
-    with psycopg.connect(
-        host=creds["host"],
-        port=int(creds["port"]),
-        dbname=creds["database"],
-        user=creds["user"],
-        password="",
-        autocommit=True,
-    ) as conn:
+    with pg_connect(creds) as conn:
         conn.execute("CREATE TABLE public.quantized (n numeric, t timestamp)")
         rows = ", ".join(
             f"({n}, '{t}')"
@@ -987,7 +951,7 @@ def _quantized_adapter(vendor: str, request: pytest.FixtureRequest) -> Adapter:
     elif vendor == "databricks":
         cursor = request.getfixturevalue("databricks_test_schema")
         _seed_quantized_databricks(cursor)
-        adapter = DatabricksAdapter(_DATABRICKS_CREDS, cursor_factory=lambda _params: cursor)
+        adapter = DatabricksAdapter(DATABRICKS_CREDS, cursor_factory=lambda _params: cursor)
     elif vendor == "bigquery":
         bq_cursor, dataset = request.getfixturevalue("bigquery_test_dataset")
         _seed_quantized_bigquery(bq_cursor, dataset)
@@ -1090,13 +1054,13 @@ class TestQuantizedCount:
     ) -> None:
         """The batched Phase A statement already runs once per table; the census rides it."""
 
-        from tests.adapters.test_dialect_guard import _install_recorder
+        from tests.adapters._dialects import install_recorder
 
         con = request.getfixturevalue("duckdb_native_connection")
         _seed_quantized_duckdb(con)
         adapter = DuckdbAdapter({"database": ":memory:"}, cursor_factory=lambda _params: con)
         adapter.connect()
-        recorder = _install_recorder(adapter)
+        recorder = install_recorder(adapter)
 
         try:
             table = next(iter(adapter.list_tables(include=["*.quantized"], exclude=[])))
@@ -1117,16 +1081,8 @@ _LENGTH_VALUES = ("a", "bb", "ccc", "dddd", "Grüße")
 
 
 def _seed_length_postgres(creds: dict[str, str]) -> None:
-    import psycopg
 
-    with psycopg.connect(
-        host=creds["host"],
-        port=int(creds["port"]),
-        dbname=creds["database"],
-        user=creds["user"],
-        password="",
-        autocommit=True,
-    ) as conn:
+    with pg_connect(creds) as conn:
         conn.execute("CREATE TABLE public.lengths (s text)")
         values = ", ".join(f"('{v}')" for v in _LENGTH_VALUES)
         conn.execute(f"INSERT INTO public.lengths (s) VALUES {values}")
@@ -1235,7 +1191,7 @@ def _length_adapter(vendor: str, request: pytest.FixtureRequest) -> Adapter:
     elif vendor == "databricks":
         cursor = request.getfixturevalue("databricks_test_schema")
         _seed_length_databricks(cursor)
-        adapter = DatabricksAdapter(_DATABRICKS_CREDS, cursor_factory=lambda _params: cursor)
+        adapter = DatabricksAdapter(DATABRICKS_CREDS, cursor_factory=lambda _params: cursor)
     elif vendor == "bigquery":
         bq_cursor, dataset = request.getfixturevalue("bigquery_test_dataset")
         _seed_length_bigquery(bq_cursor, dataset)
@@ -1289,13 +1245,13 @@ class TestLength:
         issues one more, since it has no ordered-set aggregate for a percentile (SPEC 2.2.4).
         """
 
-        from tests.adapters.test_dialect_guard import _install_recorder
+        from tests.adapters._dialects import install_recorder
 
         con = request.getfixturevalue("duckdb_native_connection")
         _seed_length_duckdb(con)
         adapter = DuckdbAdapter({"database": ":memory:"}, cursor_factory=lambda _params: con)
         adapter.connect()
-        recorder = _install_recorder(adapter)
+        recorder = install_recorder(adapter)
 
         try:
             table = next(iter(adapter.list_tables(include=["*.lengths"], exclude=[])))
@@ -1339,16 +1295,8 @@ _FOLDED_NORMALIZED_CARDINALITY = 3  # trim + fold: alice, bob, carol
 
 
 def _seed_folded_postgres(creds: dict[str, str]) -> None:
-    import psycopg
 
-    with psycopg.connect(
-        host=creds["host"],
-        port=int(creds["port"]),
-        dbname=creds["database"],
-        user=creds["user"],
-        password="",
-        autocommit=True,
-    ) as conn:
+    with pg_connect(creds) as conn:
         conn.execute("CREATE TABLE public.folded (s VARCHAR(16))")
         values = ", ".join(f"('{v}')" for v in _FOLDED_VALUES)
         conn.execute(f"INSERT INTO public.folded (s) VALUES {values}")
@@ -1457,7 +1405,7 @@ def _folded_adapter(vendor: str, request: pytest.FixtureRequest) -> Adapter:
     elif vendor == "databricks":
         cursor = request.getfixturevalue("databricks_test_schema")
         _seed_folded_databricks(cursor)
-        adapter = DatabricksAdapter(_DATABRICKS_CREDS, cursor_factory=lambda _params: cursor)
+        adapter = DatabricksAdapter(DATABRICKS_CREDS, cursor_factory=lambda _params: cursor)
     elif vendor == "bigquery":
         bq_cursor, dataset = request.getfixturevalue("bigquery_test_dataset")
         _seed_folded_bigquery(bq_cursor, dataset)
@@ -1490,7 +1438,8 @@ class TestNormalizedCardinality:
             table = next(iter(adapter.list_tables(include=["*.folded"], exclude=[])))
             columns = adapter.introspect_columns(table.fqn)
             stats = adapter.compute_statistics(table.fqn, columns, CONFIG, frozenset())[1]["s"]
-            normalized = adapter.compute_normalized_cardinality(table.fqn, "s")
+            s_type = next(c.classified_type for c in columns if c.name == "s")
+            normalized = adapter.compute_normalized_cardinality(table.fqn, "s", s_type)
 
             if vendor == "mysql":
                 # MariaDB's default collation is case-insensitive and PAD SPACE, so `cardinality`
@@ -1514,7 +1463,7 @@ class TestNormalizedCardinality:
 
         try:
             table = next(iter(adapter.list_tables(include=["*.clean"], exclude=[])))
-            normalized = adapter.compute_normalized_cardinality(table.fqn, "s")
+            normalized = adapter.compute_normalized_cardinality(table.fqn, "s", "VARCHAR")
             assert normalized == 3
         finally:
             adapter.close()

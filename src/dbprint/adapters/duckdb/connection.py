@@ -4,7 +4,6 @@ adapter exposes, letting tests inject an already-seeded in-memory database.
 
 from __future__ import annotations
 
-import importlib
 import logging
 import threading
 from dataclasses import dataclass
@@ -63,7 +62,7 @@ class Connection(FactoryConnection):
     def _open_failure(self, exc: Exception) -> str:
         return f"could not open duckdb database {self.params.database!r}: {exc}"
 
-    def _opened(self, cursor: Any) -> Any:
+    def _opened(self, cursor: Any, /) -> Any:
         limit = self.params.statement_timeout
 
         return cursor if limit is None else _TimedCursor(cursor, limit)
@@ -80,13 +79,7 @@ def _default_cursor_factory(params: ConnectionParams) -> Any:
     lazy, so a base install never pays duckdb's import cost.
     """
 
-    try:
-        duckdb = importlib.import_module("duckdb")
-    except ImportError as exc:
-        raise DuckdbConnectionError(
-            "duckdb is not installed. Install dbprint with the [duckdb] extra: "
-            "`pip install dbprint[duckdb]`.",
-        ) from exc
+    duckdb = driver.import_extra("duckdb", "duckdb", "duckdb", DuckdbConnectionError)
 
     return duckdb.connect(database=params.database, read_only=params.read_only)
 

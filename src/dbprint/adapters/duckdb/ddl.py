@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from .connection import Cursor, exec_query
 from ..identifiers import Identity
+from ..sql_layout import trimmed_lines
 
 
 def extract_ddl(cursor: Cursor, identity: Identity) -> str:
@@ -47,7 +48,4 @@ def extract_ddl(cursor: Cursor, identity: Identity) -> str:
 def normalize(raw: str) -> str:
     """Strip trailing whitespace per line and ensure terminal newline."""
 
-    lines = [line.rstrip() for line in raw.splitlines()]
-    text = "\n".join(lines).strip("\n")
-
-    return text + "\n" if text else ""
+    return trimmed_lines(raw)

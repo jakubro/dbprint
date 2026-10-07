@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_context.html" import context_panel %}
 {% block body %}
 
 {% macro col_links(cols, base_url='') %}
@@ -90,10 +91,10 @@
             ({{ col_links(k.columns) }}) - {{ k.detection }}{% if k.note %}: {{ k.note }}{% endif %}{% if not loop.last %}<br>{% endif %}
           {% endfor %}
         </div>
-      {% elif grain.exhausted == true %}
+      {% elif grain.state == "exhausted" %}
         <div class="big">-</div>
         <div class="muted">searched, none found</div>
-      {% elif grain.exhausted == false %}
+      {% elif grain.state == "bounded" %}
         <div class="big">-</div>
         <div class="muted">search bounded, none found</div>
       {% else %}
@@ -135,6 +136,13 @@
       </div>
     </div>
   {% endif %}
+  {% if no_rows %}
+    <div class="card">
+      <div class="label">completeness</div>
+      <div class="big">-</div>
+      <div class="muted">no rows measured</div>
+    </div>
+  {% endif %}
   {% if completeness %}
     <div class="card">
       <div class="label">completeness</div>
@@ -156,12 +164,22 @@
   {% if columns %}<button class="tab-btn" data-tab="columns">Columns</button>{% endif %}
   {% if has_relationships %}<button class="tab-btn" data-tab="relationships">Relationships</button>{% endif %}
   {% if ddl %}<button class="tab-btn" data-tab="ddl">DDL</button>{% endif %}
+  <button class="tab-btn" data-tab="context">Context</button>
 </div>
 
 <div data-tab-panel="overview">
   {% if description %}
     <h2>Description</h2>
     <div class="md">{{ description|md }}</div>
+  {% endif %}
+
+  {% if unlisted_annotations %}
+    <h2>Annotations</h2>
+    <ul>
+      {% for name, note in unlisted_annotations %}
+        <li><code>{{ name }}</code>: <span class="md">{{ note|md }}</span></li>
+      {% endfor %}
+    </ul>
   {% endif %}
 
   {% if grain %}
@@ -176,14 +194,12 @@
             </li>
           {% endfor %}
         </ul>
-      {% elif grain.exhausted == true %}
+      {% elif grain.state == "exhausted" %}
         <div class="hedge">Searched for an undeclared grain; none found.</div>
-      {% elif grain.exhausted == false %}
+      {% elif grain.state == "bounded" %}
         <div class="hedge">Search for an undeclared grain was bounded; none found within the cap.</div>
-      {% elif grain.search_ran %}
-        <div class="hedge">Grain search ran; the file records no result.</div>
       {% else %}
-        <div class="hedge">Not determined - nothing declared, and no measured search ran.</div>
+        <div class="hedge">Not determined.</div>
       {% endif %}
     </div>
   {% endif %}
@@ -192,8 +208,7 @@
     <div class="hedge-block">
       <h2>Timeline - <a href="#col-{{ timeline.column }}">{{ timeline.column }}</a> by {{ timeline.unit }}</h2>
       <div class="hedge">
-        Bucketed non-null counts,
-        {{ 'every scanned row' if timeline.coverage >= 1 else timeline.coverage|percent ~ ' of scanned rows' }}.
+        Bucketed non-null counts{% if timeline.coverage_words %}, {{ timeline.coverage_words }}{% endif %}.
         A missing bucket is a gap - no rows fell in that {{ timeline.unit }}.
       </div>
       {% if timeline.buckets %}
@@ -311,6 +326,9 @@
 
   {% if columns_empty_notice %}
     <div class="notice">{{ columns_empty_notice }}</div>
+  {% elif no_rows %}
+    <h2>Cardinality and completeness by column</h2>
+    <div class="notice">No rows measured - a column holds no cardinality or completeness to plot.</div>
   {% elif columns %}
     <h2>Cardinality and completeness by column</h2>
     <div class="chart-panel" data-chart>
@@ -402,7 +420,7 @@
             <td>{{ col.classification|capitalize|nbsp }}</td>
             <td>
               <div class="bar-inline">
-                <span class="bar-track"><span class="bar-fill" style="width:{{ ((col.null_rate or 0) * 100)|round(2) }}%"></span></span>
+                {% if col.null_rate is not none %}<span class="bar-track"><span class="bar-fill" style="width:{{ (col.null_rate * 100)|round(2) }}%"></span></span>{% endif %}
                 <span class="num" title="{{ col.null_count }}">{{ col.null_count|number }}</span>
               </div>
               {% if col.zero_count or col.negative_count or col.empty_count %}
@@ -420,7 +438,7 @@
                 <div class="bar-inline">
                   <span class="num" title="{{ col.cardinality.value }}">{{ col.cardinality.value|number }}</span>
                   {% if col.cardinality.approximate %}<span class="muted">(approx)</span>{% endif %}
-                  {% if col.cardinality.saturates %}<span class="muted">(= scanned rows)</span>{% endif %}
+                  {% if col.cardinality.saturates %}<span class="muted">(= {{ "scanned rows" if col.cardinality.saturates == "scanned_rows" else "row count" }})</span>{% endif %}
                 </div>
               {% else %}
                 <span class="muted">n/a</span>
@@ -436,7 +454,7 @@
                   <div class="bars">
                     {% for v in col.value_list.bars %}
                       <div class="bar-row">
-                        <span class="bar-label">{{ v.value }}</span>
+                        <span class="bar-label">{{ v.value }}{% if v.spellings %} <span class="muted">+ {{ v.spellings|join(", ") }}</span>{% endif %}</span>
                         <span class="bar-track"><span class="bar-fill" style="width:{{ v.pct }}%"></span></span>
                         <span class="bar-count muted">{{ v.count|number }}</span>
                       </div>
@@ -527,10 +545,10 @@
             {% endfor %}
           </tbody>
         </table>
-        {% if null_patterns.coverage is not none %}
+        {% if null_patterns.coverage_words %}
           <div class="muted">
             Observed over
-            {{ 'every scanned row' if null_patterns.coverage >= 1 else null_patterns.coverage|percent ~ ' of scanned rows' }}{% if null_patterns.coverage_method == 'bounded' %} (bounded){% endif %}.
+            {{ null_patterns.coverage_words }}{% if null_patterns.coverage_method == 'bounded' %} (bounded){% endif %}.
           </div>
         {% endif %}
       </div>
@@ -622,5 +640,7 @@
     <pre>{{ ddl }}</pre>
   </div>
 {% endif %}
+
+{{ context_panel(context) }}
 
 {% endblock %}

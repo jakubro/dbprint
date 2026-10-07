@@ -10,28 +10,16 @@ import yaml
 from click.testing import CliRunner
 
 from dbprint.adapters import (
-    ColumnMeta,
     ColumnStats,
-    CommentsMeta,
     Inferred,
     MockAdapter,
     MockTable,
 )
 from dbprint.cli import run_log
 from dbprint.cli.main import main
+from tests._cli import AUTO_PROJECT_YAML, credential_env, patch_registry
+from tests._prints import columns, mock_table
 
-
-PROJECT_YAML = """\
-defaults:
-  max_age_days: 7
-  statistics: {}
-  diff: {}
-connections:
-  primary:
-    adapter: postgres
-    auto: true
-    output: prints
-"""
 
 EXIT_DRIFT = 3
 
@@ -46,17 +34,10 @@ def _fixture_multi() -> dict[str, MockTable]:
 
 
 def _table(schema: str, name: str) -> MockTable:
-    return MockTable(
-        type="table",
-        namespace_path=(schema, name),
-        ddl=f"CREATE TABLE {schema}.{name} (id uuid PRIMARY KEY);\n",
-        columns=[
-            ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1),
-        ],
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats={
+    return mock_table(
+        f"{schema}.{name}",
+        columns(("id", "uuid")),
+        {
             "id": ColumnStats(
                 sql_type="uuid",
                 nullable=False,
@@ -68,6 +49,7 @@ def _table(schema: str, name: str) -> MockTable:
                 inferred=Inferred(candidate_key=True),
             ),
         },
+        ddl=f"CREATE TABLE {schema}.{name} (id uuid PRIMARY KEY);\n",
         samples={"id": [f"00000000-0000-7000-8000-{i:012d}" for i in range(10)]},
         row_count=10,
     )
@@ -75,17 +57,10 @@ def _table(schema: str, name: str) -> MockTable:
 
 def _fixture() -> dict[str, MockTable]:
     return {
-        "public.t": MockTable(
-            type="table",
-            namespace_path=("public", "t"),
-            ddl="CREATE TABLE public.t (id uuid PRIMARY KEY);\n",
-            columns=[
-                ColumnMeta(name="id", sql_type="uuid", nullable=False, default=None, ordinal=1),
-            ],
-            relationships=[],
-            indexes=[],
-            comments=CommentsMeta(table=None, columns={}),
-            stats={
+        "public.t": mock_table(
+            "public.t",
+            columns(("id", "uuid")),
+            {
                 "id": ColumnStats(
                     sql_type="uuid",
                     nullable=False,
@@ -97,6 +72,7 @@ def _fixture() -> dict[str, MockTable]:
                     inferred=Inferred(candidate_key=True),
                 ),
             },
+            ddl="CREATE TABLE public.t (id uuid PRIMARY KEY);\n",
             samples={"id": [f"00000000-0000-7000-8000-{i:012d}" for i in range(20)]},
             row_count=100,
         ),
@@ -115,25 +91,11 @@ class _MockPostgresAdapter(MockAdapter):
 def _setup_project(tmp_path: Path) -> None:
     """Write a minimal .dbprint.yaml in tmp_path; preset credentials via env."""
 
-    (tmp_path / ".dbprint.yaml").write_text(PROJECT_YAML)
+    (tmp_path / ".dbprint.yaml").write_text(AUTO_PROJECT_YAML)
 
 
 def _patch_registry():
-    return patch.dict(
-        "dbprint.cli.adapter_registry.ADAPTERS",
-        {"postgres": _MockPostgresAdapter},
-        clear=True,
-    )
-
-
-def _credential_env() -> dict[str, str]:
-    return {
-        "DBPRINT_PRIMARY_HOST": "h",
-        "DBPRINT_PRIMARY_PORT": "5432",
-        "DBPRINT_PRIMARY_DATABASE": "d",
-        "DBPRINT_PRIMARY_USER": "u",
-        "DBPRINT_PRIMARY_PASSWORD": "p",
-    }
+    return patch_registry({"postgres": _MockPostgresAdapter})
 
 
 class TestGenerateHappyPath:
@@ -145,7 +107,7 @@ class TestGenerateHappyPath:
         _setup_project(tmp_path)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         runner = CliRunner()
@@ -163,7 +125,7 @@ class TestGenerateHappyPath:
         _setup_project(tmp_path)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         runner = CliRunner()
@@ -209,7 +171,7 @@ class TestPipedOutput:
         _setup_project(tmp_path)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         runner = CliRunner()
@@ -233,11 +195,7 @@ class _MockMultiPostgresAdapter(MockAdapter):
 
 
 def _patch_registry_multi():
-    return patch.dict(
-        "dbprint.cli.adapter_registry.ADAPTERS",
-        {"postgres": _MockMultiPostgresAdapter},
-        clear=True,
-    )
+    return patch_registry({"postgres": _MockMultiPostgresAdapter})
 
 
 def _setup_multi_project(tmp_path: Path, *, config_include: list[str] | None = None) -> None:
@@ -273,7 +231,7 @@ class TestCliSelectorNarrowing:
         _setup_multi_project(tmp_path)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         runner = CliRunner()
@@ -293,7 +251,7 @@ class TestCliSelectorNarrowing:
         _setup_multi_project(tmp_path, config_include=["seedbank.*"])
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         runner = CliRunner()
@@ -313,7 +271,7 @@ class TestCliSelectorNarrowing:
         _setup_multi_project(tmp_path)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         runner = CliRunner()
@@ -334,7 +292,7 @@ class TestCliSelectorNarrowing:
         _setup_multi_project(tmp_path)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         runner = CliRunner()
@@ -353,7 +311,7 @@ class TestCliSelectorNarrowing:
         _setup_multi_project(tmp_path)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         runner = CliRunner()
@@ -372,7 +330,7 @@ class TestCliSelectorNarrowing:
         _setup_multi_project(tmp_path, config_include=["seedbank.*"])
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         runner = CliRunner()
@@ -407,7 +365,7 @@ class TestRunLog:
         _setup_project(tmp_path)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         runner = CliRunner()
@@ -443,7 +401,7 @@ class TestRunLog:
         )
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         runner = CliRunner()
@@ -489,7 +447,7 @@ class TestRunLog:
         _setup_project(tmp_path)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         runner = CliRunner()
@@ -512,7 +470,7 @@ class TestRunLog:
         _setup_project(tmp_path)
         monkeypatch.chdir(tmp_path)
 
-        for k, v in _credential_env().items():
+        for k, v in credential_env().items():
             monkeypatch.setenv(k, v)
 
         blocked_root = tmp_path / "not-a-directory"

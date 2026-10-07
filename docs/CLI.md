@@ -353,10 +353,10 @@ Complete `--help` for every command, captured verbatim. This file is generated f
 │ --purpose               [profile|query]  What the fragment is for. profile describes the data:   │
 │                                          DDL, a per-column Notes summary of the statistics,      │
 │                                          relationships. query is for writing SQL against the     │
-│                                          table: DDL, the join paths, a data dictionary, and the  │
+│                                          table: DDL, the join paths, a data dictionary, the      │
 │                                          value lists a predicate can be written from, with       │
-│                                          counts and coverage - and none of the statistics, which │
-│                                          describe the data rather than what a predicate needs.   │
+│                                          counts and coverage, and each nullable column's null    │
+│                                          share.                                                  │
 │                                          [default: profile]                                      │
 │ --no-ddl                                 Omit the DDL section.                                   │
 │ --no-relationships                       Omit the Relationships section (profile) or the Joins   │
@@ -366,8 +366,9 @@ Complete `--help` for every command, captured verbatim. This file is generated f
 │ --no-stats                               Omit the Cardinality table. No effect under --purpose   │
 │                                          query, which carries none.                              │
 │ --budget                INTEGER          Soft output cap in tokens (approx chars/4); the table's │
-│                                          identity is charged first and a section that does not   │
-│                                          fit is skipped, never truncated. e.g. 4000              │
+│                                          identity is charged first, the Terms legend next, and a │
+│                                          section that does not fit is skipped, never truncated - │
+│                                          the legend among them. e.g. 4000                        │
 │ --output                FILE             Write output to FILE instead of stdout.                 │
 │ --tui/--no-tui                           Force TTY (syntax-highlighted) or piped (plain-text)    │
 │                                          rendering. md format only.                              │
@@ -461,7 +462,8 @@ Complete `--help` for every command, captured verbatim. This file is generated f
  Exit codes:
 
   • 0: clean shutdown
-  • 1: missing [docs] extra, a non-loopback --host, or an unresolved connection
+  • 1: missing [docs] extra, a non-loopback --host, a port already in use, or an unresolved
+    connection
 
  Examples:
 

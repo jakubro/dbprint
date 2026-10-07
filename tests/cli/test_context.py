@@ -566,6 +566,20 @@ class TestSeveralConnections:
         assert "# Context for connection production (1 table)" in result.output
         assert "# Context for connection staging (1 table)" in result.output
 
+    def test_the_reply_opens_with_one_legend_for_every_connection(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._two_connections(tmp_path, committed_print)
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(main, ["context", "arboretum.seedbank.accession"])
+
+        assert result.exit_code == 0
+        assert result.stdout.startswith("## Terms\n\n- ")
+        assert result.stdout.count("## Terms") == 1
+
     def test_json_is_one_array_keyed_by_connection(
         self,
         tmp_path: Path,

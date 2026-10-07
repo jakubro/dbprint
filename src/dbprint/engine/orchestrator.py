@@ -59,11 +59,25 @@ from dbprint.config.duration import format_duration_seconds
 from dbprint.spec import artifact_yaml
 from dbprint.spec.absence import SAMPLED_CLASSIFICATIONS, block_value, emits, sample_verdicts
 from dbprint.spec.artifact_yaml import ArtifactLoader
+from dbprint.spec.artifacts import (
+    DDL_FILENAME,
+    DESCRIPTION_FILENAME,
+    DIFF_FILENAME,
+    MANIFEST_ANNOTATIONS_FILENAME,
+    MANIFEST_FILENAME,
+    PRODUCER_ARTIFACTS,
+    READING_GUIDE_FILENAME,
+    RELATIONSHIPS_ANNOTATIONS_FILENAME,
+    RELATIONSHIPS_FILENAME,
+    STATISTICS_ANNOTATIONS_FILENAME,
+    STATISTICS_FILENAME,
+)
 from dbprint.spec.classification import (
     Classification,
     classify,
     compute_candidate_key_exception,
     compute_cardinality_ratio,
+    compute_fanout_avg,
     compute_null_rate,
     has_calendar_component,
     has_day_resolution,
@@ -101,6 +115,7 @@ from dbprint.spec.spatial import Geometry
 from dbprint.spec.statistics_matrix import (
     FORBIDDEN_FIELDS,
     REQUIRED_FIELDS,
+    forbids,
     part_forbidden_fields,
 )
 from dbprint.spec.temporal_age import freshness_classification
@@ -130,7 +145,7 @@ from .manifest_builder import (
 )
 from .manifest_builder import build as build_manifest
 from .pool import SessionPool
-from .reading_guide import READING_GUIDE_FILENAME, READING_GUIDE_TEXT
+from .reading_guide import READING_GUIDE_TEXT
 from .result import (
     EXIT_CONNECTION,
     EXIT_DRIFT,
@@ -154,13 +169,6 @@ from .result import (
 )
 from .staging import RunStage, StageRefused
 from .value_resolution import spelling_groups
-from .writer import (
-    DESCRIPTION_FILENAME,
-    MANIFEST_ANNOTATIONS_FILENAME,
-    PRODUCER_ARTIFACTS,
-    RELATIONSHIPS_ANNOTATIONS_FILENAME,
-    STATISTICS_ANNOTATIONS_FILENAME,
-)
 from .yaml_dumper import dump_yaml as _dump_yaml
 
 
@@ -240,7 +248,7 @@ class Engine:
         req = request or GenerateRequest()
         started = time.monotonic()
         generated_at = _utc_iso_now()
-        prints_root = self._conn.output / self._conn.name
+        prints_root = self._conn.print_root
 
         if req.dry_run:
             return self._generate(req, None, started, generated_at)
@@ -272,7 +280,7 @@ class Engine:
         started: float,
         generated_at: str,
     ) -> GenerateResult:
-        prints_root = self._conn.output / self._conn.name
+        prints_root = self._conn.print_root
         committed = CommittedPrint.load(prints_root)
         emitter = _ProgressEmitter(req.on_progress, self._conn.name)
 
@@ -384,7 +392,7 @@ class Engine:
         started = time.monotonic()
         generated_at = _utc_iso_now()
 
-        prints_root = self._conn.output / self._conn.name
+        prints_root = self._conn.print_root
         committed = CommittedPrint.load(prints_root)
 
         if committed.manifest is None:
@@ -614,7 +622,7 @@ class Engine:
         dependencies_map: dict[str, tuple[str, ...]] | None,
         unlisted_namespaces: tuple[str, ...],
     ) -> _ExtractionOutcome:
-        prints_root = self._conn.output / self._conn.name
+        prints_root = self._conn.print_root
         matched_fqns = tuple(t.fqn for t in tables)
         total = len(tables)
         baseline_states = committed.baseline_states()
@@ -760,7 +768,7 @@ class Engine:
                 # Compared through the one dumper rather than re-read: the committed file is
                 # already parsed, and the carry model reads each artifact once.
                 if artifact != _dump_yaml(table.relationships):
-                    stage.write(table.directory, {"relationships.yaml": artifact})
+                    stage.write(table.directory, {RELATIONSHIPS_FILENAME: artifact})
 
         diff_dict = _compute_diff_dict(
             project_root=self._project_root,
@@ -984,10 +992,10 @@ class Engine:
 
         if stage is not None:
             emitter.table_phase(index, total, tbl.fqn, "write")
-            artifacts: dict[str, str | bytes] = {"ddl.sql": ctx.ddl}
+            artifacts: dict[str, str | bytes] = {DDL_FILENAME: ctx.ddl}
 
             if ctx.statistics_yaml is not None:
-                artifacts["statistics.yaml"] = ctx.statistics_yaml
+                artifacts[STATISTICS_FILENAME] = ctx.statistics_yaml
             stage.write(tbl_dir, artifacts)
 
         ctx.tbl_dir = tbl_dir
@@ -1819,6 +1827,8 @@ class Engine:
         )
         if pools_floats(part.path, classification, stats.sql_type):
             stats = replace(stats, values=None, frequencies=None, distribution=None)
+        elif _withholds_values(classification, looks_like):
+            stats = replace(stats, values=None, values_coverage=None, distribution=None)
 
         enriched = _EnrichedColumnStats(
             stats=_fill_empty_value_shape(stats, classification),
@@ -2339,7 +2349,7 @@ class Engine:
                 continue
 
             artifact = _serialize_relationships(fqn, ctx, per_table_meta, committed)
-            stage.write(ctx.tbl_dir, {"relationships.yaml": artifact})
+            stage.write(ctx.tbl_dir, {RELATIONSHIPS_FILENAME: artifact})
 
     def _write_key_sketches(
         self,
@@ -2573,7 +2583,7 @@ class Engine:
                 if column in declared or committed_column.candidate_key:
                     parents.append(candidate)
 
-                if committed_column.candidate_key or cardinality > threshold:
+                if cardinality > threshold:
                     children.append(candidate)
 
         for fqn, ctx in per_table_meta.items():
@@ -2612,7 +2622,7 @@ class Engine:
                 if column in single_col_keys or candidate_key:
                     parents.append(candidate)
 
-                if candidate_key or cardinality > threshold:
+                if cardinality > threshold:
                     children.append(candidate)
 
         proposed = inference.infer_value_derived_edges(children, parents, frozenset(existing))
@@ -2683,6 +2693,7 @@ class Engine:
                     normalized = self._adapter.compute_normalized_cardinality(
                         ctx.fqn,
                         column,
+                        sql_types[column],
                         ctx.read_scope,
                     )
             except Exception as exc:  # noqa: BLE001 - run-all-then-report; this column only
@@ -2728,12 +2739,12 @@ class Engine:
             has_manifest_annotations=(prints_root / MANIFEST_ANNOTATIONS_FILENAME).is_file(),
         )
         artifacts: dict[str, str | bytes] = {
-            "diff.yaml": _dump_yaml(outcome.diff_dict),
+            DIFF_FILENAME: _dump_yaml(outcome.diff_dict),
             READING_GUIDE_FILENAME: READING_GUIDE_TEXT,
         }
 
         if not _manifest_unchanged(manifest_dict, committed.manifest):
-            artifacts["manifest.yaml"] = _dump_yaml(manifest_dict)
+            artifacts[MANIFEST_FILENAME] = _dump_yaml(manifest_dict)
 
         stage.write(prints_root, artifacts)
 
@@ -3222,10 +3233,15 @@ def _suppressed_columns(detected: dict[str, _ColumnDetection]) -> frozenset[str]
     return frozenset(
         name
         for name, detection in detected.items()
-        if detection.classification == "text"
-        and detection.inferred is not None
-        and detection.inferred.looks_like == _PROSE
+        if _withholds_values(
+            detection.classification,
+            detection.inferred.looks_like if detection.inferred is not None else None,
+        )
     )
+
+
+def _withholds_values(classification: str, looks_like: str | None) -> bool:
+    return classification == "text" and looks_like == _PROSE
 
 
 def _assemble_stats(
@@ -3798,7 +3814,7 @@ def _serialize_statistics(
             col_dict["collation"] = e.collation
 
         if (
-            e.classification not in ("unsupported", "spatial", "vector")
+            not forbids(e.classification, "cardinality")
             and e.stats.cardinality is not None
             and "cardinality" not in (e.stats.unmeasured or ())
         ):
@@ -4247,7 +4263,7 @@ def _emitted_extras(e: _EnrichedColumnStats, salt: str | None = None):
     if s.norm is not None:
         yield "norm", {"min": s.norm[0], "max": s.norm[1]}
 
-    if s.types is not None:
+    if s.types:
         yield "types", dict(sorted(s.types, key=lambda kind: (-kind[1], kind[0])))
 
     if s.unrepresentable:
@@ -4468,6 +4484,7 @@ class _ColumnSnapshot:
     row_count: int | None
     scoped: bool
     cardinality: int | None
+    null_count: int | None
     cardinality_method: str | None
     top_count: int | None
     sketch: tuple[int, ...] | None
@@ -4503,6 +4520,7 @@ def _column_snapshot(
             row_count=payload.get("row_count"),
             scoped=scoped,
             cardinality=col.get("cardinality"),
+            null_count=col.get("null_count"),
             cardinality_method=col.get("cardinality_method"),
             top_count=_top_count(col.get("values")),
             sketch=_decode_column_sketch(col.get("sketch")),
@@ -4522,6 +4540,7 @@ def _column_snapshot(
         row_count=table.state.row_count,
         scoped=table.state.scoped,
         cardinality=col.cardinality,
+        null_count=col.stats.get("null_count"),
         cardinality_method=col.cardinality_method,
         top_count=_top_count(col.stats.get("values")),
         sketch=_decode_column_sketch(col.sketch),
@@ -4584,11 +4603,16 @@ def _compute_observed(
     if not _scope_compatible(child, parent):
         return {"scope_compatible": False}
 
-    if not child.cardinality or child.row_count is None or not parent.cardinality:
+    if (
+        not child.cardinality
+        or child.row_count is None
+        or child.null_count is None
+        or not parent.cardinality
+    ):
         return None
 
     observed: dict[str, Any] = {
-        "fanout_avg": round(child.row_count / child.cardinality, 6),
+        "fanout_avg": compute_fanout_avg(child.row_count, child.null_count, child.cardinality),
         "target_coverage": compute_cardinality_ratio(child.cardinality, parent.cardinality),
         "scope_compatible": True,
     }
@@ -5050,7 +5074,7 @@ def _baseline_path(conn: ConnectionConfig, project_root: Path) -> str:
     reader while leaking the producing machine's layout into a published artifact.
     """
 
-    location = conn.output / conn.name
+    location = conn.print_root
 
     try:
         return str(location.relative_to(project_root))
@@ -5222,7 +5246,7 @@ def _rewrite_statistics(ctx: _PerTableContext, added: dict[str, dict[str, Any]])
     ctx.statistics_yaml = _dump_yaml(exact)
     ctx.statistics_payload = _reread_statistics(ctx.statistics_yaml)
     assert ctx.stage is not None
-    ctx.stage.write(ctx.tbl_dir, {"statistics.yaml": ctx.statistics_yaml})
+    ctx.stage.write(ctx.tbl_dir, {STATISTICS_FILENAME: ctx.statistics_yaml})
 
 
 class _ExactLoader(ArtifactLoader):

@@ -889,13 +889,13 @@ class TestWrongShapeManifest:
         payload = json.loads(result.stdout)
         assert payload[0]["summary"]["errors"] > 0
 
-    def test_a_table_entry_that_is_not_a_mapping_is_stale_rather_than_fatal(
+    def test_a_table_entry_that_is_not_a_mapping_is_skipped_and_reported(
         self,
         tmp_path: Path,
         committed_print: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Nothing in such an entry says the print is current, so it is judged stale."""
+        """Every surface skips an entry no reader can follow; conformance is what reports it."""
 
         prints = _seed_clean(tmp_path, committed_print)
         manifest_path = prints / "manifest.yaml"
@@ -906,9 +906,9 @@ class TestWrongShapeManifest:
         result = CliRunner().invoke(main, ["check", "--format", "json"])
 
         payload = json.loads(result.stdout)[0]
-        assert result.exit_code == 2
+        assert result.exit_code == 1
         assert payload["summary"]["errors"] > 0
-        assert [e["table"] for e in payload["stale_entries"]] == ["public.broken"]
+        assert payload["stale_entries"] == []
 
 
 class TestTheCauseReachesStderr:

@@ -16,6 +16,7 @@ from dbprint.config.project import ConnectionConfig, RuleConfig
 from dbprint.conformance import validate_print
 from dbprint.engine import Engine
 from dbprint.engine.context_assembler import AssemblyOptions, assemble
+from tests._engine_run import conformance_errors
 
 
 def test_a_replacing_table_states_its_key_and_counts_its_stored_rows(
@@ -289,7 +290,7 @@ def _generate(
         adapter.close()
 
     written = sorted((tmp_path / "primary").rglob("statistics.yaml"))
-    errors = [i for i in validate_print(tmp_path / "primary") if i.severity == "error"]
+    errors = conformance_errors(tmp_path / "primary")
 
     assert errors == [], errors
     assert len(written) == count

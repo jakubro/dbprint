@@ -12,11 +12,10 @@ from pathlib import Path
 import pytest
 
 from dbprint.config import load_project
+from tests._scripts import REPO_ROOT
 
 
-_REFERENCE_CONFIG_PATH = (
-    Path(__file__).resolve().parents[2] / "docs/format/v1/examples/production/.dbprint.yaml"
-)
+_REFERENCE_CONFIG_PATH = REPO_ROOT / "docs/format/v1/examples/production/.dbprint.yaml"
 _REFERENCE_CONFIG = _REFERENCE_CONFIG_PATH.read_text()
 
 # The exact commented block at the end of the reference config.

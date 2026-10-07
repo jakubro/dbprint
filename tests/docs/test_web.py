@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import html
 import re
+import shutil
+import socket
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
+import yaml
 
 from dbprint.config import ConnectionConfig
 from dbprint.docs import web
 from dbprint.docs.web import _non_breaking, _number, _percent, _pretty_datetime, _relative_time
 from dbprint.engine import AssemblyOptions, assemble_context
 from dbprint.engine.baseline import read_artifact
+from tests._cli import run_cli
+from tests._scripts import REPO_ROOT
 
 
 class TestRoutes:
@@ -359,3 +365,223 @@ class TestRelativeTime:
     @pytest.mark.parametrize("value", ["52030-01-01T00:00:00", 42, None])
     def test_unrepresentable_or_non_string_passes_through(self, value: object) -> None:
         assert _relative_time(value) == value
+
+
+@pytest.fixture
+def reference_conn(tmp_path: Path) -> ConnectionConfig:
+    """A copy of the packaged reference example, which holds a zero-row and a catalog-only table."""
+
+    source = REPO_ROOT / "docs/format/v1/examples/production/prints"
+    shutil.copytree(source, tmp_path / "prints")
+
+    return ConnectionConfig(name="production", adapter="postgres", output=tmp_path / "prints")
+
+
+class TestAPageClaimsOnlyWhatItsDataSupports:
+    def test_a_zero_row_table_reads_no_rows_not_full(
+        self,
+        reference_conn: ConnectionConfig,
+    ) -> None:
+        client = web.create_app([reference_conn]).test_client()
+
+        body = client.get("/t/production/arboretum.seedbank.storage_reading").data.decode()
+
+        assert "no rows measured" in body
+        assert "skyline-bar" not in body
+        assert "100%</div>" not in body
+
+    def test_an_unqueried_object_draws_no_null_rate_bar(
+        self,
+        reference_conn: ConnectionConfig,
+    ) -> None:
+        client = web.create_app([reference_conn]).test_client()
+
+        body = client.get("/t/production/arboretum.seedbank.accession_summary").data.decode()
+
+        assert 'class="bar-fill" style="width:' not in body
+
+
+class TestAnnotationsWithoutReadableStatistics:
+    def test_the_page_still_shows_the_note(self, reference_conn: ConnectionConfig) -> None:
+        root = reference_conn.output / reference_conn.name
+        manifest = yaml.safe_load((root / "manifest.yaml").read_text())
+        entry = manifest["tables"]["arboretum.seedbank.collector"]
+        entry["artifacts"]["statistics_annotations"] = "statistics.annotations.yaml"
+        (root / "manifest.yaml").write_text(yaml.safe_dump(manifest))
+        table_dir = root / entry["path"]
+        (table_dir / "statistics.annotations.yaml").write_text(
+            yaml.safe_dump(
+                {"format_version": 1, "columns": {"email": {"note": "a field station address"}}},
+            ),
+        )
+        (table_dir / "statistics.yaml").write_text("not: valid: yaml: [")
+        client = web.create_app([reference_conn]).test_client()
+
+        body = client.get("/t/production/arboretum.seedbank.collector").data.decode()
+
+        assert "a field station address" in body
+
+
+class TestServe:
+    def test_a_port_in_use_raises_before_announcing(self, reference_conn: ConnectionConfig) -> None:
+        from dbprint.docs import serve
+
+        announced: list[bool] = []
+
+        with socket.socket() as taken:
+            taken.bind(("127.0.0.1", 0))
+            taken.listen()
+
+            with pytest.raises(OSError):
+                serve(
+                    [reference_conn],
+                    "127.0.0.1",
+                    taken.getsockname()[1],
+                    lambda: announced.append(True),
+                )
+
+        assert announced == []
+
+
+@pytest.fixture
+def reference_project(tmp_path: Path) -> Path:
+    """The packaged reference example whole - config and print - so the real CLI can read it."""
+
+    project = tmp_path / "production"
+    shutil.copytree(REPO_ROOT / "docs/format/v1/examples/production", project)
+
+    return project
+
+
+@pytest.fixture
+def carried_project(reference_project: Path) -> Path:
+    """The reference project after a run that failed `vault`, whose earlier entry it carries."""
+
+    manifest_path = reference_project / "prints" / "production" / "manifest.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text())
+    manifest["failed_tables"] = ["arboretum.seedbank.vault"]
+    manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+
+    return reference_project
+
+
+def _context_sources(page: str) -> dict[str, str]:
+    found = re.findall(
+        r'data-purpose-panel="(\w+)".*?<pre class="context-source">(.*?)</pre>',
+        page,
+        re.DOTALL,
+    )
+
+    return {purpose: html.unescape(text) for purpose, text in found}
+
+
+class TestTheContextTab:
+    """The tab shows, per purpose, exactly what `dbprint context` prints for the page's tables."""
+
+    @pytest.mark.parametrize(
+        ("route", "selection"),
+        [
+            ("/t/production/arboretum.seedbank.accession", "arboretum.seedbank.accession"),
+            ("/s/production/arboretum.seedbank", "arboretum.seedbank.*"),
+            ("/s/production/arboretum.fixture", "arboretum.fixture.*"),
+        ],
+    )
+    def test_each_purpose_is_byte_identical_to_the_cli(
+        self,
+        reference_project: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        route: str,
+        selection: str,
+    ) -> None:
+        conn = ConnectionConfig(
+            name="production",
+            adapter="postgres",
+            output=reference_project / "prints",
+        )
+        page = web.create_app([conn]).test_client().get(route).get_data(as_text=True)
+        shown = _context_sources(page)
+
+        for purpose in ("profile", "query"):
+            result = run_cli(
+                reference_project,
+                monkeypatch,
+                ["context", selection, "production", "--purpose", purpose, "--no-tui"],
+            )
+
+            assert result.exit_code == 0, result.output
+            assert shown[purpose] == result.stdout
+
+    def test_a_multi_table_schema_carries_the_connection_header(
+        self,
+        reference_conn: ConnectionConfig,
+    ) -> None:
+        page = (
+            web.create_app([reference_conn]).test_client().get("/s/production/arboretum.seedbank")
+        )
+        shown = _context_sources(page.get_data(as_text=True))
+
+        assert shown["profile"].startswith("# Context for connection production (9 tables)")
+
+    def test_a_one_table_schema_matches_that_tables_own_tab(
+        self,
+        reference_conn: ConnectionConfig,
+    ) -> None:
+        client = web.create_app([reference_conn]).test_client()
+        schema = _context_sources(
+            client.get("/s/production/arboretum.fixture").get_data(as_text=True),
+        )
+        table = _context_sources(
+            client.get("/t/production/arboretum.fixture.shape_probe").get_data(as_text=True),
+        )
+
+        assert schema == table
+
+    def test_profile_shows_first_and_query_is_hidden(
+        self,
+        reference_conn: ConnectionConfig,
+    ) -> None:
+        page = (
+            web.create_app([reference_conn])
+            .test_client()
+            .get(
+                "/t/production/arboretum.seedbank.accession",
+            )
+        )
+        text = page.get_data(as_text=True)
+
+        assert '<button class="tab-btn" data-tab="context">Context</button>' in text
+        assert '<div data-purpose-panel="profile">' in text
+        assert '<div data-purpose-panel="query" hidden>' in text
+
+    def test_a_carried_unprofiled_table_matches_the_cli(
+        self,
+        carried_project: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        conn = ConnectionConfig(
+            name="production",
+            adapter="postgres",
+            output=carried_project / "prints",
+        )
+        page = web.create_app([conn]).test_client().get("/t/production/arboretum.seedbank.vault")
+        shown = _context_sources(page.get_data(as_text=True))
+        result = run_cli(
+            carried_project,
+            monkeypatch,
+            ["context", "arboretum.seedbank.vault", "production", "--no-tui"],
+        )
+
+        assert "Unprofiled: " in shown["profile"]
+        assert shown["profile"] == result.stdout
+
+    def test_markup_in_a_value_renders_as_text(self) -> None:
+        rendered = web._render_context("| v |\n|---|\n| '<script>x</script>' [a](javascript:x) |\n")
+
+        assert "<script>" not in rendered
+        assert "&lt;script&gt;" in rendered
+        assert "href" not in rendered
+
+    def test_the_identity_lines_keep_their_breaks(self) -> None:
+        assert "Adapter: postgres<br />" in web._render_context(
+            "# Table: t\nAdapter: postgres\nGrain: id\n",
+        )

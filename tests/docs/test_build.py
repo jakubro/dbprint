@@ -27,6 +27,21 @@ class TestBuildSite:
         assert (output / "s" / "primary" / "seedbank" / "index.html").is_file()
         assert result.pages_written == 4
 
+    def test_a_written_page_carries_both_context_purposes(
+        self,
+        rich_conn: ConnectionConfig,
+        tmp_path: Path,
+    ) -> None:
+        output = tmp_path / "site"
+
+        build.build_site([rich_conn], output)
+
+        for page in ("t/primary/seedbank.batch", "s/primary/seedbank"):
+            text = (output / page / "index.html").read_text()
+
+            assert 'data-purpose-panel="profile"' in text, page
+            assert 'data-purpose-panel="query" hidden' in text, page
+
     def test_a_failed_route_is_named_and_not_written(
         self,
         rich_conn: ConnectionConfig,

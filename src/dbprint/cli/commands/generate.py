@@ -9,6 +9,7 @@ import rich_click as click
 from rich.console import Console
 
 from dbprint.config import ConfigError, ConnectionConfig
+from dbprint.config.resolution import ConnectionResolutionError, resolve
 from dbprint.engine import (
     EXIT_CONNECTION,
     EXIT_GENERIC,
@@ -35,7 +36,6 @@ from ..rendering.errors import (
     no_tables_matched_text,
     sketch_failure_texts,
 )
-from ..resolution import ConnectionResolutionError, resolve
 from ..run_log import close_run_log, log_run_header, log_run_summary, open_run_log
 
 

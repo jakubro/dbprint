@@ -126,7 +126,7 @@ class TestEnumerate:
     ) -> None:
         """Same unconditional treatment as `diff` - `reading` is producer-written too."""
 
-        from dbprint.engine.reading_guide import READING_GUIDE_FILENAME
+        from dbprint.spec.artifacts import READING_GUIDE_FILENAME
 
         (primary_conn.output / primary_conn.name / READING_GUIDE_FILENAME).unlink()
         state = ServedConnections(served={"production": primary_conn}, default="production")
@@ -149,7 +149,7 @@ class TestEnumerate:
         neither `diff.yaml` nor the reading guide, and the listing must not shrink to 1.
         """
 
-        from dbprint.engine.reading_guide import READING_GUIDE_FILENAME
+        from dbprint.spec.artifacts import READING_GUIDE_FILENAME
 
         print_root = primary_conn.output / primary_conn.name
         (print_root / "diff.yaml").unlink()
@@ -601,15 +601,18 @@ class TestAWronglyShapedManifestIsAnErrorNotACrash:
         with pytest.raises(McpError):
             read(state, "dbprint://production/arboretum.seedbank.collector/ddl")
 
-    def test_enumeration_raises_a_protocol_error(
+    def test_enumeration_lists_the_connection_without_its_tables(
         self,
         primary_conn: ConnectionConfig,
     ) -> None:
+        """The manifest URI stays; no table URI is guessed from a manifest no reader can walk."""
+
         (primary_conn.output / primary_conn.name / "manifest.yaml").write_text("- one\n- two\n")
         state = ServedConnections({"production": primary_conn}, default="production")
+        uris = [r.uri for r in enumerate_for(state) if r.uri.startswith("dbprint://production/")]
 
-        with pytest.raises(McpError):
-            enumerate_for(state)
+        assert "dbprint://production/manifest" in uris
+        assert not any("arboretum." in uri for uri in uris)
 
     def test_an_entry_that_is_not_a_mapping_is_skipped_not_fatal(
         self,
@@ -639,10 +642,177 @@ def test_every_per_table_resource_names_the_tool_that_reads_it_interpreted(
         e for e in enumerate_for(state) if e.uri.startswith(prefix) and e.uri.count("/") == 4
     ]
 
-    assert per_table
-    assert all("get_table_context" in e.description for e in per_table), [
-        e.uri for e in per_table if "get_table_context" not in e.description
+    # The annotations resource is the one surface that names a rejected edge, so it routes nowhere.
+    routed = [e for e in per_table if not e.uri.endswith("/relationships_annotations")]
+
+    assert routed
+    assert all("get_table_context" in e.description for e in routed), [
+        e.uri for e in routed if "get_table_context" not in e.description
     ]
+
+
+_TRIAL = "arboretum.seedbank.germination_trial"
+_COLLECTOR = "arboretum.seedbank.collector"
+
+
+def _reject_the_trial_collector_edge(conn: ConnectionConfig) -> Path:
+    """Reject `germination_trial.collector_id -> collector.collector_id`, an inferred edge."""
+
+    root = conn.output / conn.name
+    manifest_path = root / "manifest.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text())
+    manifest["tables"][_TRIAL]["artifacts"]["relationships_annotations"] = (
+        "relationships.annotations.yaml"
+    )
+    manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+    path = root / "arboretum/seedbank/germination_trial/relationships.annotations.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "format_version": 1,
+                "refers_to": [
+                    {
+                        "column": ["collector_id"],
+                        "target_table": _COLLECTOR,
+                        "target_column": ["collector_id"],
+                        "verdict": "rejected",
+                    },
+                ],
+            },
+        ),
+    )
+
+    return path
+
+
+def _state(conn: ConnectionConfig) -> ServedConnections:
+    return ServedConnections(served={conn.name: conn}, default=conn.name)
+
+
+class TestTheRelationshipsResourceWithholdsRejectedEdges:
+    """SPEC 2.7.2: the served graph drops a rejected edge from both sides; the file keeps it."""
+
+    def test_the_referencers_resource_drops_the_refers_to_entry(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        _reject_the_trial_collector_edge(primary_conn)
+        state = _state(primary_conn)
+        served = yaml.safe_load(read(state, f"dbprint://production/{_TRIAL}/relationships").content)
+        on_disk = (
+            primary_conn.output
+            / "production/arboretum/seedbank/germination_trial/relationships.yaml"
+        )
+
+        assert _COLLECTOR not in [e["target_table"] for e in served["refers_to"]]
+        assert _COLLECTOR in on_disk.read_text()
+        assert served["refers_to"]
+
+    def test_the_targets_resource_drops_the_referenced_by_entry(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        _reject_the_trial_collector_edge(primary_conn)
+        state = _state(primary_conn)
+        uri = f"dbprint://production/{_COLLECTOR}/relationships"
+        served = yaml.safe_load(read(state, uri).content)
+
+        assert _TRIAL not in [e["referencer_table"] for e in served.get("referenced_by") or []]
+
+    def test_a_table_no_rejection_touches_is_served_byte_for_byte(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        _reject_the_trial_collector_edge(primary_conn)
+        state = _state(primary_conn)
+        path = primary_conn.output / "production/arboretum/seedbank/taxon/relationships.yaml"
+
+        assert read(
+            state,
+            "dbprint://production/arboretum.seedbank.taxon/relationships",
+        ).content == (path.read_text())
+
+    def test_editing_the_verdict_moves_the_version(self, primary_conn: ConnectionConfig) -> None:
+        verdicts = _reject_the_trial_collector_edge(primary_conn)
+        state = _state(primary_conn)
+        uri = f"dbprint://production/{_TRIAL}/relationships"
+        before = read(state, uri).version
+        verdicts.write_text(verdicts.read_text() + "# reviewed again\n")
+
+        assert read(state, uri).version != before
+
+    def test_both_descriptions_say_what_the_served_graph_withholds(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        _reject_the_trial_collector_edge(primary_conn)
+        listed = {e.uri: e.description for e in enumerate_for(_state(primary_conn))}
+        prefix = f"dbprint://production/{_TRIAL}"
+
+        assert "without the edges a human rejected" in listed[f"{prefix}/relationships"]
+        assert (
+            "no other resource or tool lists a rejected edge"
+            in listed[f"{prefix}/relationships_annotations"]
+        )
+
+
+def _diff_with_two_edge_events(conn: ConnectionConfig) -> Path:
+    path = conn.output / conn.name / "diff.yaml"
+    diff = yaml.safe_load(path.read_text())
+    event = {"kind": "relationship_added", "source_table": _TRIAL, "detection": "inferred"}
+    diff["changes"] = [
+        {
+            **event,
+            "source_column": ["collector_id"],
+            "target_table": _COLLECTOR,
+            "target_column": ["collector_id"],
+        },
+        {
+            **event,
+            "source_column": ["taxon_id"],
+            "target_table": "arboretum.seedbank.taxon",
+            "target_column": ["taxon_id"],
+        },
+    ]
+    diff["summary"] = {**diff.get("summary", {}), "relationships_changed": 2}
+    path.write_text(yaml.safe_dump(diff, sort_keys=False))
+
+    return path
+
+
+class TestTheDiffResourceWithholdsRejectedEdges:
+    """SPEC 2.7.2: the served diff carries no relationship event about a rejected edge."""
+
+    def test_the_event_is_dropped_and_the_summary_counts_what_is_left(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        on_disk = _diff_with_two_edge_events(primary_conn)
+        _reject_the_trial_collector_edge(primary_conn)
+        served = yaml.safe_load(read(_state(primary_conn), "dbprint://production/diff").content)
+
+        assert [c["source_column"] for c in served["changes"]] == [["taxon_id"]]
+        assert served["summary"]["relationships_changed"] == 1
+        assert "collector_id" in on_disk.read_text()
+
+    def test_with_no_rejection_the_diff_is_served_byte_for_byte(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        on_disk = _diff_with_two_edge_events(primary_conn)
+
+        assert (
+            read(_state(primary_conn), "dbprint://production/diff").content == on_disk.read_text()
+        )
+
+    def test_editing_the_verdict_moves_the_version(self, primary_conn: ConnectionConfig) -> None:
+        _diff_with_two_edge_events(primary_conn)
+        verdicts = _reject_the_trial_collector_edge(primary_conn)
+        state = _state(primary_conn)
+        before = read(state, "dbprint://production/diff").version
+        verdicts.write_text(verdicts.read_text() + "# reviewed again\n")
+
+        assert read(state, "dbprint://production/diff").version != before
 
 
 class TestPagedReads:

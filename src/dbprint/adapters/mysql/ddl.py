@@ -12,6 +12,7 @@ import re
 from .connection import Cursor, exec_query
 from ..credentials import mask_mysql_ddl
 from ..identifiers import Identity
+from ..sql_layout import trimmed_lines
 
 
 _AUTO_INCREMENT_COUNTER_RE = re.compile(r"\s+AUTO_INCREMENT=\d+", re.IGNORECASE)
@@ -35,7 +36,4 @@ def normalize(raw: str) -> str:
     """Strip the AUTO_INCREMENT counter + trailing whitespace, mask a remote table's credential."""
 
     without_counter = mask_mysql_ddl(_AUTO_INCREMENT_COUNTER_RE.sub("", raw))
-    lines = [line.rstrip() for line in without_counter.splitlines()]
-    text = "\n".join(lines).strip("\n")
-
-    return text + "\n" if text else ""
+    return trimmed_lines(without_counter)

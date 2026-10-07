@@ -1,0 +1,19 @@
+{# The Context tab: what `dbprint context` hands an agent for this page's selection, per purpose. #}
+{% macro context_panel(context) %}
+  <div data-tab-panel="context">
+    <div class="purpose-picker">
+      {% for purpose in ("profile", "query") %}
+        <button type="button" class="purpose-btn{{ ' active' if loop.first else '' }}" data-purpose="{{ purpose }}">{{ purpose }}</button>
+      {% endfor %}
+    </div>
+    {% for purpose in ("profile", "query") %}
+      <div data-purpose-panel="{{ purpose }}"{{ '' if loop.first else ' hidden' }}>
+        <details class="context-markdown">
+          <summary>Markdown</summary>
+          <pre class="context-source">{{ context[purpose] }}</pre>
+        </details>
+        <div class="md context-fragment">{{ context[purpose]|context_md }}</div>
+      </div>
+    {% endfor %}
+  </div>
+{% endmacro %}

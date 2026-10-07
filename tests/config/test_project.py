@@ -15,9 +15,10 @@ from dbprint.config import (
     load_project,
     load_project_at,
 )
+from tests._scripts import REPO_ROOT
 
 
-EXAMPLE_DIR = Path(__file__).parent.parent.parent / "docs/format/v1/examples/production"
+EXAMPLE_DIR = REPO_ROOT / "docs/format/v1/examples/production"
 
 
 def _write_config(tmp_path: Path, body: str) -> Path:

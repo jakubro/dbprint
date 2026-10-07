@@ -13,6 +13,7 @@ import yaml
 from rich.console import Console
 
 from dbprint.config import ConnectionConfig
+from dbprint.config.resolution import ConnectionResolutionError, resolve
 from dbprint.engine import (
     EXIT_GENERIC,
     EXIT_OK,
@@ -20,17 +21,17 @@ from dbprint.engine import (
     Purpose,
     assemble_context,
     assemble_context_payloads,
+    context_terms,
 )
 from dbprint.engine.baseline import (
     failed_tables,
-    manifest_shape_error,
+    read_manifest,
     unprofiled_message,
+    unusable_manifest_message,
 )
-from dbprint.spec import artifact_yaml
 from ..options import project_option, resolve_project
 from ..rendering import resolve_render_mode
 from ..rendering.context_tty import render_human
-from ..resolution import ConnectionResolutionError, resolve
 
 
 @click.command(name="context")
@@ -60,9 +61,8 @@ from ..resolution import ConnectionResolutionError, resolve
     show_default=True,
     help="What the fragment is for. `profile` describes the data: DDL, a per-column Notes "
     "summary of the statistics, relationships. `query` is for writing SQL against the table: "
-    "DDL, the join paths, a data dictionary, and the value lists a predicate can be written "
-    "from, with counts and coverage - and none of the statistics, which describe the data "
-    "rather than what a predicate needs.",
+    "DDL, the join paths, a data dictionary, the value lists a predicate can be written "
+    "from, with counts and coverage, and each nullable column's null share.",
 )
 @click.option("--no-ddl", is_flag=True, default=False, help="Omit the DDL section.")
 @click.option(
@@ -89,8 +89,9 @@ from ..resolution import ConnectionResolutionError, resolve
     "budget",
     type=int,
     default=None,
-    help="Soft output cap in tokens (approx chars/4); the table's identity is charged first "
-    "and a section that does not fit is skipped, never truncated. e.g. 4000",
+    help="Soft output cap in tokens (approx chars/4); the table's identity is charged first, "
+    "the Terms legend next, and a section that does not fit is skipped, never truncated - "
+    "the legend among them. e.g. 4000",
 )
 @click.option(
     "--output",
@@ -193,12 +194,13 @@ def context_command(
     multi_connection = len(resolved) > 1
     chunks: list[str] = []
     entries: list[dict[str, Any]] = []
+    terms: set[str] = set()
 
     for conn_config, manifest, resolved_tables in resolved:
         if multi_connection and options.format in ("json", "yaml"):
             payloads = assemble_context_payloads(
                 manifest,
-                print_root=_print_root(conn_config),
+                print_root=conn_config.print_root,
                 tables=resolved_tables,
                 options=options,
             )
@@ -206,13 +208,14 @@ def context_command(
         else:
             result = assemble_context(
                 manifest,
-                print_root=_print_root(conn_config),
+                print_root=conn_config.print_root,
                 tables=resolved_tables,
                 options=options,
                 connection_name=conn_config.name,
                 multi_connection=multi_connection,
             )
             included, chunk = result.tables_included, result.text
+            terms |= result.terms
 
         if included == 0:
             click.echo(f"{conn_config.name}: budget too small to include any table.", err=True)
@@ -231,6 +234,10 @@ def context_command(
         text = _render_connection_documents(entries, options.format)
     else:
         text = "\n\n---\n\n".join(c.rstrip() for c in chunks if c.strip())
+
+        # One legend for the whole reply; each connection's chunk reserved its room but left it out.
+        if multi_connection and (legend := context_terms.legend(terms)):
+            text = f"{legend}\n\n{text}"
 
     if text and not text.endswith("\n"):
         text += "\n"
@@ -268,10 +275,14 @@ def _resolve_connections(
     exit_code = EXIT_OK
 
     for conn_config in connections:
-        manifest = _load_manifest(conn_config)
+        read = read_manifest(conn_config.print_root)
+        manifest = read.manifest
 
         if manifest is None:
-            click.echo(f"{conn_config.name}: {_unusable_manifest_cause(conn_config)}", err=True)
+            click.echo(
+                f"{conn_config.name}: {unusable_manifest_message(read, conn_config.name)}",
+                err=True,
+            )
             exit_code = max(exit_code, EXIT_GENERIC)
             continue
 
@@ -351,48 +362,3 @@ def _unprofiled_matches(
         return []
 
     return [fqn for fqn in failed_tables(manifest) if fnmatch.fnmatchcase(fqn, target)]
-
-
-def _load_manifest(conn: ConnectionConfig) -> dict[str, Any] | None:
-    path = _manifest_path(conn)
-
-    if not path.is_file():
-        return None
-
-    try:
-        data = artifact_yaml.load(path.read_text(encoding="utf-8"))
-    except yaml.YAMLError:
-        return None
-
-    if manifest_shape_error(data) is not None:
-        return None
-
-    return data if isinstance(data, dict) else None
-
-
-def _unusable_manifest_cause(conn: ConnectionConfig) -> str:
-    """Why the manifest could not be read, in the words the user needs.
-
-    Missing and wrong-shape stay apart: conflating them sends the user to `generate`, which
-    overwrites the print instead of fixing the file. Re-reads, since the loader has failed.
-    """
-
-    path = _manifest_path(conn)
-
-    if not path.is_file():
-        return f"no manifest at {path}. Run `dbprint generate {conn.name}` first."
-
-    try:
-        data = artifact_yaml.load(path.read_text(encoding="utf-8"))
-    except yaml.YAMLError as exc:
-        return f"could not parse {path}: {exc}"
-
-    return f"ignoring {path}: {manifest_shape_error(data) or 'unusable manifest'}"
-
-
-def _manifest_path(conn: ConnectionConfig) -> Path:
-    return _print_root(conn) / "manifest.yaml"
-
-
-def _print_root(conn: ConnectionConfig) -> Path:
-    return conn.output / conn.name

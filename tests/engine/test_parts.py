@@ -207,7 +207,8 @@ def test_context_lists_each_part_under_its_label_with_presence(tmp_path: Path) -
     assert "## Column parts" in text
     assert "| items[*].sku |" in text
     assert "| attrs.status |" in text
-    assert "present in 90%" in text
+    assert "; present: 90% of rows |" in text
+    assert "; present: 100% of items[*] |" in text
 
 
 def test_search_and_resolve_reach_a_part(tmp_path: Path) -> None:

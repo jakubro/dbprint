@@ -8,32 +8,15 @@ from typing import Any, TypeGuard
 
 import yaml
 
-from dbprint.spec.drift import Data, column_field_rule
+from dbprint.spec.artifacts import declared_artifacts, walkable_tables
+from dbprint.spec.drift import NON_NUMERIC_STATS, SUMMARY_COUNTERS, Data, column_field_rule
 from dbprint.spec.redaction import NOT_COMPARED_UNDER_REDACTION
 from .issue import Issue
-from .layout import declared_artifacts, walkable_tables
 from .yaml_utils import load_yaml
 
 
-_NON_NUMERIC_STATS = {
-    "distribution",
-    "classification",
-    "values",
-}
-
 # The statistics a `redacted` marker withholds or substitutes (SPEC 2.2.9), by path head.
 _VALUE_BEARING_STATS = NOT_COMPARED_UNDER_REDACTION
-
-_KIND_TO_SUMMARY_KEY: dict[str, str] = {
-    "table_added": "tables_added",
-    "table_removed": "tables_removed",
-    "column_added": "columns_added",
-    "column_removed": "columns_removed",
-    "column_type_changed": "columns_type_changed",
-    "column_nullable_changed": "columns_nullable_changed",
-    "column_default_changed": "columns_default_changed",
-    "statistic_changed": "statistics_drifted",
-}
 
 # Ordered, because the mismatch message names them in this order.
 _TABLE_TOTAL_KEYS = (
@@ -42,16 +25,6 @@ _TABLE_TOTAL_KEYS = (
     "unevaluated_tables",
     "tables_added",
 )
-
-_GROUP_KINDS: dict[str, set[str]] = {
-    "relationships_changed": {
-        "relationship_added",
-        "relationship_removed",
-        "relationship_modified",
-    },
-    "indexes_changed": {"index_added", "index_removed", "index_modified"},
-    "comments_changed": {"comment_changed"},
-}
 
 
 def check(data: Any, path: str) -> list[Issue]:
@@ -208,18 +181,15 @@ def _check_summary_counts(changes: list[Any], summary: dict, path: str) -> list[
 
     mismatches: list[str] = []
 
-    for kind, summary_key in _KIND_TO_SUMMARY_KEY.items():
-        if summary.get(summary_key, 0) != actual[kind]:
-            mismatches.append(
-                f"{summary_key} reports {summary.get(summary_key)}, actual events for {kind}: {actual[kind]}",
-            )
-
-    for summary_key, kinds in _GROUP_KINDS.items():
+    for summary_key, kinds in SUMMARY_COUNTERS.items():
         expected = sum(actual[k] for k in kinds)
 
         if summary.get(summary_key, 0) != expected:
+            counted = (
+                f"actual events for {next(iter(kinds))}" if len(kinds) == 1 else "actual events sum"
+            )
             mismatches.append(
-                f"{summary_key} reports {summary.get(summary_key)}, actual events sum: {expected}",
+                f"{summary_key} reports {summary.get(summary_key)}, {counted}: {expected}",
             )
 
     if not mismatches:
@@ -339,7 +309,7 @@ def _check_statistic(change: dict, where: str) -> list[Issue]:
             ),
         ]
 
-    is_non_numeric = stat in _NON_NUMERIC_STATS or stat.endswith(".classification")
+    is_non_numeric = stat in NON_NUMERIC_STATS or stat.endswith(".classification")
 
     if is_non_numeric and ("delta" in change or "delta_pct" in change):
         return [

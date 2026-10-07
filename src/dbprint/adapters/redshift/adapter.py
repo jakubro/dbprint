@@ -8,7 +8,6 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import Any, ClassVar
 
-from dbprint.spec.classification import is_string_like_type
 from . import connection as connection_module
 from . import ddl as ddl_module
 from . import introspect as introspect_module
@@ -31,7 +30,7 @@ from ..base import (
     row_count_or_none,
 )
 from ..dialect import Dialect
-from ..driver import CursorFactory
+from ..driver import CursorFactory, ServerParams
 from ..errors import QueryFailed
 from ..identifiers import Identity, IdentityRegistry
 
@@ -48,8 +47,7 @@ class RedshiftAdapter(PerDatabaseSqlAdapter):
     """
 
     KNOWN_TYPES: ClassVar[tuple[str, ...]] = stats_module.KNOWN_TYPES
-    REQUIRED_KEYS: ClassVar[tuple[str, ...]] = ("host", "user", "password")
-    OPTIONAL_KEYS: ClassVar[tuple[str, ...]] = ("database", "port")
+    SERVER_PARAMS: ClassVar[type[ServerParams]] = ConnectionParams
     # RANDOM() carries no seed at all, so an unmaterialized `sample` scope redraws with no
     # guarantee of agreement across statements.
     SAMPLE_FALLBACK_COHERENT: ClassVar[bool] = False
@@ -80,7 +78,6 @@ class RedshiftAdapter(PerDatabaseSqlAdapter):
         self._factory = cursor_factory
         self._start_sessions(self._params.database or ENTRY_DATABASE)
         self._database_names: tuple[str, ...] | None = None
-        self._collations: dict[str, str] = {}
         self._identities = IdentityRegistry(DIALECT)
         self._skipped: tuple[SkippedNamespace, ...] = ()
         self._selected_databases: tuple[str, ...] = ()
@@ -104,12 +101,12 @@ class RedshiftAdapter(PerDatabaseSqlAdapter):
 
         lost = {entry.name for entry in skipped}
         reachable = [(meta, physical) for meta, physical in selected if physical[0] not in lost]
-        self._identities.register(reachable)
+        listed = self._register(reachable)
         self._skipped = tuple(skipped)
         self._external = frozenset(meta.fqn for meta, _ in reachable if meta.external)
         self._selected_databases = tuple(sorted({physical[0] for _, physical in reachable}))
 
-        return [meta for meta, _ in reachable]
+        return listed
 
     def skipped_namespaces(self) -> tuple[SkippedNamespace, ...]:
         return self._skipped
@@ -124,19 +121,8 @@ class RedshiftAdapter(PerDatabaseSqlAdapter):
         identity = self._identity(fqn)
         columns = self._columns_of(fqn)(self._handle(fqn), identity)
         self._identities.attach(fqn, columns)
-        own = self._collation(identity.parts[0])
 
-        # The manifest states the entry database's collation; a table compared under another
-        # database's default says so on each string column, or it would inherit the wrong one.
-        if own == self._collation(self._entry_database):
-            return columns
-
-        return [
-            replace(c, collation=own)
-            if c.collation is None and is_string_like_type(c.sql_type)
-            else c
-            for c in columns
-        ]
+        return self._with_database_collation(identity, columns)
 
     def introspect_view_dependencies(self) -> dict[str, tuple[str, ...]] | None:
         out: dict[str, tuple[str, ...]] = {}
@@ -200,25 +186,8 @@ class RedshiftAdapter(PerDatabaseSqlAdapter):
 
         return self._session(self._identity(fqn).parts[0]).cursor
 
-    def _collation(self, database: str) -> str:
-        if database not in self._collations:
-            cursor = self._session(database).cursor
-            self._collations[database] = introspect_module.default_collation(cursor)
-
-        return self._collations[database]
-
-    def _read_identity(self, fqn: str) -> Identity:
-        """The identity carrying its columns, read from the catalog if not yet introspected."""
-
-        identity = self._identity(fqn)
-
-        if identity.columns:
-            return identity
-
-        return self._identities.attach(
-            fqn,
-            self._columns_of(fqn)(self._handle(fqn), identity),
-        )
+    def _session_handle(self, session: Connection) -> Any:
+        return session.cursor
 
     def _columns_of(self, fqn: str) -> Callable[[Any, Identity], list[ColumnMeta]]:
         return (

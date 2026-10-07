@@ -84,7 +84,7 @@ def _to_dict(result: CheckResult) -> dict[str, Any]:
         "stale_entries": [
             {
                 "table": s.fqn,
-                "age_days": s.age_days if s.age_days != float("inf") else None,
+                "age_days": s.age_days if s.measured else None,
                 "max_age_days": s.max_age_days,
             }
             for s in result.stale_entries

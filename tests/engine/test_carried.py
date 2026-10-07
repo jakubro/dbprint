@@ -29,7 +29,7 @@ from dbprint.engine.carried import (
 from dbprint.engine.diff import DiffSelectors
 from dbprint.engine.manifest_builder import profiling_params_dict, statistics_params_dict
 from dbprint.engine.result import TableResult, TableStatus
-from tests.engine.test_orchestrator import _conn_config, _curator_fixture
+from tests._curator import conn_config, curator_fixture
 
 
 CURATOR = "public.curator"
@@ -49,7 +49,7 @@ class _FailingAdapter(MockAdapter):
 
 
 def _first_run(tmp_path: Path) -> Path:
-    Engine(MockAdapter(_curator_fixture()), _conn_config(tmp_path), tmp_path).generate()
+    Engine(MockAdapter(curator_fixture()), conn_config(tmp_path), tmp_path).generate()
 
     return tmp_path / "primary"
 
@@ -96,11 +96,11 @@ class TestReadOnce:
     ) -> None:
         root = _first_run(tmp_path)
         engine_adapter = (
-            MockAdapter(_curator_fixture())
+            MockAdapter(curator_fixture())
             if adapter is None
-            else _FailingAdapter(_curator_fixture(), adapter)
+            else _FailingAdapter(curator_fixture(), adapter)
         )
-        conn = replace(_conn_config(tmp_path), **conn_changes)
+        conn = replace(conn_config(tmp_path), **conn_changes)
         counts = _opens(monkeypatch, root)
 
         Engine(engine_adapter, conn, tmp_path).generate(request_)
@@ -115,10 +115,10 @@ class TestReadOnce:
     ) -> None:
         root = _first_run(tmp_path)
         (root / "public" / "curator" / "statistics.yaml").unlink()
-        fixture = {fqn: table for fqn, table in _curator_fixture().items() if fqn != HERBARIUM}
+        fixture = {fqn: table for fqn, table in curator_fixture().items() if fqn != HERBARIUM}
         counts = _opens(monkeypatch, root)
 
-        Engine(MockAdapter(fixture), _conn_config(tmp_path), tmp_path).generate(GenerateRequest())
+        Engine(MockAdapter(fixture), conn_config(tmp_path), tmp_path).generate(GenerateRequest())
 
         assert counts
         assert {path: n for path, n in counts.items() if n > 1} == {}
@@ -127,7 +127,7 @@ class TestReadOnce:
         root = _first_run(tmp_path)
         counts = _opens(monkeypatch, root)
 
-        Engine(MockAdapter(_curator_fixture()), _conn_config(tmp_path), tmp_path).compute_diff(
+        Engine(MockAdapter(curator_fixture()), conn_config(tmp_path), tmp_path).compute_diff(
             DiffRequest(),
         )
 
@@ -241,7 +241,7 @@ class TestFreshnessVerdict:
 
     @pytest.fixture(autouse=True)
     def _conn(self, tmp_path: Path) -> None:
-        self.conn = _conn_config(tmp_path)
+        self.conn = conn_config(tmp_path)
 
     def _table(self, **recorded: Any) -> CommittedTable:
         values: dict[str, Any] = {
@@ -312,8 +312,8 @@ class TestOffsetLessProfiledAt:
         manifest.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
         result = Engine(
-            MockAdapter(_curator_fixture()),
-            _conn_config(tmp_path),
+            MockAdapter(curator_fixture()),
+            conn_config(tmp_path),
             tmp_path,
         ).generate()
 
@@ -327,9 +327,9 @@ class TestRemovedAgreesWithTheDiff:
         """
 
         root = _first_run(tmp_path)
-        fixture = {fqn: t for fqn, t in _curator_fixture().items() if fqn != HERBARIUM}
+        fixture = {fqn: t for fqn, t in curator_fixture().items() if fqn != HERBARIUM}
 
-        result = Engine(MockAdapter(fixture), _conn_config(tmp_path), tmp_path).generate()
+        result = Engine(MockAdapter(fixture), conn_config(tmp_path), tmp_path).generate()
 
         diff = yaml.safe_load((root / "diff.yaml").read_text())
         removed = {c["table"] for c in diff["changes"] if c["kind"] == "table_removed"}
@@ -352,9 +352,9 @@ class TestTheManifestIsTheExtractedPlusTheCarried:
         tmp_path: Path,
     ) -> None:
         root = _first_run(tmp_path)
-        failing = _FailingAdapter(_curator_fixture(), HERBARIUM)
+        failing = _FailingAdapter(curator_fixture(), HERBARIUM)
 
-        Engine(failing, _conn_config(tmp_path), tmp_path).generate(GenerateRequest(force=True))
+        Engine(failing, conn_config(tmp_path), tmp_path).generate(GenerateRequest(force=True))
 
         assert set(yaml.safe_load((root / "manifest.yaml").read_text())["tables"]) == {
             CURATOR,
@@ -366,9 +366,9 @@ class TestTheFailedAndNotAttemptedPaths:
     def test_a_failed_table_keeps_its_committed_entry(self, tmp_path: Path) -> None:
         root = _first_run(tmp_path)
         before = yaml.safe_load((root / "manifest.yaml").read_text())["tables"][HERBARIUM]
-        failing = _FailingAdapter(_curator_fixture(), HERBARIUM)
+        failing = _FailingAdapter(curator_fixture(), HERBARIUM)
 
-        Engine(failing, _conn_config(tmp_path), tmp_path).generate(GenerateRequest(force=True))
+        Engine(failing, conn_config(tmp_path), tmp_path).generate(GenerateRequest(force=True))
 
         committed = CommittedPrint.load(root)
         after = yaml.safe_load((root / "manifest.yaml").read_text())["tables"][HERBARIUM]
@@ -386,9 +386,9 @@ class TestTheFailedAndNotAttemptedPaths:
     ) -> None:
         root = _first_run(tmp_path)
         before = (root / "manifest.yaml").read_text()
-        failing = _FailingAdapter(_curator_fixture(), CURATOR)
+        failing = _FailingAdapter(curator_fixture(), CURATOR)
 
-        Engine(failing, _conn_config(tmp_path), tmp_path).generate(
+        Engine(failing, conn_config(tmp_path), tmp_path).generate(
             GenerateRequest(force=True, fail_fast=True),
         )
 

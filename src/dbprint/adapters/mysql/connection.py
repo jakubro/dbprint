@@ -7,13 +7,12 @@ found" error. The driver is imported lazily, so dbprint imports without the `[my
 
 from __future__ import annotations
 
-import importlib
 import logging
 from typing import Any
 
 from .. import driver
 from ..dialect import Dialect
-from ..driver import Cursor, ServerParams
+from ..driver import Cursor, CursorFactory, FactoryConnection, ServerParams
 
 
 # mysql-connector-python defaults to pyformat; the adapter does not override it.
@@ -45,59 +44,26 @@ class ConnectionParams(ServerParams):
     error = MysqlConnectionError
 
 
-class Connection:
-    """Wraps a mysql-connector session plus its shared buffered cursor."""
+class Connection(FactoryConnection):
+    """A mysql-connector session holding one buffered cursor; `mariadb` names the server family.
 
-    def __init__(self, params: ConnectionParams) -> None:
-        self.params = params
+    The factory opens the driver connection, not a cursor: the session closes both.
+    """
+
+    error = MysqlConnectionError
+    vendor = "MySQL"
+
+    def __init__(
+        self,
+        params: ConnectionParams,
+        cursor_factory: CursorFactory[ConnectionParams] | None = None,
+    ) -> None:
+        super().__init__(params, cursor_factory)
         self._conn: Any | None = None
-        self._cursor: Cursor | None = None
         self.mariadb = False
 
-    def sibling(self) -> Connection:
-        """An unopened connection with the same parameters."""
-
-        return Connection(self.params)
-
-    def open(self) -> None:
-        connector = _import_connector()
-
-        try:
-            # With no database the session has no default; every catalog read names its own.
-            database = {} if self.params.database is None else {"database": self.params.database}
-            self._conn = connector.connect(
-                host=self.params.host,
-                port=self.params.port,
-                user=self.params.user,
-                password=self.params.password,
-                autocommit=True,
-                **database,
-            )
-        except connector.Error as exc:
-            where = f"{self.params.host}:{self.params.port}"
-            where += f"/{self.params.database}" if self.params.database is not None else ""
-
-            raise MysqlConnectionError(
-                f"could not connect to MySQL at {where} as {self.params.user!r}: {exc}",
-            ) from exc
-
-        self._cursor = self._conn.cursor(buffered=True)
-        self.mariadb = "mariadb" in str(self._conn.server_info).lower()
-
-        if self.params.statement_timeout is not None:
-            try:
-                _limit_statements(self._cursor, self.params.statement_timeout, connector.Error)
-            except connector.Error as exc:
-                raise MysqlConnectionError(f"could not set statement_timeout: {exc}") from exc
-
     def close(self) -> None:
-        if self._cursor is not None:
-            try:
-                self._cursor.close()
-            except Exception:  # noqa: BLE001, S110 - close-time failure is uninteresting
-                pass
-
-            self._cursor = None
+        super().close()
 
         if self._conn is not None:
             try:
@@ -110,12 +76,37 @@ class Connection:
     def is_open(self) -> bool:
         return self._conn is not None and bool(self._conn.is_connected())
 
-    @property
-    def cursor(self) -> Cursor:
-        if self._cursor is None:
-            raise MysqlConnectionError("connection is not open; call connect() first")
+    def _default_factory(self, params: ConnectionParams) -> Any:
+        connector = _import_connector()
+        # With no database the session has no default; every catalog read names its own.
+        database = {} if params.database is None else {"database": params.database}
 
-        return self._cursor
+        return connector.connect(
+            host=params.host,
+            port=params.port,
+            user=params.user,
+            password=params.password,
+            autocommit=True,
+            **database,
+        )
+
+    def _open_failure(self, exc: Exception) -> str:
+        return driver.connect_failure("MySQL", self.params, exc)
+
+    def _opened(self, connection: Any, /) -> Any:
+        self._conn = connection
+        cursor = connection.cursor(buffered=True)
+        self.mariadb = "mariadb" in str(connection.server_info).lower()
+
+        if self.params.statement_timeout is not None:
+            error = _import_connector().Error
+
+            try:
+                _limit_statements(cursor, self.params.statement_timeout, error)
+            except error as exc:
+                raise MysqlConnectionError(f"could not set statement_timeout: {exc}") from exc
+
+        return cursor
 
 
 def exec_query(cursor: Cursor, sql: str, params: Any = None) -> Cursor:
@@ -127,13 +118,12 @@ def exec_query(cursor: Cursor, sql: str, params: Any = None) -> Cursor:
 def _import_connector() -> Any:
     """Import mysql.connector lazily; raise an actionable error when absent."""
 
-    try:
-        return importlib.import_module("mysql.connector")
-    except ImportError as exc:
-        raise MysqlConnectionError(
-            "mysql-connector-python is not installed. Install dbprint with the "
-            "[mysql] extra: `pip install dbprint[mysql]`.",
-        ) from exc
+    return driver.import_extra(
+        "mysql.connector",
+        "mysql-connector-python",
+        "mysql",
+        MysqlConnectionError,
+    )
 
 
 def _limit_statements(cursor: Cursor, seconds: int, error: type[Exception]) -> None:

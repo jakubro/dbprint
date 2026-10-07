@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from dbprint.config import ConnectionConfig, ProjectConfig
+from dbprint.config.resolution import ConnectionResolutionError, resolve_connections
 from . import errors
 from .parse_cache import ParseCache
 
@@ -57,36 +58,18 @@ def build(
     `project_config`'s own connections.
     """
 
-    connections = project_config.connections
-    configured_set = configured if configured is not None else frozenset(connections)
+    configured_set = configured if configured is not None else frozenset(project_config.connections)
 
-    if conn_arg is not None:
-        if conn_arg not in connections:
-            raise errors.unknown_connection(conn_arg, list(configured_set))
+    try:
+        resolved = resolve_connections(project_config, conn_arg)
+    except ConnectionResolutionError as exc:
+        if conn_arg is not None:
+            raise errors.unknown_connection(conn_arg, list(configured_set)) from exc
 
-        return ServedConnections(
-            served={conn_arg: connections[conn_arg]},
-            default=conn_arg,
-            configured=configured_set,
-        )
+        raise errors.no_default_connection(list(configured_set)) from exc
 
-    auto_set = [c for c in connections.values() if c.auto]
-
-    if auto_set:
-        return ServedConnections(
-            served={c.name: c for c in auto_set},
-            default=auto_set[0].name if len(auto_set) == 1 else None,
-            configured=configured_set,
-        )
-
-    if len(connections) == 1:
-        only = next(iter(connections.values()))
-
-        return ServedConnections(
-            served={only.name: only},
-            default=only.name,
-            configured=configured_set,
-        )
-
-    # Caller should have rejected this at the CLI layer already.
-    raise errors.no_default_connection(list(configured_set))
+    return ServedConnections(
+        served={c.name: c for c in resolved.connections},
+        default=resolved.default,
+        configured=configured_set,
+    )

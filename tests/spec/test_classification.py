@@ -5,17 +5,21 @@ prints, and an unnamed type still classifies by what the adapter measured (SPEC 
 from __future__ import annotations
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from dbprint.spec.classification import (
     base_type,
     classify,
     compute_candidate_key_exception,
     compute_cardinality_ratio,
+    compute_fanout_avg,
     has_calendar_component,
     has_day_resolution,
     is_array_type,
     is_boolean_type,
     is_candidate_key,
+    is_integer_type,
     is_nullable_type,
     is_recognised_type,
     is_string_like_type,
@@ -558,3 +562,74 @@ def test_a_declared_map_names_its_key_and_value_types(
     expected: tuple[str, str] | None,
 ) -> None:
     assert map_types(sql_type) == expected
+
+
+class TestComputeFanoutAvg:
+    """Rows per distinct key among the referencing rows that carry one (SPEC 2.3.10)."""
+
+    def test_null_referencing_rows_are_not_counted(self) -> None:
+        assert compute_fanout_avg(1000, 990, 2) == 5.0
+
+    def test_it_rounds_to_six_places(self) -> None:
+        assert compute_fanout_avg(300, 4, 12) == 24.666667
+
+    def test_an_estimated_row_count_below_the_keys_floors_at_one(self) -> None:
+        assert compute_fanout_avg(10, 4, 8) == 1.0
+
+    @given(st.integers(1, 10**9), st.integers(0, 10**9), st.integers(1, 10**6))
+    def test_it_never_falls_below_one_row_per_key(
+        self,
+        row_count: int,
+        null_count: int,
+        cardinality: int,
+    ) -> None:
+        assert compute_fanout_avg(row_count, null_count, cardinality) >= 1.0
+
+    @given(st.integers(1, 10**6), st.integers(0, 10**9), st.integers(0, 10**9))
+    def test_it_never_exceeds_the_ratio_that_counts_every_row(
+        self,
+        cardinality: int,
+        keyed: int,
+        nulls: int,
+    ) -> None:
+        row_count = cardinality + keyed + nulls
+
+        assert compute_fanout_avg(row_count, nulls, cardinality) <= round(
+            row_count / cardinality,
+            6,
+        )
+
+
+class TestIsIntegerType:
+    @pytest.mark.parametrize(
+        "sql_type",
+        [
+            "integer",
+            "BIGINT",
+            "int(11) unsigned",
+            "Nullable(Int64)",
+            "UInt8",
+            "HUGEINT",
+            "NUMBER(38,0)",
+            "numeric(10)",
+            "DECIMAL(12, 0)",
+            "Decimal32(0)",
+        ],
+    )
+    def test_a_type_holding_only_whole_numbers(self, sql_type: str) -> None:
+        assert is_integer_type(sql_type)
+
+    @pytest.mark.parametrize(
+        "sql_type",
+        [
+            "decimal",
+            "numeric",
+            "NUMBER",
+            "NUMBER(38,2)",
+            "Decimal32(2)",
+            "double precision",
+            "real",
+        ],
+    )
+    def test_a_type_that_can_hold_a_fraction(self, sql_type: str) -> None:
+        assert not is_integer_type(sql_type)

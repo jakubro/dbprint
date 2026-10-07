@@ -89,9 +89,9 @@ class DatabricksAdapter(SqlAdapter):
             unity_catalog=self._unity_catalog,
             catalogs=self._catalogs,
         )
-        self._identities.register(selected)
+        listed = self._register(selected)
 
-        return [meta for meta, _ in selected]
+        return listed
 
     def skipped_namespaces(self) -> tuple[SkippedNamespace, ...]:
         return self._skipped

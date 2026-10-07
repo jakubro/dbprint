@@ -15,6 +15,7 @@ import yaml
 
 from dbprint.spec.looks_like import LooksLike
 from dbprint.spec.sensitivity import Sensitivity
+from dbprint.spec.temporal_age import negative_max_age_refusal
 from .duration import DurationError, parse_duration_seconds
 from .selectors import match
 
@@ -226,6 +227,12 @@ class ConnectionConfig:
     redact: tuple[RedactRule, ...] = ()
     redaction_salt: str | None = None
     assertions_raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def print_root(self) -> Path:
+        """The directory this connection's print lives in."""
+
+        return self.output / self.name
 
     @property
     def rules_read_row_counts(self) -> bool:
@@ -1465,11 +1472,7 @@ def _coerce_max_age_days(value: Any, config_path: Path, field_label: str) -> int
         raise ConfigError(f"{config_path}: {field_label}: expected integer, got {value!r}.")
 
     if value < 0:
-        raise ConfigError(
-            f"{config_path}: {field_label} is {value}, which no print can ever satisfy: every "
-            f"table re-extracts on every run and `check` reports every one of them stale. Use 0 "
-            f"to ask for that deliberately, or a positive number of days.",
-        )
+        raise ConfigError(negative_max_age_refusal(f"{config_path}: {field_label}", value))
 
     return value
 

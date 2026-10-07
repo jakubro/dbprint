@@ -100,7 +100,7 @@ class TestFreshnessVerdictIsUnconditional:
         assert "FAIL: conformance (1 error(s))" in output
         assert "OK: every print is within its max-age threshold" in output
 
-    def test_an_unmeasurable_age_is_a_note_not_an_exceedance(self) -> None:
+    def test_an_unmeasurable_age_fails_under_its_own_heading_never_beside_an_ok(self) -> None:
         result = CheckResult(
             connection_name="primary",
             print_root="prints/primary",
@@ -116,9 +116,9 @@ class TestFreshnessVerdictIsUnconditional:
 
         output = buf.getvalue()
 
-        assert "NOTE: 1 print(s) have an unmeasurable age" in output
+        assert "FAIL: 1 print(s) have an unmeasurable age" in output
         assert "exceed their max-age" not in output
-        assert "OK: every print is within its max-age threshold" in output
+        assert "OK:" not in output.split("conformance clean", 1)[1]
 
     def test_a_measured_exceedance_and_an_unmeasurable_entry_are_counted_separately(self) -> None:
         result = CheckResult(
@@ -141,7 +141,7 @@ class TestFreshnessVerdictIsUnconditional:
 
         assert "FAIL: 1 print(s) exceed their max-age" in output
         assert "public.exceeded" in output
-        assert "NOTE: 1 print(s) have an unmeasurable age" in output
+        assert "FAIL: 1 print(s) have an unmeasurable age" in output
         assert "public.unmeasurable" in output
 
 

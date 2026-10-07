@@ -6,15 +6,17 @@ The specification groups codes by concern; this sorts by code so a pasted one ca
 from __future__ import annotations
 
 import re
+import runpy
 from pathlib import Path
+from types import SimpleNamespace
 
+
+# `scripts/` is not a package, so the shared parser loads by path.
+spec_markdown = SimpleNamespace(**runpy.run_path(str(Path(__file__).with_name("spec_markdown.py"))))
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC_PATH = ROOT / "docs" / "format" / "v1" / "SPEC.md"
+SPEC_PATH = spec_markdown.SPEC_PATH
 DOCS_PATH = ROOT / "docs" / "reference" / "conformance.md"
-
-CATALOG_START = "### 6.3 Error catalog"
-CATALOG_END = "### 6.4 Catalog totals"
 
 SEVERITIES = {"E": "error", "W": "warning"}
 
@@ -63,42 +65,19 @@ def build_document() -> str:
 
 
 def parse_catalog(spec_text: str) -> list[dict[str, str]]:
-    """Every catalog entry from SPEC 6.3, carrying the group heading each was listed under."""
+    """Every catalog entry from SPEC 6.3, its severity spelled out and its group anchored."""
 
-    block = _section(spec_text, CATALOG_START, CATALOG_END)
-    entries: list[dict[str, str]] = []
-    group = ""
+    entries = []
 
-    for line in block.splitlines():
-        if line.startswith("#### "):
-            group = line.removeprefix("#### ").strip()
-            continue
-
-        if not line.startswith("|") or line.startswith("|--"):
-            continue
-
-        cells = [cell.strip() for cell in line.strip("|").split("|")]
-
-        if len(cells) != 3 or not cells[0].startswith("`"):
-            continue  # the `| Code | Sev | Trigger |` header, repeated once per group
-
-        severity = SEVERITIES.get(cells[1])
+    for entry in spec_markdown.error_catalog(spec_text):
+        severity = SEVERITIES.get(entry["severity"])
 
         if severity is None:
-            raise ValueError(f"SPEC 6.3 row {cells[0]} carries an unknown severity {cells[1]!r}")
+            raise ValueError(
+                f"SPEC 6.3 row {entry['code']} carries an unknown severity {entry['severity']!r}",
+            )
 
-        entries.append(
-            {
-                "code": cells[0].strip("`"),
-                "severity": severity,
-                "group": group,
-                "anchor": slug(group),
-                "trigger": cells[2],
-            },
-        )
-
-    if not entries:
-        raise ValueError(f"no catalog rows found between {CATALOG_START!r} and {CATALOG_END!r}")
+        entries.append({**entry, "severity": severity, "anchor": slug(entry["group"])})
 
     return entries
 
@@ -114,18 +93,6 @@ def write_document() -> None:
 
     DOCS_PATH.parent.mkdir(parents=True, exist_ok=True)
     DOCS_PATH.write_text(build_document())
-
-
-def _section(text: str, start: str, end: str) -> str:
-    """The text between two headings, each of which must occur exactly once."""
-
-    for marker in (start, end):
-        found = text.count(marker)
-
-        if found != 1:
-            raise ValueError(f"{marker!r} occurs {found} times in SPEC.md, expected exactly once")
-
-    return text[text.index(start) : text.index(end)]
 
 
 if __name__ == "__main__":

@@ -11,7 +11,6 @@ import yaml
 
 from dbprint.adapters import (
     ColumnMeta,
-    CommentsMeta,
     ForeignKeyMeta,
     MockAdapter,
     MockTable,
@@ -21,19 +20,25 @@ from dbprint.adapters import (
 from dbprint.adapters.base import ColumnStats
 from dbprint.config import ConnectionConfig
 from dbprint.engine import Engine, GenerateRequest
+from tests._engine_run import artifact
+from tests._prints import columns, mock_table
 
 
 ROW_COUNT = 60
 
 
-def _column(cardinality: int, values: tuple[ValueCount, ...]) -> ColumnStats:
+def _column(
+    cardinality: int,
+    values: tuple[ValueCount, ...],
+    rows: int = ROW_COUNT,
+) -> ColumnStats:
     return ColumnStats(
         sql_type="integer",
         nullable=False,
         null_count=0,
         null_rate=0.0,
         cardinality=cardinality,
-        cardinality_ratio=cardinality / ROW_COUNT,
+        cardinality_ratio=cardinality / rows,
         cardinality_method="exact",
         values=values,
         values_coverage=1.0,
@@ -53,11 +58,12 @@ def _fixture(
     parent_unique: bool = True,
     declared_edge: bool = False,
     second_child: bool = False,
+    child_rows: int = ROW_COUNT,
 ) -> dict[str, MockTable]:
     # A non-key parent still needs `cardinality_ratio < 0.9999` (SPEC 4.2), or the recomputed
     # `candidate_key` makes it eligible anyway - one row short of `cardinality` clears that.
     parent_cardinality = ROW_COUNT if parent_unique else ROW_COUNT - 5
-    b_columns = [ColumnMeta(name="id", sql_type="integer", nullable=False, default=None, ordinal=1)]
+    b_columns = list(columns(("id", "integer")))
     b_stats = {"id": _column(parent_cardinality, _values(range(parent_cardinality)))}
     b_unique_keys = [UniqueKeyMeta(columns=("id",), primary=True)] if parent_unique else []
 
@@ -75,16 +81,11 @@ def _fixture(
         if parent_unique:
             b_unique_keys.append(UniqueKeyMeta(columns=("code",), primary=False))
 
-    b = MockTable(
-        type="table",
-        namespace_path=("public", "b"),
+    b = mock_table(
+        "public.b",
+        tuple(b_columns),
+        b_stats,
         ddl="CREATE TABLE public.b (id integer);\n",
-        columns=b_columns,
-        relationships=[],
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats=b_stats,
-        samples={},
         row_count=ROW_COUNT,
         unique_keys=b_unique_keys,
     )
@@ -103,10 +104,10 @@ def _fixture(
         if declared_edge
         else []
     )
-    a_columns = [
-        ColumnMeta(name="linked_ref", sql_type="integer", nullable=False, default=None, ordinal=1),
-    ]
-    a_stats = {"linked_ref": _column(child_cardinality, _values(range(child_cardinality)))}
+    a_columns = list(columns(("linked_ref", "integer")))
+    a_stats = {
+        "linked_ref": _column(child_cardinality, _values(range(child_cardinality)), child_rows),
+    }
 
     if second_child:
         a_columns.append(
@@ -123,19 +124,13 @@ def _fixture(
             _values(range(1000, 1000 + child_cardinality)),
         )
 
-    a = MockTable(
-        type="table",
-        namespace_path=("public", "a"),
+    a = mock_table(
+        "public.a",
+        tuple(a_columns),
+        a_stats,
         ddl="CREATE TABLE public.a (linked_ref integer);\n",
-        columns=a_columns,
         relationships=relationships,
-        indexes=[],
-        comments=CommentsMeta(table=None, columns={}),
-        stats=a_stats,
-        samples={},
-        # Fixed, independent of `child_cardinality`: a row_count tracking it would make the
-        # ratio 1.0 and the column its own candidate key, whatever this fixture isolates.
-        row_count=ROW_COUNT,
+        row_count=child_rows,
     )
 
     return {"public.b": b, "public.a": a}
@@ -166,6 +161,21 @@ class TestEligibility:
         a, _ = _generate(tmp_path, child_cardinality=30)
 
         assert a["refers_to"] == []
+
+    def test_a_unique_child_at_the_threshold_is_not_proposed(self, tmp_path: Path) -> None:
+        """50 distinct values over 50 rows is a candidate key, and still enumerable (floor 1)."""
+
+        a, _ = _generate(tmp_path, child_cardinality=50, child_rows=50)
+
+        assert a["refers_to"] == []
+
+    def test_a_one_row_table_proposes_nothing(self, tmp_path: Path) -> None:
+        """Every column of a one-row table is a candidate key; one shared value is no evidence."""
+
+        a, b = _generate(tmp_path, child_cardinality=1, child_rows=1)
+
+        assert a["refers_to"] == []
+        assert b["referenced_by"] == []
 
     def test_a_non_key_parent_is_not_proposed_into(self, tmp_path: Path) -> None:
         """The parent carries no single-column key and no candidate_key (floor 2)."""
@@ -241,9 +251,7 @@ class TestDiffExclusion:
         Engine(MockAdapter(_fixture(parent_unique=False)), conn, tmp_path).generate()
         Engine(MockAdapter(_fixture()), conn, tmp_path).generate(GenerateRequest(force=True))
         diff = yaml.safe_load((tmp_path / "w" / "diff.yaml").read_text())
-        refers_to = yaml.safe_load(
-            (tmp_path / "w" / "public" / "a" / "relationships.yaml").read_text(),
-        )["refers_to"]
+        refers_to = artifact(tmp_path / "w", "public.a", "relationships")["refers_to"]
         events = [c for c in diff["changes"] if c["kind"].startswith("relationship_")]
 
         assert [e["detection"] for e in refers_to] == ["measured"]

@@ -10,6 +10,7 @@ import yaml
 
 from dbprint.config import ConnectionConfig
 from dbprint.docs import catalogue, view
+from dbprint.engine.table_readings import live_annotations
 from dbprint.spec.scope import scope_of
 
 
@@ -143,18 +144,23 @@ class TestGrainView:
     def test_empty_keys_with_no_search_reads_as_not_determined(self) -> None:
         grain = view.grain_view({"grain": {"keys": []}})
 
-        assert grain == {"key_list": [], "search_ran": False, "exhausted": None}
+        assert grain == {"key_list": [], "state": "not_determined"}
 
     def test_search_exhausted_true_means_nothing_found(self) -> None:
         grain = view.grain_view({"grain": {"keys": [], "search": {"exhausted": True}}})
 
-        assert grain == {"key_list": [], "search_ran": True, "exhausted": True}
+        assert grain == {"key_list": [], "state": "exhausted"}
+
+    def test_a_search_recording_no_outcome_reads_as_not_determined(self) -> None:
+        grain = view.grain_view({"grain": {"keys": [], "search": {}}})
+
+        assert grain == {"key_list": [], "state": "not_determined"}
 
     def test_search_exhausted_false_means_the_search_gave_up(self) -> None:
         grain = view.grain_view({"grain": {"keys": [], "search": {"exhausted": False}}})
 
         assert grain is not None
-        assert grain["exhausted"] is False
+        assert grain["state"] == "bounded"
 
     def test_annotated_key_rides_beside_the_measured_one(self) -> None:
         statistics = {"grain": {"keys": [{"columns": ["id"], "detection": "declared"}]}}
@@ -202,7 +208,7 @@ class TestNullPatternsView:
         patterns = view.null_patterns_view(statistics)
 
         assert patterns is not None
-        assert patterns["coverage"] == 1.0
+        assert patterns["coverage_words"] == "every scanned row"
         assert {"columns": ["notes"], "count": 20} in patterns["patterns"]
 
     def test_absent_is_none(self) -> None:
@@ -368,6 +374,33 @@ class TestSummaryCards:
         assert cards["referenced_by"] == 1
 
 
+class TestDataThrough:
+    """The "data through" card reads a column whose name records a creation or an update."""
+
+    @staticmethod
+    def _fresh(maximum: str) -> dict[str, object]:
+        return {
+            "classification": "temporal",
+            "range": {"min": "2026-01-01", "max": maximum},
+            "freshness": {"classification": "live", "max_age_days": 0},
+        }
+
+    def test_a_future_dated_column_claims_no_currency(self) -> None:
+        cards = view.summary_cards({"matures_at": self._fresh("2027-01-01")}, None)
+
+        assert cards["freshest"] is None
+
+    def test_an_update_stamp_wins_over_a_later_future_date(self) -> None:
+        columns = {"matures_at": self._fresh("2027-01-01"), "updated_at": self._fresh("2026-09-01")}
+
+        assert view.summary_cards(columns, None)["freshest"]["column"] == "updated_at"
+
+    def test_a_camel_case_update_stamp_is_read_through_its_physical_name(self) -> None:
+        column = {**self._fresh("2026-09-01"), "physical_name": "updatedAt"}
+
+        assert view.summary_cards({"updatedat": column}, None)["freshest"]["column"] == "updatedat"
+
+
 class TestCardinalityView:
     def test_averages_the_null_adjusted_ratio(self, companion_conn: ConnectionConfig) -> None:
         # 100/100, 75/(100-25), 40/(100-20) -> avg 0.8333; the raw ratio would give 0.717.
@@ -492,7 +525,19 @@ class TestCardinalityCell:
         cell = view.cardinality_cell({"cardinality": 10, "rows_scanned": 10}, 1000, scope)
 
         assert cell is not None
-        assert cell["saturates"] is True
+        assert cell["saturates"] == "scanned_rows"
+
+    def test_an_unscoped_cell_saturates_the_row_count(self) -> None:
+        cell = view.cardinality_cell({"cardinality": 10}, 10)
+
+        assert cell is not None
+        assert cell["saturates"] == "row_count"
+
+    def test_a_row_count_the_statistics_lack_saturates_nothing(self) -> None:
+        cell = view.cardinality_cell({"cardinality": 10}, None)
+
+        assert cell is not None
+        assert cell["saturates"] is None
 
     def test_no_cardinality_is_none(self) -> None:
         assert view.cardinality_cell({}, 100) is None
@@ -618,26 +663,29 @@ class TestSketchAvailable:
         assert view.sketch_available(col) is False
 
 
-class TestAnnotationView:
+class TestLiveAnnotations:
     def test_stale_key_is_filtered_out(self, rich_conn: ConnectionConfig) -> None:
         found = catalogue.load_connections([rich_conn])[0]
         artifacts = catalogue.load_table(found, "seedbank.batch")
         assert artifacts is not None
-        assert artifacts.statistics is not None
-        known = artifacts.statistics["columns"]
+        assert artifacts.statistics_annotations is not None
 
-        annotations = view.annotation_view(artifacts.statistics_annotations, known)
+        annotations = live_annotations(
+            artifacts.statistics_annotations["columns"],
+            artifacts.statistics,
+        )
 
         assert "cultivar_id" in annotations
         assert "stale_column_name" not in annotations
 
-    def test_no_known_columns_keeps_every_key(self) -> None:
-        annotations = view.annotation_view({"columns": {"x": {"note": "n"}}}, {})
+    def test_no_statistics_keeps_every_key(self) -> None:
+        assert "x" in live_annotations({"x": {"note": "n"}}, None)
 
-        assert "x" in annotations
+    def test_an_empty_columns_map_keeps_no_key(self) -> None:
+        assert live_annotations({"x": {"note": "n"}}, {"columns": {}}) == {}
 
     def test_absent_annotations_is_empty(self) -> None:
-        assert view.annotation_view(None, {}) == {}
+        assert live_annotations(None, None) == {}
 
 
 class TestColumnView:
@@ -647,7 +695,10 @@ class TestColumnView:
         assert artifacts is not None
         assert artifacts.statistics is not None
         columns = artifacts.statistics["columns"]
-        annotations = view.annotation_view(artifacts.statistics_annotations, columns)
+        annotations = live_annotations(
+            (artifacts.statistics_annotations or {}).get("columns"),
+            artifacts.statistics,
+        )
         targets = catalogue.leaf_targets(found, "seedbank.batch")
 
         rendered = view.column_view(
@@ -659,7 +710,7 @@ class TestColumnView:
             targets,
         )
 
-        assert "FK -> seedbank.cultivar.cultivar_id (declared)" in rendered["notes"]
+        assert "FK: seedbank.cultivar.cultivar_id (declared)" in rendered["notes"]
 
     def test_statistics_params_reaches_the_configured_sample_size_hedge(self) -> None:
         """`engine.context_assembler` threads the manifest's `statistics_params` (SPEC 2.5) into
@@ -718,7 +769,10 @@ class TestColumnView:
         assert artifacts is not None
         assert artifacts.statistics is not None
         columns = artifacts.statistics["columns"]
-        annotations = view.annotation_view(artifacts.statistics_annotations, columns)
+        annotations = live_annotations(
+            (artifacts.statistics_annotations or {}).get("columns"),
+            artifacts.statistics,
+        )
         targets = catalogue.leaf_targets(found, "seedbank.batch")
         targets.update({name: f"#col-{name}" for name in columns})
 
@@ -1230,6 +1284,35 @@ class TestBuildTableView:
         assert page["catalog_only_notice"] is None
 
 
+class TestTheContextView:
+    def test_a_table_carries_both_purposes(self, rich_conn: ConnectionConfig) -> None:
+        found = catalogue.load_connections([rich_conn])[0]
+        artifacts = catalogue.load_table(found, "seedbank.batch")
+        assert artifacts is not None
+
+        context = view.build_table_view(found, artifacts)["context"]
+
+        assert set(context) == {"profile", "query"}
+        assert context["profile"].startswith("# Table: seedbank.batch")
+        assert "## Column values" in context["query"]
+        assert "## Column values" not in context["profile"]
+        assert context["profile"].endswith("\n") and not context["profile"].endswith("\n\n")
+
+    def test_a_schema_covers_every_table_under_the_connection_header(
+        self,
+        rich_conn: ConnectionConfig,
+    ) -> None:
+        found = catalogue.load_connections([rich_conn])[0]
+        result = view.build_schema_view(found, "seedbank")
+
+        assert result is not None
+        for purpose in ("profile", "query"):
+            text = result["context"][purpose]
+
+            assert text.startswith("# Context for connection primary (2 tables)"), purpose
+            assert text.index("# Table: seedbank.batch") < text.index("# Table: seedbank.cultivar")
+
+
 class TestBuildSchemaView:
     def test_counts_intra_schema_edges_only(self, rich_conn: ConnectionConfig) -> None:
         found = catalogue.load_connections([rich_conn])[0]
@@ -1255,3 +1338,25 @@ class TestBuildIndexView:
         assert len(result) == 1
         assert result[0]["name"] == "primary"
         assert len(result[0]["tables"]) == 2
+
+
+class TestValueListSpellings:
+    """The docs page groups a value list's spellings as `dbprint context` does (SPEC 2.2.4)."""
+
+    def test_a_member_folds_into_its_canonical_bar(self) -> None:
+        col = {
+            "values": [
+                {"value": "Active", "count": 80},
+                {"value": "ACTIVE", "count": 15, "spelling_of": "Active"},
+                {"value": "dormant", "count": 5, "spelling_of": "Dormant"},
+            ],
+            "values_coverage": 1.0,
+        }
+        reading = view.values_view(col)
+        assert reading is not None
+        bars = reading["bars"]
+
+        assert [(b["value"], b["count"], b["spellings"]) for b in bars] == [
+            ("Active", 95, ["ACTIVE"]),
+            ("dormant", 5, []),
+        ]

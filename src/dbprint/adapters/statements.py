@@ -21,12 +21,14 @@ from .base import (
     Length,
     NullPatterns,
     PartSource,
+    RowCountMethod,
     TableCounts,
     TableScope,
     TopN,
     ValueList,
     VectorReading,
     has_measurable_nulls,
+    is_string_like,
     null_flags,
     null_patterns_from_rows,
     seed_from_fqn,
@@ -489,6 +491,33 @@ def distinct_values(
     return [r[0] for r in rows]
 
 
+def typed_distinct_values(
+    execute: Execute,
+    source: str,
+    column: str,
+    n: int,
+    seed: int,
+    sql_type: str | None,
+    *,
+    dialect: Dialect,
+    render_text: Callable[[str, str], str],
+    render_operand: Callable[[str, str], str],
+    unsupported: Callable[[str], bool],
+) -> list[Any]:
+    """`distinct_values` reading a string-like column as its engine text, any other typed column
+    through its comparable operand, and an untyped one as written.
+    """
+
+    if sql_type is None:
+        selected = column
+    elif is_string_like(sql_type, unsupported):
+        selected = render_text(column, sql_type)
+    else:
+        selected = render_operand(column, sql_type)
+
+    return distinct_values(execute, dialect, source, column, selected, n, seed)
+
+
 def _starved(scope: TableScope | None, values: list[Any], n: int) -> bool:
     # Only a predicate can starve a draw; a fraction sizes it to the rate it asked for.
     if scope is None or not scope.filter:
@@ -619,6 +648,55 @@ def vector(
         zero_count=None if norm is None else int(zeros or 0),
         unmeasured=("norm", "zero_count") if norm is None else (),
     )
+
+
+def table_row_count(
+    execute: Execute,
+    dialect: Dialect,
+    quoted: str,
+    rows_scanned: int,
+    scope: TableScope | None,
+    estimate: Callable[[], int | None],
+) -> tuple[int, RowCountMethod]:
+    """Rows in the table and how they were obtained (SPEC 2.2.1); a narrowed read takes `estimate`.
+
+    With none, or under `count_exactly`, it counts, so a filter matching nothing never reads as empty.
+    """
+
+    if scope is None or not scope.narrows:
+        return rows_scanned, "exact"
+
+    found = None if scope.count_exactly else estimate()
+
+    if found is not None:
+        return found, "approximate"
+
+    row = execute(f"SELECT {dialect.row_count} FROM {quoted} {SOURCE_ALIAS}").fetchone()
+
+    return (int(row[0]) if row and row[0] is not None else rows_scanned), "exact"
+
+
+def normalized_cardinality(
+    execute: Execute,
+    dialect: Dialect,
+    source: str,
+    column: str,
+    text: str,
+) -> int:
+    """The distinct count of `column` read as `text`, trimmed and case-folded (SPEC 2.2.4)."""
+
+    row = execute(
+        f"""
+        SELECT
+          {dialect.distinct_count.format(dialect.trim_fold.format(text))} AS n
+        FROM
+          {indented(source, 10)}
+        WHERE
+          {column} IS NOT NULL
+        """,
+    ).fetchone()
+
+    return int(row[0]) if row and row[0] is not None else 0
 
 
 def row_count_of(execute: Execute, source: str) -> int:

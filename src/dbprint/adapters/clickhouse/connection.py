@@ -4,7 +4,6 @@ readonly` is applied; read-only is the connected user's own grants.
 
 from __future__ import annotations
 
-import importlib
 import logging
 from types import MappingProxyType
 from typing import Any
@@ -22,6 +21,7 @@ DIALECT = Dialect(
     row_count="count()",
     count_fn="count",
     distinct_count="uniqExact({})",
+    trim_fold="lowerUTF8(trimBoth({}))",
     text_type=None,
     order_by_alias=True,
     group_by_ordinal=False,
@@ -54,10 +54,7 @@ class Connection(FactoryConnection):
         return _default_cursor_factory(params)
 
     def _open_failure(self, exc: Exception) -> str:
-        where = f"{self.params.host}:{self.params.port}"
-        where += f"/{self.params.database}" if self.params.database is not None else ""
-
-        return f"could not connect to ClickHouse at {where} as {self.params.user!r}: {exc}"
+        return driver.connect_failure("ClickHouse", self.params, exc)
 
 
 def exec_query(cursor: Cursor, sql: str, params: Any = None) -> Cursor:
@@ -71,13 +68,12 @@ def _default_cursor_factory(params: ConnectionParams) -> Any:
     - lazy, so a base install never pays clickhouse-connect's import cost.
     """
 
-    try:
-        dbapi = importlib.import_module("clickhouse_connect.dbapi")
-    except ImportError as exc:
-        raise ClickhouseConnectionError(
-            "clickhouse-connect is not installed. Install dbprint with the [clickhouse] "
-            "extra: `pip install dbprint[clickhouse]`.",
-        ) from exc
+    dbapi = driver.import_extra(
+        "clickhouse_connect.dbapi",
+        "clickhouse-connect",
+        "clickhouse",
+        ClickhouseConnectionError,
+    )
 
     # Unrecognised keywords travel as server settings on every request; a zero speed-check delay
     # makes the limit wall-clock rather than a projection that can fire before it is reached.

@@ -7,13 +7,12 @@ tests/test_skill_claims_agreement.py.
 
 from __future__ import annotations
 
-import importlib.util
-from pathlib import Path
-
 import pytest
 
+from tests._scripts import REPO_ROOT, load_script
+from tests.spec._spec_markdown import section, table_rows
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+
 GUIDE_PATH = REPO_ROOT / "src/dbprint/engine/reading_guide.md"
 
 # SPEC 3.1's classification table, parsed rather than hardcoded, so a new classification
@@ -21,26 +20,13 @@ GUIDE_PATH = REPO_ROOT / "src/dbprint/engine/reading_guide.md"
 _SPEC_PATH = REPO_ROOT / "docs/format/v1/SPEC.md"
 
 
-def _load_generator():
-    """Import scripts/gen_reading_guide.py so the test shares the generator's render path."""
-
-    path = REPO_ROOT / "scripts" / "gen_reading_guide.py"
-    spec = importlib.util.spec_from_file_location("gen_reading_guide", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    return module
-
-
-gen = _load_generator()
+gen = load_script("gen_reading_guide")
 
 
 def _spec_classifications() -> list[str]:
-    section = gen._section(_SPEC_PATH.read_text(), "### 3.1 Defined classifications", "### 3.2")
-    rows = gen._table_rows(section)[1:]  # drop the header row
+    rows = table_rows(section("### 3.1 Defined classifications", "### 3.2"))[1:]
 
-    return [gen._BACKTICKED.search(cells[0]).group(1) for cells in rows]  # type: ignore[union-attr]
+    return [cells[0].strip("`") for cells in rows]
 
 
 def test_the_shipped_package_copy_matches_the_generator() -> None:

@@ -43,7 +43,6 @@ from ..base import (
     PhaseA,
     PhaseB,
     Range,
-    RowCountMethod,
     TableCounts,
     TableScope,
     TopN,
@@ -59,12 +58,13 @@ from ..base import (
     numeric_block_from_row,
     phase_a_cost,
     profile_over,
+    row_count_or_none,
     run_phase_a,
     unrepresentable_fields,
     whole_temporal_block,
 )
 from ..errors import QueryFailed
-from ..identifiers import SOURCE_ALIAS, Identity, qualified, quote
+from ..identifiers import SOURCE_ALIAS, Identity, source_column
 from ..sql_layout import call, derived, indented, select_from
 from ..statements import column_alias
 
@@ -102,7 +102,7 @@ def compute_base(
     if not columns:
         return TableCounts(row_count=0, rows_scanned=0), PhaseA({})
 
-    source = _table_source(identity, scope)
+    source = table_source(identity, scope)
     rows_scanned, phase_a = run_phase_a(
         columns,
         phase_a_cost,
@@ -110,12 +110,13 @@ def compute_base(
         partial(_null_counts, cursor, source),
         declines=lambda col: _is_unsupported(col.classified_type),
     )
-    row_count, row_count_method = _table_row_count(
-        cursor,
-        identity,
+    row_count, row_count_method = statements.table_row_count(
+        partial(exec_query, cursor),
+        DIALECT,
+        identity.quoted(),
         rows_scanned,
         scope,
-        exact_count=exact_count,
+        lambda: None if exact_count else row_count_or_none(table_rows_estimate(cursor, identity)),
     )
 
     return TableCounts(row_count, rows_scanned, row_count_method), phase_a
@@ -140,7 +141,7 @@ def compute_columns(
     `source` replaces the table's own, for a part read through its derived rows.
     """
 
-    source = source or _table_source(identity, scope)
+    source = source or table_source(identity, scope)
     reads = ColumnReads(
         value_list=partial(_fetch_value_list, cursor, source),
         numeric_block=partial(_fetch_numeric_block, cursor, source),
@@ -164,9 +165,11 @@ def compute_columns(
 
 
 def table_source(identity: Identity, scope: TableScope | None) -> str:
-    """The FROM expression a table's statistics read, which a descent derives its parts from."""
+    """The FROM expression every phase reads: a materialized scope's one copied draw, else a
+    sample whose seed re-derives from the table's own name, so every phase builds the same text.
+    """
 
-    return _table_source(identity, scope)
+    return _source(identity.quoted(), scope, statements.table_seed(identity))
 
 
 def profile_part(
@@ -262,9 +265,9 @@ def compute_null_patterns(
     return statements.null_patterns(
         partial(exec_query, cursor),
         DIALECT,
-        _table_source(identity, scope),
+        table_source(identity, scope),
         columns,
-        [_qualified(col.name) for col in columns],
+        [source_column(col, DIALECT) for col in columns],
         config,
         counts,
         base,
@@ -284,10 +287,10 @@ def probe_grain(
     return statements.grain_pairs(
         partial(exec_query, cursor),
         DIALECT,
-        _table_source(identity, scope),
+        table_source(identity, scope),
         counts,
         candidates,
-        {col.name: _qualified(col.name) for col in columns},
+        {col.name: source_column(col, DIALECT) for col in columns},
     )
 
 
@@ -305,12 +308,12 @@ def probe_timeline(
     del counts
 
     col = {c.name: c for c in columns}[column]
-    cn = _qualified(col.name)
+    cn = source_column(col, DIALECT)
 
     return statements.timeline(
         partial(exec_query, cursor),
         DIALECT,
-        _table_source(identity, scope),
+        table_source(identity, scope),
         cn,
         _timeline_bucket_expr(cn, col.classified_type, unit),
         render_domain("bkt.bucket_start", col.classified_type, already_utc=True),
@@ -356,9 +359,9 @@ def compute_populated_windows(
 
     return statements.populated_windows(
         partial(exec_query, cursor),
-        _table_source(identity, scope),
-        _qualified(anchor.name),
-        {subject: _qualified(by_name[subject].name) for subject in subject_columns},
+        table_source(identity, scope),
+        source_column(anchor, DIALECT),
+        {subject: source_column(by_name[subject], DIALECT) for subject in subject_columns},
         lambda expr: render_domain(expr, anchor.classified_type),
     )
 
@@ -379,10 +382,10 @@ def probe_dependencies(
     return statements.dependency_strengths(
         partial(exec_query, cursor),
         DIALECT,
-        _table_source(identity, scope),
+        table_source(identity, scope),
         base,
         candidates,
-        {col.name: _qualified(col.name) for col in columns},
+        {col.name: source_column(col, DIALECT) for col in columns},
     )
 
 
@@ -410,16 +413,6 @@ def release(cursor: Cursor, scope: TableScope) -> None:
     exec_query(cursor, f"DROP TEMPORARY TABLE IF EXISTS {scope.materialized}")
 
 
-def _table_source(identity: Identity, scope: TableScope | None) -> str:
-    """The FROM expression every phase reads.
-
-    A materialized scope names one copied draw; unmaterialized, the seed re-derives from
-    the table's own name, so every phase builds the same text.
-    """
-
-    return _source(identity.quoted(), scope, statements.table_seed(identity))
-
-
 def _source(quoted_fqn: str, scope: TableScope | None, seed: int | None = None) -> str:
     """Table reference every statistics query selects FROM. See ARCHITECTURE.md 2.
 
@@ -440,34 +433,6 @@ def _source(quoted_fqn: str, scope: TableScope | None, seed: int | None = None) 
         return derived(f"SELECT * FROM {quoted_fqn} WHERE ({scope.filter})", SOURCE_ALIAS)
 
 
-def _table_row_count(
-    cursor: Cursor,
-    identity: Identity,
-    rows_scanned: int,
-    scope: TableScope | None,
-    *,
-    exact_count: bool,
-) -> tuple[int, RowCountMethod]:
-    """Rows in the table and how they were obtained, per SPEC 2.2.1.
-
-    A narrowed read takes the catalog estimate; with none it counts exactly, since the
-    scanned figure would report a filter matching nothing as an empty table (SPEC 2.2.7).
-    InnoDB's sampled `table_rows` lags, so an estimate under the scan still stands (SPEC 2.2.8).
-    """
-
-    if scope is None or not scope.narrows:
-        return rows_scanned, "exact"
-
-    estimate = -1 if exact_count or scope.count_exactly else table_rows_estimate(cursor, identity)
-
-    if estimate >= 0:
-        return estimate, "approximate"
-
-    row = exec_query(cursor, f"SELECT COUNT(1) FROM {identity.quoted()} {SOURCE_ALIAS}").fetchone()
-
-    return (int(row[0]) if row and row[0] is not None else rows_scanned), "exact"
-
-
 def _null_counts(
     cursor: Cursor,
     source: str,
@@ -478,7 +443,7 @@ def _null_counts(
         DIALECT,
         source,
         columns,
-        lambda col: _qualified(col.name),
+        lambda col: source_column(col, DIALECT),
     )
 
 
@@ -492,7 +457,7 @@ def _phase_a_statement(
     select_parts: list[str] = ["COUNT(1) AS row_count"]
 
     for col in columns:
-        cn = _qualified(col.name)
+        cn = source_column(col, DIALECT)
         select_parts.append(f"COUNT(1) - COUNT({cn}) AS null_{column_alias(col.name)}")
 
         if is_numeric_type(col.classified_type) and not is_boolean_type(col.classified_type):
@@ -585,7 +550,7 @@ def _fetch_value_list(
     A TIMESTAMP routes through the same UTC-pinning renderer as `range`.
     """
 
-    cn = _qualified(col.name)
+    cn = source_column(col, DIALECT)
     select_expr = cn
 
     if is_binary_type(col.classified_type):
@@ -615,7 +580,7 @@ def _fetch_numeric_block(
     *,
     values: bool = True,
 ) -> NumericBlock:
-    cn = _qualified(col.name)
+    cn = source_column(col, DIALECT)
     value = _RANKED_VALUE
     select_parts = [
         f"MIN({value}) AS mn",
@@ -684,7 +649,7 @@ def _fetch_native_temporal_block(
     a date to truncate to (SPEC 2.2.4), so `quantized_count` is always absent.
     """
 
-    cn = _qualified(col.name)
+    cn = source_column(col, DIALECT)
     keys = config.percentiles
     time_only = temporal_shape(col.classified_type) == "time"
     earliest = _as_date(f"MIN({_RANKED_VALUE})", col.classified_type)
@@ -751,7 +716,7 @@ def _fetch_calendar_temporal_block(
     as no data; rendering to text keeps it a value.
     """
 
-    cn = _qualified(col.name)
+    cn = source_column(col, DIALECT)
     keys = config.percentiles
     # A DATE value is always its own day-truncation (SPEC 2.2.3): the count would be a
     # truism, so `quantized_count` is omitted entirely rather than published as a constant.
@@ -865,7 +830,7 @@ def _percentile_select(keys: Sequence[int]) -> list[str]:
 
 
 def _fetch_vector(cursor: Cursor, source: str, col: ColumnMeta) -> VectorReading:
-    cn = _qualified(col.name)
+    cn = source_column(col, DIALECT)
 
     # Outside HeatWave no function takes a VECTOR's norm (DISTANCE is HeatWave-only).
     return statements.vector(
@@ -878,7 +843,7 @@ def _fetch_vector(cursor: Cursor, source: str, col: ColumnMeta) -> VectorReading
 
 
 def _fetch_spatial(cursor: Cursor, source: str, col: ColumnMeta) -> tuple[Geometry, Extent | None]:
-    cn = _qualified(col.name)
+    cn = source_column(col, DIALECT)
     execute = partial(exec_query, cursor)
 
     try:
@@ -965,7 +930,7 @@ def _fetch_length_p95(cursor: Cursor, source: str, col: ColumnMeta) -> float | N
     an explicit alias, the shared helpers repeating an expression only a bare column resolves.
     """
 
-    cn = _qualified(col.name)
+    cn = source_column(col, DIALECT)
     _, length_expr = _length_exprs(cn, col.classified_type)
     ranked = f"""
         SELECT
@@ -1008,7 +973,3 @@ def _approximate_distribution_via_top_n(
 
 def _is_unsupported(sql_type: str) -> bool:
     return base_type(sql_type) in _UNSUPPORTED_TYPES
-
-
-def _qualified(name: str) -> str:
-    return qualified(quote(name, DIALECT))

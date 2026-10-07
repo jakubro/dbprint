@@ -25,8 +25,8 @@ from dbprint.spec.absence import (
     Absence,
     read_column_field,
 )
+from tests.spec._absence_table import absence_table_fields
 from tests.spec._spec_markdown import matrix, section, table_rows
-from tests.spec.test_absence_table import _absence_table_fields
 
 
 _PACKAGE = Path(dbprint.__file__).parent
@@ -73,22 +73,21 @@ _READS_ANOTHER_DOCUMENT: dict[tuple[str, str, str], str] = {
         )
     },
     ("engine/carried.py", "_load_table", "scope"): "records the committed scope verbatim",
-    ("docs/view.py", "_annotated_grain_keys", "grain"): "annotation file",
+    ("docs/view.py", "grain_view", "grain"): "annotation file",
     ("docs/view.py", "_row_count", "row_count"): "manifest entry",
     ("docs/view.py", "column_view", "values"): "annotation value notes",
     ("docs/view.py", "row_count_view", "rows_scanned"): "scope_view's own rendered mapping",
     ("engine/thresholds.py", "resolve", "row_count"): "manifest entry",
+    ("engine/value_list.py", "value_notes", "values"): "annotation",
     ("engine/context_assembler.py", "_annotated_grain", "grain"): "annotation file",
     ("engine/context_assembler.py", "_annotation_entry_has_content", "values"): "annotation",
     ("engine/context_assembler.py", "_load_table_artifacts", "row_count"): "manifest entry",
     ("engine/context_assembler.py", "_markdown_annotations", "values"): "annotation",
     ("engine/context_assembler.py", "_provenance_block", "percentiles"): "statistics_params",
-    ("engine/context_assembler.py", "_value_notes", "values"): "annotation",
     ("mcp/tools.py", "_column_filters", "candidate_key"): "tool arguments",
     ("mcp/tools.py", "_column_filters", "looks_like"): "tool arguments",
     ("mcp/tools.py", "_column_filters", "redacted"): "tool arguments",
     ("mcp/tools.py", "_column_filters", "sensitivity"): "tool arguments",
-    ("mcp/tools.py", "_column_value_notes", "values"): "annotation",
     ("mcp/tools.py", "_matching_value_notes", "values"): "annotation",
     ("mcp/tools.py", "_search_match", "row_count"): "manifest entry",
     ("mcp/tools.py", "_tool_list_tables", "row_count"): "manifest entry",
@@ -110,7 +109,7 @@ def test_the_sweep_flags_what_it_exists_to_catch() -> None:
 
 
 def test_the_column_fields_are_spec_7_2() -> None:
-    assert set(_absence_table_fields()) == COLUMN_FIELDS
+    assert set(absence_table_fields()) == COLUMN_FIELDS
 
 
 def test_the_table_blocks_are_spec_7_3s_statistics_rows() -> None:
@@ -238,7 +237,7 @@ def test_notes_render_no_number_for_a_lost_measurement(
     column: dict[str, Any],
     forbidden: str,
 ) -> None:
-    note = notes_synthesis.synthesize(column)
+    note = notes_synthesis.synthesize(column).text
 
     assert forbidden not in note
     assert "unmeasured:" in note
@@ -290,8 +289,8 @@ _PRESENT: dict[str, dict[str, Any]] = {
 _CLAIMS: dict[tuple[str, str], str] = {
     ("notes", "omitted"): "candidate key",
     ("notes", "not_applicable"): "candidate key",
-    ("notes", "unmeasured"): "true / ",
-    ("notes", "withheld"): "mean=",
+    ("notes", "unmeasured"): "true: ",
+    ("notes", "withheld"): "mean: ",
     ("hints", "omitted"): "candidate key",
     ("hints", "not_applicable"): "candidate key",
     ("docs", "unmeasured"): "covered",
@@ -301,10 +300,10 @@ _CLAIMS: dict[tuple[str, str], str] = {
 
 def _rendered(surface: str, column: dict[str, Any]) -> str:
     if surface == "notes":
-        return notes_synthesis.synthesize(column)
+        return notes_synthesis.synthesize(column).text
 
     if surface == "hints":
-        return notes_synthesis.synthesize(column, hints_only=True)
+        return notes_synthesis.synthesize(column, hints_only=True).text
 
     view = column_view("c", column, 600, None, {}, {})
 
@@ -324,7 +323,7 @@ def test_no_rendering_claims_what_an_absent_field_would_have_said(surface: str, 
 def test_the_notes_and_the_docs_page_name_an_unmeasured_field() -> None:
     view = column_view("c", _LOST_VALUES, 600, None, {}, {})
 
-    assert "unmeasured" in notes_synthesis.synthesize(_LOST_VALUES)
+    assert "unmeasured" in notes_synthesis.synthesize(_LOST_VALUES).text
     assert "values" in (view["unmeasured"] or ())
 
 

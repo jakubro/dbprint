@@ -14,9 +14,10 @@ import pytest
 from click.testing import CliRunner
 
 from dbprint.cli.main import main
+from tests._scripts import REPO_ROOT
 
 
-CLI_ROOT = Path(__file__).resolve().parents[2] / "src" / "dbprint" / "cli"
+CLI_ROOT = REPO_ROOT / "src" / "dbprint" / "cli"
 
 # Names that hold an exit code; an integer assigned or compared to one is a literal.
 _EXIT_NAMES = frozenset({"exit_code", "exit_codes", "overall_exit", "offline_exit", "top"})

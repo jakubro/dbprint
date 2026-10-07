@@ -51,6 +51,7 @@ from .dialect import Dialect
 
 
 if TYPE_CHECKING:
+    from .driver import ServerParams
     from .identifiers import Identity, IdentityRegistry
 
 
@@ -691,6 +692,9 @@ class SkippedNamespace:
 # SPEC 4.2's 0.9999 candidate-key threshold, with headroom for an estimate's own error.
 EXACT_PROBE_RATIO = 0.85
 
+# Estimated rows above which an engine able to estimate a distinct count does (SPEC 2.2.2).
+APPROXIMATE_THRESHOLD = 1_000_000
+
 
 @dataclass(frozen=True)
 class PhaseA:
@@ -744,6 +748,12 @@ def phase_a_cost(column: ColumnMeta) -> int:
         return 7
 
     return 2
+
+
+def counts_approximately(estimate: float, narrows: bool) -> bool:
+    """Whether Phase A estimates distinct counts: past `APPROXIMATE_THRESHOLD`, read whole."""
+
+    return estimate > APPROXIMATE_THRESHOLD and not narrows
 
 
 def run_phase_a(
@@ -982,6 +992,14 @@ class ArrayReads:
     size: Callable[[str], str]
     distinct: Callable[[str], str] | None
     norm: Callable[[str], str] | None
+
+
+def part_value_name(dialect: Dialect) -> str:
+    """The quoted name a part source gives its value, as `source_column` reads it back."""
+
+    from .identifiers import quote
+
+    return quote(_PART_VALUE.name, dialect)
 
 
 @dataclass(frozen=True)
@@ -1765,6 +1783,8 @@ class Adapter(ABC):
 
     REQUIRED_KEYS: ClassVar[tuple[str, ...]] = ()
     OPTIONAL_KEYS: ClassVar[tuple[str, ...]] = ()
+    # A server adapter's credential type; when set, it alone decides the two key tuples above.
+    SERVER_PARAMS: ClassVar[type[ServerParams] | None] = None
     # Credential keys naming a local file: resolved against the project root, refused if absent.
     PATH_KEYS: ClassVar[tuple[str, ...]] = ()
 
@@ -1777,6 +1797,13 @@ class Adapter(ABC):
     MATERIALIZED_SCOPE_SESSION_SCOPED: ClassVar[bool] = True
     # The vendor spellings this adapter knowingly declines or profiles as text by representability.
     KNOWN_TYPES: ClassVar[tuple[str, ...]] = ()
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+
+        if (params := cls.__dict__.get("SERVER_PARAMS")) is not None:
+            cls.REQUIRED_KEYS = params.required_keys()
+            cls.OPTIONAL_KEYS = params.optional_keys()
 
     def recognises_type(self, sql_type: str) -> bool:
         """Whether `sql_type` is named by a shared table or this adapter's own declared spellings."""
@@ -2105,11 +2132,11 @@ class Adapter(ABC):
         self,
         fqn: str,
         column: str,
+        sql_type: str,
         scope: TableScope | None = None,
     ) -> int:
-        """The distinct count of `column` once trimmed and case-folded (SPEC 2.2.4) - computed
-        in-database over the set `scope` narrows `cardinality` to (SPEC 2.2.8). A materialized
-        `scope` is the same rows; without one this is a later read of a table that may have moved.
+        """Distinct count of `column` as `sql_type`'s engine text, trimmed and case-folded (SPEC 2.2.4),
+        over `scope`'s rows (SPEC 2.2.8); unmaterialized, a later read of a table that may have moved.
         """
 
     @abstractmethod
@@ -2446,6 +2473,7 @@ class SqlAdapter(Adapter):
 
         maps: MapReads = self._stats.MAPS
         value = source_column(_PART_VALUE, self.DIALECT)
+        named = part_value_name(self.DIALECT)
         execute = partial(self._driver.exec_query, cursor)
         keys, distinct = statements.map_keys(
             execute,
@@ -2456,7 +2484,7 @@ class SqlAdapter(Adapter):
         key_set = PartSource(
             f"{node.path}{KEYS}",
             entries.key_sql_type,
-            derived(select_from(["ent.k AS v"], entries.source), SOURCE_ALIAS),
+            derived(select_from([f"ent.k AS {named}"], entries.source), SOURCE_ALIAS),
             value,
             unlisted=distinct - len(keys),
         )
@@ -2465,7 +2493,7 @@ class SqlAdapter(Adapter):
                 f"{node.path}{member_step(scalar_text(key))}",
                 entries.value_sql_type,
                 derived(
-                    select_from(["ent.v AS v"], entries.source)
+                    select_from([f"ent.v AS {named}"], entries.source)
                     + f"\nWHERE\n  ent.k = {maps.literal(key, entries.key_sql_type)}",
                     SOURCE_ALIAS,
                 ),
@@ -2489,6 +2517,7 @@ class SqlAdapter(Adapter):
         from .sql_layout import derived, select_from
 
         value = source_column(_PART_VALUE, self.DIALECT)
+        named = part_value_name(self.DIALECT)
         execute = partial(self._driver.exec_query, cursor)
         entries = documents.entries(node)
         keys, distinct = statements.map_keys(execute, self.DIALECT, entries, config.max_parts)
@@ -2505,7 +2534,7 @@ class SqlAdapter(Adapter):
                 PartSource(
                     f"{node.path}{KEYS}",
                     documents.key_sql_type,
-                    derived(select_from(["ent.k AS v"], entries), SOURCE_ALIAS),
+                    derived(select_from([f"ent.k AS {named}"], entries), SOURCE_ALIAS),
                     value,
                     unlisted=distinct - len(keys),
                 ),
@@ -2557,7 +2586,7 @@ class SqlAdapter(Adapter):
         )
         read = (
             f"CASE WHEN {kind} = {string_literal(documents.null_name)} THEN NULL "
-            f"ELSE {documents.read('ent.v', sql_type)} END AS v"
+            f"ELSE {documents.read('ent.v', sql_type)} END AS {part_value_name(self.DIALECT)}"
         )
 
         return PartSource(
@@ -2791,12 +2820,14 @@ class SqlAdapter(Adapter):
         self,
         fqn: str,
         column: str,
+        sql_type: str,
         scope: TableScope | None = None,
     ) -> int:
         return self._normalization.compute_normalized_cardinality(
             self._handle(fqn),
             self._read_identity(fqn),
             column,
+            sql_type,
             scope,
         )
 
@@ -2835,10 +2866,26 @@ class SqlAdapter(Adapter):
             order=order,
         )
 
+    def _register(self, selected: Sequence[tuple[TableMeta, tuple[str, ...]]]) -> list[TableMeta]:
+        """Capture `selected`'s physical spellings for every later read, and list its tables."""
+
+        self._identities.register(selected)
+
+        return [meta for meta, _ in selected]
+
     def _identity(self, fqn: str) -> Identity:
         return self._identities[fqn]
 
     def _read_identity(self, fqn: str) -> Identity:
+        """The identity carrying its columns, read from the catalog if not yet introspected."""
+
+        identity = self._identity(fqn)
+
+        if identity.columns:
+            return identity
+
+        self.introspect_columns(fqn)
+
         return self._identity(fqn)
 
     def _handle(self, fqn: str) -> Any:
@@ -2862,6 +2909,7 @@ class PerDatabaseSqlAdapter(SqlAdapter):
 
     _entry_database: str
     _sessions: dict[str, Any]
+    _collations: dict[str, str]
 
     def close(self) -> None:
         for session in self._sessions.values():
@@ -2878,10 +2926,41 @@ class PerDatabaseSqlAdapter(SqlAdapter):
     @abstractmethod
     def _unopened(self, database: str) -> Any: ...
 
+    @abstractmethod
+    def _session_handle(self, session: Any) -> Any:
+        """What this engine's catalog reads take from an open session of one database."""
+
     def _start_sessions(self, entry_database: str) -> None:
         self._entry_database = entry_database
         self._connection = self._unopened(entry_database)
         self._sessions = {entry_database: self._connection}
+        self._collations = {}
+
+    def _with_database_collation(
+        self,
+        identity: Identity,
+        columns: list[ColumnMeta],
+    ) -> list[ColumnMeta]:
+        own = self._collation(identity.parts[0])
+
+        # The manifest states the entry database's collation; a table compared under another
+        # database's default says so on each string column, or it would inherit the wrong one.
+        if own == self._collation(self._entry_database):
+            return columns
+
+        return [
+            replace(c, collation=own)
+            if c.collation is None and is_string_like_type(c.sql_type)
+            else c
+            for c in columns
+        ]
+
+    def _collation(self, database: str) -> str:
+        if database not in self._collations:
+            handle = self._session_handle(self._session(database))
+            self._collations[database] = self._introspect.default_collation(handle)
+
+        return self._collations[database]
 
     def _session(self, database: str) -> Any:
         session = self._sessions.get(database)

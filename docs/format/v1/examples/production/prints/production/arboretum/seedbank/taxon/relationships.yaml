@@ -13,7 +13,7 @@ refers_to:
   detection: declared
   constraint_name: taxon_parent_taxon_id_fkey
   observed:
-    fanout_avg: 25.0
+    fanout_avg: 24.666667
     target_coverage: 0.04
     scope_compatible: true
     fanout_max: 36
@@ -49,20 +49,6 @@ refers_to:
     containment: 1.0
     answerable_count: 300
 referenced_by:
-- column:
-  - taxon_id
-  referencer_table: arboretum.fixture.shape_probe
-  referencer_column:
-  - probe_id
-  detection: measured
-  observed:
-    fanout_avg: 1.0
-    target_coverage: 0.166667
-    scope_compatible: true
-    fanout_max: 1
-    coherent: true
-    containment: 1.0
-    answerable_count: 50
 - column:
   - taxon_id
   referencer_table: arboretum.seedbank.accession
@@ -174,7 +160,7 @@ referenced_by:
   detection: declared
   constraint_name: taxon_parent_taxon_id_fkey
   observed:
-    fanout_avg: 25.0
+    fanout_avg: 24.666667
     target_coverage: 0.04
     scope_compatible: true
     fanout_max: 36

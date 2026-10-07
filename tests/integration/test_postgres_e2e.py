@@ -4,54 +4,21 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import psycopg
 import pytest
 import yaml
-from click.testing import CliRunner, Result
+from click.testing import Result
 
 from dbprint.cli import run_log
-from dbprint.cli.main import main
-from dbprint.conformance import validate_print
+from tests._cli import credential_env, run_cli, write_project
+from tests._engine_run import conformance_errors
+from tests.conftest import pg_connect
 
 
 CONN_NAME = "e2e_conn"
 
 
-def _render_project_yaml(*, max_age_days: int = 7) -> str:
-    return f"""\
-defaults:
-  max_age_days: {max_age_days}
-  statistics:
-    enumeration_threshold: 50
-    top_n_values: 20
-    percentiles: [1, 25, 50, 75, 99]
-  diff:
-    stat_change_threshold:
-      default: 0.01
-
-connections:
-  {CONN_NAME}:
-    adapter: postgres
-    auto: true
-    output: prints
-"""
-
-
-def _write_project(project_dir: Path) -> None:
-    project_dir.mkdir(parents=True, exist_ok=True)
-    (project_dir / ".dbprint.yaml").write_text(_render_project_yaml())
-
-
 def _credential_env(creds: dict[str, str]) -> dict[str, str]:
-    upper = CONN_NAME.upper()
-
-    return {
-        f"DBPRINT_{upper}_HOST": creds["host"],
-        f"DBPRINT_{upper}_PORT": str(creds["port"]),
-        f"DBPRINT_{upper}_DATABASE": creds["database"],
-        f"DBPRINT_{upper}_USER": creds["user"],
-        f"DBPRINT_{upper}_PASSWORD": creds["password"] or "",
-    }
+    return credential_env(CONN_NAME, creds)
 
 
 def _run_generate(
@@ -59,20 +26,7 @@ def _run_generate(
     env: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> Result:
-    runner = CliRunner()
-    monkeypatch.chdir(project_dir)
-
-    for k, v in env.items():
-        monkeypatch.setenv(k, v)
-
-    return runner.invoke(main, ["generate", "--no-tui"])
-
-
-def _run_list(project_dir: Path, monkeypatch: pytest.MonkeyPatch) -> Result:
-    runner = CliRunner()
-    monkeypatch.chdir(project_dir)
-
-    return runner.invoke(main, ["list", "--no-tui"])
+    return run_cli(project_dir, monkeypatch, ["generate", "--no-tui"], env)
 
 
 def test_postgres_end_to_end(
@@ -84,7 +38,7 @@ def test_postgres_end_to_end(
 
     db = e2e_postgres_db["database"]
     project_dir = tmp_path / "project"
-    _write_project(project_dir)
+    write_project(project_dir, CONN_NAME, "postgres")
     env = _credential_env(e2e_postgres_db)
 
     result = _run_generate(project_dir, env, monkeypatch)
@@ -98,12 +52,11 @@ def test_postgres_end_to_end(
     assert (print_dir / "manifest.yaml").is_file()
     assert (print_dir / "diff.yaml").is_file()
 
-    list_result = _run_list(project_dir, monkeypatch)
+    list_result = run_cli(project_dir, monkeypatch, ["list", "--no-tui"])
     assert list_result.exit_code == 0
     assert "curator" in list_result.output or "table_count" in list_result.output
 
-    issues = validate_print(print_dir)
-    errors = [i for i in issues if i.severity == "error"]
+    errors = conformance_errors(print_dir)
     assert errors == [], "Conformance violations:\n" + "\n".join(
         f"  {e.code} at {e.path}: {e.detail}" for e in errors
     )
@@ -178,7 +131,7 @@ def test_categorical_classification_for_biome(
 
     db = e2e_postgres_db["database"]
     project_dir = tmp_path / "project"
-    _write_project(project_dir)
+    write_project(project_dir, CONN_NAME, "postgres")
     env = _credential_env(e2e_postgres_db)
     result = _run_generate(project_dir, env, monkeypatch)
     assert result.exit_code in (0, 3), result.output
@@ -202,7 +155,7 @@ def test_temporal_classification_for_curation_event_created_at(
 
     db = e2e_postgres_db["database"]
     project_dir = tmp_path / "project"
-    _write_project(project_dir)
+    write_project(project_dir, CONN_NAME, "postgres")
     env = _credential_env(e2e_postgres_db)
     result = _run_generate(project_dir, env, monkeypatch)
     assert result.exit_code in (0, 3), result.output
@@ -227,12 +180,12 @@ def test_approximate_path_activates_under_low_threshold(
     """Force APPROXIMATE_THRESHOLD low so even seeded data hits the approximate path."""
 
     db = e2e_postgres_db["database"]
-    from dbprint.adapters.postgres import stats as stats_module
+    from dbprint.adapters import base as adapters_base
 
-    monkeypatch.setattr(stats_module, "APPROXIMATE_THRESHOLD", 10)
+    monkeypatch.setattr(adapters_base, "APPROXIMATE_THRESHOLD", 10)
 
     project_dir = tmp_path / "project"
-    _write_project(project_dir)
+    write_project(project_dir, CONN_NAME, "postgres")
     env = _credential_env(e2e_postgres_db)
     result = _run_generate(project_dir, env, monkeypatch)
     assert result.exit_code in (0, 3), result.output
@@ -256,7 +209,7 @@ def test_statement_tracing(
 
     db = e2e_postgres_db["database"]
     project_dir = tmp_path / "project"
-    _write_project(project_dir)
+    write_project(project_dir, CONN_NAME, "postgres")
     env = _credential_env(e2e_postgres_db)
 
     result = _run_generate(project_dir, env, monkeypatch)
@@ -297,7 +250,7 @@ def test_freshness_skip_on_immediate_rerun(
     """Re-running generate within max_age_days should skip every table."""
 
     project_dir = tmp_path / "project"
-    _write_project(project_dir)
+    write_project(project_dir, CONN_NAME, "postgres")
     env = _credential_env(e2e_postgres_db)
 
     first = _run_generate(project_dir, env, monkeypatch)
@@ -334,7 +287,7 @@ def test_a_narrowed_read_over_a_stale_estimate_conforms(
         f"{stats['scope']['rows_scanned']} rows scanned, so the exception is untested"
     )
 
-    errors = [i for i in validate_print(print_dir) if i.severity == "error"]
+    errors = conformance_errors(print_dir)
     assert errors == [], "Conformance violations:\n" + "\n".join(
         f"  {e.code} at {e.path}: {e.detail}" for e in errors
     )
@@ -356,14 +309,7 @@ connections:
 def _seed_lagging_estimate(creds: dict[str, str]) -> None:
     """Leaves reltuples stale: ANALYZE while small, then autovacuum-disabled inserts grow it."""
 
-    with psycopg.connect(
-        host=creds["host"],
-        port=int(creds["port"]),
-        dbname=creds["database"],
-        user=creds["user"],
-        password=creds["password"],
-        autocommit=True,
-    ) as conn:
+    with pg_connect(creds) as conn:
         conn.execute(
             "CREATE TABLE public.lagging (id BIGINT PRIMARY KEY, bucket INT) "
             "WITH (autovacuum_enabled = false)",

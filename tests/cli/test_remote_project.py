@@ -14,14 +14,8 @@ import pytest
 from click.testing import CliRunner
 
 from dbprint.cli.main import main
+from tests._cli import PROJECT_YAML
 
-
-PROJECT_YAML = """\
-connections:
-  primary:
-    adapter: postgres
-    output: prints
-"""
 
 # Passed to every git subprocess call; only `commit` actually reads author/committer.
 _GIT_IDENTITY_ENV = {

@@ -9,16 +9,14 @@ from __future__ import annotations
 import pytest
 
 from dbprint.adapters.base import ColumnMeta, null_patterns_from_rows
+from tests._prints import columns
 
 
 CAP = 3
 
 
 def _columns(*names: str) -> list[ColumnMeta]:
-    return [
-        ColumnMeta(name=name, sql_type="integer", nullable=True, default=None, ordinal=i)
-        for i, name in enumerate(names, start=1)
-    ]
+    return list(columns(*((name, "integer", True) for name in names)))
 
 
 class TestDecoding:

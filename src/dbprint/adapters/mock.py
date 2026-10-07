@@ -454,6 +454,7 @@ class MockAdapter(Adapter):
         self,
         fqn: str,
         column: str,
+        sql_type: str,
         scope: TableScope | None = None,
     ) -> int:
         """The fixture's stated merged count, defaulting to `cardinality` (no merges).
@@ -462,6 +463,7 @@ class MockAdapter(Adapter):
         the same state, so the wrong scope is caught rather than answered anyway.
         """
 
+        del sql_type  # the fixture states the merged count; nothing is rendered
         scripted = self.scripted("compute_normalized_cardinality")
 
         if scripted is not None:

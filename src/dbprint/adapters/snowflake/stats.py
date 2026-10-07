@@ -50,13 +50,13 @@ from ..base import (
     PhaseA,
     PhaseB,
     Range,
-    RowCountMethod,
     TableCounts,
     TableScope,
     TopN,
     ValueCount,
     ValueList,
     VectorReading,
+    counts_approximately,
     declared_maps,
     empty_base_stats,
     is_string_like,
@@ -65,8 +65,10 @@ from ..base import (
     measure_columns,
     measures_length,
     numeric_block_from_row,
+    part_value_name,
     phase_a_cost,
     profile_over,
+    row_count_or_none,
     run_phase_a,
     unrepresentable_fields,
     whole_temporal_block,
@@ -77,7 +79,6 @@ from ..statements import column_alias
 
 
 # Threshold above which cardinality is estimated rather than counted. SPEC 2.2.2.
-APPROXIMATE_THRESHOLD = 1_000_000
 
 _UNSUPPORTED_TYPES = (
     "record",
@@ -107,12 +108,12 @@ def compute_base(
     if not columns:
         return TableCounts(row_count=0, rows_scanned=0), PhaseA({})
 
-    source = _table_source(identity, scope)
+    source = table_source(identity, scope)
     narrows = scope is not None and scope.narrows
 
     estimate = introspect.row_count_estimate(cursor, identity)
     # The catalog estimate describes the table, not the slice, so a narrowed read counts exactly.
-    approximate = estimate > APPROXIMATE_THRESHOLD and not narrows
+    approximate = counts_approximately(estimate, narrows)
 
     rows_scanned, phase_a = run_phase_a(
         columns,
@@ -122,7 +123,14 @@ def compute_base(
         partial(_recount, cursor, identity, source) if approximate else None,
         declines=lambda col: _is_unsupported(col.classified_type),
     )
-    row_count, row_count_method = _table_row_count(cursor, identity, rows_scanned, estimate, scope)
+    row_count, row_count_method = statements.table_row_count(
+        partial(exec_query, cursor),
+        DIALECT,
+        identity.quoted(),
+        rows_scanned,
+        scope,
+        lambda: row_count_or_none(estimate),
+    )
 
     return TableCounts(row_count, rows_scanned, row_count_method), phase_a
 
@@ -143,7 +151,7 @@ def compute_columns(
 ) -> PhaseB:
     """Phase B: the classification-specific statistics, keyed by column name."""
 
-    source = source or _table_source(identity, scope)
+    source = source or table_source(identity, scope)
     reads = ColumnReads(
         value_list=partial(_fetch_value_list, cursor, identity, source),
         numeric_block=partial(_fetch_numeric_block, cursor, identity, source),
@@ -180,9 +188,11 @@ _ELEMENT_KINDS = {
 
 
 def table_source(identity: Identity, scope: TableScope | None) -> str:
-    """The FROM expression a table's statistics read, which a descent derives its parts from."""
+    """The FROM expression every phase reads, rebuilt per phase with its seed re-derived from the
+    table's own name: every call produces the same text, which on this engine is not the same rows.
+    """
 
-    return _table_source(identity, scope)
+    return _source(identity, scope, statements.table_seed(identity))
 
 
 def profile_part(
@@ -249,7 +259,7 @@ def element_type_of(cursor: Cursor, node: PartSource) -> str | None:
 ARRAYS = ArrayReads(
     elements=lambda node, element: derived(
         select_from(
-            [f"{_flattened_value(element)} AS v"],
+            [f"{_flattened_value(element)} AS {part_value_name(DIALECT)}"],
             f"{node.source},\nLATERAL FLATTEN(INPUT => {node.operand}) flt",
         ),
         SOURCE_ALIAS,
@@ -327,7 +337,7 @@ def compute_null_patterns(
     return statements.null_patterns(
         partial(exec_query, cursor),
         DIALECT,
-        _table_source(identity, scope),
+        table_source(identity, scope),
         columns,
         [identity.source_column(col.name) for col in columns],
         config,
@@ -349,7 +359,7 @@ def probe_grain(
     return statements.grain_pairs(
         partial(exec_query, cursor),
         DIALECT,
-        _table_source(identity, scope),
+        table_source(identity, scope),
         counts,
         candidates,
         {col.name: identity.source_column(col.name) for col in columns},
@@ -375,7 +385,7 @@ def probe_timeline(
     return statements.timeline(
         partial(exec_query, cursor),
         DIALECT,
-        _table_source(identity, scope),
+        table_source(identity, scope),
         cn,
         f"DATE_TRUNC('{unit}', {cn})",
         render_domain("bkt.bucket_start", col.classified_type),
@@ -400,7 +410,7 @@ def compute_populated_windows(
 
     return statements.populated_windows(
         partial(exec_query, cursor),
-        _table_source(identity, scope),
+        table_source(identity, scope),
         identity.source_column(anchor.name),
         {subject: identity.source_column(by_name[subject].name) for subject in subject_columns},
         lambda expr: render_domain(expr, anchor.classified_type),
@@ -423,7 +433,7 @@ def probe_dependencies(
     return statements.dependency_strengths(
         partial(exec_query, cursor),
         DIALECT,
-        _table_source(identity, scope),
+        table_source(identity, scope),
         base,
         candidates,
         {col.name: identity.source_column(col.name) for col in columns},
@@ -454,16 +464,6 @@ def release(cursor: Cursor, identity: Identity, scope: TableScope) -> None:
     exec_query(cursor, f"DROP TABLE IF EXISTS {identity.sibling(scope.materialized)}")
 
 
-def _table_source(identity: Identity, scope: TableScope | None) -> str:
-    """The FROM expression every phase reads.
-
-    Rebuilt per phase, not threaded: the seed is re-derived from the table's own name, so
-    every call produces the same text - which on this engine is not the same rows.
-    """
-
-    return _source(identity, scope, statements.table_seed(identity))
-
-
 def _source(identity: Identity, scope: TableScope | None, seed: int | None = None) -> str:
     """Table reference every statistics query selects FROM. See ARCHITECTURE.md 2.
 
@@ -485,31 +485,6 @@ def _source(identity: Identity, scope: TableScope | None, seed: int | None = Non
         return f"{base} {SOURCE_ALIAS} SAMPLE SYSTEM ({scope.sample * 100}){seeded}"
     else:
         return derived(f"SELECT * FROM {base} WHERE {scope.filter}", SOURCE_ALIAS)
-
-
-def _table_row_count(
-    cursor: Cursor,
-    identity: Identity,
-    rows_scanned: int,
-    estimate: int,
-    scope: TableScope | None,
-) -> tuple[int, RowCountMethod]:
-    """Rows in the table and how they were obtained, per SPEC 2.2.1.
-
-    A narrowed read takes the catalog estimate; with none it counts exactly, since the
-    scanned figure would report a filter matching nothing as an empty table (SPEC 2.2.7).
-    An estimate below the scanned count still stands (SPEC 2.2.8).
-    """
-
-    if scope is None or not scope.narrows:
-        return rows_scanned, "exact"
-
-    if estimate >= 0 and not scope.count_exactly:
-        return estimate, "approximate"
-
-    row = exec_query(cursor, f"SELECT COUNT(1) FROM {identity.quoted()} {SOURCE_ALIAS}").fetchone()
-
-    return (int(row[0]) if row and row[0] is not None else rows_scanned), "exact"
 
 
 def _null_counts(

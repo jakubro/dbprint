@@ -11,10 +11,10 @@ import yaml
 from dbprint.adapters.mock import MockAdapter, MockTable
 from dbprint.config import ConnectionConfig
 from dbprint.config.project import RuleConfig
-from dbprint.conformance import validate_print
 from dbprint.engine import Engine, thresholds
 from dbprint.engine.context_assembler import AssemblyOptions, assemble
-from tests.engine.test_orchestrator import _conn_config, _curator_fixture
+from tests._curator import conn_config, curator_fixture
+from tests._engine_run import conformance_errors
 
 
 REMOTE = "public.curator"
@@ -29,7 +29,7 @@ READ_THROUGH = (
 
 
 def _fixture(*, external: bool = True) -> dict[str, MockTable]:
-    fixture = _curator_fixture()
+    fixture = curator_fixture()
     fixture[REMOTE] = replace(fixture[REMOTE], external=external, row_count_estimate=100)
 
     return fixture
@@ -52,7 +52,7 @@ class _Recorder(MockAdapter):
 
 
 def _conn(tmp_path: Path, *rules: RuleConfig) -> ConnectionConfig:
-    return replace(_conn_config(tmp_path, max_age_days=30), rules=rules)
+    return replace(conn_config(tmp_path, max_age_days=30), rules=rules)
 
 
 def _opted_in(tmp_path: Path) -> ConnectionConfig:
@@ -89,7 +89,7 @@ def test_a_marked_object_no_rule_opts_in_is_described_without_a_query(tmp_path: 
     assert (tmp_path / "primary/public/curator/relationships.yaml").is_file()
     assert [call for call in adapter.calls if call[1] == REMOTE] == []
     assert ("compute_base_statistics", "public.herbarium") in adapter.calls
-    assert [i for i in validate_print(tmp_path / "primary") if i.severity == "error"] == []
+    assert conformance_errors(tmp_path / "primary") == []
 
 
 def test_an_opted_in_marked_object_is_profiled_and_keeps_its_mark(tmp_path: Path) -> None:
@@ -99,7 +99,7 @@ def test_an_opted_in_marked_object_is_profiled_and_keeps_its_mark(tmp_path: Path
     assert "catalog_only" not in statistics
     assert statistics["row_count"] == 100
     assert statistics["external"] is True
-    assert [i for i in validate_print(tmp_path / "primary") if i.severity == "error"] == []
+    assert conformance_errors(tmp_path / "primary") == []
 
 
 def test_a_size_rule_reads_no_estimate_for_a_marked_object(tmp_path: Path) -> None:
@@ -177,7 +177,7 @@ def test_an_opted_in_context_says_the_statistics_were_read_through_it(tmp_path: 
 
 
 def _snapshot_fixture() -> dict[str, MockTable]:
-    fixture = _curator_fixture()
+    fixture = curator_fixture()
     fixture[REMOTE] = replace(fixture[REMOTE], opt_in_only=True, row_count_estimate=100)
 
     return fixture
@@ -192,7 +192,7 @@ def test_an_opt_in_only_object_is_catalog_only_without_the_external_mark(tmp_pat
     assert "external" not in statistics
     assert [call for call in adapter.calls if call[1] == REMOTE] == []
     assert "External:" not in _context(tmp_path, AssemblyOptions())
-    assert [i for i in validate_print(tmp_path / "primary") if i.severity == "error"] == []
+    assert conformance_errors(tmp_path / "primary") == []
 
 
 def test_opting_an_opt_in_only_object_in_profiles_it_and_rereads_it(tmp_path: Path) -> None:
