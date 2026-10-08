@@ -8,6 +8,8 @@ internal-error shape, hiding a handler that forgot to map its own errors.
 from __future__ import annotations
 
 import json
+import logging
+import socket
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +18,7 @@ import pytest
 import yaml
 from mcp import ClientSession
 from mcp.client import Client
+from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.shared.exceptions import MCPError as SdkMcpError
 from mcp.types import CallToolResult, TextContent
@@ -23,6 +26,7 @@ from mcp.types import CallToolResult, TextContent
 from dbprint.config import ConnectionConfig
 from dbprint.mcp import ServedConnections, build_server
 from dbprint.mcp import tools as tools_module
+from dbprint.mcp.server import run_http
 from tests._scripts import REPO_ROOT
 from .conftest import StdioServer
 
@@ -891,3 +895,56 @@ class TestRealTransportErrorPaths:
         assert result.is_error is False
         assert "next_cursor" in payload
         assert "arboretum.seedbank.vault" in payload.get("unreadable_tables", [])
+
+
+class TestHttpTransport:
+    def test_a_disconnecting_sse_client_logs_no_error(
+        self,
+        primary_conn: ConnectionConfig,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+
+        async def _run() -> list[str]:
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(run_http, build_server(_state_for(primary_conn)), "127.0.0.1", port)
+                await _until_listening(port)
+                logging.getLogger("uvicorn.error").addHandler(caplog.handler)
+
+                async with (
+                    sse_client(f"http://127.0.0.1:{port}/sse") as (read, write),
+                    ClientSession(read, write) as session,
+                ):
+                    await session.initialize()
+                    names = [tool.name for tool in (await session.list_tools()).tools]
+
+                await anyio.sleep(0.5)
+                # The cancel logs uvicorn's lifespan teardown; only the disconnect is under test.
+                logging.getLogger("uvicorn.error").removeHandler(caplog.handler)
+                tg.cancel_scope.cancel()
+
+            return names
+
+        try:
+            names = anyio.run(_run)
+        finally:
+            logging.getLogger("uvicorn.error").removeHandler(caplog.handler)
+
+        assert "list_tables" in names
+        assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+
+
+async def _until_listening(port: int) -> None:
+    for _ in range(100):
+        try:
+            stream = await anyio.connect_tcp("127.0.0.1", port)
+        except OSError:
+            await anyio.sleep(0.05)
+        else:
+            await stream.aclose()
+
+            return
+
+    raise AssertionError(f"nothing listened on port {port}")

@@ -420,10 +420,12 @@ def compute_populated_windows(
 
     for i, subject in enumerate(subject_columns):
         subject_cn = identity.source_column(subject)
-        agg_exprs.append(
-            f"MIN(CASE WHEN {subject_cn} IS NOT NULL THEN {anchor_cn} END) AS from_{i}",
+        agg_exprs.extend(
+            (
+                f"MIN(CASE WHEN {subject_cn} IS NOT NULL THEN {anchor_cn} END) AS from_{i}",
+                f"MAX(CASE WHEN {subject_cn} IS NOT NULL THEN {anchor_cn} END) AS to_{i}",
+            ),
         )
-        agg_exprs.append(f"MAX(CASE WHEN {subject_cn} IS NOT NULL THEN {anchor_cn} END) AS to_{i}")
 
     row = exec_query(cursor, select_from(agg_exprs, source)).fetchone()
 
@@ -567,15 +569,23 @@ def _phase_a_statement(
         select_parts.append(f"COUNTIF({cn} IS NULL) AS dbprint_null_{a}")
 
         if is_numeric_type(col.classified_type):
-            select_parts.append(f"COUNTIF({cn} = 0) AS dbprint_zero_{a}")
-            select_parts.append(f"COUNTIF({cn} < 0) AS dbprint_neg_{a}")
-            select_parts.append(f"COUNTIF({cn} = CAST({cn} AS INT64)) AS dbprint_quant_{a}")
+            select_parts.extend(
+                (
+                    f"COUNTIF({cn} = 0) AS dbprint_zero_{a}",
+                    f"COUNTIF({cn} < 0) AS dbprint_neg_{a}",
+                    f"COUNTIF({cn} = CAST({cn} AS INT64)) AS dbprint_quant_{a}",
+                ),
+            )
         elif measures_length(col.classified_type, _is_unsupported):
             empty_condition, length_expr = _length_exprs(cn, col.classified_type)
-            select_parts.append(f"COUNTIF({empty_condition}) AS dbprint_empty_{a}")
-            select_parts.append(f"MIN({length_expr}) AS dbprint_lenmin_{a}")
-            select_parts.append(f"MAX({length_expr}) AS dbprint_lenmax_{a}")
-            select_parts.append(f"AVG({length_expr}) AS dbprint_lenavg_{a}")
+            select_parts.extend(
+                (
+                    f"COUNTIF({empty_condition}) AS dbprint_empty_{a}",
+                    f"MIN({length_expr}) AS dbprint_lenmin_{a}",
+                    f"MAX({length_expr}) AS dbprint_lenmax_{a}",
+                    f"AVG({length_expr}) AS dbprint_lenavg_{a}",
+                ),
+            )
 
         # `_is_unsupported` types are skipped outright - SPEC 3.3's `unsupported` carries no
         # cardinality. JSON still measures, through `_exact_count_expr`'s string encoding.
@@ -690,9 +700,13 @@ def _fetch_phase_b_batch(
             is_tz = shape == "timestamp_tz"
             day_aligned = not (date_only or time_only)
 
-            select_parts.append(f"MIN({cn}) AS mn_{a}")
-            select_parts.append(f"MAX({cn}) AS mx_{a}")
-            select_parts.append(f"APPROX_QUANTILES({cn}, 100) AS qs_{a}")
+            select_parts.extend(
+                (
+                    f"MIN({cn}) AS mn_{a}",
+                    f"MAX({cn}) AS mx_{a}",
+                    f"APPROX_QUANTILES({cn}, 100) AS qs_{a}",
+                ),
+            )
 
             if date_only:
                 # A DATE has no time-of-day component, so a calendar-date difference already

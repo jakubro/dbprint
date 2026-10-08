@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -83,7 +84,7 @@ class TestDescriptionPreservation:
     def test_description_md_rejected_at_writer(self, tmp_path: Path) -> None:
         tbl_dir = tmp_path / "t"
 
-        with pytest.raises(WriterError, match="description.md"):
+        with pytest.raises(WriterError, match=re.escape("description.md")):
             write_atomic(tbl_dir, {DESCRIPTION_FILENAME: "user content\n"})
 
     def test_existing_description_left_alone(self, tmp_path: Path) -> None:
@@ -96,7 +97,7 @@ class TestDescriptionPreservation:
     def test_annotations_yaml_rejected_at_writer(self, tmp_path: Path) -> None:
         tbl_dir = tmp_path / "t"
 
-        with pytest.raises(WriterError, match="statistics.annotations.yaml"):
+        with pytest.raises(WriterError, match=re.escape("statistics.annotations.yaml")):
             write_atomic(tbl_dir, {STATISTICS_ANNOTATIONS_FILENAME: "columns: {}\n"})
 
     def test_existing_annotations_left_alone(self, tmp_path: Path) -> None:
@@ -113,7 +114,7 @@ class TestDescriptionPreservation:
     def test_relationships_annotations_yaml_rejected_at_writer(self, tmp_path: Path) -> None:
         tbl_dir = tmp_path / "t"
 
-        with pytest.raises(WriterError, match="relationships.annotations.yaml"):
+        with pytest.raises(WriterError, match=re.escape("relationships.annotations.yaml")):
             write_atomic(tbl_dir, {RELATIONSHIPS_ANNOTATIONS_FILENAME: "refers_to: []\n"})
 
     def test_existing_relationship_annotations_left_alone(self, tmp_path: Path) -> None:
@@ -130,7 +131,7 @@ class TestDescriptionPreservation:
     def test_manifest_annotations_yaml_rejected_at_writer(self, tmp_path: Path) -> None:
         conn_root = tmp_path / "primary"
 
-        with pytest.raises(WriterError, match="manifest.annotations.yaml"):
+        with pytest.raises(WriterError, match=re.escape("manifest.annotations.yaml")):
             write_atomic(conn_root, {MANIFEST_ANNOTATIONS_FILENAME: "notes: x\n"})
 
     def test_existing_manifest_annotations_left_alone(self, tmp_path: Path) -> None:

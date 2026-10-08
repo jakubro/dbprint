@@ -9,24 +9,24 @@ from dbprint.spec.classification import compute_null_rate
 
 class TestComputeNullRate:
     def test_rounds_to_six_places(self) -> None:
-        assert compute_null_rate(1, 3) == 0.333333
+        assert compute_null_rate(1, 3) == 0.333333  # noqa: RUF069 - the expected value is an exact literal
 
     def test_zero_nulls_is_zero(self) -> None:
-        assert compute_null_rate(0, 1000) == 0.0
+        assert compute_null_rate(0, 1000) == 0.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_no_rows_scanned_is_zero(self) -> None:
         """SPEC 2.2.2: `0` when `rows_scanned == 0`, not a division error."""
 
-        assert compute_null_rate(0, 0) == 0.0
+        assert compute_null_rate(0, 0) == 0.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_a_nonzero_non_null_count_never_rounds_up_to_one(self) -> None:
-        assert round(9_999_999 / 10_000_000, 6) == 1.0
-        assert compute_null_rate(9_999_999, 10_000_000) == 0.999999
+        assert round(9_999_999 / 10_000_000, 6) == 1.0  # noqa: RUF069 - the expected value is an exact literal
+        assert compute_null_rate(9_999_999, 10_000_000) == 0.999999  # noqa: RUF069 - the expected value is an exact literal
 
     def test_an_all_null_column_still_reports_the_true_sentinel(self) -> None:
         """The ceiling is gated on a nonzero non-null count, never on the rounded value."""
 
-        assert compute_null_rate(1000, 1000) == 1.0
+        assert compute_null_rate(1000, 1000) == 1.0  # noqa: RUF069 - the expected value is an exact literal
 
 
 class TestTheSharedPhaseBUsesThisFunction:

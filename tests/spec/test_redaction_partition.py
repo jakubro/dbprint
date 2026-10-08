@@ -79,7 +79,7 @@ def test_the_schema_forbids_the_withheld_set_under_a_marker() -> None:
 
 
 def test_apply_redaction_rule_keeps_the_count_profile_and_drops_the_rest() -> None:
-    column = {field: 1 for field in FIELD_ROLES} | {"redacted": "mask"}
+    column = dict.fromkeys(FIELD_ROLES, 1) | {"redacted": "mask"}
 
     apply_redaction_rule(column)
 

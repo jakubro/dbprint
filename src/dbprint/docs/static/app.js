@@ -10,9 +10,10 @@ document.addEventListener("DOMContentLoaded", () => {
   document.querySelector(".sidebar .nav-current")?.scrollIntoView({ block: "center" });
 });
 
-// Column anchors (#col-x) live in the "columns" panel. Switching tabs waits for `load`:
-// mermaid renders around DOMContentLoaded and its text measurement fails inside a hidden panel.
-window.addEventListener("load", () => {
+// Column anchors (#col-x) live in the "columns" panel. Diagrams render before any tab switch:
+// mermaid's text measurement fails inside a hidden panel.
+window.addEventListener("load", async () => {
+  await mermaid.run();
   if (location.hash.startsWith("#col-")) jumpToColumn(location.hash);
 });
 

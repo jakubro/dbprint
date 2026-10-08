@@ -25,7 +25,7 @@ class TestDriverScalars:
                 "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
             ),
             (datetime.date(2026, 7, 31), "2026-07-31"),
-            (datetime.datetime(2026, 7, 31, 15, 0), "2026-07-31T15:00:00"),  # noqa: DTZ001 - naive
+            (datetime.datetime(2026, 7, 31, 15, 0), "2026-07-31T15:00:00"),
             (
                 datetime.datetime(2026, 7, 31, 15, 0, tzinfo=datetime.UTC),
                 "2026-07-31T15:00:00Z",
@@ -81,7 +81,7 @@ class TestExactDecimals:
         assert dump_yaml({"v": decimal.Decimal("NaN")}) == "v: .nan\n"
 
 
-class _Spelled(str):
+class _Spelled(str):  # noqa: FURB189 - the refusal under test is of a str subclass
     pass
 
 

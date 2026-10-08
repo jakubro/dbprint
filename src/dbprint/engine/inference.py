@@ -173,7 +173,7 @@ def _measure_containment(child: SketchCandidate, parent: SketchCandidate) -> flo
         ratio, _count = result
         containment = min(1.0, round(ratio, 6))
 
-        return containment if containment == 1.0 else None
+        return containment if containment == 1.0 else None  # noqa: RUF069 - clamped and rounded; only an exact 1.0 qualifies
 
     if not child.cardinality:
         return None

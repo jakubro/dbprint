@@ -742,7 +742,7 @@ def _markdown_marker(cursor: str) -> str:
 def _tool_list_tables(state: ServedConnections, arguments: dict[str, Any]) -> dict[str, Any]:
     conn = state.resolve(arguments.get("connection"))
     pattern = str(arguments.get("pattern") or "*")
-    detail = bool(arguments.get("detail", False))
+    detail = bool(arguments.get("detail"))
     manifest = _load_manifest(state, conn) or {}
     entries = walkable_tables(manifest)
     # fnmatch.fnmatchcase never raises for a string pattern - no parse error to catch.

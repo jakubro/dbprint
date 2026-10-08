@@ -20,77 +20,77 @@ classifiers = [
   "Topic :: Software Development :: Documentation",
 ]
 dependencies = [
-  "click>=8.0",
-  "jsonschema>=4.20",
-  "python-dotenv>=1.0",
-  "pyyaml>=6.0",
-  "rich>=13.0",
-  "rich-click>=1.7",
-  "tzdata>=2024.1",
+  "click>=8.5.0",
+  "jsonschema>=4.26.0",
+  "python-dotenv>=1.2.4",
+  "pyyaml>=6.0.3",
+  "rich>=15.0.0",
+  "rich-click>=1.9.9",
+  "tzdata>=2026.5",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "pytest>=8.0",
-  "pytest-cov",
-  "ruff>=0.16.3",
-  "ty>=0.0.73",
-  "hatchling",
-  "duckdb>=1.0",
-  "psycopg[binary]>=3.2",
-  "mysql-connector-python>=26.7",
+  "pytest>=9.1.1",
+  "pytest-cov>=7.1.0",
+  "ruff>=0.16.10",
+  "ty>=0.0.85",
+  "hatchling>=1.32.4",
+  "duckdb>=1.5.6",
+  "psycopg[binary]>=3.3.6",
+  "mysql-connector-python>=26.7.0",
   "pytest-xdist>=3.8.0",
-  "chdb>=4.3",
-  "clickhouse-connect>=1.7",
-  "redshift-connector>=2.1",
-  "databricks-sql-connector>=4.2",
-  "pyspark>=4.0",
-  "delta-spark>=4.0",
-  "google-cloud-bigquery>=3.27",
-  "deptry>=0.25",
+  "chdb>=4.4.0",
+  "clickhouse-connect>=1.10.0",
+  "redshift-connector>=2.1.17",
+  "databricks-sql-connector>=4.6.0",
+  "pyspark>=4.2.0",
+  "delta-spark>=4.4.1",
+  "google-cloud-bigquery>=3.46.1",
+  "deptry>=0.25.1",
   "import-linter>=2.15",
-  "hypothesis>=6.168",
-  "mutmut>=3.8",
-  "sqlglot>=30.20",
+  "hypothesis>=6.168.5",
+  "mutmut>=3.8.0",
+  "sqlglot>=30.21.0",
 ]
 postgres = [
-  "psycopg[binary]>=3.2",
+  "psycopg[binary]>=3.3.6",
 ]
 mysql = [
-  "mysql-connector-python>=26.7",
+  "mysql-connector-python>=26.7.0",
 ]
 snowflake = [
-  "cryptography>=50.0",
-  "snowflake-connector-python>=3.6",
+  "cryptography>=50.0.2",
+  "snowflake-connector-python>=4.8.0",
 ]
 duckdb = [
-  "duckdb>=1.0",
+  "duckdb>=1.5.6",
 ]
 clickhouse = [
-  "clickhouse-connect>=1.7",
+  "clickhouse-connect>=1.10.0",
 ]
 redshift = [
-  "redshift-connector>=2.1",
+  "redshift-connector>=2.1.17",
 ]
 databricks = [
-  "databricks-sql-connector>=4.2",
+  "databricks-sql-connector>=4.6.0",
 ]
 bigquery = [
-  "google-cloud-bigquery>=3.27",
+  "google-cloud-bigquery>=3.46.1",
 ]
 mcp = [
-  "mcp>=2,<3",
-  "anyio>=4.13",
-  "starlette>=1.2",
-  "uvicorn>=0.49",
+  "mcp>=2.3.0,<3",
+  "anyio>=4.15.1",
+  "starlette>=1.7.0",
+  "uvicorn>=0.54.0",
 ]
 docs = [
-  "flask>=3.0",
-  "markdown>=3.6",
-  "inflect>=7.0",
-  "jinja2>=3.1",
-  "markupsafe>=3.0",
-  "waitress>=3.0",
+  "flask>=3.1.3",
+  "markdown>=3.11",
+  "inflect>=7.5.0",
+  "jinja2>=3.1.6",
+  "markupsafe>=3.0.4",
+  "waitress>=3.0.2",
 ]
 
 [project.scripts]
@@ -102,7 +102,7 @@ Repository = "https://github.com/jakubro/dbprint"
 Issues = "https://github.com/jakubro/dbprint/issues"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.32.4"]
 build-backend = "hatchling.build"
 
 [tool.hatch.version]

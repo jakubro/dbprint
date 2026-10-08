@@ -540,7 +540,7 @@ class TestAnsiIntervalsAreMeasuredAsText:
             {"value": "INTERVAL '0-6' YEAR TO MONTH", "count": 1},
             {"value": "INTERVAL '2-0' YEAR TO MONTH", "count": 1},
         ]
-        assert term["values_coverage"] == 1.0
+        assert term["values_coverage"] == 1.0  # noqa: RUF069 - the expected value is an exact literal
 
         for entry in term["values"]:
             (row,) = databricks_test_schema.execute(

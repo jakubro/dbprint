@@ -80,8 +80,7 @@ def build_document() -> str:
         if tool is None:
             continue
 
-        out.append(text[cursor : match.start()])
-        out.append(render_tool_block(tool))
+        out.extend((text[cursor : match.start()], render_tool_block(tool)))
         cursor = match.end()
 
     out.append(text[cursor:])

@@ -73,7 +73,7 @@ def resolve(
     listed = [entry for entry in entries if isinstance(entry, dict)]
 
     if complete is None:
-        complete = coverage == 1.0
+        complete = coverage == 1.0  # noqa: RUF069 - coverage 1.0 is the exhaustive sentinel
 
     reply: dict[str, Any] = {
         "coverage": coverage,

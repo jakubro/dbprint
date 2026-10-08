@@ -400,7 +400,7 @@ class TestEmptyTableConformance:
         assert cols["id"]["classification"] == "categorical"
         assert cols["id"]["values"] == []
         # Nothing to list is everything there is to list.
-        assert cols["id"]["values_coverage"] == 1.0
+        assert cols["id"]["values_coverage"] == 1.0  # noqa: RUF069 - the expected value is an exact literal
         assert "distribution" in cols["id"]
 
         assert cols["status"]["classification"] == "categorical"
@@ -408,12 +408,12 @@ class TestEmptyTableConformance:
 
         assert cols["herbarium_id"]["classification"] == "foreign_key_candidate"
         assert cols["herbarium_id"]["values"] == []
-        assert cols["herbarium_id"]["values_coverage"] == 1.0
+        assert cols["herbarium_id"]["values_coverage"] == 1.0  # noqa: RUF069 - the expected value is an exact literal
         assert "distribution" in cols["herbarium_id"]
 
         assert cols["flag"]["classification"] == "boolean"
         assert cols["flag"]["values"] == []
-        assert cols["flag"]["values_coverage"] == 1.0
+        assert cols["flag"]["values_coverage"] == 1.0  # noqa: RUF069 - the expected value is an exact literal
 
 
 class TestHappyPath:
@@ -4301,17 +4301,17 @@ class TestMeasuredOverlap:
         Engine(MockAdapter(_overlap_fixture()), conn_config(tmp_path), tmp_path).generate()
         observed = self._refers_to(tmp_path, "disjoint_child")["observed"]
 
-        assert observed["containment"] == 0.0
-        assert observed["target_coverage"] == 0.0
+        assert observed["containment"] == 0.0  # noqa: RUF069 - the expected value is an exact literal
+        assert observed["target_coverage"] == 0.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_a_partial_edge_measures_the_true_share_on_each_side(self, tmp_path: Path) -> None:
         Engine(MockAdapter(_overlap_fixture()), conn_config(tmp_path), tmp_path).generate()
         observed = self._refers_to(tmp_path, "partial_child")["observed"]
 
         # 3 of the child's 5 values are in the parent: containment = 3/5.
-        assert observed["containment"] == 0.6
+        assert observed["containment"] == 0.6  # noqa: RUF069 - the expected value is an exact literal
         # Those same 3 matches cover 3 of the parent's 10 values: target_coverage = 3/10.
-        assert observed["target_coverage"] == 0.3
+        assert observed["target_coverage"] == 0.3  # noqa: RUF069 - the expected value is an exact literal
 
     def test_repeated_generation_is_byte_identical(self, tmp_path: Path) -> None:
         Engine(MockAdapter(_overlap_fixture()), conn_config(tmp_path), tmp_path).generate()
@@ -4377,8 +4377,8 @@ class TestMeasuredOverlap:
 
         edge = self._refers_to(tmp_path, "big_child")["observed"]
 
-        assert edge["containment"] == 1.0
-        assert edge["target_coverage"] == 0.004545
+        assert edge["containment"] == 1.0  # noqa: RUF069 - the expected value is an exact literal
+        assert edge["target_coverage"] == 0.004545  # noqa: RUF069 - the expected value is an exact literal
         # The fixture's own truncation, not a test-side clamp, keeps 4 of the child's 5 answerable.
         assert edge["answerable_count"] == 4
 
@@ -4420,8 +4420,8 @@ class TestObservedBlock:
         Engine(MockAdapter(fixture), conn_config(tmp_path), tmp_path).generate()
         edge = self._refers_to(tmp_path, "child")[0]
 
-        assert edge["observed"]["fanout_avg"] == 1.0
-        assert edge["observed"]["target_coverage"] == 1.0
+        assert edge["observed"]["fanout_avg"] == 1.0  # noqa: RUF069 - the expected value is an exact literal
+        assert edge["observed"]["target_coverage"] == 1.0  # noqa: RUF069 - the expected value is an exact literal
         assert edge["observed"]["coherent"] is True
 
     def test_an_edge_whose_child_outnumbers_its_parent_is_incoherent(

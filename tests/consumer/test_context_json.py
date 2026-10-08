@@ -204,7 +204,7 @@ def test_scoped_complete_list_rides_beside_the_top_level_scope(
     payload = _payload(adversarial_print, SCOPED_TABLE)
 
     assert payload["scope"]["rows_scanned"] == 250
-    assert payload["statistics"]["columns"][SCOPED_COMPLETE_LIST_COLUMN]["values_coverage"] == 1.0
+    assert payload["statistics"]["columns"][SCOPED_COMPLETE_LIST_COLUMN]["values_coverage"] == 1.0  # noqa: RUF069 - the expected value is an exact literal
 
 
 def test_scoped_candidate_key_rides_beside_the_top_level_scope(
@@ -212,7 +212,7 @@ def test_scoped_candidate_key_rides_beside_the_top_level_scope(
 ) -> None:
     payload = _payload(adversarial_print, SCOPED_TABLE)
 
-    assert payload["scope"]["sample"] == 0.25
+    assert payload["scope"]["sample"] == 0.25  # noqa: RUF069 - the expected value is an exact literal
     assert payload["statistics"]["columns"][SCOPED_KEY_COLUMN]["inferred"]["candidate_key"] is True
 
 

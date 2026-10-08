@@ -243,8 +243,8 @@ def test_is_nullable_type_matches_a_bare_wrapper() -> None:
 
 
 def test_is_nullable_type_matches_nullable_nested_under_another_wrapper() -> None:
-    """ClickHouse's canonical nullable-low-cardinality spelling nests `Nullable` inside
-    `LowCardinality`, which an anchored `^Nullable\\(...\\)$` test never reaches.
+    r"""ClickHouse's canonical nullable-low-cardinality spelling nests `Nullable` inside
+    `LowCardinality`, which an anchored `^Nullable\(...\)$` test never reaches.
     """
 
     assert is_nullable_type("LowCardinality(Nullable(String))") is True
@@ -350,7 +350,7 @@ def test_nanosecond_clock_types_take_the_clock_path() -> None:
 
 class TestCandidateKeyEdges:
     def test_no_rows_scanned_is_a_zero_ratio(self) -> None:
-        assert compute_cardinality_ratio(0, 0) == 0.0
+        assert compute_cardinality_ratio(0, 0) == 0.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_a_single_distinct_value_can_clear_the_threshold(self) -> None:
         assert is_candidate_key(1, 1.0) is True
@@ -568,13 +568,13 @@ class TestComputeFanoutAvg:
     """Rows per distinct key among the referencing rows that carry one (SPEC 2.3.10)."""
 
     def test_null_referencing_rows_are_not_counted(self) -> None:
-        assert compute_fanout_avg(1000, 990, 2) == 5.0
+        assert compute_fanout_avg(1000, 990, 2) == 5.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_it_rounds_to_six_places(self) -> None:
-        assert compute_fanout_avg(300, 4, 12) == 24.666667
+        assert compute_fanout_avg(300, 4, 12) == 24.666667  # noqa: RUF069 - the expected value is an exact literal
 
     def test_an_estimated_row_count_below_the_keys_floors_at_one(self) -> None:
-        assert compute_fanout_avg(10, 4, 8) == 1.0
+        assert compute_fanout_avg(10, 4, 8) == 1.0  # noqa: RUF069 - the expected value is an exact literal
 
     @given(st.integers(1, 10**9), st.integers(0, 10**9), st.integers(1, 10**6))
     def test_it_never_falls_below_one_row_per_key(

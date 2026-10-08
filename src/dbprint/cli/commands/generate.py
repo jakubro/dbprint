@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import sys
 from pathlib import Path
 
 import rich_click as click
@@ -174,7 +175,7 @@ def generate_command(
             err=True,
         )
 
-    out = click.get_text_stream("stderr")
+    out = sys.stderr
     renderer = (
         None if quiet else build_progress_renderer(live=mode == "tty", console=console, out=out)
     )

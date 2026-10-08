@@ -2735,8 +2735,8 @@ class TestTheQueryValueTableShowsWhatAPredicateCanUse:
             "Meise",
             "Paris",
         ]
-        assert institution["coverage"] == 0.8
-        assert institution["shown_coverage"] == 0.75
+        assert institution["coverage"] == 0.8  # noqa: RUF069 - the expected value is an exact literal
+        assert institution["shown_coverage"] == 0.75  # noqa: RUF069 - the expected value is an exact literal
         assert "seed_count" not in payload["values"]
         assert "shown_coverage" not in payload["values"]["rank"]
 
@@ -2982,10 +2982,10 @@ class TestTheQueryPurposeStatesEachNullShareOnce:
         garden = next(e for e in candidates["joins"]["refers_to"] if e["column"] == ["garden_id"])
         composite = candidates["joins"]["refers_to"][0]
 
-        assert candidates["values"]["rank"]["null_rate"] == 0.0
-        assert candidates["values"]["condition"]["null_rate"] == 0.05
+        assert candidates["values"]["rank"]["null_rate"] == 0.0  # noqa: RUF069 - the expected value is an exact literal
+        assert candidates["values"]["condition"]["null_rate"] == 0.05  # noqa: RUF069 - the expected value is an exact literal
         assert "null_rate" not in candidates["values"]["viability"]
-        assert garden["null_rate"] == 0.004
+        assert garden["null_rate"] == 0.004  # noqa: RUF069 - the expected value is an exact literal
         assert "null_rate" not in composite
         assert candidates["nulls"] == {"site_id": 0.2, "plot_no": 0.0, "withdrawn_at": 0.5}
 

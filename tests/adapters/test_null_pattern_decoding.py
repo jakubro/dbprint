@@ -103,7 +103,7 @@ class TestCoverage:
             cap=CAP,
         )
 
-        assert census.coverage == 1.0
+        assert census.coverage == 1.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_a_truncated_census_reports_what_the_cap_left(self) -> None:
         """One row beyond the cap is fetched, so truncation is observed, not predicted."""
@@ -119,7 +119,7 @@ class TestCoverage:
         census = null_patterns_from_rows([], _columns("a"), rows_scanned=0, cap=CAP)
 
         assert census.patterns == ()
-        assert census.coverage == 1.0
+        assert census.coverage == 1.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_an_untruncated_census_short_of_rows_scanned_reports_the_real_quotient(
         self,

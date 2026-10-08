@@ -25,17 +25,17 @@ class TestTheFloorKeepsAMeasurementsMagnitude:
         assert round_statistic(-4.0e-07) == pytest.approx(-4.0e-07)
 
     def test_a_real_zero_stays_zero(self) -> None:
-        assert round_statistic(0.0) == 0.0
+        assert round_statistic(0.0) == 0.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_an_ordinary_magnitude_still_rounds_to_six_decimals(self) -> None:
-        assert round_statistic(1 / 3) == 0.333333
+        assert round_statistic(1 / 3) == 0.333333  # noqa: RUF069 - the expected value is an exact literal
 
 
 class TestAListedValueIsPublishedAsMeasured:
     """SPEC 2.2.7: a cell value is not a computed statistic, so nothing rounds it."""
 
     def test_precision_past_the_sixth_decimal_survives(self) -> None:
-        assert measured_value(31.41592653) == 31.41592653
+        assert measured_value(31.41592653) == 31.41592653  # noqa: RUF069 - the expected value is an exact literal
 
     def test_two_values_agreeing_to_six_decimals_stay_distinct(self) -> None:
         assert measured_value(31.4159265) != measured_value(31.4159266)

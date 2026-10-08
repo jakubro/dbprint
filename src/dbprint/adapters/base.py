@@ -1107,9 +1107,9 @@ class DocumentReads:
 
 
 def key_literal(key: Any, key_sql_type: str, *, backslash_escapes: bool = False) -> str:
-    """`key` as a SQL literal of `key_sql_type`: an integer bare, a string quoted, anything else cast.
+    r"""`key` as a SQL literal of `key_sql_type`: an integer bare, a string quoted, anything else cast.
 
-    `backslash_escapes` names a dialect whose string literals treat `\\` as an escape.
+    `backslash_escapes` names a dialect whose string literals treat `\` as an escape.
     """
 
     if isinstance(key, int) and not isinstance(key, bool):

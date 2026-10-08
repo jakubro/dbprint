@@ -143,7 +143,7 @@ def test_categorical_classification_for_biome(
     assert biome["classification"] == "categorical"
     assert "values" in biome
     assert {entry["value"] for entry in biome["values"]} == {"temperate", "tropical", "arid"}
-    assert biome["values_coverage"] == 1.0
+    assert biome["values_coverage"] == 1.0  # noqa: RUF069 - the expected value is an exact literal
 
 
 def test_temporal_classification_for_curation_event_created_at(

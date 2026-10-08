@@ -305,6 +305,7 @@ class TestRoutes:
         response = client.get("/static/vendor/mermaid.min.js")
 
         assert response.status_code == 200
+        assert b'version:"12.1.0"' in response.data
 
     def test_no_cdn_reference_anywhere_in_a_rendered_page(
         self,

@@ -210,7 +210,7 @@ def test_scoped_complete_list_is_served_beside_its_scope(
     statistics = _statistics(adversarial_print, SCOPED_TABLE)
 
     assert statistics["scope"]["rows_scanned"] == 250
-    assert statistics["columns"][SCOPED_COMPLETE_LIST_COLUMN]["values_coverage"] == 1.0
+    assert statistics["columns"][SCOPED_COMPLETE_LIST_COLUMN]["values_coverage"] == 1.0  # noqa: RUF069 - the expected value is an exact literal
 
 
 def test_scoped_candidate_key_is_served_beside_its_scope(
@@ -218,7 +218,7 @@ def test_scoped_candidate_key_is_served_beside_its_scope(
 ) -> None:
     statistics = _statistics(adversarial_print, SCOPED_TABLE)
 
-    assert statistics["scope"]["sample"] == 0.25
+    assert statistics["scope"]["sample"] == 0.25  # noqa: RUF069 - the expected value is an exact literal
     assert statistics["columns"][SCOPED_KEY_COLUMN]["rows_scanned"] == 250
 
 

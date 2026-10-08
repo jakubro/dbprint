@@ -12,10 +12,10 @@ from dbprint.engine.freshness import evaluate, format_age
 
 class TestParseDuration:
     def test_days(self) -> None:
-        assert parse_duration("7d") == 7.0
+        assert parse_duration("7d") == 7.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_hours(self) -> None:
-        assert parse_duration("12h") == 0.5
+        assert parse_duration("12h") == 0.5  # noqa: RUF069 - the expected value is an exact literal
 
     def test_minutes(self) -> None:
         assert parse_duration("30m") == pytest.approx(30 / (24 * 60))
@@ -24,7 +24,7 @@ class TestParseDuration:
         assert parse_duration("60s") == pytest.approx(60 / (24 * 3600))
 
     def test_case_insensitive(self) -> None:
-        assert parse_duration("7D") == 7.0
+        assert parse_duration("7D") == 7.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_invalid_grammar_raises(self) -> None:
         with pytest.raises(DurationError):
@@ -98,7 +98,7 @@ class TestPerTableThreshold:
 
         stale = evaluate(manifest, 7.0, _NOW, threshold_for=lambda _fqn: 2.0)
 
-        assert stale[0].max_age_days == 2.0
+        assert stale[0].max_age_days == 2.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_a_resolver_overrides_the_run_level_value(self) -> None:
         """The positional value must not leak past a resolver that answered."""
@@ -113,7 +113,7 @@ class TestPerTableThreshold:
         stale = evaluate(manifest, 7.0, _NOW, threshold_for=lambda _fqn: 2.0)
 
         assert stale[0].age_days == float("inf")
-        assert stale[0].max_age_days == 2.0
+        assert stale[0].max_age_days == 2.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_without_a_resolver_every_entry_takes_the_run_level_value(self) -> None:
         manifest = _manifest_with(("a", _ts(_NOW, 10.0)), ("b", _ts(_NOW, 10.0)))

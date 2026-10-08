@@ -8,6 +8,7 @@ conformance error, not stale. Top-level exit code = max across every evaluated c
 from __future__ import annotations
 
 import contextlib
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -200,7 +201,7 @@ def check_command(
         else build_progress_renderer(
             live=mode == "tty",
             console=err_console,
-            out=click.get_text_stream("stderr"),
+            out=sys.stderr,
         )
     )
     # A renderer always exists (or is explicitly None under --quiet), and
@@ -241,7 +242,7 @@ def check_command(
         for text in deferred:
             emit_error(text)
 
-        stream = click.get_text_stream("stdout")
+        stream = sys.stdout
         fmt_lower = fmt.lower()
 
         if fmt_lower in {"json", "yaml"}:

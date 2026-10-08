@@ -71,7 +71,7 @@ class TestParseInstant:
     def test_a_datetime_object_passes_through_normalized(self) -> None:
         """A driver-native value, read before the artifact's own string rendering."""
 
-        naive = datetime(2026, 8, 10, 16, 47, 47)  # noqa: DTZ001 - the case under test
+        naive = datetime(2026, 8, 10, 16, 47, 47)
 
         assert parse_instant(naive) == datetime(2026, 8, 10, 16, 47, 47, tzinfo=UTC)
 

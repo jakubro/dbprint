@@ -1078,8 +1078,7 @@ def _stat_paths(stats: dict[str, Any]) -> set[str]:
 
     for k, v in stats.items():
         if isinstance(v, dict):
-            for sub in v:
-                flat.add(f"{k}.{sub}")
+            flat.update(f"{k}.{sub}" for sub in v)
         else:
             flat.add(k)
 

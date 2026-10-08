@@ -42,7 +42,7 @@ class TestASuppressedColumnEmitsNoList:
         field_notes = _profile(tmp_path)["field_notes"]
 
         assert field_notes["cardinality"] == 100
-        assert field_notes["cardinality_ratio"] == 0.5
+        assert field_notes["cardinality_ratio"] == 0.5  # noqa: RUF069 - the expected value is an exact literal
         assert field_notes["null_count"] == 0
         assert field_notes["sql_type"] == "text"
 
@@ -54,7 +54,7 @@ class TestASuppressedColumnEmitsNoList:
         assert institution["classification"] == "text"
         assert institution["inferred"]["looks_like"] == "email"
         assert len(institution["values"]) == 20
-        assert institution["values_coverage"] == 0.2
+        assert institution["values_coverage"] == 0.2  # noqa: RUF069 - the expected value is an exact literal
         assert institution["distribution"] == "long_tail"
 
     def test_a_categorical_column_reporting_prose_keeps_its_list(self, tmp_path: Path) -> None:
@@ -65,7 +65,7 @@ class TestASuppressedColumnEmitsNoList:
         assert status["classification"] == "categorical"
         assert status["inferred"]["looks_like"] == "prose"
         assert status["values"]
-        assert status["values_coverage"] == 1.0
+        assert status["values_coverage"] == 1.0  # noqa: RUF069 - the expected value is an exact literal
         assert status["distribution"]
 
     def test_the_print_conforms(self, tmp_path: Path) -> None:

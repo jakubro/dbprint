@@ -7,6 +7,7 @@ call `Engine.compute_diff()`, render the diff dict (human / json / yaml).
 from __future__ import annotations
 
 import contextlib
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -171,7 +172,7 @@ def diff_command(
         else build_progress_renderer(
             live=progress_mode == "tty",
             console=err_console,
-            out=click.get_text_stream("stderr"),
+            out=sys.stderr,
         )
     )
 
@@ -299,7 +300,7 @@ def diff_command(
             payload_mode = (
                 resolve_render_mode(tui, stdout_console) if fmt_lower == "human" else "piped"
             )
-            stream = click.get_text_stream("stdout")
+            stream = sys.stdout
             _emit(results, fmt_lower, threshold, stream, mode=payload_mode)
 
         log_run_summary(overall_exit)

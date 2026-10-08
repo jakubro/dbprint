@@ -141,9 +141,13 @@ def _notes_battery() -> list[tuple[Rendered, dict[str, Any]]]:
     ]
     scope = scope_of({"scope": {"rows_scanned": 2, "sample": 0.5}})
     out = [(synthesize(column), column) for column in columns]
-    out.append((synthesize(columns[6], scope=scope), columns[6]))
-    out.append((synthesize(columns[8], scope=scope), columns[8]))
-    out.append((synthesize(columns[5], statistics_params={"top_n_values": 1}), columns[5]))
+    out.extend(
+        (
+            (synthesize(columns[6], scope=scope), columns[6]),
+            (synthesize(columns[8], scope=scope), columns[8]),
+            (synthesize(columns[5], statistics_params={"top_n_values": 1}), columns[5]),
+        ),
+    )
     out += [
         (
             synthesize({"classification": "foreign_key_candidate"}, [f"public.herbarium.id ({d})"]),

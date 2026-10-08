@@ -535,22 +535,26 @@ def _phase_a_statement(
         select_parts.append(f"COALESCE(COUNT_IF({cn} IS NULL), 0) AS null_{column_alias(col.name)}")
 
         if is_numeric_type(col.classified_type):
-            select_parts.append(f"COALESCE(COUNT_IF({cn} = 0), 0) AS zero_{column_alias(col.name)}")
-            select_parts.append(f"COALESCE(COUNT_IF({cn} < 0), 0) AS neg_{column_alias(col.name)}")
-            select_parts.append(
-                f"COALESCE(COUNT_IF({cn} = TRUNC({cn})), 0) AS quant_{column_alias(col.name)}",
+            select_parts.extend(
+                (
+                    f"COALESCE(COUNT_IF({cn} = 0), 0) AS zero_{column_alias(col.name)}",
+                    f"COALESCE(COUNT_IF({cn} < 0), 0) AS neg_{column_alias(col.name)}",
+                    f"COALESCE(COUNT_IF({cn} = TRUNC({cn})), 0) AS quant_{column_alias(col.name)}",
+                ),
             )
         elif measures_length(col.classified_type, _is_unsupported):
             empty_condition, length_expr = _length_exprs(cn, col.classified_type)
-            select_parts.append(
-                f"COALESCE(COUNT_IF({empty_condition}), 0) AS empty_{column_alias(col.name)}",
-            )
-            select_parts.append(f"MIN({length_expr}) AS lenmin_{column_alias(col.name)}")
-            select_parts.append(f"MAX({length_expr}) AS lenmax_{column_alias(col.name)}")
-            select_parts.append(f"AVG({length_expr}) AS lenavg_{column_alias(col.name)}")
-            select_parts.append(
-                f"PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY {length_expr}) "
-                f"AS lenp95_{column_alias(col.name)}",
+            select_parts.extend(
+                (
+                    f"COALESCE(COUNT_IF({empty_condition}), 0) AS empty_{column_alias(col.name)}",
+                    f"MIN({length_expr}) AS lenmin_{column_alias(col.name)}",
+                    f"MAX({length_expr}) AS lenmax_{column_alias(col.name)}",
+                    f"AVG({length_expr}) AS lenavg_{column_alias(col.name)}",
+                    (
+                        f"PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY {length_expr}) "
+                        f"AS lenp95_{column_alias(col.name)}"
+                    ),
+                ),
             )
 
         select_parts.append(f"{_distinct_expr(cn, approximate)} AS card_{column_alias(col.name)}")

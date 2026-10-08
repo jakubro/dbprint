@@ -427,23 +427,23 @@ def _phase_a_statement(
         select_parts.append(f"COUNT(1) - COUNT({cn}) AS null_{a}")
 
         if is_numeric_type(col.classified_type):
-            select_parts.append(
-                f"COALESCE(SUM(CASE WHEN {cn} = 0 THEN 1 ELSE 0 END), 0) AS zero_{a}",
-            )
-            select_parts.append(
-                f"COALESCE(SUM(CASE WHEN {cn} < 0 THEN 1 ELSE 0 END), 0) AS neg_{a}",
-            )
-            select_parts.append(
-                f"COALESCE(SUM(CASE WHEN {cn} = TRUNC({cn}) THEN 1 ELSE 0 END), 0) AS quant_{a}",
+            select_parts.extend(
+                (
+                    f"COALESCE(SUM(CASE WHEN {cn} = 0 THEN 1 ELSE 0 END), 0) AS zero_{a}",
+                    f"COALESCE(SUM(CASE WHEN {cn} < 0 THEN 1 ELSE 0 END), 0) AS neg_{a}",
+                    f"COALESCE(SUM(CASE WHEN {cn} = TRUNC({cn}) THEN 1 ELSE 0 END), 0) AS quant_{a}",
+                ),
             )
         elif measures_length(col.classified_type, _is_unsupported):
             empty_condition, length_expr = _length_exprs(cn, col.classified_type)
-            select_parts.append(
-                f"COALESCE(SUM(CASE WHEN {empty_condition} THEN 1 ELSE 0 END), 0) AS empty_{a}",
+            select_parts.extend(
+                (
+                    f"COALESCE(SUM(CASE WHEN {empty_condition} THEN 1 ELSE 0 END), 0) AS empty_{a}",
+                    f"MIN({length_expr}) AS lenmin_{a}",
+                    f"MAX({length_expr}) AS lenmax_{a}",
+                    f"AVG({length_expr}::FLOAT8) AS lenavg_{a}",
+                ),
             )
-            select_parts.append(f"MIN({length_expr}) AS lenmin_{a}")
-            select_parts.append(f"MAX({length_expr}) AS lenmax_{a}")
-            select_parts.append(f"AVG({length_expr}::FLOAT8) AS lenavg_{a}")
 
         select_parts.append(f"COUNT(DISTINCT {cn}) AS card_{a}")
 

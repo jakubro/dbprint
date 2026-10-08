@@ -804,7 +804,7 @@ class TestEdgeCases:
                 frozenset(),
             )
             assert stats["opt"].null_count == 2
-            assert stats["opt"].null_rate == 1.0
+            assert stats["opt"].null_rate == 1.0  # noqa: RUF069 - the expected value is an exact literal
             assert stats["opt"].cardinality == 0
         finally:
             adapter.close()
@@ -991,7 +991,7 @@ class TestEdgeCases:
 
             # uuid -> text: a unit ratio does not suppress the value list (SPEC 4.2), and
             # `inferred.candidate_key` is the engine's to stamp, not the adapter's.
-            assert stats["id"].cardinality_ratio == 1.0
+            assert stats["id"].cardinality_ratio == 1.0  # noqa: RUF069 - the expected value is an exact literal
             assert stats["id"].values is not None
             assert stats["id"].range is None
             assert stats["id"].percentiles is None
@@ -1616,7 +1616,7 @@ class TestApproximateCardinality:
         # Every value distinct: the estimate must land on the row count, not zero, and a
         # ratio of 1.0 reaches the near-unique re-probe, which counts it exactly.
         assert stats["id"].cardinality == 500
-        assert stats["id"].cardinality_ratio == 1.0
+        assert stats["id"].cardinality_ratio == 1.0  # noqa: RUF069 - the expected value is an exact literal
         assert stats["id"].cardinality_method == "exact"
 
         # A small enumeration stays under the re-probe ratio and keeps its positive estimate.
@@ -1947,7 +1947,7 @@ class TestScopedStatistics:
         )
 
         assert counts.rows_scanned == 100
-        assert stats["id"].cardinality_ratio == 1.0
+        assert stats["id"].cardinality_ratio == 1.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_a_filter_matching_nothing_is_not_an_empty_table(
         self,
@@ -2274,7 +2274,7 @@ class TestOutOfRangeTemporal:
         assert rng.min is None
         assert rng.max is None
         assert rng.span_days == 0
-        assert percentiles == {p: None for p in percentiles}
+        assert percentiles == dict.fromkeys(percentiles)
         assert unrepresentable == ()
 
 

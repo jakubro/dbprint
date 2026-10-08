@@ -94,7 +94,7 @@ def list_is_complete(column: Mapping[str, Any]) -> bool:
     Without a `values_coverage`, `frequencies.listed` against an exact `cardinality` decides.
     """
 
-    if column_value(column, "values_coverage") == 1.0:
+    if column_value(column, "values_coverage") == 1.0:  # noqa: RUF069 - coverage 1.0 is the exhaustive sentinel
         return True
 
     frequencies = column_value(column, "frequencies")
@@ -123,7 +123,7 @@ def qualify(text: str, scope: ScanScope | None) -> str:
 def coverage_statement(coverage: float, scope: ScanScope | None) -> str:
     """What a value list at `coverage` covers - the whole domain, over the scan, or a sample."""
 
-    if coverage != 1.0:
+    if coverage != 1.0:  # noqa: RUF069 - coverage 1.0 is the exhaustive sentinel
         return SAMPLED_STATEMENT
 
     return SCANNED_DOMAIN_STATEMENT if scope is not None else WHOLE_DOMAIN_STATEMENT

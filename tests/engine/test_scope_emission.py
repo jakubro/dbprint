@@ -281,7 +281,7 @@ class TestResolution:
         scope = _table_scope(conn.settings_for("anything.at.all"))
 
         assert scope is not None
-        assert scope.sample == 0.1
+        assert scope.sample == 0.1  # noqa: RUF069 - the expected value is an exact literal
 
     def test_a_later_rule_replaces_an_earlier_predicate(self) -> None:
         conn = _conn(

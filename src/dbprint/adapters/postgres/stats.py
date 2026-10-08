@@ -632,26 +632,28 @@ def _phase_a_statement(
         )
 
         if is_numeric_type(col.classified_type):
-            select_parts.append(
-                f"COUNT(1) FILTER (WHERE {cn} = 0) AS zero_{column_alias(col.name)}",
-            )
-            select_parts.append(f"COUNT(1) FILTER (WHERE {cn} < 0) AS neg_{column_alias(col.name)}")
-            select_parts.append(
-                f"COUNT(1) FILTER (WHERE {cn} = TRUNC({cn})) AS quant_{column_alias(col.name)}",
+            select_parts.extend(
+                (
+                    f"COUNT(1) FILTER (WHERE {cn} = 0) AS zero_{column_alias(col.name)}",
+                    f"COUNT(1) FILTER (WHERE {cn} < 0) AS neg_{column_alias(col.name)}",
+                    f"COUNT(1) FILTER (WHERE {cn} = TRUNC({cn})) AS quant_{column_alias(col.name)}",
+                ),
             )
 
         # SPEC 2.2.3 conditions `length` on the published `sql_type`, which a domain renames.
         if measures_length(col.sql_type, _is_unsupported):
             empty_condition, length_expr = _length_exprs(cn, col.sql_type)
-            select_parts.append(
-                f"COUNT(1) FILTER (WHERE {empty_condition}) AS empty_{column_alias(col.name)}",
-            )
-            select_parts.append(f"MIN({length_expr}) AS lenmin_{column_alias(col.name)}")
-            select_parts.append(f"MAX({length_expr}) AS lenmax_{column_alias(col.name)}")
-            select_parts.append(f"AVG({length_expr}) AS lenavg_{column_alias(col.name)}")
-            select_parts.append(
-                f"PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY {length_expr}) "
-                f"AS lenp95_{column_alias(col.name)}",
+            select_parts.extend(
+                (
+                    f"COUNT(1) FILTER (WHERE {empty_condition}) AS empty_{column_alias(col.name)}",
+                    f"MIN({length_expr}) AS lenmin_{column_alias(col.name)}",
+                    f"MAX({length_expr}) AS lenmax_{column_alias(col.name)}",
+                    f"AVG({length_expr}) AS lenavg_{column_alias(col.name)}",
+                    (
+                        f"PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY {length_expr}) "
+                        f"AS lenp95_{column_alias(col.name)}"
+                    ),
+                ),
             )
 
         if not approximate:

@@ -13,7 +13,7 @@ import shutil
 import signal
 import subprocess
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -105,7 +105,7 @@ def registry(root: Path) -> Path:
 
 
 @contextmanager
-def registered(root: Path, name: str, kind: str, **handle: str) -> Iterator[Path]:
+def registered(root: Path, name: str, kind: str, **handle: str) -> Generator[Path]:
     """Hold a marker for a substrate while the body, its own teardown included, runs.
 
     The marker precedes the resource and outlives it, so a run killed in between leaves one.
@@ -247,10 +247,12 @@ def start_failure(kind: str, server_said: str, root: Path, port: int | None = No
         held = port_holder(port)
         lines.append(f"  port {port} " + (f"held by {held}" if held else "held by no process"))
 
-    lines.append(
-        f"  live suite substrates: {len(entries)}" + "".join(f"\n    {e}" for e in entries),
+    lines.extend(
+        (
+            f"  live suite substrates: {len(entries)}" + "".join(f"\n    {e}" for e in entries),
+            f"  MemAvailable: {available_mb()} MiB",
+        ),
     )
-    lines.append(f"  MemAvailable: {available_mb()} MiB")
 
     return "\n".join(lines)
 

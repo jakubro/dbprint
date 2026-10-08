@@ -662,7 +662,7 @@ def skyline_heights(columns: dict[str, Any]) -> dict[str, float]:
     lo, hi = min(log_values.values()), max(log_values.values())
 
     if hi == lo:
-        return {col: 100.0 for col in log_values}
+        return dict.fromkeys(log_values, 100.0)
 
     return {col: round(max(6.0, (v - lo) / (hi - lo) * 100), 1) for col, v in log_values.items()}
 

@@ -115,8 +115,7 @@ def _spliced(text: str, spans: list[tuple[int, int]]) -> str:
         if start < cursor:
             continue
 
-        out.append(text[cursor:start])
-        out.append(MASK)
+        out.extend((text[cursor:start], MASK))
         cursor = end
 
     out.append(text[cursor:])

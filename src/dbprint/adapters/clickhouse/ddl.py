@@ -5,7 +5,7 @@ per-object statement and no external binary.
 from __future__ import annotations
 
 from .connection import Cursor, exec_query
-from .introspect import SECRETS_HIDDEN
+from .introspect import FORCE_DISPLAY_MASKING
 from ..credentials import mask_clickhouse_strings
 from ..identifiers import Identity
 from ..sql_layout import trimmed_lines
@@ -26,7 +26,7 @@ def extract_ddl(cursor: Cursor, identity: Identity, *, hide_secrets: bool = Fals
           system.tables tbl
         WHERE
           tbl.database = %s
-          AND tbl.name = %s{SECRETS_HIDDEN if hide_secrets else ""}
+          AND tbl.name = %s{FORCE_DISPLAY_MASKING if hide_secrets else ""}
         """,
         identity.parts,
     ).fetchone()

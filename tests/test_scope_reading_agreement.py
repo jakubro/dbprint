@@ -136,7 +136,7 @@ def _names_coverage(node: ast.AST) -> bool:
 
 
 def _is_one(node: ast.AST) -> bool:
-    return isinstance(node, ast.Constant) and node.value == 1.0 and not isinstance(node.value, bool)
+    return isinstance(node, ast.Constant) and node.value == 1.0 and not isinstance(node.value, bool)  # noqa: RUF069 - the expected value is an exact literal
 
 
 def _callee(call: ast.Call) -> str | None:

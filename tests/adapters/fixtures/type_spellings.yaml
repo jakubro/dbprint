@@ -86,6 +86,7 @@ clickhouse:
   Ring: spatial
   LineString: spatial
   MultiLineString: spatial
+  MultiPoint: spatial
   Polygon: spatial
   MultiPolygon: spatial
   Geometry: spatial

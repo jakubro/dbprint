@@ -85,7 +85,7 @@ def test_each_engine_states_its_family_and_its_ordered_key(
     cursor.execute("INSERT INTO seedbank.plot_total VALUES (1, '2026-01-01', 1)")
     merging = _generate(cursor, tmp_path, "*.plot_total")["merging"]
 
-    assert merging["engine"] == engine.split("(")[0]
+    assert merging["engine"] == engine.split("(", maxsplit=1)[0]
     assert merging["key"] == expected_key
     assert merging["one_row_per_key"] is one_row_per_key
 

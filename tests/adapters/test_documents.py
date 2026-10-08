@@ -135,7 +135,7 @@ class TestDuckdb:
         assert {"values", "values_coverage", "distribution", "unmeasured"} & set(
             parts[".notes"],
         ) == set()
-        assert parts[".grade"]["values_coverage"] == 1.0
+        assert parts[".grade"]["values_coverage"] == 1.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_a_column_rule_withholds_the_key_names_and_marks_the_elements(
         self,

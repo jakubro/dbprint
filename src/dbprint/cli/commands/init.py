@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import TextIO
 
@@ -74,7 +75,7 @@ def init_command(ctx: click.Context, force: bool) -> None:
 
     cwd = Path.cwd()
     outcomes = _scaffold(cwd, force=force)
-    out: TextIO = click.get_text_stream("stdout")
+    out: TextIO = sys.stdout
 
     out.writelines(f"{status}\t{kind}\t{path}\n" for kind, path, status in outcomes)
 
@@ -82,26 +83,21 @@ def init_command(ctx: click.Context, force: bool) -> None:
 
 
 def _scaffold(cwd: Path, *, force: bool) -> list[tuple[str, Path, str]]:
-    outcomes: list[tuple[str, Path, str]] = []
-    outcomes.append(
+    return [
         _write_template(
             cwd / ".dbprint.yaml",
             PROJECT_TEMPLATE,
             force=force,
             kind="project_config",
         ),
-    )
-    outcomes.append(_ensure_dir(cwd / "prints", kind="prints_dir"))
-    outcomes.append(
+        _ensure_dir(cwd / "prints", kind="prints_dir"),
         _write_template(
             CONNECTIONS_FILE,
             CONNECTIONS_TEMPLATE,
             force=False,
             kind="connections_file",
         ),
-    )
-
-    return outcomes
+    ]
 
 
 def _write_template(path: Path, content: str, *, force: bool, kind: str) -> tuple[str, Path, str]:

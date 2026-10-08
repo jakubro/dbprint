@@ -768,7 +768,7 @@ def _shown_values(
     A sampled list is cut to `QUERY_SAMPLE_LIMIT` categories, a spelling group counting as one.
     """
 
-    if coverage == 1.0:
+    if coverage == 1.0:  # noqa: RUF069 - coverage 1.0 is the exhaustive sentinel
         return entries, coverage
 
     groups = grouped_values(entries)[:QUERY_SAMPLE_LIMIT]
@@ -1455,7 +1455,7 @@ def _markdown_null_patterns(a: TableArtifacts) -> list[Rendered]:
     if not scanned:
         return [Rendered(line) for line in lines]
 
-    every = len(shown) == len(patterns) and block.get("coverage") == 1.0
+    every = len(shown) == len(patterns) and block.get("coverage") == 1.0  # noqa: RUF069 - coverage 1.0 is the exhaustive sentinel
     held = sum(int(entry.get("count") or 0) for entry in shown) / scanned
     covered = "every scanned row" if every else table_readings.scanned_row_share(held)
     # Silent on `measured` - matches the per-column coverage hedge (notes_synthesis.py).
@@ -2138,7 +2138,7 @@ def _structured_values(a: TableArtifacts) -> dict[str, Any]:
             "coverage_statement": coverage_statement(coverage, scope),
         }
 
-        if coverage != 1.0:
+        if coverage != 1.0:  # noqa: RUF069 - coverage 1.0 is the exhaustive sentinel
             block["shown_coverage"] = share
 
         redaction = column_value(col, "redacted")

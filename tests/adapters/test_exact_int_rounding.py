@@ -21,7 +21,7 @@ class TestExactIntegerTotals:
         assert isinstance(round_statistic(big, exact_int=True), int)
 
     def test_a_non_integral_decimal_still_rounds(self) -> None:
-        assert round_statistic(Decimal("1.5"), exact_int=True) == 1.5
+        assert round_statistic(Decimal("1.5"), exact_int=True) == 1.5  # noqa: RUF069 - the expected value is an exact literal
 
     def test_without_the_flag_an_integral_decimal_is_left_rate_valued(self) -> None:
         out = round_statistic(Decimal(7))

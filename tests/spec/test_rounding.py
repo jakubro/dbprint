@@ -129,10 +129,10 @@ def test_measured_value_refuses_a_type_it_cannot_spell(value: object, type_name:
 def test_measured_text_spells_a_temporal_and_refuses_a_number() -> None:
     assert measured_text(datetime.date(2024, 5, 6), "timeline.bucket") == "2024-05-06"
 
-    with pytest.raises(UnrepresentableValue, match="^timeline.bucket is int, "):
+    with pytest.raises(UnrepresentableValue, match=r"^timeline\.bucket is int, "):
         measured_text(4, "timeline.bucket")
 
-    with pytest.raises(UnrepresentableValue, match="^timeline.bucket is bytes, "):
+    with pytest.raises(UnrepresentableValue, match=r"^timeline\.bucket is bytes, "):
         measured_text(b"4", "timeline.bucket")
 
 

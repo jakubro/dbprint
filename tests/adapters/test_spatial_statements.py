@@ -43,6 +43,9 @@ class _Recorded:
     def fetchall(self) -> list[tuple[Any, ...]]:
         return self._rows
 
+    def fetchone(self) -> tuple[Any, ...] | None:
+        return self._rows[0] if self._rows else None
+
 
 @pytest.mark.parametrize("vendor", sorted(_SPATIAL_TYPES))
 def test_the_spatial_read_speaks_its_own_dialect(
@@ -88,6 +91,9 @@ def _read(vendor: str, monkeypatch: pytest.MonkeyPatch, module: ModuleType) -> l
 
     def execute(_cursor: Any, sql: str, *_params: Any) -> _Recorded:
         seen.append(sql)
+
+        if "CAST(NULL AS Geometry)" in sql:
+            return _Recorded([("Enum8('LineString' = 0, 'Point' = 1, 'MultiPoint' = 2)",)])
 
         return _Recorded([])
 

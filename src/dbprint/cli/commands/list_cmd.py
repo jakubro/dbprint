@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
@@ -131,10 +132,10 @@ def list_command(
         elif mode == "tty":
             render_human(conn_config.name, summary, console)
         else:
-            render_piped(conn_config.name, summary, click.get_text_stream("stdout"))
+            render_piped(conn_config.name, summary, sys.stdout)
 
     if fmt_lower in {"json", "yaml"}:
-        render_data(entries, fmt_lower, click.get_text_stream("stdout"))
+        render_data(entries, fmt_lower, sys.stdout)
 
     ctx.exit(overall_exit)
 
@@ -195,4 +196,4 @@ def _drop(
     if fmt in {"json", "yaml"}:
         entries.append({"connection": name, "ok": False, "causes": list(causes)})
     elif mode != "tty":
-        render_not_run_piped(name, causes, click.get_text_stream("stdout"))
+        render_not_run_piped(name, causes, sys.stdout)

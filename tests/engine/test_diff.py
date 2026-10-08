@@ -712,7 +712,7 @@ class TestStatisticChanges:
         assert change["before"] == 10
         assert change["after"] == 15
         assert change["delta"] == 5
-        assert change["delta_pct"] == 0.5
+        assert change["delta_pct"] == 0.5  # noqa: RUF069 - the expected value is an exact literal
 
     def test_statistic_changed_non_numeric_no_delta(self) -> None:
         before = _table(
@@ -753,7 +753,7 @@ class TestStatisticChanges:
         diff = _compute({"public.t": before}, {"public.t": after})
         change = next(c for c in diff["changes"] if c["kind"] == "statistic_changed")
         assert change["delta"] == -10
-        assert change["delta_pct"] == -0.1
+        assert change["delta_pct"] == -0.1  # noqa: RUF069 - the expected value is an exact literal
 
     def test_negative_before_rising_reports_positive_delta_pct(self) -> None:
         before = _table(
@@ -767,7 +767,7 @@ class TestStatisticChanges:
         diff = _compute({"public.t": before}, {"public.t": after})
         change = next(c for c in diff["changes"] if c["kind"] == "statistic_changed")
         assert change["delta"] == 10
-        assert change["delta_pct"] == 0.1
+        assert change["delta_pct"] == 0.1  # noqa: RUF069 - the expected value is an exact literal
 
     def test_crossing_zero_is_not_clamped(self) -> None:
         before = _table(
@@ -781,7 +781,7 @@ class TestStatisticChanges:
         diff = _compute({"public.t": before}, {"public.t": after})
         change = next(c for c in diff["changes"] if c["kind"] == "statistic_changed")
         assert change["delta"] == 100
-        assert change["delta_pct"] == 2.0
+        assert change["delta_pct"] == 2.0  # noqa: RUF069 - the expected value is an exact literal
 
 
 class TestValuesRestored:
@@ -1843,7 +1843,7 @@ _SHAPE_COLUMN_FIELDS = {"sql_type", "nullable", "physical_name", "collation"}
 
 def _column_pair(field: str) -> tuple[TableState, TableState]:
     before_value, after_value = _COLUMN_SAMPLES[field]
-    key = field.split(".")[0]
+    key = field.split(".", maxsplit=1)[0]
     sides = []
 
     for value in (before_value, after_value):

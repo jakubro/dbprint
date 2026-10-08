@@ -38,7 +38,7 @@ _RATIO_CEILING = 0.999999
 def _floored(rounded: float, numerator: int) -> float:
     """A nonzero numerator never rounds all the way down to 0.0."""
 
-    return _RATIO_FLOOR if numerator > 0 and rounded == 0.0 else rounded
+    return _RATIO_FLOOR if numerator > 0 and rounded == 0.0 else rounded  # noqa: RUF069 - rounding to exactly 0.0 is what the floor replaces
 
 
 def compute_cardinality_ratio(cardinality: int, rows_scanned: int) -> float:
@@ -111,7 +111,7 @@ def compute_null_rate(null_count: int, rows_scanned: int) -> float:
     rounded = round(null_count / rows_scanned, 6)
     non_null = rows_scanned - null_count
 
-    if non_null > 0 and rounded == 1.0:
+    if non_null > 0 and rounded == 1.0:  # noqa: RUF069 - rounding to exactly 1.0 is what the ceiling replaces
         return _RATIO_CEILING
 
     return _floored(rounded, null_count)

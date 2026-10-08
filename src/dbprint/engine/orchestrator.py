@@ -11,7 +11,7 @@ import itertools
 import logging
 import time
 import traceback
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
@@ -3142,7 +3142,7 @@ class _OperationFailed(RuntimeError):
 
 
 @contextmanager
-def _operation(name: str) -> Iterator[None]:
+def _operation(name: str) -> Generator[None]:
     """Tag a failure raised inside with the adapter operation that produced it.
 
     Covers pure-Python failures (identifier rejection, DDL normalization) with no statement of
@@ -3556,7 +3556,7 @@ def _stamp_values_coverage_method(
                 listed,
                 non_null,
             )
-        elif e.stats.values_coverage == 1.0:
+        elif e.stats.values_coverage == 1.0:  # noqa: RUF069 - coverage 1.0 is the exhaustive sentinel
             e.values_coverage_method = "measured"
 
 

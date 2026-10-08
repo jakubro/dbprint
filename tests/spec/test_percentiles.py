@@ -45,7 +45,7 @@ class TestAboveTheLimit:
     def test_a_percentile_above_the_maximum_takes_the_nearest_float_inside(self) -> None:
         coherent = coherent_percentiles({"p99": float(BASE + 1_256)}, BASE, BASE + 1_000)
 
-        assert coherent["p99"] == float(BASE + 768)
+        assert coherent["p99"] == float(BASE + 768)  # noqa: RUF069 - integers convert to float exactly
         assert isinstance(coherent["p99"], float)
 
     def test_a_descent_between_keys_is_flattened(self) -> None:
@@ -60,7 +60,7 @@ class TestAboveTheLimit:
 
         coherent = coherent_percentiles(given, BASE, BASE + 1_000_000)
 
-        assert coherent["p100"] == float(BASE + 512)
+        assert coherent["p100"] == float(BASE + 512)  # noqa: RUF069 - integers convert to float exactly
 
     def test_an_int_percentile_is_already_exact_and_never_rewritten(self) -> None:
         given = {"p01": BASE - 5}
@@ -72,7 +72,7 @@ class TestAboveTheLimit:
 
         coherent = coherent_percentiles({"p50": float(2**53) - 2.0}, odd, odd)
 
-        assert coherent["p50"] == float(odd)
+        assert coherent["p50"] == float(odd)  # noqa: RUF069 - integers convert to float exactly
 
 
 class TestBelowTheLimit:
@@ -105,7 +105,7 @@ class TestAStraddlingRange:
     def test_a_percentile_far_below_a_minimum_near_zero_is_left(self) -> None:
         coherent = coherent_percentiles({"p01": -500.0}, 0, BASE)
 
-        assert coherent["p01"] == -500.0
+        assert coherent["p01"] == -500.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_a_percentile_above_the_far_maximum_is_still_clamped(self) -> None:
         coherent = coherent_percentiles({"p99": float(BASE) + 256.0}, 0, BASE)

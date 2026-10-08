@@ -120,7 +120,7 @@ def warning_line(depth: int, text: str, *, cap: int) -> str:
 
 
 def banner_box(text: str, *, cap: int) -> str:
-    """A `cap`-wide rounded box, `text` centred on its middle line; three lines joined by `\\n`.
+    r"""A `cap`-wide rounded box, `text` centred on its middle line; three lines joined by `\n`.
     No blank line above or below - the box is its own separation; its glyphs are display text.
     """
 

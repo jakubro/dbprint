@@ -363,10 +363,18 @@ def populated_windows(
     outer_exprs = []
 
     for i, operand in enumerate(subjects.values()):
-        agg_exprs.append(f"MIN(CASE WHEN {operand} IS NOT NULL THEN {anchor} END) AS from_{i}")
-        agg_exprs.append(f"MAX(CASE WHEN {operand} IS NOT NULL THEN {anchor} END) AS to_{i}")
-        outer_exprs.append(f"{render(f'agg.from_{i}')} AS from_{i}_text")
-        outer_exprs.append(f"{render(f'agg.to_{i}')} AS to_{i}_text")
+        agg_exprs.extend(
+            (
+                f"MIN(CASE WHEN {operand} IS NOT NULL THEN {anchor} END) AS from_{i}",
+                f"MAX(CASE WHEN {operand} IS NOT NULL THEN {anchor} END) AS to_{i}",
+            ),
+        )
+        outer_exprs.extend(
+            (
+                f"{render(f'agg.from_{i}')} AS from_{i}_text",
+                f"{render(f'agg.to_{i}')} AS to_{i}_text",
+            ),
+        )
 
     row = execute(
         f"""

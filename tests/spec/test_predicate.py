@@ -35,12 +35,12 @@ class TestParse:
     def test_scalar_numeric(self) -> None:
         p = parse("null_rate", 0.0)
         assert isinstance(p, ScalarPredicate)
-        assert p.expected == 0.0
+        assert p.expected == 0.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_range_min_only(self) -> None:
         p = parse("cardinality_ratio", {"min": 0.999})
         assert isinstance(p, RangePredicate)
-        assert p.min == 0.999
+        assert p.min == 0.999  # noqa: RUF069 - the expected value is an exact literal
         assert p.max is None
 
     def test_range_both(self) -> None:
@@ -187,7 +187,7 @@ class TestScalarEqualityAgainstAFlooredOrCeilingedRatio:
 class TestResolve:
     def test_flat_field(self) -> None:
         ref = resolve({"null_rate": 0.05}, "null_rate")
-        assert ref.found and ref.value == 0.05
+        assert ref.found and ref.value == 0.05  # noqa: RUF069 - the expected value is an exact literal
 
     def test_dotted_path(self) -> None:
         ref = resolve({"range": {"min": 0, "max": 100}}, "range.min")

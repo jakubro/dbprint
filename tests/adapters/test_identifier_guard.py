@@ -6,6 +6,7 @@ A structural sweep, plus behavioural cases on engines that can hold the spelling
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 from typing import Any, LiteralString, cast
 
@@ -327,7 +328,7 @@ def test_a_dotted_clickhouse_table_is_refused_on_the_real_catalog(
     )
     adapter.connect()
 
-    with pytest.raises(IdentifierRejected, match="Detail: 'beds.v2'"):
+    with pytest.raises(IdentifierRejected, match=re.escape("Detail: 'beds.v2'")):
         adapter.list_tables(include=["*"], exclude=[])
 
 

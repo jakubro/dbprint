@@ -645,7 +645,7 @@ def _parse_connection(
     return ConnectionConfig(
         name=name,
         adapter=adapter,
-        auto=bool(body.get("auto", False)),
+        auto=bool(body.get("auto")),
         output=output,
         include=include,
         exclude=exclude,

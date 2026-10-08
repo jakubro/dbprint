@@ -41,7 +41,7 @@ def test_an_exact_number_is_digested_as_the_artifact_spells_it() -> None:
 def test_a_digest_without_a_salt_is_refused(salt: str | None) -> None:
     with pytest.raises(
         ValueError,
-        match="^hash redaction requires a redaction_salt carrying a value$",
+        match=r"^hash redaction requires a redaction_salt carrying a value$",
     ):
         redact_value("alice", "hash", salt)
 

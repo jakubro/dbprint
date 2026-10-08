@@ -101,7 +101,7 @@ REMOTE_ENGINES = frozenset(
 _Candidate = tuple[TableMeta, tuple[str, str]]
 
 # Appended to a catalog read that returns DDL or a comment when the session would unmask secrets.
-SECRETS_HIDDEN = "\nSETTINGS\n  format_display_secrets_in_show_and_select = 0"
+FORCE_DISPLAY_MASKING = "\nSETTINGS\n  format_display_secrets_in_show_and_select = 0"
 
 
 def list_tables(
@@ -433,7 +433,7 @@ def comments(cursor: Cursor, identity: Identity, *, hide_secrets: bool = False) 
           system.tables tbl
         WHERE
           tbl.database = %s
-          AND tbl.name = %s{SECRETS_HIDDEN if hide_secrets else ""}
+          AND tbl.name = %s{FORCE_DISPLAY_MASKING if hide_secrets else ""}
         """,
         identity.parts,
     ).fetchone()

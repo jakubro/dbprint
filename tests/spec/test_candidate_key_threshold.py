@@ -43,14 +43,14 @@ class TestSharedHelper:
         rounded = compute_cardinality_ratio(9998, 9999)
 
         assert raw < 0.9999
-        assert rounded == 0.9999
+        assert rounded == 0.9999  # noqa: RUF069 - the expected value is an exact literal
 
     def test_the_floor_does_not_approach_the_candidate_key_threshold(self) -> None:
         """A floored near-zero ratio must stay far below 0.9999, not drift toward it."""
 
         ratio = compute_cardinality_ratio(1, 10_000_000)
 
-        assert ratio == 0.000001
+        assert ratio == 0.000001  # noqa: RUF069 - the expected value is an exact literal
         assert is_candidate_key(1, ratio) is False
 
 

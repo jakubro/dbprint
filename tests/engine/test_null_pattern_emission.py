@@ -181,7 +181,7 @@ class TestContextRendering:
         text = _context_accession(tmp_path, ACCESSION_NULL_PATTERNS, fmt="yaml")
         payload = yaml.safe_load(text)
 
-        assert payload["statistics"]["null_patterns"]["coverage"] == 1.0
+        assert payload["statistics"]["null_patterns"]["coverage"] == 1.0  # noqa: RUF069 - the expected value is an exact literal
 
 
 def _generate(

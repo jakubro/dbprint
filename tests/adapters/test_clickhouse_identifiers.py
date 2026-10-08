@@ -244,7 +244,7 @@ class TestAgainstTheLiveEngine:
             adapter.close()
 
         assert grain == pair
-        assert dependencies[("seedcount", "vaultref")] == 1.0
+        assert dependencies[("seedcount", "vaultref")] == 1.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_a_mixed_case_column_is_addressed_by_its_catalog_spelling(
         self,

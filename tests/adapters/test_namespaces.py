@@ -6,6 +6,7 @@ Each class builds two namespaces on a shared substrate and scopes to them with s
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 from collections.abc import Iterator
 from pathlib import Path
@@ -325,7 +326,10 @@ class TestBigqueryCaseCollision:
     def test_datasets_differing_by_case_collide_on_one_path(self) -> None:
         meta = TableMeta(fqn="seedbank.taxon", type="table", namespace_path=("seedbank", "taxon"))
 
-        with pytest.raises(IdentifierRejected, match="case-collides-with-Seedbank.taxon"):
+        with pytest.raises(
+            IdentifierRejected,
+            match=re.escape("case-collides-with-Seedbank.taxon"),
+        ):
             enforce_table_identifiers(
                 [(meta, ("Seedbank", "taxon")), (meta, ("seedbank", "taxon"))],
             )

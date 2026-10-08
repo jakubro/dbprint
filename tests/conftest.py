@@ -18,7 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -438,7 +438,7 @@ def committed_print(tmp_path: Path) -> Path:
 
 
 @contextmanager
-def _serialize_cluster_bootstrap() -> Iterator[None]:
+def _serialize_cluster_bootstrap() -> Generator[None]:
     """Hold an exclusive cross-process lock across a live-cluster bootstrap.
 
     Cluster fixtures are session-scoped per xdist worker, so several can bootstrap at once,
@@ -515,7 +515,7 @@ def fresh_database(
     prefix: str,
     *,
     create: Callable[[Mapping[str, str], str], None] | None = None,
-) -> Iterator[dict[str, str]]:
+) -> Generator[dict[str, str]]:
     """Credentials for a new database in `cluster`, force-dropped on exit.
 
     `create(admin_creds, name)` replaces the bare `CREATE DATABASE`.

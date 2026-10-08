@@ -476,8 +476,12 @@ def compute_populated_windows(
         to_expr = f"maxIf({anchor_cn}, {subject_cn} IS NOT NULL)"
         rendered_from = render_domain(from_expr, anchor.classified_type)
         rendered_to = render_domain(to_expr, anchor.classified_type)
-        exprs.append(f"{rendered_from} AS from_{column_alias(subject)}")
-        exprs.append(f"{rendered_to} AS to_{column_alias(subject)}")
+        exprs.extend(
+            (
+                f"{rendered_from} AS from_{column_alias(subject)}",
+                f"{rendered_to} AS to_{column_alias(subject)}",
+            ),
+        )
 
     row = exec_query(cursor, select_from(exprs, source)).fetchone()
 
@@ -598,18 +602,26 @@ def _phase_a_statement(
         select_parts.append(f"countIf({cn} IS NULL) AS null_{a}")
 
         if is_numeric_type(col.classified_type):
-            select_parts.append(f"countIf({cn} = 0) AS zero_{a}")
-            select_parts.append(f"countIf({cn} < 0) AS neg_{a}")
-            select_parts.append(f"countIf({cn} = trunc({cn})) AS quant_{a}")
+            select_parts.extend(
+                (
+                    f"countIf({cn} = 0) AS zero_{a}",
+                    f"countIf({cn} < 0) AS neg_{a}",
+                    f"countIf({cn} = trunc({cn})) AS quant_{a}",
+                ),
+            )
         elif is_string_like(col.classified_type, _is_unsupported):
             # A non-String type (UUID, Enum) has no native `= ''`/`length()`; casting first
             # is what every "string-like" type here actually shares (Postgres does the same).
             rendered = f"toString({cn})"
-            select_parts.append(f"countIf({rendered} = '') AS empty_{a}")
-            # `length()` is bytes on ClickHouse; `lengthUTF8()` is characters (SPEC 2.2.4).
-            select_parts.append(f"min(lengthUTF8({rendered})) AS lenmin_{a}")
-            select_parts.append(f"max(lengthUTF8({rendered})) AS lenmax_{a}")
-            select_parts.append(f"avg(lengthUTF8({rendered})) AS lenavg_{a}")
+            select_parts.extend(
+                (
+                    f"countIf({rendered} = '') AS empty_{a}",
+                    # ClickHouse `length()` counts bytes, `lengthUTF8()` characters (SPEC 2.2.4).
+                    f"min(lengthUTF8({rendered})) AS lenmin_{a}",
+                    f"max(lengthUTF8({rendered})) AS lenmax_{a}",
+                    f"avg(lengthUTF8({rendered})) AS lenavg_{a}",
+                ),
+            )
 
         select_parts.append(f"{card_fn}({cn}) AS card_{a}")
 
@@ -710,9 +722,11 @@ def _fetch_vector(cursor: Cursor, source: str, col: ColumnMeta) -> VectorReading
 def _fetch_spatial(cursor: Cursor, source: str, col: ColumnMeta) -> tuple[Geometry, Extent | None]:
     cn = source_column(col, DIALECT)
     geo_type = base_type(col.classified_type)
+    variants = _geometry_variants(cursor) if geo_type == "geometry" else ()
+    points = _points(cn, geo_type, variants)
     # Every vertex as one flat Array(Point), computed once beside the value it came from.
     flattened = derived(
-        select_from([f"{cn} AS dbprint_geo", f"{_points(cn, geo_type)} AS dbprint_points"], source),
+        select_from([f"{cn} AS dbprint_geo", f"{points} AS dbprint_points"], source),
         "spt",
     )
     min_x, min_y, max_x, max_y = (
@@ -752,10 +766,19 @@ _GEO_VARIANTS = (
     ("MultiLineString", "multilinestring"),
     ("Polygon", "polygon"),
     ("MultiPolygon", "multipolygon"),
+    ("MultiPoint", "multipoint"),
 )
 
 
-def _points(cn: str, geo_type: str) -> str:
+def _geometry_variants(cursor: Cursor) -> tuple[tuple[str, str], ...]:
+    # Naming a variant the server's `Geometry` lacks fails the statement, even in an untaken branch.
+    row = exec_query(cursor, "SELECT toTypeName(variantType(CAST(NULL AS Geometry)))").fetchone()
+    declared = set(re.findall(r"'(\w+)' = ", row[0]))
+
+    return tuple(variant for variant in _GEO_VARIANTS if variant[0] in declared)
+
+
+def _points(cn: str, geo_type: str, variants: tuple[tuple[str, str], ...] = ()) -> str:
     if geo_type == "point":
         return f"[{cn}]"
 
@@ -765,10 +788,10 @@ def _points(cn: str, geo_type: str) -> str:
     if geo_type != "geometry":
         return call("arrayFlatten", cn)
 
-    # A `Geometry` value is a Variant of the six, each reached through its own element.
+    # A `Geometry` value is a Variant of the types the server declares, each its own element.
     *branches, (_, last) = (
         (variant, _points(f"variantElement({cn}, '{variant}')", geo_type))
-        for variant, geo_type in _GEO_VARIANTS
+        for variant, geo_type in variants
     )
     tests = [
         arg for variant, points in branches for arg in (f"variantType({cn}) = '{variant}'", points)

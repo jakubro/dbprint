@@ -14,12 +14,12 @@ import secrets
 import shutil
 import time
 import types
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Self, cast
 
 import yaml
 from rich.live import Live
@@ -134,10 +134,10 @@ class FrozenDatetime(datetime):
     """A `datetime` whose `now` is `FROZEN_NOW` - what a stamp and a freshness read agree on."""
 
     @classmethod
-    def now(cls, tz: Any = None) -> datetime:
+    def now(cls, tz: Any = None) -> Self:
         del tz
 
-        return FROZEN_NOW
+        return cls.combine(FROZEN_NOW.date(), FROZEN_NOW.timetz())
 
 
 class EventDrivenLive(Live):
@@ -147,7 +147,8 @@ class EventDrivenLive(Live):
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **{**kwargs, "auto_refresh": False})
+        kwargs["auto_refresh"] = False
+        super().__init__(*args, **kwargs)
 
     def update(self, renderable: Any, *, refresh: bool = False) -> None:
         del refresh
@@ -206,9 +207,13 @@ def build_cast(credentials: dict[str, str]) -> str:
         at = _type_command(frames, at, command)
         at = _emit_events(frames, at, events)
 
-    frames.append((at, PROMPT))
-    # A trailing empty frame writes no bytes but extends the recording, holding the closing screen.
-    frames.append((at + _FINAL_HOLD, ""))
+    frames.extend(
+        (
+            (at, PROMPT),
+            # An empty trailing frame writes nothing but holds the closing screen on display.
+            (at + _FINAL_HOLD, ""),
+        ),
+    )
     header = {
         "version": 2,
         "width": WIDTH,
@@ -347,7 +352,10 @@ def _prepare_workspace(credentials: dict[str, str]) -> None:
 
 
 @contextmanager
-def _patched_environment(credentials: dict[str, str] | None, clock: SteppedClock) -> Iterator[None]:
+def _patched_environment(
+    credentials: dict[str, str] | None,
+    clock: SteppedClock,
+) -> Generator[None]:
     """Redirect HOME, supply the credentials the run needs, and pin what varies between runs.
 
     Both clocks, the live footer and the colour/size environment each change what the CLI writes.
@@ -397,7 +405,7 @@ def _patched_environment(credentials: dict[str, str] | None, clock: SteppedClock
     init_command.CONNECTIONS_FILE = connections_file
     connections_config.CONNECTIONS_FILE_DEFAULT = connections_file
     run_log.LOGS_ROOT = HOME_DIR / ".dbprint" / "logs"
-    progress.Live = EventDrivenLive
+    progress.Live = cast(Any, EventDrivenLive)
     orchestrator.time = cast(Any, clock)
     progress.time = cast(Any, clock)
 

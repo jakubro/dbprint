@@ -15,7 +15,7 @@ import os
 import shutil
 import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from glob import glob
 from pathlib import Path
@@ -189,7 +189,7 @@ def _locate(binary: str, candidate_globs: tuple[str, ...]) -> Path | None:
 
 
 @contextmanager
-def _install_lock() -> Iterator[None]:
+def _install_lock() -> Generator[None]:
     """Hold an exclusive file lock for the duration of an install.
 
     pytest-xdist fans fixtures out across processes, and apt fails outright on a held

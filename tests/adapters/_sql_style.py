@@ -203,7 +203,7 @@ def _join_spellings(tokens: list[Token]) -> list[str]:
     return out
 
 
-def _alias_violations(tree: exp.Expression, tokens: list[Token]) -> Iterator[str]:
+def _alias_violations(tree: exp.Expr, tokens: list[Token]) -> Iterator[str]:
     ctes = {cte.alias_or_name for cte in tree.find_all(exp.CTE)}
     alias_starts = {token.start: index for index, token in enumerate(tokens)}
 
@@ -239,7 +239,7 @@ def _under_select_star(table: exp.Table) -> bool:
     return select is not None and all(isinstance(e, exp.Star) for e in select.expressions)
 
 
-def _column_violations(tree: exp.Expression, dialect: str) -> Iterator[str]:
+def _column_violations(tree: exp.Expr, dialect: str) -> Iterator[str]:
     ctes = {cte.alias_or_name for cte in tree.find_all(exp.CTE)}
 
     for column in tree.find_all(exp.Column):
@@ -298,7 +298,7 @@ def _partiql_names(select: exp.Select) -> set[str]:
     return unpivoted | navigated
 
 
-def _counting_violations(tree: exp.Expression) -> Iterator[str]:
+def _counting_violations(tree: exp.Expr) -> Iterator[str]:
     for count in tree.find_all(exp.Count):
         if isinstance(count.this, exp.Star):
             yield "COUNT(*), not COUNT(1)"
@@ -312,7 +312,7 @@ def _counting_violations(tree: exp.Expression) -> Iterator[str]:
             yield "SUM(CASE WHEN ... IS NOT NULL ...), not COUNT(col)"
 
 
-def _tests_non_null(condition: exp.Expression) -> bool:
+def _tests_non_null(condition: exp.Expr) -> bool:
     if isinstance(condition, exp.Not):
         return isinstance(condition.this, exp.Is)
 
@@ -357,7 +357,7 @@ _ONE_LINER = 80
 def _layout(
     text: str,
     tokens: list[Token],
-    tree: exp.Expression,
+    tree: exp.Expr,
     *,
     first_line: int = 1,
 ) -> list[str]:
@@ -369,7 +369,7 @@ def _layout(
     return _long_lines(text, first_line) + _clause_breaks(tokens) + _case_breaks(tokens) + aliases
 
 
-def _short_aliases(tree: exp.Expression) -> Iterator[str]:
+def _short_aliases(tree: exp.Expr) -> Iterator[str]:
     for node in tree.find_all(exp.Table, exp.Subquery):
         alias = node.args.get("alias")
 
@@ -377,7 +377,7 @@ def _short_aliases(tree: exp.Expression) -> Iterator[str]:
             yield f"alias {alias.name!r}, not three letters"
 
 
-def _is_one_liner(text: str, tree: exp.Expression) -> bool:
+def _is_one_liner(text: str, tree: exp.Expr) -> bool:
     sources = [*tree.find_all(exp.Table), *tree.find_all(exp.Subquery)]
 
     return (

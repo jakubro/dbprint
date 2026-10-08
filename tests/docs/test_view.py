@@ -50,7 +50,7 @@ class TestRowCountView:
         row_count = view.row_count_view(artifacts.entry, artifacts.statistics)
 
         assert row_count["rows_scanned"] == 300
-        assert row_count["share"] == 1.0
+        assert row_count["share"] == 1.0  # noqa: RUF069 - the expected value is an exact literal
         assert row_count["filter"] is None
 
     def test_scoped_table_reports_the_measured_share(self, scoped_conn: ConnectionConfig) -> None:
@@ -61,7 +61,7 @@ class TestRowCountView:
         row_count = view.row_count_view(artifacts.entry, artifacts.statistics)
 
         assert row_count["rows_scanned"] == 10_000
-        assert row_count["share"] == 0.01
+        assert row_count["share"] == 0.01  # noqa: RUF069 - the expected value is an exact literal
 
     def test_a_sampled_read_carries_its_sample_fraction(
         self,
@@ -77,7 +77,7 @@ class TestRowCountView:
 
         row_count = view.row_count_view(artifacts.entry, artifacts.statistics)
 
-        assert row_count["sample"] == 0.01
+        assert row_count["sample"] == 0.01  # noqa: RUF069 - the expected value is an exact literal
 
     def test_no_statistics_carries_no_scan_share(self) -> None:
         row_count = view.row_count_view({"row_count": 300}, None)
@@ -115,9 +115,9 @@ class TestScopeView:
         assert scope is not None
         # 10_000/1_000_000 -> 0.01; sample=0.01 agrees numerically on purpose, so the
         # assertion below pins which field is read.
-        assert scope["share"] == 0.01
+        assert scope["share"] == 0.01  # noqa: RUF069 - the expected value is an exact literal
         assert scope["rows_scanned"] == 10_000
-        assert scope["sample"] == 0.01
+        assert scope["sample"] == 0.01  # noqa: RUF069 - the expected value is an exact literal
 
     def test_share_none_when_row_count_absent_or_zero(self) -> None:
         no_row_count = view.scope_view({"scope": {"rows_scanned": 5}})
@@ -550,8 +550,8 @@ class TestValuesView:
         result = view.values_view(col)
 
         assert result is not None
-        assert result["bars"][0]["pct"] == 100.0
-        assert result["bars"][1]["pct"] == 50.0
+        assert result["bars"][0]["pct"] == 100.0  # noqa: RUF069 - the expected value is an exact literal
+        assert result["bars"][1]["pct"] == 50.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_coverage_and_method_pass_through(self, rich_conn: ConnectionConfig) -> None:
         col = _column(rich_conn, "seedbank.batch", "cultivar_id")
@@ -559,7 +559,7 @@ class TestValuesView:
         result = view.values_view(col)
 
         assert result is not None
-        assert result["coverage"] == 0.05
+        assert result["coverage"] == 0.05  # noqa: RUF069 - the expected value is an exact literal
         assert result["coverage_text"] == "5% covered"
 
     def test_no_values_no_coverage_is_none(self) -> None:
@@ -922,7 +922,7 @@ class TestRelationshipRows:
             artifacts.relationships_annotations,
         )
 
-        assert rows["refers_to"][0]["observed"]["fanout_avg"] == 7.5
+        assert rows["refers_to"][0]["observed"]["fanout_avg"] == 7.5  # noqa: RUF069 - the expected value is an exact literal
 
     def test_observed_states_the_scopes_were_compared_when_incompatible(self) -> None:
         """Distinct from `test_observed_is_none_when_never_measured` below: this edge WAS

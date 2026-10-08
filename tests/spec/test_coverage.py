@@ -14,25 +14,25 @@ class TestCoverageShare:
         listed = 9_999_996
         non_null = 10_000_000
 
-        assert round(listed / non_null, 6) == 1.0
+        assert round(listed / non_null, 6) == 1.0  # noqa: RUF069 - the expected value is an exact literal
         assert coverage_share(listed, non_null, exhaustive=False) < 1.0
 
     def test_an_exhaustive_list_reports_one(self) -> None:
-        assert coverage_share(500, 500, exhaustive=True) == 1.0
+        assert coverage_share(500, 500, exhaustive=True) == 1.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_an_exhaustive_list_reports_one_even_when_the_raw_ratio_undershoots(self) -> None:
         """Phases A and B can disagree on a live table; a complete list is still exhaustive."""
 
         assert round(499_636 / 500_000, 6) < 1.0
-        assert coverage_share(499_636, 500_000, exhaustive=True) == 1.0
+        assert coverage_share(499_636, 500_000, exhaustive=True) == 1.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_a_column_with_no_rows_reports_one(self) -> None:
         """An empty list covers everything there is to cover."""
 
-        assert coverage_share(0, 0, exhaustive=True) == 1.0
+        assert coverage_share(0, 0, exhaustive=True) == 1.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_a_truncated_list_reports_its_share_unchanged(self) -> None:
-        assert coverage_share(20, 100, exhaustive=False) == 0.2
+        assert coverage_share(20, 100, exhaustive=False) == 0.2  # noqa: RUF069 - the expected value is an exact literal
 
     @pytest.mark.parametrize(
         ("listed", "non_null", "exhaustive"),
@@ -80,7 +80,7 @@ def test_the_enumeration_limit_is_the_larger_setting() -> None:
 
 
 def test_a_share_is_rounded_to_six_places() -> None:
-    assert coverage_share(1, 3, exhaustive=False) == 0.333333
+    assert coverage_share(1, 3, exhaustive=False) == 0.333333  # noqa: RUF069 - the expected value is an exact literal
 
 
 @pytest.mark.parametrize(

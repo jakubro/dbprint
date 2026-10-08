@@ -84,7 +84,7 @@ class TestAColumnPhaseACouldNotMeasure:
 
         assert grade["classification"] == "numeric"
         assert grade["null_count"] == 12
-        assert grade["null_rate"] == 0.03
+        assert grade["null_rate"] == 0.03  # noqa: RUF069 - the expected value is an exact literal
         assert "cardinality" not in grade
         assert grade["unmeasured"] == [
             "cardinality",

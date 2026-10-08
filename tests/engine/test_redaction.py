@@ -716,7 +716,7 @@ class TestAggregatesUnderARedactedColumn:
         amount = self._amount(tmp_path, values=(10, 20, 30), redact=False)
 
         assert set(self.WITHHELD_NUMERIC) <= amount.keys()
-        assert amount["sum"] == 60.0
+        assert amount["sum"] == 60.0  # noqa: RUF069 - the expected value is an exact literal
 
     def _institution(self, tmp_path: Path, *, distinct: int) -> dict[str, Any]:
         rows = 480

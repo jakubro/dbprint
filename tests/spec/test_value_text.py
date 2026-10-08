@@ -42,7 +42,7 @@ SAMPLES: list[tuple[Any, str]] = [
     (datetime.timedelta(days=1), "24:00:00"),
     (datetime.timedelta(hours=-1), "-01:00:00"),
     (datetime.timedelta(days=1, milliseconds=500), "24:00:00.500000"),
-    (datetime.datetime(2024, 1, 9, 9, 30), "2024-01-09T09:30:00"),  # noqa: DTZ001 - naive
+    (datetime.datetime(2024, 1, 9, 9, 30), "2024-01-09T09:30:00"),
     (datetime.datetime(2024, 1, 9, 9, 30, tzinfo=datetime.UTC), "2024-01-09T09:30:00Z"),
     (datetime.date(2024, 1, 9), "2024-01-09"),
     (datetime.time(9, 30, 15), "09:30:15"),
@@ -104,7 +104,7 @@ def test_ties_order_on_code_point_after_count() -> None:
 def test_a_float_statistic_reads_back_exactly_and_never_in_exponent_form(number: float) -> None:
     text = spell_number(number)
 
-    assert float(text) == number
+    assert float(text) == number  # noqa: RUF069 - the round trip must be exact
     assert "e" not in text.lower()
 
 
@@ -149,7 +149,7 @@ class TestSpellNumberProperties:
         text = spell_number(value)
 
         assert "e" not in text.lower()
-        assert float(text) == value
+        assert float(text) == value  # noqa: RUF069 - the round trip must be exact
 
     @given(st.decimals(allow_nan=False, allow_infinity=False))
     def test_a_decimal_is_positional_and_parses_back_exactly(self, value: Decimal) -> None:

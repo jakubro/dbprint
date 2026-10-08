@@ -127,7 +127,7 @@ class TestTheExampleTeachesTheFieldsItIsTheDemonstrationOf:
             name
             for payload in _statistics().values()
             for name, column in payload["columns"].items()
-            if column.get("values_coverage") == 1.0 and column.get("inferred", {}).get("looks_like")
+            if column.get("values_coverage") == 1.0 and column.get("inferred", {}).get("looks_like")  # noqa: RUF069 - the expected value is an exact literal
         ]
 
         assert enumerated, "no column pairs an exhaustive value list with a `looks_like`"

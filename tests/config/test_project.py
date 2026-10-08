@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -57,7 +58,7 @@ connections:
         assert cfg.project_root == tmp_path.resolve()
 
     def test_missing_config_raises_clear_error(self, tmp_path: Path) -> None:
-        with pytest.raises(ConfigError, match="no .dbprint.yaml found"):
+        with pytest.raises(ConfigError, match=re.escape("no .dbprint.yaml found")):
             load_project(tmp_path)
 
 
@@ -101,7 +102,7 @@ connections:
         deep = tmp_path / "a" / "b" / "c"
         deep.mkdir(parents=True)
 
-        with pytest.raises(ConfigError, match="no .dbprint.yaml at"):
+        with pytest.raises(ConfigError, match=re.escape("no .dbprint.yaml at")):
             load_project_at(deep)
 
     def test_never_scans_downward(self, tmp_path: Path) -> None:
@@ -116,7 +117,7 @@ connections:
 """,
         )
 
-        with pytest.raises(ConfigError, match="no .dbprint.yaml at"):
+        with pytest.raises(ConfigError, match=re.escape("no .dbprint.yaml at")):
             load_project_at(tmp_path)
 
     def test_missing_config_names_the_exact_path_checked(self, tmp_path: Path) -> None:
@@ -231,10 +232,10 @@ connections:
         )
         cfg = load_project(tmp_path)
         thresholds = cfg.connections["primary"].diff.stat_change_threshold
-        assert thresholds["cardinality_ratio"] == 0.5
-        assert thresholds["percentile_pct"] == 0.99
+        assert thresholds["cardinality_ratio"] == 0.5  # noqa: RUF069 - the expected value is an exact literal
+        assert thresholds["percentile_pct"] == 0.99  # noqa: RUF069 - the expected value is an exact literal
         # Unspecified key falls back to the built-in default.
-        assert thresholds["default"] == 0.01
+        assert thresholds["default"] == 0.01  # noqa: RUF069 - the expected value is an exact literal
 
     def test_output_path_resolved_against_project_root(self, tmp_path: Path) -> None:
         _write_config(
@@ -560,7 +561,7 @@ class TestRules:
             "defaults:\n  rules:\n    - sample: 0.01\nconnections:\n  w:\n    adapter: postgres\n",
         )
 
-        assert load_project(root).connections["w"].settings_for("a.b").sample == 0.01
+        assert load_project(root).connections["w"].settings_for("a.b").sample == 0.01  # noqa: RUF069 - the expected value is an exact literal
 
     def test_a_connection_rule_overrides_a_defaults_rule(self, tmp_path: Path) -> None:
         """Defaults rules are walked first, so a connection rule always wins."""
@@ -577,7 +578,7 @@ class TestRules:
             "      - sample: 0.5\n",
         )
 
-        assert load_project(root).connections["w"].settings_for("a.b").sample == 0.5
+        assert load_project(root).connections["w"].settings_for("a.b").sample == 0.5  # noqa: RUF069 - the expected value is an exact literal
 
     def test_a_rule_applies_only_to_the_tables_it_matches(self, tmp_path: Path) -> None:
         root = _write_config(
@@ -591,7 +592,7 @@ class TestRules:
         )
         conn = load_project(root).connections["w"]
 
-        assert conn.settings_for("fixture.curation_event").sample == 0.25
+        assert conn.settings_for("fixture.curation_event").sample == 0.25  # noqa: RUF069 - the expected value is an exact literal
         assert conn.settings_for("public.curator").sample is None
 
     def test_a_rule_exclude_removes_tables_from_its_own_match(self, tmp_path: Path) -> None:
@@ -607,7 +608,7 @@ class TestRules:
         )
         conn = load_project(root).connections["w"]
 
-        assert conn.settings_for("fixture.curation_event").sample == 0.25
+        assert conn.settings_for("fixture.curation_event").sample == 0.25  # noqa: RUF069 - the expected value is an exact literal
         assert conn.settings_for("fixture.curation_event_v2").sample is None
 
     def test_later_matching_rules_win_key_by_key(self, tmp_path: Path) -> None:
@@ -757,7 +758,7 @@ class TestRules:
             "connections:\n  w:\n    adapter: postgres\n    rules:\n      - sample: 1\n",
         )
 
-        assert load_project(root).connections["w"].settings_for("a.b").sample == 1.0
+        assert load_project(root).connections["w"].settings_for("a.b").sample == 1.0  # noqa: RUF069 - the expected value is an exact literal
 
     @pytest.mark.parametrize("bad", ["''", "null", "3"], ids=["empty", "null", "number"])
     def test_filter_must_be_a_non_empty_string(self, tmp_path: Path, bad: str) -> None:
@@ -919,13 +920,13 @@ class TestSizeConditions:
     def test_a_rule_applies_only_to_tables_over_its_bar(self, tmp_path: Path) -> None:
         conn = _size_rule_config(tmp_path)
 
-        assert conn.settings_for("fixture.curation_event", 800_000_000).sample == 0.01
+        assert conn.settings_for("fixture.curation_event", 800_000_000).sample == 0.01  # noqa: RUF069 - the expected value is an exact literal
         assert conn.settings_for("fixture.curation_event", 1000).sample is None
 
     def test_the_bar_is_inclusive(self, tmp_path: Path) -> None:
         conn = _size_rule_config(tmp_path)
 
-        assert conn.settings_for("fixture.curation_event", 500_000_000).sample == 0.01
+        assert conn.settings_for("fixture.curation_event", 500_000_000).sample == 0.01  # noqa: RUF069 - the expected value is an exact literal
 
     def test_the_name_matcher_still_applies(self, tmp_path: Path) -> None:
         """Both conditions hold or the rule does not govern the table."""
@@ -1205,7 +1206,7 @@ class TestMaxRowsScanned:
 
         settings = load_project(root).connections["w"].settings_for("a.b", 10_000_000_000)
 
-        assert settings.sample == 0.5
+        assert settings.sample == 0.5  # noqa: RUF069 - the expected value is an exact literal
         assert settings.max_rows_scanned is None
 
     def test_a_later_ceiling_beats_an_earlier_explicit_sample(self, tmp_path: Path) -> None:
@@ -1225,7 +1226,7 @@ class TestMaxRowsScanned:
         settings = load_project(root).connections["w"].settings_for("a.b", 10_000_000_000)
 
         assert settings.sample is not None
-        assert settings.sample != 0.5
+        assert settings.sample != 0.5  # noqa: RUF069 - the expected value is an exact literal
         assert settings.sample * 10_000_000_000 <= 1_000_000_000
 
     def test_the_same_rule_setting_both_prefers_the_explicit_sample(self, tmp_path: Path) -> None:
@@ -1240,7 +1241,7 @@ class TestMaxRowsScanned:
             "        max_rows_scanned: 1000000000\n",
         )
 
-        assert load_project(root).connections["w"].settings_for("a.b", 10_000_000_000).sample == 0.5
+        assert load_project(root).connections["w"].settings_for("a.b", 10_000_000_000).sample == 0.5  # noqa: RUF069 - the expected value is an exact literal
 
     def test_a_ceiling_yields_to_a_filter_rather_than_colliding(self, tmp_path: Path) -> None:
         """Unlike sample+filter, a ceiling meeting a filter is not a load-time refusal."""
@@ -1834,7 +1835,7 @@ class TestStatChangeThresholdIsValidated:
         )
         conn = load_project(tmp_path).connections["w"]
 
-        assert conn.diff.stat_change_threshold["default"] == 1.0
+        assert conn.diff.stat_change_threshold["default"] == 1.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_a_valid_block_still_merges_over_the_spec_defaults(self, tmp_path: Path) -> None:
         _write_config(
@@ -1844,8 +1845,8 @@ class TestStatChangeThresholdIsValidated:
         )
         thresholds = load_project(tmp_path).connections["w"].diff.stat_change_threshold
 
-        assert thresholds["cardinality_ratio"] == 0.5
-        assert thresholds["default"] == 0.01
+        assert thresholds["cardinality_ratio"] == 0.5  # noqa: RUF069 - the expected value is an exact literal
+        assert thresholds["default"] == 0.01  # noqa: RUF069 - the expected value is an exact literal
 
     def test_an_absent_block_keeps_the_spec_defaults(self, tmp_path: Path) -> None:
         _write_config(tmp_path, "connections:\n  w:\n    adapter: postgres\n")

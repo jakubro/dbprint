@@ -114,7 +114,7 @@ class TestAnExhaustiveListPublishesOneRegardlessOfTheRawRatio:
     def test_an_exhaustive_list_publishes_exactly_one(self) -> None:
         """Exhaustive is 1.0 whatever the raw quotient of the two reads comes to."""
 
-        assert coverage_share(499_636, 500_000, exhaustive=True) == 1.0
+        assert coverage_share(499_636, 500_000, exhaustive=True) == 1.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_the_drift_that_produced_the_undershoot_still_surfaces_as_a_warning(self) -> None:
         """Publishing 1.0 does not hide the phase disagreement, only reclassifies it."""

@@ -461,19 +461,23 @@ def _phase_a_statement(
         select_parts.append(f"COUNT(1) - COUNT({cn}) AS null_{column_alias(col.name)}")
 
         if is_numeric_type(col.classified_type) and not is_boolean_type(col.classified_type):
-            select_parts.append(f"COALESCE(SUM({cn} = 0), 0) AS zero_{column_alias(col.name)}")
-            select_parts.append(f"COALESCE(SUM({cn} < 0), 0) AS neg_{column_alias(col.name)}")
-            select_parts.append(
-                f"COALESCE(SUM({cn} = TRUNCATE({cn}, 0)), 0) AS quant_{column_alias(col.name)}",
+            select_parts.extend(
+                (
+                    f"COALESCE(SUM({cn} = 0), 0) AS zero_{column_alias(col.name)}",
+                    f"COALESCE(SUM({cn} < 0), 0) AS neg_{column_alias(col.name)}",
+                    f"COALESCE(SUM({cn} = TRUNCATE({cn}, 0)), 0) AS quant_{column_alias(col.name)}",
+                ),
             )
         elif measures_length(col.classified_type, _is_unsupported):
             empty_condition, length_expr = _length_exprs(cn, col.classified_type)
-            select_parts.append(
-                f"COALESCE(SUM({empty_condition}), 0) AS empty_{column_alias(col.name)}",
+            select_parts.extend(
+                (
+                    f"COALESCE(SUM({empty_condition}), 0) AS empty_{column_alias(col.name)}",
+                    f"MIN({length_expr}) AS lenmin_{column_alias(col.name)}",
+                    f"MAX({length_expr}) AS lenmax_{column_alias(col.name)}",
+                    f"AVG({length_expr}) AS lenavg_{column_alias(col.name)}",
+                ),
             )
-            select_parts.append(f"MIN({length_expr}) AS lenmin_{column_alias(col.name)}")
-            select_parts.append(f"MAX({length_expr}) AS lenmax_{column_alias(col.name)}")
-            select_parts.append(f"AVG({length_expr}) AS lenavg_{column_alias(col.name)}")
 
         select_parts.append(f"COUNT(DISTINCT {cn}) AS card_{column_alias(col.name)}")
 

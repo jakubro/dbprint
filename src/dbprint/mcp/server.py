@@ -213,13 +213,16 @@ async def run_http(server: Server, host: str, port: int) -> None:
 
     from mcp.server.sse import SseServerTransport
     from starlette.applications import Starlette
+    from starlette.responses import Response
     from starlette.routing import Mount, Route
 
     transport = SseServerTransport("/messages/")
 
-    async def handle_sse(request: Any) -> None:
+    async def handle_sse(request: Any) -> Response:
         async with transport.connect_sse(request.scope, request.receive, request._send) as streams:
             await server.run(streams[0], streams[1], initialization_options(server))
+
+        return Response()
 
     app = Starlette(
         routes=[

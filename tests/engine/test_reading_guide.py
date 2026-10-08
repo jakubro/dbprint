@@ -7,6 +7,8 @@ tests/test_skill_claims_agreement.py.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from tests._scripts import REPO_ROOT, load_script
@@ -73,7 +75,7 @@ def test_the_consumer_must_guard_fires_on_an_uncited_new_rule() -> None:
         "A consumer MUST do something this guide never mentions or exempts.\n",
     )
 
-    with pytest.raises(AssertionError, match="0.1"):
+    with pytest.raises(AssertionError, match=re.escape("0.1")):
         gen._check_consumer_must_coverage(augmented)
 
 

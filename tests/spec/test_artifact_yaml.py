@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import importlib
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -94,7 +94,7 @@ def test_without_libyaml_every_read_falls_back_to_the_pure_python_parser(
 
 
 @contextmanager
-def _libyaml_removed() -> Iterator[None]:
+def _libyaml_removed() -> Generator[None]:
     c_loader = yaml.CSafeLoader
     del yaml.CSafeLoader
     importlib.reload(artifact_yaml)

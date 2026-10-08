@@ -634,7 +634,7 @@ class TestOutOfRangeTemporal:
         stats = _temporal_stats(fresh_duckdb)["seen_at"]
 
         assert stats.range is not None
-        expected_min = datetime(2026, 1, 1, 12, 0, 0)  # noqa: DTZ001 - naive-column expectation
+        expected_min = datetime(2026, 1, 1, 12, 0, 0)
         expected_max = expected_min + timedelta(days=59)
         assert stats.range.min == expected_min.isoformat()
         assert stats.range.max == expected_max.isoformat()

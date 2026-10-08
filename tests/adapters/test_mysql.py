@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import secrets
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, ClassVar
@@ -1062,7 +1062,7 @@ def events_db(mysql_cluster: MysqlCluster) -> Iterator[dict[str, str]]:
         cur.execute(
             "CREATE TABLE curation_event (id INT PRIMARY KEY AUTO_INCREMENT, occurred_at DATETIME NOT NULL)",
         )
-        base = datetime(2025, 1, 1, 12, 0, 0)  # noqa: DTZ001 - seeds a naive DATETIME column
+        base = datetime(2025, 1, 1, 12, 0, 0)
         rows = [
             ((base + timedelta(days=i % 60)).strftime("%Y-%m-%d %H:%M:%S"),) for i in range(200)
         ]
@@ -1696,7 +1696,7 @@ def _scratch_database(
     cluster: MysqlCluster,
     prefix: str,
     seed: Callable[[Any], None],
-) -> Iterator[dict[str, str]]:
+) -> Generator[dict[str, str]]:
     import mysql.connector
 
     server = {

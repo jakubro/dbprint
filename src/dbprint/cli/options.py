@@ -67,7 +67,7 @@ def refuse_if_remote(project: str | None, command: str) -> None:
         raise ConfigError(
             f"--project {project!r} names a remote repository. `dbprint {command}` needs a "
             f"local one to write to (or query live) - clone it yourself first, or point "
-            f"{command.split()[0]!r} at a local checkout instead.",
+            f"{command.split(maxsplit=1)[0]!r} at a local checkout instead.",
         )
 
 

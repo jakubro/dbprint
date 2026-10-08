@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from dbprint.adapters import (
@@ -58,7 +60,7 @@ class TestFixtureRoundTrip:
         adapter = MockAdapter({"schema.t": _empty_table()})
         adapter.connect()
 
-        with pytest.raises(KeyError, match="schema.missing"):
+        with pytest.raises(KeyError, match=re.escape("schema.missing")):
             adapter.extract_ddl("schema.missing")
 
 

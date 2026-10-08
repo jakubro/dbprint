@@ -241,21 +241,21 @@ _CONDITIONAL_CELLS: tuple[_ConditionalCell, ...] = (
         fields=frozenset({"extent"}),
         reason="the column holds no non-empty value for a bounding box to describe",
         spec_ref="§2.2.3",
-        holds=lambda col, rows_scanned: _no_bounded_value(col, rows_scanned),
+        holds=_no_bounded_value,
     ),
     _ConditionalCell(
         classifications=frozenset({"vector"}),
         fields=frozenset({"dimension"}),
         reason="the scanned set holds no non-null vector to count the elements of",
         spec_ref="§2.2.3",
-        holds=lambda col, rows_scanned: _no_non_null_rows(col, rows_scanned),
+        holds=_no_non_null_rows,
     ),
     _ConditionalCell(
         classifications=frozenset({"vector"}),
         fields=frozenset({"norm"}),
         reason="the scanned set holds no non-zero vector to take the norm of",
         spec_ref="§2.2.3",
-        holds=lambda col, rows_scanned: _no_nonzero_vector(col, rows_scanned),
+        holds=_no_nonzero_vector,
     ),
     # `length` follows the value's type, not the classification - `categorical` and
     # `foreign_key_candidate` match before any type-based branch runs (SPEC 3.2).
@@ -1212,7 +1212,7 @@ def _check_null_pattern_reconciliation(
 
     coverage = block.get("coverage")
     complete = (
-        isinstance(coverage, (int, float)) and not isinstance(coverage, bool) and coverage == 1.0
+        isinstance(coverage, (int, float)) and not isinstance(coverage, bool) and coverage == 1.0  # noqa: RUF069 - coverage 1.0 is the exhaustive sentinel
     )
     implied: dict[str, int] = {}
 
@@ -1963,7 +1963,7 @@ def _listed_total(values: list) -> int:
 def _is_exhaustive(coverage: object) -> bool:
     """True when the list claims to carry the whole column."""
 
-    return isinstance(coverage, (int, float)) and not isinstance(coverage, bool) and coverage == 1.0
+    return isinstance(coverage, (int, float)) and not isinstance(coverage, bool) and coverage == 1.0  # noqa: RUF069 - coverage 1.0 is the exhaustive sentinel
 
 
 def _check_unmeasured(

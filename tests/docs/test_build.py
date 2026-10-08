@@ -102,7 +102,7 @@ class TestBuildSite:
 
         assert (output / "static" / "app.js").is_file()
         assert (output / "static" / "app.css").is_file()
-        assert (output / "static" / "vendor" / "mermaid.min.js").is_file()
+        assert 'version:"12.1.0"' in (output / "static" / "vendor" / "mermaid.min.js").read_text()
 
     def test_writes_the_ownership_marker(self, rich_conn: ConnectionConfig, tmp_path: Path) -> None:
         output = tmp_path / "site"

@@ -44,8 +44,8 @@ _VALUES: dict[str, tuple[Any, Any]] = {
     "season": (1990, 1991),
     "sown_on": (dt.date(2024, 1, 1), dt.date(2024, 2, 29)),
     "sown_at": (
-        dt.datetime(2024, 1, 1, 0, 0, 0, 500000),  # noqa: DTZ001 - seeds a naive temporal column
-        dt.datetime(2024, 6, 1, 12, 0),  # noqa: DTZ001 - seeds a naive temporal column
+        dt.datetime(2024, 1, 1, 0, 0, 0, 500000),
+        dt.datetime(2024, 6, 1, 12, 0),
     ),
     "sown_at_tz": (
         dt.datetime(2024, 1, 1, 0, 0, 0, 500000, tzinfo=dt.UTC),

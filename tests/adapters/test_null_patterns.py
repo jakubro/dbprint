@@ -62,7 +62,7 @@ class TestTheCensusReconciles:
             adapter.close()
 
         assert census is not None, "the fixture carries nulls, so a census is owed"
-        assert census.coverage == 1.0, "a full scan of a small table lists every combination"
+        assert census.coverage == 1.0, "a full scan of a small table lists every combination"  # noqa: RUF069 - the expected value is an exact literal
 
         implied: dict[str, int] = {}
 

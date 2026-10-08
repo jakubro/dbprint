@@ -271,8 +271,10 @@ class TestAgainstRealPackagedContent:
         cited: set[str] = set()
 
         for source in sources:
-            for match in re.finditer(r'"(§[0-9][0-9.]*)"', source.read_text()):
-                cited.add(match.group(1).rstrip("."))
+            cited.update(
+                match.group(1).rstrip(".")
+                for match in re.finditer(r'"(§[0-9][0-9.]*)"', source.read_text())
+            )
 
         assert cited, "no spec_ref citations found - the scan itself is broken"
 
@@ -288,8 +290,10 @@ class TestAgainstRealPackagedContent:
         cited: set[str] = set()
 
         for source in sources:
-            for match in re.finditer(r'"(ASSERTIONS\.md §[0-9][0-9.]*)"', source.read_text()):
-                cited.add(match.group(1).rstrip("."))
+            cited.update(
+                match.group(1).rstrip(".")
+                for match in re.finditer(r'"(ASSERTIONS\.md §[0-9][0-9.]*)"', source.read_text())
+            )
 
         assert cited, "no ASSERTIONS.md citations found - the scan itself is broken"
 

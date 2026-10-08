@@ -102,7 +102,7 @@ def test_scoped_table_states_the_population(adversarial_print: AdversarialPrint)
     assert scope is not None
     assert scope["rows_scanned"] == 250
     assert scope["row_count"] == 1000
-    assert scope["share"] == 0.25
+    assert scope["share"] == 0.25  # noqa: RUF069 - the expected value is an exact literal
 
 
 def test_redacted_column_carries_no_real_literal(adversarial_print: AdversarialPrint) -> None:

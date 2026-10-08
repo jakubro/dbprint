@@ -322,7 +322,7 @@ def test_scoped_candidate_key_match_carries_the_scope(adversarial_print: Adversa
     matches = _dict_result(adversarial_print, "search_columns", {"candidate_key": True})["matches"]
     key = next(m for m in matches if (m["table"], m["column"]) == (SCOPED_TABLE, SCOPED_KEY_COLUMN))
 
-    assert key["scope"]["sample"] == 0.25
+    assert key["scope"]["sample"] == 0.25  # noqa: RUF069 - the expected value is an exact literal
     assert "candidate key over the rows scanned" in _md(adversarial_print, SCOPED_TABLE)
 
 

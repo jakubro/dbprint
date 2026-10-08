@@ -138,8 +138,8 @@ class TestDuckdb:
         )
         extent = columns["shape"]["extent"]
 
-        assert extent["max_x"] == 1.000001
-        assert extent["min_x"] == -1.000001
+        assert extent["max_x"] == 1.000001  # noqa: RUF069 - the expected value is an exact literal
+        assert extent["min_x"] == -1.000001  # noqa: RUF069 - the expected value is an exact literal
 
     def test_without_the_extension_the_column_names_both_fields_unmeasured(
         self,
@@ -296,6 +296,27 @@ def test_clickhouse_reads_every_geo_type_without_a_reference_system(
         {"kind": "point", "count": 15},
     ]
     assert columns["shape"]["extent"] == {"min_x": 1.0, "min_y": 0.0, "max_x": 30.0, "max_y": 3.0}
+
+
+def test_clickhouse_flattens_a_multipoint_held_in_a_geometry(
+    clickhouse_native_connection: Any,
+    tmp_path: Path,
+) -> None:
+    cursor = clickhouse_native_connection
+    cursor.execute("CREATE TABLE seedbank.plot (plot_id UInt32, shape Geometry) ENGINE = Memory")
+    cursor.execute(
+        "INSERT INTO seedbank.plot VALUES (1, (1, 2)::Point), "
+        "(2, [(3, 4), (7, 9)]::LineString), (3, [(-5, 6), (11, 12)]::MultiPoint)",
+    )
+    adapter = ClickhouseAdapter(
+        {"host": "chdb", "database": "seedbank"},
+        cursor_factory=lambda _params: cursor,
+    )
+    columns = generate(adapter, "clickhouse", tmp_path, "*.plot")
+
+    assert columns["shape"]["geometry"]["empty_count"] == 0
+    assert {"kind": "multipoint", "count": 1} in columns["shape"]["geometry"]["kinds"]
+    assert columns["shape"]["extent"] == {"min_x": -5.0, "min_y": 2.0, "max_x": 11.0, "max_y": 12.0}
 
 
 def _duckdb_columns(

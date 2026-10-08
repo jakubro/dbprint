@@ -63,7 +63,7 @@ class UnrepresentableValue(TypeError):
 def measured_value(
     value: Any,
     field: str | None = None,
-) -> None | bool | int | float | Decimal | str:
+) -> bool | int | float | Decimal | str | None:
     """One published cell as SPEC 2.2.4/2.2.6 allow it: a scalar, an exact number exactly.
 
     Dispatches on the exact type, so a driver's subclass is refused like any unknown type.
@@ -133,7 +133,7 @@ def round_statistic(value: Any, *, exact_int: bool = False) -> Any:
 
     rounded = round(number, DECIMAL_PLACES)
 
-    if rounded == 0.0 and number != 0.0:
+    if rounded == 0.0 and number != 0.0:  # noqa: RUF069 - an exact 0.0 after rounding is what the floor replaces
         return float(f"{number:.{FLOOR_SIGNIFICANT_FIGURES}g}")
 
     return rounded

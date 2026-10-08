@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import sys
 from difflib import get_close_matches
 from pathlib import Path
 from typing import Any, cast
@@ -251,7 +252,7 @@ def context_command(
 
         if mode == "tty":
             tty_console = Console(
-                file=click.get_text_stream("stdout"),
+                file=sys.stdout,
                 force_terminal=True,
                 soft_wrap=True,
             )

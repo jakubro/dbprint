@@ -779,7 +779,7 @@ class TestMachineOutputNamesTheDefault:
         payload = json.loads(result.stdout)[0]
 
         # The one table was judged against its own recorded 30, not this 7.
-        assert payload["default_max_age_days"] == 7.0
+        assert payload["default_max_age_days"] == 7.0  # noqa: RUF069 - the expected value is an exact literal
         assert "max_age_days" not in payload
         assert result.exit_code == 0
 
@@ -796,7 +796,7 @@ class TestMachineOutputNamesTheDefault:
         payload = json.loads(result.stdout)[0]
 
         # Fractional days survive: the field stays a float fed by parse_duration.
-        assert payload["default_max_age_days"] == 0.5
+        assert payload["default_max_age_days"] == 0.5  # noqa: RUF069 - the expected value is an exact literal
         assert [s["max_age_days"] for s in payload["stale_entries"]] == [0.5]
 
     def test_a_missing_manifest_still_reports_the_default(
@@ -810,7 +810,7 @@ class TestMachineOutputNamesTheDefault:
         payload = json.loads(result.stdout)[0]
 
         assert payload["manifest_present"] is False
-        assert payload["default_max_age_days"] == 7.0
+        assert payload["default_max_age_days"] == 7.0  # noqa: RUF069 - the expected value is an exact literal
 
 
 class TestConformanceError:

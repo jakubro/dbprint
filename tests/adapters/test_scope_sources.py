@@ -100,15 +100,15 @@ class TestLooksLikePathEstimate:
     def test_a_sample_scales_the_estimate(self) -> None:
         """A fraction is arithmetic, so a sampled read can reach the cheap path."""
 
-        assert scoped_estimate(1_000_000, TableScope(sample=0.001)) == 1_000.0
+        assert scoped_estimate(1_000_000, TableScope(sample=0.001)) == 1_000.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_a_filter_leaves_the_estimate_alone(self) -> None:
         """Nothing here estimates selectivity, so a predicate cannot shrink the figure."""
 
-        assert scoped_estimate(1_000_000, TableScope(filter="a > 1")) == 1_000_000.0
+        assert scoped_estimate(1_000_000, TableScope(filter="a > 1")) == 1_000_000.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_an_unscoped_read_keeps_the_whole_table(self) -> None:
-        assert scoped_estimate(1_000_000, None) == 1_000_000.0
+        assert scoped_estimate(1_000_000, None) == 1_000_000.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_no_catalog_estimate_routes_to_the_direct_read(self) -> None:
         assert scoped_estimate(None, TableScope(sample=0.5)) < 0

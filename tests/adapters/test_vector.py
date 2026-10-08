@@ -62,7 +62,7 @@ def test_pgvector_columns_publish_dimension_norm_and_zero_count(
     assert columns["raw"]["norm"] == {"min": 1.0, "max": 60.0}
     assert columns["mixed"]["dimension"] == {"min": 2, "max": 5}
     assert columns["pair"]["zero_count"] == 3
-    assert columns["pair"]["norm"]["min"] == 1.0
+    assert columns["pair"]["norm"]["min"] == 1.0  # noqa: RUF069 - the expected value is an exact literal
     assert not {"cardinality", "values", "sketch", "redacted"} & set(columns["pair"])
 
 

@@ -41,7 +41,7 @@ def test_an_array_of_records_publishes_each_part_over_its_occurrences(tmp_path: 
     assert [v["value"] for v in parts["[*].sku"]["values"]] == ["SKU-A", "SKU-B", "SKU-C"]
     assert parts["[*].qty"]["classification"] == "numeric"
     assert parts["[*].qty"]["range"] == {"min": 1, "max": 60}
-    assert parts["[*].qty"]["cardinality_ratio"] == 0.24
+    assert parts["[*].qty"]["cardinality_ratio"] == 0.24  # noqa: RUF069 - the expected value is an exact literal
     assert parts["[*].qty"]["occurrences"] == 250
     assert not {"nullable", "rows_scanned", "sketch"} & set(parts["[*].sku"])
 

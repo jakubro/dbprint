@@ -173,7 +173,7 @@ class TestBucketsAndCoverage:
             timeline_buckets={"created_at": buckets},
         )
 
-        assert payload["timeline"]["coverage"] == 0.5
+        assert payload["timeline"]["coverage"] == 0.5  # noqa: RUF069 - the expected value is an exact literal
 
     def test_no_buckets_from_the_probe_is_a_present_empty_list(self, tmp_path: Path) -> None:
         payload = _generate(
@@ -184,7 +184,7 @@ class TestBucketsAndCoverage:
         )
 
         assert payload["timeline"]["buckets"] == []
-        assert payload["timeline"]["coverage"] == 0.0
+        assert payload["timeline"]["coverage"] == 0.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_coverage_rounds_a_long_decimal_tail_to_six_places(self, tmp_path: Path) -> None:
         payload = _generate(
@@ -194,7 +194,7 @@ class TestBucketsAndCoverage:
             timeline_buckets={"created_at": (("2024-01-01T00:00:00", 6),)},
         )
 
-        assert payload["timeline"]["coverage"] == 0.857143
+        assert payload["timeline"]["coverage"] == 0.857143  # noqa: RUF069 - the expected value is an exact literal
 
     def test_a_fully_covered_anchor_reads_exactly_one_not_the_clamp(
         self,
@@ -207,7 +207,7 @@ class TestBucketsAndCoverage:
             timeline_buckets={"created_at": (("2024-01-01T00:00:00", 100),)},
         )
 
-        assert payload["timeline"]["coverage"] == 1.0
+        assert payload["timeline"]["coverage"] == 1.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_covered_exceeding_rows_scanned_clamps_below_one(self, tmp_path: Path) -> None:
         payload = _generate(
@@ -218,7 +218,7 @@ class TestBucketsAndCoverage:
             timeline_buckets={"created_at": (("2024-01-01T00:00:00", 100),)},
         )
 
-        assert payload["timeline"]["coverage"] == 0.999999
+        assert payload["timeline"]["coverage"] == 0.999999  # noqa: RUF069 - the expected value is an exact literal
 
     def test_a_clamped_coverage_is_conformant_and_reports_the_overrun(
         self,
@@ -232,7 +232,7 @@ class TestBucketsAndCoverage:
         )
         codes = {issue.code for issue in validate_print(tmp_path / "w")}
 
-        assert payload["timeline"]["coverage"] == 0.999999
+        assert payload["timeline"]["coverage"] == 0.999999  # noqa: RUF069 - the expected value is an exact literal
         assert "stats.timeline-coverage-mismatch" not in codes
         assert "stats.timeline-buckets-exceed-rows-scanned" in codes
 

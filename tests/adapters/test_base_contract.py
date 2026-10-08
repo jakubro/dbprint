@@ -753,7 +753,7 @@ class TestStatistics:
 
         withdrawn = stats["withdrawn_at"]
         assert withdrawn.null_count == 3
-        assert withdrawn.null_rate == 1.0
+        assert withdrawn.null_rate == 1.0  # noqa: RUF069 - the expected value is an exact literal
         assert withdrawn.cardinality == 0
 
     def test_cardinality_ratio_in_unit_range(
@@ -877,7 +877,7 @@ class TestStatistics:
 
                 if non_null <= 0:
                     # SPEC 2.2.7: no non-null rows still reports coverage 1.0.
-                    assert s.values_coverage == 1.0, (
+                    assert s.values_coverage == 1.0, (  # noqa: RUF069 - the expected value is an exact literal
                         f"{t.fqn}.{name}: all-null column reports coverage {s.values_coverage}"
                     )
                     continue
@@ -925,7 +925,7 @@ class TestStatistics:
                         f"{t.fqn}.{name}: {s.cardinality} distinct values inside the bound "
                         f"but only {len(s.values)} listed"
                     )
-                    assert s.values_coverage == 1.0
+                    assert s.values_coverage == 1.0  # noqa: RUF069 - the expected value is an exact literal
 
     def test_a_closed_domain_above_top_n_values_is_still_enumerated_in_full(
         self,
@@ -956,7 +956,7 @@ class TestStatistics:
                 )
 
                 if s.values_coverage is not None:
-                    assert s.values_coverage == 1.0, (
+                    assert s.values_coverage == 1.0, (  # noqa: RUF069 - the expected value is an exact literal
                         f"{t.fqn}.{name}: complete list reports coverage {s.values_coverage}"
                     )
 
@@ -1257,7 +1257,7 @@ class TestLifecycle:
     def test_closing_an_adapter_never_connected_is_a_no_op(self, kind: str) -> None:
         # The ABC cannot type the constructor, as in `cli/engine_setup.py`.
         adapter_class = cast(Any, ADAPTERS[kind])
-        credentials = {key: "1" for key in adapter_class.REQUIRED_KEYS} | {"password": "p"}
+        credentials = dict.fromkeys(adapter_class.REQUIRED_KEYS, "1") | {"password": "p"}
         adapter = adapter_class(credentials)
 
         assert adapter.close() is None

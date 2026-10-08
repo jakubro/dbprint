@@ -90,7 +90,7 @@ _BIGQUERY_EMULATOR_IMAGE = "ghcr.io/goccy/bigquery-emulator:0.8.1"
 WIDE_ROW_COUNT = 200
 WIDE_DISTINCT = 60
 
-_WIDE_EPOCH = datetime(2026, 1, 1, 12, 0, 0)  # noqa: DTZ001 - seeds a naive temporal column
+_WIDE_EPOCH = datetime(2026, 1, 1, 12, 0, 0)
 _WIDE_HERBARIUM_IDS = (
     "00000000-0000-7000-8000-000000000001",
     "00000000-0000-7000-8000-000000000002",
@@ -101,20 +101,20 @@ _WIDE_RANKS = ("us", "eu", "ap")
 # Day-count discriminators for SPEC 2.2.4: `observed_at` agrees under elapsed-time and
 # calendar-boundary counting, so each column below is shaped to disagree - 0 either way,
 # 0 elapsed but 1 across the boundary, and a 23:59:59 maximum one day short of span_days.
-_WITHIN_DAY_START = datetime(2026, 1, 1, 1, 0, 0)  # noqa: DTZ001 - seeds a naive temporal column
-_ACROSS_MIDNIGHT_START = datetime(2026, 1, 1, 23, 50, 0)  # noqa: DTZ001 - seeds a naive column
-_LATE_EVENING_START = datetime(2025, 11, 3, 23, 59, 59)  # noqa: DTZ001 - seeds a naive column
+_WITHIN_DAY_START = datetime(2026, 1, 1, 1, 0, 0)
+_ACROSS_MIDNIGHT_START = datetime(2026, 1, 1, 23, 50, 0)
+_LATE_EVENING_START = datetime(2025, 11, 3, 23, 59, 59)
 # The minimum's sub-second part exceeds the maximum's, so a count of second boundaries reads one
 # day more than the 58.99999 days that elapsed; only exact elapsed time gives 58.
-_SUBSECOND_START = datetime(2026, 1, 1, 0, 0, 0, 250000)  # noqa: DTZ001 - seeds a naive column
-_SUBSECOND_MIN = datetime(2026, 1, 1, 0, 0, 0, 500000)  # noqa: DTZ001 - seeds a naive column
+_SUBSECOND_START = datetime(2026, 1, 1, 0, 0, 0, 250000)
+_SUBSECOND_MIN = datetime(2026, 1, 1, 0, 0, 0, 500000)
 
 # Future-dated columns (SPEC 2.2.4 clamp), pinned to fixed far-future instants rather than
 # offsets from the clock so the fixture stays deterministic: `scheduled_at` is future
 # throughout, `expires_at` pairs a past minimum with a sentinel maximum - the shape that
 # drives the age subtraction negative without the clamp.
-_SCHEDULED_START = datetime(3000, 1, 1, 12, 0, 0)  # noqa: DTZ001 - seeds a naive temporal column
-_EXPIRES_START = datetime(2020, 1, 1, 12, 0, 0)  # noqa: DTZ001 - seeds a naive temporal column
+_SCHEDULED_START = datetime(3000, 1, 1, 12, 0, 0)
+_EXPIRES_START = datetime(2020, 1, 1, 12, 0, 0)
 _EXPIRES_STEP_DAYS = 6000
 
 WideRow = tuple[str, str, str, int, str, str, str, str, str, str, str, str]
@@ -589,7 +589,7 @@ class SnowflakeDialectShim:
             [catalog, schema, table],
         ).fetchall()
 
-        return rows if rows else [(None,)]
+        return rows or [(None,)]
 
     def _table_comment(self, params: Any) -> list[tuple[Any, ...]]:
         return self._con.execute(
