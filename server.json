@@ -1,0 +1,44 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.jakubro/dbprint",
+  "title": "dbprint",
+  "description": "A database's schema, value lists and joins, from a snapshot in your repo - no database connection.",
+  "repository": {
+    "url": "https://github.com/jakubro/dbprint",
+    "source": "github"
+  },
+  "websiteUrl": "https://jakubro.github.io/dbprint/",
+  "version": "0.13.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "dbprint",
+      "version": "0.13.0",
+      "runtimeHint": "uvx",
+      "runtimeArguments": [
+        {
+          "type": "named",
+          "name": "--with",
+          "value": "dbprint[mcp]==0.13.0",
+          "description": "Install the MCP extra the serve command needs"
+        }
+      ],
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "serve"
+        },
+        {
+          "type": "named",
+          "name": "--project",
+          "description": "Directory holding .dbprint.yaml, that file itself, or a git address of a repository carrying one",
+          "isRequired": true,
+          "format": "string"
+        }
+      ],
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

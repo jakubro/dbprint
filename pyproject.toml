@@ -1,7 +1,7 @@
 [project]
 name = "dbprint"
 dynamic = ["version"]
-description = "Offline database prints — DDL snapshots and column statistics, committed to git."
+description = "Snapshot a database's schema, values and joins into your repo, with notes on what they mean, so coding agents answer without querying it."
 readme = "README.md"
 requires-python = ">=3.13"
 license = "Apache-2.0"
@@ -84,6 +84,9 @@ mcp = [
   "starlette>=1.7.0",
   "uvicorn>=0.54.0",
 ]
+dbt = [
+  "sqlglot>=30.21.0",
+]
 docs = [
   "flask>=3.1.3",
   "markdown>=3.11",
@@ -143,7 +146,6 @@ DEP002 = [
   "import-linter",
   "hypothesis",
   "mutmut",
-  "sqlglot",
 ]
 
 [tool.importlinter]
@@ -218,6 +220,14 @@ source_modules = ["dbprint"]
 forbidden_modules = ["mcp"]
 allow_indirect_imports = true
 ignore_imports = ["dbprint.mcp.server -> mcp"]
+
+[[tool.importlinter.contracts]]
+name = "only engine/lineage.py imports sqlglot"
+type = "forbidden"
+source_modules = ["dbprint"]
+forbidden_modules = ["sqlglot"]
+allow_indirect_imports = true
+ignore_imports = ["dbprint.engine.lineage -> sqlglot"]
 
 [[tool.importlinter.contracts]]
 name = "only docs/web.py imports Flask"

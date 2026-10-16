@@ -12,7 +12,7 @@ from dbprint.adapters import BigqueryAdapter, ClickhouseAdapter, DatabricksAdapt
 from dbprint.adapters.base import Member, PartSource
 from dbprint.adapters.dialect import Vendor
 from dbprint.adapters.sql_layout import select_from
-from dbprint.config import StatisticsConfig
+from dbprint.config import PartsProfile
 from dbprint.config.project import RedactRule
 from tests.adapters._composites import duckdb_print, generate, parts_of, psql
 from tests.adapters._credentials import DATABRICKS_CREDS
@@ -74,7 +74,7 @@ class TestDuckdb:
         self,
         tmp_path: Path,
     ) -> None:
-        plot = duckdb_print(tmp_path, *_PLOT, statistics=StatisticsConfig(max_part_depth=1))
+        plot = duckdb_print(tmp_path, *_PLOT, parts=PartsProfile(max_depth=1))
         parts = plot["grower"]["plot"]["parts"]
 
         assert set(parts) == {".town", ".code", '["row label"]', ".spot"}
@@ -93,7 +93,7 @@ class TestDuckdb:
         assert plot["parts_found"] == 3
 
     def test_descent_off_leaves_the_record_unsupported(self, tmp_path: Path) -> None:
-        plot = duckdb_print(tmp_path, *_PLOT, statistics=StatisticsConfig(max_parts=0))
+        plot = duckdb_print(tmp_path, *_PLOT, parts=PartsProfile(enabled=False))
 
         assert plot["grower"]["plot"]["classification"] == "unsupported"
         assert "parts" not in plot["grower"]["plot"]

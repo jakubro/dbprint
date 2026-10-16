@@ -10,7 +10,13 @@ import pytest
 from dbprint.adapters import ColumnMeta, ColumnStats, MockAdapter, MockTable
 from dbprint.adapters.base import PhaseA, TableCounts, TableScope, run_phase_b
 from dbprint.adapters.errors import QueryFailed
-from dbprint.config import ConnectionConfig, StatisticsConfig
+from dbprint.config import (
+    ConnectionConfig,
+    ProfileConfig,
+    RelationshipsProfile,
+    RunConfig,
+    StatisticsConfig,
+)
 from dbprint.engine import Engine, GenerateResult
 from tests._engine_run import artifact, conformance_errors
 from tests._prints import columns, mock_table
@@ -60,8 +66,8 @@ class TestATimedOutColumnStatistic:
             name="w",
             adapter="postgres",
             output=tmp_path,
-            infer_relationships=False,
-            statement_timeout=600,
+            run=RunConfig(statement_timeout=600),
+            profile=ProfileConfig(relationships=RelationshipsProfile(infer=False)),
         )
 
         with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
@@ -82,8 +88,8 @@ def _generate(tmp_path: Path, statement_timeout: int | None) -> GenerateResult:
         name="w",
         adapter="postgres",
         output=tmp_path,
-        infer_relationships=False,
-        statement_timeout=statement_timeout,
+        run=RunConfig(statement_timeout=statement_timeout),
+        profile=ProfileConfig(relationships=RelationshipsProfile(infer=False)),
     )
 
     return Engine(_TimesOut({"s.a": _table("a"), "s.b": _table("b")}), conn, tmp_path).generate()

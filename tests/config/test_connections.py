@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from dbprint.config import ConfigError, resolve_connection
+from dbprint.config.connections import CredentialsFileInvalid
 
 
 REQUIRED = ["host", "port", "database", "user", "password"]
@@ -396,3 +397,63 @@ primary:
         )
         assert resolved == {"port": "5432"}
         assert isinstance(resolved["port"], str)
+
+
+class TestTheEntryIsStrict:
+    """This connection's own entry is checked; other projects' entries share the file untouched."""
+
+    def _resolve(self, tmp_path: Path, body: str) -> dict[str, str]:
+        cfile = _write_connections_file(tmp_path / "connections.yaml", body)
+
+        return resolve_connection(
+            "primary",
+            REQUIRED,
+            project_root=tmp_path,
+            connections_file=cfile,
+            env={},
+            optional_keys=["sslmode"],
+        )
+
+    def test_an_unknown_key_is_refused_with_its_nearest_name(self, tmp_path: Path) -> None:
+        body = (
+            "primary:\n  host: h\n  port: 1\n  database: d\n  user: u\n  password: s3cret\n"
+            "  sslmod: require\n"
+        )
+
+        with pytest.raises(
+            CredentialsFileInvalid,
+            match=r"sslmod: unknown key; did you mean 'sslmode'\?",
+        ):
+            self._resolve(tmp_path, body)
+
+    def test_a_non_mapping_entry_is_refused(self, tmp_path: Path) -> None:
+        with pytest.raises(CredentialsFileInvalid, match="primary: expected a mapping"):
+            self._resolve(tmp_path, "primary: host=h\n")
+
+    def test_a_nested_value_is_refused(self, tmp_path: Path) -> None:
+        body = "primary:\n  host: {name: h}\n  port: 1\n  database: d\n  user: u\n  password: p\n"
+
+        with pytest.raises(
+            CredentialsFileInvalid,
+            match="host: expected a single value, got a dict",
+        ):
+            self._resolve(tmp_path, body)
+
+    def test_an_unknown_key_and_a_missing_one_are_reported_together(self, tmp_path: Path) -> None:
+        body = "primary:\n  host: h\n  port: 1\n  database: d\n  usr: u\n  password: hunter2\n"
+
+        with pytest.raises(CredentialsFileInvalid) as exc:
+            self._resolve(tmp_path, body)
+
+        message = str(exc.value)
+        assert "usr: unknown key; did you mean 'user'?" in message
+        assert "Also missing required credentials: ['user']" in message
+        assert "hunter2" not in message
+
+    def test_another_connections_entry_is_not_checked(self, tmp_path: Path) -> None:
+        body = (
+            "primary:\n  host: h\n  port: 1\n  database: d\n  user: u\n  password: p\n"
+            "elsewhere:\n  anything: goes\n"
+        )
+
+        assert self._resolve(tmp_path, body)["host"] == "h"

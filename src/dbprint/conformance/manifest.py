@@ -15,6 +15,7 @@ from dbprint.spec.artifacts import (
 )
 from dbprint.spec.fqn import directory_segments
 from dbprint.spec.fqn import split as split_fqn
+from dbprint.spec.profile import DISABLEABLE, effective_profile, switched_off
 from .issue import Issue
 from .progress import TableSink
 from .yaml_utils import load_yaml
@@ -53,6 +54,7 @@ def check(
     issues: list[Issue] = []
     tables = walkable_tables(manifest_data)
     total = len(tables)
+    connection_profile = manifest_data.get("profile")
     # Table dir -> the canonical filenames its entry declares; the second pass flags a file
     # on disk absent from this set as `manifest.orphaned-artifact`.
     declared_files: dict[Path, set[str]] = {}
@@ -118,6 +120,16 @@ def check(
                             ),
                         )
 
+                    if key == "statistics" and isinstance(connection_profile, dict):
+                        issues.extend(
+                            _check_profile_disabled(
+                                rel,
+                                tbl_fqn,
+                                effective_profile(connection_profile, tbl_entry.get("profile")),
+                                data.get("disabled"),
+                            ),
+                        )
+
                     if key == "statistics":
                         manifest_count = tbl_entry.get("columns")
                         stats_columns = data.get("columns")
@@ -170,6 +182,32 @@ def check(
             )
 
     return issues
+
+
+def _check_profile_disabled(
+    rel: str,
+    tbl_fqn: str,
+    profile: dict,
+    disabled: object,
+) -> list[Issue]:
+    """SPEC 2.5: the effective profile's switched-off measurements are the file's `disabled`."""
+
+    expected = set(switched_off(profile))
+    named = {n for n in disabled if n in DISABLEABLE} if isinstance(disabled, list) else set()
+
+    if expected == named:
+        return []
+
+    return [
+        Issue(
+            rel,
+            "manifest.profile-disabled-mismatch",
+            "error",
+            f"the manifest's profile for {tbl_fqn} switches off {sorted(expected)} but its "
+            f"statistics.yaml's disabled names {sorted(named)}.",
+            "§2.5",
+        ),
+    ]
 
 
 def check_selectors_agree_with_diff(

@@ -14,3 +14,4 @@ htmlcov/
 node_modules/
 site/dist/
 site/public/spec/
+site/public/config/

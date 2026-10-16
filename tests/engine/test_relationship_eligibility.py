@@ -18,6 +18,7 @@ from dbprint.adapters.base import (
     UniqueKeyMeta,
 )
 from dbprint.adapters.mock import MockAdapter, MockTable
+from dbprint.config import ProfileConfig, RelationshipsProfile
 from dbprint.config.project import ConnectionConfig
 from dbprint.engine import Engine, GenerateRequest
 from tests._prints import VAULT_COLUMNS, columns, connection_config, exact_stats, mock_table
@@ -95,7 +96,10 @@ def _fixture() -> dict[str, MockTable]:
 
 
 def _conn(tmp_path: Path, *, infer_relationships: bool = True) -> ConnectionConfig:
-    return connection_config(output=tmp_path, infer_relationships=infer_relationships)
+    return connection_config(
+        output=tmp_path,
+        profile=ProfileConfig(relationships=RelationshipsProfile(infer=infer_relationships)),
+    )
 
 
 def _relationships(tmp_path: Path, table: str) -> dict[str, Any]:

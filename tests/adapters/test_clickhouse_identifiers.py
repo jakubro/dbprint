@@ -123,7 +123,7 @@ class TestAnIdentifierTheFormatCannotSpellIsStillRefused:
         with pytest.raises(IdentifierRejected) as excinfo:
             _enumerate("Seedbank", "field notes")
 
-        assert 'exclude:\n      - "seedbank.field notes"' in str(excinfo.value)
+        assert 'tables:\n      exclude:\n        - "seedbank.field notes"' in str(excinfo.value)
 
     def test_a_lowercase_exclude_matches_a_capitalised_table(self) -> None:
         cursor = _Cursor([(name, "MergeTree", "") for name in ("Accession", "vault")])

@@ -405,3 +405,36 @@ def test_a_value_note_on_a_column_the_statistics_lack_does_not_stop_the_columns_
     assert [i.path for i in ca.check_value_notes(tmp_path, _print(tmp_path, annotations))] == [
         f"{_ANN}::columns.color.values[0]",
     ]
+
+
+class TestDerivedFrom:
+    """SPEC 2.7.1: a lineage source the print lacks is stale, at warning severity."""
+
+    def _sources(self, tmp_path: Path, *sources: dict[str, str]) -> list[Issue]:
+        manifest = _print(tmp_path, {"columns": {"color": {"derived_from": list(sources)}}})
+
+        return ca.check_derived_from(tmp_path, manifest)
+
+    def test_a_source_the_print_holds_is_quiet(self, tmp_path: Path) -> None:
+        assert self._sources(tmp_path, {"table": "s.t", "column": "code"}) == []
+
+    def test_an_unknown_table_and_an_unknown_column_are_each_named(self, tmp_path: Path) -> None:
+        issues = self._sources(
+            tmp_path,
+            {"table": "s.t", "column": "shade"},
+            {"table": "s.elsewhere", "column": "color"},
+        )
+
+        assert [(i.path, i.code, i.severity) for i in issues] == [
+            (f"{_ANN}::columns.color.derived_from[0]", "annotations.unknown-source", "warning"),
+            (f"{_ANN}::columns.color.derived_from[1]", "annotations.unknown-source", "warning"),
+        ]
+        assert "s.elsewhere.color" in issues[1].detail
+
+    def test_a_malformed_source_is_left_to_the_schema(self, tmp_path: Path) -> None:
+        manifest = _print(
+            tmp_path,
+            {"columns": {"color": {"derived_from": [{"table": {"a": 1}, "column": ["x"]}]}}},
+        )
+
+        assert ca.check_derived_from(tmp_path, manifest) == []

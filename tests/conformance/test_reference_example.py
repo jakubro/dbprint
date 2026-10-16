@@ -545,3 +545,14 @@ def _committed_classifications() -> dict[str, set[str]]:
                 out.setdefault(classification, set()).add(f"{short}.{column}")
 
     return out
+
+
+def test_the_example_shows_a_switched_off_measurement() -> None:
+    disabled = {
+        path.parent.name: yaml.safe_load(path.read_text(encoding="utf-8")).get("disabled")
+        for path in EXAMPLE.rglob("statistics.yaml")
+    }
+
+    assert {name: names for name, names in disabled.items() if names} == {
+        "germination_by_taxon_mv": ["timeline"],
+    }

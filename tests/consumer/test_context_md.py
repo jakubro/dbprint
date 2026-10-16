@@ -17,6 +17,7 @@ from dbprint.cli.main import main
 from tests._grammar import split_outside_literals
 from tests.fixtures.adversarial import (
     APPROXIMATE_ROW_COUNT_TABLE,
+    CONNECTION_NOTE,
     DECLARED_MISSING_KIND,
     DECLARED_MISSING_TABLE,
     DELIMITER_COLUMN,
@@ -28,6 +29,10 @@ from tests.fixtures.adversarial import (
     FUTURE_DATED_COLUMN,
     GRAIN_NO_OUTCOME_TABLE,
     GRAMMAR_VALUE,
+    HUMAN_EDGE_COLUMN,
+    HUMAN_EDGE_NOTE,
+    HUMAN_EDGE_TARGET,
+    HUMAN_EDGE_TARGET_COLUMN,
     INCOMPLETE_GRAIN_TABLE,
     LINE_BREAK_VALUE,
     NEVER_DECLARED_KIND,
@@ -63,6 +68,8 @@ COVERS = frozenset(
         "unevaluated_diff_table",
         "empty_columns_map",
         "column_with_several_edges",
+        "connection_notes",
+        "human_authored_edge",
         "orphan_spelling",
         "percentile_inside_range",
         "grain_search_without_outcome",
@@ -411,3 +418,26 @@ def test_every_standing_edge_is_named_surest_first(adversarial_print: Adversaria
 
     assert "FK: public.cultivar.id (declared), public.wide_lookup.a (measured); " in row
     assert REJECTED_EDGE_TARGET not in row
+
+
+def test_a_human_authored_edge_reaches_both_tables_tagged_annotated(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    source = _render(adversarial_print, SEVERAL_EDGES_TABLE)
+    target = _render(adversarial_print, HUMAN_EDGE_TARGET)
+
+    assert (
+        f"-> {HUMAN_EDGE_TARGET}.{HUMAN_EDGE_TARGET_COLUMN} (annotated); via: {HUMAN_EDGE_COLUMN}"
+        in source
+    )
+    assert f"note: {HUMAN_EDGE_NOTE}" in source
+    assert f"<- {SEVERAL_EDGES_TABLE}.{HUMAN_EDGE_COLUMN} (annotated)" in target
+
+
+def test_connection_notes_reach_a_single_table_reader_once(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    text = _render(adversarial_print, SEVERAL_EDGES_TABLE)
+
+    assert text.count(CONNECTION_NOTE) == 1
+    assert "## Connection notes" in text

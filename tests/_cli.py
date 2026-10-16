@@ -60,11 +60,13 @@ def write_project(project_dir: Path, conn_name: str, adapter: str, rules: str = 
     (project_dir / ".dbprint.yaml").write_text(
         f"""\
 defaults:
-  max_age_days: 7
-  statistics:
-    enumeration_threshold: 50
-    top_n_values: 20
-    percentiles: [1, 25, 50, 75, 99]
+  profile:
+    freshness:
+      max_age_days: 7
+    statistics:
+      enumeration_threshold: 50
+      top_n_values: 20
+      percentiles: [1, 25, 50, 75, 99]
 
 connections:
   {conn_name}:

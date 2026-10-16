@@ -23,7 +23,7 @@ from dbprint.adapters import (
     ValueCount,
 )
 from dbprint.adapters.base import PhaseA, TableCounts
-from dbprint.config import ConnectionConfig
+from dbprint.config import ConnectionConfig, ProfileConfig, RelationshipsProfile, SketchesProfile
 from dbprint.conformance.schema_validation import check_statistics
 from dbprint.conformance.statistics import check
 from dbprint.engine import Engine
@@ -203,8 +203,10 @@ def _generate_degraded(
         name="w",
         adapter="postgres",
         output=tmp_path,
-        infer_relationships=False,
-        sketch_all_columns=sketch_all_columns,
+        profile=ProfileConfig(
+            relationships=RelationshipsProfile(infer=False),
+            sketches=SketchesProfile(columns="all" if sketch_all_columns else "required"),
+        ),
     )
     Engine(adapter, conn, tmp_path).generate()
     payload = artifact(tmp_path / "w", "seedbank.accession")
@@ -217,7 +219,7 @@ def _generate(tmp_path: Path, column: ColumnStats) -> dict[str, Any]:
         name="w",
         adapter="postgres",
         output=tmp_path,
-        infer_relationships=False,
+        profile=ProfileConfig(relationships=RelationshipsProfile(infer=False)),
     )
     Engine(MockAdapter(_fixture(column)), conn, tmp_path).generate()
 

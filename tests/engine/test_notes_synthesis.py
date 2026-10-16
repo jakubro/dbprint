@@ -118,7 +118,7 @@ class TestCategorical:
     def test_a_truncated_list_mentions_no_entry_it_does_not_show(self) -> None:
         values = [{"value": f"v{i}", "count": 10 - i} for i in range(10)]
         s = _stats("categorical", cardinality=10, values=values, values_coverage=0.42)
-        out = synthesize(s, statistics_params={"top_n_values": 3})
+        out = synthesize(s, profile={"statistics": {"top_n_values": 3}})
 
         assert "configured" not in out
         assert "total" not in out
@@ -133,7 +133,7 @@ class TestCategorical:
             values_coverage=1.0,
         )
 
-        assert "configured" not in synthesize(s, statistics_params={"top_n_values": 3})
+        assert "configured" not in synthesize(s, profile={"statistics": {"top_n_values": 3}})
 
 
 class TestForeignKeyCandidate:
@@ -296,7 +296,7 @@ class TestText:
             values_coverage=0.86,
         )
 
-        assert "configured" not in synthesize(s, statistics_params={"top_n_values": 2})
+        assert "configured" not in synthesize(s, profile={"statistics": {"top_n_values": 2}})
 
 
 class TestJson:
@@ -588,7 +588,7 @@ class TestLooksLikeSuffix:
             values=[{"value": "a@b.com", "count": 1}],
             inferred={"looks_like": "email"},
         )
-        out = synthesize(s, statistics_params={"looks_like_sample_size": 500})
+        out = synthesize(s, profile={"looks_like": {"sample_size": 500}})
 
         assert out.endswith("; looks like: email (drawn 500)")
 
@@ -631,7 +631,7 @@ class TestLooksLikeSuffix:
             values=[{"value": "a@b.com", "count": 1}],
             inferred={"looks_like": "email", "sampled": 500, "matched": 480},
         )
-        out = synthesize(s, statistics_params={"looks_like_sample_size": 500})
+        out = synthesize(s, profile={"looks_like": {"sample_size": 500}})
 
         assert out.endswith("; looks like: email (480 of 500 sampled, 500 configured)")
 

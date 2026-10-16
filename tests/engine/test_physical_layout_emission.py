@@ -19,7 +19,7 @@ from dbprint.adapters import (
     PhysicalLayout,
     PhysicalLayoutKey,
 )
-from dbprint.config import ConnectionConfig
+from dbprint.config import ConnectionConfig, ProfileConfig, RelationshipsProfile
 from dbprint.engine import Engine, GenerateRequest
 from dbprint.engine.context_assembler import AssemblyOptions, assemble
 from tests._engine_run import artifact
@@ -207,7 +207,7 @@ def _conn(tmp_path: Path) -> ConnectionConfig:
         name="w",
         adapter="postgres",
         output=tmp_path,
-        infer_relationships=False,
+        profile=ProfileConfig(relationships=RelationshipsProfile(infer=False)),
     )
 
 

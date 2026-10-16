@@ -32,7 +32,7 @@ GRANT ROLE dbprint_ro TO USER dbprint_service;
 | `USAGE` | the database | reaching anything inside it |
 | `USAGE` | each schema profiled | reaching anything inside it |
 | `SELECT` | each table and materialized view profiled | DDL and statistics |
-| `SELECT` | each plain view profiled | DDL only — no statement is issued against a view |
+| `SELECT` | each plain view profiled | DDL only under the default `read.views.mode: catalog`, which issues no statement against a view; a view read in `full` or `filter` mode is queried like a table |
 
 Querying a table takes `SELECT` on the table together with `USAGE` on the database and the schema containing it — operating on an object requires at least one privilege on each of its parents. `SELECT` on a view is sufficient to read that view; the underlying objects do not also need it.
 
@@ -77,7 +77,7 @@ The consequence for a sampled Snowflake print: coherence between a shape claim a
 
 ## When dbprint writes
 
-Only one thing makes dbprint write, and only under one condition: `materialize_sample` is on by default, and it fires **only for a table narrowed to a fraction of its rows**. A fraction has two sources — a rule's `sample`, and a `max_rows_scanned` ceiling resolving against the table's size, which is legal at connection and `defaults` level as well as inside a rule. A project that narrows nothing, which is what `dbprint init` scaffolds, never writes. A `filter` is a predicate rather than a fraction and never materializes.
+Only one thing makes dbprint write, and only under one condition: `profile.read.tables.materialize` is on by default, and it fires **only for a table read in `sample` mode** — by a `fraction`, or by a `max_rows` ceiling that resolves below the table's size, at whatever level the ceiling is set. A project that narrows nothing, which is what `dbprint init` scaffolds, never writes. A `filter` is a predicate rather than a fraction and never materializes.
 
 Where it does fire, the drawn rows are copied once into a session-lifetime temporary table created **in the profiled table's own schema**, and every statistics statement for that table reads the copy. That is what makes the numbers in one file describe one set of rows, and it is why the fraction is not simply re-evaluated: two evaluations of one seeded expression are not documented to read the same rows.
 
@@ -91,7 +91,7 @@ materialize its sample of 0.25 (<cause>), and this adapter's per-statement fallb
 seeded into agreement across statements. Narrow with a filter instead of a sample fraction.
 ```
 
-Setting `materialize_sample: false` on a `sample`-scoped table is refused the same way, before any statement runs.
+Setting `read.tables.materialize: false` on a `sample`-mode table is refused the same way, before any statement runs.
 
 ## Column types
 
@@ -107,7 +107,7 @@ Setting `materialize_sample: false` on a `sample`-scoped table is refused the sa
 
 An event table is profiled as a table. A temporary table is not listed.
 
-An external table is listed with `external: true` (SPEC 2.2.20) and, unless a `read_rows` rule opts it in, described from the catalog alone. Opted in, every statement scans the stage's files on warehouse time, and a file Snowflake cannot read is skipped without an error. An Iceberg table is an ordinary table.
+An external table is listed with `external: true` (SPEC 2.2.20) and, unless a matching rule writes its `read.tables.mode`, described from the catalog alone. Read that way, every statement scans the stage's files on warehouse time, and a file Snowflake cannot read is skipped without an error. An Iceberg table is an ordinary table.
 
 ## Namespaces
 
@@ -115,11 +115,11 @@ An external table is listed with `external: true` (SPEC 2.2.20) and, unless a `r
 
 ## Statement timeout
 
-`statement_timeout` becomes the session's `STATEMENT_TIMEOUT_IN_SECONDS`, which covers queueing, compilation and execution of every statement, and a statement that exceeds it is cancelled by Snowflake. A lower non-zero limit set on the warehouse still wins. The vendor's ceiling is 7 days; a larger value is refused when the connection opens.
+`run.statement_timeout` becomes the session's `STATEMENT_TIMEOUT_IN_SECONDS`, which covers queueing, compilation and execution of every statement, and a statement that exceeds it is cancelled by Snowflake. A lower non-zero limit set on the warehouse still wins. The vendor's ceiling is 7 days; a larger value is refused when the connection opens.
 
 ## Parallelism
 
-`parallelism: N` opens N sessions and profiles up to N tables at once, all on the connection's warehouse. A warehouse runs a limited number of statements concurrently and queues the rest; a multi-cluster warehouse may instead scale out and bill for the extra clusters.
+`run.parallelism: N` opens N sessions and profiles up to N tables at once, all on the connection's warehouse. A warehouse runs a limited number of statements concurrently and queues the rest; a multi-cluster warehouse may instead scale out and bill for the extra clusters.
 
 ## Reference
 

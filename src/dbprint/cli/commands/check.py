@@ -148,10 +148,9 @@ def check_command(
     **Exit codes:**
 
     - `0`: ok
-    - `1`: generic - a malformed print, a column the current `redact` rules
-      would publish otherwise than the print does (`privacy.redaction-not-applied`),
-      or a table whose `rules` narrow it both by a predicate and by a fraction,
-      which this command refuses to judge
+    - `1`: generic - a malformed print, a `.dbprint.yaml` that fails to load, or a
+      column the current `redact` rules would publish otherwise than the print does
+      (`privacy.redaction-not-applied`)
     - `2`: staleness
     - `3`: drift (`--online`) - the committed print no longer matches the
       database, including a statistic that moved (`generate` sets this code for
@@ -281,7 +280,9 @@ def _check_one(
         click.echo(str(exc), err=True)
         ctx.exit(EXIT_GENERIC)
 
-    default_max_age_days = override if override is not None else conn_config.max_age_days
+    default_max_age_days = (
+        override if override is not None else conn_config.profile.freshness.max_age_days
+    )
 
     print_root = conn_config.print_root
     read = read_manifest(print_root)
@@ -467,7 +468,11 @@ def _redaction_issues(conn_config: ConnectionConfig, print_root: Path) -> tuple[
 
         remedy = (
             f"run `dbprint generate` to re-read {table.fqn}"
-            if selectors.match(table.fqn, list(conn_config.include), list(conn_config.exclude))
+            if selectors.match(
+                table.fqn,
+                list(conn_config.tables.include),
+                list(conn_config.tables.exclude),
+            )
             else f"the connection's selectors exclude {table.fqn} - include it again and run "
             f"`dbprint generate`, or delete its directory"
         )

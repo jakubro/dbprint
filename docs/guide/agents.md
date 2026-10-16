@@ -17,12 +17,14 @@ The repository carries a skill that tells an agent where a print's files live, w
 
 | Client | Where |
 |---|---|
-| Claude Code | `.claude/skills/dbprint.md` in the project, or `~/.claude/skills/` for every project |
+| Claude Code | `.claude/skills/dbprint/SKILL.md` in the project, or `~/.claude/skills/dbprint/SKILL.md` for every project |
 | Cursor | the project's `.cursor/rules/` directory, or the global rules under Settings |
 | Cline | Custom Instructions in settings |
 | Anything else | wherever that client reads persistent instructions from |
 
 The skill itself and its install notes are published here: [installing it](../examples/skill/README.md) and [the skill itself](../examples/skill/dbprint.md).
+
+A second skill, [the annotation skill](../examples/skill/dbprint-annotate.md), is for writing a print rather than reading it: it has an agent write the [annotation files](annotations.md) from the code that writes each table and read-only queries against the database. It installs the same way, and `dbprint annotate <table> | <agent CLI>` hands one table's brief to an agent without installing anything.
 
 ## The MCP server
 
@@ -53,21 +55,22 @@ For a local socket instead of stdio, `--transport http --port 8765`. The bind ad
 
 The server states which tool answers which question, then how to read an answer, as its own MCP `instructions` on every handshake:
 
-> Serves committed dbprint prints: a database's structure and per-column statistics, captured offline. Answer from these tools, not from the print's files: a file read directly carries none of the scope, redaction and unmeasured handling the tools apply.
+> Answers questions about a database from its print, a snapshot dbprint took of it and committed to the repository: DDL, row counts, column statistics and value lists, joins, and notes people wrote. No database is queried. Answer from these tools, not the print's files, which lack the sampling, redaction and missing-measurement handling the tools apply.
 >
 > Which tool answers what:
 > - Writing SQL: get_table_context with purpose: query for every table the query touches - DDL, the Joins list, the data dictionary, value lists.
 > - A filter value whose stored spelling is not listed in full there: resolve_value; use every spelling it returns.
 > - Which table or column holds a fact, by name, type, shape (email, phone) or what its notes say: search_columns (`text` searches the notes).
 > - Which tables exist, their row counts, whether their statistics are stale: list_tables with detail: true.
-> - What changed since the previous run: get_diff.
+> - What changed since the previous print: get_diff.
 > - What a field or a finding's spec_ref means: get_reference; how to read json/yaml fields: get_reference document: guide.
-> - The raw manifest index: get_manifest.
+> - The print's raw table index: get_manifest.
 >
 > Reading an answer:
 > - Scope. A table with a scope block was read in part, by a sample or a row filter; its statistics describe the rows scanned, not the table. Under a sample a row count - nulls, a value's count, a true/false split - MAY be multiplied by row_count / rows_scanned for a rough table-wide figure; under a filter nothing rescales, and a distinct count, ratio, bound, percentile, sum or mean never does.
-> - Inference. Fields under inferred, and relationships whose detection is inferred or measured, are dbprint's guesses, not database constraints. No sensitivity on a column means nothing was detected, not that the column is safe to publish.
-> - Absence. A missing field is not zero. A field named in an unmeasured list was not measured this run: its value is unknown, not none.
+> - Inference. Fields under inferred, and joins whose detection is inferred or measured, are dbprint's guesses, not database constraints. No sensitivity on a column means nothing was detected, not that the column is safe to publish.
+> - Absence. A missing field is not zero. A field named in an unmeasured or disabled list was not measured: its value is unknown, not none.
+> - Meanings. A print states what the data holds, not what its codes, units or defaults mean: read the code or docs for any meaning it does not annotate.
 
 **Get the rescaling direction right.** Under a sample, a row count — nulls, a value's count, a true/false split — on a column carrying a population marker scales to table grain by `count * (row_count / rows_scanned)`; under a filter nothing rescales. A distinct count, a ratio, a bound, a percentile or an aggregate is not scalable at all, under any formula.
 
@@ -114,10 +117,10 @@ $ dbprint context 'arboretum.seedbank.*' --budget 4000
 
 | `--purpose` | Sections | Read it when |
 |---|---|---|
-| `profile` (default) | Header, Terms, DDL, Description, Annotations, Cardinality table, Relationships | You want to know what is in the table and how much of it was measured |
-| `query` | Header, Terms, DDL, Joins, Data dictionary, Column values | You are about to write SQL against the table |
+| `profile` (default) | Header, Terms, Connection notes, DDL, Description, Annotations, Cardinality table, Relationships | You want to know what is in the table and how much of it was measured |
+| `query` | Header, Terms, DDL, Connection notes, Joins, Data dictionary, Column values | You are about to write SQL against the table |
 
-`query` drops every statistic but each nullable column's null share — the cue that a predicate needs an `IS NULL` arm — and renders instead what a query writer needs a literal from: the columns whose value list a predicate can be written from, each with its counts, and a coverage cell saying whether that list is the column's whole domain or, as a percentage, the share of it the five most frequent values cover. A value with a note in `statistics.annotations.yaml` carries it inline, so what a code means sits beside the code itself. Every value and number is spelled so it reads back as itself — `NULL` is a genuine null, `'NULL'` the stored string; the [MCP server specification](../MCP.md#41-get_table_context) states the full rule. The join paths are the `## Joins` list: the DDL's foreign keys and the edges the print inferred or measured, each with its detection, so a table whose catalog declares no key still says what it joins to.
+`query` drops every statistic but each nullable column's null share — the cue that a predicate needs an `IS NULL` arm — and renders instead what a query writer needs a literal from: the columns whose value list a predicate can be written from, each with its counts, and a coverage cell saying whether that list is the column's whole domain or, as a percentage, the share of it the five most frequent values cover. A numeric or date column with no such list shows its frequent values instead — a sentinel like `-1` or `9999-12-31` on a share of the rows — labelled as frequent values rather than a domain. A value with a note in `statistics.annotations.yaml` carries it inline, so what a code means sits beside the code itself, and a column whose `derived_from` names a source carries that source's notes too. Every value and number is spelled so it reads back as itself — `NULL` is a genuine null, `'NULL'` the stored string; the [MCP server specification](../MCP.md#41-get_table_context) states the full rule. The join paths are the `## Joins` list: the DDL's foreign keys and the edges the print inferred or measured, each with its detection, so a table whose catalog declares no key still says what it joins to; an edge a human added in `relationships.annotations.yaml` is listed as `annotated`. Under either purpose, a header line `Meanings: not documented here` marks a table with no description and no column or value note, whose codes, units and defaults the agent must read from the code.
 
 When the fragment is over budget, dropping a whole section usually beats letting `--budget` truncate, because you choose what goes:
 
@@ -131,7 +134,7 @@ When the fragment is over budget, dropping a whole section usually beats letting
 
 `--all` covers every table in the manifest instead of a pattern, and `--output FILE` writes to a file rather than stdout, for a pipeline assembling a prompt. `--format json` and `--format yaml` give structured output instead of Markdown; both omit each column's sketch payload, which no prompt has a use for.
 
-Note that connection-level notes from `manifest.annotations.yaml` ride the document header, which only a render covering two or more tables has. A fact a reader of one table needs belongs in that table's own annotation file — see [annotating a print](annotations.md).
+Connection-level notes from `manifest.annotations.yaml` reach every render: a single table carries them in its own `## Connection notes` section (`connection_notes` in json and yaml), and a render over several tables carries them once, in the document header — see [annotating a print](annotations.md).
 
 ## What to expect the agent to get wrong
 

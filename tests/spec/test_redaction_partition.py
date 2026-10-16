@@ -34,6 +34,7 @@ _READS_THE_MARKER_FOR_ANOTHER_REASON: dict[tuple[str, str], str] = {
         "_check_sketch",
     ): "keeps its own code, stats.sketch-on-redacted-column",
     ("engine/carried.py", "_columns"): "hydrates the committed marker and sketch verbatim",
+    ("spec/absence.py", "_switched_off"): "a redacted column never carries a sketch to switch off",
     (
         "conformance/statistics.py",
         "_check_mean_containment",
@@ -89,6 +90,7 @@ def test_apply_redaction_rule_keeps_the_count_profile_and_drops_the_rest() -> No
         "cardinality_ratio",
         "classification",
         "collation",
+        "derived_from",
         "distribution",
         "frequencies",
         "freshness",

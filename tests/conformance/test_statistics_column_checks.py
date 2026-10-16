@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import base64
 import struct
-from typing import Any, Literal
+from pathlib import Path
+from typing import Any, ClassVar, Literal
 
 import pytest
+import yaml
 
 from dbprint.conformance import statistics as st
+from dbprint.conformance import validate_print
 from dbprint.conformance.issue import Issue
 
 
@@ -1741,3 +1744,51 @@ class TestEachCheckAddressesItsOwnPath:
         assert [i.code for i in st.check({"null_patterns": {"patterns": []}}, _P, "s.t")] == [
             "stats.null-patterns-absent-with-nulls",
         ]
+
+
+class TestDerivedFrom:
+    """SPEC 2.2.4 `derived_from`: legal on any column, never on a part, always well-formed."""
+
+    PATH: ClassVar[str] = "arboretum/fixture/shape_probe/statistics.yaml"
+    SOURCE: ClassVar[list[dict[str, str]]] = [
+        {"table": "arboretum.seedbank.collector", "column": "email"},
+    ]
+
+    def _codes(self, committed_print: Path, edit: Any) -> list[str]:
+        root = committed_print / "production"
+        path = root / self.PATH
+        before = {i.code for i in validate_print(root) if i.path.startswith(self.PATH)}
+        statistics = yaml.safe_load(path.read_text())
+        edit(statistics["columns"])
+        path.write_text(yaml.safe_dump(statistics, sort_keys=False))
+
+        return [
+            i.code
+            for i in validate_print(root)
+            if i.path.startswith(self.PATH) and i.code not in before
+        ]
+
+    def test_a_column_may_carry_it(self, committed_print: Path) -> None:
+        codes = self._codes(
+            committed_print,
+            lambda c: c["probe_id"].update(derived_from=self.SOURCE),
+        )
+
+        assert codes == []
+
+    def test_a_part_may_not(self, committed_print: Path) -> None:
+        def edit(columns: dict[str, Any]) -> None:
+            column = next(c for c in columns.values() if isinstance(c.get("parts"), dict))
+            next(iter(column["parts"].values()))["derived_from"] = self.SOURCE
+
+        assert any(code.startswith("schema.") for code in self._codes(committed_print, edit))
+
+    def test_an_entry_missing_its_column_is_malformed(self, committed_print: Path) -> None:
+        codes = self._codes(
+            committed_print,
+            lambda c: c["probe_id"].update(
+                derived_from=[{"table": "arboretum.seedbank.collector"}],
+            ),
+        )
+
+        assert codes and all(code.startswith("schema.") for code in codes)

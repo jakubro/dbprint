@@ -56,10 +56,20 @@ def unknown_column(column: str, table: str, columns: list[str]) -> McpError:
     )
 
 
-def unknown_part(part: str, column: str, table: str, parts: list[str]) -> McpError:
+def unknown_part(
+    part: str,
+    column: str,
+    table: str,
+    parts: list[str],
+    *,
+    switched_off: bool = False,
+) -> McpError:
     """The requested part is not among those the column lists; the paths it has are listed."""
 
-    known = ", ".join(parts) if parts else "none - the column lists no parts"
+    if switched_off:
+        known = "none - not measured: switched off for this table"
+    else:
+        known = ", ".join(parts) if parts else "none - the column lists no parts"
 
     return McpError(
         -32602,

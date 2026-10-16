@@ -40,7 +40,7 @@ Because the fraction cannot be seeded, coherence across a sampled table depends 
 
 ## When dbprint writes — and where the copy lives
 
-Only one thing makes dbprint write, and only under one condition: `materialize_sample` is on by default, and it fires **only for a table narrowed to a fraction of its rows**. A fraction has two sources — a rule's `sample`, and a `max_rows_scanned` ceiling resolving against the table's size, which is legal at connection and `defaults` level as well as inside a rule. A project that narrows nothing, which is what `dbprint init` scaffolds, never writes. A `filter` is a predicate rather than a fraction and never materializes.
+Only one thing makes dbprint write, and only under one condition: `profile.read.tables.materialize` is on by default, and it fires **only for a table read in `sample` mode** — by a `fraction`, or by a `max_rows` ceiling that resolves below the table's size, at whatever level the ceiling is set. A project that narrows nothing, which is what `dbprint init` scaffolds, never writes. A `filter` is a predicate rather than a fraction and never materializes.
 
 BigQuery is the one adapter where the copy is **not** a session-scoped temporary table — it is a real table in the profiled dataset:
 
@@ -52,7 +52,7 @@ AS SELECT * FROM (SELECT * FROM <table> TABLESAMPLE SYSTEM (p PERCENT)) src
 
 The profiling role needs create rights in that dataset (`roles/bigquery.dataEditor` above), and `CREATE OR REPLACE` means an orphaned copy from an earlier interrupted run cannot wedge a later one. The scratch prefix is excluded from enumeration, so a copy is never profiled as a table of its own. Release is `DROP TABLE IF EXISTS`; when the drop itself fails, the run warns that the copy outlives this run and is not session-scoped — the 6-hour expiration is what bounds its storage in that case, not any cleanup dbprint performs.
 
-`materialize_sample: false` never falls back on BigQuery: `SAMPLE_FALLBACK_COHERENT` is `false` here, so a `sample`-scoped table with the write disabled is refused before any statement runs, the same as on ClickHouse or Redshift.
+`read.tables.materialize: false` never falls back on BigQuery: `SAMPLE_FALLBACK_COHERENT` is `false` here, so a `sample`-scoped table with the write disabled is refused before any statement runs, the same as on ClickHouse or Redshift.
 
 ## Identifiers
 
@@ -60,9 +60,9 @@ BigQuery is case-sensitive while the format addresses objects by lowercased path
 
 ## Table kinds
 
-A table clone is profiled as a table; the print names no base table. An external table is listed with `external: true` (SPEC 2.2.20) and a snapshot as a plain `table`; unless a `read_rows` rule opts either in, it is described from `INFORMATION_SCHEMA` alone. A snapshot is skipped by default for cost: its rows never change, so profiling it would bill a full read of a past state on every run. Other table types are not listed.
+A table clone is profiled as a table; the print names no base table. An external table is listed with `external: true` (SPEC 2.2.20) and a snapshot as a plain `table`; unless a matching rule writes its `read.tables.mode`, it is described from `INFORMATION_SCHEMA` alone. A snapshot is skipped by default for cost: its rows never change, so profiling it would bill a full read of a past state on every run. Other table types are not listed.
 
-Opted in, either is profiled like a table. An external table bills every statement for the bytes it reads, results from sources other than Cloud Storage are not cached, and a dry run may report 0 bytes; a `sample` rule is the cheapest way to profile one, since `TABLESAMPLE` reads a subset of its files.
+Read that way, either is profiled like a table. An external table bills every statement for the bytes it reads, results from sources other than Cloud Storage are not cached, and a dry run may report 0 bytes; `mode: sample` is the cheapest way to profile one, since `TABLESAMPLE` reads a subset of its files.
 
 ## Namespaces
 
@@ -89,7 +89,7 @@ Opted in, either is profiled like a table. An external table bills every stateme
 
 ## The row-count estimate
 
-A rule carrying `min_rows`, and any `max_rows_scanned` ceiling, needs to know how big a table is before profiling it. That size comes from `INFORMATION_SCHEMA.PARTITIONS`, summed over the table's partitions — an unpartitioned table is a single row keyed `NULL`. It is dataset-qualified, which BigQuery documents for that view, and it needs `bigquery.tables.get` and `bigquery.tables.list`, both already carried by the `roles/bigquery.dataViewer` above.
+A rule carrying `min_rows`, and any `max_rows` ceiling, needs to know how big a table is before profiling it. That size comes from `INFORMATION_SCHEMA.PARTITIONS`, summed over the table's partitions — an unpartitioned table is a single row keyed `NULL`. It is dataset-qualified, which BigQuery documents for that view, and it needs `bigquery.tables.get` and `bigquery.tables.list`, both already carried by the `roles/bigquery.dataViewer` above.
 
 Unlike the three reads below, this one does not degrade: a refused or unavailable read fails that table and names `estimate_row_count` as the operation, rather than answering "no estimate". The two are not the same fact — an absent estimate is something the catalog said about the table, while a missing grant would otherwise leave every size-conditioned rule declining in silence, on every table, with nothing in the output saying so.
 
@@ -97,11 +97,11 @@ Three catalog reads degrade rather than fail when the connection cannot see a co
 
 ## Statement timeout
 
-`statement_timeout` becomes every query job's `jobTimeoutMs`. BigQuery stops a job that exceeds it on a best-effort basis, and one it fails to stop keeps the run waiting.
+`run.statement_timeout` becomes every query job's `jobTimeoutMs`. BigQuery stops a job that exceeds it on a best-effort basis, and one it fails to stop keeps the run waiting.
 
 ## Parallelism
 
-`parallelism: N` runs up to N tables' jobs at once, each table on one client throughout. Concurrent query jobs count against the project's interactive-query quota and, on capacity pricing, share the reservation's slots.
+`run.parallelism: N` runs up to N tables' jobs at once, each table on one client throughout. Concurrent query jobs count against the project's interactive-query quota and, on capacity pricing, share the reservation's slots.
 
 ## Reference
 

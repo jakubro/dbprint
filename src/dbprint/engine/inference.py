@@ -30,6 +30,8 @@ _FK_SUFFIX = "_id"
 _VALUE_DERIVED_MIN_ANSWERABLE = 400
 _VALUE_DERIVED_MIN_CONTAINMENT = 0.95
 
+_NEVER_REFERRING_KINDS = frozenset({"temporal", "boolean"})
+
 
 @dataclass(frozen=True)
 class TableInventory:
@@ -98,6 +100,9 @@ class SketchCandidate:
     sql_type: str
     cardinality: int
     sketch: tuple[int, ...]
+    declared_key: bool = False
+    candidate_key: bool = False
+    dense: bool = False
 
 
 def infer_value_derived_edges(
@@ -105,7 +110,7 @@ def infer_value_derived_edges(
     parents: Sequence[SketchCandidate],
     existing: frozenset[tuple[str, str, str, str]],
 ) -> dict[str, list[ForeignKeyMeta]]:
-    """Propose an edge from measured value containment alone (SPEC 2.3's `measured` detection) -
+    """Propose an edge from measured value containment (SPEC 2.3's `measured` detection) -
     every qualifying child column of a table contributes, and the table's whole list is ordered
     once at the end for diff stability across runs.
     """
@@ -115,7 +120,7 @@ def infer_value_derived_edges(
     for child in children:
         child_kind = sketch_kind(child.sql_type)
 
-        if child_kind is None:
+        if child_kind is None or not _may_refer(child, child_kind):
             continue
 
         for parent in parents:
@@ -123,6 +128,11 @@ def infer_value_derived_edges(
                 continue
 
             if sketch_kind(parent.sql_type) != child_kind:
+                continue
+
+            # Any small integer falls inside a gapless 1..N sequence, so only a reference's name
+            # can make containment in one evidence (SPEC 2.3.11 rule 1).
+            if parent.dense and not child.column.endswith(_FK_SUFFIX):
                 continue
 
             if (child.fqn, child.column, parent.fqn, parent.column) in existing:
@@ -152,6 +162,17 @@ def infer_value_derived_edges(
         fqn: [fk for _, _, _, fk in sorted(entries, key=lambda p: (p[1], p[2], p[0]))]
         for fqn, entries in proposals.items()
     }
+
+
+def _may_refer(child: SketchCandidate, kind: str) -> bool:
+    """SPEC 2.3.11 floor 1: a table's own key and a timestamp overlap unrelated columns by
+    construction; a measured-unique child must carry the `_id` name to stand as a reference.
+    """
+
+    if child.declared_key or kind in _NEVER_REFERRING_KINDS:
+        return False
+
+    return not child.candidate_key or child.column.endswith(_FK_SUFFIX)
 
 
 def _measure_containment(child: SketchCandidate, parent: SketchCandidate) -> float | None:

@@ -30,13 +30,17 @@ from dbprint.engine.baseline import (
     read_manifest,
     table_directory,
 )
-from dbprint.engine.context_assembler import incoming_rejections
+from dbprint.engine.context_assembler import (
+    authored_relationship_annotations,
+    incoming_rejections,
+)
 from dbprint.engine.freshness import classify
 from dbprint.engine.table_readings import live_annotations
 from dbprint.engine.value_list import value_notes
-from dbprint.spec.absence import Absence, column_value, read_column_field
+from dbprint.spec.absence import Absence, column_value, disabled_of, read_column_field
 from dbprint.spec.artifacts import (
     DIFF_FILENAME,
+    MANIFEST_ANNOTATIONS_FILENAME,
     MANIFEST_FILENAME,
     declared_artifacts,
     walkable_tables,
@@ -101,21 +105,22 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
         name="get_table_context",
         description=(
             "Read one table. Call it before writing SQL against a table, with "
-            "`purpose: query`: DDL, the Joins list (every edge relationships.yaml carries - "
-            "declared, inferred or measured - except edges a human rejected; a join described "
-            "only in the table's description is not in it), a data dictionary, the value "
-            "lists a predicate is written from, with their counts and coverage, and each "
-            "nullable column's null share. Call it with the default `purpose: profile` to "
-            "describe the data - statistics such as null "
-            "rates, cardinality and ranges, relationships, the description and notes. "
+            "`purpose: query`: DDL, the Joins list (declared foreign keys, joins dbprint "
+            "inferred from column names or measured from values, and joins a person added, "
+            "tagged annotated - minus any a person rejected; a join mentioned only in the "
+            "table's prose description is not in it), a data dictionary, the value lists a "
+            "predicate is written from, with their counts and coverage, and each nullable "
+            "column's null share, plus notes that apply to the whole database. Call it with "
+            "the default `purpose: profile` to describe the data - statistics such as null "
+            "rates, cardinality and ranges, joins, the table's prose description and notes. "
             "Use search_columns or list_tables first when the table is not yet known, "
             "and resolve_value to check how one phrase is spelled in one column. Paged: md "
             "and yaml end every page but the last with a `next_cursor` line, json carries "
             "it as a key; a section too long for one page continues on the next, never "
             "dropped. Under `profile`, md Notes summarise each column - a long value list "
             "shows its 5 most frequent values - while json and yaml carry the statistics "
-            "whole; for json/yaml a `_corrupted` field names any declared artifact that "
-            "failed to parse."
+            "whole; for json/yaml a `_corrupted` field names any of the table's print files "
+            "that failed to parse."
         ),
         input_schema={
             "type": "object",
@@ -132,8 +137,9 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                 "connection": {
                     "type": "string",
                     "description": (
-                        "Connection name from .dbprint.yaml; omit it to use the server's "
-                        "default connection"
+                        "Which database to read, by connection name; needed only when the "
+                        "server serves several, and the error for a missing one lists them. "
+                        "Omit it for the server's default"
                     ),
                 },
                 "purpose": {
@@ -155,9 +161,10 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                     "description": (
                         "md renders the chosen purpose as Markdown - under `profile`, a "
                         "per-column Notes summary rather than the raw statistics fields "
-                        "json and yaml carry. All three omit each column's sketch payload; "
-                        "the verbatim statistics.yaml, sketch included, is reachable as the "
-                        "dbprint://<connection>/<table>/statistics resource. get_reference "
+                        "json and yaml carry. All three omit each column's sketch (a hashed "
+                        "summary of its distinct values); the table's raw statistics file, "
+                        "sketch included, is the dbprint://<connection>/<table>/statistics "
+                        "resource. get_reference "
                         "document: guide explains each json/yaml field."
                     ),
                 },
@@ -180,12 +187,15 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                 "include_description": {
                     "type": "boolean",
                     "default": True,
-                    "description": "Include the table's description.md, when authored",
+                    "description": "Include the table's prose description, when one was written",
                 },
                 "include_annotations": {
                     "type": "boolean",
                     "default": True,
-                    "description": "Include statistics.annotations.yaml notes and claims, when authored",
+                    "description": (
+                        "Include the notes and claims people wrote on its columns and values, "
+                        "and notes that apply to the whole database, when written"
+                    ),
                 },
                 "cursor": _CURSOR_PROPERTY,
             },
@@ -198,12 +208,12 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
             "List a connection's tables, optionally narrowed by an fnmatch pattern over "
             "the dotted names. Use it to see which tables exist, their row counts, and "
             "whether each table's statistics are stale: `detail: true` adds each "
-            "table's type, row_count, columns and profiled_at, and the freshness verdict "
-            "`dbprint list` and `dbprint check` give it - `live`, `stale`, or `dormant` "
+            "table's type, row_count, columns and profiled_at, and a freshness verdict "
+            "- `live`, `stale`, or `dormant` "
             "when profiled_at is unreadable - with its age_days and the max_age_days it "
             "is judged against. A table whose threshold cannot be resolved carries "
             "`threshold_error` instead of a verdict. To find columns rather than tables, "
-            "use search_columns; for the raw manifest index, get_manifest. "
+            "use search_columns; for the print's raw table index, get_manifest. "
             "Paged: every reply carries the `total` matched, and `next_cursor` while more remain."
         ),
         input_schema={
@@ -213,8 +223,9 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                 "connection": {
                     "type": "string",
                     "description": (
-                        "Connection name from .dbprint.yaml; omit it to use the server's "
-                        "default connection"
+                        "Which database to read, by connection name; needed only when the "
+                        "server serves several, and the error for a missing one lists them. "
+                        "Omit it for the server's default"
                     ),
                 },
                 "pattern": {
@@ -229,7 +240,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                     "default": False,
                     "description": (
                         "Project each entry's type/row_count/columns/profiled_at from "
-                        "the manifest plus its freshness verdict; false returns bare FQN "
+                        "the print's index plus its freshness verdict; false returns bare FQN "
                         "strings, unchanged"
                     ),
                 },
@@ -258,7 +269,9 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
             "result carries `unreadable_tables` only when a table's own statistics or "
             "annotations failed to parse, on its first page: a statistics failure drops "
             "that table's columns from `matches` entirely; an annotations-only failure "
-            "still returns them, without the annotation."
+            "still returns them, without the annotation. A `looks_like` search also carries "
+            "`switched_off_tables` on its first page, naming each table whose looks_like "
+            "detection was switched off, where a non-match is not a finding."
         ),
         input_schema={
             "type": "object",
@@ -315,16 +328,17 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                     "type": "string",
                     "minLength": 1,
                     "description": (
-                        "Case-insensitive substring matched against the column name, its "
-                        "annotation note and its per-value notes - words, not meaning. A "
+                        "Case-insensitive substring matched against the column name, the "
+                        "note people wrote on it and its per-value notes - words, not meaning. A "
                         "match found through per-value notes carries them as `value_notes`"
                     ),
                 },
                 "connection": {
                     "type": "string",
                     "description": (
-                        "Connection name from .dbprint.yaml; omit it to use the server's "
-                        "default connection"
+                        "Which database to read, by connection name; needed only when the "
+                        "server serves several, and the error for a missing one lists them. "
+                        "Omit it for the server's default"
                     ),
                 },
                 "cursor": _CURSOR_PROPERTY,
@@ -341,7 +355,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
             "the reply carries the spelling a predicate must use; `definition` - the "
             "text names what a value's note says it means; `nearest` - the listed "
             "values closest to the text, ranked; `none`; or `unavailable` where the "
-            "column publishes no value list, lost it this run, or redacts it. Every "
+            "column publishes no value list, lost it on the latest print, or redacts it. Every "
             "reply carries the column's `coverage` and how many values the print "
             "`listed`, plus a caveat sentence wherever that list is a sample - a "
             "spelling absent from a sample is not evidence it is absent from the "
@@ -381,8 +395,9 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                 "connection": {
                     "type": "string",
                     "description": (
-                        "Connection name from .dbprint.yaml; omit it to use the server's "
-                        "default connection"
+                        "Which database to read, by connection name; needed only when the "
+                        "server serves several, and the error for a missing one lists them. "
+                        "Omit it for the server's default"
                     ),
                 },
                 "cursor": _CURSOR_PROPERTY,
@@ -393,9 +408,9 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
     ToolDef(
         name="get_manifest",
         description=(
-            "Return the parsed manifest.yaml for a connection - an index of "
-            "tables and their artifacts, not a semantic catalogue of what they mean. "
-            "Use it for a manifest field no other tool projects; for table names, row "
+            "Return the print's index for a connection - its tables and the files each "
+            "has, not a semantic catalogue of what they mean. "
+            "Use it for an index field no other tool projects; for table names, row "
             "counts and staleness, list_tables with `detail: true` is shorter and "
             "already judges each table's freshness. "
             "The `tables` map is paged in FQN order with `total` and `next_cursor`; every "
@@ -409,8 +424,9 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                 "connection": {
                     "type": "string",
                     "description": (
-                        "Connection name from .dbprint.yaml; omit it to use the server's "
-                        "default connection"
+                        "Which database to read, by connection name; needed only when the "
+                        "server serves several, and the error for a missing one lists them. "
+                        "Omit it for the server's default"
                     ),
                 },
                 "pattern": {
@@ -428,13 +444,13 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
     ToolDef(
         name="get_diff",
         description=(
-            "Answer what changed between the connection's last two generate runs: "
-            "the parsed diff.yaml, whose `summary` counts every kind of change and whose "
+            "Answer what changed between the database's last two prints: "
+            "the recorded diff, whose `summary` counts every kind of change and whose "
             "`changes` list names each one - tables and columns added, removed or "
             "retyped, relationships changed, statistics that drifted. A statistic with "
             "no drift event did not change between the two runs; a table "
             "counted in `unevaluated_tables` was not compared. The `changes` list is paged in "
-            "file order with `total` and `next_cursor`; every other key of the document rides "
+            "recorded order with `total` and `next_cursor`; every other key of the document rides "
             "the first page whole. "
             "A table's current state, rather than what changed, is get_table_context's answer."
         ),
@@ -445,8 +461,9 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                 "connection": {
                     "type": "string",
                     "description": (
-                        "Connection name from .dbprint.yaml; omit it to use the server's "
-                        "default connection"
+                        "Which database to read, by connection name; needed only when the "
+                        "server serves several, and the error for a missing one lists them. "
+                        "Omit it for the server's default"
                     ),
                 },
                 "table": {
@@ -474,7 +491,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
             "print's field means, or what a finding's spec_ref (e.g. '§2.2.4') refers to. "
             "A section returns its own text and lists its direct subsections, each read "
             "by its own number or heading; omit section for the heading tree. The guide "
-            "is the one this dbprint version ships, not a print's own reading.md. Paged "
+            "is the one this dbprint version ships, not the copy stored with a print. Paged "
             "like get_table_context's md. Depends on no connection or print; what one "
             "print's tables hold is get_table_context's and list_tables' answer."
         ),
@@ -658,10 +675,12 @@ def _tool_get_table_context(
         relationships,
         state.files.read,
     )
+    _, authors = authored_relationship_annotations(manifest, print_root, state.files.read)
     files = (
         print_root / MANIFEST_FILENAME,
         *(table_dir / name for name in artifacts.values()),
-        *referencers,
+        *dict.fromkeys((*referencers, *authors)),
+        print_root / MANIFEST_ANNOTATIONS_FILENAME,
     )
     call = paging.Call("get_table_context", arguments, files)
 
@@ -955,6 +974,7 @@ def _tool_search_columns(state: ServedConnections, arguments: dict[str, Any]) ->
 
     matches: list[dict[str, Any]] = []
     unreadable: list[str] = []
+    switched_off: list[str] = []
 
     for fqn, entry in sorted(walkable_tables(manifest).items()):
         artifacts = declared_artifacts(entry)
@@ -971,6 +991,9 @@ def _tool_search_columns(state: ServedConnections, arguments: dict[str, Any]) ->
 
         if stats_error is not None or annotation_error is not None:
             unreadable.append(fqn)
+
+        if filters.looks_like and "looks_like" in disabled_of(statistics or {}):
+            switched_off.append(fqn)
 
         column_names = set(stats_columns) | set(
             live_annotations(annotation_columns, statistics or None),
@@ -998,7 +1021,10 @@ def _tool_search_columns(state: ServedConnections, arguments: dict[str, Any]) ->
         return _paged(reply, total=len(matches), next_cursor=next_cursor)
 
     call = paging.Call("search_columns", arguments, tuple(files))
-    head = {"unreadable_tables": sorted(unreadable)} if unreadable else {}
+    head: dict[str, Any] = {"unreadable_tables": sorted(unreadable)} if unreadable else {}
+
+    if switched_off:
+        head["switched_off_tables"] = sorted(switched_off)
 
     return _page(call, list(enumerate(matches)), render, arguments, head=head)
 
@@ -1137,7 +1163,13 @@ def _tool_resolve_value(state: ServedConnections, arguments: dict[str, Any]) -> 
         parts = _parts_of(col)
 
         if part not in parts:
-            raise errors.unknown_part(part, column, table, sorted(parts))
+            raise errors.unknown_part(
+                part,
+                column,
+                table,
+                sorted(parts),
+                switched_off="parts" in disabled_of(statistics or {}),
+            )
 
         # A part counts over its own occurrences, never the table's scanned rows (SPEC 2.2.18).
         col, scope = parts[part], None

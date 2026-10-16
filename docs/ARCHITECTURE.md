@@ -23,11 +23,16 @@ This map is maintained by hand. It is not generated from the tree and nothing ch
 │   │   ├── engine_setup.py                 #   credentials -> adapter -> Engine, for one connection
 │   │   ├── options.py                      #   the shared --project locator + remote helpers
 │   │   ├── run_log.py                      #   per-run log under ~/.dbprint/logs/, 3 kept
-│   │   └── resolution.py                   #   implicit connection resolution
+│   │   └── selection.py                    #   one table's selection against committed manifests
 │   ├── config/                             # On-disk configuration loaders
-│   │   ├── project.py                      #   .dbprint.yaml schema + discovery
+│   │   ├── project.py                      #   .dbprint.yaml dataclasses + discovery
+│   │   ├── project.schema.json             #   the packaged .dbprint.yaml JSON Schema
+│   │   ├── validation.py                   #   strict validation against it, every problem at once
+│   │   ├── merge.py                        #   the one merge rule: maps by key, later wins, lists replace
+│   │   ├── read.py                         #   profile.read resolution: one mode per object type
 │   │   ├── connections.py                  #   ~/.dbprint/connections.yaml + env + .env
 │   │   ├── remote.py                       #   git-address --project: parse, then clone into a cache
+│   │   ├── resolution.py                   #   implicit connection resolution
 │   │   └── selectors.py                    #   fnmatch-based include/exclude matching
 │   ├── adapters/                           # Database adapters
 │   │   ├── base.py                         #   Adapter ABC, SqlAdapter, intermediate dataclass types
@@ -63,6 +68,9 @@ This map is maintained by hand. It is not generated from the tree and nothing ch
 │   │   ├── context_assembler.py            # per-table fragment builder for `dbprint context`
 │   │   ├── token_budget.py                 #   char/4 token approximation + section-priority selector
 │   │   ├── context_terms.py                #   the labels a Markdown reply prints, and its Terms legend
+│   │   ├── explain.py                      #   what one table resolves to, for `dbprint config explain`
+│   │   ├── annotate_skill.py               #   the packaged annotation skill's steps, for `dbprint annotate`
+│   │   ├── lineage.py                      #   derived_from traced from a dbt manifest (the [dbt] extra)
 │   │   ├── notes_synthesis.py              #   per-classification Notes templates
 │   │   ├── reading_guide.py                #   the reading.md written into every print
 │   │   ├── yaml_dumper.py                  #   deterministic YAML emission
@@ -102,6 +110,7 @@ This map is maintained by hand. It is not generated from the tree and nothing ch
 │   │   ├── redaction.py                    #   the SPEC cell-value redaction primitives
 │   │   ├── statistics_matrix.py            #   required/forbidden fields per classification
 │   │   ├── artifacts.py                    #   a print's filenames and the manifest entries a reader follows
+│   │   ├── profile.py                      #   the manifest's recorded profile and the measurements it disables
 │   │   ├── absence.py                      #   what an absent field means, read by every consumer
 │   │   ├── scope.py                        #   what a scoped file's statistics cover, read by every consumer
 │   │   ├── coverage.py                     #   values_coverage arithmetic + its markers
@@ -345,7 +354,7 @@ Adapters do not return artifact-shaped dicts. They return typed intermediate rec
 
 | Type | Fields (summary) |
 |---|---|
-| `TableMeta` | `fqn`, `type` (`table` / `view` / `matview`), namespace path components, `external` (rows live in another system), `opt_in_only` (profiled only when a `read_rows` rule opts it in; never published) |
+| `TableMeta` | `fqn`, `type` (`table` / `view` / `matview`), namespace path components, `external` (rows live in another system), `opt_in_only` (profiled only under a rule's explicit `read.tables.mode`; never published) |
 | `ColumnMeta` | `name` (always lowercase — the artifact's map key), `sql_type`, `nullable`, `default`, ordinal position, `physical_name` (catalog spelling, only when it differs from `name`), `classify_as` (the built-in a user-defined type resolves to — a Postgres domain's base type, or `anyenum`/`anyrange`/`anymultirange`; classification and every adapter's routing read `classified_type`, while `sql_type` stays the declared name). The engine refuses a table two of whose columns fold to one `name` (SPEC 1.5.2) |
 | `ForeignKeyMeta` | `column` (array), `target_table`, `target_column` (array), `on_delete`, `on_update`, `constraint_name`, `detection` — `declared` for an edge read from the catalog (the default, so an adapter never sets it) and `inferred` for one the engine derived from column naming |
 | `IndexMeta` | `name`, `columns` (ordered array), `unique`, `type` (adapter-native: `btree`, `gin`, …) |
@@ -355,15 +364,15 @@ Adapters do not return artifact-shaped dicts. They return typed intermediate rec
 | `CommentsMeta` | `table` (str / None), `columns` (dict name -> str) |
 | `ColumnStats` | The classification-dependent payload — see [§2.2 of the spec](format/v1/SPEC.md#22-statisticsyaml) for the field matrix. Every value-bearing field (`values`, `range`, `percentiles`, timeline buckets, populated windows) holds only `None`, `bool`, `int`, `float`, `Decimal` or `str`, produced by `spec.rounding.measured_value`, which raises `UnrepresentableValue` for any other driver type and fails the table |
 | `PartStats` / `ColumnParts` | One descent's result ([SPEC 2.2.18](format/v1/SPEC.md)): each chosen part's `ColumnStats` over its own `occurrences`, with its samples and `size`, plus how many paths the descent found. `Adapter.profile_parts` returns one `ColumnParts` per column it descends into and defaults to none; the engine calls it per column after Phase B while `max_parts` is positive, then classifies, detects, redacts and serializes each part through the column path. `adapters.base.descend` is the shared walk: a kind-specific `children` step turns a `PartSource` (path, type, one-row-per-occurrence source) into its children, and `spec.parts.select_parts` chooses which to profile, so an array of records composes without either step knowing the other. `SqlAdapter.profile_parts` descends through the stats module's `ARRAYS` reads (the element source, size, distinct count and norm of an array), `RECORDS` reads (a record's or union's members and the source of each, held where its parent is non-null or its tag names it), `MAPS` reads (a map as one row per entry, its keys pre-cut to `max_parts` by one grouped statement and each key compared as a literal) and `DOCUMENTS` reads (a JSON document's objects as entries and arrays as elements, each part typed by the names its values hold and read through the matching scalar reader), counts a node's occurrences as its derived source's rows, and profiles each chosen part with the module's `profile_part` — its own Phase A and Phase B rerun over that source as a synthetic column `v`, so a part is measured by the code that measures a column. `Adapter.document_types` counts each `json` column's values by engine type name, which the engine reads whatever `max_parts` is |
-| `StatisticsConfig` | Input bundle: `enumeration_threshold`, `top_n_values`, `looks_like_sample_size`, `percentiles` |
+| `StatisticsConfig` | Input bundle: `enumeration_threshold`, `top_n_values`, `top_n_null_patterns`, `looks_like_sample_size`, `percentiles`, `max_parts`, `max_part_depth` — built per table by `ProfileConfig.adapter_config()`, a switched-off `looks_like` or `parts` arriving as a zero bound |
 
 ### Cardinality measurement
 
 `cardinality_method` (part of `BaseStats`, [§2.2.2 of the spec](format/v1/SPEC.md#222-universal-per-column-fields)) records how a column's distinct-value count was obtained, and the eight adapters split two ways on it.
 
-Five reach a cheap population-level estimate instead of scanning the distinct set: Postgres reads the planner's stored `n_distinct` from `pg_stats`; Snowflake and BigQuery compute an HLL sketch via `APPROX_COUNT_DISTINCT`, duckdb via `approx_count_distinct`, ClickHouse via `uniqCombined64`. All five report `approximate` for that estimate, and all five re-probe a near-unique column exactly — one `COUNT(DISTINCT)` statement per table, after every batch, once the estimate crosses a threshold close to the row count — because an estimation error near that boundary is exactly where it would flip a `candidate_key` verdict.
+Four reach a cheap population-level estimate instead of scanning the distinct set: Postgres reads the planner's stored `n_distinct` from `pg_stats`; Snowflake and BigQuery compute an HLL sketch via `APPROX_COUNT_DISTINCT`, ClickHouse via `uniqCombined64`. All four report `approximate` for that estimate, and all four re-probe a near-unique column exactly — one `COUNT(DISTINCT)` statement per table, after every batch, once the estimate crosses a threshold close to the row count — because an estimation error near that boundary is exactly where it would flip a `candidate_key` verdict.
 
-MySQL, Redshift and Databricks publish `exact` unconditionally: none exposes a stored per-column distinct-value estimate to read, so `compute_column_statistics` issues a `COUNT(DISTINCT)` for every column on every table there — not a choice between two paths, because only one exists. Measured on MySQL against a multi-million-row table, that statement costs single-digit seconds per column and scales with cardinality and value width; on a wide table the cost is paid once per column, every run, regardless of table size.
+MySQL, Redshift, Databricks and duckdb publish `exact` unconditionally: the first three expose no stored per-column distinct-value estimate to read, and duckdb's `approx_count_distinct` errs by tens of percent on large tables while its in-process exact count stays cheap, so `compute_column_statistics` issues a `COUNT(DISTINCT)` for every column on every table there — not a choice between two paths, because only one exists. Measured on MySQL against a multi-million-row table, that statement costs single-digit seconds per column and scales with cardinality and value width; on a wide table the cost is paid once per column, every run, regardless of table size.
 
 The asymmetry is load-bearing for anyone reading a print from one of those three: `approximate` never appears there, and `exact` does not carry the same weight it carries on the other five — it means "the only measurement this adapter has," not "counted because the population was small enough to count."
 
@@ -373,7 +382,7 @@ A `TableScope` narrows what a table's statistics describe: a fraction or a predi
 
 **One table's profile issues on the order of `1 + C + 2N + 2M` statements against that expression, and reusing the text is not reusing the rows.** A sampling construct draws again every time it is evaluated, so the fields of one `statistics.yaml` can describe different rows on a table nobody wrote to — and `values_coverage` is a listed sum over `rows_scanned - null_count`, an identity that holds only when both sides came from the same rows. So a sampled table is read once into a session-lifetime copy (a real, self-expiring dataset table on BigQuery instead, which has no session-scoped relation to copy into), and every statement after that reads a name: `materialize_scope` creates it and puts its name on the scope, `_source` returns that name instead of a sampling construct, and `release_scope` drops it. The engine wraps the three statistics calls in the pair, and the copy is producer-internal — `TableScope.materialized` never reaches an artifact, because SPEC 2.2.8 forbids recording how the sample was drawn.
 
-Three things bound it. The copy costs a write, so it is refusable: the `materialize_sample` connection key turns it off, and a refused `CREATE TEMPORARY TABLE` is caught the same way. What happens next turns on whether the adapter's per-statement fallback can be seeded into agreement across statements (`Adapter.SAMPLE_FALLBACK_COHERENT`) — a coherent adapter degrades to the seeded path below with a warning; one that is not refuses the table outright, naming the connection key and the adapter's own limitation, rather than publish a file whose fields describe different rows. Only a drawn fraction is copied — a full scan has nothing to copy, and a predicate selects the same rows however often it is evaluated (`TableScope` rejects a `materialized` without a `sample`). And the copy holds the sampled fraction only, for the session, so it is gone when the run ends — except on BigQuery, which has no session-scoped table at all: its copy is an ordinary dataset table instead, bounded by an expiration set at create time rather than by session teardown (see CONFIG.md's per-adapter note).
+Three things bound it. The copy costs a write, so it is refusable: the table's resolved `profile.read.tables.materialize` turns it off, and a refused `CREATE TEMPORARY TABLE` is caught the same way. What happens next turns on whether the adapter's per-statement fallback can be seeded into agreement across statements (`Adapter.SAMPLE_FALLBACK_COHERENT`) — a coherent adapter degrades to the seeded path below with a warning; one that is not refuses the table outright, naming the connection key and the adapter's own limitation, rather than publish a file whose fields describe different rows. Only a drawn fraction is copied — a full scan has nothing to copy, and a predicate selects the same rows however often it is evaluated (`TableScope` rejects a `materialized` without a `sample`). And the copy holds the sampled fraction only, for the session, so it is gone when the run ends — except on BigQuery, which has no session-scoped table at all: its copy is an ordinary dataset table instead, bounded by an expiration set at create time rather than by session teardown (see CONFIG.md's per-adapter note).
 
 The sampler adds its own bounded draw on top of that source rather than reading all of it: `SELECT DISTINCT` blocks, so a row limit trims the result and not the scan, and scanning the whole scoped set once per eligible column is the cost a scope exists to avoid. The scoped source decides *which* rows are eligible; the sampler's own draw decides *how many* of them it reads, sized from the scoped estimate. A draw returning fewer than `MIN_SAMPLE_DRAW` values is re-taken over the scoped set directly, which is what keeps a selective predicate from yielding a near-empty draw with nothing recording it.
 
@@ -457,6 +466,7 @@ sequenceDiagram
     Config-->>Engine: credentials dict
     Engine->>Stage: open (lock, recover an interrupted run)
     Engine->>Engine: load baseline manifest (if any)
+    Engine->>Engine: load dbt manifest (when dbt_manifest is set)
     Engine->>Adapter: connect()
     Engine->>Adapter: list_tables(include, exclude)
     Adapter-->>Engine: [TableMeta, ...]
@@ -465,8 +475,8 @@ sequenceDiagram
     Adapter-->>Engine: naming-inference inventory (skipped objects included)
 
     loop For each table (up to `parallelism` at once, fault-isolated)
-        Engine->>Adapter: estimate_row_count (only when min_rows or max_rows_scanned is set)
-        Engine->>Config: settings_for(fqn, estimate)
+        Engine->>Adapter: estimate_row_count (only when min_rows or read.tables.max_rows is set)
+        Engine->>Config: settings_for(fqn, kind, estimate)
         Engine->>Engine: skip if fresh vs max_age and not --force
         Engine->>Adapter: extract_ddl + introspect_* + compute_base_statistics
         Adapter-->>Engine: intermediate records + counts and per-column cardinality
@@ -478,6 +488,7 @@ sequenceDiagram
         Engine->>Stage: stage ddl.sql + statistics.yaml
     end
 
+    Engine->>Stage: stage derived_from (dbt lineage), rewriting fresh tables' statistics.yaml
     Engine->>RGraph: resolve(all refers_to)
     RGraph-->>Engine: per-table referenced_by
     Engine->>Stage: stage relationships.yaml per table
@@ -496,24 +507,25 @@ sequenceDiagram
 2. **Resolve credentials** for the named connection via `config.connections` (env > file > `.env`).
 3. **Open the adapter** (`Adapter.connect()`). A failed connect aborts this connection but does not abort sibling connections in a multi-connection run.
 4. **Load the baseline manifest** from `prints/<connection>/manifest.yaml` if it exists. The baseline is the "before" side for diff computation and the source of `profiled_at` timestamps for the `max_age` freshness check. For diff computation the baseline tables are hydrated from their per-table `relationships.yaml` and `statistics.yaml`; column structure (`sql_type`, `nullable`) is synthesised from the `statistics.yaml` column entries so column add / remove / type / nullable drift is detectable between existing tables. `statistics.yaml` carries no column defaults, so the hydrated baseline marks every default unknown and `column_default_changed` never fires from a committed baseline (v1 boundary).
-5. **Enumerate tables** via `Adapter.list_tables(include, exclude)`. The adapter applies the selectors at query time when efficient and at the Python boundary otherwise.
-6. **Catalog pre-pass**, once, before the loop. Read the columns and the declared unique keys of every object the inventory needs into the inventory that foreign-key inference resolves against — this run's matched tables, plus whatever the baseline manifest still lists. It covers objects the freshness check will skip and objects a CLI narrowing left unmatched, and that is the point in both cases: an inference universe that shrank to the objects one run happened to profile, or happened to be asked to profile, would classify a column differently for a reason that has nothing to do with the database. With no baseline the universe is exactly this run's matched tables, so a narrowed first run infers nothing extra. Views and matviews are in it because they originate edges; what they may never be is an edge's target. An object whose catalog read fails is registered with whatever was read rather than dropped, so a failure can only ever suppress an edge, never invent one by making some other object's name unambiguous. The pass does not run when the connection sets `infer_relationships: false`, and then nothing infers. Extraction reads each object's columns from this inventory rather than asking the catalog a second time.
-7. **Per-table loop** (fault-isolated). With `parallelism: N` the engine opens up to N — 1 more sessions through `new_session()` once listing is done, and gives each its own single-thread worker; the catalog pre-pass, this loop and the key-sketch pass each hand the next table to whichever session is free. A table runs start to finish on one session, which then owns it: the normalized-cardinality pass and the release of its sampled copy run there too. Results are put back in listing order before any cross-table step, so every artifact matches a sequential run's, and every unit runs in a copy of the coordinator's context so the statement trace keeps its connection tag. `--fail-fast` stops handing out tables; those in flight finish. At `parallelism: 1` everything runs inline on the calling thread.
-   - **Size pre-flight**, only when the cascade carries `min_rows` or `max_rows_scanned` anywhere — the ceiling is legal at connection and `defaults` level too, and needs the estimate to derive its fraction. Read `Adapter.estimate_row_count` and pass it to `settings_for`, which needs it to decide whether a size-conditioned rule governs this table. It runs before the freshness skip because the condition gates every key a rule carries, `max_age_days` among them. A catalog with no estimate leaves those rules unapplied; a read that raises fails this table alone.
-   - **Freshness skip.** A listed table is skipped, unless `--force` was passed, when the one freshness predicate in `engine/carried.py` says its committed print still stands — the same producer version wrote it and it is younger than `max_age_days`. Mark the table `skipped` in the result.
+5. **Enumerate tables** via `Adapter.list_tables(include, exclude)`. The adapter applies the selectors at query time when efficient and at the Python boundary otherwise. Listing is the first point an external table is known, so an adapter declaring `EXTERNAL_READ_REFUSED` (its read of one reaches another live database) refuses here, before any table is read, a rule writing a non-`catalog` `read.tables.mode` for one: `ConfigError`, exit 1.
+6. **Catalog pre-pass**, once, before the loop. Read the columns and the declared unique keys of every object the inventory needs into the inventory that foreign-key inference resolves against — this run's matched tables, plus whatever the baseline manifest still lists. It covers objects the freshness check will skip and objects a CLI narrowing left unmatched, and that is the point in both cases: an inference universe that shrank to the objects one run happened to profile, or happened to be asked to profile, would classify a column differently for a reason that has nothing to do with the database. With no baseline the universe is exactly this run's matched tables, so a narrowed first run infers nothing extra. Views and matviews are in it because they originate edges; what they may never be is an edge's target. An object whose catalog read fails is registered with whatever was read rather than dropped, so a failure can only ever suppress an edge, never invent one by making some other object's name unambiguous. The pass does not run when no level of the cascade sets `profile.relationships.infer` — not the connection, not any rule — and then nothing infers. Extraction reads each object's columns from this inventory rather than asking the catalog a second time.
+7. **Per-table loop** (fault-isolated). With `run.parallelism: N` the engine opens up to N — 1 more sessions through `new_session()` once listing is done, and gives each its own single-thread worker; the catalog pre-pass, this loop and the key-sketch pass each hand the next table to whichever session is free. A table runs start to finish on one session, which then owns it: the normalized-cardinality pass and the release of its sampled copy run there too. Results are put back in listing order before any cross-table step, so every artifact matches a sequential run's, and every unit runs in a copy of the coordinator's context so the statement trace keeps its connection tag. `--fail-fast` stops handing out tables; those in flight finish. At `run.parallelism: 1` everything runs inline on the calling thread.
+   - **Size pre-flight**, only when the cascade carries `min_rows` or `read.tables.max_rows` anywhere — a ceiling at any level needs the estimate to derive its fraction. An object no rule reads (a view, an external table, a `catalog`-mode table) is skipped unless a `min_rows` rule that writes its mode names it. Read `Adapter.estimate_row_count` and pass it to `settings_for`, which needs it to decide whether a size-conditioned rule governs this table. It runs before the freshness skip because the condition gates every key a rule carries, `max_age_days` among them. A catalog with no estimate leaves those rules unapplied; a read that raises fails this table alone.
+   - **Freshness skip.** A listed table is skipped, unless `--force` was passed, when the one freshness predicate in `engine/carried.py` says its committed print still stands — the same producer version wrote it, it is younger than `max_age_days`, and the profile and redaction it recorded are the ones this run resolves. Mark the table `skipped` in the result.
    - **Extract** via the adapter: DDL, relationships, indexes, comments, statistics, `looks_like` samples. Column metadata comes from the pre-pass inventory, and from the adapter only for an object the inventory holds no columns for.
    - **Classify** each column per [§3.2 of the spec](format/v1/SPEC.md#32-priority-order-first-match-wins). Classification needs `cardinality_ratio` from the statistics pass, so it runs after extraction.
    - **Assemble artifact dicts** for `statistics.yaml` and (the outgoing half of) `relationships.yaml`. `referenced_by` is filled in by the second pass.
    - **Preserve `description.md` and `statistics.annotations.yaml`** if a prior version exists in the table directory; never overwrite user content.
    - **Stage** this table's artifacts under the run's stage (§4); nothing reaches the print root yet.
    - On any exception, log it and mark the table `failed` in the result. Continue to the next table; the prior on-disk artifacts for the failed table remain intact.
-8. **Second pass — relationship graph.** Build a reverse index from every table's `refers_to` to populate each table's `referenced_by`. Stage each `relationships.yaml` with the completed graph.
-9. **Diff.** Compute the change-event stream by comparing the baseline manifest against the current state. Every change kind specified in [§2.6.6 of the spec](format/v1/SPEC.md#266-per-kind-field-schemas) is produced from this step.
-10. **Stage `manifest.yaml`** and **`diff.yaml`**.
-11. **Sweep undeclared directories.** Record for deletion the producer-written files in every directory under the connection root the new manifest does not declare; user-authored files are kept, and a directory left empty is removed at commit.
-12. **Commit** the stage (§4). Steps 10-12 run only when no matched table was left unattempted, so `--dry-run`, a truncated `--fail-fast` run and `compute_diff()` write and delete nothing.
-13. **Close the adapter.**
-14. **Return** `GenerateResult` with per-table status, summary counts, elapsed time, and the list of errors.
+8. **Lineage**, only when the connection names a `dbt_manifest`. The manifest is loaded and parsed before connecting, so an unusable one fails the connection with exit 1 before any table is read. After the loop each re-read model's columns get `derived_from` in their staged `statistics.yaml`, and a fresh table whose traced sources changed has its committed `statistics.yaml` rewritten in place rather than re-read.
+9. **Second pass — relationship graph.** Build a reverse index from every table's `refers_to` to populate each table's `referenced_by`. Stage each `relationships.yaml` with the completed graph.
+10. **Diff.** Compute the change-event stream by comparing the baseline manifest against the current state. Every change kind specified in [§2.6.6 of the spec](format/v1/SPEC.md#266-per-kind-field-schemas) is produced from this step.
+11. **Stage `manifest.yaml`** and **`diff.yaml`**.
+12. **Sweep undeclared directories.** Record for deletion the producer-written files in every directory under the connection root the new manifest does not declare; user-authored files are kept, and a directory left empty is removed at commit.
+13. **Commit** the stage (§4). Steps 11-13 run only when no matched table was left unattempted, so `--dry-run`, a truncated `--fail-fast` run and `compute_diff()` write and delete nothing.
+14. **Close the adapter.**
+15. **Return** `GenerateResult` with per-table status, summary counts, elapsed time, and the list of errors.
 
 ### `compute_diff()` — diff only, no disk writes
 
@@ -607,7 +619,7 @@ A per-table crash contract kept every table an aborted run had rewritten, but th
 
 `manifest.yaml` and `diff.yaml` sit at the connection root rather than in a table directory, and the engine writes them once, after the table loop. Both describe the whole print set, so neither is meaningful until every matched table has been accounted for.
 
-The manifest indexes what is on disk, not what the run re-read. A table the target still lists but the run did not re-extract — skipped as fresh, or failed — keeps its previous entry, `profiled_at` included, and a failed one is also named in the manifest's `failed_tables`, so the print says it was attempted and could not be profiled; advancing that stamp would renew freshness off a read that never happened, and the table would never be profiled again. Tables outside this run's selectors keep their entries for the same reason: a narrowed run learns nothing about them. Only a table the target has stopped listing loses its entry and is reported removed — except when the listing shares no in-scope table with the committed print at all. That run is refused with exit 4 before any table is read, because a wrong path or a role without grants lists nothing without erroring; `generate --confirm-all-removed` records a real total removal. A removed table's producer files are deleted after the manifest write (§3 step 11).
+The manifest indexes what is on disk, not what the run re-read. A table the target still lists but the run did not re-extract — skipped as fresh, or failed — keeps its previous entry, `profiled_at` included, and a failed one is also named in the manifest's `failed_tables`, so the print says it was attempted and could not be profiled; advancing that stamp would renew freshness off a read that never happened, and the table would never be profiled again. Tables outside this run's selectors keep their entries for the same reason: a narrowed run learns nothing about them. Only a table the target has stopped listing loses its entry and is reported removed — except when the listing shares no in-scope table with the committed print at all. That run is refused with exit 4 before any table is read, because a wrong path or a role without grants lists nothing without erroring; `generate --confirm-all-removed` records a real total removal. A removed table's producer files are deleted after the manifest write (§3 step 12).
 
 Every committed table gets exactly one disposition per run — re-extracted, fresh, failed, not attempted, out of scope, removed, or dropped for a missing artifact — and a carried table's next entry comes from one rebase, `carried_entry`, whichever reason carried it.
 
@@ -664,8 +676,8 @@ A pattern of `arboretum.*` matches every table under the `arboretum` namespace a
 
 | Source | Field | Default |
 |---|---|---|
-| `.dbprint.yaml` | `connections.<name>.include` | `["*"]` (everything visible to the connection) |
-| `.dbprint.yaml` | `connections.<name>.exclude` | `[]` |
+| `.dbprint.yaml` | `connections.<name>.tables.include` | `["*"]` (everything visible to the connection) |
+| `.dbprint.yaml` | `connections.<name>.tables.exclude` | `[]` |
 | CLI flag | `--include PATTERN` (repeatable) | none |
 | CLI flag | `--exclude PATTERN` (repeatable) | none |
 
@@ -752,14 +764,12 @@ The project config is committed to source control; the connections file is not. 
 
 ```yaml
 arboretum:
-  adapter: postgres
   host: db.internal
   port: 5432
   database: arboretum
   user: dbprint_ro
   password: <redacted>
 warehouse:
-  adapter: snowflake
   account: xy12345.us-east-1
   user: DBPRINT_RO
   warehouse: COMPUTE_WH
@@ -769,7 +779,7 @@ warehouse:
   # private_key_file_pwd: <passphrase>        # only when the key is encrypted
 ```
 
-Only the connection names referenced by `.dbprint.yaml` need entries; extras are ignored.
+Only the connection names referenced by `.dbprint.yaml` need entries. The entry a run reads is checked against its adapter's `REQUIRED_KEYS`, `OPTIONAL_KEYS` and `PATH_KEYS` plus `redaction_salt` — an unknown key or a nested value is refused, naming keys only — while other connections' entries are left alone, since the file is shared across projects.
 
 ---
 
@@ -982,7 +992,7 @@ chdb embeds the same ClickHouse engine the production driver (`clickhouse-connec
 
 What it proves: dialect shape and engine semantics both — a table's `SAMPLE` behavior, its aggregate functions, and its catalog reads are all the real thing. What it cannot prove: anything distributed. `SAMPLE` against a `Distributed` table or a `ReplicatedMergeTree`, cluster-wide `system` table behavior, and access-control-gated reads are all outside an in-process build's reach.
 
-One measured finding shapes the adapter more than the substrate choice does: a table's own `SAMPLE BY` key does not guarantee that `SAMPLE` narrows anything — a monotonic key was measured reading the whole table at every requested fraction. Materialization is not an optimization here the way it is for the other four adapters; it is the only way a sampled `statistics.yaml` can be trusted, which is why `materialize_sample: false` fails a sampled table outright on this adapter rather than degrading to an unseeded read (see [CONFIG.md](CONFIG.md)'s `materialize_sample` section).
+One measured finding shapes the adapter more than the substrate choice does: a table's own `SAMPLE BY` key does not guarantee that `SAMPLE` narrows anything — a monotonic key was measured reading the whole table at every requested fraction. Materialization is not an optimization here the way it is for the other four adapters; it is the only way a sampled `statistics.yaml` can be trusted, which is why `read.tables.materialize: false` fails a sampled table outright on this adapter rather than degrading to an unseeded read (see [CONFIG.md](CONFIG.md)'s `profile.read` section).
 
 ### Why Postgres, shimmed, for Redshift
 

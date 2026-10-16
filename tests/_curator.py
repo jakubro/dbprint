@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,6 @@ from dbprint.adapters import (
     MockTable,
     NullPattern,
     NullPatterns,
-    StatisticsConfig,
     UniqueKeyMeta,
     ValueCount,
 )
@@ -26,13 +26,14 @@ def conn_config(
     enumeration_threshold: int | None = None,
     **overrides: Any,
 ) -> ConnectionConfig:
-    statistics = (
-        StatisticsConfig()
-        if enumeration_threshold is None
-        else StatisticsConfig(enumeration_threshold=enumeration_threshold)
-    )
+    conn = connection_config(output=tmp_path, **overrides)
 
-    return connection_config(output=tmp_path, statistics=statistics, **overrides)
+    if enumeration_threshold is None:
+        return conn
+
+    statistics = replace(conn.profile.statistics, enumeration_threshold=enumeration_threshold)
+
+    return replace(conn, profile=replace(conn.profile, statistics=statistics))
 
 
 def curator_fixture() -> dict[str, MockTable]:

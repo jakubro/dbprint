@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, TypeGuard
 
 from dbprint.spec import parts as part_paths
-from dbprint.spec.absence import emits, sample_verdicts
+from dbprint.spec.absence import disabled_of, emits, sample_verdicts
 from dbprint.spec.classification import (
     compute_candidate_key_exception,
     compute_cardinality_ratio,
@@ -24,6 +24,7 @@ from dbprint.spec.looks_like import MATCH_THRESHOLD
 from dbprint.spec.normalization import fold
 from dbprint.spec.percentiles import beyond_float64_precision
 from dbprint.spec.percentiles import tolerance as percentile_tolerance
+from dbprint.spec.profile import BLOCKS_OF, COLUMN_FIELDS_OF
 from dbprint.spec.redaction import (
     REDACTED_DAY_COUNT_GRANULARITY,
     WITHHELD_UNDER_REDACTION,
@@ -301,6 +302,7 @@ def check(data: Any, path: str, tbl_fqn: str) -> list[Issue]:
     catalog_only = data.get("catalog_only") is True
 
     issues.extend(_check_table_unmeasured(data, path))
+    issues.extend(_check_disabled(data, path))
     issues.extend(_check_depends_on(data, path))
     issues.extend(_check_scope(data, path, row_count))
 
@@ -505,7 +507,11 @@ def _check_null_patterns(
     if block is None or not isinstance(block, dict):
         # SPEC 2.2.1: a file naming the census unmeasured has already said the read did not
         # answer, so its absence asserts nothing about whether the table carries nulls.
-        if nulls_exist and "null_patterns" not in _table_unmeasured_of(data):
+        if (
+            nulls_exist
+            and "null_patterns" not in _table_unmeasured_of(data)
+            and "null_patterns" not in disabled_of(data)
+        ):
             return [
                 Issue(
                     path,
@@ -1398,7 +1404,15 @@ def _check_scope(data: dict, path: str, row_count: int) -> list[Issue]:
 # Catalog/DDL-derivable per-column fields - never a query result. Mirrors the schema's own
 # CatalogOnlyColumn definition, so the two cannot disagree about what is permitted.
 _CATALOG_ONLY_COLUMN_FIELDS = frozenset(
-    {"sql_type", "nullable", "classification", "physical_name", "collation", "physical_layout_key"},
+    {
+        "sql_type",
+        "nullable",
+        "classification",
+        "physical_name",
+        "collation",
+        "physical_layout_key",
+        "derived_from",
+    },
 )
 
 
@@ -2045,6 +2059,75 @@ def _check_table_unmeasured(data: dict, path: str) -> list[Issue]:
         for block in sorted(_table_unmeasured_of(data))
         if data.get(block) is not None
     ]
+
+
+def _check_disabled(data: dict, path: str) -> list[Issue]:
+    """SPEC 2.2.21: a switched-off measurement emits nothing, and is never also named unmeasured."""
+
+    disabled = disabled_of(data)
+
+    if not disabled:
+        return []
+
+    issues: list[Issue] = []
+    unmeasured = set(_table_unmeasured_of(data))
+
+    for name in sorted(disabled):
+        for block in BLOCKS_OF.get(name, ()):
+            if data.get(block) is not None:
+                issues.append(_disabled_emitted(path, name, block))
+
+            if block in unmeasured:
+                issues.append(_disabled_unmeasured(path, name, block))
+
+    columns = data.get("columns")
+
+    for col_name, col in columns.items() if isinstance(columns, dict) else ():
+        if not isinstance(col, dict):
+            continue
+
+        owners = [(f"{path}::columns.{col_name}", col)]
+        parts = col.get("parts")
+
+        if isinstance(parts, dict):
+            owners += [
+                (f"{path}::columns.{col_name}.parts.{part}", block)
+                for part, block in parts.items()
+                if isinstance(block, dict)
+            ]
+
+        for where, block in owners:
+            named = unmeasured_of(block)
+
+            for name in sorted(disabled):
+                for field in COLUMN_FIELDS_OF.get(name, ()):
+                    if emits(block, field):
+                        issues.append(_disabled_emitted(where, name, field))
+
+                    if field in named:
+                        issues.append(_disabled_unmeasured(where, name, field))
+
+    return issues
+
+
+def _disabled_emitted(where: str, name: str, field: str) -> Issue:
+    return Issue(
+        where,
+        "stats.disabled-names-emitted-field",
+        "error",
+        f"disabled names {name!r}, which switches off {field!r}, but it is emitted.",
+        "§2.2.21",
+    )
+
+
+def _disabled_unmeasured(where: str, name: str, field: str) -> Issue:
+    return Issue(
+        where,
+        "stats.disabled-and-unmeasured",
+        "error",
+        f"unmeasured names {field!r}, which belongs to {name!r}, switched off in disabled.",
+        "§2.2.21",
+    )
 
 
 def _check_distribution(col: dict, col_path: str) -> list[Issue]:

@@ -20,6 +20,7 @@ from dbprint.adapters import DuckdbAdapter, StatisticsConfig
 from dbprint.adapters import base as adapter_base
 from dbprint.adapters import statements as adapter_statements
 from dbprint.cli.adapter_registry import ADAPTERS
+from dbprint.config import ProfileConfig, SketchesProfile
 from dbprint.config.project import ConnectionConfig
 from dbprint.engine import Engine, GenerateRequest
 from dbprint.engine.yaml_dumper import dump_yaml
@@ -476,7 +477,7 @@ def test_a_rerun_over_unchanged_decimals_reports_no_change_and_keeps_every_digit
         name="garden",
         adapter="duckdb",
         output=tmp_path / "prints",
-        sketch_all_columns=True,
+        profile=ProfileConfig(sketches=SketchesProfile(columns="all")),
     )
 
     for _ in range(2):

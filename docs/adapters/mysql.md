@@ -24,7 +24,7 @@ GRANT CREATE TEMPORARY TABLES ON my_db.* TO 'dbprint_ro'@'%';
 
 | Privilege | On | Needed for |
 |---|---|---|
-| `SELECT` | the database | connecting, enumerating, DDL and statistics — a plain view takes it for DDL only, since no statement is issued against one |
+| `SELECT` | the database | connecting, enumerating, DDL and statistics — a plain view takes it for DDL only under the default `read.views.mode: catalog`, which issues no statement against one; a view read in `full` or `filter` mode is queried like a table |
 | `SHOW VIEW` | the database | a view's DDL only |
 | `CREATE TEMPORARY TABLES` | the database | the sampled-table copy — without it, a `sample`-scoped table is refused rather than degraded |
 
@@ -64,7 +64,7 @@ The extra distinct-value draw that `inferred.looks_like` takes on top of the sam
 
 ## When dbprint writes
 
-Only one thing makes dbprint write, and only under one condition: `materialize_sample` is on by default, and it fires **only for a table narrowed to a fraction of its rows**. A fraction has two sources — a rule's `sample`, and a `max_rows_scanned` ceiling resolving against the table's size, which is legal at connection and `defaults` level as well as inside a rule. A project that narrows nothing, which is what `dbprint init` scaffolds, never writes. A `filter` is a predicate rather than a fraction and never materializes.
+Only one thing makes dbprint write, and only under one condition: `profile.read.tables.materialize` is on by default, and it fires **only for a table read in `sample` mode** — by a `fraction`, or by a `max_rows` ceiling that resolves below the table's size, at whatever level the ceiling is set. A project that narrows nothing, which is what `dbprint init` scaffolds, never writes. A `filter` is a predicate rather than a fraction and never materializes.
 
 Where it does fire, the drawn rows are copied once into a session-lifetime `TEMPORARY` table, and every statistics statement for that table reads the copy. That is what makes the numbers in one file describe one set of rows.
 
@@ -79,7 +79,7 @@ across statements. Narrow with a filter instead of a sample fraction.
 
 MySQL reports the underlying cause as a plain access-denied error rather than one naming temporary tables specifically, so the parenthesized cause is worth reading in full before concluding the account lost its `SELECT` rather than `CREATE TEMPORARY TABLES`.
 
-There is no fallback path to choose here: setting `materialize_sample: false` on a `sample`-scoped table refuses it before any statement runs, for the same reason — MySQL's undocumented `RAND(seed)` guarantee means an unmaterialized draw is never trusted.
+There is no fallback path to choose here: setting `read.tables.materialize: false` on a `sample`-mode table refuses it before any statement runs, for the same reason — MySQL's undocumented `RAND(seed)` guarantee means an unmaterialized draw is never trusted.
 
 ## Listed values
 
@@ -99,7 +99,7 @@ A MariaDB system-versioned table is profiled over its current rows; history rows
 
 A MariaDB view never carries `depends_on`: MariaDB's catalog holds only the view's definition text.
 
-A `FEDERATED`, `CONNECT` or `SPIDER` table is listed with `external: true` (SPEC 2.2.20) and, unless a `read_rows` rule opts it in, described from the catalog alone. Opted in, every statement reaches the remote side, and a `FEDERATED` read that cannot use an index fetches every remote row. `MERGE`, `CSV`, `ARCHIVE`, `MEMORY`, `BLACKHOLE` and `NDB` are ordinary tables.
+A `FEDERATED`, `CONNECT` or `SPIDER` table is listed with `external: true` (SPEC 2.2.20) and described from the catalog alone. A rule writing any other `read.tables.mode` for it is refused before any table is read, with exit 1, because the read would reach another live database. `MERGE`, `CSV`, `ARCHIVE`, `MEMORY`, `BLACKHOLE` and `NDB` are ordinary tables.
 
 ## Credentials in a remote table's DDL
 
@@ -113,11 +113,11 @@ A print written by an earlier release may hold the password in `ddl.sql`. The fi
 
 ## Statement timeout
 
-`statement_timeout` is applied once per session. On Oracle MySQL it is `max_execution_time`, which bounds read-only `SELECT` statements only: `SHOW CREATE TABLE`, the sample copy (`CREATE TEMPORARY TABLE ... SELECT`), `DROP` and statements inside stored programs run unbounded there. On MariaDB it is `max_statement_time`, which covers every statement but is checked at intervals, so a statement can overrun it briefly. A statement that exceeds the limit is cancelled by the server.
+`run.statement_timeout` is applied once per session. On Oracle MySQL it is `max_execution_time`, which bounds read-only `SELECT` statements only: `SHOW CREATE TABLE`, the sample copy (`CREATE TEMPORARY TABLE ... SELECT`), `DROP` and statements inside stored programs run unbounded there. On MariaDB it is `max_statement_time`, which covers every statement but is checked at intervals, so a statement can overrun it briefly. A statement that exceeds the limit is cancelled by the server.
 
 ## Parallelism
 
-`parallelism: N` opens N connections and profiles up to N tables at once. Each counts against the server's `max_connections` and the account's `MAX_USER_CONNECTIONS`; a connection the server refuses leaves the run on the rest, with a warning.
+`run.parallelism: N` opens N connections and profiles up to N tables at once. Each counts against the server's `max_connections` and the account's `MAX_USER_CONNECTIONS`; a connection the server refuses leaves the run on the rest, with a warning.
 
 ## Reference
 

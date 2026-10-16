@@ -202,13 +202,18 @@ def _setup_multi_project(tmp_path: Path, *, config_include: list[str] | None = N
     include_yaml = ""
 
     if config_include:
-        include_yaml = "    include:\n" + "\n".join(f'      - "{p}"' for p in config_include) + "\n"
+        include_yaml = (
+            "    tables:\n      include:\n"
+            + "\n".join(f'        - "{p}"' for p in config_include)
+            + "\n"
+        )
 
     (tmp_path / ".dbprint.yaml").write_text(
         f"""\
 defaults:
-  max_age_days: 7
-  statistics: {{}}
+  profile:
+    freshness:
+      max_age_days: 7
   diff: {{}}
 connections:
   primary:
@@ -386,18 +391,26 @@ class TestRunLog:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         (tmp_path / ".dbprint.yaml").write_text(
-            "defaults:\n"
-            "  max_age_days: 7\n"
-            "  statistics: {}\n"
-            "  diff: {}\n"
-            "connections:\n"
-            "  primary:\n"
-            "    adapter: postgres\n"
-            "    auto: true\n"
-            "    output: prints\n"
-            "    rules:\n"
-            '      - include: ["public.*"]\n'
-            "        max_age_days: 1\n",
+            """\
+defaults:
+  profile:
+    freshness:
+      max_age_days: 7
+    statistics: {}
+  diff: {}
+connections:
+  primary:
+    adapter: postgres
+    auto: true
+    output: prints
+    rules:
+    - match:
+        tables:
+        - public.*
+      profile:
+        freshness:
+          max_age_days: 1
+""",
         )
         monkeypatch.chdir(tmp_path)
 
@@ -409,7 +422,7 @@ class TestRunLog:
         with _patch_registry():
             runner.invoke(main, ["generate", "--no-tui"])
 
-        assert "rules=connection 'primary' rules[0]" in _log_text(tmp_path)
+        assert "rules=connections.primary.rules[0]" in _log_text(tmp_path)
 
     def test_offline_command_writes_no_log(
         self,

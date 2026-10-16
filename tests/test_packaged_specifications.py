@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from dbprint.engine.annotate_skill import annotate_skill_steps
 from tests._scripts import REPO_ROOT
 
 
@@ -126,7 +127,14 @@ def _links(text: str) -> list[str]:
     return found
 
 
-@pytest.mark.parametrize("source,target", sorted(PACKAGED.items()))
+# The annotation skill is self-contained by design and carries no link to rewrite.
+_LINKLESS = frozenset({"docs/examples/skill/dbprint-annotate.md"})
+
+
+@pytest.mark.parametrize(
+    "source,target",
+    sorted((s, t) for s, t in PACKAGED.items() if s not in _LINKLESS),
+)
 def test_packaged_links_are_absolute_and_survive_a_real_build(
     tmp_path: Path,
     source: str,
@@ -194,7 +202,10 @@ def test_the_real_loader_resolves_against_an_installed_wheel(tmp_path: Path) -> 
         "import sys; sys.path.insert(0, sys.argv[1]); "
         "from dbprint.mcp import reference; "
         "print(reference.__file__); "
-        "print(reference.read_document('spec')[:40].replace(chr(10), ' '))"
+        "print(reference.read_document('spec')[:40].replace(chr(10), ' ')); "
+        "from dbprint.engine import annotate_skill; "
+        "print(annotate_skill.__file__); "
+        "print(annotate_skill.annotate_skill_steps().splitlines()[0])"
     )
     result = subprocess.run(
         [sys.executable, "-S", "-c", script, str(site_dir)],
@@ -202,13 +213,15 @@ def test_the_real_loader_resolves_against_an_installed_wheel(tmp_path: Path) -> 
         capture_output=True,
         text=True,
     )
-    resolved_from, snippet = result.stdout.splitlines()
+    resolved_from, snippet, skill_from, skill_heading = result.stdout.splitlines()
 
     assert resolved_from.startswith(str(site_dir)), (
         f"reference module resolved from {resolved_from}, not the installed wheel at "
         f"{site_dir} - an ambient install may have shadowed it"
     )
     assert "dbprint format specification" in snippet
+    assert skill_from.startswith(str(site_dir))
+    assert skill_heading == "# Annotating a dbprint print"
 
 
 def test_rewrite_links_preserves_fragments() -> None:
@@ -296,3 +309,16 @@ def test_url_constants_match_astro_config() -> None:
     assert f'const BASE = "{SITE_BASE}"' in config
     assert f'const REPOSITORY = "{REPOSITORY}"' in config
     assert f'const REF = "{REF}"' in config
+
+
+def test_the_annotate_brief_prints_the_skill_body_without_its_frontmatter() -> None:
+    steps = annotate_skill_steps()
+
+    assert steps.startswith("# Annotating a dbprint print\n")
+    assert "name: dbprint-annotate" not in steps
+
+
+def test_the_wheel_carries_the_config_schema(tmp_path: Path) -> None:
+    wheel = _built_wheel(tmp_path)
+
+    assert "dbprint/config/project.schema.json" in wheel.namelist()

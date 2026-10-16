@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Copies the packaged JSON Schemas into public/spec/v1/ so `astro build` serves them at their
-// own `$id` path. Gitignored - a committed copy would fork the normative source.
+// Copies the packaged JSON Schemas into public/ so `astro build` serves each at its own `$id`
+// path. Gitignored - a committed copy would fork the normative source.
 
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -16,4 +16,12 @@ for (const name of schemas) {
   writeFileSync(`${TARGET}/${name}`, readFileSync(`${SOURCE}/${name}`));
 }
 
-console.log(`copied ${schemas.length} schema(s) to public/spec/v1/`);
+const CONFIG_SOURCE = fileURLToPath(
+  new URL("../../src/dbprint/config/project.schema.json", import.meta.url),
+);
+const CONFIG_TARGET = fileURLToPath(new URL("../public/config", import.meta.url));
+
+mkdirSync(CONFIG_TARGET, { recursive: true });
+writeFileSync(`${CONFIG_TARGET}/project.schema.json`, readFileSync(CONFIG_SOURCE));
+
+console.log(`copied ${schemas.length} schema(s) to public/spec/v1/ and the config schema to public/config/`);

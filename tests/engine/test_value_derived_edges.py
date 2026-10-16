@@ -4,6 +4,7 @@ algorithm is covered in isolation elsewhere; these cover the wiring around it.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -17,8 +18,8 @@ from dbprint.adapters import (
     UniqueKeyMeta,
     ValueCount,
 )
-from dbprint.adapters.base import ColumnStats
-from dbprint.config import ConnectionConfig
+from dbprint.adapters.base import ColumnStats, Range
+from dbprint.config import ConnectionConfig, ProfileConfig, RelationshipsProfile
 from dbprint.engine import Engine, GenerateRequest
 from tests._engine_run import artifact
 from tests._prints import columns, mock_table
@@ -141,7 +142,7 @@ def _generate(tmp_path: Path, **kwargs: Any) -> tuple[dict[str, Any], dict[str, 
         name="w",
         adapter="postgres",
         output=tmp_path,
-        infer_relationships=False,
+        profile=ProfileConfig(relationships=RelationshipsProfile(infer=False)),
     )
     Engine(MockAdapter(_fixture(**kwargs)), conn, tmp_path).generate()
     root = tmp_path / "w" / "public"
@@ -245,7 +246,7 @@ class TestDiffExclusion:
             name="w",
             adapter="postgres",
             output=tmp_path,
-            infer_relationships=False,
+            profile=ProfileConfig(relationships=RelationshipsProfile(infer=False)),
         )
         # A non-unique parent proposes nothing; the second run's unique one proposes the edge.
         Engine(MockAdapter(_fixture(parent_unique=False)), conn, tmp_path).generate()
@@ -256,3 +257,52 @@ class TestDiffExclusion:
 
         assert [e["detection"] for e in refers_to] == ["measured"]
         assert events == []
+
+
+def _dense_parent_print(tmp_path: Path, child_name: str, *, gapped: bool) -> dict[str, Any]:
+    parent_values = [*range(1, 60), 100] if gapped else list(range(1, 61))
+    parent_stats = replace(
+        _column(60, tuple(ValueCount(value=v, count=1) for v in parent_values)),
+        range=Range(min=parent_values[0], max=parent_values[-1]),
+    )
+    parent = mock_table(
+        "public.taxon",
+        columns(("taxon_id", "integer")),
+        {"taxon_id": parent_stats},
+        ddl="CREATE TABLE public.taxon (taxon_id integer);\n",
+        row_count=ROW_COUNT,
+        unique_keys=[UniqueKeyMeta(columns=("taxon_id",), primary=True)],
+    )
+    child = mock_table(
+        "public.trial",
+        columns((child_name, "integer")),
+        {child_name: _column(55, _values(range(2, 57)))},
+        ddl=f"CREATE TABLE public.trial ({child_name} integer);\n",
+        row_count=ROW_COUNT,
+    )
+    conn = ConnectionConfig(
+        name="w",
+        adapter="postgres",
+        output=tmp_path,
+        profile=ProfileConfig(relationships=RelationshipsProfile(infer=False)),
+    )
+    Engine(MockAdapter({"public.taxon": parent, "public.trial": child}), conn, tmp_path).generate()
+
+    return artifact(tmp_path / "w", "public.trial", "relationships")
+
+
+class TestDenseParent:
+    """SPEC 2.3.11 rule 1: a gapless integer key admits only an `_id`-named child."""
+
+    def test_a_count_column_into_a_dense_key_is_not_proposed(self, tmp_path: Path) -> None:
+        assert _dense_parent_print(tmp_path, "sown_count", gapped=False)["refers_to"] == []
+
+    def test_an_id_named_column_into_a_dense_key_is_proposed(self, tmp_path: Path) -> None:
+        refers_to = _dense_parent_print(tmp_path, "taxon_id", gapped=False)["refers_to"]
+
+        assert [(e["column"], e["detection"]) for e in refers_to] == [(["taxon_id"], "measured")]
+
+    def test_a_count_column_into_a_gapped_key_is_proposed(self, tmp_path: Path) -> None:
+        refers_to = _dense_parent_print(tmp_path, "sown_count", gapped=True)["refers_to"]
+
+        assert [(e["column"], e["detection"]) for e in refers_to] == [(["sown_count"], "measured")]

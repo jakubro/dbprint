@@ -8,7 +8,14 @@ vocabulary, including codes only the CLI returns.
 from __future__ import annotations
 
 from dbprint.config.duration import DurationError, parse_duration
-from .context_assembler import AssemblyOptions, AssemblyResult, PayloadResult, Purpose
+from .context_assembler import (
+    AssemblyOptions,
+    AssemblyResult,
+    OpenQuestion,
+    PayloadResult,
+    Purpose,
+    open_questions,
+)
 from .context_assembler import assemble as assemble_context
 from .context_assembler import assemble_payloads as assemble_context_payloads
 from .context_assembler import assemble_structured as assemble_structured_context
@@ -17,7 +24,7 @@ from .context_assembler import structured_sections as structured_context_section
 from .freshness import StaleEntry
 from .freshness import evaluate as evaluate_freshness
 from .freshness import format_age as format_freshness_age
-from .orchestrator import Engine
+from .orchestrator import ConnectFailed, Engine
 from .result import (
     EXIT_ASSERTION,
     EXIT_CONNECTION,
@@ -51,6 +58,7 @@ __all__ = [
     "EXIT_TOTAL_FAILURE",
     "AssemblyOptions",
     "AssemblyResult",
+    "ConnectFailed",
     "DiffRequest",
     "DiffResult",
     "DiffSummary",
@@ -58,6 +66,7 @@ __all__ = [
     "Engine",
     "GenerateRequest",
     "GenerateResult",
+    "OpenQuestion",
     "PayloadResult",
     "ProgressCallback",
     "ProgressEvent",
@@ -72,6 +81,7 @@ __all__ = [
     "context_sections",
     "evaluate_freshness",
     "format_freshness_age",
+    "open_questions",
     "parse_duration",
     "structured_context_sections",
 ]

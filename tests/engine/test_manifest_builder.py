@@ -5,27 +5,43 @@ An optional key survives `build` -> `carried_entry` both ways, or a skipped tabl
 
 from __future__ import annotations
 
+import json
+from importlib import resources
 from typing import Any
 
+import pytest
+from jsonschema import Draft202012Validator
+
+from dbprint.config import LooksLikeProfile, ProfileConfig, ReadConfig, ReadSettings
 from dbprint.engine.carried import CarriedTable, CommittedTable, carried_entry
 from dbprint.engine.diff import DiffSelectors
-from dbprint.engine.manifest_builder import ManifestTableEntry, build
+from dbprint.engine.manifest_builder import (
+    ManifestTableEntry,
+    build,
+    profile_delta,
+    profile_dict,
+)
+from dbprint.spec.profile import effective_profile
 
 
-DEFAULT_STATISTICS_PARAMS: dict[str, Any] = {
-    "enumeration_threshold": 50,
-    "top_n_values": 20,
-    "top_n_null_patterns": 20,
-    "looks_like_sample_size": 1000,
-    "percentiles": [1, 25, 50, 75, 99],
-}
-DEFAULT_PROFILING_PARAMS: dict[str, Any] = {
-    "infer_relationships": True,
-    "sketch_all_columns": False,
-    "compute_timeline": True,
-    "materialize_sample": True,
+DEFAULT_PROFILE: dict[str, Any] = {
+    "read": {"tables": {"mode": "full"}, "views": {"mode": "catalog"}},
+    "statistics": {
+        "enumeration_threshold": 50,
+        "top_n_values": 20,
+        "percentiles": [1, 25, 50, 75, 99],
+    },
+    "looks_like": {"enabled": True, "sample_size": 1000},
+    "null_patterns": {"enabled": True, "top_n": 20},
+    "parts": {"enabled": True, "max": 20, "max_depth": 3},
+    "timeline": {"enabled": True},
+    "sketches": {"enabled": True, "columns": "required"},
+    "relationships": {"infer": True},
 }
 NO_SELECTORS = DiffSelectors(include=("*",), exclude=())
+_MANIFEST_DEFS = json.loads(
+    resources.files("dbprint.spec.v1").joinpath("manifest.schema.json").read_text("utf-8"),
+)["$defs"]
 
 
 def _carried(fqn: str, payload: dict[str, Any]) -> ManifestTableEntry:
@@ -76,8 +92,7 @@ def _manifest(entries: list[ManifestTableEntry], **overrides: Any) -> dict[str, 
         "adapter_kind": "postgres",
         "entries": entries,
         "generated_at": "2026-08-01T00:00:00Z",
-        "statistics_params": DEFAULT_STATISTICS_PARAMS,
-        "profiling_params": DEFAULT_PROFILING_PARAMS,
+        "profile": DEFAULT_PROFILE,
         "selectors": NO_SELECTORS,
         "redaction_rules_configured": 0,
         "default_collation": "en_US.UTF-8",
@@ -172,10 +187,51 @@ class TestManifestAnnotationsPresence:
 class TestProvenance:
     """SPEC 2.5: the manifest records what produced the print."""
 
-    def test_statistics_params_recorded_at_top_level(self) -> None:
-        manifest = _manifest([_entry()])
+    def test_the_default_profile_records_every_block(self) -> None:
+        assert profile_dict(ProfileConfig()) == DEFAULT_PROFILE
+        assert _manifest([_entry()])["profile"] == DEFAULT_PROFILE
 
-        assert manifest["statistics_params"] == DEFAULT_STATISTICS_PARAMS
+    def test_a_switched_off_feature_records_no_parameters(self) -> None:
+        profile = ProfileConfig(looks_like=LooksLikeProfile(enabled=False, sample_size=7))
+
+        assert profile_dict(profile)["looks_like"] == {"enabled": False}
+
+    def test_a_read_block_records_only_its_modes_parameters(self) -> None:
+        read = ReadSettings(tables=ReadConfig(mode="filter", filter="id > 0", max_rows=9))
+
+        assert profile_dict(ProfileConfig(read=read))["read"]["tables"] == {
+            "mode": "filter",
+            "filter": "id > 0",
+        }
+
+    @pytest.mark.parametrize(
+        "read",
+        [
+            ReadSettings(),
+            ReadSettings(tables=ReadConfig(mode="sample", fraction=0.25)),
+            ReadSettings(tables=ReadConfig(mode="sample", max_rows=500, materialize=False)),
+            ReadSettings(views=ReadConfig(mode="filter", filter="id > 0")),
+        ],
+    )
+    def test_the_schema_requires_every_leaf_the_producer_records(self, read: ReadSettings) -> None:
+        recorded = profile_dict(ProfileConfig(read=read))
+        validator = Draft202012Validator({"$ref": "#/$defs/Profile", "$defs": _MANIFEST_DEFS})
+
+        assert validator.is_valid(recorded)
+
+        for path in _leaves(recorded):
+            assert not validator.is_valid(_without(recorded, path)), path
+
+    def test_a_delta_names_each_differing_block_whole(self) -> None:
+        sampled = {**DEFAULT_PROFILE, "read": {**DEFAULT_PROFILE["read"]}}
+        sampled["read"]["tables"] = {"mode": "sample", "max_rows": 9, "materialize": True}
+        ceiling = {**sampled, "read": {**sampled["read"]}}
+        ceiling["read"]["tables"] = {"mode": "sample", "fraction": 0.5, "materialize": True}
+        delta = profile_delta(ceiling, sampled)
+
+        assert delta == {"read": {"tables": ceiling["read"]["tables"]}}
+        assert effective_profile(sampled, delta) == ceiling
+        assert profile_delta(DEFAULT_PROFILE, DEFAULT_PROFILE) is None
 
     def test_selectors_recorded_as_applied(self) -> None:
         manifest = _manifest(
@@ -196,25 +252,42 @@ class TestProvenance:
     def test_default_collation_recorded(self) -> None:
         assert _manifest([_entry()], default_collation="C")["default_collation"] == "C"
 
-    def test_a_table_with_no_override_carries_no_statistics_params(self) -> None:
-        assert "statistics_params" not in _payload(_entry())
+    def test_a_table_with_no_override_carries_no_profile(self) -> None:
+        assert "profile" not in _payload(_entry())
 
     def test_a_tables_own_override_is_recorded(self) -> None:
-        override = {"top_n_values": 50}
-        assert _payload(_entry(statistics_params=override))["statistics_params"] == override
+        override = {"null_patterns": {"enabled": False}}
+        assert _payload(_entry(profile=override))["profile"] == override
 
     def test_a_tables_override_survives_a_carry_forward(self) -> None:
-        override = {"top_n_values": 50}
-        carried = _carried(
-            "seedbank.accession",
-            _payload(_entry(statistics_params=override)),
-        )
+        override = {"null_patterns": {"enabled": False}}
+        carried = _carried("seedbank.accession", _payload(_entry(profile=override)))
 
-        assert carried.statistics_params == override
-        assert _payload(carried)["statistics_params"] == override
+        assert carried.profile == override
+        assert _payload(carried)["profile"] == override
 
     def test_an_entry_from_a_producer_that_recorded_none_stays_that_way(self) -> None:
         carried = _carried("seedbank.accession", _payload(_entry()))
 
-        assert carried.statistics_params is None
-        assert "statistics_params" not in _payload(carried)
+        assert carried.profile is None
+        assert "profile" not in _payload(carried)
+
+
+def _leaves(tree: dict[str, Any], prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
+    return [
+        leaf
+        for key, value in tree.items()
+        for leaf in (
+            _leaves(value, (*prefix, key)) if isinstance(value, dict) else [(*prefix, key)]
+        )
+    ]
+
+
+def _without(tree: dict[str, Any], path: tuple[str, ...]) -> dict[str, Any]:
+    head, *rest = path
+
+    return {
+        key: (_without(value, tuple(rest)) if key == head and rest else value)
+        for key, value in tree.items()
+        if key != head or rest
+    }

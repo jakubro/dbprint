@@ -52,6 +52,7 @@ class ClickhouseAdapter(SqlAdapter):
     # SAMPLE's determinism depends on a declared SAMPLE BY key; an unmaterialized scope on a
     # table without one is not a seeded per-row guarantee.
     SAMPLE_FALLBACK_COHERENT: ClassVar[bool] = False
+    EXTERNAL_READ_REFUSED: ClassVar[bool] = True
 
     DIALECT: ClassVar[Dialect] = DIALECT
     _driver = connection_module

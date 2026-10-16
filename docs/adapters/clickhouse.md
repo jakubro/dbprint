@@ -44,7 +44,7 @@ Missing `SELECT` on `system.data_skipping_indices` fails index enumeration for t
 
 ## When dbprint writes
 
-Only one thing makes dbprint write, and only under one condition: `materialize_sample` is on by default, and it fires **only for a table narrowed to a fraction of its rows**. A fraction has two sources — a rule's `sample`, and a `max_rows_scanned` ceiling resolving against the table's size, which is legal at connection and `defaults` level as well as inside a rule. A project that narrows nothing, which is what `dbprint init` scaffolds, never writes. A `filter` is a predicate rather than a fraction and never materializes.
+Only one thing makes dbprint write, and only under one condition: `profile.read.tables.materialize` is on by default, and it fires **only for a table read in `sample` mode** — by a `fraction`, or by a `max_rows` ceiling that resolves below the table's size, at whatever level the ceiling is set. A project that narrows nothing, which is what `dbprint init` scaffolds, never writes. A `filter` is a predicate rather than a fraction and never materializes.
 
 Where it does fire, dbprint checks the samplable map from `list_tables` **before** touching the server. A table with no declared `SAMPLE BY` key (or that is not a MergeTree-family table) is refused outright:
 
@@ -56,16 +56,17 @@ fraction.), and this adapter's per-statement fallback cannot be seeded into agre
 statements. Narrow with a filter instead of a sample fraction.
 ```
 
-Where the table is samplable, the copy is created as `CREATE TEMPORARY TABLE <name> ENGINE = MergeTree ORDER BY tuple() AS SELECT * FROM (SELECT * FROM <table> SAMPLE p)`, session-scoped, dropped as soon as the table finishes. `materialize_sample: false` never falls back on ClickHouse either — `SAMPLE_FALLBACK_COHERENT` is `false` here, so an unmaterialized `sample` scope on a `sample`-narrowed table is refused the same way, before any statement runs:
+Where the table is samplable, the copy is created as `CREATE TEMPORARY TABLE <name> ENGINE = MergeTree ORDER BY tuple() AS SELECT * FROM (SELECT * FROM <table> SAMPLE p)`, session-scoped, dropped as soon as the table finishes. `read.tables.materialize: false` never falls back on ClickHouse either — `SAMPLE_FALLBACK_COHERENT` is `false` here, so an unmaterialized `sample` scope on a `sample`-narrowed table is refused the same way, before any statement runs:
 
 ```
-table 'my_db.germination_trial': connection 'primary' (clickhouse) sets
-materialize_sample: false, and this adapter's per-statement sampling construct cannot be
-seeded into agreement across statements. Set materialize_sample: true for this connection,
-or narrow with a filter instead of a sample fraction.
+table 'my_db.germination_trial': connection 'primary' (clickhouse) reads it
+with read.tables.materialize: false, and this adapter's per-statement sampling
+construct cannot be seeded into agreement across statements. Set
+read.tables.materialize: true for this table's rule,
+or narrow with mode: filter instead of a sample.
 ```
 
-On ClickHouse, `materialize_sample` therefore decides whether a `sample`-scoped table is profiled at all, not merely how faithfully.
+On ClickHouse, `materialize` therefore decides whether a `sample`-scoped table is profiled at all, not merely how faithfully.
 
 ## Identifiers
 
@@ -82,13 +83,13 @@ Some engines hold no rows a read can describe, so `list_tables` leaves them out 
 
 ## Remote engines
 
-A table whose engine fetches its rows from another system on every read is listed with `external: true` (SPEC 2.2.20). Unless a `read_rows` rule opts it in, it is described from the catalog alone: no statement reaches the source, and an unreachable source does not fail the run. The engines this covers:
+A table whose engine fetches its rows from another system on every read is listed with `external: true` (SPEC 2.2.20). It is always described from the catalog alone: no statement reaches the source, and an unreachable source does not fail the run. The engines this covers:
 
 - **Object storage and lakes** — `URL`, `S3` (and `COSN`, `OSS`, `GCS`), `AzureBlobStorage`, `HDFS`, `Hive`, and `DeltaLake`, `Hudi`, `Iceberg` and `Paimon` in every storage variant.
 - **Other databases** — `MySQL`, `PostgreSQL`, `ODBC`, `JDBC`, `MongoDB`, `Redis`, `SQLite`, `ArrowFlight`, `YTsaurus`, `ExternalDistributed`.
 - **`Executable` and `ExecutablePool`** — their script runs on every read.
 
-Opted in, such a table is read like any other, at the source's cost. It has no `SAMPLE BY` key, so narrow it with a `filter`: a `sample`, or a `max_rows_scanned` ceiling that resolves to a fraction, fails it. `Distributed`, `Remote`, `Merge`, `Dictionary` and the engines that store rows locally are ordinary tables.
+A rule writing any other `read.tables.mode` for it is refused before any table is read, with exit 1, because the read would reach another live database. `Distributed`, `Remote`, `Merge`, `Dictionary` and the engines that store rows locally are ordinary tables.
 
 ## Secrets in DDL
 
@@ -129,11 +130,11 @@ A temporal percentile is read from the column's non-null values sorted in one st
 
 ## Statement timeout
 
-`statement_timeout` is sent with every request as the `max_execution_time` setting, with `timeout_before_checking_execution_speed` at zero so the limit is wall-clock rather than a projection of the remaining time. ClickHouse checks it at designated points only — not while merging aggregation states or during most of query analysis — so a statement can overrun it. A statement that exceeds it is cancelled by the server.
+`run.statement_timeout` is sent with every request as the `max_execution_time` setting, with `timeout_before_checking_execution_speed` at zero so the limit is wall-clock rather than a projection of the remaining time. ClickHouse checks it at designated points only — not while merging aggregation states or during most of query analysis — so a statement can overrun it. A statement that exceeds it is cancelled by the server.
 
 ## Parallelism
 
-`parallelism: N` opens N HTTP sessions and profiles up to N tables at once. A sampled table's temporary copy belongs to its session, and every read of it runs there. Concurrent statements count against the server's `max_concurrent_queries` and any per-user limit.
+`run.parallelism: N` opens N HTTP sessions and profiles up to N tables at once. A sampled table's temporary copy belongs to its session, and every read of it runs there. Concurrent statements count against the server's `max_concurrent_queries` and any per-user limit.
 
 ## Reference
 

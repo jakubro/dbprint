@@ -39,11 +39,12 @@ const SIDEBAR = [
       { label: "Giving a print to an agent", slug: "guide/agents" },
       { label: "When something goes wrong", slug: "guide/troubleshooting" },
       {
-        label: "The packaged agent skill",
+        label: "The packaged agent skills",
         collapsed: true,
         items: [
-          { label: "Installing it", slug: "examples/skill/readme" },
-          { label: "The skill itself", slug: "examples/skill/dbprint" },
+          { label: "Installing them", slug: "examples/skill/readme" },
+          { label: "The reading skill", slug: "examples/skill/dbprint" },
+          { label: "The annotation skill", slug: "examples/skill/dbprint-annotate" },
         ],
       },
     ],

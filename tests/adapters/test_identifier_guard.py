@@ -18,6 +18,7 @@ from dbprint.adapters import ClickhouseAdapter, DuckdbAdapter, SnowflakeAdapter,
 from dbprint.adapters.base import materialized_name, seed_from_fqn
 from dbprint.adapters.identifiers import IdentifierRejected
 from dbprint.cli.adapter_registry import ADAPTERS
+from dbprint.config import TablesConfig
 from dbprint.config.project import ConnectionConfig
 from dbprint.conformance.layout import PATH_SEGMENT_RE as VALIDATOR_PATH_SEGMENT_RE
 from dbprint.engine import EXIT_PARTIAL, Engine
@@ -251,7 +252,7 @@ def test_a_case_colliding_column_pair_is_refused_through_the_real_adapter(
         name="garden",
         adapter=cast(Any, vendor),
         output=tmp_path / "prints",
-        include=("*.seedbank.plot", "*.seedbank.herbarium"),
+        tables=TablesConfig(include=("*.seedbank.plot", "*.seedbank.herbarium")),
     )
 
     result = Engine(adapter, conn, tmp_path).generate()

@@ -14,8 +14,7 @@ import yaml
 
 from dbprint import __version__ as DBPRINT_VERSION
 from dbprint.adapters import MockAdapter, MockTable
-from dbprint.config import TableSettings
-from dbprint.config.project import StatisticsConfig
+from dbprint.config import PartsProfile, ProfileConfig, RunConfig, TableSettings
 from dbprint.engine import DiffRequest, Engine, GenerateRequest
 from dbprint.engine.carried import (
     CarriedTable,
@@ -27,7 +26,7 @@ from dbprint.engine.carried import (
     plan_carry,
 )
 from dbprint.engine.diff import DiffSelectors
-from dbprint.engine.manifest_builder import profiling_params_dict, statistics_params_dict
+from dbprint.engine.manifest_builder import profile_dict
 from dbprint.engine.result import TableResult, TableStatus
 from tests._curator import conn_config, curator_fixture
 
@@ -82,7 +81,7 @@ class TestReadOnce:
             ("failed", CURATOR, GenerateRequest(force=True), {}),
             ("not_attempted", CURATOR, GenerateRequest(force=True, fail_fast=True), {}),
             ("out_of_scope", None, GenerateRequest(force=True, cli_include=(CURATOR,)), {}),
-            ("two_sessions", None, GenerateRequest(), {"parallelism": 2}),
+            ("two_sessions", None, GenerateRequest(), {"run": RunConfig(parallelism=2)}),
         ],
     )
     def test_generate(
@@ -236,7 +235,7 @@ class TestSameModelOnEveryRoute:
 
 
 class TestFreshnessVerdict:
-    SETTINGS = TableSettings(statistics=StatisticsConfig(), max_age_days=7)
+    SETTINGS = TableSettings(profile=ProfileConfig(), max_age_days=7)
     NOW = "2026-06-10T00:00:00Z"
 
     @pytest.fixture(autouse=True)
@@ -247,8 +246,7 @@ class TestFreshnessVerdict:
         values: dict[str, Any] = {
             "dbprint_version": DBPRINT_VERSION,
             "profiled_at": "2026-06-09T00:00:00Z",
-            "statistics_params": statistics_params_dict(StatisticsConfig()),
-            "profiling_params": profiling_params_dict(self.conn),
+            "profile": profile_dict(ProfileConfig()),
             **recorded,
         }
 
@@ -278,18 +276,18 @@ class TestFreshnessVerdict:
         assert verdict.reason.startswith(reason)
 
     def test_a_parameter_a_print_predates_reads_as_its_default(self) -> None:
-        recorded = statistics_params_dict(StatisticsConfig())
-        del recorded["max_parts"], recorded["max_part_depth"]
-        table = self._table(statistics_params=recorded)
+        recorded = profile_dict(ProfileConfig())
+        del recorded["parts"]["max_depth"], recorded["sketches"]
+        table = self._table(profile=recorded)
 
         assert freshness(table, self.SETTINGS, generated_at=self.NOW, conn=self.conn).fresh
 
     def test_a_changed_descent_bound_makes_the_print_stale(self) -> None:
-        settings = TableSettings(statistics=StatisticsConfig(max_parts=0), max_age_days=7)
+        settings = TableSettings(profile=ProfileConfig(parts=PartsProfile(max=5)), max_age_days=7)
         verdict = freshness(self._table(), settings, generated_at=self.NOW, conn=self.conn)
 
         assert not verdict.fresh
-        assert verdict.reason.startswith("statistics_params (max_parts)")
+        assert verdict.reason.startswith("profile (parts.max)")
 
     def test_no_committed_print_is_not_fresh(self) -> None:
         assert not freshness(None, self.SETTINGS, generated_at=self.NOW, conn=self.conn).fresh

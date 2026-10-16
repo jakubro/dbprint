@@ -17,16 +17,18 @@ from tests._scripts import load_script
 
 gen = load_script("gen_cli_docs")
 
-COMMANDS = ("init", "generate", "diff", "list", "check", "context", "serve")
+COMMANDS = ("init", "generate", "diff", "list", "check", "context", "annotate", "serve")
 CONNECTION_COMMANDS = (
     ("generate",),
     ("diff",),
     ("list",),
     ("check",),
     ("context",),
+    ("annotate",),
     ("serve",),
     ("docs", "serve"),
     ("docs", "build"),
+    ("config", "explain"),
 )
 
 # A purpose phrase that only the expanded (multi-line) docstring carries.
@@ -37,6 +39,7 @@ PURPOSE = {
     "list": "freshness buckets",
     "check": "CI gate",
     "context": "prompt-ready",
+    "annotate": "calls no model",
     "serve": "Model Context Protocol",
 }
 
@@ -60,7 +63,7 @@ def _flat(*args: str) -> str:
 
 
 class TestRootHelp:
-    def test_lists_all_seven_commands(self) -> None:
+    def test_lists_every_root_command(self) -> None:
         flat = _flat()
 
         for name in COMMANDS:

@@ -1,11 +1,13 @@
 ---
 name: dbprint
-description: Read the committed dbprint print of a database before touching the live database. Use for any fact about a database's tables or data — whether a table exists, whether it is empty, how many rows it holds, which column carries a fact, types, enum values, null rates, keys, join paths — before running a query through a database CLI or a database MCP server, and before trusting any claim about what data already exists. Applies wherever a .dbprint.yaml or a prints/ directory is present.
+description: Answer questions about a database from its dbprint snapshot - schema, row counts, column values and their spellings, null rates, keys and join paths, captured from the live database and committed to this repository. Use whenever a task needs any fact about a database - before querying it, and before trusting a claim about what data it holds.
 ---
 
 # Reading a database from its dbprint print
 
 **Before any live database call, read the print.** `prints/<connection>/` carries DDL, row counts, per-column statistics, relationships and hand-authored descriptions for the printed tables. It is offline — no connection, no credentials, no database time.
+
+Where no dbprint server is connected and the repository holds no `prints/` directory, there is no print to read — query the database as usual.
 
 A question is a database question whenever its answer lives in the database, however it is phrased and whether or not SQL is involved: does this table exist, is it empty, how many rows does it hold, are there old records this change has to stay compatible with, which column holds this fact, what values does this status take. Each of those is one tool call against the print.
 
@@ -33,13 +35,13 @@ The tools below are the print's MCP surface. Where they are not connected, `dbpr
 
 **Before writing SQL, read the table under `purpose: query`.** `get_table_context` with `purpose: query`, or `dbprint context <table> --purpose query` in a shell, returns the DDL, the Joins list, the data dictionary, and the value lists with their counts and coverage — what a predicate is written from. Every other row above lands in the default `profile` purpose, which carries the statistics that describe the data rather than what a query needs. Reach for `resolve_value` where a filter needs a phrase no list renders in full; where the list is already complete, the call costs a turn and adds nothing.
 
-Resources sit alongside the tools and carry what the tools omit: `dbprint://<connection>/reading` (the traps guide), `.../manifest_annotations` (connection-wide facts — never visible through `get_table_context`, which renders one table and drops the connection header), and per-table `.../statistics`, the only place a column's sketch payload is reachable.
+Resources sit alongside the tools and carry what the tools omit: `dbprint://<connection>/reading` (the traps guide), `.../manifest_annotations` (connection-wide facts, which `get_table_context` also carries as its Connection notes), and per-table `.../statistics`, the only place a column's sketch payload is reachable.
 
 **Three things decide whether a number taken from the print is right**, and the number alone shows none of them:
 
 - **Population.** A `statistics.yaml` carrying a `scope` block was not read whole. Read which cause it names: `sample` (a fraction, to bound cost) or `filter` (a row predicate, verbatim) — never both. Every field in the file except `row_count` is measured over `rows_scanned`. Under `sample`, a count may be scaled to table grain by multiplying by `row_count / rows_scanned`; under `filter` nothing rescales, because the scanned set was chosen, not drawn. A ratio, a percentile, a bound, a mean and `sum` never rescale at all. Where `row_count_method` is `approximate`, the ratio is itself an estimate.
 - **Inference.** Everything under `inferred` is dbprint's guess, not the catalog's assertion — `candidate_key`, `looks_like`, `sensitivity`, `epoch_unit`. Relationships record the same distinction in `detection`: only `detection: declared` comes from the catalog, `inferred` is proposed from naming, `measured` from value containment. An absent `sensitivity` is not a statement that a column is safe.
-- **Absence.** An absent field has a cause, and the causes are enumerated per field — fetch them with `get_reference` (`spec`, sections 7.2 and 7.3) rather than guessing. Three cases differ: `unmeasured` is the only marker meaning a run attempted a measurement and failed; some absences are assertions, not gaps (no `scope` means every row was read, no `null_patterns` block means no column carries a null unless the file's own `unmeasured` names that block, no `redacted` marker means no redaction rule matched); and the rest are forbidden-for-this-classification, readable off `classification` and `sql_type`.
+- **Absence.** An absent field has a cause, and the causes are enumerated per field — fetch them with `get_reference` (`spec`, sections 7.2 and 7.3) rather than guessing. Four cases differ: `unmeasured` is the only marker meaning a run attempted a measurement and failed; `disabled` names a measurement configuration switched off for that table, so everything it produces is unknown, never none; some absences are assertions, not gaps (no `scope` means every row was read, no `null_patterns` block means no column carries a null unless the file's own `unmeasured` or `disabled` names that block, no `redacted` marker means no redaction rule matched); and the rest are forbidden-for-this-classification, readable off `classification` and `sql_type`.
 
 `values_coverage: 1.0` means an exact-match predicate is complete over what was scanned; anything less is a frequent-value sample, and a value's absence from that list is not its absence from the column. A text column whose `looks_like` is `prose` publishes no value list at all — that is a rule, not a truncation.
 

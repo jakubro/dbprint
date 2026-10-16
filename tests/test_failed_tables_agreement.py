@@ -25,8 +25,13 @@ _NEEDS_NO_FAILURES = {
     ("cli/commands/check.py", "_load_committed_statistics"): "reads one present table's files",
     ("cli/commands/check.py", "_summary_view"): "renders issues keyed by present tables",
     ("cli/commands/check.py", "_tables_with_errors"): "maps issues onto present tables",
+    ("engine/context_assembler.py", "authored_relationship_annotations"): (
+        "reads present tables' annotation files"
+    ),
     ("engine/context_assembler.py", "incoming_rejections"): "reads present referencers' files",
     ("engine/context_assembler.py", "_incoming_cardinalities"): "reads present referencers' files",
+    ("engine/context_assembler.py", "_inherited_notes"): "reads present sources' annotation files",
+    ("engine/context_assembler.py", "open_questions"): "reads one present table's files",
     ("mcp/resources.py", "_without_rejected_edges"): "reads one present table's annotations",
     ("mcp/resources.py", "diff_without_rejected"): "reads present source tables' annotations",
     ("engine/thresholds.py", "resolve"): "resolves thresholds for present entries",

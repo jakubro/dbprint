@@ -6,53 +6,57 @@ Two axes, and they never mix. `include` and `exclude` decide **which** tables ar
 
 ## Which tables
 
-`include` and `exclude` are `fnmatch` globs over the lowercased fully-qualified name, so matching is case-insensitive and `*` spans the dot separators.
+`tables.include` and `tables.exclude` are `fnmatch` globs over the lowercased fully-qualified name, so matching is case-insensitive and `*` spans the dot separators.
 
 ```yaml
 # .dbprint.yaml
 connections:
   primary:
     adapter: postgres
-    include: ["arboretum.seedbank.*", "arboretum.fixture.*"]
-    exclude: ["arboretum.seedbank.audit_*"]
+    tables:
+      include: ["arboretum.seedbank.*", "arboretum.fixture.*"]
+      exclude: ["arboretum.seedbank.audit_*"]
 ```
 
-Omitting `include` profiles everything the connection can see. On a warehouse that is the difference between a print you commit and one you abandon.
+Omitting `tables.include` profiles everything the connection can see. On a warehouse that is the difference between a print you commit and one you abandon.
 
-The command line can narrow this further for one run — `--include` intersects with the config and `--exclude` unions with it — but neither can widen beyond what the config already admits. `--dry-run` resolves the whole plan and writes nothing, which is how to see what a scope change would do before it runs.
+The command line can narrow this further for one run — `--include` intersects with the config and `--exclude` unions with it — but neither can widen beyond what the config already admits. `--dry-run` resolves the whole plan and writes nothing, which is how to see what a scope change would do before it runs. For one table, `dbprint config explain <table>` prints the profile it resolves to, each value commented with the default, connection or rule that set it.
 
 ## How much of each table
 
-A `rules` entry pairs a matcher with the settings it overrides. Every matching rule applies, in declaration order, and later ones win.
+A `rules` entry pairs a `match` with a partial `profile` merged over the tables it matches. Every matching rule applies, in declaration order, and later ones win.
 
 ```yaml
 # .dbprint.yaml
 connections:
   primary:
     rules:
-      - include: ["arboretum.seedbank.germination_trial"]
-        sample: 0.01
-      - include: ["arboretum.seedbank.accession"]
-        filter: "collected_on >= current_date - interval '30 days'"
-      - min_rows: 500000000
-        max_rows_scanned: 1000000000
+      - match: {tables: ["arboretum.seedbank.germination_trial"]}
+        profile: {read: {tables: {mode: sample, fraction: 0.01}}}
+      - match: {tables: ["arboretum.seedbank.accession"]}
+        profile: {read: {tables: {mode: filter, filter: "collected_on >= current_date - interval '30 days'"}}}
+      - match: {min_rows: 500000000}
+        profile: {read: {tables: {mode: sample, max_rows: 1000000000}}}
+      - match: {tables: ["arboretum.seedbank.*_archive"]}
+        profile: {read: {tables: {mode: catalog}}}
 ```
 
-Three ways to narrow, and a table takes at most one of the first two:
+Each table is read in exactly one mode, so it can never be narrowed two ways at once:
 
-- **`sample`** reads a fraction of the table, drawn once and seeded from the table's own name. Within a run every statistic for the table reads that one draw. Across runs only PostgreSQL and duckdb guarantee the same rows come back; see your engine's adapter page.
+- **`sample` with `fraction`** reads a fraction of the table, drawn once and seeded from the table's own name. Within a run every statistic for the table reads that one draw. Across runs only PostgreSQL and duckdb guarantee the same rows come back; see your engine's adapter page.
+- **`sample` with `max_rows`** is a ceiling in rows rather than a fraction; the engine resolves it against the catalog's row estimate. It is as natural in a connection's or `defaults`' own `profile.read` as in a rule, because a project-wide budget is the point of it.
 - **`filter`** is one SQL predicate, interpolated verbatim into every statistics query for that table. dbprint does not parse or validate it. Treat `.dbprint.yaml` as carrying the same trust as the credentials file.
-- **`max_rows_scanned`** is a ceiling in rows rather than a fraction; the engine resolves it against the catalog's row estimate. Unlike the other two it is also legal at connection and `defaults` level, because a project-wide budget is the point of it.
+- **`catalog`** reads no rows at all: the table is described from the catalog, as plain views are by default, and its `statistics.yaml` carries `catalog_only`.
 
-A cascade that resolves one table to both a `sample` and a `filter` is refused rather than silently resolved — a config that reads as narrowing two ways does not quietly do one.
+A rule that switches mode drops the parameters the new mode does not take, so a filtered table never inherits a project-wide ceiling. Plain views have their own block, `read.views`, which defaults to `catalog` and takes `full` or `filter`.
 
 ## The gate that covers tables nobody has named
 
-`min_rows` sits on the matcher rather than on a setting, so it gates everything the rule sets:
+`min_rows` sits on the `match` rather than in the `profile`, so it gates everything the rule sets:
 
 ```yaml
-      - min_rows: 500000000
-        sample: 0.01
+      - match: {min_rows: 500000000}
+        profile: {read: {tables: {mode: sample, fraction: 0.01}}}
 ```
 
 That samples every table over half a billion rows without naming any of them — including the one somebody adds next quarter. It is the difference between a scoping config that ages well and one that needs an edit every time the schema grows.
@@ -75,7 +79,7 @@ The same applies to `values_coverage`: a value of `1.0` under a scope means the 
 
 ## What a scope removes outright, rather than rescales
 
-Five whole-table measurements do not just change denominator under a `scope` block — they stop running:
+Six whole-table measurements do not just change denominator under a `scope` block — they stop running:
 
 - **`timeline`** is absent entirely — a bucketed count over a sample is not a timeline.
 - **`populated`** goes absent alongside it, on every column, for the same reason: it is the timeline anchor's own `min`/`max` over the rows where the *subject* column is non-null, so it needs the same whole-table read `timeline` does. Where it is present, it states what the data shows — never when the column was added.
@@ -104,5 +108,7 @@ Sampling is not the only lever. Two `statistics` keys cut cost on wide tables wi
 | `top_n_values` | `20` | How many entries a `values` list samples once cardinality passes `enumeration_threshold`; `values_coverage` states how much of the column the listed entries account for |
 
 Lowering `enumeration_threshold` is the cheapest single change on a wide table.
+
+The optional measurements are switches, so a table can also drop one outright: `looks_like`, `null_patterns`, `parts`, `timeline` and `sketches` take `{enabled: false}`, and `relationships` takes `{infer: false}`, in `defaults`, on a connection or in a rule's `profile`. The table's `statistics.yaml` names each switched-off measurement in `disabled`, so a reader takes the missing block as not measured rather than as none.
 
 Every key named on this page, with its type, default and cascade rules, is in [Configuration](../CONFIG.md).

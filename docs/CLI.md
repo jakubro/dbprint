@@ -26,7 +26,9 @@ Complete `--help` for every command, captured verbatim. This file is generated f
 │ --help     -h  Show this message and exit.                                                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ───────────────────────────────────────────────────────────────────────────────────────╮
+│ annotate  Print an authoring brief for one table's annotations, or check them.                   │
 │ check     Verify committed prints are well-formed, fresh, and meet assertions.                   │
+│ config    Inspect .dbprint.yaml: how its defaults, connections and rules resolve for a table.    │
 │ context   Emit an agent-ready context fragment for committed tables.                             │
 │ diff      Compare committed prints against the live database (read-only).                        │
 │ docs      Browse a committed print as an HTML site: serve it live, or build it static.           │
@@ -63,6 +65,65 @@ Complete `--help` for every command, captured verbatim. This file is generated f
 │              ~/.dbprint/connections.yaml is shared by every project on the host and is written   │
 │              only when absent.                                                                   │
 │ --help   -h  Show this message and exit.                                                         │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+```
+
+## `dbprint config`
+
+```text
+ Usage: dbprint config [OPTIONS] COMMAND [ARGS]...
+
+ Inspect .dbprint.yaml: how its defaults, connections and rules resolve for a table.
+ Read-only. Nothing here writes a file or, without --online, opens a connection.
+
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ --help  -h  Show this message and exit.                                                          │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ───────────────────────────────────────────────────────────────────────────────────────╮
+│ explain  Print the profile one table resolves to, each value commented with where it came from.  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+```
+
+## `dbprint config explain`
+
+```text
+ Usage: dbprint config explain [OPTIONS] [CONNECTION] [TABLE]
+
+ Print the profile one table resolves to, each value commented with where it came from.
+ Walks defaults, the connection and every rule in order, as generate does, and prints the result as
+ a YAML profile: block whose comments name the layer that set each value - built-in default,
+ defaults.profile, the connection, or a rule by its config path - with every rule's matcher and
+ whether it applied. Never writes. Size rules are evaluated offline against the row count the print
+ last recorded; a table the print does not hold is matched by name alone, which the output says.
+
+ Arguments:
+
+  • CONNECTION: connection to explain; resolved from .dbprint.yaml when omitted (the auto: true
+    set, or the sole connection). A single argument that names no connection is read as TABLE.
+  • TABLE: fully qualified name, e.g. arboretum.seedbank.accession. Omitted, the connection's own
+    profile and its rule list are printed.
+
+ Exit codes:
+
+  • 0: printed
+  • 1: the config fails to load, or the connection is unknown or ambiguous
+  • 4: --online could not reach the database
+
+ Examples:
+
+  • dbprint config explain: the connection-level profile and its rules
+  • dbprint config explain warehouse arboretum.seedbank.accession: one table, offline
+  • dbprint config explain arboretum.seedbank.accession --online: against the live estimate
+
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ --project      TEXT  Exact project locator: a directory whose direct child is .dbprint.yaml,     │
+│                      that .dbprint.yaml file itself, or a git address (a forge URL, an SSH       │
+│                      remote, or <git-url>#<ref>:<subpath>). No upward walk, no downward scan.    │
+│                      Omit it to walk up from the working directory instead.                      │
+│ --online             Ask the database for the table's current row-count estimate instead of the  │
+│                      count the print last recorded; size rules (min_rows) are evaluated against  │
+│                      it.                                                                         │
+│ --help     -h        Show this message and exit.                                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -118,9 +179,9 @@ Complete `--help` for every command, captured verbatim. This file is generated f
 │                                  working directory instead.                                      │
 │ --force                          Re-profile every matched table, bypassing the freshness skip.   │
 │ --dry-run                        Compute everything; write nothing to disk.                      │
-│ --include                  TEXT  Narrow scope to tables also matching PATTERN (intersects config │
-│                                  include); repeatable. e.g. --include '*.public.*'               │
-│ --exclude                  TEXT  Also drop tables matching PATTERN (unions config exclude);      │
+│ --include                  TEXT  Narrow scope to tables also matching PATTERN (intersects        │
+│                                  tables.include); repeatable. e.g. --include '*.public.*'        │
+│ --exclude                  TEXT  Also drop tables matching PATTERN (unions tables.exclude);      │
 │                                  repeatable. e.g. --exclude '*.audit_*'                          │
 │ --confirm-all-removed            Record every committed table as removed when the target lists   │
 │                                  none of them. Without it, such a run exits 4 and writes         │
@@ -178,9 +239,9 @@ Complete `--help` for every command, captured verbatim. This file is generated f
 │                                        scan. Omit it to walk up from the working directory       │
 │                                        instead.                                                  │
 │ --include           TEXT               Narrow scope to tables also matching PATTERN (intersects  │
-│                                        config include); repeatable. e.g. --include '*.public.*'  │
-│ --exclude           TEXT               Also drop tables matching PATTERN (unions config          │
-│                                        exclude); repeatable.                                     │
+│                                        tables.include); repeatable. e.g. --include '*.public.*'  │
+│ --exclude           TEXT               Also drop tables matching PATTERN (unions                 │
+│                                        tables.exclude); repeatable.                              │
 │ --format            [human|json|yaml]  Output format.                                            │
 │                                        [default: human]                                          │
 │ --output            FILE               Write the diff to FILE instead of stdout.                 │
@@ -213,9 +274,8 @@ Complete `--help` for every command, captured verbatim. This file is generated f
  Exit codes:
 
   • 0: ok
-  • 1: a connection could not be summarised - its manifest is missing or unparseable, or its rules
-    narrow one of its tables both by a predicate and by a fraction. Other connections are still
-    summarised
+  • 1: a connection could not be summarised - its manifest is missing or unparseable. Other
+    connections are still summarised
 
  Examples:
 
@@ -262,9 +322,8 @@ Complete `--help` for every command, captured verbatim. This file is generated f
  Exit codes:
 
   • 0: ok
-  • 1: generic - a malformed print, a column the current redact rules would publish otherwise than
-    the print does (privacy.redaction-not-applied), or a table whose rules narrow it both by a
-    predicate and by a fraction, which this command refuses to judge
+  • 1: generic - a malformed print, a .dbprint.yaml that fails to load, or a column the current
+    redact rules would publish otherwise than the print does (privacy.redaction-not-applied)
   • 2: staleness
   • 3: drift (--online) - the committed print no longer matches the database, including a statistic
     that moved (generate sets this code for a change of shape only)
@@ -373,6 +432,49 @@ Complete `--help` for every command, captured verbatim. This file is generated f
 │ --tui/--no-tui                           Force TTY (syntax-highlighted) or piped (plain-text)    │
 │                                          rendering. md format only.                              │
 │ --help              -h                   Show this message and exit.                             │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+```
+
+## `dbprint annotate`
+
+```text
+ Usage: dbprint annotate [OPTIONS] TABLE [CONNECTION]
+
+ Print an authoring brief for one table's annotations, or check them.
+ The brief is the annotation skill's steps, the table's --purpose query context, and the open
+ questions the print measured but cannot answer - each naming the file it is answered in. Pipe it
+ into an agent CLI or paste it into a chat; dbprint launches no program and calls no model. --check
+ then lists every finding on the table's annotation files.
+
+ Arguments:
+
+  • TABLE: one table FQN (e.g. arboretum.seedbank.accession), not a pattern.
+  • CONNECTION: connection scope; resolved from .dbprint.yaml when omitted (the auto: true set, or
+    the sole connection).
+
+ Exit codes:
+
+  • 0: ok; with --check, no annotation finding
+  • 1: unknown table, missing manifest, a table in several connections with no CONNECTION, or
+    --check found annotation findings
+
+ Examples:
+
+  • dbprint annotate arboretum.seedbank.accession: the brief, for reading or pasting
+  • dbprint annotate arboretum.seedbank.accession | claude -p: hand it to an agent CLI
+  • dbprint annotate arboretum.seedbank.accession --check: the table's annotation findings
+
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ --project           TEXT  Exact project locator: a directory whose direct child is               │
+│                           .dbprint.yaml, that .dbprint.yaml file itself, or a git address (a     │
+│                           forge URL, an SSH remote, or <git-url>#<ref>:<subpath>). No upward     │
+│                           walk, no downward scan. Omit it to walk up from the working directory  │
+│                           instead.                                                               │
+│ --check                   List this table's annotation findings instead of printing the brief;   │
+│                           exit 1 if there are any.                                               │
+│ --tui/--no-tui            Force TTY (syntax-highlighted) or piped (plain-text) rendering of the  │
+│                           brief.                                                                 │
+│ --help          -h        Show this message and exit.                                            │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 

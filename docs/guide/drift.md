@@ -20,7 +20,7 @@ The diff, `generate`'s exit code, `check --online` and the validator draw that l
 
 [SPEC 2.6.6](../format/v1/SPEC.md#266-per-kind-field-schemas) gives every kind its own field schema.
 
-For a one-off comparison against the live database, `dbprint diff` does the same computation and writes nothing to disk. It is not read-only against the database: it re-profiles every table in scope, so any table narrowed to a fraction still gets the temporary-table copy that `materialize_sample` describes. The same is true of `check --online`. A comparison that touches nothing needs either no sampling in scope or `materialize_sample: false`.
+For a one-off comparison against the live database, `dbprint diff` does the same computation and writes nothing to disk. It is not read-only against the database: it re-profiles every table in scope, so any table narrowed to a fraction still gets the temporary-table copy that `read.tables.materialize` describes. The same is true of `check --online`. A comparison that touches nothing needs either no sampling in scope or `materialize: false`.
 
 ### The thresholds are presentation, not filtering
 
@@ -41,7 +41,7 @@ A `scope` block on either side is table-grain, never per-column, and it suppress
 
 A scoped table that emits no change at all is counted `unevaluated`, not `unchanged` — as is a `catalog_only` table on either side, or a table this run did not re-read. "Not compared" and "compared and equal" are separate numbers in the artifact; `table_row_count_changed` is exempt from all of this, since `row_count` is a count over the whole table rather than the scanned set, and stays meaningful under a sample-scale scope.
 
-Four more sets narrow the comparison for reasons that have nothing to do with scope: `freshness`, `sql_type`, `nullable`, `rows_scanned` and every `inferred.sampled`/`inferred.matched`/`inferred.looks_like_candidate*`/`sketch` field are never compared at all — they move on every run regardless of the data, or (for `sketch`) a `diff` run never re-executes the pass that produces one. `cardinality`/`cardinality_ratio` drop out of the comparison only when either side counted approximately, since two approximations of one unchanged column differ by construction. `normalized_cardinality` drops out only when the path is present on one side and absent on the other — a side that never computed it, not a value that appeared or vanished. And `unmeasured` itself is read off both sides to decide what *not* to compare, never compared as a statistic in its own right — a field either side names there has no reading behind it to diff.
+Four more sets narrow the comparison for reasons that have nothing to do with scope: `freshness`, `sql_type`, `nullable`, `rows_scanned` and every `inferred.sampled`/`inferred.matched`/`inferred.looks_like_candidate*`/`sketch` field are never compared at all — they move on every run regardless of the data, or (for `sketch`) a `diff` run never re-executes the pass that produces one. `derived_from` is never compared either: it is parsed from a dbt project's compiled SQL, not read from the database. `cardinality`/`cardinality_ratio` drop out of the comparison only when either side counted approximately, since two approximations of one unchanged column differ by construction. `normalized_cardinality` drops out only when the path is present on one side and absent on the other — a side that never computed it, not a value that appeared or vanished. And `unmeasured` itself is read off both sides to decide what *not* to compare, never compared as a statistic in its own right — a field either side names there has no reading behind it to diff. `disabled` works the same way: a measurement either side switched off produces no event, so turning a switch on or off is never reported as drift.
 
 ### `detection: measured` edges never appear in a diff
 
@@ -49,19 +49,23 @@ Filtered off both sides before any matching happens: a `diff` run never executes
 
 ## How old: freshness
 
-Every table carries a freshness threshold in days. `max_age_days` sets it, and a `rules` entry can override it per table — which is how a dimension refreshes daily while a matview that takes an hour to profile refreshes monthly:
+Every table carries a freshness threshold in days. `profile.freshness.max_age_days` sets it, and a `rules` entry can override it per table — which is how a dimension refreshes daily while a matview that takes an hour to profile refreshes monthly:
 
 ```yaml
 # .dbprint.yaml
 connections:
   primary:
-    max_age_days: 1
+    profile:
+      freshness: {max_age_days: 1}
     rules:
-      - include: ["arboretum.seedbank.germination_by_taxon_mv"]
-        max_age_days: 30
+      - match: {tables: ["arboretum.seedbank.germination_by_taxon_mv"]}
+        profile:
+          freshness: {max_age_days: 30}
 ```
 
 The threshold does two jobs. `dbprint generate` skips a table whose print is still inside it, so a re-run is cheap rather than a full re-profile; `--force` re-profiles every matched table regardless, which is what to reach for when a run reports skips you did not want. `dbprint check` fails on a table that has fallen outside it.
+
+Age is not the only thing that re-reads a table. One whose resolved profile or redaction no longer matches what its manifest entry recorded — a rule added, a switch flipped, a sample fraction changed — is re-read however young it is, so a config change takes effect on the next `generate` without `--force`. Lineage from a `dbt_manifest` is the exception in the other direction: it is read from local files, so a young table whose traced sources changed has its `statistics.yaml` updated in place rather than re-read.
 
 Two values behave specially. `0` means the print is stale the moment it is written — `generate` re-extracts it every run and `check`'s freshness gate cannot pass, whatever order the commands run in. A negative value asks for the same thing and is refused when the config loads, because it holds every table stale with no way for the artifact to say so.
 
@@ -92,4 +96,4 @@ A print regenerated on every run produces a diff on every run, and a diff nobody
 
 - **Seeded sampling.** A sampled table draws one row set per run, and on PostgreSQL and duckdb the same one next run, so its statistics do not move on a table nobody wrote to. On the other six engines that stability is likely rather than guaranteed — see your engine's adapter page before gating on it.
 - **A stable redaction salt.** Rotating it changes every hashed value at once.
-- **A `max_rows_scanned` ceiling snaps to a grid** rather than tracking the catalog estimate exactly, so an estimate that drifted by a few percent resolves to the same fraction and reports nothing.
+- **A `max_rows` ceiling snaps to a grid** rather than tracking the catalog estimate exactly, so an estimate that drifted by a few percent resolves to the same fraction and reports nothing.

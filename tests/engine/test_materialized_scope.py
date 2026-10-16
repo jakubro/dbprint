@@ -23,7 +23,7 @@ from dbprint.adapters import (
     TableScope,
 )
 from dbprint.adapters.base import BaseStats, ColumnProgress, PhaseA, PhaseB, TableCounts
-from dbprint.config import ConnectionConfig, RuleConfig
+from dbprint.config import ConnectionConfig, ProfileConfig, RelationshipsProfile, RuleConfig
 from dbprint.engine import Engine
 from tests._prints import quarter_scanned_table
 
@@ -116,7 +116,10 @@ class TestASampledTableIsCopied:
     def test_every_statistics_call_receives_the_copy(self, tmp_path: Path) -> None:
         """One draw for the whole table means one scope for every statement over it."""
 
-        adapter = _run(tmp_path, RuleConfig(sample=0.25))
+        adapter = _run(
+            tmp_path,
+            RuleConfig(profile={"read": {"tables": {"mode": "sample", "fraction": 0.25}}}),
+        )
         seen = adapter.scopes_seen_by_statistics()
 
         assert seen, "no statistics call was made; the assertion would be vacuous"
@@ -124,7 +127,10 @@ class TestASampledTableIsCopied:
         assert all(scope is not None and scope.materialized == COPY for scope in seen)
 
     def test_the_copy_is_released_once_the_table_is_done(self, tmp_path: Path) -> None:
-        adapter = _run(tmp_path, RuleConfig(sample=0.25))
+        adapter = _run(
+            tmp_path,
+            RuleConfig(profile={"read": {"tables": {"mode": "sample", "fraction": 0.25}}}),
+        )
 
         assert adapter.released == [COPY]
 
@@ -133,7 +139,10 @@ class TestASampledTableIsCopied:
         nothing else: unresolvable to a reader, and diff churn on every run.
         """
 
-        _run(tmp_path, RuleConfig(sample=0.25))
+        _run(
+            tmp_path,
+            RuleConfig(profile={"read": {"tables": {"mode": "sample", "fraction": 0.25}}}),
+        )
         text = (tmp_path / "w" / "public" / "t" / "statistics.yaml").read_text()
 
         assert yaml.safe_load(text)["scope"] == {"rows_scanned": 250, "sample": 0.25}
@@ -144,7 +153,10 @@ class TestASampledTableIsCopied:
 class TestTheCopyIsNotAlwaysAskedFor:
     @pytest.mark.parametrize(
         "rule",
-        [None, RuleConfig(filter="bucket = 0")],
+        [
+            None,
+            RuleConfig(profile={"read": {"tables": {"mode": "filter", "filter": "bucket = 0"}}}),
+        ],
         ids=["full_scan", "filtered"],
     )
     def test_only_a_drawn_fraction_is_worth_copying(
@@ -160,9 +172,16 @@ class TestTheCopyIsNotAlwaysAskedFor:
         assert adapter.released == []
 
     def test_the_switch_off_declines_the_write(self, tmp_path: Path) -> None:
-        """`materialize_sample: false` declines the write: no copy is made, and none is read."""
+        """`materialize: false` declines the write: no copy is made, and none is read."""
 
-        adapter = _run(tmp_path, RuleConfig(sample=0.25), materialize_sample=False)
+        adapter = _run(
+            tmp_path,
+            RuleConfig(
+                profile={
+                    "read": {"tables": {"mode": "sample", "fraction": 0.25, "materialize": False}},
+                },
+            ),
+        )
 
         assert [phase for phase, _ in adapter.calls if phase == "materialize"] == []
         assert all(
@@ -176,7 +195,11 @@ class TestARefusedWriteDegrades:
         self,
         tmp_path: Path,
     ) -> None:
-        adapter = _run(tmp_path, RuleConfig(sample=0.25), refuse=True)
+        adapter = _run(
+            tmp_path,
+            RuleConfig(profile={"read": {"tables": {"mode": "sample", "fraction": 0.25}}}),
+            refuse=True,
+        )
         seen = adapter.scopes_seen_by_statistics()
 
         assert seen, "the run gave up on the table instead of falling back"
@@ -184,7 +207,11 @@ class TestARefusedWriteDegrades:
         assert (tmp_path / "w" / "public" / "t" / "statistics.yaml").is_file()
 
     def test_nothing_is_released_that_was_never_created(self, tmp_path: Path) -> None:
-        adapter = _run(tmp_path, RuleConfig(sample=0.25), refuse=True)
+        adapter = _run(
+            tmp_path,
+            RuleConfig(profile={"read": {"tables": {"mode": "sample", "fraction": 0.25}}}),
+            refuse=True,
+        )
 
         assert adapter.released == []
 
@@ -196,7 +223,11 @@ class TestARefusedWriteDegrades:
         """The numbers silently stop being coherent, so silence is the wrong answer."""
 
         with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
-            _run(tmp_path, RuleConfig(sample=0.25), refuse=True)
+            _run(
+                tmp_path,
+                RuleConfig(profile={"read": {"tables": {"mode": "sample", "fraction": 0.25}}}),
+                refuse=True,
+            )
 
         warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
         about_the_copy = [m for m in warnings if "public.t" in m and "materialize" in m]
@@ -210,7 +241,6 @@ def _run(
     rule: RuleConfig | None,
     *,
     refuse: bool = False,
-    materialize_sample: bool = True,
 ) -> _RecordingAdapter:
     adapter = _RecordingAdapter(_fixture(), refuse=refuse)
     conn = ConnectionConfig(
@@ -218,8 +248,7 @@ def _run(
         adapter="postgres",
         output=tmp_path,
         rules=() if rule is None else (rule,),
-        materialize_sample=materialize_sample,
-        infer_relationships=False,
+        profile=ProfileConfig(relationships=RelationshipsProfile(infer=False)),
     )
     Engine(adapter, conn, tmp_path).generate()
 

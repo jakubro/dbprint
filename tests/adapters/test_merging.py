@@ -12,6 +12,7 @@ from dbprint.adapters import ClickhouseAdapter
 from dbprint.adapters.clickhouse import introspect
 from dbprint.adapters.clickhouse.connection import DIALECT
 from dbprint.adapters.identifiers import Identity
+from dbprint.config import RuleMatch, TablesConfig
 from dbprint.config.project import ConnectionConfig, RuleConfig
 from dbprint.conformance import validate_print
 from dbprint.engine import Engine
@@ -134,7 +135,12 @@ def test_a_sampled_copy_states_stored_rows_under_a_final_session(
         cursor,
         tmp_path,
         "*.lot_state",
-        rules=(RuleConfig(include=("seedbank.lot_state",), sample=0.5),),
+        rules=(
+            RuleConfig(
+                match=RuleMatch(tables=("seedbank.lot_state",)),
+                profile={"read": {"tables": {"mode": "sample", "fraction": 0.5}}},
+            ),
+        ),
     )
 
     assert statistics["merging"]["rows"] == "stored"
@@ -280,8 +286,8 @@ def _generate(
         name="primary",
         adapter="clickhouse",
         output=tmp_path,
-        include=include,
         rules=rules,
+        tables=TablesConfig(include=include),
     )
 
     try:

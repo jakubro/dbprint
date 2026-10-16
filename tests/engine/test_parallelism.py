@@ -12,6 +12,7 @@ import pytest
 
 from dbprint.adapters import MockAdapter, MockTable, TableScope, trace_context
 from dbprint.adapters.base import ColumnMeta, PhaseA, StatisticsConfig, TableCounts
+from dbprint.config import RuleMatch, RunConfig
 from dbprint.config.project import ConnectionConfig, RuleConfig
 from dbprint.engine import Engine, GenerateRequest, GenerateResult, orchestrator
 from tests._curator import curator_fixture
@@ -109,8 +110,15 @@ def _conn(tmp_path: Path, parallelism: int, *, sample: bool = True) -> Connectio
         name="primary",
         adapter="postgres",
         output=tmp_path,
-        parallelism=parallelism,
-        rules=(RuleConfig(include=("public.h*", "public.curator"), sample=0.5),) if sample else (),
+        rules=(
+            RuleConfig(
+                match=RuleMatch(tables=("public.h*", "public.curator")),
+                profile={"read": {"tables": {"mode": "sample", "fraction": 0.5}}},
+            ),
+        )
+        if sample
+        else (),
+        run=RunConfig(parallelism=parallelism),
     )
 
 

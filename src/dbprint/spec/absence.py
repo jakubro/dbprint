@@ -1,18 +1,20 @@
 """What an absent field of a print means (SPEC 7.2, 7.3), read the same way by every consumer.
 
-A reading has five states, so an omitted verdict never reads as a measurement nobody took.
+A reading has six states, so an omitted verdict never reads as a measurement nobody took.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from copy import copy
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
 from .classification import is_numeric_type
+from .profile import DISABLEABLE
 from .redaction import FIELD_ROLES, WITHHELD_UNDER_REDACTION, is_redacted
+from .sketch import sketch_kind
 from .statistics_matrix import FORBIDDEN_FIELDS
 
 
@@ -24,6 +26,7 @@ class Absence(StrEnum):
     NOT_APPLICABLE = "not_applicable"
     WITHHELD = "withheld"
     UNMEASURED = "unmeasured"
+    DISABLED = "disabled"
 
 
 @dataclass(frozen=True)
@@ -72,6 +75,7 @@ COLUMN_FIELDS: frozenset[str] = frozenset(
         "physical_name",
         "collation",
         "physical_layout_key",
+        "derived_from",
         "populated",
         "inferred.looks_like",
         "inferred.sampled",
@@ -112,6 +116,7 @@ TABLE_BLOCKS: frozenset[str] = frozenset(
         "grain.search",
         "dependencies",
         "unmeasured",
+        "disabled",
         "timeline",
         "depends_on",
     },
@@ -187,6 +192,7 @@ _STATED_BY_ABSENCE: dict[str, tuple[Any, str, str]] = {
     "physical_name": (None, "the map key is the catalog's own spelling", "§2.2.4"),
     "collation": (None, "the connection's default collation applies", "§2.2.4"),
     "physical_layout_key": (None, "not a key of this table's physical layout", "§2.2.11"),
+    "derived_from": (None, "no source column was traced for it - never that it has none", "§2.2.4"),
     "inferred.sensitivity": (None, "nothing was detected - never that it is safe", "§4.4.2"),
     "inferred.epoch_unit": (None, "no epoch window matched", "§4.5.1"),
     "inferred.candidate_key_exception": (None, "no exception to state", "§4.2"),
@@ -210,10 +216,23 @@ _QUERIED_BLOCKS = frozenset(
 )
 
 
-def read_column_field(column: Mapping[str, Any], path: str) -> FieldReading:
+def disabled_of(statistics: Mapping[str, Any]) -> frozenset[str]:
+    """The measurements a `statistics.yaml` names switched off (SPEC 2.2.21); unknown names drop."""
+
+    named = read_table_block(statistics, "disabled").value
+
+    return frozenset(n for n in named or () if n in DISABLEABLE)
+
+
+def read_column_field(
+    column: Mapping[str, Any],
+    path: str,
+    *,
+    disabled: Collection[str] = (),
+) -> FieldReading:
     """Read one per-column field, or a key beneath one (`range.min`), per SPEC 7.2.
 
-    Raises KeyError for a path naming no column field, so a typo never reads as an absence.
+    `disabled` is the file's own list; an unknown path raises KeyError, so a typo never reads absent.
     """
 
     head = _column_head(path)
@@ -233,6 +252,9 @@ def read_column_field(column: Mapping[str, Any], path: str) -> FieldReading:
             "the read failed this run",
             "§2.2.4",
         )
+
+    if _switched_off(column, head, disabled):
+        return _DISABLED
 
     classification = column.get("classification")
     top = head.split(".", 1)[0]
@@ -277,6 +299,9 @@ def read_table_block(statistics: Mapping[str, Any], name: str) -> FieldReading:
     if statistics.get("catalog_only") is True and head in _QUERIED_BLOCKS:
         return FieldReading(Absence.NOT_APPLICABLE, None, "nothing was queried", "§2.2.15")
 
+    if head != "disabled" and _BLOCK_FEATURE.get(head) in disabled_of(statistics):
+        return _DISABLED
+
     return _implied_block(statistics, head)
 
 
@@ -293,10 +318,15 @@ def verdict_withheld(column: Mapping[str, Any], path: str, value: Any) -> bool:
     )
 
 
-def column_value(column: Mapping[str, Any], path: str) -> Any:
+def column_value(
+    column: Mapping[str, Any],
+    path: str,
+    *,
+    disabled: Collection[str] = (),
+) -> Any:
     """The value a reader may act on - measured or implied by omission - else None."""
 
-    reading = read_column_field(column, path)
+    reading = read_column_field(column, path, disabled=disabled)
 
     return reading.value if reading.known else None
 
@@ -380,11 +410,14 @@ def _implied_block(statistics: Mapping[str, Any], head: str) -> FieldReading:
             "§2.2.1",
         )
 
+    if head == "disabled":
+        return FieldReading(Absence.OMITTED, [], "no measurement was switched off", "§2.2.21")
+
     if head == "timeline":
         return FieldReading(
             Absence.OMITTED,
             None,
-            "no eligible anchor, a scoped or empty table, or disabled - not distinguishable",
+            "no eligible anchor, or a scoped or empty table",
             "§2.2.16",
         )
 
@@ -400,6 +433,53 @@ def _implied_block(statistics: Mapping[str, Any], head: str) -> FieldReading:
         return FieldReading(Absence.NOT_APPLICABLE, None, "a table has no dependencies", "§2.2.17")
 
     return FieldReading(Absence.NOT_APPLICABLE, None, "not emitted for this file", "§7.3")
+
+
+_DISABLED = FieldReading(
+    Absence.DISABLED,
+    None,
+    "switched off for this table by configuration",
+    "§2.2.21",
+)
+
+_BLOCK_FEATURE = {
+    "null_patterns": "null_patterns",
+    "null_patterns.coverage_method": "null_patterns",
+    "timeline": "timeline",
+}
+
+
+def _switched_off(column: Mapping[str, Any], head: str, disabled: Collection[str]) -> bool:
+    """Whether a switched-off measurement owns `head` on a column that could carry it (SPEC 2.2.21)."""
+
+    if not disabled:
+        return False
+
+    classification = column.get("classification")
+
+    if head in _LOOKS_LIKE_FIELDS | {"inferred.epoch_unit"}:
+        return (
+            "looks_like" in disabled
+            and classification in SAMPLED_CLASSIFICATIONS
+            and head not in _FORBIDDEN_NESTED.get(str(classification), frozenset())
+        )
+
+    # Checked before the forbidden test: SPEC 2.2.3 forbids `parts` on `unsupported`, which is
+    # exactly how a column reads when its descent was switched off.
+    if head in {"parts", "parts_found", "size"}:
+        return "parts" in disabled and classification in {"json", "unsupported"}
+
+    if head == "sketch":
+        sql_type = column.get("sql_type")
+
+        return (
+            "sketches" in disabled
+            and not is_redacted(column)
+            and isinstance(sql_type, str)
+            and sketch_kind(sql_type) is not None
+        )
+
+    return head == "populated" and "timeline" in disabled
 
 
 def _column_head(path: str) -> str:

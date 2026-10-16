@@ -14,6 +14,7 @@ from dbprint.mcp import errors as mcp_errors
 from dbprint.mcp import resources as mcp_resources
 from tests.fixtures.adversarial import (
     APPROXIMATE_ROW_COUNT_TABLE,
+    CONNECTION_NOTE,
     DECLARED_MISSING_KIND,
     DECLARED_MISSING_TABLE,
     DELIMITER_COLUMN,
@@ -23,6 +24,10 @@ from tests.fixtures.adversarial import (
     EXTREME_TABLE,
     FUTURE_DATED_COLUMN,
     GRAIN_NO_OUTCOME_TABLE,
+    HUMAN_EDGE_COLUMN,
+    HUMAN_EDGE_NOTE,
+    HUMAN_EDGE_TARGET,
+    HUMAN_EDGE_TARGET_COLUMN,
     INCOMPLETE_GRAIN_TABLE,
     LINE_BREAK_VALUE,
     NEVER_DECLARED_KIND,
@@ -55,6 +60,8 @@ COVERS = frozenset(
         "unevaluated_diff_table",
         "empty_columns_map",
         "column_with_several_edges",
+        "connection_notes",
+        "human_authored_edge",
         "orphan_spelling",
         "percentile_inside_range",
         "grain_search_without_outcome",
@@ -305,3 +312,33 @@ def test_a_columns_edges_are_served_less_the_rejected_one(
     targets = [e["target_table"] for e in served["refers_to"]]
 
     assert sorted(targets) == ["public.cultivar", "public.wide_lookup"]
+
+
+def test_a_human_authored_edge_is_served_in_relationships_annotations(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    conn = adversarial_print.conn.name
+    path = SEVERAL_EDGES_TABLE.replace(".", "/")
+    state = _state(adversarial_print)
+    authored = yaml.safe_load(
+        mcp_resources.read(state, f"dbprint://{conn}/{path}/relationships_annotations").content,
+    )
+    served = yaml.safe_load(
+        mcp_resources.read(state, f"dbprint://{conn}/{path}/relationships").content,
+    )
+
+    assert {
+        "column": [HUMAN_EDGE_COLUMN],
+        "target_table": HUMAN_EDGE_TARGET,
+        "target_column": [HUMAN_EDGE_TARGET_COLUMN],
+        "note": HUMAN_EDGE_NOTE,
+    } in authored["refers_to"]
+    assert HUMAN_EDGE_TARGET not in [e["target_table"] for e in served["refers_to"]]
+
+
+def test_connection_notes_are_served_as_their_own_file(adversarial_print: AdversarialPrint) -> None:
+    conn = adversarial_print.conn.name
+    uri = f"dbprint://{conn}/manifest_annotations"
+    served = yaml.safe_load(mcp_resources.read(_state(adversarial_print), uri).content)
+
+    assert served["notes"] == CONNECTION_NOTE

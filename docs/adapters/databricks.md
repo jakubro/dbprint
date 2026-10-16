@@ -50,7 +50,7 @@ Databricks reproduces the sampled fraction reliably — the measured coherence a
 
 ## When dbprint writes
 
-Only one thing makes dbprint write, and only under one condition: `materialize_sample` is on by default, and it fires **only for a table narrowed to a fraction of its rows**. A fraction has two sources — a rule's `sample`, and a `max_rows_scanned` ceiling resolving against the table's size, which is legal at connection and `defaults` level as well as inside a rule. A project that narrows nothing, which is what `dbprint init` scaffolds, never writes. A `filter` is a predicate rather than a fraction and never materializes.
+Only one thing makes dbprint write, and only under one condition: `profile.read.tables.materialize` is on by default, and it fires **only for a table read in `sample` mode** — by a `fraction`, or by a `max_rows` ceiling that resolves below the table's size, at whatever level the ceiling is set. A project that narrows nothing, which is what `dbprint init` scaffolds, never writes. A `filter` is a predicate rather than a fraction and never materializes.
 
 Where it does fire, the drawn rows are copied once into a session-lifetime temporary table — `CREATE TEMPORARY TABLE <name> AS SELECT * FROM (SELECT * FROM <table> TABLESAMPLE (p PERCENT))` — and every statistics statement for that table reads the copy. Where `CREATE TEMPORARY TABLE` is unavailable (a Dedicated cluster is the usual cause), dbprint warns and degrades to reading the un-materialized `TABLESAMPLE` directly, since `SAMPLE_FALLBACK_COHERENT` is `true` on this engine — the measured reproducibility above is what makes that degrade safe rather than silently wrong.
 
@@ -66,7 +66,7 @@ Both path segments are lowercased for the FQN; columns keep their catalog spelli
 
 ## Foreign tables
 
-A `FOREIGN` table, federated by query or by catalog, is listed with `external: true` (SPEC 2.2.20) and, unless a `read_rows` rule opts it in, described from the catalog alone. Opted in, every statement goes to the remote database, with only the predicates it can translate pushed down. An `EXTERNAL` table, a streaming table and a shallow clone are ordinary tables: an external table's files sit in your own cloud storage and cost what a managed table's do. On the fallback path nothing is marked external.
+A `FOREIGN` table, federated by query or by catalog, is listed with `external: true` (SPEC 2.2.20) and described from the catalog alone. A rule writing any other `read.tables.mode` for it is refused before any table is read, with exit 1, because the read would reach another live database. An `EXTERNAL` table, a streaming table and a shallow clone are ordinary tables: an external table's files sit in your own cloud storage and cost what a managed table's do. On the fallback path nothing is marked external.
 
 ## Row count and cost
 
@@ -100,11 +100,11 @@ A `variant` column is counted and compared by its string form (`CAST(... AS STRI
 
 ## Statement timeout
 
-`statement_timeout` becomes the session's `STATEMENT_TIMEOUT`, which Databricks applies on SQL warehouses; on all-purpose compute it is not documented to apply. The vendor's ceiling is 2 days; a larger value is refused when the connection opens.
+`run.statement_timeout` becomes the session's `STATEMENT_TIMEOUT`, which Databricks applies on SQL warehouses; on all-purpose compute it is not documented to apply. The vendor's ceiling is 2 days; a larger value is refused when the connection opens.
 
 ## Parallelism
 
-`parallelism: N` opens N sessions against the SQL warehouse and profiles up to N tables at once. A warehouse queues statements beyond what its clusters run concurrently, and one set to autoscale may add clusters for them.
+`run.parallelism: N` opens N sessions against the SQL warehouse and profiles up to N tables at once. A warehouse queues statements beyond what its clusters run concurrently, and one set to autoscale may add clusters for them.
 
 ## Reference
 

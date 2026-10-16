@@ -17,7 +17,13 @@ from dbprint.adapters import (
     PhysicalLayoutKey,
     Range,
 )
-from dbprint.config import ConnectionConfig, RuleConfig
+from dbprint.config import (
+    ConnectionConfig,
+    ProfileConfig,
+    RelationshipsProfile,
+    RuleConfig,
+    TimelineProfile,
+)
 from dbprint.config.project import RedactRule
 from dbprint.conformance import validate_print
 from dbprint.engine import Engine
@@ -258,7 +264,7 @@ class TestSkipConditions:
 
         assert "timeline" not in payload
 
-    def test_compute_timeline_false_suppresses_the_block(self, tmp_path: Path) -> None:
+    def test_a_switched_off_timeline_is_absent_and_named_disabled(self, tmp_path: Path) -> None:
         payload = _generate(
             tmp_path,
             {"created_at": ("timestamp", 0, 200)},
@@ -267,6 +273,8 @@ class TestSkipConditions:
         )
 
         assert "timeline" not in payload
+        assert "timeline" in payload["disabled"]
+        assert not [c for c in payload["columns"].values() if "populated" in c]
 
 
 class TestContextRendering:
@@ -332,15 +340,21 @@ def _generate(
     sample: float | None = None,
     compute_timeline: bool = True,
 ) -> dict[str, Any]:
-    rules = (RuleConfig(sample=sample),) if sample is not None else ()
+    rules = (
+        (RuleConfig(profile={"read": {"tables": {"mode": "sample", "fraction": sample}}}),)
+        if sample is not None
+        else ()
+    )
     conn = ConnectionConfig(
         name="w",
         adapter="postgres",
         output=tmp_path,
-        infer_relationships=False,
-        redact=redact,
         rules=rules,
-        compute_timeline=compute_timeline,
+        profile=ProfileConfig(
+            relationships=RelationshipsProfile(infer=False),
+            redact=redact,
+            timeline=TimelineProfile(enabled=compute_timeline),
+        ),
     )
     fixture = _fixture(
         columns_spec,

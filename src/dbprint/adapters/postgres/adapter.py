@@ -50,6 +50,7 @@ class PostgresAdapter(PerDatabaseSqlAdapter):
     # BERNOULLI decides membership per row by hashing (block, offset, seed) - an
     # unmaterialized `sample` scope still reads the same rows on every statement.
     SAMPLE_FALLBACK_COHERENT: ClassVar[bool] = True
+    EXTERNAL_READ_REFUSED: ClassVar[bool] = True
 
     DIALECT: ClassVar[Dialect] = DIALECT
     _driver = connection_module

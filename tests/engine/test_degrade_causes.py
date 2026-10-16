@@ -20,7 +20,7 @@ from dbprint.adapters.errors import QueryFailed
 from dbprint.adapters.identifiers import Identity
 from dbprint.adapters.redshift import ddl as redshift_ddl
 from dbprint.adapters.redshift.connection import DIALECT as REDSHIFT
-from dbprint.config import ConnectionConfig
+from dbprint.config import ConnectionConfig, ProfileConfig, RelationshipsProfile, RunConfig
 from dbprint.config.project import RedactRule
 from dbprint.engine import Engine
 from dbprint.spec.rounding import UnrepresentableValue
@@ -66,8 +66,8 @@ def test_a_degraded_temporal_block_is_named_with_its_cause(
         name="g",
         adapter="duckdb",
         output=tmp_path / "prints",
-        infer_relationships=False,
-        statement_timeout=1,
+        run=RunConfig(statement_timeout=1),
+        profile=ProfileConfig(relationships=RelationshipsProfile(infer=False)),
     )
 
     with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
@@ -215,7 +215,7 @@ def test_a_degraded_column_never_names_a_field_it_never_owed(
         name="g",
         adapter="duckdb",
         output=tmp_path / "prints",
-        redact=(RedactRule(columns=("*.viability_pct",), with_="drop"),),
+        profile=ProfileConfig(redact=(RedactRule(columns=("*.viability_pct",), with_="drop"),)),
     )
 
     Engine(DuckdbAdapter({"database": str(database)}), conn, tmp_path).generate()

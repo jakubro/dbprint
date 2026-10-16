@@ -16,7 +16,13 @@ from dbprint.adapters import (
     ValueCount,
 )
 from dbprint.adapters.base import RowCountMethod, TableCounts
-from dbprint.config import ConnectionConfig, RuleConfig, StatisticsConfig, TableSettings
+from dbprint.config import (
+    ConnectionConfig,
+    ProfileConfig,
+    RuleConfig,
+    RuleMatch,
+    TableSettings,
+)
 from dbprint.conformance.statistics import check
 from dbprint.engine import Engine
 from dbprint.engine.orchestrator import (
@@ -244,7 +250,11 @@ class TestTheEngineStampsWhatTheAdapterReported:
 
 
 def _generate(tmp_path: Path, rows_scanned: int, method: RowCountMethod) -> dict[str, Any]:
-    conn = connection_config(output=tmp_path, auto=True, rules=(RuleConfig(sample=0.25),))
+    conn = connection_config(
+        output=tmp_path,
+        auto=True,
+        rules=(RuleConfig(profile={"read": {"tables": {"mode": "sample", "fraction": 0.25}}}),),
+    )
     Engine(MockAdapter(_narrowed_fixture(rows_scanned, method)), conn, tmp_path).generate()
 
     return artifact(tmp_path / "primary", "public.t")
@@ -260,35 +270,48 @@ def _conn(*rules: RuleConfig) -> ConnectionConfig:
 
 class TestResolution:
     def test_settings_without_narrowing_mean_no_scope(self) -> None:
-        settings = TableSettings(statistics=StatisticsConfig(), max_age_days=7)
+        settings = TableSettings(profile=ProfileConfig(), max_age_days=7)
 
         assert _table_scope(settings) is None
 
     def test_a_matching_rule_produces_a_scope(self) -> None:
-        conn = _conn(RuleConfig(include=("public.*",), filter="a > 1"))
-        scope = _table_scope(conn.settings_for("public.t"))
+        conn = _conn(
+            RuleConfig(
+                match=RuleMatch(tables=("public.*",)),
+                profile={"read": {"tables": {"mode": "filter", "filter": "a > 1"}}},
+            ),
+        )
+        scope = _table_scope(conn.settings_for("public.t", "table"))
 
         assert scope is not None
         assert scope.filter == "a > 1"
 
     def test_a_non_matching_rule_leaves_the_table_unscoped(self) -> None:
-        conn = _conn(RuleConfig(include=("other.*",), filter="a > 1"))
+        conn = _conn(
+            RuleConfig(
+                match=RuleMatch(tables=("other.*",)),
+                profile={"read": {"tables": {"mode": "filter", "filter": "a > 1"}}},
+            ),
+        )
 
-        assert _table_scope(conn.settings_for("public.t")) is None
+        assert _table_scope(conn.settings_for("public.t", "table")) is None
 
     def test_a_rule_matching_everything_samples_every_table(self) -> None:
-        conn = _conn(RuleConfig(sample=0.1))
-        scope = _table_scope(conn.settings_for("anything.at.all"))
+        conn = _conn(RuleConfig(profile={"read": {"tables": {"mode": "sample", "fraction": 0.1}}}))
+        scope = _table_scope(conn.settings_for("anything.at.all", "table"))
 
         assert scope is not None
         assert scope.sample == 0.1  # noqa: RUF069 - the expected value is an exact literal
 
     def test_a_later_rule_replaces_an_earlier_predicate(self) -> None:
         conn = _conn(
-            RuleConfig(filter="everything"),
-            RuleConfig(include=("public.*",), filter="narrow"),
+            RuleConfig(profile={"read": {"tables": {"mode": "filter", "filter": "everything"}}}),
+            RuleConfig(
+                match=RuleMatch(tables=("public.*",)),
+                profile={"read": {"tables": {"mode": "filter", "filter": "narrow"}}},
+            ),
         )
-        scope = _table_scope(conn.settings_for("public.t"))
+        scope = _table_scope(conn.settings_for("public.t", "table"))
 
         assert scope is not None
         assert scope.filter == "narrow"

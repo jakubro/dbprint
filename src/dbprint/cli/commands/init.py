@@ -11,16 +11,21 @@ import rich_click as click
 from dbprint.engine import EXIT_OK
 
 
+# Where the documentation site publishes the packaged `config/project.schema.json`.
+PROJECT_SCHEMA_URL = "https://jakubro.github.io/dbprint/config/project.schema.json"
 CONNECTIONS_DIR = Path("~/.dbprint").expanduser()
 CONNECTIONS_FILE = CONNECTIONS_DIR / "connections.yaml"
 
-PROJECT_TEMPLATE = """\
+PROJECT_TEMPLATE = f"""\
+# yaml-language-server: $schema={PROJECT_SCHEMA_URL}
 defaults:
-  max_age_days: 7
-  statistics:
-    enumeration_threshold: 50
-    top_n_values: 20
-    percentiles: [1, 25, 50, 75, 99]
+  profile:
+    freshness:
+      max_age_days: 7
+    statistics:
+      enumeration_threshold: 50
+      top_n_values: 20
+      percentiles: [1, 25, 50, 75, 99]
   diff:
     stat_change_threshold:
       default: 0.01
@@ -29,8 +34,9 @@ connections:
   primary:
     adapter: postgres
     auto: true
-    include:
-      - "*.public.*"
+    tables:
+      include:
+        - "*.public.*"
 """
 
 CONNECTIONS_TEMPLATE = """\

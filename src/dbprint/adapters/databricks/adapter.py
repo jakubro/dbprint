@@ -41,6 +41,7 @@ class DatabricksAdapter(SqlAdapter):
     # TABLESAMPLE ... REPEATABLE is coherent on this engine (measured, stats.py's `_source`),
     # so an unmaterialized `sample` scope still reads stably across statements.
     SAMPLE_FALLBACK_COHERENT: ClassVar[bool] = True
+    EXTERNAL_READ_REFUSED: ClassVar[bool] = True
 
     DIALECT: ClassVar[Dialect] = DIALECT
     _driver = connection_module

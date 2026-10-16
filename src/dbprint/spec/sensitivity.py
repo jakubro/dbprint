@@ -73,19 +73,58 @@ _STRONG_NAME_TOKENS = frozenset(
 # holding companies and `people.name` holding people are indistinguishable by name alone.
 _WEAK_NAME_TOKENS = frozenset({"name", "display_name", "owner", "author", "contact"})
 
-# Heads that veto a name-token match: the preceding token names something not a person.
+# Heads naming an organisation, place, label or system object - never a person - veto a name;
+# a bare `name` in a table one of them names (singular or plural) is vetoed too.
 _NAME_DISQUALIFIED_HEADS = frozenset(
     {
-        "company",
-        "product",
+        "account",
+        "branch",
         "brand",
-        "file",
-        "table",
-        "column",
-        "host",
-        "domain",
-        "field",
+        "building",
+        "campaign",
+        "category",
+        "channel",
+        "city",
         "cluster",
+        "column",
+        "company",
+        "country",
+        "domain",
+        "event",
+        "field",
+        "file",
+        "group",
+        "host",
+        "list",
+        "location",
+        "merchant",
+        "metric",
+        "office",
+        "organisation",
+        "organization",
+        "partner",
+        "plan",
+        "product",
+        "program",
+        "project",
+        "region",
+        "report",
+        "reseller",
+        "segment",
+        "site",
+        "stage",
+        "status",
+        "store",
+        "supplier",
+        "survey",
+        "table",
+        "team",
+        "template",
+        "tier",
+        "type",
+        "vendor",
+        "venue",
+        "workflow",
     },
 )
 
@@ -97,12 +136,30 @@ _STRONG_NATIONAL_ID_TOKENS = frozenset(
         "national_id",
         "national_insurance_number",
         "nino",
-        "tax_id",
-        "vat_number",
         "passport_number",
         "passport_no",
         "drivers_license",
         "driving_licence",
+    },
+)
+
+# Tax identifiers are issued to organisations as often as to people, so a head naming the
+# organisation that holds one vetoes the match.
+_TAX_ID_TOKENS = frozenset({"tax_id", "vat_number"})
+_TAX_ID_DISQUALIFIED_HEADS = frozenset(
+    {
+        "business",
+        "company",
+        "corporate",
+        "customer",
+        "merchant",
+        "organisation",
+        "organization",
+        "partner",
+        "reseller",
+        "seller",
+        "supplier",
+        "vendor",
     },
 )
 
@@ -256,7 +313,6 @@ _EMPLOYMENT_TOKENS = frozenset(
         "wage",
         "hourly_rate",
         "hourly_wage",
-        "pay",
         "pay_rate",
         "base_pay",
         "gross_pay",
@@ -264,6 +320,25 @@ _EMPLOYMENT_TOKENS = frozenset(
         "compensation",
         "bonus",
         "commission",
+    },
+)
+
+# Heads naming money that is not a person's pay - a partner's commission, a refund paid out.
+_EMPLOYMENT_DISQUALIFIED_HEADS = frozenset(
+    {
+        "affiliate",
+        "agency",
+        "company",
+        "customer",
+        "event",
+        "merchant",
+        "partner",
+        "platform",
+        "refund",
+        "reseller",
+        "supplier",
+        "total",
+        "vendor",
     },
 )
 
@@ -394,21 +469,22 @@ def detect(
     column_name: str,
     values: Iterable[object],
     looks_like: str | None = None,
+    *,
+    classification: str | None = None,
+    table: str | None = None,
 ) -> Sensitivity | None:
-    """Return the must-not-leave-the-database category this column carries, or None.
+    """Return the must-not-leave-the-database category this column carries, or None (SPEC 4.4).
 
-    `column_name` is the primary evidence (catalog metadata, unaffected by sampling; SPEC
-    4.4.3); `values` corroborate an ambiguous name and `looks_like` carries the shapes that
-    are sensitive on their own. Categories are checked most-specific first, so a column that
-    is both a name and a contact reports the name. `values` is pre-filtered to non-blank
-    strings rather than stringified and widened like `looks_like`'s sample (SPEC 4.1.1,
-    4.1.3): the value heuristics are string-shaped, so a `uuid.UUID` corroborates nothing.
+    Only string `values` corroborate; `table` settles a bare `name`, and a `boolean` carries none.
     """
+
+    if classification == "boolean":
+        return None
 
     normalized = _normalize(column_name)
     samples = [v for v in values if isinstance(v, str) and v.strip()]
 
-    if _is_personal_name(normalized, samples):
+    if _is_personal_name(normalized, samples, table):
         return "personal_name"
 
     if _is_postal_address(normalized, samples):
@@ -486,11 +562,14 @@ def _matches(
     return False
 
 
-def _is_personal_name(normalized: str, samples: list[str]) -> bool:
+def _is_personal_name(normalized: str, samples: list[str], table: str | None) -> bool:
     if _matches(normalized, _STRONG_NAME_TOKENS, _NAME_DISQUALIFIED_HEADS):
         return True
 
     if not _matches(normalized, _WEAK_NAME_TOKENS, _NAME_DISQUALIFIED_HEADS):
+        return False
+
+    if normalized == "name" and table is not None and _names_a_non_person(table):
         return False
 
     return _share(samples, _looks_like_person) >= PERSONAL_NAME_VALUE_THRESHOLD
@@ -516,6 +595,9 @@ def _is_date_of_birth(normalized: str) -> bool:
 
 def _is_national_id(normalized: str, samples: list[str]) -> bool:
     if _matches(normalized, _STRONG_NATIONAL_ID_TOKENS):
+        return True
+
+    if _matches(normalized, _TAX_ID_TOKENS, _TAX_ID_DISQUALIFIED_HEADS):
         return True
 
     if not _matches(normalized, _WEAK_NATIONAL_ID_TOKENS):
@@ -546,7 +628,7 @@ def _is_demographic(normalized: str) -> bool:
 
 
 def _is_employment(normalized: str) -> bool:
-    return _matches(normalized, _EMPLOYMENT_TOKENS)
+    return _matches(normalized, _EMPLOYMENT_TOKENS, _EMPLOYMENT_DISQUALIFIED_HEADS)
 
 
 def _is_contact(normalized: str, looks_like: str | None) -> bool:
@@ -557,6 +639,16 @@ def _is_online_identifier(normalized: str, looks_like: str | None) -> bool:
     return (
         _matches(normalized, _ONLINE_IDENTIFIER_TOKENS) or looks_like in _ONLINE_IDENTIFIER_SHAPES
     )
+
+
+def _names_a_non_person(table: str) -> bool:
+    last = _normalize(table).split("_")[-1]
+    singulars = {last, last.removesuffix("s"), last.removesuffix("es")}
+
+    if last.endswith("ies"):
+        singulars.add(last.removesuffix("ies") + "y")
+
+    return not singulars.isdisjoint(_NAME_DISQUALIFIED_HEADS)
 
 
 def _share(samples: list[str], predicate: Callable[[str], bool]) -> float:

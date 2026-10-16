@@ -23,7 +23,7 @@ Seven outcomes from `check`, ordered so a pipeline can decide how much each one 
 | Code | Meaning |
 |---|---|
 | `0` | ok |
-| `1` | generic — a malformed print, or a table whose rules narrow it both by a predicate and by a fraction, which the command refuses to judge |
+| `1` | generic — a malformed print, a `.dbprint.yaml` that fails to load, or a column the current `redact` rules would publish otherwise than the print does (`privacy.redaction-not-applied`) |
 | `2` | staleness — a print is older than its own threshold |
 | `3` | drift (`--online`) — the committed print no longer matches the database |
 | `4` | connection (`--online`) — the database could not be reached, or the target lists none of the committed tables |
@@ -93,7 +93,7 @@ For the online job, install the extra for your engine and supply credentials thr
 
 The online job needs a database reachable from the runner and the read privileges your engine's adapter page lists — [duckdb](../adapters/duckdb.md), [PostgreSQL](../adapters/postgres.md), [MySQL](../adapters/mysql.md), [ClickHouse](../adapters/clickhouse.md), [Redshift](../adapters/redshift.md), [Snowflake](../adapters/snowflake.md), [Databricks](../adapters/databricks.md), [BigQuery](../adapters/bigquery.md). PostgreSQL additionally needs `pg_dump` on `PATH`, at least the server's major version.
 
-It also needs the temporary-table privilege from that page if anything in scope resolves to a fraction. `--online` re-extracts, so a `sample`, a `filter`-free `max_rows_scanned` ceiling, or a connection-level ceiling all make the job write a temporary table. Without the privilege the job still passes, but each statistic for those tables is measured over its own draw.
+It also needs the temporary-table privilege from that page if anything in scope resolves to a fraction. `--online` re-extracts, so any table read in `sample` mode — by `fraction`, or by a `max_rows` ceiling at any level that resolves below its size — makes the job write a temporary table. Without the privilege the job still passes, but each statistic for those tables is measured over its own draw.
 
 ## Exit codes from `generate`
 

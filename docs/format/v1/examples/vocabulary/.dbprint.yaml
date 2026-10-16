@@ -7,4 +7,6 @@ connections:
     adapter: postgres
     auto: true
     output: prints
-    max_age_days: 1
+    profile:
+      freshness:
+        max_age_days: 1

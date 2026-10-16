@@ -26,7 +26,9 @@ connections:
   primary:
     adapter: postgres
     output: prints
-    max_age_days: 36500
+    profile:
+      freshness:
+        max_age_days: 36500
 """
 
 

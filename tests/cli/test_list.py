@@ -15,6 +15,17 @@ from dbprint.cli.main import main
 from tests._cli import PROJECT_YAML
 
 
+_PROFILE = {
+    "statistics": {
+        "enumeration_threshold": 50,
+        "top_n_values": 30,
+        "percentiles": [1, 25, 50, 75, 99],
+    },
+    "looks_like": {"enabled": True, "sample_size": 1000},
+    "null_patterns": {"enabled": True, "top_n": 20},
+}
+
+
 PRODUCTION_PROJECT_YAML = """\
 connections:
   production:
@@ -49,13 +60,7 @@ def _write_manifest(
         "connection": "primary",
         "adapter": "postgres",
         "dbprint_version": "0.1.0",
-        "statistics_params": {
-            "enumeration_threshold": 50,
-            "top_n_values": 30,
-            "top_n_null_patterns": 20,
-            "looks_like_sample_size": 1000,
-            "percentiles": [1, 25, 50, 75, 99],
-        },
+        "profile": _PROFILE,
         "selectors": {"include": ["*"], "exclude": []},
         "redaction_rules_configured": 0,
         "default_collation": "en_US.UTF-8",
@@ -175,9 +180,14 @@ class TestFormatOption:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        (tmp_path / ".dbprint.yaml").write_text(CASCADE_YAML)
+        (tmp_path / ".dbprint.yaml").write_text(REFUSING_YAML)
         _write_named_manifest(tmp_path, "good", ("public.curator",))
-        _write_named_manifest(tmp_path, "bad", ("public.curator", "public.herbarium"))
+        _write_named_manifest(
+            tmp_path,
+            "bad",
+            ("public.curator", "public.herbarium"),
+            refused=("public.herbarium",),
+        )
         monkeypatch.chdir(tmp_path)
         result = CliRunner().invoke(main, ["list", "--format", "json"])
 
@@ -290,13 +300,7 @@ class TestDescribedCountsTheFile:
             "connection": "primary",
             "adapter": "postgres",
             "dbprint_version": "0.1.0",
-            "statistics_params": {
-                "enumeration_threshold": 50,
-                "top_n_values": 30,
-                "top_n_null_patterns": 20,
-                "looks_like_sample_size": 1000,
-                "percentiles": [1, 25, 50, 75, 99],
-            },
+            "profile": _PROFILE,
             "selectors": {"include": ["*"], "exclude": []},
             "redaction_rules_configured": 0,
             "default_collation": "en_US.UTF-8",
@@ -355,13 +359,7 @@ def _write_two_table_manifest(tmp_path: Path, profiled_at: str) -> None:
         "connection": "primary",
         "adapter": "postgres",
         "dbprint_version": "0.1.0",
-        "statistics_params": {
-            "enumeration_threshold": 50,
-            "top_n_values": 30,
-            "top_n_null_patterns": 20,
-            "looks_like_sample_size": 1000,
-            "percentiles": [1, 25, 50, 75, 99],
-        },
+        "profile": _PROFILE,
         "selectors": {"include": ["*"], "exclude": []},
         "redaction_rules_configured": 0,
         "default_collation": "en_US.UTF-8",
@@ -379,7 +377,7 @@ def _write_two_table_manifest(tmp_path: Path, profiled_at: str) -> None:
     (prints / "manifest.yaml").write_text(yaml.safe_dump(manifest))
 
 
-CASCADE_YAML = """\
+REFUSING_YAML = """\
 connections:
   good:
     adapter: postgres
@@ -389,11 +387,6 @@ connections:
     adapter: postgres
     auto: true
     output: prints
-    rules:
-      - include: ["*"]
-        sample: 0.1
-      - include: ["public.herbarium"]
-        filter: "id > 0"
 """
 
 SIZE_GATED_YAML = """\
@@ -401,11 +394,17 @@ connections:
   primary:
     adapter: postgres
     output: prints
-    max_age_days: 7
+    profile:
+      freshness:
+        max_age_days: 7
     rules:
-      - include: ["public.t"]
+    - profile:
+        freshness:
+          max_age_days: 30
+      match:
+        tables:
+        - public.t
         min_rows: 1000000
-        max_age_days: 30
 """
 
 CONNECTION_CEILING_ONLY_YAML = """\
@@ -413,8 +412,13 @@ connections:
   primary:
     adapter: postgres
     output: prints
-    max_age_days: 7
-    max_rows_scanned: 1000000000
+    profile:
+      freshness:
+        max_age_days: 7
+      read:
+        tables:
+          mode: sample
+          max_rows: 1000000000
 """
 
 RULE_CEILING_ONLY_YAML = """\
@@ -422,16 +426,30 @@ connections:
   primary:
     adapter: postgres
     output: prints
-    max_age_days: 7
+    profile:
+      freshness:
+        max_age_days: 7
     rules:
-      - include: ["public.t"]
-        max_rows_scanned: 1000000000
-        max_age_days: 30
+    - profile:
+        read:
+          tables:
+            mode: sample
+            max_rows: 1000000000
+        freshness:
+          max_age_days: 30
+      match:
+        tables:
+        - public.t
 """
 
 
-def _write_named_manifest(tmp_path: Path, connection: str, fqns: tuple[str, ...]) -> None:
-    """Manifest for one connection, no entry recording a threshold of its own."""
+def _write_named_manifest(
+    tmp_path: Path,
+    connection: str,
+    fqns: tuple[str, ...],
+    refused: tuple[str, ...] = (),
+) -> None:
+    """Manifest for one connection; only a `refused` entry records a threshold, a forbidden one."""
 
     prints = tmp_path / "prints" / connection
     prints.mkdir(parents=True, exist_ok=True)
@@ -442,13 +460,7 @@ def _write_named_manifest(tmp_path: Path, connection: str, fqns: tuple[str, ...]
         "connection": connection,
         "adapter": "postgres",
         "dbprint_version": "0.1.0",
-        "statistics_params": {
-            "enumeration_threshold": 50,
-            "top_n_values": 30,
-            "top_n_null_patterns": 20,
-            "looks_like_sample_size": 1000,
-            "percentiles": [1, 25, 50, 75, 99],
-        },
+        "profile": _PROFILE,
         "selectors": {"include": ["*"], "exclude": []},
         "redaction_rules_configured": 0,
         "default_collation": "en_US.UTF-8",
@@ -459,68 +471,12 @@ def _write_named_manifest(tmp_path: Path, connection: str, fqns: tuple[str, ...]
                 "artifacts": {"ddl": "ddl.sql", "statistics": "statistics.yaml"},
                 "columns": 3,
                 "profiled_at": stamp,
+                **({"max_age_days": 1.5} if fqn in refused else {}),
             }
             for fqn in fqns
         },
     }
     (prints / "manifest.yaml").write_text(yaml.safe_dump(manifest))
-
-
-class TestContradictoryCascadeOffline:
-    """A connection whose rules refuse a table is reported and skipped whole, not fatal -
-    a partial one would leave `table_count` wrong.
-    """
-
-    @staticmethod
-    def _seed(tmp_path: Path) -> None:
-        (tmp_path / ".dbprint.yaml").write_text(CASCADE_YAML)
-        _write_named_manifest(tmp_path, "good", ("public.curator",))
-        _write_named_manifest(tmp_path, "bad", ("public.curator", "public.herbarium"))
-
-    def test_the_refusal_names_the_table_and_both_rules(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        self._seed(tmp_path)
-        monkeypatch.chdir(tmp_path)
-        result = CliRunner().invoke(main, ["list", "--no-tui"])
-
-        assert "public.herbarium" in result.stderr
-        assert "rules[0]" in result.stderr
-        assert "rules[1]" in result.stderr
-        assert result.exit_code == 1
-
-    def test_a_connection_after_the_bad_one_still_renders(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """`list` renders inside its loop; an uncaught raise would stop everything after it."""
-
-        (tmp_path / ".dbprint.yaml").write_text(
-            CASCADE_YAML.replace("  good:", "  zzz_good:"),
-        )
-        _write_named_manifest(tmp_path, "zzz_good", ("public.curator",))
-        _write_named_manifest(tmp_path, "bad", ("public.curator", "public.herbarium"))
-        monkeypatch.chdir(tmp_path)
-        result = CliRunner().invoke(main, ["list", "--no-tui"])
-
-        assert "zzz_good\ttable_count\t1" in result.stdout
-
-    def test_the_refused_connection_renders_no_counts(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Totals that describe fewer tables than `table_count` are worse than none."""
-
-        self._seed(tmp_path)
-        monkeypatch.chdir(tmp_path)
-        result = CliRunner().invoke(main, ["list", "--no-tui"])
-
-        assert "good\ttable_count\t1" in result.stdout
-        assert "bad\ttable_count" not in result.stdout
 
 
 class TestForbiddenRecordedThreshold:
@@ -610,13 +566,7 @@ def _write_typed_manifest(tmp_path: Path, entries: dict[str, str]) -> None:
         "connection": "primary",
         "adapter": "postgres",
         "dbprint_version": "0.1.0",
-        "statistics_params": {
-            "enumeration_threshold": 50,
-            "top_n_values": 30,
-            "top_n_null_patterns": 20,
-            "looks_like_sample_size": 1000,
-            "percentiles": [1, 25, 50, 75, 99],
-        },
+        "profile": _PROFILE,
         "selectors": {"include": ["*"], "exclude": []},
         "redaction_rules_configured": 0,
         "default_collation": "en_US.UTF-8",
@@ -865,28 +815,19 @@ class TestADroppedConnectionIsReported:
 
         assert "primary\tnot_run\tignoring" in result.stdout
 
-    def test_a_refused_cascade_is_named_on_stdout(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        (tmp_path / ".dbprint.yaml").write_text(CASCADE_YAML)
-        _write_named_manifest(tmp_path, "good", ("public.curator",))
-        _write_named_manifest(tmp_path, "bad", ("public.curator", "public.herbarium"))
-        monkeypatch.chdir(tmp_path)
-        result = CliRunner().invoke(main, ["list", "--no-tui"])
-
-        assert "bad\tnot_run\t" in result.stdout
-        assert "public.herbarium" in result.stdout
-
     def test_one_line_per_cause_and_no_summary_beside_it(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        (tmp_path / ".dbprint.yaml").write_text(CASCADE_YAML)
+        (tmp_path / ".dbprint.yaml").write_text(REFUSING_YAML)
         _write_named_manifest(tmp_path, "good", ("public.curator",))
-        _write_named_manifest(tmp_path, "bad", ("public.curator", "public.herbarium"))
+        _write_named_manifest(
+            tmp_path,
+            "bad",
+            ("public.curator", "public.herbarium"),
+            refused=("public.herbarium",),
+        )
         monkeypatch.chdir(tmp_path)
         result = CliRunner().invoke(main, ["list", "--no-tui"])
         bad_lines = [line for line in result.stdout.splitlines() if line.startswith("bad\t")]

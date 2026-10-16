@@ -46,6 +46,8 @@ STATISTICS_DEFERRED = {
     "columns": "address-by-map-key (keyed-map shape), not address-by-identity-tuple",
     "unmeasured": "a producer's record of what its own run could not obtain - a human has "
     "nothing to correct about it, and annotating a field as measured would not make it so",
+    "disabled": "the producer's configuration, not the data - a human changes it in "
+    "`.dbprint.yaml`, not by annotating the print",
 }
 RELATIONSHIPS_DEFERRED = {
     "eligible_target": "a table-level scalar, not addressable",
@@ -176,6 +178,19 @@ _COLUMNS_PROPERTY: dict[str, Any] = {
                     "properties": {
                         "value": {},
                         "note": {"type": "string"},
+                    },
+                },
+            },
+            "derived_from": {
+                "type": "array",
+                "minItems": 0,
+                "items": {
+                    "type": "object",
+                    "required": ["table", "column"],
+                    "additionalProperties": False,
+                    "properties": {
+                        "table": {"type": "string", "minLength": 1},
+                        "column": {"type": "string", "minLength": 1},
                     },
                 },
             },

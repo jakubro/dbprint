@@ -30,13 +30,17 @@ There is no host, no port, no user, and nothing to grant — the file's own file
 
 duckdb is coherent **row for row** on a sampled table, the same guarantee PostgreSQL gives: every statement for a sampled table reads the same rows, including the extra distinct-value draw `inferred.looks_like` takes on top of them.
 
+## Distinct counts
+
+Every `cardinality` is an exact distinct count at every table size, so `cardinality_method` is always `exact` — unlike adapters that read the engine's own estimate on a large table.
+
 ## When dbprint writes
 
-Only one thing makes dbprint write, and only under one condition: `materialize_sample` is on by default, and it fires **only for a table narrowed to a fraction of its rows**. A fraction has two sources — a rule's `sample`, and a `max_rows_scanned` ceiling resolving against the table's size, which is legal at connection and `defaults` level as well as inside a rule. A project that narrows nothing, which is what `dbprint init` scaffolds, never writes. A `filter` is a predicate rather than a fraction and never materializes.
+Only one thing makes dbprint write, and only under one condition: `profile.read.tables.materialize` is on by default, and it fires **only for a table read in `sample` mode** — by a `fraction`, or by a `max_rows` ceiling that resolves below the table's size, at whatever level the ceiling is set. A project that narrows nothing, which is what `dbprint init` scaffolds, never writes. A `filter` is a predicate rather than a fraction and never materializes.
 
 Where it does fire, the drawn rows are copied once into a session-lifetime temporary table in duckdb's own `temp` catalog — unqualified, since duckdb allows a temporary table only there — and every statistics statement for that table reads the copy.
 
-`materialize_sample: false` never falls back on duckdb: `SAMPLE_FALLBACK_COHERENT` is `true` here, the same as PostgreSQL, so an unmaterialized `sample` scope already stays coherent across statements. The only way the write itself can fail is the read-only interaction above.
+`read.tables.materialize: false` never falls back on duckdb: `SAMPLE_FALLBACK_COHERENT` is `true` here, the same as PostgreSQL, so an unmaterialized `sample` scope already stays coherent across statements. The only way the write itself can fail is the read-only interaction above.
 
 ## Identifiers
 
@@ -61,11 +65,11 @@ Every duckdb identifier resolves case-insensitively, so a capital in the catalog
 
 ## Statement timeout
 
-duckdb has no server to cancel on, so `statement_timeout` is a client-side clock: a timer interrupts the connection when a statement outlives the limit. The interrupt is observed only where duckdb checks for it, so a statement can overrun briefly.
+duckdb has no server to cancel on, so `run.statement_timeout` is a client-side clock: a timer interrupts the connection when a statement outlives the limit. The interrupt is observed only where duckdb checks for it, so a statement can overrun briefly.
 
 ## Parallelism
 
-`parallelism` is refused above `1` at load. An unnamed `:memory:` database is private to each session, and a temporary table to the connection that made it, so a second session would read neither; duckdb already parallelises one statement across cores.
+`run.parallelism` is refused above `1` at load. An unnamed `:memory:` database is private to each session, and a temporary table to the connection that made it, so a second session would read neither; duckdb already parallelises one statement across cores.
 
 ## Reference
 

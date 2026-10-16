@@ -14,7 +14,6 @@ from dbprint.config.connections import env_var_name
 
 
 _PROJECT = """\
-version: 1
 connections:
   garden:
     adapter: duckdb

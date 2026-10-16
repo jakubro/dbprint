@@ -12,6 +12,8 @@ timeline:
   unit: day
   buckets: []
   coverage: 0.0
+disabled:
+- relationships.infer
 unmeasured:
 - null_patterns
 columns:

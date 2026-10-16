@@ -10,7 +10,7 @@ from typing import Any
 import yaml
 
 from dbprint.adapters import MockAdapter, MockTable, TableType
-from dbprint.config import ConnectionConfig
+from dbprint.config import ConnectionConfig, ProfileConfig, RelationshipsProfile
 from dbprint.engine import Engine
 from dbprint.engine.context_assembler import AssemblyOptions, assemble
 from tests._engine_run import artifact
@@ -54,7 +54,7 @@ def _generate(tmp_path: Path, dependencies: dict[str, tuple[str, ...]] | None) -
         name="w",
         adapter="postgres",
         output=tmp_path,
-        infer_relationships=False,
+        profile=ProfileConfig(relationships=RelationshipsProfile(infer=False)),
     )
     Engine(MockAdapter(_fixture(), dependencies=dependencies), conn, tmp_path).generate()
 

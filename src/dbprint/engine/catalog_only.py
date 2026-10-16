@@ -2,15 +2,26 @@
 
 from __future__ import annotations
 
+from dbprint.config.read import ReadMode
+
 
 def described_without_query(
-    table_type: str | None,
+    mode: ReadMode,
     *,
-    read_rows: bool,
+    explicit: bool,
     has_columns: bool,
+    view: bool = False,
     external: bool = False,
     opt_in_only: bool = False,
 ) -> bool:
-    """A plain view, external or opt-in-only object is, unless `read_rows` opts it in with columns."""
+    """Catalog-only under `mode: catalog`; a view or a remote object whose catalog lists no
+    columns; or an external or opt-in-only object no rule reads by an explicit `mode`.
+    """
 
-    return (table_type == "view" or external or opt_in_only) and not (read_rows and has_columns)
+    special = view or external or opt_in_only
+
+    return (
+        mode == "catalog"
+        or (special and not has_columns)
+        or ((external or opt_in_only) and not explicit)
+    )

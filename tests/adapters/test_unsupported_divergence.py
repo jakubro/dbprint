@@ -14,6 +14,7 @@ import yaml
 from dbprint.adapters import Adapter, AdapterType, PostgresAdapter
 from dbprint.adapters.postgres.stats import _UNSUPPORTED_TYPES as POSTGRES_UNSUPPORTED
 from dbprint.adapters.snowflake.stats import _UNSUPPORTED_TYPES as SNOWFLAKE_UNSUPPORTED
+from dbprint.config import TablesConfig
 from dbprint.config.project import StatisticsConfig
 from dbprint.engine import Engine
 from dbprint.spec.classification import _UNSUPPORTED_TYPES as SPEC_UNSUPPORTED
@@ -185,7 +186,12 @@ def _generate(
     tmp_path: Path,
     include: str,
 ) -> dict[str, Any]:
-    conn_config = connection_config(adapter=name, output=tmp_path, auto=True, include=(include,))
+    conn_config = connection_config(
+        adapter=name,
+        output=tmp_path,
+        auto=True,
+        tables=TablesConfig(include=(include,)),
+    )
 
     try:
         Engine(adapter, conn_config, tmp_path).generate()

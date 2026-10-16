@@ -299,10 +299,18 @@ connections:
     adapter: postgres
     auto: true
     output: prints
-    include: ["*.public.lagging"]
+    tables:
+      include:
+      - '*.public.lagging'
     rules:
-      - include: ["*.public.lagging"]
-        sample: 1.0
+    - match:
+        tables:
+        - '*.public.lagging'
+      profile:
+        read:
+          tables:
+            mode: sample
+            fraction: 1.0
 """
 
 

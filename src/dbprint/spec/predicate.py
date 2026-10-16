@@ -5,6 +5,7 @@ Each form parses raw YAML to a typed predicate, then evaluates it against an act
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
@@ -361,13 +362,19 @@ class StatRef:
         return self.reading.known
 
 
-def resolve(stats: dict[str, Any], path: str, scope: ScanScope | None = None) -> StatRef:
+def resolve(
+    stats: dict[str, Any],
+    path: str,
+    scope: ScanScope | None = None,
+    *,
+    disabled: Collection[str] = (),
+) -> StatRef:
     """Resolve an assertable stat against a column's statistics through `spec.absence`.
 
-    `accepted_values` binds only a list that is the column's whole domain: exhaustive and unscoped.
+    `accepted_values` binds only an exhaustive, unscoped list; `disabled` is the file's (SPEC 2.2.21).
     """
 
-    reading = read_column_field(stats, _COLUMN_FIELD_OF.get(path, path))
+    reading = read_column_field(stats, _COLUMN_FIELD_OF.get(path, path), disabled=disabled)
 
     if path == "accepted_values" and reading.state is Absence.PRESENT:
         if not list_is_complete(stats):
@@ -400,6 +407,9 @@ def inapplicable_reason(
 
     if ref.reading.state is Absence.UNMEASURED:
         return f"stat {stat!r} is unmeasured for column {column!r}: {ref.reading.cause}"
+
+    if ref.reading.state is Absence.DISABLED:
+        return f"stat {stat!r} is not measured for column {column!r}: switched off for this table"
 
     if not ref.found:
         return f"stat {stat!r} not emitted for column {column!r}: {ref.reading.cause}"

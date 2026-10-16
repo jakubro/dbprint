@@ -122,8 +122,6 @@ columns:
     cardinality: 8
     cardinality_ratio: 0.166667
     cardinality_method: exact
-    inferred:
-      sensitivity: personal_name
     values:
     - value: Cinder Bluff Store
       count: 6

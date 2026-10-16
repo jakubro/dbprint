@@ -28,7 +28,7 @@ from dbprint.adapters.snowflake.connection import (
     _default_cursor_factory,
     _load_private_key,
 )
-from dbprint.config.project import RuleConfig
+from dbprint.config.project import RuleConfig, RuleMatch
 from dbprint.engine import Engine
 from tests._prints import connection_config
 from tests.adapters._credentials import SNOWFLAKE_CREDS
@@ -1598,7 +1598,12 @@ class TestTableKinds:
         config = connection_config(
             adapter="snowflake",
             output=tmp_path,
-            rules=(RuleConfig(include=("*.field_log",), sample=0.5),),
+            rules=(
+                RuleConfig(
+                    match=RuleMatch(tables=("*.field_log",)),
+                    profile={"read": {"tables": {"mode": "sample", "fraction": 0.5}}},
+                ),
+            ),
         )
 
         try:

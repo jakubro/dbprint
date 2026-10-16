@@ -7,6 +7,7 @@ import pytest
 from dbprint.spec.absence import (
     Absence,
     column_value,
+    disabled_of,
     emits,
     read_column_field,
     read_table_block,
@@ -257,7 +258,7 @@ _TABLE_READINGS = [
         (
             "omitted",
             None,
-            "no eligible anchor, a scoped or empty table, or disabled - not distinguishable",
+            "no eligible anchor, or a scoped or empty table",
             "§2.2.16",
         ),
     ),
@@ -325,3 +326,48 @@ def test_a_failed_draw_owes_only_the_verdicts_its_classification_allows(
     expected: set[str],
 ) -> None:
     assert sample_verdicts(classification) == expected
+
+
+@pytest.mark.parametrize(
+    ("column", "path", "feature"),
+    [
+        ({"classification": "text", "cardinality": 3}, "inferred.looks_like", "looks_like"),
+        ({"classification": "text", "cardinality": 3}, "inferred.epoch_unit", "looks_like"),
+        ({"classification": "unsupported"}, "parts", "parts"),
+        ({"classification": "json"}, "size", "parts"),
+        ({"classification": "text", "sql_type": "text"}, "sketch", "sketches"),
+        ({"classification": "numeric"}, "populated", "timeline"),
+    ],
+)
+def test_a_switched_off_field_reads_disabled_where_the_column_could_carry_it(
+    column: dict[str, object],
+    path: str,
+    feature: str,
+) -> None:
+    assert read_column_field(column, path, disabled={feature}).state is Absence.DISABLED
+    assert read_column_field(column, path).state is not Absence.DISABLED
+
+
+@pytest.mark.parametrize(
+    ("column", "path", "feature"),
+    [
+        ({"classification": "numeric"}, "inferred.looks_like", "looks_like"),
+        ({"classification": "binary"}, "inferred.epoch_unit", "looks_like"),
+        ({"classification": "text", "sql_type": "text", "redacted": "mask"}, "sketch", "sketches"),
+    ],
+)
+def test_a_field_the_column_never_carries_is_not_read_as_switched_off(
+    column: dict[str, object],
+    path: str,
+    feature: str,
+) -> None:
+    assert read_column_field(column, path, disabled={feature}).state is not Absence.DISABLED
+
+
+def test_a_switched_off_block_reads_disabled_and_the_list_drops_unknown_names() -> None:
+    statistics = {"disabled": ["null_patterns", "from_the_future"]}
+
+    assert disabled_of(statistics) == frozenset({"null_patterns"})
+    assert read_table_block(statistics, "null_patterns").state is Absence.DISABLED
+    assert read_table_block(statistics, "timeline").state is Absence.OMITTED
+    assert read_table_block({}, "disabled").value == []

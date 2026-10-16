@@ -20,7 +20,7 @@ from dbprint.adapters import (
     ValueCount,
 )
 from dbprint.adapters.base import BaseStats, TableScope, temporal_block_unmeasured
-from dbprint.config import ConnectionConfig
+from dbprint.config import ConnectionConfig, ProfileConfig, RelationshipsProfile
 from dbprint.engine import Engine
 from tests._prints import columns, mock_table
 from tests._scripts import load_script
@@ -63,7 +63,7 @@ def build(target: Path) -> Path:
         name=CONNECTION,
         adapter="postgres",
         output=target,
-        infer_relationships=False,
+        profile=ProfileConfig(relationships=RelationshipsProfile(infer=False)),
     )
     Engine(CensusFails(_fixture()), conn, target).generate()
 

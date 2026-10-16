@@ -27,7 +27,7 @@ from dbprint.adapters.mysql import introspect as introspect_module
 from dbprint.adapters.mysql import stats as stats_module
 from dbprint.adapters.mysql.connection import ConnectionParams, MysqlConnectionError, exec_query
 from dbprint.cli.main import main
-from dbprint.config import ConnectionConfig, StatisticsConfig
+from dbprint.config import ConnectionConfig, StatisticsConfig, TablesConfig
 from dbprint.engine import Engine
 from tests._cli import credential_env, write_project
 from tests._engine_run import conformance_errors
@@ -214,7 +214,11 @@ class TestPhysicalColumnIdentity:
 
         self._seed_mixed_case(mysql_test_db)
         fqn = f"{mysql_test_db['database']}.curator_profile"
-        conn = connection_config(adapter="mysql", output=tmp_path, include=(fqn,))
+        conn = connection_config(
+            adapter="mysql",
+            output=tmp_path,
+            tables=TablesConfig(include=(fqn,)),
+        )
         Engine(MysqlAdapter(mysql_test_db), conn, tmp_path).generate()
 
         table_dir = tmp_path / "primary" / mysql_test_db["database"] / "curator_profile"
@@ -286,7 +290,11 @@ class TestCollation:
 
         self._seed(mysql_test_db)
         fqn = f"{mysql_test_db['database']}.labels"
-        conn = connection_config(adapter="mysql", output=tmp_path, include=(fqn,))
+        conn = connection_config(
+            adapter="mysql",
+            output=tmp_path,
+            tables=TablesConfig(include=(fqn,)),
+        )
         Engine(MysqlAdapter(mysql_test_db), conn, tmp_path).generate()
 
         manifest = yaml.safe_load((tmp_path / "primary" / "manifest.yaml").read_text())
@@ -337,7 +345,11 @@ class TestCollation:
         conn_db.close()
 
         fqn = f"{mysql_test_db['database']}.case_variants"
-        conn = connection_config(adapter="mysql", output=tmp_path, include=(fqn,))
+        conn = connection_config(
+            adapter="mysql",
+            output=tmp_path,
+            tables=TablesConfig(include=(fqn,)),
+        )
         Engine(MysqlAdapter(mysql_test_db), conn, tmp_path).generate()
 
         table_dir = tmp_path / "primary" / mysql_test_db["database"] / "case_variants"
@@ -1000,7 +1012,7 @@ class TestAFederatedTableIsCatalogOnly:
             name="primary",
             adapter="mysql",
             output=tmp_path,
-            include=(f"{federated_db['database']}.*",),
+            tables=TablesConfig(include=(f"{federated_db['database']}.*",)),
         )
 
         try:

@@ -1789,6 +1789,10 @@ _COLUMN_SAMPLES: dict[str, tuple[Any, Any]] = {
     "physical_name": (None, "C"),
     "collation": ("en_US", "C"),
     "physical_layout_key": (True, False),
+    "derived_from": (
+        [{"table": "public.a", "column": "x"}],
+        [{"table": "public.b", "column": "x"}],
+    ),
     "classification": ("numeric", "categorical"),
     "null_count": (1, 2),
     "null_rate": (0.1, 0.2),
@@ -1874,6 +1878,7 @@ _SHAPE_KIND = {
 }
 _NOT_COMPARED = frozenset(
     {
+        "derived_from",
         "freshness",
         "inferred.looks_like_candidate",
         "inferred.looks_like_candidate_share",
@@ -1972,3 +1977,40 @@ class TestTableTypeAndCollation:
         assert _kinds(_compute({"public.t": before}, {"public.t": after})) == [
             "column_physical_name_changed",
         ]
+
+
+class TestASwitchFlipIsNotDrift:
+    """SPEC 2.6.10: a field either side's `disabled` covers, or that the switch re-derived,
+    produces no event.
+    """
+
+    def _events(self, before: dict, after: dict, disabled: frozenset[str]) -> list[dict]:
+        off = frozenset(f for name in disabled for f in diff_module.COLUMN_FIELDS_OF.get(name, ()))
+
+        return diff_module._diff_one_column_stats("t", "c", before, after, scoped=False, off=off)
+
+    def test_looks_like_off_hides_the_name_only_sensitivity_and_a_prose_columns_values(
+        self,
+    ) -> None:
+        before = {
+            "classification": "text",
+            "inferred": {"looks_like": "prose", "sensitivity": "contact"},
+            "null_count": 0,
+        }
+        after = {
+            "classification": "text",
+            "inferred": {"sensitivity": "personal_name"},
+            "values": [{"value": "a", "count": 2}],
+            "values_coverage": 0.5,
+            "null_count": 0,
+        }
+
+        assert self._events(before, after, frozenset({"looks_like"})) == []
+        assert self._events(before, after, frozenset())
+
+    def test_parts_off_hides_a_column_it_reclassified(self) -> None:
+        before = {"classification": "composite", "cardinality": 4, "null_count": 0}
+        after = {"classification": "unsupported", "null_count": 1}
+
+        assert self._events(before, after, frozenset({"parts"})) == []
+        assert self._events(before, after, frozenset())

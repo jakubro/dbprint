@@ -505,6 +505,7 @@ PART_FORBIDDEN_FIELDS: frozenset[str] = frozenset(
         "physical_name",
         "collation",
         "physical_layout_key",
+        "derived_from",
         "rows_scanned",
         "populated",
         "sketch",

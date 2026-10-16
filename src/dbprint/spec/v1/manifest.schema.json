@@ -10,7 +10,7 @@
     "connection",
     "adapter",
     "dbprint_version",
-    "statistics_params",
+    "profile",
     "selectors",
     "redaction_rules_configured",
     "default_collation",
@@ -22,8 +22,7 @@
     "connection": {"type": "string", "minLength": 1},
     "adapter": {"type": "string", "minLength": 1},
     "dbprint_version": {"type": "string", "minLength": 1},
-    "statistics_params": {"$ref": "#/$defs/StatisticsParams"},
-    "profiling_params": {"$ref": "#/$defs/ProfilingParams"},
+    "profile": {"$ref": "#/$defs/Profile"},
     "selectors": {"$ref": "#/$defs/Selectors"},
     "redaction_rules_configured": {"type": "integer", "minimum": 0},
     "default_collation": {"type": "string", "minLength": 1},
@@ -48,29 +47,115 @@
       "type": "string",
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"
     },
-    "StatisticsParams": {
+    "Profile": {
+      "description": "The connection's resolved profile for this run, every block present, without freshness or redaction. See SPEC.md section 2.5.",
+      "$ref": "#/$defs/ProfileOverride",
+      "required": ["read", "statistics", "looks_like", "null_patterns", "parts", "timeline", "sketches", "relationships"],
+      "properties": {
+        "read": {"required": ["tables", "views"]}
+      }
+    },
+    "ProfileOverride": {
+      "description": "The blocks of a table's resolved profile that differ from the connection's, each whole. See SPEC.md section 2.5.",
       "type": "object",
       "properties": {
-        "enumeration_threshold": {"type": "integer", "minimum": 1},
-        "top_n_values": {"type": "integer", "minimum": 1},
-        "top_n_null_patterns": {"type": "integer", "minimum": 1},
-        "looks_like_sample_size": {"type": "integer", "minimum": 1},
-        "max_parts": {"type": "integer", "minimum": 0},
-        "max_part_depth": {"type": "integer", "minimum": 1},
-        "percentiles": {
-          "type": "array",
-          "items": {"type": "integer", "minimum": 1, "maximum": 99}
+        "read": {
+          "type": "object",
+          "properties": {
+            "tables": {"$ref": "#/$defs/ReadBlock"},
+            "views": {"$ref": "#/$defs/ReadBlock"}
+          }
+        },
+        "statistics": {
+          "type": "object",
+          "required": ["enumeration_threshold", "top_n_values", "percentiles"],
+          "properties": {
+            "enumeration_threshold": {"type": "integer", "minimum": 1},
+            "top_n_values": {"type": "integer", "minimum": 1},
+            "percentiles": {
+              "type": "array",
+              "items": {"type": "integer", "minimum": 1, "maximum": 99}
+            }
+          }
+        },
+        "looks_like": {
+          "type": "object",
+          "required": ["enabled"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "sample_size": {"type": "integer", "minimum": 1}
+          },
+          "if": {"properties": {"enabled": {"const": true}}},
+          "then": {"required": ["sample_size"]}
+        },
+        "null_patterns": {
+          "type": "object",
+          "required": ["enabled"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "top_n": {"type": "integer", "minimum": 1}
+          },
+          "if": {"properties": {"enabled": {"const": true}}},
+          "then": {"required": ["top_n"]}
+        },
+        "parts": {
+          "type": "object",
+          "required": ["enabled"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "max": {"type": "integer", "minimum": 1},
+            "max_depth": {"type": "integer", "minimum": 1}
+          },
+          "if": {"properties": {"enabled": {"const": true}}},
+          "then": {"required": ["max", "max_depth"]}
+        },
+        "timeline": {
+          "type": "object",
+          "required": ["enabled"],
+          "properties": {"enabled": {"type": "boolean"}}
+        },
+        "sketches": {
+          "type": "object",
+          "required": ["enabled"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "columns": {"enum": ["required", "all"]}
+          },
+          "if": {"properties": {"enabled": {"const": true}}},
+          "then": {"required": ["columns"]}
+        },
+        "relationships": {
+          "type": "object",
+          "required": ["infer"],
+          "properties": {"infer": {"type": "boolean"}}
         }
       }
     },
-    "ProfilingParams": {
+    "ReadBlock": {
       "type": "object",
+      "required": ["mode"],
       "properties": {
-        "infer_relationships": {"type": "boolean"},
-        "sketch_all_columns": {"type": "boolean"},
-        "compute_timeline": {"type": "boolean"},
-        "materialize_sample": {"type": "boolean"}
-      }
+        "mode": {"enum": ["full", "sample", "filter", "catalog"]},
+        "fraction": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "max_rows": {"type": "integer", "minimum": 1},
+        "materialize": {"type": "boolean"},
+        "filter": {"type": "string", "minLength": 1}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"mode": {"const": "sample"}}},
+          "then": {
+            "required": ["materialize"],
+            "not": {"required": ["fraction", "max_rows"]},
+            "if": {"not": {"required": ["max_rows"]}},
+            "then": {"required": ["fraction"]}
+          }
+        },
+        {
+          "if": {"properties": {"mode": {"const": "filter"}}},
+          "then": {"required": ["filter"]}
+        }
+      ]
     },
     "Selectors": {
       "type": "object",
@@ -91,9 +176,8 @@
         "columns": {"type": "integer", "minimum": 0},
         "profiled_at": {"$ref": "#/$defs/UtcIso8601"},
         "max_age_days": {"type": "integer", "minimum": 0},
-        "statistics_params": {"$ref": "#/$defs/StatisticsParams"},
-        "max_rows_scanned": {"type": "integer", "minimum": 1},
-        "profiling_params": {"$ref": "#/$defs/ProfilingParams"}
+        "profile": {"$ref": "#/$defs/ProfileOverride"},
+        "max_rows_scanned": {"type": "integer", "minimum": 1}
       }
     },
     "Artifacts": {

@@ -42,6 +42,28 @@
                 }
               }
             }
+          },
+          "derived_from": {
+            "type": "array",
+            "minItems": 0,
+            "items": {
+              "type": "object",
+              "required": [
+                "table",
+                "column"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "table": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "column": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
           }
         }
       }

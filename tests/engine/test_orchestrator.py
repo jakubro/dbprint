@@ -41,6 +41,16 @@ from dbprint.adapters import (
     ValueCount,
 )
 from dbprint.adapters.base import SkippedNamespace
+from dbprint.config import (
+    FreshnessConfig,
+    ProfileConfig,
+    ReadConfig,
+    ReadSettings,
+    RelationshipsProfile,
+    RuleMatch,
+    SketchesProfile,
+    TablesConfig,
+)
 from dbprint.config.project import ConnectionConfig, RedactRule, RuleConfig
 from dbprint.conformance import validate_print
 from dbprint.engine import (
@@ -1076,7 +1086,10 @@ class TestEpochUnit:
     def test_a_dropped_epoch_column_still_reports_its_unit(self, tmp_path: Path) -> None:
         conn = replace(
             conn_config(tmp_path),
-            redact=(RedactRule(columns=("*.epoch_dropped",), with_="drop"),),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                redact=(RedactRule(columns=("*.epoch_dropped",), with_="drop"),),
+            ),
         )
         stats = self._stats(tmp_path, conn)
         assert stats["epoch_dropped"]["inferred"]["epoch_unit"] == "seconds"
@@ -1131,7 +1144,13 @@ class TestColumnCaseCollision:
     @pytest.mark.parametrize("infer", [False, True], ids=["no-pre-pass", "pre-pass"])
     def test_the_table_is_refused_and_the_run_continues(self, tmp_path: Path, infer: bool) -> None:
         fixture = self._colliding(curator_fixture(), "public.curator")
-        conn = replace(conn_config(tmp_path), infer_relationships=infer)
+        conn = replace(
+            conn_config(tmp_path),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                relationships=RelationshipsProfile(infer=infer),
+            ),
+        )
 
         result = Engine(MockAdapter(fixture), conn, tmp_path).generate()
 
@@ -1166,26 +1185,6 @@ class TestFaultIsolation:
         assert statuses["public.herbarium"] == "ok"
         assert result.exit_code == EXIT_PARTIAL
 
-    def test_a_table_narrowed_two_ways_fails_alone(self, tmp_path: Path) -> None:
-        """Rules that settle one table with a filter and a sample say nothing about the rest."""
-
-        conn = replace(
-            conn_config(tmp_path),
-            rules=(
-                RuleConfig(include=("public.curator",), filter="id IS NOT NULL"),
-                RuleConfig(include=("public.curator",), sample=0.5),
-            ),
-        )
-        result = Engine(MockAdapter(curator_fixture()), conn, tmp_path).generate()
-
-        statuses = {t.fqn: t.status for t in result.tables}
-        assert statuses == {"public.curator": "failed", "public.herbarium": "ok"}
-        assert result.exit_code == EXIT_PARTIAL
-
-        failure = next(t for t in result.tables if t.status == "failed")
-        assert "rules[0]" in (failure.error or "")
-        assert "rules[1]" in (failure.error or "")
-
 
 class _IncoherentSampleAdapter(MockAdapter):
     """Declares its fallback incoherent, like Snowflake/MySQL/ClickHouse/Redshift/BigQuery."""
@@ -1205,14 +1204,22 @@ class TestSampleFallbackCoherence:
     measuring it over rows that would differ between statements.
     """
 
-    def test_materialize_sample_false_refuses_an_incoherent_adapter(
+    def test_materialize_false_refuses_an_incoherent_adapter(
         self,
         tmp_path: Path,
     ) -> None:
         conn = replace(
             conn_config(tmp_path),
-            materialize_sample=False,
-            rules=(RuleConfig(include=("public.curator",), sample=0.5),),
+            rules=(
+                RuleConfig(
+                    match=RuleMatch(tables=("public.curator",)),
+                    profile={
+                        "read": {
+                            "tables": {"mode": "sample", "fraction": 0.5, "materialize": False},
+                        },
+                    },
+                ),
+            ),
         )
         result = Engine(_IncoherentSampleAdapter(curator_fixture()), conn, tmp_path).generate()
 
@@ -1222,12 +1229,17 @@ class TestSampleFallbackCoherence:
         }
 
         failure = next(t for t in result.tables if t.fqn == "public.curator")
-        assert "materialize_sample" in (failure.error or "")
+        assert "read.tables.materialize: false" in (failure.error or "")
 
     def test_a_refused_write_names_the_underlying_cause(self, tmp_path: Path) -> None:
         conn = replace(
             conn_config(tmp_path),
-            rules=(RuleConfig(include=("public.curator",), sample=0.5),),
+            rules=(
+                RuleConfig(
+                    match=RuleMatch(tables=("public.curator",)),
+                    profile={"read": {"tables": {"mode": "sample", "fraction": 0.5}}},
+                ),
+            ),
         )
         result = Engine(_RefusingMaterializeAdapter(curator_fixture()), conn, tmp_path).generate()
 
@@ -1239,14 +1251,22 @@ class TestSampleFallbackCoherence:
         failure = next(t for t in result.tables if t.fqn == "public.curator")
         assert "simulated write refusal" in (failure.error or "")
 
-    def test_a_coherent_adapter_is_unaffected_by_materialize_sample_false(
+    def test_a_coherent_adapter_is_unaffected_by_materialize_false(
         self,
         tmp_path: Path,
     ) -> None:
         conn = replace(
             conn_config(tmp_path),
-            materialize_sample=False,
-            rules=(RuleConfig(include=("public.curator",), sample=0.5),),
+            rules=(
+                RuleConfig(
+                    match=RuleMatch(tables=("public.curator",)),
+                    profile={
+                        "read": {
+                            "tables": {"mode": "sample", "fraction": 0.5, "materialize": False},
+                        },
+                    },
+                ),
+            ),
         )
         result = Engine(MockAdapter(curator_fixture()), conn, tmp_path).generate()
 
@@ -1255,8 +1275,16 @@ class TestSampleFallbackCoherence:
     def test_a_filter_scope_is_unaffected_on_an_incoherent_adapter(self, tmp_path: Path) -> None:
         conn = replace(
             conn_config(tmp_path),
-            materialize_sample=False,
-            rules=(RuleConfig(include=("public.curator",), filter="id IS NOT NULL"),),
+            rules=(
+                RuleConfig(
+                    match=RuleMatch(tables=("public.curator",)),
+                    profile={"read": {"tables": {"mode": "filter", "filter": "id IS NOT NULL"}}},
+                ),
+            ),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                read=ReadSettings(tables=ReadConfig(mode="full", materialize=False)),
+            ),
         )
         result = Engine(_IncoherentSampleAdapter(curator_fixture()), conn, tmp_path).generate()
 
@@ -1266,7 +1294,13 @@ class TestSampleFallbackCoherence:
         self,
         tmp_path: Path,
     ) -> None:
-        conn = replace(conn_config(tmp_path), materialize_sample=False)
+        conn = replace(
+            conn_config(tmp_path),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                read=ReadSettings(tables=ReadConfig(mode="full", materialize=False)),
+            ),
+        )
         result = Engine(_IncoherentSampleAdapter(curator_fixture()), conn, tmp_path).generate()
 
         assert {t.status for t in result.tables} == {"ok"}
@@ -1308,7 +1342,7 @@ class TestClassifierFaultIsolation:
         monkeypatch.setattr(
             orchestrator,
             "detect_sensitivity",
-            lambda physical_name, samples, looks_like: (_ for _ in ()).throw(
+            lambda physical_name, samples, looks_like, **_: (_ for _ in ()).throw(
                 ValueError("hostile value"),
             ),
         )
@@ -1418,8 +1452,16 @@ class TestPerTableFreshnessSkip:
 
         # curator is past its own 1 day; herbarium is well inside the 30.
         conn = replace(
-            conn_config(tmp_path, max_age_days=30),
-            rules=(RuleConfig(include=("public.curator",), max_age_days=1),),
+            conn_config(
+                tmp_path,
+                profile=ProfileConfig(freshness=FreshnessConfig(max_age_days=30)),
+            ),
+            rules=(
+                RuleConfig(
+                    match=RuleMatch(tables=("public.curator",)),
+                    profile={"freshness": {"max_age_days": 1}},
+                ),
+            ),
         )
         result = Engine(MockAdapter(curator_fixture()), conn, tmp_path).generate()
 
@@ -1433,8 +1475,16 @@ class TestPerTableFreshnessSkip:
         self._age_manifest(tmp_path / "primary" / "manifest.yaml", days=3.0)
 
         conn = replace(
-            conn_config(tmp_path, max_age_days=30),
-            rules=(RuleConfig(include=("public.curator",), max_age_days=1),),
+            conn_config(
+                tmp_path,
+                profile=ProfileConfig(freshness=FreshnessConfig(max_age_days=30)),
+            ),
+            rules=(
+                RuleConfig(
+                    match=RuleMatch(tables=("public.curator",)),
+                    profile={"freshness": {"max_age_days": 1}},
+                ),
+            ),
         )
         result = Engine(MockAdapter(curator_fixture()), conn, tmp_path).generate(
             GenerateRequest(force=True),
@@ -1681,7 +1731,12 @@ class TestSizeConditionedRules:
     def test_only_the_table_over_the_bar_is_narrowed(self, tmp_path: Path) -> None:
         conn = replace(
             conn_config(tmp_path),
-            rules=(RuleConfig(min_rows=100_000, sample=0.01),),
+            rules=(
+                RuleConfig(
+                    match=RuleMatch(min_rows=100_000),
+                    profile={"read": {"tables": {"mode": "sample", "fraction": 0.01}}},
+                ),
+            ),
         )
         Engine(
             MockAdapter(_sized_fixture(curator=280_421, herbarium=1000)),
@@ -1697,7 +1752,12 @@ class TestSizeConditionedRules:
 
         conn = replace(
             conn_config(tmp_path),
-            rules=(RuleConfig(min_rows=100_000, sample=0.01),),
+            rules=(
+                RuleConfig(
+                    match=RuleMatch(min_rows=100_000),
+                    profile={"read": {"tables": {"mode": "sample", "fraction": 0.01}}},
+                ),
+            ),
         )
         Engine(
             MockAdapter(_sized_fixture(curator=None, herbarium=None)),
@@ -1716,7 +1776,12 @@ class TestSizeConditionedRules:
 
         conn = replace(
             conn_config(tmp_path),
-            rules=(RuleConfig(min_rows=100_000, sample=0.01),),
+            rules=(
+                RuleConfig(
+                    match=RuleMatch(min_rows=100_000),
+                    profile={"read": {"tables": {"mode": "sample", "fraction": 0.01}}},
+                ),
+            ),
         )
 
         with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
@@ -1738,7 +1803,12 @@ class TestSizeConditionedRules:
 
         conn = replace(
             conn_config(tmp_path),
-            rules=(RuleConfig(include=("public.curator",), min_rows=100_000, sample=0.01),),
+            rules=(
+                RuleConfig(
+                    match=RuleMatch(tables=("public.curator",), min_rows=100_000),
+                    profile={"read": {"tables": {"mode": "sample", "fraction": 0.01}}},
+                ),
+            ),
         )
 
         with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
@@ -1758,7 +1828,12 @@ class TestSizeConditionedRules:
     ) -> None:
         conn = replace(
             conn_config(tmp_path),
-            rules=(RuleConfig(min_rows=100_000, sample=0.01),),
+            rules=(
+                RuleConfig(
+                    match=RuleMatch(min_rows=100_000),
+                    profile={"read": {"tables": {"mode": "sample", "fraction": 0.01}}},
+                ),
+            ),
         )
 
         with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
@@ -1772,7 +1847,10 @@ class TestSizeConditionedRules:
 
     def test_no_estimate_is_read_when_no_rule_carries_one(self, tmp_path: Path) -> None:
         adapter = _EstimateCountingAdapter(_sized_fixture(curator=280_421, herbarium=1000))
-        conn = replace(conn_config(tmp_path), rules=(RuleConfig(sample=0.01),))
+        conn = replace(
+            conn_config(tmp_path),
+            rules=(RuleConfig(profile={"read": {"tables": {"mode": "sample", "fraction": 0.01}}}),),
+        )
         Engine(adapter, conn, tmp_path).generate()
 
         assert adapter.estimate_calls == []
@@ -1784,7 +1862,12 @@ class TestSizeConditionedRules:
         adapter = _EstimateCountingAdapter(_sized_fixture(curator=280_421, herbarium=1000))
         conn = replace(
             conn_config(tmp_path),
-            rules=(RuleConfig(min_rows=100_000, sample=0.01),),
+            rules=(
+                RuleConfig(
+                    match=RuleMatch(min_rows=100_000),
+                    profile={"read": {"tables": {"mode": "sample", "fraction": 0.01}}},
+                ),
+            ),
         )
         Engine(adapter, conn, tmp_path).generate()
 
@@ -1803,8 +1886,16 @@ class TestSizeConditionedRules:
         TestPerTableFreshnessSkip._age_manifest(tmp_path / "primary" / "manifest.yaml", days=3.0)
 
         conn = replace(
-            conn_config(tmp_path, max_age_days=30),
-            rules=(RuleConfig(min_rows=100_000, max_age_days=1),),
+            conn_config(
+                tmp_path,
+                profile=ProfileConfig(freshness=FreshnessConfig(max_age_days=30)),
+            ),
+            rules=(
+                RuleConfig(
+                    match=RuleMatch(min_rows=100_000),
+                    profile={"freshness": {"max_age_days": 1}},
+                ),
+            ),
         )
         result = Engine(
             MockAdapter(_sized_fixture(curator=280_421, herbarium=1000)),
@@ -1822,7 +1913,12 @@ class TestSizeConditionedRules:
 
         conn = replace(
             conn_config(tmp_path),
-            rules=(RuleConfig(min_rows=100_000, sample=0.01),),
+            rules=(
+                RuleConfig(
+                    match=RuleMatch(min_rows=100_000),
+                    profile={"read": {"tables": {"mode": "sample", "fraction": 0.01}}},
+                ),
+            ),
         )
         result = Engine(
             _EstimateFailingAdapter(_sized_fixture(curator=280_421, herbarium=1000)),
@@ -1838,7 +1934,12 @@ class TestSizeConditionedRules:
     def test_a_failed_estimate_names_the_operation(self, tmp_path: Path) -> None:
         conn = replace(
             conn_config(tmp_path),
-            rules=(RuleConfig(min_rows=100_000, sample=0.01),),
+            rules=(
+                RuleConfig(
+                    match=RuleMatch(min_rows=100_000),
+                    profile={"read": {"tables": {"mode": "sample", "fraction": 0.01}}},
+                ),
+            ),
         )
         result = Engine(
             _EstimateFailingAdapter(_sized_fixture(curator=280_421, herbarium=1000)),
@@ -1855,20 +1956,25 @@ class TestSizeConditionedRules:
         tmp_path: Path,
     ) -> None:
         """The catalog estimate and the later-profiled row count can disagree across
-        `min_rows`, and `statistics_params` tracks the estimate the rule was gated on.
+        `min_rows`, and the entry's `profile` tracks the estimate the rule was gated on.
         """
 
         fixture = _sized_fixture(curator=50_000, herbarium=1000)
         fixture["public.curator"] = replace(fixture["public.curator"], row_count=200_000)
         conn = replace(
             conn_config(tmp_path),
-            rules=(RuleConfig(min_rows=100_000, statistics={"top_n_values": 5}),),
+            rules=(
+                RuleConfig(
+                    match=RuleMatch(min_rows=100_000),
+                    profile={"statistics": {"top_n_values": 5}},
+                ),
+            ),
         )
         Engine(MockAdapter(fixture), conn, tmp_path).generate()
 
         manifest = yaml.safe_load((tmp_path / "primary" / "manifest.yaml").read_text())
 
-        assert "statistics_params" not in manifest["tables"]["public.curator"]
+        assert "profile" not in manifest["tables"]["public.curator"]
 
 
 class TestMaxRowsScannedCeiling:
@@ -1881,7 +1987,13 @@ class TestMaxRowsScannedCeiling:
         return stats.get("scope")
 
     def test_only_the_table_over_the_ceiling_is_narrowed(self, tmp_path: Path) -> None:
-        conn = replace(conn_config(tmp_path), max_rows_scanned=100_000)
+        conn = replace(
+            conn_config(tmp_path),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                read=ReadSettings(tables=ReadConfig(mode="sample", max_rows=100_000)),
+            ),
+        )
         Engine(
             MockAdapter(_sized_fixture(curator=280_421, herbarium=1000)),
             conn,
@@ -1892,7 +2004,13 @@ class TestMaxRowsScannedCeiling:
         assert self._scope_of(tmp_path, "herbarium") is None
 
     def test_an_unavailable_estimate_takes_the_unnarrowed_path(self, tmp_path: Path) -> None:
-        conn = replace(conn_config(tmp_path), max_rows_scanned=100_000)
+        conn = replace(
+            conn_config(tmp_path),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                read=ReadSettings(tables=ReadConfig(mode="sample", max_rows=100_000)),
+            ),
+        )
         Engine(
             MockAdapter(_sized_fixture(curator=None, herbarium=None)),
             conn,
@@ -1906,7 +2024,13 @@ class TestMaxRowsScannedCeiling:
         tmp_path: Path,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        conn = replace(conn_config(tmp_path), max_rows_scanned=100_000)
+        conn = replace(
+            conn_config(tmp_path),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                read=ReadSettings(tables=ReadConfig(mode="sample", max_rows=100_000)),
+            ),
+        )
 
         with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
             Engine(
@@ -1916,34 +2040,7 @@ class TestMaxRowsScannedCeiling:
             ).generate()
 
         assert "public.curator" in caplog.text
-        assert "max_rows_scanned" in caplog.text
-
-    def test_a_ceiling_yields_to_a_filter_and_the_run_warns(
-        self,
-        tmp_path: Path,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """The predicate already narrows, so the ceiling stands down rather than colliding."""
-
-        conn = replace(
-            conn_config(tmp_path),
-            max_rows_scanned=100_000,
-            rules=(RuleConfig(include=("public.curator",), filter="id IS NOT NULL"),),
-        )
-
-        with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
-            Engine(
-                MockAdapter(_sized_fixture(curator=280_421, herbarium=1000)),
-                conn,
-                tmp_path,
-            ).generate()
-
-        scope = self._scope_of(tmp_path, "curator")
-
-        assert scope is not None
-        assert scope.get("filter") == "id IS NOT NULL"
-        assert "sample" not in scope
-        assert "public.curator" in caplog.text
+        assert "read.tables.max_rows" in caplog.text
 
     def test_no_estimate_is_read_when_no_ceiling_or_min_rows_is_set(self, tmp_path: Path) -> None:
         adapter = _EstimateCountingAdapter(_sized_fixture(curator=280_421, herbarium=1000))
@@ -1959,7 +2056,13 @@ class TestMaxRowsScannedCeiling:
 
         fixture = _with_a_view(_sized_fixture(curator=280_421, herbarium=1000))
         adapter = _EstimateCountingAdapter(fixture)
-        conn = replace(conn_config(tmp_path), max_rows_scanned=100_000)
+        conn = replace(
+            conn_config(tmp_path),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                read=ReadSettings(tables=ReadConfig(mode="sample", max_rows=100_000)),
+            ),
+        )
         Engine(adapter, conn, tmp_path).generate()
 
         assert "public.active_curators_v" not in adapter.estimate_calls
@@ -1970,7 +2073,13 @@ class TestMaxRowsScannedCeiling:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         fixture = _with_a_view(_sized_fixture(curator=None, herbarium=1000))
-        conn = replace(conn_config(tmp_path), max_rows_scanned=100_000)
+        conn = replace(
+            conn_config(tmp_path),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                read=ReadSettings(tables=ReadConfig(mode="sample", max_rows=100_000)),
+            ),
+        )
 
         with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
             Engine(MockAdapter(fixture), conn, tmp_path).generate()
@@ -1999,7 +2108,13 @@ class TestMaxRowsScannedCeiling:
         """A matview can carry an estimate, so an absent one is a state that can change."""
 
         fixture = self._with_a_matview(_sized_fixture(curator=280_421, herbarium=1000))
-        conn = replace(conn_config(tmp_path), max_rows_scanned=100_000)
+        conn = replace(
+            conn_config(tmp_path),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                read=ReadSettings(tables=ReadConfig(mode="sample", max_rows=100_000)),
+            ),
+        )
 
         with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
             Engine(MockAdapter(fixture), conn, tmp_path).generate()
@@ -2019,7 +2134,13 @@ class TestMaxRowsScannedCeiling:
 
         shutil.rmtree(tmp_path / "primary")
         with_ceiling = _with_a_view(_sized_fixture(curator=280_421, herbarium=1000))
-        conn = replace(conn_config(tmp_path), max_rows_scanned=100_000)
+        conn = replace(
+            conn_config(tmp_path),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                read=ReadSettings(tables=ReadConfig(mode="sample", max_rows=100_000)),
+            ),
+        )
         Engine(MockAdapter(with_ceiling), conn, tmp_path).generate()
 
         assert normalize_instants(baseline.read_text()) == baseline_text
@@ -2032,8 +2153,13 @@ class TestRecordedFreshnessThreshold:
 
     def test_each_entry_records_what_its_own_rules_resolved(self, tmp_path: Path) -> None:
         conn = replace(
-            conn_config(tmp_path, max_age_days=7),
-            rules=(RuleConfig(include=("public.curator",), max_age_days=30),),
+            conn_config(tmp_path, profile=ProfileConfig(freshness=FreshnessConfig(max_age_days=7))),
+            rules=(
+                RuleConfig(
+                    match=RuleMatch(tables=("public.curator",)),
+                    profile={"freshness": {"max_age_days": 30}},
+                ),
+            ),
         )
         Engine(MockAdapter(curator_fixture()), conn, tmp_path).generate()
 
@@ -2059,7 +2185,10 @@ class TestRecordedFreshnessThreshold:
 
         assert _thresholds(manifest) == {"public.curator": 7, "public.herbarium": 7}
 
-        raised = replace(conn_config(tmp_path), rules=(RuleConfig(max_age_days=30),))
+        raised = replace(
+            conn_config(tmp_path),
+            rules=(RuleConfig(profile={"freshness": {"max_age_days": 30}}),),
+        )
         result = Engine(MockAdapter(curator_fixture()), raised, tmp_path).generate()
 
         assert {t.status for t in result.tables} == {"skipped"}
@@ -2073,7 +2202,12 @@ class TestRecordedFreshnessThreshold:
         manifest = tmp_path / "primary" / "manifest.yaml"
         conn = replace(
             conn_config(tmp_path),
-            rules=(RuleConfig(include=("public.curator",), max_age_days=30),),
+            rules=(
+                RuleConfig(
+                    match=RuleMatch(tables=("public.curator",)),
+                    profile={"freshness": {"max_age_days": 30}},
+                ),
+            ),
         )
         result = Engine(_CuratorDdlFailingAdapter(curator_fixture()), conn, tmp_path).generate(
             GenerateRequest(force=True),
@@ -2091,7 +2225,10 @@ class TestRecordedFreshnessThreshold:
         _build_engine(tmp_path, curator_fixture()).generate()
         manifest = tmp_path / "primary" / "manifest.yaml"
 
-        narrowed = replace(conn_config(tmp_path), rules=(RuleConfig(max_age_days=30),))
+        narrowed = replace(
+            conn_config(tmp_path),
+            rules=(RuleConfig(profile={"freshness": {"max_age_days": 30}}),),
+        )
         Engine(MockAdapter(curator_fixture()), narrowed, tmp_path).generate(
             GenerateRequest(force=True, cli_include=("public.curator",)),
         )
@@ -2672,7 +2809,7 @@ class TestTotalFailure:
         # while curator has no entry, is extracted, and fails.
         primed = Engine(
             MockAdapter(curator_fixture()),
-            conn_config(tmp_path, include=("public.herbarium",)),
+            conn_config(tmp_path, tables=TablesConfig(include=("public.herbarium",))),
             tmp_path,
         )
         primed.generate()
@@ -2690,7 +2827,7 @@ class TestTotalFailure:
         assert result.exit_code == EXIT_PARTIAL
 
     def test_zero_matched_tables_is_not_total_failure(self, tmp_path: Path) -> None:
-        conn = conn_config(tmp_path, include=("nope.*",))
+        conn = conn_config(tmp_path, tables=TablesConfig(include=("nope.*",)))
         result = Engine(MockAdapter(curator_fixture()), conn, tmp_path).generate()
 
         assert result.tables == ()
@@ -2791,7 +2928,7 @@ class TestSelectors:
     def test_exclude_filters_tables(self, tmp_path: Path) -> None:
         fixture = curator_fixture()
         adapter = MockAdapter(fixture)
-        conn = conn_config(tmp_path, exclude=("public.herbarium",))
+        conn = conn_config(tmp_path, tables=TablesConfig(exclude=("public.herbarium",)))
         engine = Engine(adapter, conn, tmp_path)
         result = engine.generate()
         fqns = {t.fqn for t in result.tables}
@@ -2803,7 +2940,10 @@ class TestSelectors:
     ) -> None:
         """`--include '*'` is documented as unable to widen a run, so the two runs agree."""
 
-        narrow = replace(conn_config(tmp_path), include=("public.curator",))
+        narrow = replace(
+            conn_config(tmp_path),
+            tables=replace(conn_config(tmp_path).tables, include=("public.curator",)),
+        )
         Engine(MockAdapter(curator_fixture()), narrow, tmp_path).generate()
 
         flagged = Engine(MockAdapter(curator_fixture()), narrow, tmp_path).generate(
@@ -2819,7 +2959,7 @@ class TestSelectors:
         wide = conn_config(tmp_path)
         Engine(MockAdapter(curator_fixture()), wide, tmp_path).generate()
 
-        narrow = replace(wide, include=("public.curator",))
+        narrow = replace(wide, tables=replace(wide.tables, include=("public.curator",)))
         Engine(MockAdapter(curator_fixture()), narrow, tmp_path).generate(
             GenerateRequest(force=True, cli_include=("*",)),
         )
@@ -2833,7 +2973,10 @@ class TestSelectors:
     def test_both_artifacts_record_the_configured_scope(self, tmp_path: Path) -> None:
         """A recorded pattern the run could not have reached is a scope it never scanned."""
 
-        narrow = replace(conn_config(tmp_path), include=("public.curator",))
+        narrow = replace(
+            conn_config(tmp_path),
+            tables=replace(conn_config(tmp_path).tables, include=("public.curator",)),
+        )
         Engine(MockAdapter(curator_fixture()), narrow, tmp_path).generate(
             GenerateRequest(cli_include=("*",)),
         )
@@ -3402,7 +3545,10 @@ class TestStatisticDrift:
     ) -> None:
         """`cardinality_ratio` is scan-normalised, so a `scope` block cannot suppress it."""
 
-        sampled = replace(conn_config(tmp_path), rules=(RuleConfig(sample=0.5),))
+        sampled = replace(
+            conn_config(tmp_path),
+            rules=(RuleConfig(profile={"read": {"tables": {"mode": "sample", "fraction": 0.5}}}),),
+        )
         Engine(MockAdapter(curator_fixture()), sampled, tmp_path).generate()
         result = Engine(
             MockAdapter(_curator_with_moved_herbarium_id_stats_fixture()),
@@ -3533,8 +3679,11 @@ class TestStatisticDrift:
     ) -> None:
         conn = replace(
             conn_config(tmp_path),
-            redact=(RedactRule(columns=("*.herbarium_id",), with_="hash"),),
             redaction_salt="pepper",
+            profile=replace(
+                conn_config(tmp_path).profile,
+                redact=(RedactRule(columns=("*.herbarium_id",), with_="hash"),),
+            ),
         )
         Engine(MockAdapter(curator_fixture()), conn, tmp_path).generate()
         result = Engine(MockAdapter(curator_fixture()), conn, tmp_path).compute_diff()
@@ -3801,7 +3950,13 @@ class TestInferredForeignKeys:
         assert stats["columns"]["curator_id"]["classification"] == "foreign_key_candidate"
 
     def test_the_kill_switch_leaves_the_graph_declared_only(self, tmp_path: Path) -> None:
-        conn = replace(conn_config(tmp_path), infer_relationships=False)
+        conn = replace(
+            conn_config(tmp_path),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                relationships=RelationshipsProfile(infer=False),
+            ),
+        )
         Engine(MockAdapter(_inferrable_fixture()), conn, tmp_path).generate()
 
         assert self._refers_to(tmp_path, "specimen_loan") == []
@@ -3837,8 +3992,16 @@ class TestInferredForeignKeys:
         # specimen_loan is past its own 1-day threshold; curator stays inside the connection's 30.
         TestPerTableFreshnessSkip._age_manifest(tmp_path / "primary" / "manifest.yaml", days=3.0)
         conn = replace(
-            conn_config(tmp_path, max_age_days=30),
-            rules=(RuleConfig(include=("public.specimen_loan",), max_age_days=1),),
+            conn_config(
+                tmp_path,
+                profile=ProfileConfig(freshness=FreshnessConfig(max_age_days=30)),
+            ),
+            rules=(
+                RuleConfig(
+                    match=RuleMatch(tables=("public.specimen_loan",)),
+                    profile={"freshness": {"max_age_days": 1}},
+                ),
+            ),
         )
         result = Engine(MockAdapter(_inferrable_fixture()), conn, tmp_path).generate()
 
@@ -4337,7 +4500,12 @@ class TestMeasuredOverlap:
         fixture["public.parent"] = replace(fixture["public.parent"], rows_scanned=5)
         conn = replace(
             conn_config(tmp_path),
-            rules=(RuleConfig(include=("public.child", "public.parent"), sample=0.5),),
+            rules=(
+                RuleConfig(
+                    match=RuleMatch(tables=("public.child", "public.parent")),
+                    profile={"read": {"tables": {"mode": "sample", "fraction": 0.5}}},
+                ),
+            ),
         )
         Engine(MockAdapter(fixture), conn, tmp_path).generate()
 
@@ -4444,7 +4612,12 @@ class TestObservedBlock:
         fixture["public.child"] = replace(fixture["public.child"], rows_scanned=20)
         conn = replace(
             conn_config(tmp_path),
-            rules=(RuleConfig(include=("public.child",), sample=0.5),),
+            rules=(
+                RuleConfig(
+                    match=RuleMatch(tables=("public.child",)),
+                    profile={"read": {"tables": {"mode": "sample", "fraction": 0.5}}},
+                ),
+            ),
         )
         Engine(MockAdapter(fixture), conn, tmp_path).generate()
         edge = self._refers_to(tmp_path, "child")[0]
@@ -4512,8 +4685,11 @@ class TestKeySketch:
     def test_a_redacted_join_key_carries_no_sketch(self, tmp_path: Path) -> None:
         conn = replace(
             conn_config(tmp_path),
-            redact=(RedactRule(columns=("*.parent_id",), with_="hash"),),
             redaction_salt="pepper",
+            profile=replace(
+                conn_config(tmp_path).profile,
+                redact=(RedactRule(columns=("*.parent_id",), with_="hash"),),
+            ),
         )
         Engine(MockAdapter(_observed_fixture()), conn, tmp_path).generate()
 
@@ -4524,7 +4700,12 @@ class TestKeySketch:
         fixture["public.child"] = replace(fixture["public.child"], rows_scanned=20)
         conn = replace(
             conn_config(tmp_path),
-            rules=(RuleConfig(include=("public.child",), sample=0.5),),
+            rules=(
+                RuleConfig(
+                    match=RuleMatch(tables=("public.child",)),
+                    profile={"read": {"tables": {"mode": "sample", "fraction": 0.5}}},
+                ),
+            ),
         )
         Engine(MockAdapter(fixture), conn, tmp_path).generate()
 
@@ -4557,7 +4738,17 @@ class TestWidenedSketchCandidates:
     def _conn(tmp_path: Path, *, sketch_all_columns: bool = False) -> ConnectionConfig:
         conn = conn_config(tmp_path, enumeration_threshold=SPEC_SKETCH_K + 10)
 
-        return replace(conn, sketch_all_columns=sketch_all_columns) if sketch_all_columns else conn
+        return (
+            replace(
+                conn,
+                profile=replace(
+                    conn.profile,
+                    sketches=SketchesProfile(columns="all" if sketch_all_columns else "required"),
+                ),
+            )
+            if sketch_all_columns
+            else conn
+        )
 
     def test_a_declared_unique_column_above_k_carries_a_sketch(self, tmp_path: Path) -> None:
         Engine(
@@ -4823,8 +5014,11 @@ class TestNormalizedCardinality:
 
         conn = replace(
             conn_config(tmp_path),
-            redact=(RedactRule(columns=("*.parent_code",), with_="hash"),),
             redaction_salt="pepper",
+            profile=replace(
+                conn_config(tmp_path).profile,
+                redact=(RedactRule(columns=("*.parent_code",), with_="hash"),),
+            ),
         )
         Engine(MockAdapter(_folded_fixture()), conn, tmp_path).generate()
         col = self._stats(tmp_path, "child")["columns"]["parent_code"]
@@ -4839,7 +5033,12 @@ class TestNormalizedCardinality:
         fixture["public.child"] = replace(fixture["public.child"], rows_scanned=20)
         conn = replace(
             conn_config(tmp_path),
-            rules=(RuleConfig(include=("public.child",), sample=0.5),),
+            rules=(
+                RuleConfig(
+                    match=RuleMatch(tables=("public.child",)),
+                    profile={"read": {"tables": {"mode": "sample", "fraction": 0.5}}},
+                ),
+            ),
         )
         Engine(MockAdapter(fixture), conn, tmp_path).generate()
 
@@ -5086,8 +5285,16 @@ class TestCatalogReadsPerRun:
         _build_engine(tmp_path, curator_fixture()).generate()
         TestPerTableFreshnessSkip._age_manifest(tmp_path / "primary" / "manifest.yaml", days=3.0)
         conn = replace(
-            conn_config(tmp_path, max_age_days=30),
-            rules=(RuleConfig(include=("public.curator",), max_age_days=1),),
+            conn_config(
+                tmp_path,
+                profile=ProfileConfig(freshness=FreshnessConfig(max_age_days=30)),
+            ),
+            rules=(
+                RuleConfig(
+                    match=RuleMatch(tables=("public.curator",)),
+                    profile={"freshness": {"max_age_days": 1}},
+                ),
+            ),
         )
         adapter = _ColumnCountingAdapter(curator_fixture())
         result = Engine(adapter, conn, tmp_path).generate()
@@ -5101,7 +5308,13 @@ class TestCatalogReadsPerRun:
     def test_inference_off_leaves_extraction_as_the_only_reader(self, tmp_path: Path) -> None:
         """No pre-pass runs, so each profiled table is read where it always was."""
 
-        conn = replace(conn_config(tmp_path), infer_relationships=False)
+        conn = replace(
+            conn_config(tmp_path),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                relationships=RelationshipsProfile(infer=False),
+            ),
+        )
         adapter = _ColumnCountingAdapter(curator_fixture())
         Engine(adapter, conn, tmp_path).generate()
 
@@ -5814,7 +6027,7 @@ class TestListingSharingNothingWithTheBaseline:
 
     def test_a_baseline_wholly_outside_the_scope_is_not_refused(self, tmp_path: Path) -> None:
         self._printed(tmp_path)
-        conn = conn_config(tmp_path, include=("other.*",))
+        conn = conn_config(tmp_path, tables=TablesConfig(include=("other.*",)))
         result = Engine(MockAdapter({}), conn, tmp_path).generate(GenerateRequest(force=True))
 
         assert result.exit_code == EXIT_OK
@@ -5990,7 +6203,7 @@ class TestARemovedTableLeavesNoProducerFileBehind:
         root = self._printed(tmp_path)
         engine = Engine(
             MockAdapter(self._without_herbarium()),
-            conn_config(tmp_path, exclude=exclude),
+            conn_config(tmp_path, tables=TablesConfig(exclude=exclude)),
             tmp_path,
         )
 
@@ -6033,7 +6246,7 @@ class TestARemovedTableLeavesNoProducerFileBehind:
     def test_a_carried_entry_dropped_for_a_missing_artifact_is_swept(self, tmp_path: Path) -> None:
         root = self._printed(tmp_path)
         (root / "public" / "herbarium" / "statistics.yaml").unlink()
-        conn = conn_config(tmp_path, exclude=("public.herbarium",))
+        conn = conn_config(tmp_path, tables=TablesConfig(exclude=("public.herbarium",)))
         Engine(MockAdapter(self._without_herbarium()), conn, tmp_path).generate()
 
         assert not (root / "public" / "herbarium").exists()
@@ -6294,8 +6507,8 @@ class TestAnEdgeWithACarriedEndpointMatchesAFullRun:
         con.execute("CREATE TABLE plot_a AS SELECT i AS id FROM range(200) r(i)")
         con.execute("CREATE TABLE plot_b AS SELECT i AS id FROM range(300) r(i)")
         con.execute(
-            "CREATE TABLE sowing AS SELECT i AS id, i % 150 AS plot_a_ref, "
-            "i % 250 AS plot_b_ref FROM range(1000) r(i)",
+            "CREATE TABLE sowing AS SELECT i AS id, i % 150 AS plot_a_id, "
+            "i % 250 AS plot_b_id FROM range(1000) r(i)",
         )
         con.close()
         conn = ConnectionConfig(name="g", adapter="duckdb", output=tmp_path / "prints")

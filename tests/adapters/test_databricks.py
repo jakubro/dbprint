@@ -14,6 +14,7 @@ import yaml
 from dbprint.adapters import DatabricksAdapter, StatisticsConfig
 from dbprint.adapters.databricks.introspect import UnmappedTableType
 from dbprint.adapters.identifiers import table_meta
+from dbprint.config import TablesConfig
 from dbprint.engine import Engine
 from dbprint.spec.sketch import low64_md5
 from tests._engine_run import conformance_errors
@@ -508,7 +509,7 @@ class TestAnsiIntervalsAreMeasuredAsText:
             adapter="databricks",
             output=tmp_path,
             auto=True,
-            include=(f"*.{table}",),
+            tables=TablesConfig(include=(f"*.{table}",)),
         )
         Engine(_databricks_adapter(cursor), conn_config, tmp_path).generate()
         errors = conformance_errors(tmp_path / "primary")

@@ -128,70 +128,26 @@ def test_an_excluded_foreign_table_is_not_listed(
     assert not [fqn for fqn in manifest if fqn.endswith(".remote_storage_log")]
 
 
-def test_an_opted_in_foreign_table_is_read_through_the_wrapper(
+@pytest.mark.parametrize("read", ["{mode: full}", "{mode: filter, filter: id > 1}"])
+def test_an_explicit_read_of_a_foreign_table_is_refused_before_any_table_is_read(
     fdw_db: dict[str, str],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    read: str,
 ) -> None:
     before = _seq_scans(fdw_db)
-    rules = '    rules:\n      - include: ["*.remote_storage_log"]\n        read_rows: true\n'
-    result, prints = _generate(fdw_db, tmp_path, monkeypatch, rules)
-    manifest = yaml.safe_load((prints / "manifest.yaml").read_text())["tables"]
-    statistics = _artifact(
-        prints,
-        manifest,
-        _fqn(manifest, "remote_storage_log"),
-        "statistics.yaml",
-    )
-
-    assert result.exit_code in (0, 3), result.output
-    assert statistics["row_count"] == 50
-    assert statistics["external"] is True
-    assert _seq_scans(fdw_db) > before
-    assert_conformant(prints)
-
-
-def test_an_analyzed_large_foreign_table_draws_no_tablesample(
-    fdw_db: dict[str, str],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    with pg_connect(fdw_db) as conn:
-        conn.execute(
-            "INSERT INTO seedbank.storage_log SELECT g, g % 7, now() FROM generate_series(51, 30000) g",
-        )
-        conn.execute("ANALYZE seedbank.remote_storage_log")
-
-    rules = '    rules:\n      - include: ["*.remote_storage_log"]\n        read_rows: true\n'
-    result, prints = _generate(fdw_db, tmp_path, monkeypatch, rules)
-    manifest = yaml.safe_load((prints / "manifest.yaml").read_text())["tables"]
-    statistics = _artifact(
-        prints,
-        manifest,
-        _fqn(manifest, "remote_storage_log"),
-        "statistics.yaml",
-    )
-
-    assert result.exit_code in (0, 3), result.output
-    assert statistics["row_count"] == 30000
-
-
-def test_a_sample_on_an_opted_in_foreign_table_fails_it_alone(
-    fdw_db: dict[str, str],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
     rules = (
-        '    rules:\n      - include: ["*.remote_storage_log"]\n        read_rows: true\n'
-        "        sample: 0.1\n"
+        '    rules:\n      - match: {tables: ["*.remote_storage_log"]}\n'
+        f"        profile: {{read: {{tables: {read}}}}}\n"
     )
     result, prints = _generate(fdw_db, tmp_path, monkeypatch, rules)
-    manifest = yaml.safe_load((prints / "manifest.yaml").read_text())["tables"]
 
-    assert result.exit_code == 5, result.output
-    assert "cannot be sampled (TABLESAMPLE applies to local tables only)" in result.output
-    assert "narrow it with a filter rule instead" in result.output
-    assert _fqn(manifest, "herbarium")
+    assert result.exit_code == 1, result.output
+    assert "connections.fdw.rules[0].profile.read.tables.mode" in result.output
+    assert "is not valid for external table" in result.output
+    assert "on postgres" in result.output
+    assert not (prints / "manifest.yaml").exists()
+    assert _seq_scans(fdw_db) == before
 
 
 def _generate(
@@ -202,7 +158,12 @@ def _generate(
     exclude: tuple[str, ...] = ("*.storage_log", "*.field_survey_src"),
 ) -> tuple[Any, Path]:
     project = tmp_path / "project"
-    write_project(project, "fdw", "postgres", f"    exclude: {list(exclude)}\n{rules}")
+    write_project(
+        project,
+        "fdw",
+        "postgres",
+        f"    tables:\n      exclude: {list(exclude)}\n{rules}",
+    )
     monkeypatch.chdir(project)
 
     for key, value in creds.items():

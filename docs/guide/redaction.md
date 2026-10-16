@@ -12,13 +12,14 @@ An entry covers a column matching **any** of its three criteria. Entries apply i
 # .dbprint.yaml
 connections:
   primary:
-    redact:
-      - columns: ["arboretum.seedbank.collector.email", "arboretum.seedbank.*.*_address"]
-        with: mask
-      - sensitivity: [personal_name, national_id]
-        with: drop
-      - looks_like: [email]
-        with: hash
+    profile:
+      redact:
+        - columns: ["arboretum.seedbank.collector.email", "arboretum.seedbank.*.*_address"]
+          with: mask
+        - sensitivity: [personal_name, national_id]
+          with: drop
+        - looks_like: [email]
+          with: hash
 ```
 
 | Criterion | Matches on | Use it for |
@@ -56,11 +57,22 @@ or as `DBPRINT_PRIMARY_REDACTION_SALT` in the environment, which is how CI suppl
 
 Keep it stable for the life of the project. Rotating it changes every hashed value in every column at once, and `dbprint diff` reports all of them as movement.
 
-## Cascade, and the direction it only goes in
+## `defaults` and a connection's own list
 
-`redact` concatenates rather than overrides: the `defaults` entries are walked first, then the connection's own, and the last matching entry decides the primitive.
+`profile.redact` is a list, so a connection that sets its own replaces the one in `defaults` whole — any `defaults` entry it does not repeat no longer covers its columns, because no primitive means "not redacted". To keep a project-wide entry in every connection, anchor it once under the root `x-shared` key and list it with an alias wherever it applies:
 
-So a connection can change what a project-wide rule applies to a column — `mask` to `hash` — but it cannot lift the coverage, because no primitive means "not redacted". A connection that has to stay unredacted is one whose rule does not belong in `defaults` in the first place.
+```yaml
+x-shared:
+  mask_contact: &mask_contact {sensitivity: [contact], with: mask}
+
+connections:
+  primary:
+    profile:
+      redact:
+        - *mask_contact
+        - columns: ["arboretum.seedbank.collector.institution"]
+          with: hash
+```
 
 ## Three things redaction does not change
 

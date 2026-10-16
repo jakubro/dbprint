@@ -5,6 +5,7 @@ A PyYAML build without libyaml falls back to the pure-Python parser, which is sl
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 import yaml
@@ -17,7 +18,23 @@ class ArtifactLoader(_BASE):
     """PyYAML's safe constructors over the fastest parser available; custom loaders subclass it."""
 
 
+class ExactLoader(ArtifactLoader):
+    """Reads every float as the `Decimal` its text spells, so a rewrite keeps digits past binary64."""
+
+
 def load(text: str, *, loader: type[ArtifactLoader] = ArtifactLoader) -> Any:
     """Parse one artifact's text; raises `yaml.YAMLError` exactly as `yaml.safe_load` does."""
 
     return yaml.load(text, Loader=loader)
+
+
+def _construct_exact_float(loader: ArtifactLoader, node: yaml.ScalarNode) -> Any:
+    text = loader.construct_scalar(node)
+
+    try:
+        return Decimal(text.replace("_", ""))
+    except ArithmeticError:
+        return loader.construct_yaml_float(node)
+
+
+ExactLoader.add_constructor("tag:yaml.org,2002:float", _construct_exact_float)

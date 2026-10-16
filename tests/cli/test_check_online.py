@@ -39,8 +39,10 @@ from tests._prints import (
 
 PROJECT_BASE = """\
 defaults:
-  max_age_days: 7
-  statistics: {}
+  profile:
+    freshness:
+      max_age_days: 7
+    statistics: {}
   diff: {}
 connections:
   primary:
@@ -85,12 +87,19 @@ def _seed_clean_print(tmp_path: Path, committed_print: Path) -> Path:
         "connection": "primary",
         "adapter": "postgres",
         "dbprint_version": "0.1.0",
-        "statistics_params": {
-            "enumeration_threshold": 50,
-            "top_n_values": 30,
-            "top_n_null_patterns": 20,
-            "looks_like_sample_size": 1000,
-            "percentiles": [1, 25, 50, 75, 99],
+        "profile": {
+            "read": {"tables": {"mode": "full"}, "views": {"mode": "catalog"}},
+            "statistics": {
+                "enumeration_threshold": 50,
+                "top_n_values": 30,
+                "percentiles": [1, 25, 50, 75, 99],
+            },
+            "looks_like": {"enabled": True, "sample_size": 1000},
+            "null_patterns": {"enabled": True, "top_n": 20},
+            "parts": {"enabled": True, "max": 20, "max_depth": 3},
+            "timeline": {"enabled": True},
+            "sketches": {"enabled": True, "columns": "required"},
+            "relationships": {"infer": True},
         },
         "selectors": {"include": ["*"], "exclude": []},
         "redaction_rules_configured": 0,
@@ -1032,98 +1041,6 @@ class TestDriftCountSurvivesALateAssertionConnectionFailure:
         assert data[0]["online_disposition"] == "assertions_connection_failed"
 
 
-CONTRADICTORY_RULES = """\
-    rules:
-      - include: ["*"]
-        sample: 0.1
-      - include: ["fixture.shape_probe"]
-        filter: "probe_id > 0"
-    assertions:
-      queries:
-        - name: bad
-          sql: SELECT 7
-          expect: 0
-"""
-
-
-class TestARefusedTableDoesNotCostTheConnectionItsOnlinePhase:
-    """One table its own rules contradict is reported; the connection is still verified."""
-
-    def _run(
-        self,
-        tmp_path: Path,
-        committed_print: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        *args: str,
-    ):
-        (tmp_path / ".dbprint.yaml").write_text(_project_with_assertions(CONTRADICTORY_RULES))
-        _seed_clean_print(tmp_path, committed_print)
-        monkeypatch.chdir(tmp_path)
-
-        for k, v in credential_env().items():
-            monkeypatch.setenv(k, v)
-
-        with _patch_registry():
-            return CliRunner().invoke(main, ["check", "--online", *args])
-
-    def test_the_online_phase_runs(
-        self,
-        tmp_path: Path,
-        committed_print: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The failing SQL assertion is only reachable online, so exit 6 proves it ran."""
-
-        result = self._run(tmp_path, committed_print, monkeypatch)
-
-        assert result.exit_code == 6, result.output
-
-    def test_the_refused_table_is_still_reported(
-        self,
-        tmp_path: Path,
-        committed_print: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        result = self._run(tmp_path, committed_print, monkeypatch, "--format", "json")
-        payload = json.loads(result.stdout)[0]
-
-        assert [n["subject"] for n in payload["not_run"]] == ["fixture.shape_probe"]
-
-    def test_a_conformance_error_still_suppresses_the_online_phase(
-        self,
-        tmp_path: Path,
-        committed_print: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The narrowing is to the refusal trigger, not to the gate."""
-
-        (tmp_path / ".dbprint.yaml").write_text(
-            _project_with_assertions(
-                """\
-    assertions:
-      queries:
-        - name: bad
-          sql: SELECT 7
-          expect: 0
-""",
-            ),
-        )
-        prints = _seed_clean_print(tmp_path, committed_print)
-        stats_path = prints / "fixture" / "shape_probe" / "statistics.yaml"
-        stats = yaml.safe_load(stats_path.read_text())
-        stats["columns"]["probe_id"]["cardinality"] = 9999
-        stats_path.write_text(yaml.safe_dump(stats))
-        monkeypatch.chdir(tmp_path)
-
-        for k, v in credential_env().items():
-            monkeypatch.setenv(k, v)
-
-        with _patch_registry():
-            result = CliRunner().invoke(main, ["check", "--online"])
-
-        assert result.exit_code == 1, result.output
-
-
 def _vault_table() -> MockTable:
     """`seedbank.vault` - the print's real 6-column storage-site table."""
 
@@ -1481,66 +1398,6 @@ class TestAPartialOnlineScanIsReported:
 
         assert result.exit_code == 5
         assert "seedbank.vault" in result.stderr
-
-
-CONTRADICTORY_RULES_ONLINE = """\
-    rules:
-      - include: ["*"]
-        sample: 0.1
-      - include: ["seedbank.vault"]
-        filter: "vault_id > 0"
-"""
-
-
-class _RefusedTablePartiallyFailingAdapter(_PartiallyFailingAdapter):
-    """Same as `_PartiallyFailingAdapter`; also refused offline by a contradictory cascade."""
-
-
-class TestTheSameTableIsNotReportedTwice:
-    """A table refused offline and failed per-table online is one `not_run` entry: both
-    `thresholds.resolve` and the engine's `_process_table` would produce one, and the
-    engine's is kept.
-    """
-
-    def _run(self, tmp_path: Path, committed_print: Path, monkeypatch: pytest.MonkeyPatch):
-        (tmp_path / ".dbprint.yaml").write_text(
-            _project_with_assertions(CONTRADICTORY_RULES_ONLINE),
-        )
-        _seed_two_table_print(tmp_path, committed_print)
-        monkeypatch.chdir(tmp_path)
-
-        for k, v in credential_env().items():
-            monkeypatch.setenv(k, v)
-
-        with patch_registry({"postgres": _RefusedTablePartiallyFailingAdapter}):
-            return CliRunner().invoke(main, ["check", "--online", "--format", "json"])
-
-    def test_the_table_appears_once(
-        self,
-        tmp_path: Path,
-        committed_print: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        result = self._run(tmp_path, committed_print, monkeypatch)
-        payload = json.loads(result.stdout)[0]
-        subjects = [n["subject"] for n in payload["not_run"]]
-
-        assert subjects.count("seedbank.vault") == 1
-
-    def test_the_kept_entry_is_the_engines(
-        self,
-        tmp_path: Path,
-        committed_print: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The kept cause is the online producer's, not the offline resolver's rules prose."""
-
-        result = self._run(tmp_path, committed_print, monkeypatch)
-        payload = json.loads(result.stdout)[0]
-        entry = next(n for n in payload["not_run"] if n["subject"] == "seedbank.vault")
-
-        assert "online scan" in entry["cause"]
-        assert "rules[" not in entry["cause"]
 
 
 def _age_the_print(prints: Path, days: int) -> None:

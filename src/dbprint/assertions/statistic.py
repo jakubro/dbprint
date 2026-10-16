@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from dbprint.conformance.issue import Issue
-from dbprint.spec.absence import read_column_field, read_table_block
+from dbprint.spec.absence import disabled_of, read_column_field, read_table_block
 from dbprint.spec.predicate import (
     MalformedPredicate,
     Outcome,
@@ -101,6 +101,7 @@ def _evaluate_table(
 
     columns_stats = table_stats.get("columns") or {}
     scope = scope_of(table_stats)
+    disabled = disabled_of(table_stats)
 
     for col_name, col_preds in predicates.columns.items():
         col_stats = columns_stats.get(col_name)
@@ -127,6 +128,7 @@ def _evaluate_table(
                     raw,
                     col_stats,
                     scope,
+                    disabled,
                 ),
             )
 
@@ -141,6 +143,7 @@ def _check_column_predicate(
     raw: Any,
     col_stats: dict[str, Any],
     scope: ScanScope | None = None,
+    disabled: frozenset[str] = frozenset(),
 ) -> list[Issue]:
     """Evaluate one column predicate; emit at most one Issue."""
 
@@ -185,7 +188,7 @@ def _check_column_predicate(
             ),
         ]
 
-    ref = resolve_stat(col_stats, stat, scope)
+    ref = resolve_stat(col_stats, stat, scope, disabled=disabled)
     inapplicable = inapplicable_reason(col_stats, column, stat, predicate, ref)
 
     if inapplicable is not None:

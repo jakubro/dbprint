@@ -128,6 +128,72 @@ def _check_ineligible_target(data: dict, path: str) -> list[Issue]:
     ]
 
 
+def check_disabled_edges(print_root: Path, manifest_data: dict) -> list[Issue]:
+    """SPEC 2.2.21: no inferred edge leaves an object with inference switched off, and no
+    measured edge touches one with sketches switched off.
+    """
+
+    tables = walkable_tables(manifest_data)
+    disabled: dict[str, set[str]] = {}
+    edges: list[tuple[str, int, dict]] = []
+
+    for tbl_fqn, tbl_entry in tables.items():
+        artifacts = declared_artifacts(tbl_entry)
+        directory = print_root / tbl_entry.get("path", "")
+        statistics = (
+            _load_mapping(directory / artifacts["statistics"])
+            if "statistics" in artifacts
+            else None
+        )
+        named = (statistics or {}).get("disabled")
+        disabled[tbl_fqn] = (
+            {n for n in named if isinstance(n, str)} if isinstance(named, list) else set()
+        )
+        relationships = (
+            _load_mapping(directory / artifacts["relationships"])
+            if "relationships" in artifacts
+            else None
+        )
+
+        for j, entry in enumerate((relationships or {}).get("refers_to") or []):
+            if isinstance(entry, dict):
+                edges.append((tbl_fqn, j, entry))
+
+    issues: list[Issue] = []
+
+    for tbl_fqn, j, entry in edges:
+        where = f"{tables[tbl_fqn].get('path', '')}/relationships.yaml::refers_to[{j}]"
+        detection = entry.get("detection")
+
+        if detection == "inferred" and "relationships.infer" in disabled[tbl_fqn]:
+            issues.append(
+                Issue(
+                    where,
+                    "relationships.inferred-edge-under-disabled",
+                    "error",
+                    f"{tbl_fqn} switches naming inference off but carries an inferred edge.",
+                    "§2.2.21",
+                ),
+            )
+
+        endpoints = (tbl_fqn, entry.get("target_table"))
+
+        if detection == "measured" and any(
+            "sketches" in disabled.get(str(fqn), set()) for fqn in endpoints
+        ):
+            issues.append(
+                Issue(
+                    where,
+                    "relationships.measured-edge-under-disabled",
+                    "error",
+                    "a measured edge has an endpoint whose sketches are switched off.",
+                    "§2.2.21",
+                ),
+            )
+
+    return issues
+
+
 def check_reciprocity(
     print_root: Path,
     manifest_data: dict,

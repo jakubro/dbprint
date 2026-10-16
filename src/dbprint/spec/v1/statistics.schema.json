@@ -127,6 +127,9 @@
     "unmeasured": {
       "$ref": "#/$defs/TableUnmeasured"
     },
+    "disabled": {
+      "$ref": "#/$defs/Disabled"
+    },
     "timeline": {
       "$ref": "#/$defs/Timeline"
     },
@@ -876,6 +879,34 @@
         ]
       }
     },
+    "SourceColumn": {
+      "description": "SPEC 2.2.4: one column a column is traced to - its table's FQN and its name.",
+      "type": "object",
+      "required": [
+        "table",
+        "column"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "table": {
+          "type": "string",
+          "minLength": 1
+        },
+        "column": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "DerivedFrom": {
+      "description": "SPEC 2.2.4: the columns this column's defining SELECT copies or computes it from, sorted by (table, column), unique.",
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/SourceColumn"
+      }
+    },
     "CatalogOnlyColumn": {
       "type": "object",
       "additionalProperties": false,
@@ -903,6 +934,9 @@
         },
         "physical_layout_key": {
           "const": true
+        },
+        "derived_from": {
+          "$ref": "#/$defs/DerivedFrom"
         }
       }
     },
@@ -1066,6 +1100,9 @@
         "occurrences": {
           "type": "integer",
           "minimum": 0
+        },
+        "derived_from": {
+          "$ref": "#/$defs/DerivedFrom"
         }
       },
       "allOf": [
@@ -1308,6 +1345,13 @@
           "not": {
             "required": [
               "physical_layout_key"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "derived_from"
             ]
           }
         },
@@ -4365,6 +4409,23 @@
       "items": {
         "type": "string",
         "pattern": "^(min|max|p[0-9]{2})$"
+      }
+    },
+    "Disabled": {
+      "description": "SPEC 2.2.21: the optional measurements configuration switched off for this object, sorted. Each named measurement's fields and blocks MUST be absent - the conformance validator carries that half. Omitted entirely when nothing was switched off.",
+      "type": "array",
+      "uniqueItems": true,
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "enum": [
+          "looks_like",
+          "null_patterns",
+          "parts",
+          "relationships.infer",
+          "sketches",
+          "timeline"
+        ]
       }
     },
     "TableUnmeasured": {

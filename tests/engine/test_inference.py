@@ -627,6 +627,9 @@ def _candidate(
     *,
     sql_type: str = "integer",
     cardinality: int | None = None,
+    declared_key: bool = False,
+    candidate_key: bool = False,
+    dense: bool = False,
 ) -> SketchCandidate:
     return SketchCandidate(
         fqn=fqn,
@@ -634,11 +637,14 @@ def _candidate(
         sql_type=sql_type,
         cardinality=cardinality if cardinality is not None else len(sketch),
         sketch=sketch,
+        declared_key=declared_key,
+        candidate_key=candidate_key,
+        dense=dense,
     )
 
 
 class TestValueDerivedEdges:
-    """SPEC 2.3.11: an edge proposed from measured containment, independent of either name."""
+    """SPEC 2.3.11: an edge proposed from measured containment; a name decides one child case."""
 
     def test_a_strict_exhaustive_subset_is_proposed(self) -> None:
         child = _candidate("public.a", "linked_ref", (2, 3))
@@ -783,3 +789,62 @@ class TestValueDerivedEdges:
 
         assert infer_value_derived_edges([left], [right], frozenset()) == {}
         assert infer_value_derived_edges([right], [left], frozenset()) == {}
+
+
+class TestAMeasuredChildIsAReferenceNotAKey:
+    """SPEC 2.3.11 floor 1: unrelated id sequences and timestamps overlap by construction."""
+
+    PARENT = _candidate("public.b", "id", (1, 2, 3, 4, 5), declared_key=True)
+
+    def test_a_declared_key_of_its_own_table_proposes_nothing(self) -> None:
+        child = _candidate("public.a", "herbarium_id", (2, 3), declared_key=True)
+
+        assert infer_value_derived_edges([child], [self.PARENT], frozenset()) == {}
+
+    def test_a_measured_key_not_named_as_a_reference_proposes_nothing(self) -> None:
+        child = _candidate("public.a", "id", (2, 3), candidate_key=True)
+
+        assert infer_value_derived_edges([child], [self.PARENT], frozenset()) == {}
+
+    def test_a_measured_key_named_as_a_reference_is_proposed(self) -> None:
+        child = _candidate("public.a", "herbarium_id", (2, 3), candidate_key=True)
+        out = infer_value_derived_edges([child], [self.PARENT], frozenset())
+
+        assert [(fk.column, fk.target_table) for fk in out["public.a"]] == [
+            (("herbarium_id",), "public.b"),
+        ]
+
+    @pytest.mark.parametrize("sql_type", ["timestamp", "date"])
+    def test_a_temporal_child_is_never_compared(self, sql_type: str) -> None:
+        child = _candidate("public.a", "withdrawn_at", (2, 3), sql_type=sql_type)
+        parent = _candidate("public.b", "matures_at", (1, 2, 3, 4), sql_type=sql_type)
+
+        assert infer_value_derived_edges([child], [parent], frozenset()) == {}
+
+
+class TestADenseParentAdmitsOnlyANamedReference:
+    """SPEC 2.3.11 rule 1: every small integer falls inside a gapless sequence."""
+
+    DENSE = _candidate("public.taxon", "taxon_id", (1, 2, 3, 4, 5), declared_key=True, dense=True)
+    GAPPED = _candidate("public.taxon", "taxon_id", (1, 2, 3, 4, 5), declared_key=True)
+
+    def test_a_count_column_into_a_dense_parent_proposes_nothing(self) -> None:
+        child = _candidate("public.trial", "sown_count", (2, 3))
+
+        assert infer_value_derived_edges([child], [self.DENSE], frozenset()) == {}
+
+    def test_an_id_named_child_into_a_dense_parent_is_proposed(self) -> None:
+        child = _candidate("public.trial", "taxon_id", (2, 3))
+        out = infer_value_derived_edges([child], [self.DENSE], frozenset())
+
+        assert [(fk.column, fk.target_table) for fk in out["public.trial"]] == [
+            (("taxon_id",), "public.taxon"),
+        ]
+
+    def test_any_child_into_a_gapped_parent_is_proposed(self) -> None:
+        child = _candidate("public.trial", "sown_count", (2, 3))
+        out = infer_value_derived_edges([child], [self.GAPPED], frozenset())
+
+        assert [(fk.column, fk.target_table) for fk in out["public.trial"]] == [
+            (("sown_count",), "public.taxon"),
+        ]

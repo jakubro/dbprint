@@ -20,6 +20,7 @@ from dbprint.spec.looks_like import (
     _CURRENCY_CODES,
     LooksLike,
     LooksLikeMatch,
+    _assign,
     _match_prose,
     detect,
     detect_with_evidence,
@@ -593,7 +594,7 @@ class TestFinancialIdentifiers:
         """~10% of a sequential-id column passes Luhn by chance; 0.10 cannot clear 0.95."""
 
         sample = [f"411111111100{i:04d}" for i in range(30)]
-        assert sum(detect([v]) == "card_number" for v in sample) == 3
+        assert sum(_assign(v) == "card_number" for v in sample) == 3
         assert detect(sample) is None
 
     @pytest.mark.parametrize(
@@ -991,8 +992,11 @@ class TestIso8601DateAndDatetime:
 
         assert detect(_repeat("20240115")) == "numeric_string"
 
-    def test_a_slash_separated_date_stays_path(self) -> None:
-        assert detect(_repeat("01/15/2024")) == "path"
+    @pytest.mark.parametrize("value", ["01/15/2024", "07/11/2025", "2025/11/07", "7/11/25"])
+    def test_a_slash_separated_date_reports_nothing(self, value: str) -> None:
+        """No pattern claims a slash date, so the honest verdict is none - never `path`."""
+
+        assert detect_with_evidence(_repeat(value)) == LooksLikeMatch(None, 30, 0)
 
     def test_a_week_date_is_not_detected(self) -> None:
         """ISO 8601's own week-date form (year, week, weekday) - unclaimed either way."""
@@ -1159,6 +1163,17 @@ class TestPathDoesNotSubsumeDenserPatterns:
 
         assert detect(_repeat("report/42")) == "path"
 
+    @pytest.mark.parametrize("value", ["3/4", "12/40/7", "/2025/11/07"])
+    def test_a_chain_of_all_digit_segments_is_not_a_path(self, value: str) -> None:
+        assert detect(_repeat(value)) != "path"
+
+    @pytest.mark.parametrize(
+        "value",
+        ["usr/local/bin", "/var/log/app.log", "images/2025/11/a.png", "v1/users"],
+    )
+    def test_a_path_with_one_named_segment_is_still_a_path(self, value: str) -> None:
+        assert detect(_repeat(value)) == "path"
+
 
 class TestDetectWithEvidence:
     """The draw size and the winning pattern's tally, beside the same verdict `detect` returns."""
@@ -1301,7 +1316,7 @@ class TestNearMiss:
     ],
 )
 def test_a_single_value_at_each_matchers_boundary(value: str, expected: str | None) -> None:
-    assert detect([value]) == expected
+    assert _assign(value) == expected
 
 
 def test_a_value_every_structural_shape_rejects_can_still_be_refused_as_prose() -> None:
@@ -1337,3 +1352,109 @@ class TestBinaryContentKinds:
         sample = [bytearray(b"GIF87a.."), memoryview(b"GIF89a.."), b"GIF89a.."]
 
         assert detect(sample) == "gif"
+
+
+class TestClosedListsNeedMoreThanMembership:
+    """Two-letter codes sit in the alpha-2 set by chance; a short sample needs the name to agree."""
+
+    @pytest.mark.parametrize("values", [["ne", "se"], ["id"], ["MC"]])
+    def test_a_short_code_list_with_no_country_word_reports_nothing(
+        self,
+        values: list[str],
+    ) -> None:
+        assert detect(values) is None
+
+    @pytest.mark.parametrize(
+        ("values", "column_name"),
+        [
+            (["us", "ca", "pr", "vi"], "country_code"),
+            (["GB", "US", "AU"], "provenance_country"),
+            (["DE", "FR"], "shipToCountry"),
+        ],
+    )
+    def test_a_short_list_named_for_a_country_is_a_country_code(
+        self,
+        values: list[str],
+        column_name: str,
+    ) -> None:
+        assert detect(values, column_name=column_name) == "country_code"
+
+    def test_eight_codes_need_no_name(self) -> None:
+        assert detect(["us", "ca", "de", "fr", "gb", "jp", "au", "nz"]) == "country_code"
+
+
+class TestChecksumPatternsNeedADistinctSample:
+    """One digit run in ten passes Luhn, so a single value cannot decide `card_number`."""
+
+    def test_a_single_luhn_valid_epoch_is_a_numeric_string(self) -> None:
+        assert detect(["1640000000002"]) == "numeric_string"
+
+    def test_four_distinct_pans_are_not_enough(self) -> None:
+        pans = ["4111111111111111", "5500005555555559", "6011111111111117", "3530111333300000"]
+
+        assert detect(pans) == "numeric_string"
+
+    def test_five_distinct_pans_are_a_card_number(self) -> None:
+        pans = [
+            "4111111111111111",
+            "5500005555555559",
+            "6011111111111117",
+            "3530111333300000",
+            "4012888888881881",
+        ]
+
+        assert detect(pans) == "card_number"
+
+    def test_five_distinct_isbns_are_an_isbn(self) -> None:
+        isbns = ["9780306406157", "0132350882", "080442957X", "9781861972712", "0306406152"]
+
+        assert detect(isbns) == "isbn"
+
+
+class TestOpaqueIdsAreNotBase64:
+    def test_vendor_prefixed_ids_are_not_base64(self) -> None:
+        ids = ["lot_K4m9Tq2WxR7n", "seedlot_Hx7Rb3NdQ2pZ"]
+
+        assert detect(ids) is None
+
+    def test_letters_and_digits_that_decode_to_noise_are_not_base64(self) -> None:
+        assert detect(["mQ3vLx8RtZp2KwNe", "Gk7hTz2QwN9bVr4X"]) is None
+
+    def test_an_encoded_json_payload_is_still_base64(self) -> None:
+        payloads = [
+            base64.b64encode(f'{{"reading": {i}, "unit": "C"}}'.encode()).decode()
+            for i in range(20)
+        ]
+
+        assert detect(payloads) == "base64"
+
+    def test_unpadded_letters_and_digits_that_decode_to_text_are_base64(self) -> None:
+        assert detect(["c3BlY2ltZW4tcGhvdG8tMjA0", "c3BlY2ltZW4tcGhvdG8tMjA1"]) == "base64"
+
+
+class TestAClosedPicklistIsNotProse:
+    _LABELS = (
+        "Sealed in foil and moved to the cold room",
+        "Returned to the donor garden for regrowth",
+        "Held back until the germination test is done",
+    )
+
+    def test_sentence_labels_repeated_across_many_rows_are_not_prose(self) -> None:
+        assert detect(self._LABELS, classification="categorical", cardinality=3, rows=600) is None
+
+    def test_the_same_sentences_each_on_one_row_are_still_prose(self) -> None:
+        assert detect(self._LABELS, classification="categorical", cardinality=3, rows=3) == "prose"
+
+    def test_a_text_column_of_sentences_is_still_prose(self) -> None:
+        assert detect(self._LABELS, classification="text", cardinality=3, rows=600) == "prose"
+
+
+class TestAWithheldCountryCodeIsNotAZone:
+    """IANA keeps `GB` and `NZ` as zone aliases, the reason `country_code` outranks `timezone`."""
+
+    @pytest.mark.parametrize("values", [["GB"], ["GB", "NZ"], ["GB", "US"]])
+    def test_a_short_code_list_reports_no_zone(self, values: list[str]) -> None:
+        assert detect_with_evidence(values) == LooksLikeMatch(None, len(values), 0)
+
+    def test_a_real_zone_column_is_unchanged(self) -> None:
+        assert detect(["UTC", "Europe/London", "America/New_York"]) == "timezone"

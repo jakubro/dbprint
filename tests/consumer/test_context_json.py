@@ -15,6 +15,7 @@ from click.testing import CliRunner
 from dbprint.cli.main import main
 from tests.fixtures.adversarial import (
     APPROXIMATE_ROW_COUNT_TABLE,
+    CONNECTION_NOTE,
     DECLARED_MISSING_KIND,
     DECLARED_MISSING_TABLE,
     DELIMITER_COLUMN,
@@ -27,6 +28,10 @@ from tests.fixtures.adversarial import (
     EXTREME_WIDE_P50,
     FUTURE_DATED_COLUMN,
     GRAIN_NO_OUTCOME_TABLE,
+    HUMAN_EDGE_COLUMN,
+    HUMAN_EDGE_NOTE,
+    HUMAN_EDGE_TARGET,
+    HUMAN_EDGE_TARGET_COLUMN,
     INCOMPLETE_GRAIN_TABLE,
     LINE_BREAK_VALUE,
     NEVER_DECLARED_KIND,
@@ -39,6 +44,7 @@ from tests.fixtures.adversarial import (
     SCOPED_KEY_COLUMN,
     SCOPED_LATEST_COLUMN,
     SCOPED_TABLE,
+    SEVERAL_EDGES_COLUMN,
     SEVERAL_EDGES_TABLE,
     SPELLING_COLUMN,
     SPELLING_VALUES,
@@ -59,6 +65,8 @@ COVERS = frozenset(
         "unevaluated_diff_table",
         "empty_columns_map",
         "column_with_several_edges",
+        "connection_notes",
+        "human_authored_edge",
         "orphan_spelling",
         "percentile_inside_range",
         "grain_search_without_outcome",
@@ -288,6 +296,32 @@ def test_a_columns_edges_are_carried_less_the_rejected_one(
     adversarial_print: AdversarialPrint,
 ) -> None:
     payload = _payload(adversarial_print, SEVERAL_EDGES_TABLE)
-    targets = [e["target_table"] for e in payload["relationships"]["refers_to"]]
+    targets = [
+        e["target_table"]
+        for e in payload["relationships"]["refers_to"]
+        if e["column"] == [SEVERAL_EDGES_COLUMN]
+    ]
 
     assert sorted(targets) == ["public.cultivar", "public.wide_lookup"]
+
+
+def test_a_human_authored_edge_reaches_both_tables_tagged_annotated(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    source = _payload(adversarial_print, SEVERAL_EDGES_TABLE)["relationships"]["refers_to"]
+    target = _payload(adversarial_print, HUMAN_EDGE_TARGET)["relationships"]["referenced_by"]
+
+    assert {
+        "column": [HUMAN_EDGE_COLUMN],
+        "target_table": HUMAN_EDGE_TARGET,
+        "target_column": [HUMAN_EDGE_TARGET_COLUMN],
+        "detection": "annotated",
+        "note": HUMAN_EDGE_NOTE,
+    } in source
+    assert [e["detection"] for e in target if e["referencer_table"] == SEVERAL_EDGES_TABLE] == [
+        "annotated",
+    ]
+
+
+def test_connection_notes_reach_a_single_table_reader(adversarial_print: AdversarialPrint) -> None:
+    assert _payload(adversarial_print, SEVERAL_EDGES_TABLE)["connection_notes"] == CONNECTION_NOTE

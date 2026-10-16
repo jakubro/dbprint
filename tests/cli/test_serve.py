@@ -16,8 +16,10 @@ from dbprint.engine import EXIT_GENERIC
 
 PROJECT_BASE = """\
 defaults:
-  max_age_days: 7
-  statistics: {}
+  profile:
+    freshness:
+      max_age_days: 7
+    statistics: {}
   diff: {}
 connections:
   primary:

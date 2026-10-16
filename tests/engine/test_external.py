@@ -9,10 +9,11 @@ from typing import Any
 import yaml
 
 from dbprint.adapters.mock import MockAdapter, MockTable
-from dbprint.config import ConnectionConfig
+from dbprint.config import ConnectionConfig, FreshnessConfig, ProfileConfig, RuleMatch
 from dbprint.config.project import RuleConfig
 from dbprint.engine import Engine, thresholds
 from dbprint.engine.context_assembler import AssemblyOptions, assemble
+from dbprint.engine.result import EXIT_GENERIC
 from tests._curator import conn_config, curator_fixture
 from tests._engine_run import conformance_errors
 
@@ -52,11 +53,20 @@ class _Recorder(MockAdapter):
 
 
 def _conn(tmp_path: Path, *rules: RuleConfig) -> ConnectionConfig:
-    return replace(conn_config(tmp_path, max_age_days=30), rules=rules)
+    return replace(
+        conn_config(tmp_path, profile=ProfileConfig(freshness=FreshnessConfig(max_age_days=30))),
+        rules=rules,
+    )
 
 
 def _opted_in(tmp_path: Path) -> ConnectionConfig:
-    return _conn(tmp_path, RuleConfig(include=(REMOTE,), read_rows=True))
+    return _conn(
+        tmp_path,
+        RuleConfig(
+            match=RuleMatch(tables=(REMOTE,)),
+            profile={"read": {"tables": {"mode": "full"}}},
+        ),
+    )
 
 
 def _statistics(tmp_path: Path) -> dict[str, Any]:
@@ -104,11 +114,26 @@ def test_an_opted_in_marked_object_is_profiled_and_keeps_its_mark(tmp_path: Path
 
 def test_a_size_rule_reads_no_estimate_for_a_marked_object(tmp_path: Path) -> None:
     adapter = _Recorder(_fixture())
-    conn = _conn(tmp_path, RuleConfig(min_rows=10, max_age_days=3))
+    conn = _conn(
+        tmp_path,
+        RuleConfig(match=RuleMatch(min_rows=10), profile={"freshness": {"max_age_days": 3}}),
+    )
     Engine(adapter, conn, tmp_path).generate()
 
     assert ("estimate_row_count", REMOTE) not in adapter.calls
     assert ("estimate_row_count", "public.herbarium") in adapter.calls
+
+
+def test_a_size_rule_that_opts_a_marked_object_in_reads_its_estimate(tmp_path: Path) -> None:
+    adapter = _Recorder(_fixture())
+    conn = _conn(
+        tmp_path,
+        RuleConfig(match=RuleMatch(min_rows=10), profile={"read": {"tables": {"mode": "full"}}}),
+    )
+    Engine(adapter, conn, tmp_path).generate()
+
+    assert ("estimate_row_count", REMOTE) in adapter.calls
+    assert ("compute_base_statistics", REMOTE) in adapter.calls
 
 
 def test_a_local_table_carries_no_mark(tmp_path: Path) -> None:
@@ -117,12 +142,55 @@ def test_a_local_table_carries_no_mark(tmp_path: Path) -> None:
     assert "external" not in _statistics(tmp_path)
 
 
-def test_a_filter_added_to_a_catalog_only_object_leaves_it_fresh(tmp_path: Path) -> None:
+def test_an_explicit_filter_opts_a_marked_object_in(tmp_path: Path) -> None:
     Engine(MockAdapter(_fixture()), _conn(tmp_path), tmp_path).generate()
-    filtered = _conn(tmp_path, RuleConfig(include=(REMOTE,), filter="id IS NOT NULL"))
+    filtered = _conn(
+        tmp_path,
+        RuleConfig(
+            match=RuleMatch(tables=(REMOTE,)),
+            profile={"read": {"tables": {"mode": "filter", "filter": "id IS NOT NULL"}}},
+        ),
+    )
     result = Engine(MockAdapter(_fixture()), filtered, tmp_path).generate()
 
-    assert next(t for t in result.tables if t.fqn == REMOTE).status == "skipped"
+    assert _reason(result) == "catalog_only changed since it was profiled"
+    assert _statistics(tmp_path)["scope"]["filter"] == "id IS NOT NULL"
+
+
+class _Refusing(_Recorder):
+    EXTERNAL_READ_REFUSED = True
+
+
+def test_an_explicit_read_of_a_marked_object_is_refused_before_any_table_is_read(
+    tmp_path: Path,
+) -> None:
+    adapter = _Refusing(_fixture())
+
+    conn = _conn(
+        tmp_path,
+        RuleConfig(
+            match=RuleMatch(tables=(REMOTE,)),
+            profile={"read": {"tables": {"mode": "full"}}},
+            label="connections.primary.rules[0]",
+        ),
+    )
+    result = Engine(adapter, conn, tmp_path).generate()
+
+    assert result.exit_code == EXIT_GENERIC
+    assert result.error == (
+        "connections.primary.rules[0].profile.read.tables.mode: full is not valid for external "
+        "table 'public.curator' on postgres - reading it reaches another system; describe it from "
+        "the catalog"
+    )
+    assert [c for c in adapter.calls if c[0] == "compute_base_statistics"] == []
+
+
+def test_a_refusing_adapter_still_describes_a_marked_object_no_rule_opts_in(
+    tmp_path: Path,
+) -> None:
+    Engine(_Refusing(_fixture()), _conn(tmp_path), tmp_path).generate()
+
+    assert _statistics(tmp_path)["catalog_only"] is True
 
 
 def test_opting_in_and_marking_each_reextract_with_their_reason(tmp_path: Path) -> None:
@@ -157,7 +225,10 @@ def test_offline_no_size_gate_is_claimed_for_an_entry_nothing_queried(tmp_path: 
     for entry in manifest["tables"].values():
         entry.pop("max_age_days")
 
-    conn = _conn(tmp_path, RuleConfig(min_rows=10, max_age_days=3))
+    conn = _conn(
+        tmp_path,
+        RuleConfig(match=RuleMatch(min_rows=10), profile={"freshness": {"max_age_days": 3}}),
+    )
 
     assert thresholds.resolve(conn, manifest).size_gated == ("public.herbarium",)
 
@@ -185,7 +256,14 @@ def _snapshot_fixture() -> dict[str, MockTable]:
 
 def test_an_opt_in_only_object_is_catalog_only_without_the_external_mark(tmp_path: Path) -> None:
     adapter = _Recorder(_snapshot_fixture())
-    Engine(adapter, _conn(tmp_path, RuleConfig(min_rows=10, max_age_days=3)), tmp_path).generate()
+    Engine(
+        adapter,
+        _conn(
+            tmp_path,
+            RuleConfig(match=RuleMatch(min_rows=10), profile={"freshness": {"max_age_days": 3}}),
+        ),
+        tmp_path,
+    ).generate()
     statistics = _statistics(tmp_path)
 
     assert statistics["catalog_only"] is True
@@ -206,12 +284,16 @@ def test_opting_an_opt_in_only_object_in_profiles_it_and_rereads_it(tmp_path: Pa
     assert "external" not in statistics
 
 
-def test_a_marked_object_narrowed_two_ways_fails_alone(tmp_path: Path) -> None:
+def test_diff_reports_the_refusal_as_this_connections_result(tmp_path: Path) -> None:
+    Engine(MockAdapter(_fixture()), _conn(tmp_path), tmp_path).generate()
     conn = _conn(
         tmp_path,
-        RuleConfig(include=(REMOTE,), filter="id IS NOT NULL"),
-        RuleConfig(include=(REMOTE,), sample=0.5),
+        RuleConfig(
+            match=RuleMatch(tables=(REMOTE,)),
+            profile={"read": {"tables": {"mode": "full"}}},
+        ),
     )
-    result = Engine(MockAdapter(_fixture()), conn, tmp_path).generate()
+    result = Engine(_Refusing(_fixture()), conn, tmp_path).compute_diff()
 
-    assert {t.fqn: t.status for t in result.tables} == {REMOTE: "failed", "public.herbarium": "ok"}
+    assert result.exit_code == EXIT_GENERIC
+    assert "is not valid for external table 'public.curator'" in result.failed_tables[0]

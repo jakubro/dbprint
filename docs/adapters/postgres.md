@@ -26,7 +26,7 @@ GRANT TEMPORARY ON DATABASE my_db TO dbprint_ro;
 | `CONNECT` | the database | connecting |
 | `USAGE` | each schema profiled | reaching anything inside it |
 | `SELECT` | each table and materialized view profiled | DDL and statistics |
-| `SELECT` | each plain view profiled | DDL only — no statement is issued against a view |
+| `SELECT` | each plain view profiled | DDL only under the default `read.views.mode: catalog`, which issues no statement against a view; a view read in `full` or `filter` mode is queried like a table |
 | `TEMPORARY` | the database | the sampled-table copy only |
 
 `CONNECT` and `TEMPORARY` are granted to `PUBLIC` on a stock cluster, so a role that was only just created already holds both. They are listed because a hardened cluster that revoked them from `PUBLIC` needs them granted back explicitly.
@@ -52,7 +52,7 @@ GRANT TEMPORARY ON DATABASE my_db TO dbprint_ro;
 
 Granting `USAGE` on the schema moves both messages from naming the schema to naming the object, which is the signal that the remaining gap is `SELECT`. A run that ends `4 ok / 1 failed` exits `5`, and the tables that succeeded are still written.
 
-A plain view is the exception at every rung, including the bottom one: a role holding no grant at all still gets a complete print of it. No query is issued against a view no `read_rows` rule opts in, so its `statistics.yaml` comes from the catalog, and its DDL succeeds where every table's fails. A view a `read_rows` rule opts in is queried like a table and needs `SELECT` on it.
+A plain view is the exception at every rung, including the bottom one: a role holding no grant at all still gets a complete print of it. No query is issued against a view read in the default `read.views.mode: catalog`, so its `statistics.yaml` comes from the catalog, and its DDL succeeds where every table's fails. A view read in `full` or `filter` mode is queried like a table and needs `SELECT` on it.
 
 ## Sampling
 
@@ -66,7 +66,7 @@ PostgreSQL is one of two engines on which a sampled print is coherent **row for 
 
 ## When dbprint writes
 
-Only one thing makes dbprint write, and only under one condition: `materialize_sample` is on by default, and it fires **only for a table narrowed to a fraction of its rows**. A fraction has two sources — a rule's `sample`, and a `max_rows_scanned` ceiling resolving against the table's size, which is legal at connection and `defaults` level as well as inside a rule. A project that narrows nothing, which is what `dbprint init` scaffolds, never writes. A `filter` is a predicate rather than a fraction and never materializes.
+Only one thing makes dbprint write, and only under one condition: `profile.read.tables.materialize` is on by default, and it fires **only for a table read in `sample` mode** — by a `fraction`, or by a `max_rows` ceiling that resolves below the table's size, at whatever level the ceiling is set. A project that narrows nothing, which is what `dbprint init` scaffolds, never writes. A `filter` is a predicate rather than a fraction and never materializes.
 
 Where it does fire, the drawn rows are copied once into a session-lifetime temporary table in the session's own temporary space, and every statistics statement for that table reads the copy. That is what makes the numbers in one file describe one set of rows.
 
@@ -78,13 +78,13 @@ table 'arboretum.seedbank.germination_trial': could not materialize its sample o
 each statistic for it is measured over its own draw of the rows
 ```
 
-The fallback is not an equivalent path. Each statement then draws its own rows, so a column's listed value counts and the non-null figure they are a share of come from different reads, and the file can disagree with itself on a table nobody wrote to. Setting `materialize_sample: false` chooses that trade deliberately, which is the right call where the tool must stay strictly read-only — and the wrong one where it was chosen to avoid a grant.
+The fallback is not an equivalent path. Each statement then draws its own rows, so a column's listed value counts and the non-null figure they are a share of come from different reads, and the file can disagree with itself on a table nobody wrote to. Setting `read.tables.materialize: false` chooses that trade deliberately, which is the right call where the tool must stay strictly read-only — and the wrong one where it was chosen to avoid a grant.
 
 ## Foreign tables
 
-A foreign table is listed with `external: true` (SPEC 2.2.20). Unless a `read_rows` rule opts it in, it is described from the catalog alone: `USAGE` on its schema is enough, its DDL shows the `CREATE FOREIGN TABLE ... SERVER ... OPTIONS (...)` statement, and no statement reaches the remote server. The foreign server and its user mappings are never dumped.
+A foreign table is listed with `external: true` (SPEC 2.2.20). It is always described from the catalog alone: `USAGE` on its schema is enough, its DDL shows the `CREATE FOREIGN TABLE ... SERVER ... OPTIONS (...)` statement, and no statement reaches the remote server. The foreign server and its user mappings are never dumped.
 
-Opted in, it is read through the wrapper, which needs `SELECT` on it and a user mapping for the role, and every statement reads the remote system. `TABLESAMPLE` works on local tables only, so narrow one with a `filter`; a `sample` fails it with `foreign table <fqn> cannot be sampled (TABLESAMPLE applies to local tables only); narrow it with a filter rule instead`. A foreign partition is not listed, like any partition; reading its partitioned parent reads it too.
+A rule writing any other `read.tables.mode` for it is refused before any table is read, with exit 1, because the read would reach another live database. A foreign partition is not listed, like any partition; reading its partitioned parent reads it too.
 
 ## Types without a comparison operator
 
@@ -112,11 +112,11 @@ A network (`inet`, `cidr`), range, multirange or `interval` column lists its val
 
 ## Statement timeout
 
-`statement_timeout` is sent as the session's own `statement_timeout` setting in the connection's start-up packet, so it bounds every statement the session runs, lock waits included, and a statement that exceeds it is cancelled by the server. `pg_dump`, which extracts each table's DDL, zeroes that setting on its own session; there the limit becomes `--lock-wait-timeout`, bounding the wait for the table lock, while the dump as a whole keeps its fixed 60-second ceiling.
+`run.statement_timeout` is sent as the session's own `statement_timeout` setting in the connection's start-up packet, so it bounds every statement the session runs, lock waits included, and a statement that exceeds it is cancelled by the server. `pg_dump`, which extracts each table's DDL, zeroes that setting on its own session; there the limit becomes `--lock-wait-timeout`, bounding the wait for the table lock, while the dump as a whole keeps its fixed 60-second ceiling.
 
 ## Parallelism
 
-`parallelism: N` opens up to N sessions per database the run reads, each on first use, and profiles up to N tables at once. `pg_dump` opens a connection of its own for each table's DDL, so the connection count on the server can reach twice N; size `max_connections` and any per-role `CONNECTION LIMIT` for that.
+`run.parallelism: N` opens up to N sessions per database the run reads, each on first use, and profiles up to N tables at once. `pg_dump` opens a connection of its own for each table's DDL, so the connection count on the server can reach twice N; size `max_connections` and any per-role `CONNECTION LIMIT` for that.
 
 ## Reference
 

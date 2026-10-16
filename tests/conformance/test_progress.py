@@ -93,7 +93,6 @@ def test_findings_count_attributes_each_issue_to_its_table(print_dir: Path) -> N
         "arboretum.fixture.shape_probe": 1,
         "arboretum.seedbank.collector": 2,
         "arboretum.seedbank.taxon": 1,
-        "arboretum.seedbank.vault": 1,
     }
     assert len(findings) == 10
 

@@ -42,6 +42,7 @@ class MysqlAdapter(SqlAdapter):
     # RAND(seed) is undocumented across multiple references in one statement, so a
     # `sample` scope with no copy must be refused rather than measured over drifting rows.
     SAMPLE_FALLBACK_COHERENT: ClassVar[bool] = False
+    EXTERNAL_READ_REFUSED: ClassVar[bool] = True
 
     DIALECT: ClassVar[Dialect] = DIALECT
     _driver = connection_module

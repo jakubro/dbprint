@@ -19,7 +19,7 @@ from dbprint.adapters import (
     TableCounts,
     TableScope,
 )
-from dbprint.config import ConnectionConfig, RuleConfig
+from dbprint.config import ConnectionConfig, ProfileConfig, RelationshipsProfile, RuleConfig
 from dbprint.engine import Engine
 from tests._engine_run import artifact
 from tests._prints import columns, mock_table
@@ -207,13 +207,17 @@ def _generate(
     row_count: int = 10_000,
     adapter: type[MockAdapter] = MockAdapter,
 ) -> dict[str, Any]:
-    rules = (RuleConfig(sample=sample),) if sample is not None else ()
+    rules = (
+        (RuleConfig(profile={"read": {"tables": {"mode": "sample", "fraction": sample}}}),)
+        if sample is not None
+        else ()
+    )
     conn = ConnectionConfig(
         name="w",
         adapter="postgres",
         output=tmp_path,
-        infer_relationships=False,
         rules=rules,
+        profile=ProfileConfig(relationships=RelationshipsProfile(infer=False)),
     )
     fixture = _fixture(strengths, row_count)
     Engine(adapter(fixture), conn, tmp_path).generate()

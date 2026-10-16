@@ -1,23 +1,26 @@
-"""Project config (`.dbprint.yaml`) - schema, dataclasses, upward-discovery loader.
+"""Project config (`.dbprint.yaml`) - dataclasses, the one merge rule, upward-discovery loader.
 
-Defaults cascade into per-connection blocks where the connection doesn't override.
+Values cascade `defaults` -> connection -> each matching rule; the file is schema-validated first.
 """
 
 from __future__ import annotations
 
+import copy
 import math
 import os
-from dataclasses import dataclass, field, replace
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any, Literal, get_args
+from typing import Any, Literal
 
 import yaml
 
-from dbprint.spec.looks_like import LooksLike
-from dbprint.spec.sensitivity import Sensitivity
-from dbprint.spec.temporal_age import negative_max_age_refusal
-from .duration import DurationError, parse_duration_seconds
+from dbprint.spec.profile import DISABLEABLE
+from .duration import parse_duration_seconds
+from .merge import merge, merge_into
+from .read import BUILTIN_READ, MODE_PARAMETERS, ObjectKind, ReadMode, fold_read
 from .selectors import match
+from .validation import format_problems, validate_project
 
 
 ENUMERATION_THRESHOLD_DEFAULT = 50
@@ -29,8 +32,8 @@ MAX_PARTS_DEFAULT = 20
 MAX_PART_DEPTH_DEFAULT = 3
 MAX_AGE_DAYS_DEFAULT = 7
 
-# `max_rows_scanned` snaps its resolved fraction down this grid, so estimate drift stays
-# within a step (ratio in CONFIG.md).
+# A `read.tables.max_rows` ceiling snaps its resolved fraction down this grid, so estimate drift
+# stays within a step (ratio in CONFIG.md).
 CEILING_GRID_RATIO = 1.1
 STAT_CHANGE_THRESHOLD_DEFAULT = {
     "cardinality_ratio": 0.02,
@@ -39,11 +42,13 @@ STAT_CHANGE_THRESHOLD_DEFAULT = {
     "default": 0.01,
 }
 OUTPUT_DEFAULT = "prints"
-INFER_RELATIONSHIPS_DEFAULT = True
 MATERIALIZE_SAMPLE_DEFAULT = True
-SKETCH_ALL_COLUMNS_DEFAULT = False
-COMPUTE_TIMELINE_DEFAULT = True
 PARALLELISM_DEFAULT = 1
+
+
+BUILTIN_LABEL = "built-in default"
+
+RuleOutcome = Literal["applied", "name_mismatch", "below_min_rows", "size_unknown"]
 
 # Credential key for the redaction salt - it lives with the passwords, not in `.dbprint.yaml`.
 REDACTION_SALT_KEY = "redaction_salt"
@@ -59,27 +64,16 @@ ADAPTERS: tuple[str, ...] = (
     "bigquery",
 )
 
-# Keys read only inside a `rules:` entry, mapped to the tail of the remediation snippet an
-# error suggests. `min_rows` only selects tables, so its snippet also needs a narrowing
-# setting (`sample`/`filter`).
-_RULE_ONLY_KEYS: dict[str, str] = {
-    "sample": "",
-    "filter": "",
-    "min_rows": ", sample: 0.01",
-    "read_rows": "",
-}
-
-_STATISTICS_INT_KEYS: tuple[str, ...] = (
-    "enumeration_threshold",
-    "top_n_values",
-    "top_n_null_patterns",
-    "looks_like_sample_size",
-    "max_parts",
-    "max_part_depth",
-)
-
-# The integer keys a value below this floor is refused for; `max_parts: 0` turns descent off.
-_STATISTICS_INT_FLOORS: dict[str, int] = {"max_parts": 0, "max_part_depth": 1}
+AdapterName = Literal[
+    "postgres",
+    "snowflake",
+    "mysql",
+    "duckdb",
+    "clickhouse",
+    "redshift",
+    "databricks",
+    "bigquery",
+]
 
 
 class ConfigError(ValueError):
@@ -88,7 +82,7 @@ class ConfigError(ValueError):
 
 @dataclass(frozen=True)
 class StatisticsConfig:
-    """Tuning for statistics computation per SPEC 2.2."""
+    """What an adapter computes per SPEC 2.2; a switched-off feature arrives as a zero bound."""
 
     enumeration_threshold: int = ENUMERATION_THRESHOLD_DEFAULT
     top_n_values: int = TOP_N_VALUES_DEFAULT
@@ -100,46 +94,45 @@ class StatisticsConfig:
 
 
 @dataclass(frozen=True)
-class RuleConfig:
-    """One profiling rule: a matcher plus the settings it overrides.
-
-    `include`/`exclude`/`min_rows` select the tables the rule governs; the rest override the
-    connection's settings for them. `sample` and `filter` each narrow rows per SPEC 2.2.8, at
-    most one per rule; `max_rows_scanned` narrows too but cascades like `sample` without
-    joining that exclusion, and `statistics` merges key by key. `label` names the rule in an
-    error (`defaults rules[0]`, `connection 'w' rules[1]`), empty for a rule built in code.
-    """
+class TablesConfig:
+    """Which tables a connection profiles; a rule never widens this."""
 
     include: tuple[str, ...] = ("*",)
     exclude: tuple[str, ...] = ()
-    min_rows: int | None = None
-    sample: float | None = None
+
+
+@dataclass(frozen=True)
+class RunConfig:
+    """How a run talks to the database: sessions at once, and the per-statement limit in seconds."""
+
+    parallelism: int = PARALLELISM_DEFAULT
+    statement_timeout: int | None = None
+
+
+@dataclass(frozen=True)
+class FreshnessConfig:
+    """How old a print may grow before `generate` re-profiles it and `check` fails it."""
+
+    max_age_days: int = MAX_AGE_DAYS_DEFAULT
+
+
+@dataclass(frozen=True)
+class ReadConfig:
+    """How one object type's rows are read; only the parameters of `mode` are set."""
+
+    mode: ReadMode
+    fraction: float | None = None
+    max_rows: int | None = None
+    materialize: bool = MATERIALIZE_SAMPLE_DEFAULT
     filter: str | None = None
-    max_rows_scanned: int | None = None
-    statistics: dict[str, Any] = field(default_factory=dict)
-    max_age_days: int | None = None
-    read_rows: bool | None = None
-    label: str = ""
 
-    def matches(self, fqn: str, row_count: int | None = None) -> bool:
-        """True when this rule governs a table of that name at that size.
 
-        `row_count` is the catalog estimate, None when unavailable or when the caller holds
-        no database. A `min_rows` rule left without one goes unapplied, not assumed to match.
-        """
+@dataclass(frozen=True)
+class ReadSettings:
+    """`profile.read`: tables are read whole and views described from the catalog by default."""
 
-        if not self.matches_name(fqn):
-            return False
-
-        if self.min_rows is None:
-            return True
-
-        return row_count is not None and row_count >= self.min_rows
-
-    def matches_name(self, fqn: str) -> bool:
-        """True when the name matchers admit `fqn`, disregarding any size condition."""
-
-        return match(fqn, list(self.include), list(self.exclude))
+    tables: ReadConfig = field(default_factory=lambda: ReadConfig(mode="full"))
+    views: ReadConfig = field(default_factory=lambda: ReadConfig(mode="catalog"))
 
 
 @dataclass(frozen=True)
@@ -168,21 +161,216 @@ class RedactRule:
 
 
 @dataclass(frozen=True)
-class TableSettings:
-    """Effective settings for one table once the rule cascade has been applied.
+class StatisticsProfile:
+    """Per-column statistics tuning (SPEC 2.2)."""
 
-    At most one of `sample` and `filter` is set (SPEC 2.2.8); a ceiling folds into `sample` as a fraction.
+    enumeration_threshold: int = ENUMERATION_THRESHOLD_DEFAULT
+    top_n_values: int = TOP_N_VALUES_DEFAULT
+    percentiles: tuple[int, ...] = PERCENTILES_DEFAULT
+
+
+@dataclass(frozen=True)
+class LooksLikeProfile:
+    """Value-shape detection over a sample of each text-like column (SPEC 4.1)."""
+
+    enabled: bool = True
+    sample_size: int = LOOKS_LIKE_SAMPLE_SIZE_DEFAULT
+
+
+@dataclass(frozen=True)
+class NullPatternsProfile:
+    """The table's `null_patterns` block (SPEC 2.2.13)."""
+
+    enabled: bool = True
+    top_n: int = TOP_N_NULL_PATTERNS_DEFAULT
+
+
+@dataclass(frozen=True)
+class PartsProfile:
+    """Descent into array, record, map and JSON columns (SPEC 2.2.18)."""
+
+    enabled: bool = True
+    max: int = MAX_PARTS_DEFAULT
+    max_depth: int = MAX_PART_DEPTH_DEFAULT
+
+
+@dataclass(frozen=True)
+class TimelineProfile:
+    """The table's `timeline` block and each column's `populated` (SPEC 2.2.16)."""
+
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
+class SketchesProfile:
+    """Value sketches (SPEC 2.2.14): the required columns, or every sketchable one."""
+
+    enabled: bool = True
+    columns: Literal["required", "all"] = "required"
+
+
+@dataclass(frozen=True)
+class RelationshipsProfile:
+    """Foreign keys inferred from column naming (SPEC 2.3.8)."""
+
+    infer: bool = True
+
+
+@dataclass(frozen=True)
+class ProfileConfig:
+    """What is measured and how; resolved per connection, and per table once rules apply."""
+
+    freshness: FreshnessConfig = field(default_factory=FreshnessConfig)
+    statistics: StatisticsProfile = field(default_factory=StatisticsProfile)
+    read: ReadSettings = field(default_factory=ReadSettings)
+    looks_like: LooksLikeProfile = field(default_factory=LooksLikeProfile)
+    null_patterns: NullPatternsProfile = field(default_factory=NullPatternsProfile)
+    parts: PartsProfile = field(default_factory=PartsProfile)
+    timeline: TimelineProfile = field(default_factory=TimelineProfile)
+    sketches: SketchesProfile = field(default_factory=SketchesProfile)
+    relationships: RelationshipsProfile = field(default_factory=RelationshipsProfile)
+    redact: tuple[RedactRule, ...] = ()
+
+    def disabled(self) -> tuple[str, ...]:
+        """The measurements this profile switches off, sorted, as SPEC 2.2.21 names them."""
+
+        off = {
+            "looks_like": not self.looks_like.enabled,
+            "null_patterns": not self.null_patterns.enabled,
+            "parts": not self.parts.enabled,
+            "relationships.infer": not self.relationships.infer,
+            "sketches": not self.sketches.enabled,
+            "timeline": not self.timeline.enabled,
+        }
+
+        return tuple(name for name in DISABLEABLE if off[name])
+
+    def adapter_config(self) -> StatisticsConfig:
+        """The adapter's statistics bounds; a switched-off sample or descent is a zero bound."""
+
+        return StatisticsConfig(
+            enumeration_threshold=self.statistics.enumeration_threshold,
+            top_n_values=self.statistics.top_n_values,
+            top_n_null_patterns=self.null_patterns.top_n,
+            looks_like_sample_size=self.looks_like.sample_size if self.looks_like.enabled else 0,
+            percentiles=self.statistics.percentiles,
+            max_parts=self.parts.max if self.parts.enabled else 0,
+            max_part_depth=self.parts.max_depth,
+        )
+
+
+@dataclass(frozen=True)
+class RuleMatch:
+    """The tables a rule governs: name patterns, and optionally a minimum catalog row count."""
+
+    tables: tuple[str, ...] = ("*",)
+    exclude: tuple[str, ...] = ()
+    min_rows: int | None = None
+
+
+@dataclass(frozen=True)
+class RuleConfig:
+    """One profiling rule: the tables it matches and the partial `profile` it merges over them.
+
+    `label` is the rule's config path (`defaults.rules[0]`), empty for a rule built in code.
     """
 
-    statistics: StatisticsConfig
+    match: RuleMatch = field(default_factory=RuleMatch)
+    profile: Mapping[str, Any] = field(default_factory=dict)
+    label: str = ""
+
+    def matches(self, fqn: str, row_count: int | None = None) -> bool:
+        """True when this rule governs a table of that name at that size."""
+
+        return self.verdict(fqn, row_count) == "applied"
+
+    def verdict(self, fqn: str, row_count: int | None = None) -> RuleOutcome:
+        """Whether this rule governs a table of that name at that size, and if not, why.
+
+        Without a `row_count` (catalog estimate) a `min_rows` rule is `size_unknown`, never applied.
+        """
+
+        if not self.matches_name(fqn):
+            return "name_mismatch"
+
+        if self.match.min_rows is None:
+            return "applied"
+
+        if row_count is None:
+            return "size_unknown"
+
+        return "applied" if row_count >= self.match.min_rows else "below_min_rows"
+
+    def matches_name(self, fqn: str) -> bool:
+        """True when the name matchers admit `fqn`, disregarding any size condition."""
+
+        return match(fqn, list(self.match.tables), list(self.match.exclude))
+
+    def written_mode(self, kind: ObjectKind) -> ReadMode | None:
+        """The `read.<kind>.mode` this rule writes, if it writes one."""
+
+        read = self.profile.get("read")
+        block = read.get(kind) if isinstance(read, Mapping) else None
+
+        return block.get("mode") if isinstance(block, Mapping) else None
+
+    def sets(self, *path: str) -> bool:
+        """True when this rule's `profile` writes the key at `path`."""
+
+        node: Any = self.profile
+
+        for key in path:
+            if not isinstance(node, Mapping) or key not in node:
+                return False
+
+            node = node[key]
+
+        return True
+
+
+@dataclass(frozen=True)
+class RuleVerdict:
+    """One rule's outcome for one table: its config path, its matcher, and whether it applied."""
+
+    label: str
+    match: RuleMatch
+    outcome: RuleOutcome
+
+
+@dataclass(frozen=True)
+class ResolvedProfile:
+    """A table's merged `profile` tree, the layer that set each leaf, and every rule's verdict.
+
+    A list is one leaf, since a later list replaces an earlier one whole.
+    """
+
+    values: Mapping[str, Any]
+    origins: Mapping[tuple[str, ...], str]
+    rules: tuple[RuleVerdict, ...] = ()
+
+
+@dataclass(frozen=True)
+class TableSettings:
+    """Effective settings for one object once the rule cascade has been applied.
+
+    `explicit`: a matching rule wrote `mode`. A `max_rows` ceiling resolves into `sample` (SPEC 2.2.8).
+    """
+
+    profile: ProfileConfig
     max_age_days: int
+    mode: ReadMode = "full"
+    explicit: bool = False
     sample: float | None = None
     filter: str | None = None
+    materialize: bool = MATERIALIZE_SAMPLE_DEFAULT
     max_rows_scanned: int | None = None
-    ceiling_yielded: bool = False
     matched_rules: tuple[str, ...] = ()
-    read_rows: bool = False
-    sample_rule: str = ""
+
+    @property
+    def statistics(self) -> StatisticsConfig:
+        """The bounds the adapter computes this object's statistics under."""
+
+        return self.profile.adapter_config()
 
 
 @dataclass(frozen=True)
@@ -196,37 +384,22 @@ class DiffConfig:
 
 @dataclass(frozen=True)
 class ConnectionConfig:
-    """Per-connection settings; `include`/`exclude` gate what is profiled, `rules` say how."""
+    """Per-connection settings; `tables` gate what is profiled, `profile` and `rules` say how."""
 
     name: str
-    adapter: Literal[
-        "postgres",
-        "snowflake",
-        "mysql",
-        "duckdb",
-        "clickhouse",
-        "redshift",
-        "databricks",
-        "bigquery",
-    ]
+    adapter: AdapterName
     auto: bool = False
     output: Path = field(default_factory=lambda: Path(OUTPUT_DEFAULT))
-    include: tuple[str, ...] = ("*",)
-    exclude: tuple[str, ...] = ()
-    max_age_days: int = MAX_AGE_DAYS_DEFAULT
-    max_rows_scanned: int | None = None
-    statement_timeout: int | None = None
-    parallelism: int = PARALLELISM_DEFAULT
-    statistics: StatisticsConfig = field(default_factory=StatisticsConfig)
+    tables: TablesConfig = field(default_factory=TablesConfig)
+    run: RunConfig = field(default_factory=RunConfig)
+    profile: ProfileConfig = field(default_factory=ProfileConfig)
     rules: tuple[RuleConfig, ...] = ()
     diff: DiffConfig = field(default_factory=DiffConfig)
-    infer_relationships: bool = INFER_RELATIONSHIPS_DEFAULT
-    materialize_sample: bool = MATERIALIZE_SAMPLE_DEFAULT
-    sketch_all_columns: bool = SKETCH_ALL_COLUMNS_DEFAULT
-    compute_timeline: bool = COMPUTE_TIMELINE_DEFAULT
-    redact: tuple[RedactRule, ...] = ()
-    redaction_salt: str | None = None
     assertions_raw: dict[str, Any] = field(default_factory=dict)
+    redaction_salt: str | None = None
+    dbt_manifest: Path | None = None
+    # The layer each leaf of `profile` came from; a leaf absent here is the connection's own.
+    profile_origins: Mapping[tuple[str, ...], str] = field(default_factory=dict)
 
     @property
     def print_root(self) -> Path:
@@ -235,15 +408,16 @@ class ConnectionConfig:
         return self.output / self.name
 
     @property
-    def rules_read_row_counts(self) -> bool:
+    def reads_row_counts(self) -> bool:
         """True when any rule carries a size condition, or a ceiling is in force anywhere.
 
         Constant for a whole run, since the rule list is fixed at load. The engine reads it
         to decide whether to fetch a catalog estimate at all.
         """
 
-        return self.max_rows_scanned is not None or any(
-            rule.min_rows is not None or rule.max_rows_scanned is not None for rule in self.rules
+        return self.profile.read.tables.max_rows is not None or any(
+            rule.match.min_rows is not None or rule.sets("read", "tables", "max_rows")
+            for rule in self.rules
         )
 
     def size_conditions_name(self, fqn: str) -> bool:
@@ -254,21 +428,41 @@ class ConnectionConfig:
         every table, unlike a rule's own condition.
         """
 
-        if self.max_rows_scanned is not None:
+        if self.profile.read.tables.max_rows is not None:
             return True
 
         return any(
-            (rule.min_rows is not None or rule.max_rows_scanned is not None)
+            (rule.match.min_rows is not None or rule.sets("read", "tables", "max_rows"))
             and rule.matches_name(fqn)
             for rule in self.rules
         )
 
+    @property
+    def any_infers(self) -> bool:
+        """True when the connection or any rule leaves naming inference on for some table."""
+
+        return self.profile.relationships.infer or any(
+            rule.profile.get("relationships", {}).get("infer") is True for rule in self.rules
+        )
+
     def min_rows_conditions_name(self, fqn: str) -> bool:
         """True when some rule selecting this name carries `min_rows` - narrower than
-        `size_conditions_name`, a `max_rows_scanned` ceiling not affecting `max_age_days`.
+        `size_conditions_name`, a `read.tables.max_rows` ceiling not affecting `max_age_days`.
         """
 
-        return any(rule.min_rows is not None and rule.matches_name(fqn) for rule in self.rules)
+        return any(
+            rule.match.min_rows is not None and rule.matches_name(fqn) for rule in self.rules
+        )
+
+    def min_rows_decides_mode(self, fqn: str, kind: ObjectKind) -> bool:
+        """True when some rule selecting this name carries `min_rows` and writes `read.<kind>.mode`."""
+
+        return any(
+            rule.match.min_rows is not None
+            and rule.matches_name(fqn)
+            and rule.written_mode(kind) is not None
+            for rule in self.rules
+        )
 
     def redaction_for(
         self,
@@ -276,15 +470,11 @@ class ConnectionConfig:
         sensitivity: str | None,
         looks_like: str | None,
     ) -> str | None:
-        """The primitive covering one column, or None when nothing redacts it.
-
-        Declaration order, last match wins, with `defaults` rules walking before the
-        connection's own. No primitive means the column is not redacted.
-        """
+        """The primitive covering one column, or None when nothing redacts it; last match wins."""
 
         primitive: str | None = None
 
-        for rule in self.redact:
+        for rule in self.profile.redact:
             if rule.covers(qualified, sensitivity, looks_like):
                 primitive = rule.with_
 
@@ -306,7 +496,7 @@ class ConnectionConfig:
 
         primitive: str | None = None
 
-        for rule in self.redact:
+        for rule in self.profile.redact:
             if rule.covers(qualified, column_sensitivity, column_looks_like) or (
                 (sensitivity is not None and sensitivity in rule.sensitivity)
                 or (looks_like is not None and looks_like in rule.looks_like)
@@ -315,91 +505,90 @@ class ConnectionConfig:
 
         return primitive
 
-    def settings_for(self, fqn: str, row_count: int | None = None) -> TableSettings:
-        """Effective settings for one table: connection values, then every matching rule.
+    def settings_for(
+        self,
+        fqn: str,
+        kind: Literal["table", "view"],
+        row_count: int | None = None,
+    ) -> TableSettings:
+        """Effective settings for one object: the connection's profile, then every matching rule.
 
-        Rules apply in declaration order, later ones winning. `row_count` is the catalog
-        estimate gating every size-conditioned rule; callers holding no database omit it,
-        leaving those rules unapplied. `max_rows_scanned` cascades on the same timeline as
-        `sample` and whichever was set last wins, so a ceiling a later `sample` overrides is
-        never converted to a fraction. A `filter` on the table beats a ceiling outright, and
-        `ceiling_yielded` says so for the caller to log (`config` does not log - GUIDELINES).
-
-        Raises `ConfigError` when matching rules settle both a filter and an explicit sample:
-        each rule carries at most one, so the pair arises only across rules, once a table
-        name is in hand.
+        `row_count` (catalog estimate) gates size rules and resolves a ceiling; omitted, neither applies.
         """
 
-        statistics = self.statistics
-        max_age_days = self.max_age_days
-        sample: float | None = None
-        predicate: str | None = None
-        sample_rule = ""
-        filter_rule = ""
-        cap = self.max_rows_scanned
-        cap_position = 0 if self.max_rows_scanned is not None else -1
-        sample_position = -1
-        matched_rules: list[str] = []
-        read_rows = False
-
-        for index, rule in enumerate(self.rules):
-            if not rule.matches(fqn, row_count):
-                continue
-
-            matched_rules.append(rule.label or f"rules[{index}]")
-
-            if rule.statistics:
-                statistics = replace(statistics, **rule.statistics)
-
-            if rule.max_age_days is not None:
-                max_age_days = rule.max_age_days
-
-            if rule.read_rows is not None:
-                read_rows = rule.read_rows
-
-            if rule.sample is not None:
-                sample = rule.sample
-                sample_rule = rule.label or f"rules[{index}]"
-                sample_position = index + 1
-
-            if rule.filter is not None:
-                predicate = rule.filter
-                filter_rule = rule.label or f"rules[{index}]"
-
-            if rule.max_rows_scanned is not None:
-                cap = rule.max_rows_scanned
-                cap_position = index + 1
-
-        if sample is not None and predicate is not None:
-            raise ConfigError(
-                f"connection {self.name!r}: table {fqn!r} resolves to both a filter "
-                f"(from {filter_rule}) and a sample (from {sample_rule}). A table is narrowed "
-                f"by a predicate or by a fraction, never both - drop one of the two keys, or "
-                f"narrow the rule that sets it so it stops matching this table.",
-            )
-
-        ceiling_yielded = False
-        governing_cap: int | None = None
-
-        if predicate is not None:
-            ceiling_yielded = cap is not None
-        elif cap is not None and cap_position > sample_position:
-            sample = _resolve_ceiling(cap, row_count)
-            governing_cap = cap
+        resolved = self.resolve_profile(fqn, row_count)
+        key: ObjectKind = "views" if kind == "view" else "tables"
+        applied = [v.outcome == "applied" for v in resolved.rules]
+        tree = resolved.values
+        block = tree["read"][key]
+        mode = block["mode"]
+        cap = block.get("max_rows") if mode == "sample" else None
 
         return TableSettings(
-            statistics=statistics,
-            max_age_days=max_age_days,
-            sample=sample,
-            filter=predicate,
-            max_rows_scanned=governing_cap,
-            ceiling_yielded=ceiling_yielded,
-            matched_rules=tuple(matched_rules),
-            read_rows=read_rows,
-            sample_rule=sample_rule
-            if sample is not None and sample_position >= cap_position
-            else "",
+            profile=_typed_profile(tree),
+            max_age_days=tree["freshness"]["max_age_days"],
+            mode=mode,
+            explicit=any(
+                rule.written_mode(key) is not None
+                for rule, hit in zip(self.rules, applied, strict=True)
+                if hit
+            ),
+            sample=(_resolve_ceiling(cap, row_count) if cap is not None else block.get("fraction")),
+            filter=block.get("filter") if mode == "filter" else None,
+            materialize=block.get("materialize", MATERIALIZE_SAMPLE_DEFAULT),
+            max_rows_scanned=cap,
+            matched_rules=tuple(v.label for v in resolved.rules if v.outcome == "applied"),
         )
+
+    def resolve_profile(self, fqn: str | None, row_count: int | None = None) -> ResolvedProfile:
+        """The profile one table resolves to, with each leaf's origin and every rule's verdict.
+
+        With no `fqn`, the connection's own profile and no rule layers.
+        """
+
+        own = f"connections.{self.name}.profile"
+        tree = _profile_tree(self.profile)
+        origins = {path: self.profile_origins.get(path, own) for path in _leaf_paths(tree)}
+        blocks = {kind: _read_tree(getattr(self.profile.read, kind)) for kind in BUILTIN_READ}
+        read_origins = {
+            kind: {key: self.profile_origins.get(("read", kind, key), own) for key in block}
+            for kind, block in blocks.items()
+        }
+        verdicts: list[RuleVerdict] = []
+
+        for index, rule in enumerate(self.rules if fqn is not None else ()):
+            label = rule.label or f"rules[{index}]"
+            verdicts.append(RuleVerdict(label, rule.match, rule.verdict(str(fqn), row_count)))
+
+            if verdicts[-1].outcome != "applied":
+                continue
+
+            merge_into(tree, origins, {k: v for k, v in rule.profile.items() if k != "read"}, label)
+
+            for kind in BUILTIN_READ:
+                if written := (rule.profile.get("read") or {}).get(kind):
+                    blocks[kind] = fold_read(blocks[kind], written, label, read_origins[kind])
+
+        # A rule writing no `mode` is validated against the connection's, but an earlier matching
+        # rule may have switched it; a parameter the final mode does not take stays inert.
+        tree["read"] = {
+            kind: {
+                key: value
+                for key, value in block.items()
+                if key == "mode" or key in MODE_PARAMETERS[block["mode"]]
+            }
+            for kind, block in blocks.items()
+        }
+        origins.update(
+            {
+                ("read", kind, key): label
+                for kind, keys in read_origins.items()
+                for key, label in keys.items()
+                if key in tree["read"][kind]
+            },
+        )
+
+        return ResolvedProfile(values=tree, origins=origins, rules=tuple(verdicts))
 
 
 @dataclass(frozen=True)
@@ -418,7 +607,7 @@ def bind_redaction_salt(conn: ConnectionConfig, salt: str | None) -> ConnectionC
 
     material = bool(salt and salt.strip())
 
-    if not material and any(rule.with_ == "hash" for rule in conn.redact):
+    if not material and any(rule.with_ == "hash" for rule in conn.profile.redact):
         raise ConfigError(
             f"connection {conn.name!r}: a `redact` rule uses `with: hash` but no "
             f"`{REDACTION_SALT_KEY}` carries a value. Add it to the connection's entry in "
@@ -476,22 +665,15 @@ def _load_project_from(config_path: Path) -> ProjectConfig:
     """Parse one resolved `.dbprint.yaml` path into a `ProjectConfig`."""
 
     raw = _load_yaml(config_path)
+
+    if problems := validate_project(raw):
+        raise ConfigError(format_problems(config_path, problems))
+
     project_root = config_path.parent
-
-    defaults = _parse_defaults(raw.get("defaults") or {})
-    connections_raw = raw.get("connections") or {}
-
-    if not isinstance(connections_raw, dict):
-        raise ConfigError(
-            f"{config_path}: `connections` must be a mapping, got {type(connections_raw).__name__}.",
-        )
-
-    if not connections_raw:
-        raise ConfigError(f"{config_path}: at least one connection must be defined.")
-
+    defaults = raw.get("defaults") or {}
     connections = {
-        name: _parse_connection(name, body or {}, defaults, project_root, config_path)
-        for name, body in connections_raw.items()
+        name: _build_connection(name, body, defaults, project_root)
+        for name, body in raw["connections"].items()
     }
 
     return ProjectConfig(project_root=project_root, connections=connections)
@@ -507,933 +689,209 @@ def _find_project_config(start: Path) -> Path | None:
     return None
 
 
-def _load_yaml(path: Path) -> dict[str, Any]:
+def _load_yaml(path: Path) -> Any:
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        return yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
-        raise ConfigError(f"{path}: invalid YAML — {exc}") from exc
-
-    if data is None:
-        return {}
-
-    if not isinstance(data, dict):
-        raise ConfigError(f"{path}: top-level YAML must be a mapping, got {type(data).__name__}.")
-
-    return data
+        raise ConfigError(f"{path}: invalid YAML - {exc}") from exc
 
 
-def _parse_defaults(raw: dict[str, Any]) -> dict[str, Any]:
-    """Parse project-level defaults block; missing fields stay as None."""
-
-    return {
-        "statistics": raw.get("statistics"),
-        "rules": raw.get("rules"),
-        "redact": raw.get("redact"),
-        "diff": raw.get("diff"),
-        "max_age_days": raw.get("max_age_days"),
-        "max_rows_scanned": raw.get("max_rows_scanned"),
-        "statement_timeout": raw.get("statement_timeout"),
-        "parallelism": raw.get("parallelism"),
-        "output": raw.get("output"),
-        "include": raw.get("include"),
-        "exclude": raw.get("exclude"),
-        "infer_relationships": raw.get("infer_relationships"),
-        "materialize_sample": raw.get("materialize_sample"),
-        "sketch_all_columns": raw.get("sketch_all_columns"),
-        "compute_timeline": raw.get("compute_timeline"),
-        "raw": raw,
-    }
+_BUILTIN_PROFILE: dict[str, Any] = {
+    "freshness": asdict(FreshnessConfig()),
+    "statistics": {**asdict(StatisticsProfile()), "percentiles": list(PERCENTILES_DEFAULT)},
+    "read": {kind: dict(block) for kind, block in BUILTIN_READ.items()},
+    "looks_like": asdict(LooksLikeProfile()),
+    "null_patterns": asdict(NullPatternsProfile()),
+    "parts": asdict(PartsProfile()),
+    "timeline": asdict(TimelineProfile()),
+    "sketches": asdict(SketchesProfile()),
+    "relationships": asdict(RelationshipsProfile()),
+    "redact": [],
+}
 
 
-def _parse_connection(
+def _build_connection(
     name: str,
     body: dict[str, Any],
     defaults: dict[str, Any],
     project_root: Path,
-    config_path: Path,
 ) -> ConnectionConfig:
-    adapter = body.get("adapter")
+    def merged(key: str, base: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        layers = [("built-in", base or {}), ("defaults", defaults.get(key) or {})]
 
-    if adapter not in ADAPTERS:
-        raise ConfigError(
-            f"{config_path}: connection {name!r}: adapter must be one of {ADAPTERS}, got {adapter!r}.",
-        )
+        return merge([*layers, (f"connections.{name}", body.get(key) or {})])[0]
 
-    output_raw = body.get("output") or defaults.get("output") or OUTPUT_DEFAULT
-    output = resolve_project_path(output_raw, project_root)
+    tables = merged("tables")
+    run = merged("run")
+    layers = [
+        ("defaults.profile", defaults.get("profile") or {}),
+        (f"connections.{name}.profile", body.get("profile") or {}),
+    ]
+    profile, origins = merge([(BUILTIN_LABEL, _BUILTIN_PROFILE), *layers])
+    profile["read"] = {}
 
-    include = _coerce_pattern_list(
-        body.get("include"),
-        defaults.get("include"),
-        ("*",),
-        config_path,
-        name,
-        "include",
-    )
-    exclude = _coerce_pattern_list(
-        body.get("exclude"),
-        defaults.get("exclude"),
-        (),
-        config_path,
-        name,
-        "exclude",
-    )
+    for kind in BUILTIN_READ:
+        block, read_origins = dict(BUILTIN_READ[kind]), {"mode": BUILTIN_LABEL}
 
-    max_age_days = _resolve_max_age_days(
-        body.get("max_age_days"),
-        defaults.get("max_age_days"),
-        config_path,
-        name,
-    )
-    max_rows_scanned = _resolve_max_rows_scanned(
-        body.get("max_rows_scanned"),
-        defaults.get("max_rows_scanned"),
-        config_path,
-        name,
-    )
+        for label, layer in layers:
+            if written := (layer.get("read") or {}).get(kind):
+                block = fold_read(block, written, label, read_origins)
 
-    statement_timeout = _resolve_statement_timeout(
-        body.get("statement_timeout"),
-        defaults.get("statement_timeout"),
-        config_path,
-        name,
-    )
-    parallelism = _resolve_parallelism(
-        body.get("parallelism"),
-        defaults.get("parallelism"),
-        adapter,
-        config_path,
-        name,
-    )
+        profile["read"][kind] = block
+        origins = {path: o for path, o in origins.items() if path[:2] != ("read", kind)}
+        origins.update({("read", kind, key): o for key, o in read_origins.items()})
 
-    statistics = _parse_statistics(
-        body.get("statistics"),
-        defaults["statistics"],
-        config_path=config_path,
-        conn_name=name,
+    timeout = run.get("statement_timeout")
+    rules = tuple(
+        _build_rule(rule, f"{where}.rules[{index}]")
+        for where, block in (("defaults", defaults), (f"connections.{name}", body))
+        for index, rule in enumerate(block.get("rules") or [])
     )
-    _reject_misplaced_keys(defaults["raw"], body, config_path, name)
-    rules = _parse_rules(defaults["rules"], config_path, name, source="defaults") + _parse_rules(
-        body.get("rules"),
-        config_path,
-        name,
-        source=f"connection {name!r}",
-    )
-    diff = _parse_diff(body.get("diff"), defaults["diff"], config_path, name)
-    redact = _parse_redact(
-        defaults["redact"],
-        config_path,
-        name,
-        source="defaults",
-    ) + _parse_redact(
-        body.get("redact"),
-        config_path,
-        name,
-        source=f"connection {name!r}",
-    )
-
-    assertions_raw = body.get("assertions")
-
-    if assertions_raw is None:
-        assertions_raw = {}
-    elif not isinstance(assertions_raw, dict):
-        raise ConfigError(
-            f"{config_path}: connection {name!r}: `assertions` must be a mapping, "
-            f"got {type(assertions_raw).__name__}.",
-        )
+    output = body.get("output") or defaults.get("output") or OUTPUT_DEFAULT
+    manifest = body.get("dbt_manifest")
 
     return ConnectionConfig(
         name=name,
-        adapter=adapter,
+        adapter=body["adapter"],
         auto=bool(body.get("auto")),
-        output=output,
-        include=include,
-        exclude=exclude,
-        max_age_days=max_age_days,
-        max_rows_scanned=max_rows_scanned,
-        statement_timeout=statement_timeout,
-        parallelism=parallelism,
-        statistics=statistics,
+        output=resolve_project_path(output, project_root),
+        tables=TablesConfig(
+            include=tuple(p.lower() for p in tables.get("include", ["*"])),
+            exclude=tuple(p.lower() for p in tables.get("exclude", [])),
+        ),
+        run=RunConfig(
+            parallelism=run.get("parallelism", PARALLELISM_DEFAULT),
+            statement_timeout=parse_duration_seconds(timeout) if timeout is not None else None,
+        ),
+        profile=_typed_profile(profile),
         rules=rules,
-        diff=diff,
-        redact=redact,
-        infer_relationships=_coerce_bool(
-            body.get("infer_relationships"),
-            defaults.get("infer_relationships"),
-            default=INFER_RELATIONSHIPS_DEFAULT,
-            field_label=f"connection {name!r}: infer_relationships",
-            config_path=config_path,
+        diff=DiffConfig(
+            stat_change_threshold={
+                **STAT_CHANGE_THRESHOLD_DEFAULT,
+                **merged("diff").get("stat_change_threshold", {}),
+            },
         ),
-        materialize_sample=_coerce_bool(
-            body.get("materialize_sample"),
-            defaults.get("materialize_sample"),
-            default=MATERIALIZE_SAMPLE_DEFAULT,
-            field_label=f"connection {name!r}: materialize_sample",
-            config_path=config_path,
-        ),
-        sketch_all_columns=_coerce_bool(
-            body.get("sketch_all_columns"),
-            defaults.get("sketch_all_columns"),
-            default=SKETCH_ALL_COLUMNS_DEFAULT,
-            field_label=f"connection {name!r}: sketch_all_columns",
-            config_path=config_path,
-        ),
-        compute_timeline=_coerce_bool(
-            body.get("compute_timeline"),
-            defaults.get("compute_timeline"),
-            default=COMPUTE_TIMELINE_DEFAULT,
-            field_label=f"connection {name!r}: compute_timeline",
-            config_path=config_path,
-        ),
-        assertions_raw=dict(assertions_raw),
+        assertions_raw=dict(body.get("assertions") or {}),
+        dbt_manifest=resolve_project_path(manifest, project_root) if manifest else None,
+        profile_origins=origins,
     )
 
 
-def _parse_statistics(
-    conn_block: Any,
-    defaults_block: Any,
-    config_path: Path,
-    conn_name: str,
-) -> StatisticsConfig:
-    """Merge defaults <- per-connection for statistics, validating each block where written."""
-
-    integers = {
-        **_coerce_statistics_integers(defaults_block, config_path, conn_name, "defaults"),
-        **_coerce_statistics_integers(
-            conn_block,
-            config_path,
-            conn_name,
-            f"connection {conn_name!r}",
-        ),
-    }
-
-    merged = {**(defaults_block or {}), **(conn_block or {})}
-    percentiles_raw = merged.get("percentiles", list(PERCENTILES_DEFAULT))
-
-    return StatisticsConfig(
-        percentiles=_coerce_percentiles(percentiles_raw, config_path, conn_name),
-        **integers,
-    )
-
-
-def _parse_rules(
-    raw: Any,
-    config_path: Path,
-    conn_name: str,
-    *,
-    source: str,
-) -> tuple[RuleConfig, ...]:
-    """Parse one `rules:` list into ordered RuleConfigs; validate every entry."""
-
-    if raw is None:
-        return ()
-
-    if not isinstance(raw, list):
-        raise ConfigError(
-            f"{config_path}: connection {conn_name!r}: {source} rules must be a list of rule "
-            f"mappings, got {type(raw).__name__}.",
-        )
-
-    return tuple(
-        _parse_rule(entry, index, config_path, conn_name, source=source)
-        for index, entry in enumerate(raw)
-    )
-
-
-def _parse_rule(
-    raw: Any,
-    index: int,
-    config_path: Path,
-    conn_name: str,
-    *,
-    source: str,
-) -> RuleConfig:
-    label = f"{source} rules[{index}]"
-
-    if not isinstance(raw, dict):
-        raise ConfigError(
-            f"{config_path}: connection {conn_name!r}: {label} must be a mapping, "
-            f"got {type(raw).__name__}.",
-        )
-
-    include = _coerce_pattern_list(
-        raw.get("include"),
-        None,
-        ("*",),
-        config_path,
-        conn_name,
-        "include",
-        label=label,
-    )
-    exclude = _coerce_pattern_list(
-        raw.get("exclude"),
-        None,
-        (),
-        config_path,
-        conn_name,
-        "exclude",
-        label=label,
-    )
-    min_rows = _coerce_min_rows(raw.get("min_rows"), config_path, conn_name, label)
-    sample = _coerce_sample(raw.get("sample"), config_path, conn_name, label)
-    predicate = _coerce_predicate(raw.get("filter"), config_path, conn_name, label)
-    statistics = _coerce_statistics_overrides(
-        raw.get("statistics"),
-        config_path,
-        conn_name,
-        label,
-    )
-    max_age_days = _coerce_max_age_days(
-        raw.get("max_age_days"),
-        config_path,
-        f"connection {conn_name!r}: {label}.max_age_days",
-    )
-    max_rows_scanned = _coerce_max_rows_scanned(
-        raw.get("max_rows_scanned"),
-        config_path,
-        f"connection {conn_name!r}: {label}.max_rows_scanned",
-    )
-    read_rows = _coerce_read_rows(raw.get("read_rows"), config_path, conn_name, label)
-
-    # A rule that changes nothing is a mis-nested or misspelled key ignored keys would hide.
-    if (
-        sample is None
-        and predicate is None
-        and not statistics
-        and max_age_days is None
-        and max_rows_scanned is None
-        and read_rows is None
-    ):
-        raise ConfigError(
-            f"{config_path}: connection {conn_name!r}: {label} sets no sample, filter, statistics, "
-            f"max_age_days, max_rows_scanned or read_rows, so it would do nothing. Remove it or "
-            f"give it a setting.",
-        )
-
-    # A view has no row-count estimate, so a size condition never selects one it could read.
-    if read_rows and min_rows is not None:
-        raise ConfigError(
-            f"{config_path}: connection {conn_name!r}: {label} sets read_rows: true with min_rows. "
-            f"read_rows governs plain views, which have no row-count estimate, so min_rows never "
-            f"selects one and the rule's read_rows could never apply. Drop min_rows, or move "
-            f"read_rows into a rule of its own.",
-        )
-
-    # A rule that sets something but matches nothing. An absent `include` defaults to
-    # `["*"]`, so only an explicit empty list reaches here.
-    if not include:
-        raise ConfigError(
-            f"{config_path}: connection {conn_name!r}: {label}.include is an empty list, so the "
-            f"rule matches no table and would do nothing. Remove it, or list the patterns the "
-            f"rule should match.",
-        )
-
-    if sample is not None and predicate is not None:
-        raise ConfigError(
-            f"{config_path}: connection {conn_name!r}: {label} sets both sample and filter. "
-            f"A table is narrowed by a predicate or by a fraction, never both - keep one, or "
-            f"widen the predicate to describe the rows you want.",
-        )
+def _build_rule(raw: dict[str, Any], label: str) -> RuleConfig:
+    matcher = raw.get("match") or {}
 
     return RuleConfig(
-        include=include,
-        exclude=exclude,
-        min_rows=min_rows,
-        sample=sample,
-        filter=predicate,
-        max_rows_scanned=max_rows_scanned,
-        statistics=statistics,
-        max_age_days=max_age_days,
-        read_rows=read_rows,
+        match=RuleMatch(
+            tables=tuple(p.lower() for p in matcher.get("tables", ["*"])),
+            exclude=tuple(p.lower() for p in matcher.get("exclude", [])),
+            min_rows=matcher.get("min_rows"),
+        ),
+        profile=_integral(copy.deepcopy(raw["profile"])),
         label=label,
     )
 
 
-_REDACTION_PRIMITIVES: tuple[str, ...] = ("mask", "drop", "hash")
+def _typed_profile(tree: Mapping[str, Any]) -> ProfileConfig:
+    tree = _integral(tree)
+    read, statistics = tree["read"], tree["statistics"]
 
-# The closed vocabularies a redact rule can target, read from the modules that define them
-# so a new value needs no second edit here. `columns` globs over names, so it has no set.
-_SENSITIVITIES: frozenset[str] = frozenset(get_args(Sensitivity))
-_LOOKS_LIKE_PATTERNS: frozenset[str] = frozenset(get_args(LooksLike))
-
-
-def _parse_redact(
-    raw: Any,
-    config_path: Path,
-    conn_name: str,
-    *,
-    source: str,
-) -> tuple[RedactRule, ...]:
-    """Parse one `redact:` list into ordered RedactRules; validate every entry."""
-
-    if raw is None:
-        return ()
-
-    if not isinstance(raw, list):
-        raise ConfigError(
-            f"{config_path}: connection {conn_name!r}: {source} `redact` must be a list of rule "
-            f"mappings, got {type(raw).__name__}.",
-        )
-
-    return tuple(
-        _parse_redact_rule(entry, index, config_path, conn_name, source=source)
-        for index, entry in enumerate(raw)
-    )
-
-
-def _parse_redact_rule(
-    raw: Any,
-    index: int,
-    config_path: Path,
-    conn_name: str,
-    *,
-    source: str,
-) -> RedactRule:
-    label = f"{source} redact[{index}]"
-
-    if not isinstance(raw, dict):
-        raise ConfigError(
-            f"{config_path}: connection {conn_name!r}: {label} must be a mapping, "
-            f"got {type(raw).__name__}.",
-        )
-
-    columns = _coerce_pattern_list(
-        raw.get("columns"),
-        None,
-        (),
-        config_path,
-        conn_name,
-        "columns",
-        label=label,
-    )
-    sensitivity = _coerce_vocabulary(
-        _coerce_pattern_list(
-            raw.get("sensitivity"),
-            None,
-            (),
-            config_path,
-            conn_name,
-            "sensitivity",
-            label=label,
+    return ProfileConfig(
+        freshness=FreshnessConfig(max_age_days=tree["freshness"]["max_age_days"]),
+        statistics=StatisticsProfile(
+            enumeration_threshold=statistics["enumeration_threshold"],
+            top_n_values=statistics["top_n_values"],
+            percentiles=tuple(statistics["percentiles"]),
         ),
-        _SENSITIVITIES,
-        config_path,
-        conn_name,
-        "sensitivity",
-        label,
-    )
-    looks_like = _coerce_vocabulary(
-        _coerce_pattern_list(
-            raw.get("looks_like"),
-            None,
-            (),
-            config_path,
-            conn_name,
-            "looks_like",
-            label=label,
-        ),
-        _LOOKS_LIKE_PATTERNS,
-        config_path,
-        conn_name,
-        "looks_like",
-        label,
-    )
-
-    # A rule naming no target would cover every column, never what an author means.
-    if not (columns or sensitivity or looks_like):
-        raise ConfigError(
-            f"{config_path}: connection {conn_name!r}: {label} names no `columns`, `sensitivity` "
-            f"or `looks_like`, so it targets nothing. Give it one of the three.",
-        )
-
-    primitive = raw.get("with", "mask")
-
-    if primitive not in _REDACTION_PRIMITIVES:
-        raise ConfigError(
-            f"{config_path}: connection {conn_name!r}: {label}.with must be one of "
-            f"{_REDACTION_PRIMITIVES}, got {primitive!r}.",
-        )
-
-    return RedactRule(
-        columns=columns,
-        sensitivity=sensitivity,
-        looks_like=looks_like,
-        with_=primitive,
-    )
-
-
-def _reject_misplaced_keys(
-    defaults_raw: dict[str, Any],
-    body: dict[str, Any],
-    config_path: Path,
-    conn_name: str,
-) -> None:
-    """Refuse a `scope:` block and the rule keys authors hoist above it.
-
-    Unknown keys drop silently, so any of these shapes would load clean and narrow nothing.
-    The list is not a schema - each entry is a place authors land often enough to name.
-    """
-
-    for where, block in (("defaults", defaults_raw), (f"connection {conn_name!r}", body)):
-        if "scope" in block:
-            raise ConfigError(
-                f"{config_path}: {where}: `scope` is not read here. Move `sample` and `filter` "
-                f"into a `rules:` list, where each entry carries its own `include`/`exclude`.",
+        read=ReadSettings(tables=_typed_read(read["tables"]), views=_typed_read(read["views"])),
+        looks_like=LooksLikeProfile(**tree["looks_like"]),
+        null_patterns=NullPatternsProfile(**tree["null_patterns"]),
+        parts=PartsProfile(**tree["parts"]),
+        timeline=TimelineProfile(**tree["timeline"]),
+        sketches=SketchesProfile(**tree["sketches"]),
+        relationships=RelationshipsProfile(**tree["relationships"]),
+        redact=tuple(
+            rule
+            if isinstance(rule, RedactRule)
+            else RedactRule(
+                columns=tuple(p.lower() for p in rule.get("columns", [])),
+                sensitivity=tuple(rule.get("sensitivity", [])),
+                looks_like=tuple(rule.get("looks_like", [])),
+                with_=rule.get("with", "mask"),
             )
-
-        for key, remediation_tail in _RULE_ONLY_KEYS.items():
-            if key in block:
-                what = (
-                    "opts a rule's own views into being read"
-                    if key == "read_rows"
-                    else "narrows a rule's own tables"
-                )
-                raise ConfigError(
-                    f"{config_path}: {where}: `{key}` is not read here - it {what}, "
-                    f"not the connection. Move it into a `rules:` list: "
-                    f'rules: [{{include: ["schema.table"], {key}: {block[key]!r}'
-                    f"{remediation_tail}}}].",
-                )
-
-
-def _coerce_read_rows(value: Any, config_path: Path, conn_name: str, label: str) -> bool | None:
-    if value is None:
-        return None
-
-    if not isinstance(value, bool):
-        raise ConfigError(
-            f"{config_path}: connection {conn_name!r}: {label}.read_rows: expected true or false, "
-            f"got {value!r}.",
-        )
-
-    return value
-
-
-def _coerce_min_rows(value: Any, config_path: Path, conn_name: str, label: str) -> int | None:
-    """Validate a rule's size condition; absent stays absent.
-
-    Zero is refused, not read as a no-op: it silently excludes tables the catalog cannot size.
-    """
-
-    if value is None:
-        return None
-
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ConfigError(
-            f"{config_path}: connection {conn_name!r}: {label}.min_rows must be a positive "
-            f"integer, got {value!r}.",
-        )
-
-    if value < 1:
-        raise ConfigError(
-            f"{config_path}: connection {conn_name!r}: {label}.min_rows is {value}, which selects "
-            f"every table the catalog can size and no table it cannot. Drop the key to let the "
-            f"rule match every table it names.",
-        )
-
-    return value
-
-
-def _coerce_max_rows_scanned(value: Any, config_path: Path, field_label: str) -> int | None:
-    """Validate one row-count ceiling; absent stays absent.
-
-    Zero or negative is refused: "read nothing" is not a narrowing a producer can act on.
-    """
-
-    if value is None:
-        return None
-
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ConfigError(
-            f"{config_path}: {field_label} must be a positive integer, got {value!r}.",
-        )
-
-    if value < 1:
-        raise ConfigError(
-            f"{config_path}: {field_label} is {value}, which forbids reading any row. Use a "
-            f"positive row count, or drop the key to leave the table unbounded.",
-        )
-
-    return value
-
-
-def _coerce_sample(value: Any, config_path: Path, conn_name: str, label: str) -> float | None:
-    if value is None:
-        return None
-
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ConfigError(
-            f"{config_path}: connection {conn_name!r}: {label}.sample must be a number in "
-            f"(0, 1], got {value!r}.",
-        )
-
-    if not 0 < value <= 1:
-        raise ConfigError(
-            f"{config_path}: connection {conn_name!r}: {label}.sample {value} is outside (0, 1].",
-        )
-
-    return float(value)
-
-
-def _coerce_predicate(value: Any, config_path: Path, conn_name: str, label: str) -> str | None:
-    if value is None:
-        return None
-
-    if not isinstance(value, str) or not value.strip():
-        raise ConfigError(
-            f"{config_path}: connection {conn_name!r}: {label}.filter must be a non-empty string, "
-            f"got {value!r}.",
-        )
-
-    return value.strip()
-
-
-def _coerce_statistics_overrides(
-    raw: Any,
-    config_path: Path,
-    conn_name: str,
-    label: str,
-) -> dict[str, Any]:
-    """Validate a partial statistics block into StatisticsConfig constructor kwargs."""
-
-    overrides = _coerce_statistics_integers(raw, config_path, conn_name, label)
-
-    if raw and "percentiles" in raw:
-        overrides["percentiles"] = _coerce_percentiles(
-            raw["percentiles"],
-            config_path,
-            conn_name,
-            label=label,
-        )
-
-    return overrides
-
-
-def _coerce_statistics_integers(
-    raw: Any,
-    config_path: Path,
-    conn_name: str,
-    label: str,
-) -> dict[str, Any]:
-    """Validate the integer statistics keys present in one block, naming where it sits.
-
-    Shared by the connection, `defaults` and rule levels, so one malformed value reports one
-    way. Absent or empty means no overrides; a non-mapping is refused, not read as absent.
-    """
-
-    if raw is None:
-        return {}
-
-    if not isinstance(raw, dict):
-        raise ConfigError(
-            f"{config_path}: connection {conn_name!r}: {label}.statistics must be a mapping, "
-            f"got {type(raw).__name__}.",
-        )
-
-    overrides: dict[str, Any] = {}
-
-    for key in _STATISTICS_INT_KEYS:
-        if key not in raw:
-            continue
-
-        value = raw[key]
-
-        if not isinstance(value, int) or isinstance(value, bool):
-            raise ConfigError(
-                f"{config_path}: connection {conn_name!r}: {label}.statistics.{key}: expected "
-                f"integer, got {value!r}.",
-            )
-
-        if key in _STATISTICS_INT_FLOORS and value < _STATISTICS_INT_FLOORS[key]:
-            raise ConfigError(
-                f"{config_path}: connection {conn_name!r}: {label}.statistics.{key}: expected "
-                f"an integer of at least {_STATISTICS_INT_FLOORS[key]}, got {value}.",
-            )
-
-        overrides[key] = value
-
-    return overrides
-
-
-def _parse_diff(
-    conn_block: Any,
-    defaults_block: Any,
-    config_path: Path,
-    conn_name: str,
-) -> DiffConfig:
-    """Merge defaults <- per-connection for diff; deep-merge stat_change_threshold.
-
-    Each block is validated where it is written, so an error names the block the author typed.
-    """
-
-    defaults_diff = _diff_block(defaults_block, config_path, conn_name, "defaults.")
-    conn_diff = _diff_block(conn_block, config_path, conn_name, "")
-
-    thresholds = dict(STAT_CHANGE_THRESHOLD_DEFAULT)
-    thresholds.update(
-        _coerce_stat_change_threshold(
-            defaults_diff.get("stat_change_threshold"),
-            config_path,
-            conn_name,
-            "defaults.",
-        ),
-    )
-    thresholds.update(
-        _coerce_stat_change_threshold(
-            conn_diff.get("stat_change_threshold"),
-            config_path,
-            conn_name,
-            "",
+            for rule in tree["redact"]
         ),
     )
 
-    return DiffConfig(stat_change_threshold=thresholds)
+
+def _typed_read(block: Mapping[str, Any]) -> ReadConfig:
+    return ReadConfig(
+        mode=block["mode"],
+        fraction=block.get("fraction"),
+        max_rows=block.get("max_rows"),
+        materialize=block.get("materialize", MATERIALIZE_SAMPLE_DEFAULT),
+        filter=block.get("filter"),
+    )
 
 
-def _diff_block(raw: Any, config_path: Path, conn_name: str, prefix: str) -> dict[str, Any]:
-    """One `diff` block as a mapping; absent or empty means the spec defaults govern.
+def _read_tree(read: ReadConfig) -> dict[str, Any]:
+    tree: dict[str, Any] = {"mode": read.mode}
 
-    Any other value under the key is refused rather than read as absent.
-    """
+    for key in ("fraction", "max_rows", "filter"):
+        if (value := getattr(read, key)) is not None:
+            tree[key] = value
 
-    if raw is None:
-        return {}
+    if read.mode == "sample":
+        tree["materialize"] = read.materialize
 
-    if not isinstance(raw, dict):
-        raise ConfigError(
-            f"{config_path}: connection {conn_name!r}: {prefix}diff must be a mapping, "
-            f"got {type(raw).__name__}.",
-        )
-
-    return raw
+    return tree
 
 
-def _coerce_stat_change_threshold(
-    raw: Any,
-    config_path: Path,
-    conn_name: str,
-    prefix: str,
-) -> dict[str, float]:
-    """Validate one `stat_change_threshold` block into per-stat fractions.
+def _leaf_paths(tree: Mapping[str, Any], prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
+    out: list[tuple[str, ...]] = []
 
-    An unknown key is refused rather than left to fall back to `default` silently; accepted
-    keys are SPEC 2.6.9's. Absent or empty means no overrides.
-    """
-
-    where = f"{config_path}: connection {conn_name!r}: {prefix}diff.stat_change_threshold"
-
-    if raw is None:
-        return {}
-
-    if not isinstance(raw, dict):
-        raise ConfigError(f"{where} must be a mapping, got {type(raw).__name__}.")
-
-    out: dict[str, float] = {}
-
-    for key, value in raw.items():
-        if key not in STAT_CHANGE_THRESHOLD_DEFAULT:
-            accepted = ", ".join(sorted(STAT_CHANGE_THRESHOLD_DEFAULT))
-
-            raise ConfigError(
-                f"{where}.{key} is not a threshold this reads, so it would be ignored and "
-                f"`default` applied in its place. Accepted keys: {accepted}.",
-            )
-
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ConfigError(f"{where}.{key}: expected a number in [0, 1], got {value!r}.")
-
-        if not 0 <= value <= 1:
-            raise ConfigError(
-                f"{where}.{key} is {value}, which is outside [0, 1] - a threshold is the "
-                f"fraction of a value's own size that a change has to exceed to be shown.",
-            )
-
-        out[key] = float(value)
+    for key, value in tree.items():
+        if isinstance(value, Mapping):
+            out += _leaf_paths(value, (*prefix, key))
+        else:
+            out.append((*prefix, key))
 
     return out
 
 
-def _coerce_percentiles(
-    value: Any,
-    config_path: Path,
-    conn_name: str,
-    *,
-    label: str = "",
-) -> tuple[int, ...]:
-    """Validate a percentiles list; `label` names the rule when the list came from one."""
+def _profile_tree(profile: ProfileConfig) -> dict[str, Any]:
+    """`profile` as a mergeable tree; `redact` keeps its typed rules, since a list replaces whole."""
 
-    subject = f"{label}.statistics.percentiles" if label else "percentiles"
-    prefix = f"{subject}: " if label else ""
-
-    if not isinstance(value, list) or not value:
-        raise ConfigError(
-            f"{config_path}: connection {conn_name!r}: {subject} must be a non-empty list of integers in 1..99.",
+    tree = {
+        key: asdict(getattr(profile, key))
+        for key in (
+            "freshness",
+            "statistics",
+            "looks_like",
+            "null_patterns",
+            "parts",
+            "timeline",
+            "sketches",
+            "relationships",
         )
+    }
+    tree["statistics"]["percentiles"] = list(profile.statistics.percentiles)
 
-    result: list[int] = []
-
-    for v in value:
-        if not isinstance(v, int) or isinstance(v, bool):
-            raise ConfigError(
-                f"{config_path}: connection {conn_name!r}: {prefix}percentile {v!r} is not an integer.",
-            )
-
-        if not 1 <= v <= 99:
-            raise ConfigError(
-                f"{config_path}: connection {conn_name!r}: {prefix}percentile {v} out of range (1..99).",
-            )
-
-        result.append(v)
-
-    return tuple(result)
+    return {**tree, "redact": list(profile.redact)}
 
 
-def _coerce_pattern_list(
-    conn_value: Any,
-    default_value: Any,
-    default: tuple[str, ...],
-    config_path: Path,
-    conn_name: str,
-    field: str,
-    *,
-    label: str = "",
-) -> tuple[str, ...]:
-    """Coerce a selector list; `label` names the rule when the list came from one."""
+def _integral(node: Any) -> Any:
+    """`7.0` passes the schema as an integer (JSON Schema 2020-12), so it is read as `7`."""
 
-    source = conn_value if conn_value is not None else default_value
+    if isinstance(node, dict):
+        return {key: _integral(value) for key, value in node.items()}
 
-    if source is None:
-        return default
+    if isinstance(node, list):
+        return [_integral(value) for value in node]
 
-    if not isinstance(source, list) or not all(isinstance(p, str) for p in source):
-        qualified = f"{label}.{field}" if label else field
+    if isinstance(node, float) and node.is_integer():
+        return int(node)
 
-        raise ConfigError(
-            f"{config_path}: connection {conn_name!r}: {qualified} must be a list of strings, "
-            f"got {source!r}.",
-        )
-
-    return tuple(p.lower() for p in source)
-
-
-def _coerce_vocabulary(
-    values: tuple[str, ...],
-    vocabulary: frozenset[str],
-    config_path: Path,
-    conn_name: str,
-    field: str,
-    label: str,
-) -> tuple[str, ...]:
-    """Refuse a redact target outside its closed set, naming the accepted values.
-
-    A misspelled target covers nothing but loads clean and looks redacted. Runs after
-    `_coerce_pattern_list` lowercases, so `PERSONAL_NAME` still matches.
-    """
-
-    unknown = [v for v in values if v not in vocabulary]
-
-    if unknown:
-        raise ConfigError(
-            f"{config_path}: connection {conn_name!r}: {label}.{field} entries must each be one "
-            f"of {tuple(sorted(vocabulary))}, got {unknown[0]!r}.",
-        )
-
-    return values
-
-
-def _resolve_max_age_days(
-    conn_value: Any,
-    default_value: Any,
-    config_path: Path,
-    conn_name: str,
-) -> int:
-    """Settle the connection's freshness threshold from its own block or `defaults`.
-
-    Both blocks are validated even when the connection wins, so a bad `defaults` value errors.
-    """
-
-    own = _coerce_max_age_days(conn_value, config_path, f"connection {conn_name!r}: max_age_days")
-    inherited = _coerce_max_age_days(default_value, config_path, "defaults: max_age_days")
-
-    if own is not None:
-        return own
-
-    return inherited if inherited is not None else MAX_AGE_DAYS_DEFAULT
-
-
-def _resolve_statement_timeout(
-    conn_value: Any,
-    default_value: Any,
-    config_path: Path,
-    conn_name: str,
-) -> int | None:
-    """Settle the per-statement limit in seconds; absence means no limit and no session setting."""
-
-    value = conn_value if conn_value is not None else default_value
-
-    if value is None:
-        return None
-
-    # Zero means "no limit" on some vendors and "the maximum" on Snowflake, so it is refused.
-    try:
-        if isinstance(value, str) and (seconds := parse_duration_seconds(value)) > 0:
-            return seconds
-    except DurationError:
-        pass
-
-    raise ConfigError(
-        f"{config_path}: connection {conn_name!r}: statement_timeout must be a duration like "
-        f"30s, 10m or 2h (Nd/Nh/Nm/Ns, one unit), got {value!r}.",
-    )
-
-
-def _resolve_parallelism(
-    conn_value: Any,
-    default_value: Any,
-    adapter: str,
-    config_path: Path,
-    conn_name: str,
-) -> int:
-    value = conn_value if conn_value is not None else default_value
-
-    if value is None:
-        return PARALLELISM_DEFAULT
-
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ConfigError(
-            f"{config_path}: connection {conn_name!r}: parallelism must be an integer of at "
-            f"least 1, got {value!r}.",
-        )
-
-    # An unnamed `:memory:` database is private to each session, and temp tables always are.
-    if adapter == "duckdb" and value > 1:
-        raise ConfigError(
-            f"{config_path}: connection {conn_name!r}: parallelism {value} is not supported on "
-            f"the duckdb adapter, whose sessions cannot share one database; set it to 1.",
-        )
-
-    return value
-
-
-def _resolve_max_rows_scanned(
-    conn_value: Any,
-    default_value: Any,
-    config_path: Path,
-    conn_name: str,
-) -> int | None:
-    """Settle the connection's row-count ceiling from its own block or `defaults`.
-
-    Absence means no ceiling rather than a default, so no catalog estimate is fetched for it.
-    """
-
-    own = _coerce_max_rows_scanned(
-        conn_value,
-        config_path,
-        f"connection {conn_name!r}: max_rows_scanned",
-    )
-    inherited = _coerce_max_rows_scanned(default_value, config_path, "defaults: max_rows_scanned")
-
-    return own if own is not None else inherited
+    return node
 
 
 def _resolve_ceiling(cap: int, estimate: int | None) -> float | None:
@@ -1456,43 +914,6 @@ def _resolve_ceiling(cap: int, estimate: int | None) -> float | None:
         snapped = CEILING_GRID_RATIO**steps
 
     return snapped
-
-
-def _coerce_max_age_days(value: Any, config_path: Path, field_label: str) -> int | None:
-    """Validate one freshness threshold; absent stays absent.
-
-    Zero is legal - `age_days < max_age_days` is always false, so every table re-extracts.
-    A negative is refused: it would hold every table permanently stale.
-    """
-
-    if value is None:
-        return None
-
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ConfigError(f"{config_path}: {field_label}: expected integer, got {value!r}.")
-
-    if value < 0:
-        raise ConfigError(negative_max_age_refusal(f"{config_path}: {field_label}", value))
-
-    return value
-
-
-def _coerce_bool(
-    conn_value: Any,
-    default_value: Any,
-    default: bool,
-    field_label: str,
-    config_path: Path,
-) -> bool:
-    source = conn_value if conn_value is not None else default_value
-
-    if source is None:
-        return default
-
-    if not isinstance(source, bool):
-        raise ConfigError(f"{config_path}: {field_label}: expected true or false, got {source!r}.")
-
-    return source
 
 
 def resolve_project_path(value: str | os.PathLike[str], project_root: Path) -> Path:

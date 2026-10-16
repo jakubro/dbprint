@@ -9,7 +9,9 @@ from click.exceptions import Abort, ClickException, Exit
 
 from dbprint import __version__
 from dbprint.engine import EXIT_GENERIC
+from .commands.annotate import annotate_command
 from .commands.check import check_command
+from .commands.config import config_group
 from .commands.context import context_command
 from .commands.diff import diff_command
 from .commands.docs import docs_group
@@ -70,9 +72,11 @@ def main(ctx: click.Context, debug: bool) -> None:
 
 
 main.add_command(init_command)
+main.add_command(config_group)
 main.add_command(generate_command)
 main.add_command(list_command)
 main.add_command(context_command)
+main.add_command(annotate_command)
 main.add_command(check_command)
 main.add_command(diff_command)
 main.add_command(serve_command)

@@ -1,4 +1,4 @@
-"""Hatchling build hook: rewrites SPEC.md/ASSERTIONS.md link targets to absolute URLs at
+"""Hatchling build hook: rewrites packaged documents' link targets to absolute URLs at
 wheel-build time, so an installed copy cites a working address while `docs/` stays relative.
 """
 
@@ -18,6 +18,7 @@ from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 PACKAGED: dict[str, str] = {
     "docs/format/v1/SPEC.md": "dbprint/spec/v1/SPEC.md",
     "docs/ASSERTIONS.md": "dbprint/assertions/ASSERTIONS.md",
+    "docs/examples/skill/dbprint-annotate.md": "dbprint/engine/annotate_skill.md",
 }
 
 # Mirror `site/astro.config.mjs`'s own constants - a `.mjs` file cannot be imported here, so

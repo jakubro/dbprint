@@ -119,7 +119,7 @@ class TestPersonalName:
         """No head list required: an unrecognized qualifier costs nothing per SPEC 4.4.3."""
 
         assert detect("applicant_name", _PEOPLE) == "personal_name"
-        assert detect("team_name", ["prod-eu-1", "prod-us-2"]) is None
+        assert detect("cohort_name", ["prod-eu-1", "prod-us-2"]) is None
 
     def test_a_glued_token_is_not_decomposed(self) -> None:
         """A stated gap: no separator means no token boundary to anchor on."""
@@ -222,7 +222,7 @@ class TestNationalId:
             "employee_tax_id",
             "holderPassportNumber",
             "customer-nino",
-            "vendor_vat_number",
+            "tax_id",
             "DriversLicense",
         ],
     )
@@ -440,7 +440,7 @@ class TestEmployment:
         assert detect(column, []) == "employment"
 
     def test_a_text_typed_salary_column_is_still_flagged(self) -> None:
-        """The classification does not matter to this axis - only the name does."""
+        """A text classification changes nothing here - only the name does."""
 
         assert detect("annual_salary", ["50000", "62500"]) == "employment"
 
@@ -667,3 +667,101 @@ class TestTokenRuns:
 
         assert detect("company_display_name", people) == "personal_name"
         assert _matches("company_display_name", ordered, frozenset({"company"})) is True
+
+
+_ORGANISATIONS = [
+    "Lakeside Botanical Society",
+    "Granite Ridge Arboretum",
+    "Northfield Seed Library",
+]
+
+
+class TestBooleansCarryNoCategory:
+    @pytest.mark.parametrize(
+        "column",
+        [
+            "opted_in_email",
+            "prefers_phone",
+            "wants_postal_address",
+            "enforce_strong_password",
+        ],
+    )
+    def test_a_boolean_named_for_what_it_toggles_is_not_flagged(self, column: str) -> None:
+        """Two values cannot carry any category, whatever the name says."""
+
+        assert detect(column, ["true", "false"], classification="boolean") is None
+
+    def test_the_same_name_on_a_text_column_still_reads_its_tail(self) -> None:
+        assert detect("opted_in_email", [], classification="text") == "contact"
+
+    @pytest.mark.parametrize("column", ["email", "phone_number"])
+    def test_a_real_contact_column_is_unchanged(self, column: str) -> None:
+        assert detect(column, [], classification="text") == "contact"
+
+
+class TestOrganisationNames:
+    @pytest.mark.parametrize(
+        "column",
+        [
+            "branch_name",
+            "vendor_name",
+            "supplier_name",
+            "region_name",
+            "status_name",
+            "site_name",
+        ],
+    )
+    def test_a_head_naming_an_organisation_place_or_label_vetoes(self, column: str) -> None:
+        assert detect(column, _ORGANISATIONS) is None
+
+    @pytest.mark.parametrize("table", ["sites", "stores", "accounts", "suppliers", "companies"])
+    def test_a_bare_name_in_a_table_of_non_persons_is_not_flagged(self, table: str) -> None:
+        assert detect("name", _ORGANISATIONS, table=table) is None
+
+    def test_a_bare_name_in_a_table_of_people_still_corroborates(self) -> None:
+        assert detect("name", _PEOPLE, table="curators") == "personal_name"
+
+    @pytest.mark.parametrize("column", ["display_name", "applicant_name", "curator_name"])
+    def test_a_real_name_column_is_unchanged(self, column: str) -> None:
+        assert detect(column, _PEOPLE) == "personal_name"
+
+    def test_a_strong_name_token_needs_no_values(self) -> None:
+        assert detect("first_name", ["?"], table="sites") == "personal_name"
+
+
+class TestCompanyMoneyIsNotEmployment:
+    @pytest.mark.parametrize(
+        "column",
+        [
+            "affiliate_commission",
+            "agency_commission",
+            "vendor_compensation",
+            "refund_compensation",
+            "preferred_way_to_pay",
+        ],
+    )
+    def test_money_that_is_not_a_persons_pay_is_not_flagged(self, column: str) -> None:
+        assert detect(column, []) is None
+
+    @pytest.mark.parametrize(
+        "column",
+        ["salary", "hourly_wage", "sales_rep_commission", "employee_bonus", "net_pay"],
+    )
+    def test_a_persons_pay_is_unchanged(self, column: str) -> None:
+        assert detect(column, []) == "employment"
+
+
+class TestCompanyIdentifiersAreNotNationalIds:
+    @pytest.mark.parametrize(
+        "column",
+        ["supplier_vat_number", "merchant_tax_id", "vendor_vat_number", "business_tax_id"],
+    )
+    def test_a_tax_id_held_by_an_organisation_is_not_flagged(self, column: str) -> None:
+        assert detect(column, []) is None
+
+    @pytest.mark.parametrize(
+        "column",
+        ["ssn", "passport_number", "national_insurance_number", "employee_tax_id"],
+    )
+    def test_a_persons_identifier_is_unchanged(self, column: str) -> None:
+        assert detect(column, []) == "national_id"

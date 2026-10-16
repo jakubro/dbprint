@@ -6,6 +6,7 @@ raise `ConfigError` listing every unresolved one at once.
 
 from __future__ import annotations
 
+import difflib
 import os
 import re
 from pathlib import Path
@@ -19,6 +20,13 @@ from .project import ConfigError, resolve_project_path
 
 CONNECTIONS_FILE_DEFAULT = Path("~/.dbprint/connections.yaml")
 DOTENV_FILE = ".env"
+
+
+class CredentialsFileInvalid(ConfigError):
+    """The credentials file, or its entry for a connection, is malformed: a refused config, not a
+    connection failure.
+    """
+
 
 # The keys whose empty value is itself the credential: a trust-authenticated cluster is reached
 # with a password of none, and a variable set to empty is how a runner supplies exactly that.
@@ -45,6 +53,9 @@ def resolve(
     cfile = (connections_file or CONNECTIONS_FILE_DEFAULT).expanduser()
 
     file_entry = _load_connections_file(cfile).get(connection_name, {})
+    allowed = {*required_keys, *(optional_keys or []), *(path_keys or [])}
+    problems = _entry_problems(connection_name, file_entry, allowed)
+    file_entry = file_entry if isinstance(file_entry, dict) else {}
     dotenv_map = _load_dotenv(project_root / DOTENV_FILE)
 
     resolved: dict[str, str] = {}
@@ -57,6 +68,14 @@ def resolve(
             unresolved.append(key)
         else:
             resolved[key] = value
+
+    if problems:
+        listed = "\n".join(f"  {problem}" for problem in problems)
+        missing = f"\nAlso missing required credentials: {unresolved}." if unresolved else ""
+
+        raise CredentialsFileInvalid(
+            f"{cfile}: connection {connection_name!r}:\n{listed}{missing}",
+        )
 
     if unresolved:
         blank = [
@@ -116,6 +135,29 @@ def _resolve_one(
         return None
 
 
+def _entry_problems(connection_name: str, entry: Any, allowed: set[str]) -> list[str]:
+    """What is wrong with one connection's entry, naming keys only - values are credentials."""
+
+    if not isinstance(entry, dict):
+        return [f"{connection_name}: expected a mapping of credential keys"]
+
+    problems = []
+
+    for key, value in entry.items():
+        if key not in allowed:
+            close = difflib.get_close_matches(str(key), sorted(allowed), n=1, cutoff=0.6)
+            hint = (
+                f"did you mean '{close[0]}'?"
+                if close
+                else f"valid keys: {', '.join(sorted(allowed))}"
+            )
+            problems.append(f"{key}: unknown key; {hint}")
+        elif isinstance(value, (dict, list)):
+            problems.append(f"{key}: expected a single value, got a {type(value).__name__}")
+
+    return problems
+
+
 def _existing_path(connection_name: str, key: str, value: str, project_root: Path) -> str:
     path = resolve_project_path(value, project_root)
 
@@ -151,13 +193,13 @@ def _load_connections_file(path: Path) -> dict[str, dict[str, Any]]:
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
-        raise ConfigError(f"{path}: {_yaml_fault(exc)}") from exc
+        raise CredentialsFileInvalid(f"{path}: {_yaml_fault(exc)}") from exc
 
     if data is None:
         return {}
 
     if not isinstance(data, dict):
-        raise ConfigError(
+        raise CredentialsFileInvalid(
             f"{path}: top-level YAML must be a mapping of connection names to credentials.",
         )
 

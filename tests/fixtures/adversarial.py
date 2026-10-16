@@ -37,7 +37,7 @@ from dbprint.adapters import (
 _UUID_LENGTH = Length(min=36, max=36, avg=36.0, p95=36.0)
 from dbprint.cli.main import main
 from dbprint.config import ConnectionConfig
-from dbprint.spec.artifacts import MANIFEST_FILENAME
+from dbprint.spec.artifacts import MANIFEST_ANNOTATIONS_FILENAME, MANIFEST_FILENAME
 from tests._cli import credential_env, patch_registry
 from tests._engine_run import conformance_errors
 from tests._prints import columns, mock_table
@@ -88,6 +88,13 @@ EXTREME_TABLE = "public.gauge"
 SEVERAL_EDGES_TABLE = "public.gauge"
 SEVERAL_EDGES_COLUMN = "sparse"
 REJECTED_EDGE_TARGET = "public.batch"
+# An edge only `relationships.annotations.yaml` carries (SPEC 2.7.2), out of the same table.
+HUMAN_EDGE_COLUMN = "status"
+HUMAN_EDGE_TARGET = "public.curation_event"
+HUMAN_EDGE_TARGET_COLUMN = "condition"
+HUMAN_EDGE_NOTE = "the curation state a reading was taken under"
+# `manifest.annotations.yaml`'s notes (SPEC 2.7.3), which a reader of any one table must meet.
+CONNECTION_NOTE = "condition codes are the curation states the herbarium assigns at intake"
 UNREADABLE_PROFILED_TABLE = "public.wide_lookup"
 UNREADABLE_PROFILED_AT = "not-a-date"
 EXTREME_ROW_COUNT = 10_000
@@ -112,14 +119,28 @@ connections:
     adapter: postgres
     auto: true
     output: prints
-    redact:
-      - columns: ["*.email"]
+    profile:
+      redact:
+      - columns:
+        - '*.email'
         with: mask
     rules:
-      - include: ["public.sowing_trial"]
-        sample: 0.25
-      - include: ["public.empty_scan"]
-        filter: "rank = 'never-matches'"
+    - profile:
+        read:
+          tables:
+            mode: sample
+            fraction: 0.25
+      match:
+        tables:
+        - public.sowing_trial
+    - profile:
+        read:
+          tables:
+            mode: filter
+            filter: rank = 'never-matches'
+      match:
+        tables:
+        - public.empty_scan
 """
 
 
@@ -602,7 +623,7 @@ def _inject_reader_only_states(print_root: Path) -> None:
 
 
 def _inject_several_edges(table_dir: Path) -> None:
-    """Give one column three edges, measured first and declared last, and reject the inferred one.
+    """Give one column three edges, reject the inferred one, and add an annotation-only edge.
 
     Reciprocity forbids these shapes, hence after the gate.
     """
@@ -625,8 +646,17 @@ def _inject_several_edges(table_dir: Path) -> None:
     path.write_text(yaml.safe_dump(relationships, sort_keys=False))
     rejection = {**edge(REJECTED_EDGE_TARGET, "id", "inferred"), "verdict": "rejected"}
     del rejection["detection"]
+    authored = {
+        "column": [HUMAN_EDGE_COLUMN],
+        "target_table": HUMAN_EDGE_TARGET,
+        "target_column": [HUMAN_EDGE_TARGET_COLUMN],
+        "note": HUMAN_EDGE_NOTE,
+    }
     (table_dir / "relationships.annotations.yaml").write_text(
-        yaml.safe_dump({"format_version": 1, "refers_to": [rejection]}, sort_keys=False),
+        yaml.safe_dump(
+            {"format_version": 1, "refers_to": [rejection, authored]},
+            sort_keys=False,
+        ),
     )
 
 
@@ -667,6 +697,9 @@ def build(project_dir: Path) -> AdversarialPrint:
 
     print_root = project_dir / "prints" / CONN_NAME
     _inject_incomplete_grain_search(print_root)
+    (print_root / MANIFEST_ANNOTATIONS_FILENAME).write_text(
+        yaml.safe_dump({"format_version": 1, "notes": CONNECTION_NOTE}),
+    )
 
     errors = conformance_errors(print_root)
     assert not errors, f"adversarial fixture is not conformant: {errors}"

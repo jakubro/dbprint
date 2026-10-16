@@ -281,7 +281,7 @@ class TestBudget:
         monkeypatch.chdir(tmp_path)
         result = CliRunner().invoke(
             main,
-            ["context", "arboretum.seedbank.accession", "--budget", "4000"],
+            ["context", "arboretum.seedbank.accession", "--budget", "6000"],
         )
 
         assert result.exit_code == 0

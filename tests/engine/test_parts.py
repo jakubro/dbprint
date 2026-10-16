@@ -12,7 +12,7 @@ import yaml
 
 from dbprint.adapters import MockAdapter
 from dbprint.adapters.mock import MockParts
-from dbprint.config import StatisticsConfig
+from dbprint.config import PartsProfile, ProfileConfig
 from dbprint.config.project import ConnectionConfig, RedactRule
 from dbprint.conformance import validate_print
 from dbprint.docs.view import parts_view
@@ -66,7 +66,7 @@ def test_the_cap_keeps_the_most_frequent_parts_and_counts_every_one(tmp_path: Pa
     columns = _columns(
         tmp_path,
         order_line(attrs=many_parts(30)),
-        statistics=StatisticsConfig(max_parts=5),
+        parts=PartsProfile(max=5),
     )
 
     assert list(columns["attrs"]["parts"]) == [".k00", ".k01", ".k02", ".k03", ".k04"]
@@ -74,7 +74,7 @@ def test_the_cap_keeps_the_most_frequent_parts_and_counts_every_one(tmp_path: Pa
 
 
 def test_max_parts_zero_turns_descent_off(tmp_path: Path) -> None:
-    columns = _columns(tmp_path, order_line(), statistics=StatisticsConfig(max_parts=0))
+    columns = _columns(tmp_path, order_line(), parts=PartsProfile(enabled=False))
 
     assert columns["items"]["classification"] == "unsupported"
     assert "parts" not in columns["items"]
@@ -235,7 +235,7 @@ def test_a_committed_part_marker_the_rules_now_contradict_is_named(tmp_path: Pat
 
     mismatches = redaction_mismatches(
         committed.tables["public.order_line"],
-        replace(conn, redact=()),
+        replace(conn, profile=replace(conn.profile, redact=())),
     )
 
     assert {m.column for m in mismatches} == {"attrs.status", 'attrs["user-id"]'}
@@ -248,20 +248,20 @@ def _states(columns: dict[str, Any]) -> dict[str, diff_module.ColumnState]:
     }
 
 
-def _columns(tmp_path: Path, fixture: Any, **conn_fields: Any) -> dict[str, Any]:
-    _generated(tmp_path, fixture, **conn_fields)
+def _columns(tmp_path: Path, fixture: Any, **profile_fields: Any) -> dict[str, Any]:
+    _generated(tmp_path, fixture, **profile_fields)
     path = next((tmp_path / "primary").rglob("statistics.yaml"))
 
     return yaml.safe_load(path.read_text())["columns"]
 
 
-def _generated(tmp_path: Path, fixture: Any, **conn_fields: Any) -> ConnectionConfig:
+def _generated(tmp_path: Path, fixture: Any, **profile_fields: Any) -> ConnectionConfig:
     conn = ConnectionConfig(
         name="primary",
         adapter="postgres",
         output=tmp_path,
         redaction_salt=_SALT,
-        **conn_fields,
+        profile=ProfileConfig(**profile_fields),
     )
     Engine(MockAdapter(fixture), conn, tmp_path).generate()
 

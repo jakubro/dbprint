@@ -8,6 +8,10 @@
 
 <h1>{{ fqn }} <span class="muted">{{ conn }}{% if adapter %} &middot; {{ adapter }}{% endif %}</span></h1>
 
+{% if has_connection_notes %}
+  <p class="muted"><a href="{{ url_for('index') }}#notes-{{ conn }}">Connection notes</a> for {{ conn }} apply to this table.</p>
+{% endif %}
+
 {% if unprofiled_notice %}
   <div class="notice">{{ unprofiled_notice }} - this page shows an earlier run's print.</div>
 {% endif %}
@@ -324,6 +328,13 @@
     </div>
   {% endfor %}
 
+  {% for name, message in disabled.items() %}
+    <div class="hedge-block">
+      <h2><code>{{ name }}</code></h2>
+      <div class="hedge">Named in the file's <code>disabled</code> list: {{ message }}</div>
+    </div>
+  {% endfor %}
+
   {% if columns_empty_notice %}
     <div class="notice">{{ columns_empty_notice }}</div>
   {% elif no_rows %}
@@ -585,7 +596,8 @@
             <td>
               {% if r.on_delete %}<div class="muted">on_delete={{ r.on_delete }}</div>{% endif %}
               {% if r.constraint_name %}<div class="muted">{{ r.constraint_name }}</div>{% endif %}
-              {% if r.path %}<div class="muted">via {{ r.path|join('.') }}{% if r.target_path %} -&gt; {{ r.target_path|join('.') }}{% endif %}</div>{% endif %}
+              {% if r.path or r.target_path %}<div class="muted">via {{ (r.path or ['(column)'])|join('.') }} -&gt; {{ (r.target_path or ['(column)'])|join('.') }}</div>{% endif %}
+              {% if r.note %}<div class="muted">{{ r.note }}</div>{% endif %}
               {% if r.observed %}
                 {% if r.observed.scope_compatible == false %}
                   <div class="rel-observed muted">scopes not comparable</div>
@@ -613,6 +625,8 @@
             <td>
               {% if r.on_delete %}<div class="muted">on_delete={{ r.on_delete }}</div>{% endif %}
               {% if r.constraint_name %}<div class="muted">{{ r.constraint_name }}</div>{% endif %}
+              {% if r.referencer_path or r.path %}<div class="muted">via {{ (r.referencer_path or ['(column)'])|join('.') }} -&gt; {{ (r.path or ['(column)'])|join('.') }}</div>{% endif %}
+              {% if r.note %}<div class="muted">{{ r.note }}</div>{% endif %}
               {% if r.observed %}
                 {% if r.observed.scope_compatible == false %}
                   <div class="rel-observed muted">scopes not comparable</div>

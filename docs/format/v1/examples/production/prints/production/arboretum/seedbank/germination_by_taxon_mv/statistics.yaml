@@ -25,6 +25,8 @@ depends_on:
 - arboretum.seedbank.accession
 - arboretum.seedbank.germination_trial
 - arboretum.seedbank.taxon
+disabled:
+- timeline
 columns:
   taxon_id:
     sql_type: integer

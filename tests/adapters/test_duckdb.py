@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from unittest.mock import patch
 
 import duckdb
 import pytest
 
-from dbprint.adapters import DuckdbAdapter, TableScope
+from dbprint.adapters import DuckdbAdapter, StatisticsConfig, TableScope
+from dbprint.adapters import base as adapters_base
 from dbprint.adapters.identifiers import UnknownTable
 
 
@@ -255,3 +257,34 @@ class TestNoSessionSettingIsForced:
         adapter.close()
 
         assert not any(s.strip().lower().startswith("set ") for s in recorder.statements)
+
+
+class TestDistinctCountsAreExactAtAnySize:
+    def test_a_table_past_the_estimate_threshold_counts_exactly(self) -> None:
+        con = duckdb.connect(":memory:")
+        con.execute("CREATE SCHEMA seedbank")
+        con.execute(
+            "CREATE TABLE seedbank.viability_check AS "
+            "SELECT i AS id, (i * i) % 405 AS rank FROM range(20000) t(i)",
+        )
+        adapter = DuckdbAdapter({"database": ":memory:"}, cursor_factory=lambda _params: con)
+        adapter.connect()
+
+        try:
+            adapter.list_tables(include=["*"], exclude=[])
+            fqn = "memory.seedbank.viability_check"
+            columns = adapter.introspect_columns(fqn)
+
+            with patch.object(adapters_base, "APPROXIMATE_THRESHOLD", 0):
+                stats = adapter.compute_statistics(
+                    fqn,
+                    columns,
+                    StatisticsConfig(),
+                    frozenset(),
+                    None,
+                    None,
+                )[1]
+        finally:
+            adapter.close()
+
+        assert (stats["rank"].cardinality, stats["rank"].cardinality_method) == (93, "exact")

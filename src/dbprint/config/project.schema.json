@@ -1,0 +1,690 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jakubro.github.io/dbprint/config/project.schema.json",
+  "title": "dbprint .dbprint.yaml",
+  "description": "The project file dbprint reads; see CONFIG.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "connections"
+  ],
+  "properties": {
+    "x-shared": {
+      "description": "Anything, never read: a home for YAML anchors the rest of the file aliases."
+    },
+    "defaults": {
+      "$ref": "#/$defs/Defaults"
+    },
+    "connections": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "$ref": "#/$defs/Connection"
+      }
+    }
+  },
+  "$defs": {
+    "Patterns": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "Tables": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "include": {
+          "$ref": "#/$defs/Patterns"
+        },
+        "exclude": {
+          "$ref": "#/$defs/Patterns"
+        }
+      }
+    },
+    "Run": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "parallelism": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "statement_timeout": {
+          "type": "string",
+          "pattern": "^0*[1-9][0-9]*[dhmsDHMS]$"
+        }
+      }
+    },
+    "Freshness": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_age_days": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "Statistics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enumeration_threshold": {
+          "type": "integer"
+        },
+        "top_n_values": {
+          "type": "integer"
+        },
+        "percentiles": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 99
+          }
+        }
+      }
+    },
+    "LooksLike": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "sample_size": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "NullPatterns": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "top_n": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "Parts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "max": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_depth": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "Timeline": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "Sketches": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "columns": {
+          "enum": [
+            "required",
+            "all"
+          ]
+        }
+      }
+    },
+    "Relationships": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "infer": {
+          "type": "boolean"
+        }
+      }
+    },
+    "RedactRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "columns": {
+          "$ref": "#/$defs/Patterns"
+        },
+        "sensitivity": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "contact",
+              "credential",
+              "date_of_birth",
+              "demographic",
+              "employment",
+              "financial_account",
+              "geolocation",
+              "health",
+              "national_id",
+              "online_identifier",
+              "personal_name",
+              "postal_address"
+            ]
+          }
+        },
+        "looks_like": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "base64",
+              "bic",
+              "card_number",
+              "content_type",
+              "country_code",
+              "currency_code",
+              "ean",
+              "email",
+              "filename",
+              "gif",
+              "gzip",
+              "hex",
+              "iban",
+              "imei",
+              "ip",
+              "isbn",
+              "iso8601_date",
+              "iso8601_datetime",
+              "iso8601_duration",
+              "jpeg",
+              "json",
+              "jwt",
+              "latlon",
+              "mac_address",
+              "numeric_string",
+              "path",
+              "pdf",
+              "phone",
+              "png",
+              "postal_code",
+              "prose",
+              "semver",
+              "timezone",
+              "url",
+              "urn",
+              "uuid",
+              "vin",
+              "zip"
+            ]
+          }
+        },
+        "with": {
+          "enum": [
+            "mask",
+            "drop",
+            "hash"
+          ]
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "columns"
+          ]
+        },
+        {
+          "required": [
+            "sensitivity"
+          ]
+        },
+        {
+          "required": [
+            "looks_like"
+          ]
+        }
+      ]
+    },
+    "ReadTables": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "full",
+            "sample",
+            "filter",
+            "catalog"
+          ]
+        },
+        "fraction": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "max_rows": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "materialize": {
+          "type": "boolean"
+        },
+        "filter": {
+          "type": "string",
+          "pattern": "\\S"
+        }
+      },
+      "not": {
+        "required": [
+          "fraction",
+          "max_rows"
+        ]
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "const": "full"
+              }
+            }
+          },
+          "then": {
+            "propertyNames": {
+              "not": {
+                "enum": [
+                  "fraction",
+                  "max_rows",
+                  "materialize",
+                  "filter"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "const": "sample"
+              }
+            }
+          },
+          "then": {
+            "propertyNames": {
+              "not": {
+                "enum": [
+                  "filter"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "const": "filter"
+              }
+            }
+          },
+          "then": {
+            "propertyNames": {
+              "not": {
+                "enum": [
+                  "fraction",
+                  "max_rows",
+                  "materialize"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "const": "catalog"
+              }
+            }
+          },
+          "then": {
+            "propertyNames": {
+              "not": {
+                "enum": [
+                  "fraction",
+                  "max_rows",
+                  "materialize",
+                  "filter"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ReadViews": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "full",
+            "filter",
+            "catalog"
+          ]
+        },
+        "filter": {
+          "type": "string",
+          "pattern": "\\S"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "enum": [
+                  "full",
+                  "catalog"
+                ]
+              }
+            }
+          },
+          "then": {
+            "propertyNames": {
+              "not": {
+                "enum": [
+                  "filter"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "Read": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tables": {
+          "$ref": "#/$defs/ReadTables"
+        },
+        "views": {
+          "$ref": "#/$defs/ReadViews"
+        }
+      }
+    },
+    "RuleRead": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "tables": {
+          "$ref": "#/$defs/ReadTables",
+          "minProperties": 1
+        },
+        "views": {
+          "$ref": "#/$defs/ReadViews",
+          "minProperties": 1
+        }
+      }
+    },
+    "Profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "freshness": {
+          "$ref": "#/$defs/Freshness"
+        },
+        "statistics": {
+          "$ref": "#/$defs/Statistics"
+        },
+        "read": {
+          "$ref": "#/$defs/Read"
+        },
+        "looks_like": {
+          "$ref": "#/$defs/LooksLike"
+        },
+        "null_patterns": {
+          "$ref": "#/$defs/NullPatterns"
+        },
+        "parts": {
+          "$ref": "#/$defs/Parts"
+        },
+        "timeline": {
+          "$ref": "#/$defs/Timeline"
+        },
+        "sketches": {
+          "$ref": "#/$defs/Sketches"
+        },
+        "relationships": {
+          "$ref": "#/$defs/Relationships"
+        },
+        "redact": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RedactRule"
+          }
+        }
+      }
+    },
+    "RuleProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "freshness": {
+          "$ref": "#/$defs/Freshness",
+          "minProperties": 1
+        },
+        "statistics": {
+          "$ref": "#/$defs/Statistics",
+          "minProperties": 1
+        },
+        "read": {
+          "$ref": "#/$defs/RuleRead"
+        },
+        "looks_like": {
+          "$ref": "#/$defs/LooksLike",
+          "minProperties": 1
+        },
+        "null_patterns": {
+          "$ref": "#/$defs/NullPatterns",
+          "minProperties": 1
+        },
+        "parts": {
+          "$ref": "#/$defs/Parts",
+          "minProperties": 1
+        },
+        "timeline": {
+          "$ref": "#/$defs/Timeline",
+          "minProperties": 1
+        },
+        "sketches": {
+          "$ref": "#/$defs/Sketches",
+          "minProperties": 1
+        },
+        "relationships": {
+          "$ref": "#/$defs/Relationships",
+          "minProperties": 1
+        }
+      }
+    },
+    "RuleMatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tables": {
+          "$ref": "#/$defs/Patterns",
+          "minItems": 1
+        },
+        "exclude": {
+          "$ref": "#/$defs/Patterns"
+        },
+        "min_rows": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "Rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile"
+      ],
+      "properties": {
+        "match": {
+          "$ref": "#/$defs/RuleMatch"
+        },
+        "profile": {
+          "$ref": "#/$defs/RuleProfile"
+        }
+      }
+    },
+    "Rules": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Rule"
+      }
+    },
+    "Diff": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "stat_change_threshold": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cardinality_ratio": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "default": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "percentile_pct": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "values_coverage": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        }
+      }
+    },
+    "Defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "output": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tables": {
+          "$ref": "#/$defs/Tables"
+        },
+        "run": {
+          "$ref": "#/$defs/Run"
+        },
+        "profile": {
+          "$ref": "#/$defs/Profile"
+        },
+        "rules": {
+          "$ref": "#/$defs/Rules"
+        },
+        "diff": {
+          "$ref": "#/$defs/Diff"
+        }
+      }
+    },
+    "Connection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "adapter"
+      ],
+      "properties": {
+        "adapter": {
+          "enum": [
+            "postgres",
+            "snowflake",
+            "mysql",
+            "duckdb",
+            "clickhouse",
+            "redshift",
+            "databricks",
+            "bigquery"
+          ]
+        },
+        "auto": {
+          "type": "boolean"
+        },
+        "output": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tables": {
+          "$ref": "#/$defs/Tables"
+        },
+        "run": {
+          "$ref": "#/$defs/Run"
+        },
+        "profile": {
+          "$ref": "#/$defs/Profile"
+        },
+        "rules": {
+          "$ref": "#/$defs/Rules"
+        },
+        "diff": {
+          "$ref": "#/$defs/Diff"
+        },
+        "assertions": {
+          "type": "object"
+        },
+        "dbt_manifest": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

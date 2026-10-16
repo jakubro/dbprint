@@ -33,7 +33,7 @@ from dbprint.adapters.identifiers import IdentifierRejected, enforce_table_ident
 from dbprint.adapters.postgres import introspect as postgres_introspect
 from dbprint.adapters.redshift.connection import RedshiftConnectionError
 from dbprint.adapters.snowflake import introspect as snowflake_introspect
-from dbprint.config import ConnectionConfig
+from dbprint.config import ConnectionConfig, ProfileConfig, RelationshipsProfile
 from dbprint.engine import Engine
 from tests._prints import columns, mock_table
 from tests.adapters.conftest import (
@@ -452,7 +452,7 @@ class TestTheEngineWarns:
             name="w",
             adapter="postgres",
             output=tmp_path,
-            infer_relationships=False,
+            profile=ProfileConfig(relationships=RelationshipsProfile(infer=False)),
         )
 
         with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
@@ -474,7 +474,7 @@ class TestTheEngineWarnsOfAnUnreadDependencyNamespace:
             name="w",
             adapter="postgres",
             output=tmp_path,
-            infer_relationships=False,
+            profile=ProfileConfig(relationships=RelationshipsProfile(infer=False)),
         )
 
         with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):

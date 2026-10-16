@@ -474,6 +474,13 @@ class TestTheInstructionsRouteBeforeTheyInterpret:
 
         assert "Scope." in reading
 
+    def test_the_reading_rules_say_the_print_carries_no_meanings_it_was_not_given(self) -> None:
+        from dbprint.mcp.server import SERVER_DESCRIPTION
+
+        reading = " ".join(SERVER_DESCRIPTION.split("Reading an answer:", 1)[1].split())
+
+        assert "not what its codes, units or defaults mean: read the code or docs" in reading
+
     def test_the_routing_names_the_guide(self) -> None:
         from dbprint.mcp.server import SERVER_DESCRIPTION
 

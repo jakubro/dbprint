@@ -7,6 +7,12 @@
   <h2>{{ c.name }}
     <span class="muted">{{ c.manifest.adapter }} &middot; {{ c.tables|length }} tables &middot; generated {{ c.manifest.generated_at|dt }}</span>
   </h2>
+  {% if c.notes %}
+    <section id="notes-{{ c.name }}">
+      <h3>Connection notes</h3>
+      <div class="md">{{ c.notes|md }}</div>
+    </section>
+  {% endif %}
   <table data-enhance>
     <thead>
       <tr>

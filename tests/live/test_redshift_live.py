@@ -262,8 +262,8 @@ def test_redshift_live_sampled_table_profiles(
         _credential_env(creds),
         rules="""\
     rules:
-      - include: ["public.herbarium_sheet"]
-        sample: 0.99
+      - match: {tables: ["public.herbarium_sheet"]}
+        profile: {read: {tables: {mode: sample, fraction: 0.99}}}
 """,
     )
 

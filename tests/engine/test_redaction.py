@@ -21,11 +21,16 @@ from dbprint.adapters import (
     Range,
     ValueCount,
 )
-from dbprint.config import ConfigError, load_project
+from dbprint.config import (
+    ConfigError,
+    ProfileConfig,
+    SketchesProfile,
+    StatisticsProfile,
+    load_project,
+)
 from dbprint.config.project import (
     ConnectionConfig,
     RedactRule,
-    StatisticsConfig,
     bind_redaction_salt,
 )
 from dbprint.engine import Engine
@@ -44,7 +49,11 @@ def _run(tmp_path: Path, *rules: RedactRule, salt: str | None = None) -> dict[st
 def _generate(tmp_path: Path, *rules: RedactRule, salt: str | None = None) -> str:
     """Profile the curator fixture under `rules` and return the artifact as written."""
 
-    conn = replace(conn_config(tmp_path), redact=rules, redaction_salt=salt)
+    conn = replace(
+        conn_config(tmp_path),
+        redaction_salt=salt,
+        profile=replace(conn_config(tmp_path).profile, redact=rules),
+    )
     Engine(MockAdapter(curator_fixture()), conn, tmp_path).generate()
 
     return (tmp_path / "primary" / "public" / "curator" / "statistics.yaml").read_text()
@@ -87,7 +96,10 @@ def _contacts_fixture() -> dict[str, MockTable]:
 
 
 def _run_contacts(tmp_path: Path, *rules: RedactRule) -> dict[str, Any]:
-    conn = replace(conn_config(tmp_path), redact=rules)
+    conn = replace(
+        conn_config(tmp_path),
+        profile=replace(conn_config(tmp_path).profile, redact=rules),
+    )
     Engine(MockAdapter(_contacts_fixture()), conn, tmp_path).generate()
 
     return artifact(tmp_path / "primary", "seedbank.collector")
@@ -186,7 +198,10 @@ class TestSaltIsAPrecondition:
 
         conn = replace(
             conn_config(tmp_path),
-            redact=(RedactRule(columns=("*.herbarium_id",), with_="hash"),),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                redact=(RedactRule(columns=("*.herbarium_id",), with_="hash"),),
+            ),
         )
 
         with pytest.raises(ConfigError, match="redaction_salt"):
@@ -202,7 +217,10 @@ class TestSaltIsAPrecondition:
 
         conn = replace(
             conn_config(tmp_path),
-            redact=(RedactRule(columns=("*.herbarium_id",), with_="hash"),),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                redact=(RedactRule(columns=("*.herbarium_id",), with_="hash"),),
+            ),
         )
 
         with pytest.raises(ConfigError, match="redaction_salt"):
@@ -211,7 +229,10 @@ class TestSaltIsAPrecondition:
     def test_mask_needs_no_salt(self, tmp_path: Path) -> None:
         conn = replace(
             conn_config(tmp_path),
-            redact=(RedactRule(columns=("*.herbarium_id",), with_="mask"),),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                redact=(RedactRule(columns=("*.herbarium_id",), with_="mask"),),
+            ),
         )
 
         assert bind_redaction_salt(conn, None).redaction_salt is None
@@ -221,7 +242,10 @@ class TestSaltIsAPrecondition:
 
         conn = replace(
             conn_config(tmp_path),
-            redact=(RedactRule(columns=("*.herbarium_id",), with_="mask"),),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                redact=(RedactRule(columns=("*.herbarium_id",), with_="mask"),),
+            ),
         )
 
         assert bind_redaction_salt(conn, "   ").redaction_salt is None
@@ -231,7 +255,10 @@ class TestSaltIsAPrecondition:
 
         conn = replace(
             conn_config(tmp_path),
-            redact=(RedactRule(columns=("*.herbarium_id",), with_="hash"),),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                redact=(RedactRule(columns=("*.herbarium_id",), with_="hash"),),
+            ),
         )
 
         assert bind_redaction_salt(conn, " pepper ").redaction_salt == " pepper "
@@ -328,8 +355,17 @@ class TestADefaultsRuleReachesTheArtifact:
     def test_a_defaults_rule_redacts_the_print(self, tmp_path: Path) -> None:
         payload = self._generate(
             tmp_path,
-            "defaults:\n  redact:\n    - sensitivity: [contact]\n      with: drop\n"
-            "connections:\n  primary:\n    adapter: postgres\n",
+            """\
+defaults:
+  profile:
+    redact:
+    - sensitivity:
+      - contact
+      with: drop
+connections:
+  primary:
+    adapter: postgres
+""",
         )
         col = payload["columns"]["institution"]
 
@@ -339,8 +375,17 @@ class TestADefaultsRuleReachesTheArtifact:
     def test_no_address_reaches_disk_under_a_defaults_rule(self, tmp_path: Path) -> None:
         self._generate(
             tmp_path,
-            "defaults:\n  redact:\n    - sensitivity: [contact]\n      with: drop\n"
-            "connections:\n  primary:\n    adapter: postgres\n",
+            """\
+defaults:
+  profile:
+    redact:
+    - sensitivity:
+      - contact
+      with: drop
+connections:
+  primary:
+    adapter: postgres
+""",
         )
         written = (
             tmp_path / "prints" / "primary" / "seedbank" / "collector" / "statistics.yaml"
@@ -354,9 +399,22 @@ class TestADefaultsRuleReachesTheArtifact:
     ) -> None:
         payload = self._generate(
             tmp_path,
-            "defaults:\n  redact:\n    - sensitivity: [contact]\n      with: mask\n"
-            "connections:\n  primary:\n    adapter: postgres\n    redact:\n"
-            "      - sensitivity: [contact]\n        with: drop\n",
+            """\
+defaults:
+  profile:
+    redact:
+    - sensitivity:
+      - contact
+      with: mask
+connections:
+  primary:
+    adapter: postgres
+    profile:
+      redact:
+      - sensitivity:
+        - contact
+        with: drop
+""",
         )
 
         assert payload["columns"]["institution"]["redacted"] == "drop"
@@ -367,7 +425,10 @@ class TestConformance:
 
         conn = replace(
             conn_config(tmp_path),
-            redact=(RedactRule(columns=("*.herbarium_id",), with_="drop"),),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                redact=(RedactRule(columns=("*.herbarium_id",), with_="drop"),),
+            ),
         )
         Engine(MockAdapter(curator_fixture()), conn, tmp_path).generate()
         errors = conformance_errors(tmp_path / "primary")
@@ -379,7 +440,10 @@ class TestConformance:
 
         conn = replace(
             conn_config(tmp_path),
-            redact=(RedactRule(columns=("*",), with_="mask"),),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                redact=(RedactRule(columns=("*",), with_="mask"),),
+            ),
         )
         Engine(MockAdapter(_valueless_fixture()), conn, tmp_path).generate()
         columns = _shapes_payload(tmp_path)["columns"]
@@ -399,7 +463,10 @@ class TestConformance:
 
         conn = replace(
             conn_config(tmp_path),
-            redact=(RedactRule(columns=("*",), with_="mask"),),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                redact=(RedactRule(columns=("*",), with_="mask"),),
+            ),
         )
         Engine(MockAdapter(prose_fixture()), conn, tmp_path).generate()
         columns = artifact(tmp_path / "primary", "public.curator_note")["columns"]
@@ -419,7 +486,10 @@ class TestConformance:
 
         conn = replace(
             conn_config(tmp_path),
-            redact=(RedactRule(looks_like=("prose",), with_="mask"),),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                redact=(RedactRule(looks_like=("prose",), with_="mask"),),
+            ),
         )
         Engine(MockAdapter(prose_fixture()), conn, tmp_path).generate()
         columns = artifact(tmp_path / "primary", "public.curator_note")["columns"]
@@ -437,7 +507,10 @@ class TestConformance:
 
         conn = replace(
             conn_config(tmp_path),
-            redact=(RedactRule(sensitivity=("contact",), with_="mask"),),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                redact=(RedactRule(sensitivity=("contact",), with_="mask"),),
+            ),
         )
         Engine(MockAdapter(prose_fixture()), conn, tmp_path).generate()
         columns = artifact(tmp_path / "primary", "public.curator_note")["columns"]
@@ -459,7 +532,10 @@ class TestConformance:
 
         conn = replace(
             conn_config(tmp_path),
-            redact=(RedactRule(columns=("*",), with_="mask"),),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                redact=(RedactRule(columns=("*",), with_="mask"),),
+            ),
         )
         Engine(MockAdapter(prose_fixture()), conn, tmp_path).generate()
         status = artifact(tmp_path / "primary", "public.curator_note")["columns"]["status"]
@@ -486,8 +562,13 @@ class TestACoveredColumnIsNeverSketched:
     """SPEC 2.2.14: a sketch is a set of digests of the very cell values a rule withheld."""
 
     @staticmethod
-    def _columns(tmp_path: Path, **kwargs: Any) -> dict[str, Any]:
-        conn = replace(conn_config(tmp_path, enumeration_threshold=0), **kwargs)
+    def _columns(
+        tmp_path: Path,
+        redaction_salt: str | None = None,
+        **profile_fields: Any,
+    ) -> dict[str, Any]:
+        conn = conn_config(tmp_path, enumeration_threshold=0, redaction_salt=redaction_salt)
+        conn = replace(conn, profile=replace(conn.profile, **profile_fields))
         Engine(MockAdapter(_sketchable_prose_fixture()), conn, tmp_path).generate()
 
         return artifact(tmp_path / "primary", "seedbank.collector")["columns"]
@@ -528,7 +609,7 @@ class TestACoveredColumnIsNeverSketched:
         columns = self._columns(
             tmp_path,
             redact=(RedactRule(columns=("*.field_notes",), with_="mask"),),
-            sketch_all_columns=True,
+            sketches=SketchesProfile(columns="all"),
         )
 
         assert "sketch" not in columns["field_notes"]
@@ -542,7 +623,10 @@ class TestACoveredColumnIsNeverSketched:
 
         conn = replace(
             conn_config(tmp_path),
-            redact=(RedactRule(columns=("*.field_notes",), with_="mask"),),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                redact=(RedactRule(columns=("*.field_notes",), with_="mask"),),
+            ),
         )
         Engine(MockAdapter(_unmeasured_values_fixture()), conn, tmp_path).generate()
         field_notes = artifact(tmp_path / "primary", "seedbank.accession")["columns"]["field_notes"]
@@ -598,7 +682,10 @@ class TestBoundsUnderARedactedColumn:
 
         conn = replace(
             conn_config(tmp_path),
-            redact=(RedactRule(sensitivity=("contact",), with_="drop"),),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                redact=(RedactRule(sensitivity=("contact",), with_="drop"),),
+            ),
         )
         Engine(MockAdapter(_valueless_fixture()), conn, tmp_path).generate()
         phone = _shapes_payload(tmp_path)["columns"]["phone"]
@@ -611,7 +698,10 @@ class TestBoundsUnderARedactedColumn:
     def _phone(self, tmp_path: Path, primitive: str) -> dict[str, Any]:
         conn = replace(
             conn_config(tmp_path),
-            redact=(RedactRule(columns=("*.phone",), with_=primitive),),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                redact=(RedactRule(columns=("*.phone",), with_=primitive),),
+            ),
         )
         Engine(MockAdapter(_valueless_fixture()), conn, tmp_path).generate()
 
@@ -620,8 +710,11 @@ class TestBoundsUnderARedactedColumn:
     def _observed_at(self, tmp_path: Path, primitive: str) -> dict[str, Any]:
         conn = replace(
             conn_config(tmp_path),
-            redact=(RedactRule(columns=("*.observed_at",), with_=primitive),),
             redaction_salt="pepper",
+            profile=replace(
+                conn_config(tmp_path).profile,
+                redact=(RedactRule(columns=("*.observed_at",), with_=primitive),),
+            ),
         )
         Engine(MockAdapter(_dated_fixture()), conn, tmp_path).generate()
         payload = artifact(tmp_path / "primary", "seedbank.germination_trial")
@@ -686,7 +779,10 @@ class TestAggregatesUnderARedactedColumn:
         # cardinality, so both scenarios below classify `numeric` - the footnote's own axis.
         conn = replace(
             conn_config(tmp_path, enumeration_threshold=0),
-            redact=(RedactRule(columns=("*.amount",), with_="mask"),) if redact else (),
+            profile=replace(
+                conn_config(tmp_path, enumeration_threshold=0).profile,
+                redact=(RedactRule(columns=("*.amount",), with_="mask"),) if redact else (),
+            ),
         )
         Engine(MockAdapter({"fixture.staging": table}), conn, tmp_path).generate()
         payload = artifact(tmp_path / "primary", "fixture.staging")
@@ -746,7 +842,10 @@ class TestAggregatesUnderARedactedColumn:
         )
         conn = replace(
             conn_config(tmp_path),
-            redact=(RedactRule(columns=("*.institution",), with_="mask"),),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                redact=(RedactRule(columns=("*.institution",), with_="mask"),),
+            ),
         )
         Engine(MockAdapter({"seedbank.collector": collector}), conn, tmp_path).generate()
         payload = artifact(tmp_path / "primary", "seedbank.collector")
@@ -823,7 +922,10 @@ class TestRedactedDayCounts:
         assert observed_at["freshness"]["classification"] == "stale"
 
     def test_an_unredacted_column_is_uncoarsened(self, tmp_path: Path) -> None:
-        conn = replace(conn_config(tmp_path), redact=())
+        conn = replace(
+            conn_config(tmp_path),
+            profile=replace(conn_config(tmp_path).profile, redact=()),
+        )
         Engine(MockAdapter(_stale_dated_fixture()), conn, tmp_path).generate()
         observed_at = self._payload(tmp_path)
 
@@ -833,8 +935,11 @@ class TestRedactedDayCounts:
     def _observed_at(self, tmp_path: Path, primitive: str) -> dict[str, Any]:
         conn = replace(
             conn_config(tmp_path),
-            redact=(RedactRule(columns=("*.observed_at",), with_=primitive),),
             redaction_salt="pepper",
+            profile=replace(
+                conn_config(tmp_path).profile,
+                redact=(RedactRule(columns=("*.observed_at",), with_=primitive),),
+            ),
         )
         Engine(MockAdapter(_stale_dated_fixture()), conn, tmp_path).generate()
 
@@ -882,8 +987,11 @@ def _redacted_print_errors(
 
     conn = replace(
         conn_config(tmp_path),
-        redact=(RedactRule(columns=(columns_glob,), with_=primitive),),
         redaction_salt="pepper",
+        profile=replace(
+            conn_config(tmp_path).profile,
+            redact=(RedactRule(columns=(columns_glob,), with_=primitive),),
+        ),
     )
     Engine(MockAdapter(fixture), conn, tmp_path).generate()
 
@@ -1149,9 +1257,11 @@ class TestARedactedColumnPublishesItsCountProfile:
             name="twins",
             adapter="duckdb",
             output=tmp_path / "prints",
-            statistics=StatisticsConfig(enumeration_threshold=1),
-            redact=(RedactRule(columns=("*.redacted_*.v",), with_=primitive),),
             redaction_salt="relabelling-salt",
+            profile=ProfileConfig(
+                statistics=StatisticsProfile(enumeration_threshold=1),
+                redact=(RedactRule(columns=("*.redacted_*.v",), with_=primitive),),
+            ),
         )
         adapter = DuckdbAdapter({"database": str(tmp_path / "twins.duckdb")})
         Engine(adapter, conn, tmp_path).generate()
@@ -1218,11 +1328,13 @@ class TestNoAggregateSolvesAMaskedColumn:
             name="garden",
             adapter="duckdb",
             output=tmp_path / "prints",
-            statistics=StatisticsConfig(enumeration_threshold=threshold),
-            redact=(
-                RedactRule(
-                    columns=("*.curator.stipend", "*.plot.visits", "*.vault.code"),
-                    with_="mask",
+            profile=ProfileConfig(
+                statistics=StatisticsProfile(enumeration_threshold=threshold),
+                redact=(
+                    RedactRule(
+                        columns=("*.curator.stipend", "*.plot.visits", "*.vault.code"),
+                        with_="mask",
+                    ),
                 ),
             ),
         )

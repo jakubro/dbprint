@@ -12,7 +12,9 @@ import yaml
 from dbprint.engine import AssemblyOptions, assemble_context
 from dbprint.engine.context_assembler import (
     TableArtifacts,
+    _disabled_summary,
     _grain_summary,
+    _identity_lines,
     _markdown_column_values,
     _markdown_joins,
     _markdown_null_patterns,
@@ -145,7 +147,7 @@ def _notes_battery() -> list[tuple[Rendered, dict[str, Any]]]:
         (
             (synthesize(columns[6], scope=scope), columns[6]),
             (synthesize(columns[8], scope=scope), columns[8]),
-            (synthesize(columns[5], statistics_params={"top_n_values": 1}), columns[5]),
+            (synthesize(columns[5], profile={"statistics": {"top_n_values": 1}}), columns[5]),
         ),
     )
     out += [
@@ -174,7 +176,7 @@ def _artifacts(relationships: dict[str, Any]) -> TableArtifacts:
         relationship_annotations=None,
         missing=(),
         corrupted={},
-        statistics_params_override=None,
+        profile_override=None,
     )
 
 
@@ -214,6 +216,7 @@ def _line_battery() -> list[Rendered]:
             },
         ),
         _values_cell({"redacted": "mask"}, [{"count": 3}], None),
+        _disabled_summary({"disabled": ["timeline"]}),
     ]
     document = {
         "classification": "json",
@@ -236,6 +239,31 @@ def _line_battery() -> list[Rendered]:
     }
     lines += _markdown_column_values(nullable, set())
     lines += _markdown_joins(_artifacts({}))
+    lines += _identity_lines(_artifacts({}), None, "query")
+    coded = _artifacts({})
+    coded.statistics = {
+        "row_count": 4,
+        "columns": {
+            "rank": {
+                "classification": "categorical",
+                "values": [{"value": "F", "count": 4}],
+                "values_coverage": 1.0,
+            },
+        },
+    }
+    lines += _markdown_column_values(coded, set())
+    frequent = _artifacts({})
+    frequent.statistics = {
+        "row_count": 100,
+        "columns": {
+            "sown_at": {
+                "classification": "temporal",
+                "cardinality": 90,
+                "values": [{"value": "2099-12-31", "count": 10}],
+            },
+        },
+    }
+    lines += _markdown_column_values(frequent, set())
 
     return lines
 

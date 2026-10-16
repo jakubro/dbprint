@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from dbprint.adapters import ClickhouseAdapter
+from dbprint.config import TablesConfig
 from dbprint.engine import Engine
 from tests._engine_run import conformance_errors
 from tests._prints import connection_config
@@ -44,7 +45,7 @@ def rollup(clickhouse_native_connection: Any, tmp_path: Path) -> dict[str, Any]:
         adapter="clickhouse",
         output=tmp_path,
         auto=True,
-        include=("*.reading_rollup",),
+        tables=TablesConfig(include=("*.reading_rollup",)),
     )
 
     try:

@@ -12,7 +12,7 @@ $ pip install 'dbprint[mysql]'
 
 This page uses MySQL because it needs nothing beyond the extra — no external binary, no service account file, no warehouse. Every engine dbprint ships an adapter for has its own page with the install line, the exact grants and what it cannot promise about a sampled table: [duckdb](adapters/duckdb.md), [PostgreSQL](adapters/postgres.md), [MySQL](adapters/mysql.md), [ClickHouse](adapters/clickhouse.md), [Redshift](adapters/redshift.md), [Snowflake](adapters/snowflake.md), [Databricks](adapters/databricks.md), [BigQuery](adapters/bigquery.md). Swap the extra and the two connection blocks below for your own engine and the rest of this page is unchanged.
 
-Two extras are independent of the engine: `dbprint[docs]` for the browsable site, and `dbprint[mcp]` for the MCP server. Combine them as `pip install 'dbprint[mysql,docs]'`.
+Three extras are independent of the engine: `dbprint[docs]` for the browsable site, `dbprint[mcp]` for the MCP server, and `dbprint[dbt]` for reading column lineage from a dbt project's manifest. Combine them as `pip install 'dbprint[mysql,docs]'`.
 
 You also need an account on the database that can read the tables you want profiled. Your engine's adapter page states the exact grants; a role that can already run `SELECT` against those tables is enough to follow this page.
 
@@ -33,18 +33,19 @@ Two files, with deliberately different lifetimes. `.dbprint.yaml` describes the 
 
 ## 2. Name the connection
 
-`.dbprint.yaml` arrives with one connection called `primary`. Point `adapter` and `include` at your engine — this page uses MySQL:
+`.dbprint.yaml` arrives with one connection called `primary`. Point `adapter` and `tables.include` at your engine — this page uses MySQL:
 
 ```yaml
 connections:
   primary:
     adapter: mysql
     auto: true
-    include:
-      - "seedbank.*"
+    tables:
+      include:
+        - "seedbank.*"
 ```
 
-`include` is the one line worth reading twice. It decides which tables are profiled, as `fnmatch` globs over the lowercased fully-qualified name; the shape of that name is the engine's own — `database.table` on MySQL and ClickHouse, `database.schema.table` on PostgreSQL, Redshift and Snowflake, `catalog.schema.table` on Databricks. Your adapter page states the shape for your engine. Omitting `include` entirely profiles everything the connection can see, which on a warehouse is rarely what you want.
+`tables.include` is the one line worth reading twice. It decides which tables are profiled, as `fnmatch` globs over the lowercased fully-qualified name; the shape of that name is the engine's own — `database.table` on MySQL and ClickHouse, `database.schema.table` on PostgreSQL, Redshift and Snowflake, `catalog.schema.table` on Databricks. Your adapter page states the shape for your engine. Omitting it entirely profiles everything the connection can see, which on a warehouse is rarely what you want.
 
 `auto: true` means a bare `dbprint generate` runs this connection without naming it.
 
@@ -93,7 +94,7 @@ Completed  [########################]  4/4  100%  0:00:00
 
 A progress bar tracks each pass while it runs and settles when it finishes; a boxed heading marks each pass in the scrollback above it — Cataloguing, then Profiling, then Sketching — and the tree fills in as tables complete, one line per table with its row count and how long it took. Tables are profiled in name order, not the order they appear in the schema.
 
-`- rows` appears once, on `taxon_names`, a view: no query is ever issued against one, so its `statistics.yaml` is written from the catalog alone and says so. The sketching lines carry no rows column at all — that pass reads columns rather than rows, so each of its lines is a name and a duration, nothing else.
+`- rows` appears once, on `taxon_names`, a view: by default no query is issued against a view, so its `statistics.yaml` is written from the catalog alone and says so. The sketching lines carry no rows column at all — that pass reads columns rather than rows, so each of its lines is a name and a duration, nothing else.
 
 Sketching is a second pass because it answers a different question: it summarises join keys so a consumer can estimate how far two columns overlap without querying either. It is skipped for views, and for any table you later narrow to a sample.
 

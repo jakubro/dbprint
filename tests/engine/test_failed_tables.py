@@ -13,7 +13,7 @@ import pytest
 import yaml
 
 from dbprint.adapters import MockAdapter
-from dbprint.config import ConfigError, ConnectionConfig
+from dbprint.config import ConnectionConfig, TablesConfig
 from dbprint.engine import Engine, GenerateRequest
 from tests._curator import conn_config, curator_fixture
 from tests._failing import Failing
@@ -31,25 +31,14 @@ def _diff(tmp_path: Path) -> dict[str, Any]:
     return yaml.safe_load((tmp_path / "primary" / "diff.yaml").read_text())
 
 
-@pytest.mark.parametrize("sink", ["estimate", "config", "extraction"])
+@pytest.mark.parametrize("sink", ["estimate", "extraction"])
 def test_every_failure_sink_names_the_table(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     sink: str,
 ) -> None:
     if sink == "estimate":
-        monkeypatch.setattr(ConnectionConfig, "rules_read_row_counts", property(lambda _: True))
-
-    if sink == "config":
-        original = ConnectionConfig.settings_for
-
-        def refusing(self: ConnectionConfig, fqn: str, *args: Any, **kwargs: Any) -> Any:
-            if fqn == HERBARIUM:
-                raise ConfigError("simulated refused rule")
-
-            return original(self, fqn, *args, **kwargs)
-
-        monkeypatch.setattr(ConnectionConfig, "settings_for", refusing)
+        monkeypatch.setattr(ConnectionConfig, "reads_row_counts", property(lambda _: True))
 
     adapter = Failing(curator_fixture(), HERBARIUM, sink)
 
@@ -82,7 +71,13 @@ def _carried_failure(tmp_path: Path) -> None:
     [
         ("failed", "failing", {}, GenerateRequest(), True),
         ("out_of_scope", "failing", {}, GenerateRequest(cli_include=(CURATOR,)), True),
-        ("excluded", "clean", {"exclude": (HERBARIUM,)}, GenerateRequest(), False),
+        (
+            "excluded",
+            "clean",
+            {"tables": TablesConfig(exclude=(HERBARIUM,))},
+            GenerateRequest(),
+            False,
+        ),
         ("re_extracted", "clean", {}, GenerateRequest(), False),
         ("removed", "without", {}, GenerateRequest(), False),
     ],

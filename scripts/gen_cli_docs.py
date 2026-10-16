@@ -17,15 +17,18 @@ from dbprint.cli.main import main
 WIDTH = 100
 DOCS_PATH = Path(__file__).resolve().parents[1] / "docs" / "CLI.md"
 
-# Workflow order: scaffold -> profile -> inspect -> gate -> consume -> serve -> browse.
-# "docs" is listed alongside its subcommands so both levels of --help are captured.
+# Workflow order: scaffold -> configure -> profile -> inspect -> gate -> consume -> annotate ->
+# serve -> browse. A group is listed alongside its subcommands so both levels of --help are captured.
 COMMANDS = (
     "init",
+    "config",
+    "config explain",
     "generate",
     "diff",
     "list",
     "check",
     "context",
+    "annotate",
     "serve",
     "docs",
     "docs serve",

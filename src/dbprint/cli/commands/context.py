@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import fnmatch
 import json
 import sys
-from difflib import get_close_matches
 from pathlib import Path
 from typing import Any, cast
 
@@ -13,26 +11,19 @@ import rich_click as click
 import yaml
 from rich.console import Console
 
-from dbprint.config import ConnectionConfig
 from dbprint.config.resolution import ConnectionResolutionError, resolve
 from dbprint.engine import (
     EXIT_GENERIC,
-    EXIT_OK,
     AssemblyOptions,
     Purpose,
     assemble_context,
     assemble_context_payloads,
     context_terms,
 )
-from dbprint.engine.baseline import (
-    failed_tables,
-    read_manifest,
-    unprofiled_message,
-    unusable_manifest_message,
-)
 from ..options import project_option, resolve_project
 from ..rendering import resolve_render_mode
 from ..rendering.context_tty import render_human
+from ..selection import resolve_connections
 
 
 @click.command(name="context")
@@ -186,7 +177,10 @@ def context_command(
         budget=budget,
     )
 
-    resolved, overall_exit = _resolve_connections(connections, target, select_all)
+    resolved, overall_exit, messages = resolve_connections(connections, target, select_all)
+
+    for message in messages:
+        click.echo(message, err=True)
 
     # An unconditional write would truncate the user's own `--output` file on a mistyped FQN.
     if not resolved:
@@ -263,49 +257,6 @@ def context_command(
     ctx.exit(overall_exit)
 
 
-def _resolve_connections(
-    connections: list[ConnectionConfig],
-    target: str | None,
-    select_all: bool,
-) -> tuple[list[tuple[ConnectionConfig, dict[str, Any], list[str]]], int]:
-    """Every connection that can answer, with its manifest and matched tables, plus the exit code
-    the rest earned. All resolve before any renders - the count decides how each chunk renders.
-    """
-
-    resolved: list[tuple[ConnectionConfig, dict[str, Any], list[str]]] = []
-    exit_code = EXIT_OK
-
-    for conn_config in connections:
-        read = read_manifest(conn_config.print_root)
-        manifest = read.manifest
-
-        if manifest is None:
-            click.echo(
-                f"{conn_config.name}: {unusable_manifest_message(read, conn_config.name)}",
-                err=True,
-            )
-            exit_code = max(exit_code, EXIT_GENERIC)
-            continue
-
-        if unprofiled := _unprofiled_matches(manifest, target, select_all):
-            click.echo(
-                f"{conn_config.name}: not profiled by the last run, so not included: "
-                f"{', '.join(unprofiled)} - run dbprint generate to see the cause",
-                err=True,
-            )
-
-        try:
-            resolved_tables = _resolve_tables(manifest, target, select_all)
-        except _NoMatch as exc:
-            click.echo(str(exc), err=True)
-            exit_code = max(exit_code, EXIT_GENERIC)
-            continue
-
-        resolved.append((conn_config, manifest, resolved_tables))
-
-    return resolved, exit_code
-
-
 def _render_connection_documents(entries: list[dict[str, Any]], fmt: str) -> str:
     """One entry per connection, the shape `list` and `check` already emit for several."""
 
@@ -313,53 +264,3 @@ def _render_connection_documents(entries: list[dict[str, Any]], fmt: str) -> str
         return yaml.safe_dump_all(entries, sort_keys=False, default_flow_style=False)
 
     return json.dumps(entries, indent=2, default=str, sort_keys=False) + "\n"
-
-
-class _NoMatch(ValueError):
-    """Raised when the selection matches no manifest table."""
-
-
-def _resolve_tables(manifest: dict[str, Any], target: str | None, select_all: bool) -> list[str]:
-    """Pick the ordered list of table FQNs per the selection rules."""
-
-    tables = list((manifest.get("tables") or {}).keys())
-
-    if select_all:
-        return sorted(tables)
-
-    assert target is not None
-
-    if any(ch in target for ch in "*?["):
-        matched = sorted(t for t in tables if fnmatch.fnmatchcase(t, target))
-
-        if not matched:
-            hint_list = ", ".join(sorted(tables)) or "(none)"
-
-            raise _NoMatch(f"pattern {target!r} matched no tables. Configured tables: {hint_list}")
-
-        return matched
-
-    if target in tables:
-        return [target]
-
-    if target in failed_tables(manifest):
-        raise _NoMatch(unprofiled_message(target))
-
-    suggestions = get_close_matches(target, tables, n=1, cutoff=0.6)
-    hint = f" Did you mean: {suggestions[0]}?" if suggestions else ""
-
-    raise _NoMatch(f"no table {target!r} found in manifest.{hint}")
-
-
-def _unprofiled_matches(
-    manifest: dict[str, Any],
-    target: str | None,
-    select_all: bool,
-) -> list[str]:
-    if select_all:
-        return list(failed_tables(manifest))
-
-    if target is None or not any(ch in target for ch in "*?["):
-        return []
-
-    return [fqn for fqn in failed_tables(manifest) if fnmatch.fnmatchcase(fqn, target)]

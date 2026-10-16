@@ -14,10 +14,13 @@ from typing import Any, Literal
 
 import yaml
 
-from dbprint.spec.absence import block_value, column_value
+from dbprint.spec.absence import block_value, column_value, disabled_of
 from dbprint.spec.artifacts import (
     DDL_FILENAME,
+    DESCRIPTION_FILENAME,
     MANIFEST_ANNOTATIONS_FILENAME,
+    RELATIONSHIPS_ANNOTATIONS_FILENAME,
+    STATISTICS_ANNOTATIONS_FILENAME,
     declared_artifacts,
     walkable_tables,
 )
@@ -34,6 +37,7 @@ from dbprint.spec.value_text import spell_number, spell_percent
 from . import context_terms, notes_synthesis, table_readings
 from .baseline import (
     ArtifactReader,
+    disabled_feature_message,
     failed_tables,
     missing_artifacts,
     read_artifact,
@@ -43,7 +47,13 @@ from .baseline import (
 )
 from .context_terms import TERMS
 from .notes_synthesis import Rendered
-from .relationship_graph import edge_detection, edge_key, rejected_edges, withhold_rejected
+from .relationship_graph import (
+    edge_detection,
+    edge_key,
+    rejected_edges,
+    with_human_edges,
+    withhold_rejected,
+)
 from .table_readings import grain_reading
 from .token_budget import Section, make_section, select, tokens_of, truncation_marker
 from .value_list import grouped_values, value_key, value_notes
@@ -56,16 +66,29 @@ NULL_PATTERN_DISPLAY_LIMIT = 8  # combinations rendered; the footer covers exact
 Purpose = Literal["profile", "query"]
 
 QUERY_SAMPLE_LIMIT = 5  # most frequent values of a sampled column the query purpose shows
+QUERY_FREQUENT_SHARE = 0.01  # least share of non-null rows a numeric/temporal value needs to show
 
-_DETECTION_RANK = {"declared": 0, "inferred": 1, "measured": 2}
+_DETECTION_RANK = {"declared": 0, "inferred": 1, "measured": 2, "annotated": 3}
 _NOT_A_JOIN_TARGET = "not a join target, no declared-unique column"
+_MEANINGS_UNDOCUMENTED = "meanings: not documented here"
+_CODED_CLASSIFICATIONS = frozenset({"categorical", "text"})
+_FREQUENCY_CLASSIFICATIONS = frozenset({"numeric", "temporal"})
+_FREQUENT_STATEMENT = "frequent values, not a domain"
 
 # Budget-keep order under `query`, not render order; the header is pinned rather than ranked.
-_QUERY_SECTION_PRIORITY = ("legend", "ddl", "values", "joins", "dictionary")
+_QUERY_SECTION_PRIORITY = ("legend", "ddl", "connection_notes", "values", "joins", "dictionary")
 
 _BLOCK_LABEL = {
     "physical_layout": "clustering or partitioning",
     "null_patterns": "columns null on the same rows",
+}
+_DISABLED_LABEL = {
+    "looks_like": "value shapes (looks like)",
+    "null_patterns": "columns null on the same rows",
+    "parts": "parts of nested columns",
+    "relationships.infer": "inferred relationships",
+    "sketches": "value sketches and measured joins",
+    "timeline": "timeline",
 }
 
 
@@ -100,10 +123,14 @@ class TableArtifacts:
     relationship_annotations: list[dict[str, Any]] | None
     missing: tuple[str, ...]
     corrupted: dict[str, str]
-    statistics_params_override: dict[str, Any] | None
+    profile_override: dict[str, Any] | None
     last_run_failed: bool = False
     # Each referencer column's distinct count, keyed (referencer_table, column), for SPEC 2.3.10.
     incoming_cardinalities: dict[tuple[Any, str], int] = field(default_factory=dict)
+    # SPEC 2.7.3's notes, set on a single-table render only; a multi-table one carries them once.
+    connection_notes: str | None = None
+    # SPEC 2.7.1's `derived_from`: per column, each source's label and its note and value notes.
+    inherited: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
 
 @dataclass
@@ -125,6 +152,21 @@ class PayloadResult:
     truncated: tuple[str, ...]
 
 
+OpenQuestionKind = Literal["description", "codes", "frequent_value", "edge"]
+
+
+@dataclass(frozen=True)
+class OpenQuestion:
+    """One thing the print measured but cannot explain, and the file that would answer it."""
+
+    kind: OpenQuestionKind
+    column: str | None
+    values: tuple[Any, ...]
+    edge: str | None
+    file: str
+    key: str | None
+
+
 def assemble(
     manifest: dict[str, Any],
     print_root: Path,
@@ -140,6 +182,9 @@ def assemble(
         return AssemblyResult(text="", tables_included=0)
 
     loaded = [_load_table_artifacts(manifest, print_root, fqn, read) for fqn in tables]
+
+    if len(loaded) == 1:
+        _attach_connection_notes(loaded[0], print_root, read)
 
     if options.format == "json":
         return _assemble_json(loaded, options)
@@ -172,6 +217,10 @@ def assemble_payloads(
         return PayloadResult(payloads=[], tables_included=0, truncated=())
 
     loaded = [_load_table_artifacts(manifest, print_root, fqn, read_artifact) for fqn in tables]
+
+    if len(loaded) == 1:
+        _attach_connection_notes(loaded[0], print_root, read_artifact)
+
     payloads, included, truncated = _budgeted_structured_payloads(loaded, options)
 
     return PayloadResult(payloads=payloads, tables_included=included, truncated=truncated)
@@ -190,9 +239,10 @@ def ranked_sections(
     """
 
     a = _load_table_artifacts(manifest, print_root, table, read)
+    _attach_connection_notes(a, print_root, read)
     adapter = manifest.get("adapter")
     adapter = adapter if isinstance(adapter, str) and adapter else None
-    params = table_readings.connection_statistics_params(manifest)
+    params = table_readings.connection_profile(manifest)
 
     return [(s.name, s.text, s.line_terms) for s in _sections(a, options, params, adapter)]
 
@@ -206,7 +256,80 @@ def structured_sections(
 ) -> tuple[dict[str, Any], list[tuple[str, Any]]]:
     """One table's structured identity fields and its sections, none dropped, in budget order."""
 
-    return _structured_parts(_load_table_artifacts(manifest, print_root, table, read), options)
+    a = _load_table_artifacts(manifest, print_root, table, read)
+    _attach_connection_notes(a, print_root, read)
+
+    return _structured_parts(a, options)
+
+
+def open_questions(
+    manifest: dict[str, Any],
+    print_root: Path,
+    table: str,
+    read: ArtifactReader = read_artifact,
+) -> list[OpenQuestion]:
+    """What `table`'s print cannot answer and the print-root-relative file each is answered in."""
+
+    a = _load_table_artifacts(manifest, print_root, table, read)
+    entry = walkable_tables(manifest).get(table) or {}
+    directory = table_directory(print_root, table, entry).relative_to(print_root).as_posix()
+    columns_file = f"{directory}/{STATISTICS_ANNOTATIONS_FILENAME}"
+    out: list[OpenQuestion] = []
+
+    if not (a.description and a.description.strip()):
+        out.append(
+            OpenQuestion(
+                "description",
+                None,
+                (),
+                None,
+                f"{directory}/{DESCRIPTION_FILENAME}",
+                None,
+            ),
+        )
+
+    columns = (a.statistics or {}).get("columns")
+    columns = columns if isinstance(columns, dict) else {}
+    scope = scope_of(a.statistics)
+    row_count = block_value(a.statistics or {}, "row_count")
+
+    for name in _ordered_column_names(columns):
+        col = columns[name]
+        annotation = (a.annotations or {}).get(name)
+        key = f"columns.{name}.values"
+
+        if not isinstance(col, dict) or column_value(col, "redacted"):
+            continue
+
+        listed = _covered_values(col)
+
+        if listed is not None:
+            if _codes_undocumented(col, listed[1], annotation, a.inherited.get(name)):
+                codes = tuple(e.get("value") for e in listed[0])
+                out.append(OpenQuestion("codes", name, codes, None, columns_file, key))
+
+            continue
+
+        noted = value_notes(annotation)
+
+        for frequent in (_frequent_values(col, scope, row_count) or ([], 0.0))[0]:
+            if value_key(frequent.get("value")) not in noted:
+                value = (frequent.get("value"),)
+                out.append(OpenQuestion("frequent_value", name, value, None, columns_file, key))
+
+    for edge in _edges(a)[0]:
+        detection = edge_detection(edge)
+
+        if detection not in {"measured", "inferred"} or str(edge.get("note") or "").strip():
+            continue
+
+        source = ", ".join(str(c) for c in edge.get("column") or [])
+        target = ", ".join(str(c) for c in edge.get("target_column") or [])
+        described = f"{source} -> {edge.get('target_table')}.{target} ({detection})"
+        rel_file = f"{directory}/{RELATIONSHIPS_ANNOTATIONS_FILENAME}"
+        out.append(OpenQuestion("edge", None, (), described, rel_file, "refers_to"))
+
+    return out
 
 
 def fk_target_map(
@@ -247,8 +370,8 @@ def _assemble_markdown(
     multi_connection: bool,
     read: ArtifactReader,
 ) -> AssemblyResult:
-    """Header provenance rides a multi-table or multi-connection render; a lone fragment states
-    its own dialect instead (SPEC 2.5). Connection notes appear on the multi-table case alone.
+    """Header provenance rides a multi-table or multi-connection render (SPEC 2.5); connection
+    notes ride that header over several tables and their own section over one.
     """
 
     multi_table = len(artifacts) > 1
@@ -260,9 +383,9 @@ def _assemble_markdown(
         header = f"# Context for connection {connection_name} ({len(artifacts)} {table_word})"
 
         if multi_table:
-            notes, notes_reason = _load_connection_notes(print_root, read)
+            notes, notes_reason = load_connection_notes(print_root, read)
 
-            if notes:
+            if notes and options.include_annotations:
                 header += "\n\n" + notes
 
             if notes_reason is not None:
@@ -275,7 +398,7 @@ def _assemble_markdown(
 
         header_tokens = max(HEADER_TOKEN_OVERHEAD, len(header) // 4)
 
-    connection_statistics_params = table_readings.connection_statistics_params(manifest)
+    connection_profile = table_readings.connection_profile(manifest)
     adapter = manifest.get("adapter")
     adapter = adapter if isinstance(adapter, str) and adapter else None
     shared_legend = multi_table or multi_connection
@@ -287,7 +410,7 @@ def _assemble_markdown(
             *(
                 s.terms
                 for a in artifacts
-                for s in _sections(a, options, connection_statistics_params, adapter)
+                for s in _sections(a, options, connection_profile, adapter)
             ),
         )
         legend_tokens = tokens_of(context_terms.legend(offered))
@@ -318,7 +441,7 @@ def _assemble_markdown(
             a,
             options,
             per_table_budget,
-            connection_statistics_params,
+            connection_profile,
             adapter,
             with_legend=not shared_legend,
         )
@@ -362,7 +485,7 @@ def _render_table_markdown(
     a: TableArtifacts,
     options: AssemblyOptions,
     budget: int | None,
-    connection_statistics_params: dict[str, Any],
+    connection_profile: dict[str, Any],
     adapter: str | None,
     *,
     with_legend: bool,
@@ -372,7 +495,7 @@ def _render_table_markdown(
     The legend is budgeted at every offered term, then shrunk to the terms of the kept sections.
     """
 
-    offered = _sections(a, options, connection_statistics_params, adapter)
+    offered = _sections(a, options, connection_profile, adapter)
 
     if with_legend and (
         full := context_terms.legend(frozenset().union(*(s.terms for s in offered)))
@@ -402,13 +525,13 @@ def _render_table_markdown(
 def _sections(
     a: TableArtifacts,
     options: AssemblyOptions,
-    connection_statistics_params: dict[str, Any],
+    connection_profile: dict[str, Any],
     adapter: str | None,
 ) -> list[Section]:
     if options.purpose == "query":
         return _query_sections(a, options, adapter)
 
-    return _profile_sections(a, options, connection_statistics_params, adapter)
+    return _profile_sections(a, options, connection_profile, adapter)
 
 
 def _section(name: str, lines: list[Rendered], *, pinned: bool = False) -> Section:
@@ -423,7 +546,7 @@ def _section(name: str, lines: list[Rendered], *, pinned: bool = False) -> Secti
 def _profile_sections(
     a: TableArtifacts,
     options: AssemblyOptions,
-    connection_statistics_params: dict[str, Any],
+    connection_profile: dict[str, Any],
     adapter: str | None,
 ) -> list[Section]:
     include_qualifiers = options.include_stats and bool(a.statistics)
@@ -431,10 +554,13 @@ def _profile_sections(
     sections.append(
         _section(
             "header",
-            _markdown_header(a, include_qualifiers, connection_statistics_params, adapter),
+            _markdown_header(a, include_qualifiers, connection_profile, adapter),
             pinned=True,
         ),
     )
+
+    if options.include_annotations and a.connection_notes:
+        sections.append(make_section("connection_notes", _markdown_connection_notes(a)))
 
     if options.include_ddl:
         sections.append(make_section("ddl", _markdown_ddl(a)))
@@ -454,15 +580,18 @@ def _profile_sections(
             if lost := _markdown_unmeasured(a):
                 sections.append(make_section("unmeasured", lost))
 
+            if off := _markdown_disabled(a):
+                sections.append(make_section("disabled", off))
+
             if block_value(a.statistics, "physical_layout"):
                 sections.append(make_section("physical_layout", _markdown_physical_layout(a)))
 
-            effective_params = table_readings.effective_statistics_params(
-                connection_statistics_params,
-                a.statistics_params_override,
+            profile = table_readings.effective_profile(
+                connection_profile,
+                a.profile_override,
             )
             sections.append(
-                _section("cardinality", _markdown_cardinality_table(a, effective_params)),
+                _section("cardinality", _markdown_cardinality_table(a, profile)),
             )
 
             if block_value(a.statistics, "null_patterns"):
@@ -490,6 +619,12 @@ def _query_sections(
     rendered = (
         ("header", _query_markdown_header(a, adapter)),
         ("ddl", [Rendered(_markdown_ddl(a))] if options.include_ddl else []),
+        (
+            "connection_notes",
+            [Rendered(_markdown_connection_notes(a))]
+            if options.include_annotations and a.connection_notes
+            else [],
+        ),
         ("joins", _markdown_joins(a) if options.include_relationships else []),
         ("dictionary", [Rendered(dictionary)] if dictionary else []),
         ("values", _markdown_column_values(a, joined)),
@@ -507,7 +642,7 @@ def _in_reading_order(sections: list[Section], purpose: Purpose) -> list[Section
     if purpose != "query":
         return sections
 
-    order = ("header", "legend", "ddl", "joins", "dictionary", "values")
+    order = ("header", "legend", "ddl", "connection_notes", "joins", "dictionary", "values")
 
     return sorted(sections, key=lambda s: order.index(s.name))
 
@@ -515,7 +650,7 @@ def _in_reading_order(sections: list[Section], purpose: Purpose) -> list[Section
 def _query_markdown_header(a: TableArtifacts, adapter: str | None) -> list[Rendered]:
     """Identity plus the scope marker - what the value lists below cover, and no other measure."""
 
-    lines = _identity_lines(a, adapter)
+    lines = _identity_lines(a, adapter, "query")
 
     if scoped := _scope_summary(a.statistics or {}):
         lines.append(scoped)
@@ -525,6 +660,9 @@ def _query_markdown_header(a: TableArtifacts, adapter: str | None) -> list[Rende
 
     if merging := _merging_summary(a.statistics or {}):
         lines.append(Rendered(merging))
+
+    if (off := _disabled_summary(a.statistics or {})).text:
+        lines.append(off)
 
     return lines
 
@@ -551,29 +689,53 @@ def _markdown_joins(a: TableArtifacts) -> list[Rendered]:
     shares = _null_shares(a)
 
     for entry in refers_to:
-        target = f"{entry.get('target_table', '?')}.{_join_columns(entry.get('target_column'))}"
         line = Rendered(
-            f"- {_join_columns(entry.get('column'))} -> {target} ({edge_detection(entry)})",
+            f"- {_endpoint(entry, 'column', 'path')} -> {_target(entry)} ({edge_detection(entry)})",
             _detection_terms(entry),
         )
+        facts = [line]
 
         if (column := _single_column(entry)) in shares:
-            line = notes_synthesis.join_facts([line, _nulls_fact(shares[column][0])])
+            facts.append(_nulls_fact(shares[column][0]))
 
-        lines.append(line)
+        lines.append(notes_synthesis.join_facts([*facts, *_note_fact(entry)]))
 
     for entry in referenced_by:
-        source = (
-            f"{entry.get('referencer_table', '?')}.{_join_columns(entry.get('referencer_column'))}"
+        line = Rendered(
+            f"- {_endpoint(entry, 'column', 'path')} <- {_referencer(entry)} "
+            f"({edge_detection(entry)})",
+            _detection_terms(entry),
         )
-        lines.append(
-            Rendered(
-                f"- {_join_columns(entry.get('column'))} <- {source} ({edge_detection(entry)})",
-                _detection_terms(entry),
-            ),
-        )
+        lines.append(notes_synthesis.join_facts([line, *_note_fact(entry)]))
 
     return lines
+
+
+def _target(entry: dict[str, Any]) -> str:
+    return f"{entry.get('target_table', '?')}.{_endpoint(entry, 'target_column', 'target_path')}"
+
+
+def _referencer(entry: dict[str, Any]) -> str:
+    referencer = _endpoint(entry, "referencer_column", "referencer_path")
+
+    return f"{entry.get('referencer_table', '?')}.{referencer}"
+
+
+def _endpoint(entry: dict[str, Any], columns: str, path: str) -> str:
+    """The columns, and the key path inside the one column a path-valued edge names (SPEC 2.3.9)."""
+
+    keys = entry.get(path)
+    joined = _join_columns(entry.get(columns))
+
+    return (
+        f"{joined} (path {'.'.join(map(str, keys))})" if isinstance(keys, list) and keys else joined
+    )
+
+
+def _note_fact(entry: dict[str, Any]) -> list[Rendered]:
+    note = entry.get("note")
+
+    return [Rendered(f"note: {' '.join(note.split())}")] if isinstance(note, str) else []
 
 
 def _referencing_columns(a: TableArtifacts) -> set[str]:
@@ -613,6 +775,9 @@ def _nulls_fact(share: str) -> Rendered:
 
 
 def _detection_terms(entry: dict[str, Any]) -> frozenset[str]:
+    if edge_detection(entry) == "annotated":
+        return frozenset({"annotated"})
+
     key = f"detection:{edge_detection(entry)}"
 
     return frozenset({key}) if key in TERMS else frozenset()
@@ -653,11 +818,23 @@ def _markdown_data_dictionary(a: TableArtifacts, options: AssemblyOptions) -> st
     """The table's description and every column a human has defined (SPEC 2.7.1)."""
 
     description = a.description if options.include_description else None
+    annotations = a.annotations or {}
+    columns = (a.statistics or {}).get("columns")
+    # A column whose lineage is producer-parsed carries no annotation entry of its own.
+    parsed_only = [
+        name
+        for name in (_ordered_column_names(columns) if isinstance(columns, dict) else [])
+        if name in a.inherited and name not in annotations
+    ]
     notes = (
         [
-            f"- {name}: {' '.join(entry['note'].split())}"
-            for name, entry in (a.annotations or {}).items()
-            if isinstance(entry.get("note"), str) and entry["note"].strip()
+            line
+            for name in [*annotations, *parsed_only]
+            for line in _dictionary_lines(
+                name,
+                annotations.get(name, {}),
+                a.inherited.get(name, []),
+            )
         ]
         if options.include_annotations
         else []
@@ -677,6 +854,28 @@ def _markdown_data_dictionary(a: TableArtifacts, options: AssemblyOptions) -> st
     return "\n".join(lines)
 
 
+def _dictionary_lines(
+    name: str,
+    entry: dict[str, Any],
+    inherited: list[dict[str, Any]],
+) -> list[str]:
+    lines = []
+    note = entry.get("note")
+
+    if isinstance(note, str) and note.strip():
+        lines.append(f"- {name}: {' '.join(note.split())}")
+
+    for source in inherited:
+        facts = [" ".join(source["note"].split())] if source.get("note") else []
+        facts += [
+            f"{spell_literal(v['value'])} = {' '.join(v['note'].split())}"
+            for v in source.get("values", [])
+        ]
+        lines.append(f"- {name} (from {source['source']}): {'; '.join(facts)}")
+
+    return lines
+
+
 def _markdown_column_values(a: TableArtifacts, joined: set[str]) -> list[Rendered]:
     """Every column whose list a predicate can rely on, then each nullable column's null share.
 
@@ -689,6 +888,7 @@ def _markdown_column_values(a: TableArtifacts, joined: set[str]) -> list[Rendere
         return []
 
     scope = scope_of(a.statistics)
+    row_count = block_value(a.statistics or {}, "row_count")
     annotations = a.annotations or {}
     shares = _null_shares(a)
     rows: list[Rendered] = []
@@ -696,20 +896,30 @@ def _markdown_column_values(a: TableArtifacts, joined: set[str]) -> list[Rendere
     for name in _ordered_column_names(columns):
         col = columns[name]
         listed = _covered_values(col)
+        frequent = _frequent_values(col, scope, row_count) if listed is None else None
 
-        if listed is None:
+        if listed is not None:
+            entries, coverage = listed
+            shown, share = _shown_values(entries, coverage)
+            statement = coverage_statement(coverage, scope)
+            cue = _codes_undocumented(col, coverage, annotations.get(name), a.inherited.get(name))
+        elif frequent is not None:
+            shown, share = frequent
+            statement, cue = _FREQUENT_STATEMENT, False
+        else:
             continue
 
-        entries, coverage = listed
-        shown, share = _shown_values(entries, coverage)
         values_cell = _values_cell(col, shown, annotations.get(name))
-        statement = coverage_statement(coverage, scope)
         nulls = shares.pop(name, ("",))[0]
         rows.append(
             Rendered(
-                f"| {_escape_cell(name)} | {values_cell.text} | {spell_percent(share)} - {statement} "
-                f"| {nulls} |",
-                values_cell.terms | _scope_terms(statement) | _scope_terms(nulls),
+                f"| {_escape_cell(name)} | {values_cell.text} | {spell_percent(share)} - {statement}"
+                f"{f'; {_MEANINGS_UNDOCUMENTED}' if cue else ''} | {nulls} |",
+                values_cell.terms
+                | _scope_terms(statement)
+                | _scope_terms(nulls)
+                | ({"meanings"} if cue else set())
+                | ({"frequent_values"} if frequent is not None else set()),
             ),
         )
 
@@ -759,6 +969,39 @@ def _covered_values(col: Any) -> tuple[list[dict[str, Any]], float] | None:
     return [e for e in entries if isinstance(e, dict)], float(coverage)
 
 
+def _frequent_values(
+    col: Any,
+    scope: ScanScope | None,
+    row_count: Any,
+) -> tuple[list[dict[str, Any]], float] | None:
+    """Values holding `QUERY_FREQUENT_SHARE` of non-null rows and twice an even spread's share,
+    at most `QUERY_SAMPLE_LIMIT`, with their joint share; a uniform column shows none.
+    """
+
+    if (
+        not isinstance(col, dict)
+        or column_value(col, "classification") not in _FREQUENCY_CLASSIFICATIONS
+    ):
+        return None
+
+    entries = column_value(col, "values")
+    cardinality = column_value(col, "cardinality")
+    population = notes_synthesis.non_null_rows(
+        col,
+        row_count if isinstance(row_count, int) else None,
+        scope,
+    )
+
+    if not isinstance(entries, list) or not population or not _is_number(cardinality):
+        return None
+
+    floor = max(QUERY_FREQUENT_SHARE, 2 / cardinality) if cardinality else QUERY_FREQUENT_SHARE
+    shown = [e for e in entries if isinstance(e, dict) and _count_of(e) / population >= floor]
+    shown = shown[:QUERY_SAMPLE_LIMIT]
+
+    return (shown, sum(_count_of(e) for e in shown) / population) if shown else None
+
+
 def _shown_values(
     entries: list[dict[str, Any]],
     coverage: float,
@@ -791,6 +1034,37 @@ def _is_number(value: Any) -> bool:
     """A real number - `bool` is an `int` to Python and never a coverage."""
 
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _codes_undocumented(
+    col: Any,
+    coverage: float,
+    annotation: dict[str, Any] | None,
+    inherited: list[dict[str, Any]] | None,
+) -> bool:
+    return (
+        coverage == 1.0  # noqa: RUF069 - coverage 1.0 is the exhaustive sentinel
+        and column_value(col, "classification") in _CODED_CLASSIFICATIONS
+        and not column_value(col, "redacted")
+        and not _has_meaning(annotation)
+        and not inherited
+    )
+
+
+def _meanings_documented(a: TableArtifacts, purpose: Purpose) -> bool:
+    if (a.description and a.description.strip()) or (purpose == "query" and a.inherited):
+        return True
+
+    return any(_has_meaning(entry) for entry in (a.annotations or {}).values())
+
+
+def _has_meaning(entry: Any) -> bool:
+    if not isinstance(entry, dict):
+        return False
+
+    note = entry.get("note")
+
+    return (isinstance(note, str) and bool(note.strip())) or bool(value_notes(entry))
 
 
 def _values_cell(
@@ -845,8 +1119,8 @@ def _escape_cell(text: str) -> str:
     return escaped.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
 
 
-def _identity_lines(a: TableArtifacts, adapter: str | None) -> list[Rendered]:
-    """What every header opens with: the table, its dialect, and what is missing from it.
+def _identity_lines(a: TableArtifacts, adapter: str | None, purpose: Purpose) -> list[Rendered]:
+    """What every header opens with: the table, its dialect, what is missing, what is unexplained.
 
     The adapter and missing-artifact lines are unconditional (SPEC 2.5).
     """
@@ -871,18 +1145,28 @@ def _identity_lines(a: TableArtifacts, adapter: str | None) -> list[Rendered]:
     if a.corrupted:
         lines.append(_corrupted_summary(a.corrupted))
 
-    return [Rendered(line) for line in lines]
+    rendered = [Rendered(line) for line in lines]
+
+    if not _meanings_documented(a, purpose):
+        rendered.append(
+            Rendered(
+                "Meanings: not documented here - read codes, units and defaults from the code",
+                frozenset({"meanings_table"}),
+            ),
+        )
+
+    return rendered
 
 
 def _markdown_header(
     a: TableArtifacts,
     include_qualifiers: bool,
-    connection_statistics_params: dict[str, Any],
+    connection_profile: dict[str, Any],
     adapter: str | None,
 ) -> list[Rendered]:
     """The identity lines, then one line per table-level qualifier that applies."""
 
-    lines = _identity_lines(a, adapter)
+    lines = _identity_lines(a, adapter, "profile")
 
     if not include_qualifiers:
         return lines
@@ -894,11 +1178,12 @@ def _markdown_header(
         Rendered(_merging_summary(statistics)),
         _grain_summary(statistics, a.annotated_grain),
         _timeline_summary(statistics),
+        _disabled_summary(statistics),
         Rendered(_depends_on_summary(statistics)),
         Rendered(
-            _statistics_params_override_summary(
-                connection_statistics_params,
-                a.statistics_params_override,
+            _profile_override_summary(
+                connection_profile,
+                a.profile_override,
             ),
         ),
     )
@@ -953,8 +1238,8 @@ def _merging_summary(statistics: dict[str, Any]) -> str:
     )
 
 
-def _statistics_params_override_summary(
-    connection_defaults: dict[str, Any],
+def _profile_override_summary(
+    connection_profile: dict[str, Any],
     table_override: dict[str, Any] | None,
 ) -> str:
     """Stated so a table-level override is never applied silently."""
@@ -962,16 +1247,34 @@ def _statistics_params_override_summary(
     if not table_override:
         return ""
 
-    differing = {
-        key: value for key, value in table_override.items() if value != connection_defaults.get(key)
-    }
+    own = _profile_leaves(table_readings.effective_profile(connection_profile, table_override))
+    base = _profile_leaves(connection_profile)
+    differing = {path: value for path, value in own.items() if base.get(path) != value}
 
     if not differing:
         return ""
 
-    rendered = ", ".join(f"{key}={value}" for key, value in sorted(differing.items()))
+    rendered = ", ".join(
+        f"{path}={_spell_setting(value)}" for path, value in sorted(differing.items())
+    )
 
-    return f"Statistics params override: {rendered}"
+    return f"Profile override: {rendered}"
+
+
+def _profile_leaves(tree: dict[str, Any], prefix: str = "") -> dict[str, Any]:
+    out: dict[str, Any] = {}
+
+    for key, value in tree.items():
+        if isinstance(value, dict):
+            out.update(_profile_leaves(value, f"{prefix}{key}."))
+        else:
+            out[f"{prefix}{key}"] = value
+
+    return out
+
+
+def _spell_setting(value: Any) -> str:
+    return str(value).lower() if isinstance(value, bool) else str(value)
 
 
 def _missing_summary(missing: tuple[str, ...]) -> str:
@@ -1148,13 +1451,19 @@ def _provenance_block(manifest: dict[str, Any], connection_name: str) -> str:
         rule_word = "rule" if redaction_count == 1 else "rules"
         lines.append(f"- Redaction configured: {redaction_count} {rule_word}")
 
-    percentiles = table_readings.connection_statistics_params(manifest).get("percentiles")
+    percentiles = (table_readings.connection_profile(manifest).get("statistics") or {}).get(
+        "percentiles",
+    )
 
     if isinstance(percentiles, list) and percentiles:
         rendered = ", ".join(f"P{p}" for p in percentiles)
         lines.append(f"- Percentiles configured: {rendered}")
 
     return "## Provenance\n\n" + "\n".join(lines) if lines else ""
+
+
+def _markdown_connection_notes(a: TableArtifacts) -> str:
+    return f"## Connection notes\n\n{a.connection_notes}"
 
 
 def _markdown_ddl(a: TableArtifacts) -> str:
@@ -1274,7 +1583,7 @@ def _markdown_catalog_only_columns(a: TableArtifacts) -> str:
 
 def _markdown_cardinality_table(
     a: TableArtifacts,
-    statistics_params: dict[str, Any],
+    profile: dict[str, Any],
 ) -> list[Rendered]:
     assert a.statistics is not None
     columns = a.statistics.get("columns") or {}
@@ -1297,7 +1606,7 @@ def _markdown_cardinality_table(
         notes = notes_synthesis.synthesize(
             col,
             fk_targets.get(name),
-            statistics_params=statistics_params,
+            profile=profile,
             scope=scope,
             row_count=row_count,
         )
@@ -1334,7 +1643,7 @@ def _markdown_parts(a: TableArtifacts, options: AssemblyOptions) -> list[Rendere
             if not isinstance(block, dict):
                 continue
 
-            notes = notes_synthesis.synthesize(block, None, statistics_params={}, scope=None)
+            notes = notes_synthesis.synthesize(block, None, profile={}, scope=None)
 
             if present := _presence(name, path, block, parts, scanned):
                 notes = notes_synthesis.join_facts(
@@ -1414,6 +1723,27 @@ def _markdown_unmeasured(a: TableArtifacts) -> str:
     ]
 
     return "\n".join(["## Blocks in the file's `unmeasured` list", "", *lines]) if lines else ""
+
+
+def _markdown_disabled(a: TableArtifacts) -> str:
+    """Name each switched-off measurement (SPEC 2.2.21), so its absence never reads as none."""
+
+    assert a.statistics is not None
+    lines = [
+        f"- `{name}` ({_DISABLED_LABEL[name]}): {disabled_feature_message(name)}"
+        for name in sorted(disabled_of(a.statistics))
+    ]
+
+    return "\n".join(["## Measurements in the file's `disabled` list", "", *lines]) if lines else ""
+
+
+def _disabled_summary(statistics: dict[str, Any]) -> Rendered:
+    if not (named := disabled_of(statistics)):
+        return Rendered("")
+
+    labels = ", ".join(_DISABLED_LABEL[name] for name in sorted(named))
+
+    return Rendered(f"Not measured: switched off - {labels}", frozenset({"switched_off"}))
 
 
 def _markdown_physical_layout(a: TableArtifacts) -> str:
@@ -1506,30 +1836,34 @@ def _markdown_relationships(a: TableArtifacts) -> list[Rendered]:
         return lines
 
     for entry in refers_to:
-        target = f"{entry.get('target_table', '?')}.{_join_columns(entry.get('target_column'))}"
-        via = _join_columns(entry.get("column"))
+        via = _endpoint(entry, "column", "path")
         lines.append(
             Rendered(
-                f"- -> {target} ({edge_detection(entry)}); via: {via}{_on_delete(entry)}",
+                f"- -> {_target(entry)} ({edge_detection(entry)}); via: {via}{_on_delete(entry)}",
                 _detection_terms(entry) | {"via"} | _on_delete_terms(entry),
             ),
         )
+        lines.extend(_note_line(entry))
         lines.extend(_observed_lines(entry, _own_cardinality(a, entry.get("column"))))
 
     for entry in referenced_by:
-        source = (
-            f"{entry.get('referencer_table', '?')}.{_join_columns(entry.get('referencer_column'))}"
-        )
         lines.append(
             Rendered(
-                f"- <- {source} ({edge_detection(entry)}){_on_delete(entry)}",
+                f"- <- {_referencer(entry)} ({edge_detection(entry)}){_on_delete(entry)}",
                 _detection_terms(entry) | _on_delete_terms(entry),
             ),
         )
+        lines.extend(_note_line(entry))
         referencer = (entry.get("referencer_table"), _join_columns(entry.get("referencer_column")))
         lines.extend(_observed_lines(entry, a.incoming_cardinalities.get(referencer)))
 
     return lines
+
+
+def _note_line(entry: dict[str, Any]) -> list[Rendered]:
+    note = entry.get("note")
+
+    return [Rendered(f"  note: {' '.join(note.split())}")] if isinstance(note, str) else []
 
 
 def _own_cardinality(a: TableArtifacts, columns: Any) -> int | None:
@@ -1689,7 +2023,7 @@ def _load_artifact(
     return None, "parses, but is not a mapping"
 
 
-def _load_connection_notes(
+def load_connection_notes(
     print_root: Path,
     read: ArtifactReader,
 ) -> tuple[str | None, str | None]:
@@ -1705,6 +2039,14 @@ def _load_connection_notes(
     notes = mapping.get("notes")
 
     return (notes.strip() if isinstance(notes, str) and notes.strip() else None), None
+
+
+def _attach_connection_notes(a: TableArtifacts, print_root: Path, read: ArtifactReader) -> None:
+    notes, reason = load_connection_notes(print_root, read)
+    a.connection_notes = notes
+
+    if reason is not None:
+        a.corrupted["manifest_annotations"] = reason
 
 
 def _annotation_columns(mapping: dict[str, Any] | None) -> dict[str, dict[str, Any]] | None:
@@ -1820,10 +2162,15 @@ def _load_table_artifacts(
 
         relationship_annotations = _relationship_annotation_entries(rel_ann)
 
-    table_params = entry.get("statistics_params")
+    table_profile = entry.get("profile")
     own_rejections = rejected_edges(relationship_annotations)
     incoming, _ = incoming_rejections(manifest, print_root, fqn, relationships, read)
-    shown = withhold_rejected(relationships, own_rejections, incoming, fqn)
+    authored, _ = authored_relationship_annotations(manifest, print_root, read)
+    shown = with_human_edges(
+        withhold_rejected(relationships, own_rejections, incoming, fqn),
+        authored,
+        fqn,
+    )
 
     if shown is not relationships and relationship_annotations is not None:
         kept = {edge_key(e) for e in (shown or {}).get("refers_to") or [] if isinstance(e, dict)}
@@ -1850,10 +2197,95 @@ def _load_table_artifacts(
         relationship_annotations=relationship_annotations,
         missing=missing_artifacts(table_path, artifacts),
         corrupted=corrupted,
-        statistics_params_override=table_params if isinstance(table_params, dict) else None,
+        profile_override=table_profile if isinstance(table_profile, dict) else None,
         last_run_failed=fqn in failed_tables(manifest),
         incoming_cardinalities=_incoming_cardinalities(manifest, print_root, relationships, read),
+        inherited=_inherited_notes(manifest, print_root, annotations, statistics, read),
     )
+
+
+def _inherited_notes(
+    manifest: dict[str, Any],
+    print_root: Path,
+    annotations: dict[str, dict[str, Any]] | None,
+    statistics: dict[str, Any] | None,
+    read: ArtifactReader,
+) -> dict[str, list[dict[str, Any]]]:
+    """Each column's `derived_from` sources that carry a note or value notes, one step deep.
+
+    An annotation's `derived_from` replaces the producer's parsed list for its column, even empty.
+    """
+
+    entries = walkable_tables(manifest)
+    parsed: dict[str, dict[str, dict[str, Any]]] = {}
+    out: dict[str, list[dict[str, Any]]] = {}
+    columns = (statistics or {}).get("columns")
+    lineage = {
+        name: column_value(col, "derived_from")
+        for name, col in (columns.items() if isinstance(columns, dict) else [])
+        if isinstance(col, dict) and column_value(col, "derived_from") is not None
+    }
+    lineage |= {
+        name: entry["derived_from"]
+        for name, entry in (annotations or {}).items()
+        if "derived_from" in entry
+    }
+
+    for name, sources in lineage.items():
+        for source in sources if isinstance(sources, list) else []:
+            table = source.get("table") if isinstance(source, dict) else None
+            column = source.get("column") if isinstance(source, dict) else None
+
+            if not isinstance(table, str) or not isinstance(column, str) or table not in entries:
+                continue
+
+            if table not in parsed:
+                parsed[table] = _live_source_annotations(print_root, table, entries[table], read)
+
+            noted = parsed[table].get(column)
+
+            if not isinstance(noted, dict) or not _has_meaning(noted):
+                continue
+
+            note = noted.get("note")
+            values = [
+                {"value": v.get("value"), "note": v["note"]}
+                for v in noted.get("values") or []
+                if isinstance(v, dict) and isinstance(v.get("note"), str) and v["note"].strip()
+            ]
+            out.setdefault(name, []).append(
+                {
+                    "source": f"{table}.{column}",
+                    **({"note": note} if isinstance(note, str) and note.strip() else {}),
+                    **({"values": values} if values else {}),
+                },
+            )
+
+    return out
+
+
+def _live_source_annotations(
+    print_root: Path,
+    table: str,
+    entry: dict[str, Any],
+    read: ArtifactReader,
+) -> dict[str, dict[str, Any]]:
+    artifacts = declared_artifacts(entry)
+    directory = table_directory(print_root, table, entry)
+
+    if "statistics_annotations" not in artifacts:
+        return {}
+
+    annotated = _annotation_columns(
+        _load_artifact(directory / artifacts["statistics_annotations"], read)[0],
+    )
+    statistics = (
+        _load_artifact(directory / artifacts["statistics"], read)[0]
+        if "statistics" in artifacts
+        else None
+    )
+
+    return table_readings.live_annotations(annotated, statistics)
 
 
 def _incoming_cardinalities(
@@ -1935,6 +2367,32 @@ def incoming_rejections(
     return out, tuple(consulted)
 
 
+def authored_relationship_annotations(
+    manifest: dict[str, Any],
+    print_root: Path,
+    read: ArtifactReader,
+) -> tuple[dict[str, list[dict[str, Any]] | None], tuple[Path, ...]]:
+    """Every table's `relationships.annotations.yaml` `refers_to` by FQN, and the files read.
+
+    Every table's: a human-authored edge leaves no `referenced_by` row naming whose file to read.
+    """
+
+    out: dict[str, list[dict[str, Any]] | None] = {}
+    consulted: list[Path] = []
+
+    for table, entry in sorted(walkable_tables(manifest).items()):
+        name = declared_artifacts(entry).get("relationships_annotations")
+
+        if name is None:
+            continue
+
+        path = table_directory(print_root, table, entry) / name
+        consulted.append(path)
+        out[table] = _relationship_annotation_entries(_load_artifact(path, read)[0])
+
+    return out, tuple(consulted)
+
+
 def assemble_structured(
     manifest: dict[str, Any],
     print_root: Path,
@@ -1949,6 +2407,7 @@ def assemble_structured(
     """
 
     a = _load_table_artifacts(manifest, print_root, table, read)
+    _attach_connection_notes(a, print_root, read)
 
     return _budgeted_structured_payload(a, options, options.budget)
 
@@ -1983,6 +2442,9 @@ def _structured_parts(
     if a.corrupted:
         header["_corrupted"] = dict(a.corrupted)
 
+    if not _meanings_documented(a, options.purpose):
+        header["meanings_documented"] = False
+
     candidates: list[tuple[str, Any]] = []
 
     # The counts below describe the scanned set; the header survives any budget drop (SPEC 2.2.8).
@@ -1993,6 +2455,9 @@ def _structured_parts(
 
     if options.include_ddl:
         candidates.append(("ddl", a.ddl))
+
+    if options.include_annotations and a.connection_notes:
+        candidates.append(("connection_notes", a.connection_notes))
 
     if options.include_description and a.description is not None:
         candidates.append(("description", a.description))
@@ -2046,6 +2511,9 @@ def _query_candidates(a: TableArtifacts, options: AssemblyOptions) -> list[tuple
     if options.include_ddl:
         candidates.append(("ddl", a.ddl))
 
+    if options.include_annotations and a.connection_notes:
+        candidates.append(("connection_notes", a.connection_notes))
+
     values = _structured_values(a)
 
     if values:
@@ -2077,6 +2545,9 @@ def _query_candidates(a: TableArtifacts, options: AssemblyOptions) -> list[tuple
     if dictionary:
         candidates.append(("dictionary", dictionary))
 
+    if options.include_annotations and a.inherited:
+        candidates.append(("inherited_notes", a.inherited))
+
     if options.include_description and a.description is not None:
         candidates.append(("description", a.description))
 
@@ -2091,12 +2562,25 @@ def _structured_joins(a: TableArtifacts) -> dict[str, Any]:
 
     return {
         "refers_to": [
-            _edge_fields(e, ("column", "target_table", "target_column"))
+            _edge_fields(
+                e,
+                ("column", "path", "target_table", "target_column", "target_path", "note"),
+            )
             | ({"null_rate": shares[c][1]} if (c := _single_column(e)) in shares else {})
             for e in refers_to
         ],
         "referenced_by": [
-            _edge_fields(e, ("column", "referencer_table", "referencer_column"))
+            _edge_fields(
+                e,
+                (
+                    "column",
+                    "path",
+                    "referencer_table",
+                    "referencer_column",
+                    "referencer_path",
+                    "note",
+                ),
+            )
             for e in referenced_by
         ],
     }
@@ -2120,6 +2604,7 @@ def _structured_values(a: TableArtifacts) -> dict[str, Any]:
         return {}
 
     scope = scope_of(a.statistics)
+    row_count = block_value(a.statistics or {}, "row_count")
     annotations = a.annotations or {}
     shares = _null_shares(a)
     out: dict[str, Any] = {}
@@ -2127,19 +2612,24 @@ def _structured_values(a: TableArtifacts) -> dict[str, Any]:
     for name in _ordered_column_names(columns):
         col = columns[name]
         listed = _covered_values(col)
+        frequent = _frequent_values(col, scope, row_count) if listed is None else None
+        block: dict[str, Any]
 
-        if listed is None:
+        if listed is not None:
+            entries, coverage = listed
+            shown, share = _shown_values(entries, coverage)
+            block = {
+                "coverage": coverage,
+                "coverage_statement": coverage_statement(coverage, scope),
+            }
+
+            if coverage != 1.0:  # noqa: RUF069 - coverage 1.0 is the exhaustive sentinel
+                block["shown_coverage"] = share
+        elif frequent is not None:
+            shown, share = frequent
+            block = {"coverage_statement": _FREQUENT_STATEMENT, "shown_coverage": share}
+        else:
             continue
-
-        entries, coverage = listed
-        shown, share = _shown_values(entries, coverage)
-        block: dict[str, Any] = {
-            "coverage": coverage,
-            "coverage_statement": coverage_statement(coverage, scope),
-        }
-
-        if coverage != 1.0:  # noqa: RUF069 - coverage 1.0 is the exhaustive sentinel
-            block["shown_coverage"] = share
 
         redaction = column_value(col, "redacted")
 
@@ -2151,6 +2641,14 @@ def _structured_values(a: TableArtifacts) -> dict[str, Any]:
 
         if name in shares:
             block["null_rate"] = shares[name][1]
+
+        if listed is not None and _codes_undocumented(
+            col,
+            listed[1],
+            annotations.get(name),
+            a.inherited.get(name),
+        ):
+            block["meanings_documented"] = False
 
         out[name] = block
 

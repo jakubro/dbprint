@@ -37,11 +37,12 @@ columns:
         note: Set by the intake form only; the batch importer writes `queued`.
 ```
 
-Three things are available on an entry, and they answer different questions:
+Four things are available on an entry, and they answer different questions:
 
 - **`note`** is free-form Markdown. The format imposes no structure on it.
 - **`claims`** are predicates in the [assertion grammar](../ASSERTIONS.md), evaluated against the column's own statistics. A claim that the artifact contradicts is reported by `dbprint check`, so a note that has gone stale announces itself.
 - **`values`** attach a note to one value in the column's own value list.
+- **`derived_from`** names the columns this one is copied or computed from, as `{table, column}` pairs. A query-purpose context for the column carries each source's note and value notes beside its own, labelled with the source, so a pitfall written once on a source table reaches every table built from it. It is lineage only — no join is implied — and a source the print does not hold is reported by `dbprint check` as `annotations.unknown-source`. A connection configured with a `dbt_manifest` fills this in for every model column it can trace; an entry written here replaces the traced list for its column, and `derived_from: []` suppresses it.
 
 `relationships.annotations.yaml` additionally lets a human reject an inferred edge with a verdict — the one place an annotation overrules the producer, and only because inference is a guess rather than a measurement.
 
@@ -65,6 +66,12 @@ Run `dbprint generate --force` after creating one of those three. `--force` is t
 
 `manifest.annotations.yaml` is the exception, and behaves the way you would expect: it is a connection-level file read by name from the print root rather than resolved through the manifest, so creating it takes effect at once, and the conformance validator schema-checks it whenever it is present.
 
+## Writing them with an agent
+
+Most of what belongs in an annotation is already written down somewhere — in the code that writes the table and the reports that read it — and an agent with that code and read-only database access can find it. `dbprint annotate <table>` prints a brief for one table: the steps of the [annotation skill](../examples/skill/dbprint-annotate.md), the table's `--purpose query` context, and the open questions the print measured but cannot answer, each naming the file that answers it. Pipe it into an agent CLI or paste it into a chat; dbprint launches no program and calls no model.
+
+`dbprint annotate <table> --check` then lists every finding on the table's annotation files — a contradicted claim, an unknown source, a key the format rejects — and exits 1 while any remain. The skill has the agent run it until it passes.
+
 ## Where annotations surface
 
 Not every annotation reaches every reader, and it is worth knowing which before choosing where to write something.
@@ -73,9 +80,7 @@ Not every annotation reaches every reader, and it is worth knowing which before 
 |---|---|
 | `description.md` | `dbprint context`, the MCP server, and the browsable print |
 | `statistics.annotations.yaml` | the same three, per column |
-| `relationships.annotations.yaml` | a verdict rejecting an inferred edge withholds the edge from `dbprint context` and the MCP server, and the browsable print draws it marked as rejected; an edge a human adds that resolves against no producer edge reaches the structured renders only |
-| `manifest.annotations.yaml` | the markdown render of `dbprint context` over two or more tables, and the MCP resource for the file itself |
+| `relationships.annotations.yaml` | a verdict rejecting an inferred edge withholds the edge from `dbprint context` and the MCP server, and the browsable print draws it marked as rejected; an edge a human adds that resolves against no producer edge is listed on both tables it joins, everywhere, tagged `annotated` |
+| `manifest.annotations.yaml` | `dbprint context` and `get_table_context` on any table, every format (once per document over several tables), the browsable print's index page, linked from every table page, and the MCP resource for the file itself |
 
-Two things to plan around. A human-authored edge that matches no producer edge is dropped from the markdown render and from the browsable print, which both iterate the producer's own edges; it survives in `--format json` and `--format yaml`, which carry the annotation list whole.
-
-And connection-level notes are connection-level, twice over: they ride a document header that only a multi-table render builds, and only the markdown render builds one at all. A fact a reader of one table needs belongs in that table's own annotation file, not hoisted up to the connection.
+Write a fact once, at the narrowest level it is true: a convention many tables share — what a status code means, which unit every timestamp uses — belongs in `manifest.annotations.yaml`, where every reader of every table meets it, and a fact about one table belongs in that table's own file.

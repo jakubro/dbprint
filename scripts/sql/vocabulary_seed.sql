@@ -1,7 +1,9 @@
 -- Seed data: three values per column, cycled by row ordinal so every column
 -- is a real, low-cardinality categorical the producer classifies and reads
--- the same way on every regeneration. Every value is a published test
--- vector, standard registry entry, or invented placeholder - never framed
+-- the same way on every regeneration; the card, ISBN, EAN and IMEI columns
+-- carry five, since a checksum pattern needs five distinct values to claim
+-- one. Every value is a published test vector, standard registry entry, or
+-- invented placeholder - never framed
 -- as observed: Luhn-valid non-issuable card numbers, documentation IBANs
 -- (Wikipedia's ISO 4217/13616 examples), RFC 4122's own example UUID inside
 -- a URN, locally-administered MAC addresses (RFC 7042), IANA zone names,
@@ -55,7 +57,14 @@ INSERT INTO public.shapes (
 )
 SELECT
   gen.i,
-  (ARRAY['4111111111111111', '5500005555555559', '378282246310005'])[1 + (gen.i % 3)],
+  (ARRAY[
+     '4111111111111111',
+     '5500005555555559',
+     '378282246310005',
+     '6011111111111117',
+     '3530111333300000'
+   ]
+  )[1 + (gen.i % 5)],
   (ARRAY[
      'DE89370400440532013000',
      'GB82WEST12345698765432',
@@ -84,10 +93,17 @@ SELECT
      || 'Zx9Yw8Vu7Ts6Rr5Qq4Pp3Oo2Nn1Mm0Ll9Kk8Jj7Ii6Hh'
    ])[1 + (gen.i % 3)],
   (ARRAY['v2.4.1', '3.0.0-rc.2', '1.0.0-alpha.beta'])[1 + (gen.i % 3)],
-  (ARRAY['9780306406157', '0132350882', '080442957X'])[1 + (gen.i % 3)],
-  (ARRAY['4006381333931', '5901234123457', '036000291452'])[1 + (gen.i % 3)],
+  (ARRAY['9780306406157', '0132350882', '080442957X', '9781861972712', '0306406152'])[1 + (gen.i % 5)],
+  (ARRAY['4006381333931', '5901234123457', '036000291452', '96385074', '73513537'])[1 + (gen.i % 5)],
   (ARRAY['1HGCM82633A004352', 'JH4TB2H26CC000000', '1M8GDM9AXKP042788'])[1 + (gen.i % 3)],
-  (ARRAY['352099001761481', '490154203237518', '356938035643809'])[1 + (gen.i % 3)],
+  (ARRAY[
+     '352099001761481',
+     '490154203237518',
+     '356938035643809',
+     '353456789012348',
+     '861234567890127'
+   ]
+  )[1 + (gen.i % 5)],
   (ARRAY['1704067201', '1704067202', '1704067203'])[1 + (gen.i % 3)],
   (ARRAY['2026-01-01T08:15:30', '2026-03-14T23:59:59', '2026-07-04T00:00:00'])[1 + (gen.i % 3)],
   (ARRAY['XX1234567890', 'XX9876543210', 'XX5555555555'])[1 + (gen.i % 3)],

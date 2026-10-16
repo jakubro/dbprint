@@ -70,6 +70,7 @@ FIELD_ROLES: Mapping[str, RedactionRole] = MappingProxyType(
         "physical_name": "structural",
         "collation": "structural",
         "physical_layout_key": "structural",
+        "derived_from": "structural",
         "rows_scanned": "structural",
         "unmeasured": "structural",
         "redacted": "structural",

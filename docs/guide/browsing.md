@@ -15,13 +15,15 @@ That binds `127.0.0.1:8765` and serves the connections the project resolves — 
 
 | Page | Holds |
 |---|---|
-| Index | every connection served, its schemas, and when each print was taken |
+| Index | every connection served, its schemas, when each print was taken, and the connection's notes from `manifest.annotations.yaml` — every table page links to them |
 | Schema | the tables in it, with row counts and column counts |
 | Table | the full per-column surface, its relationships, and a diagram of the edges into and out of it |
 
 The table page is the one worth knowing. It carries what `statistics.yaml` carries — classification, null rate, cardinality, value lists, ranges, percentiles — beside the prose from that table's `description.md` and `statistics.annotations.yaml`, so a measurement and the note correcting it appear together rather than in two files. Value bars spell each value as `dbprint context` does — `''` for an empty string, `'NULL'` for the stored word, `NULL` only for a genuine null — and a `drop`-redacted column's bars read `(value withheld)`.
 
 Three banners can appear above everything else, and they are deliberately distinct because absence and corruption read differently: `Missing: <kinds>` names a declared artifact that isn't on disk; `Unreadable: <kinds>` names one that is on disk but failed to parse; a catalog-only notice explains that no query was issued at all, so cardinality is not measured on this page.
+
+A measurement the file's `disabled` list names gets a block of its own, quoting the list and stating what is unknown because configuration switched it off for this table — an absent null-pattern table or timeline there is not a finding about the data.
 
 ### Timeline and Depends on
 
@@ -38,7 +40,7 @@ Further down the same cell: `mean`/`sum` render as `mean X · sum Y` whenever ei
 
 ### The relationships panel
 
-Every edge gets a Detection badge with one of three verdicts: `declared` (a real foreign key), `measured` (proposed from two columns' own sketches, never a schema fact), or `inferred` (a naming guess) — an edge carrying no `detection` at all reads as the weakest of the three, `inferred`, never defaulted upward. `declared` and `measured` are two different claims and the page never blurs them: a declared edge is a constraint the database enforces; a measured one is evidence the data happens to join cleanly today.
+Every edge gets a Detection badge with one of four verdicts: `declared` (a real foreign key), `measured` (proposed from two columns' own sketches, never a schema fact), `inferred` (a naming guess), or `annotated` (an edge a human added in `relationships.annotations.yaml`, listed on both tables it joins, with nothing measured behind it) — an edge carrying no `detection` at all reads as `inferred`, never defaulted upward. `declared` and `measured` are two different claims and the page never blurs them: a declared edge is a constraint the database enforces; a measured one is evidence the data happens to join cleanly today.
 
 Detail beside the badge carries whatever the edge can state — `on_delete`, a constraint name, the annotation path for a human-added edge — and, where the observed join was measured, its fanout, target coverage and containment, or `scopes not comparable` when the two sides' scopes can't be compared at all. A verdict a human annotation rejected renders `REJECTED by human annotation` on both the referencing and the referenced side.
 

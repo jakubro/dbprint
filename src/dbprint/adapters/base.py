@@ -275,8 +275,7 @@ def temporal_block_unmeasured(sql_type: str) -> tuple[str, ...]:
 class TableMeta:
     """Identifies a table/view/matview and its namespace position.
 
-    `external` marks an object whose rows live in another system (SPEC 2.2.20). `opt_in_only` marks
-    a local one profiled only when a `read_rows` rule opts it in; the print never names that mark.
+    `external`: rows live elsewhere (SPEC 2.2.20); `opt_in_only`: read only under an explicit mode.
     """
 
     fqn: str
@@ -1792,6 +1791,10 @@ class Adapter(ABC):
     # predicate (Postgres/duckdb BERNOULLI) redraws identically, an unseeded construct does not.
     SAMPLE_FALLBACK_COHERENT: ClassVar[bool] = True
 
+    # Whether an external table's rows live in another live database, so that reading it -
+    # even once a rule opts in - would put load on a system the connection does not name.
+    EXTERNAL_READ_REFUSED: ClassVar[bool] = False
+
     # Whether `materialize_scope`'s copy dies with the session on its own, so a failed
     # `release_scope` still leaves nothing behind. False names what cleans it up instead.
     MATERIALIZED_SCOPE_SESSION_SCOPED: ClassVar[bool] = True
@@ -2677,7 +2680,7 @@ class SqlAdapter(Adapter):
     ) -> list[Any]:
         from . import statements
 
-        if not is_string_like_type(node.sql_type):
+        if not is_string_like_type(node.sql_type) or config.looks_like_sample_size == 0:
             return []
 
         return statements.distinct_values(

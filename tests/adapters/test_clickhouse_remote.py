@@ -10,6 +10,7 @@ import yaml
 
 from dbprint.adapters import ClickhouseAdapter
 from dbprint.adapters.clickhouse import introspect
+from dbprint.config import TablesConfig
 from dbprint.config.project import ConnectionConfig
 from dbprint.engine import Engine
 from tests._engine_run import conformance_errors
@@ -84,7 +85,7 @@ def _generate(cursor: Any, tmp_path: Path) -> None:
         name="primary",
         adapter="clickhouse",
         output=tmp_path,
-        include=("seedbank.*",),
+        tables=TablesConfig(include=("seedbank.*",)),
     )
 
     try:

@@ -25,7 +25,7 @@ from dbprint.adapters import (
     TableCounts,
     TableScope,
 )
-from dbprint.config import ConnectionConfig
+from dbprint.config import ConnectionConfig, ProfileConfig, RelationshipsProfile
 from dbprint.conformance.statistics import check
 from dbprint.engine import Engine
 from dbprint.engine.context_assembler import AssemblyOptions, assemble
@@ -194,7 +194,7 @@ def _generate(
         name="w",
         adapter="postgres",
         output=tmp_path,
-        infer_relationships=False,
+        profile=ProfileConfig(relationships=RelationshipsProfile(infer=False)),
     )
     Engine(adapter(fixture), conn, tmp_path).generate()
     schema, name = table_key.split(".")

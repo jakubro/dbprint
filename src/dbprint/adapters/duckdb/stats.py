@@ -34,7 +34,6 @@ from .. import statements
 from ..base import (
     ArrayReads,
     BaseStats,
-    CardinalityMethod,
     ColumnMeta,
     ColumnProgress,
     ColumnReads,
@@ -55,7 +54,6 @@ from ..base import (
     TopN,
     ValueCount,
     ValueList,
-    counts_approximately,
     declared_maps,
     declared_members,
     empty_base_stats,
@@ -76,8 +74,6 @@ from ..identifiers import SOURCE_ALIAS, Identity, quote, source_column, string_l
 from ..sql_layout import derived, indented, listed, select_from
 from ..statements import column_alias
 
-
-# Threshold above which cardinality is estimated rather than counted. SPEC 2.2.2.
 
 _UNSUPPORTED_TYPES = (
     "record",
@@ -112,18 +108,12 @@ def compute_base(
         return TableCounts(row_count=0, rows_scanned=0), PhaseA({})
 
     source = table_source(identity, scope)
-    narrows = scope is not None and scope.narrows
-
     estimate = introspect.row_count_estimate(cursor, identity)
-    # The catalog estimate describes the table, not the slice, so a narrowed read counts exactly.
-    approximate = counts_approximately(estimate, narrows)
-
     rows_scanned, phase_a = run_phase_a(
         columns,
         phase_a_cost,
-        partial(_phase_a_statement, cursor, source, approximate=approximate),
+        partial(_phase_a_statement, cursor, source),
         partial(_null_counts, cursor, source),
-        partial(_recount, cursor, source) if approximate else None,
         declines=lambda col: _is_unsupported(col.classified_type),
     )
     row_count, row_count_method = statements.table_row_count(
@@ -202,7 +192,7 @@ def profile_part(
         lambda columns: run_phase_a(
             columns,
             phase_a_cost,
-            partial(_phase_a_statement, cursor, source, approximate=False),
+            partial(_phase_a_statement, cursor, source),
             partial(_null_counts, cursor, source),
             declines=lambda col: _is_unsupported(col.classified_type),
         ),
@@ -476,35 +466,18 @@ def _null_counts(
     )
 
 
-def _recount(
-    cursor: Cursor,
-    source: str,
-    columns: list[ColumnMeta],
-) -> Sequence[Any] | None:
-    return statements.recount(
-        partial(exec_query, cursor),
-        DIALECT,
-        source,
-        columns,
-        lambda col: source_column(col, DIALECT),
-    )
-
-
 def _phase_a_statement(
     cursor: Cursor,
     source: str,
     columns: list[ColumnMeta],
-    approximate: bool,
 ) -> tuple[int, dict[str, BaseStats]]:
-    """One query yielding row_count + per-column null_count + cardinality."""
+    """One query yielding row_count + per-column null_count + an exact cardinality."""
 
-    method: CardinalityMethod = "approximate" if approximate else "exact"
     select_parts: list[str] = ["COUNT(1) AS row_count"]
 
     for col in columns:
         cn = source_column(col, DIALECT)
-        # COALESCE guards COUNT_IF's NULL-on-empty-table result; an approximate count
-        # already returns 0 for an empty group.
+        # COALESCE guards COUNT_IF's NULL-on-empty-table result.
         select_parts.append(f"COALESCE(COUNT_IF({cn} IS NULL), 0) AS null_{column_alias(col.name)}")
 
         if is_numeric_type(col.classified_type):
@@ -530,7 +503,7 @@ def _phase_a_statement(
                 ),
             )
 
-        select_parts.append(f"{_distinct_expr(cn, approximate)} AS card_{column_alias(col.name)}")
+        select_parts.append(f"COUNT(DISTINCT {cn}) AS card_{column_alias(col.name)}")
 
     row = exec_query(cursor, select_from(select_parts, source)).fetchone()
 
@@ -569,13 +542,12 @@ def _phase_a_statement(
             length_p95 = row[idx]
             idx += 1
 
-        # An approximate count errs both ways; clamp to non-null (SPEC 2.2.2 is non-null-only).
-        cardinality = min(row_count - null_count, int(row[idx]))
+        cardinality = int(row[idx])
         idx += 1
         out[col.name] = BaseStats(
             null_count=null_count,
             cardinality=cardinality,
-            cardinality_method=method,
+            cardinality_method="exact",
             supported=not _is_unsupported(col.classified_type),
             zero_count=zero_count,
             negative_count=negative_count,
@@ -588,15 +560,6 @@ def _phase_a_statement(
         )
 
     return row_count, out
-
-
-def _distinct_expr(quoted_column: str, approximate: bool) -> str:
-    """Distinct-count aggregate for one column: an approximate estimate or an exact count."""
-
-    if approximate:
-        return f"APPROX_COUNT_DISTINCT({quoted_column})"
-
-    return f"COUNT(DISTINCT {quoted_column})"
 
 
 def _length_exprs(cn: str, sql_type: str) -> tuple[str, str]:

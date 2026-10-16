@@ -15,7 +15,13 @@ from dbprint.adapters import (
     MockTable,
     Range,
 )
-from dbprint.config import ConnectionConfig, RuleConfig
+from dbprint.config import (
+    ConnectionConfig,
+    ProfileConfig,
+    RelationshipsProfile,
+    RuleConfig,
+    TimelineProfile,
+)
 from dbprint.engine import Engine
 from dbprint.engine.context_assembler import AssemblyOptions, assemble
 from tests._engine_run import artifact
@@ -120,14 +126,20 @@ def _generate(
     sample: float | None = None,
     compute_timeline: bool = True,
 ) -> dict[str, Any]:
-    rules = (RuleConfig(sample=sample),) if sample is not None else ()
+    rules = (
+        (RuleConfig(profile={"read": {"tables": {"mode": "sample", "fraction": sample}}}),)
+        if sample is not None
+        else ()
+    )
     conn = ConnectionConfig(
         name="w",
         adapter="postgres",
         output=tmp_path,
-        infer_relationships=False,
         rules=rules,
-        compute_timeline=compute_timeline,
+        profile=ProfileConfig(
+            relationships=RelationshipsProfile(infer=False),
+            timeline=TimelineProfile(enabled=compute_timeline),
+        ),
     )
     fixture = _fixture(
         row_count=row_count,

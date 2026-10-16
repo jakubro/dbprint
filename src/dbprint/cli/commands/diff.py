@@ -52,14 +52,14 @@ from ..run_log import close_run_log, log_run_header, log_run_summary, open_run_l
     "--include",
     "include_patterns",
     multiple=True,
-    help="Narrow scope to tables also matching PATTERN (intersects config include); "
+    help="Narrow scope to tables also matching PATTERN (intersects tables.include); "
     "repeatable. e.g. `--include '*.public.*'`",
 )
 @click.option(
     "--exclude",
     "exclude_patterns",
     multiple=True,
-    help="Also drop tables matching PATTERN (unions config exclude); repeatable.",
+    help="Also drop tables matching PATTERN (unions tables.exclude); repeatable.",
 )
 @click.option(
     "--format",

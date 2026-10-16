@@ -42,19 +42,18 @@ def prose_fixture() -> dict[str, MockTable]:
             length=Length(min=3, max=3, avg=3.0, p95=3.0),
         )
 
-    # Three values, enumerated in full, so this one's counts have to add up.
+    # Enumerated in full, so the counts add up; under five rows a value, so prose is no picklist.
     status = ColumnStats(
         sql_type="text",
         nullable=False,
         null_count=0,
         null_rate=0.0,
-        cardinality=3,
-        cardinality_ratio=0.015,
+        cardinality=45,
+        cardinality_ratio=0.225,
         cardinality_method="exact",
         values=(
-            ValueCount(value="a", count=100),
-            ValueCount(value="b", count=60),
-            ValueCount(value="c", count=40),
+            ValueCount(value="a", count=112),
+            *(ValueCount(value=f"s{i:02d}", count=2) for i in range(44)),
         ),
         values_coverage=1.0,
         distribution="imbalanced",

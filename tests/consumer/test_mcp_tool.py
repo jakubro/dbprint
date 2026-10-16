@@ -21,6 +21,7 @@ from tests import _mcp_pages
 from tests._grammar import split_outside_literals
 from tests.fixtures.adversarial import (
     APPROXIMATE_ROW_COUNT_TABLE,
+    CONNECTION_NOTE,
     DECLARED_MISSING_KIND,
     DECLARED_MISSING_TABLE,
     DELIMITER_TABLE,
@@ -31,6 +32,9 @@ from tests.fixtures.adversarial import (
     EXTREME_TABLE,
     FUTURE_DATED_COLUMN,
     GRAIN_NO_OUTCOME_TABLE,
+    HUMAN_EDGE_COLUMN,
+    HUMAN_EDGE_TARGET,
+    HUMAN_EDGE_TARGET_COLUMN,
     INCOMPLETE_GRAIN_TABLE,
     NEVER_DECLARED_KIND,
     ORPHAN_SPELLING_COLUMN,
@@ -64,6 +68,8 @@ COVERS = frozenset(
         "unevaluated_diff_table",
         "empty_columns_map",
         "column_with_several_edges",
+        "connection_notes",
+        "human_authored_edge",
         "orphan_spelling",
         "percentile_inside_range",
         "grain_search_without_outcome",
@@ -473,3 +479,30 @@ def test_every_standing_edge_is_named_surest_first(adversarial_print: Adversaria
 
     assert "FK: public.cultivar.id (declared), public.wide_lookup.a (measured); " in row
     assert REJECTED_EDGE_TARGET not in row
+
+
+def test_a_human_authored_edge_reaches_both_tables_tagged_annotated(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    query = {"table": SEVERAL_EDGES_TABLE, "format": "md", "purpose": "query"}
+    source = _mcp_pages.joined(
+        _mcp_pages.pages(_state(adversarial_print), "get_table_context", query),
+    )
+    target = _md(adversarial_print, HUMAN_EDGE_TARGET)
+
+    assert (
+        f"- {HUMAN_EDGE_COLUMN} -> {HUMAN_EDGE_TARGET}.{HUMAN_EDGE_TARGET_COLUMN} (annotated)"
+        in source
+    )
+    assert f"<- {SEVERAL_EDGES_TABLE}.{HUMAN_EDGE_COLUMN} (annotated)" in target
+
+
+def test_connection_notes_reach_a_single_table_reader_once(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    text = _md(adversarial_print, SEVERAL_EDGES_TABLE)
+    arguments = {"table": SEVERAL_EDGES_TABLE, "format": "json", "purpose": "query"}
+    payload = _dict_result(adversarial_print, "get_table_context", arguments)
+
+    assert text.count(CONNECTION_NOTE) == 1
+    assert payload["connection_notes"] == CONNECTION_NOTE

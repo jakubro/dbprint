@@ -11,7 +11,12 @@ import copy
 from typing import Any
 
 from dbprint.adapters.base import ForeignKeyMeta
-from dbprint.engine.relationship_graph import rejected_edges, resolve, withhold_rejected
+from dbprint.engine.relationship_graph import (
+    rejected_edges,
+    resolve,
+    with_human_edges,
+    withhold_rejected,
+)
 
 
 def _fk(
@@ -179,3 +184,68 @@ class TestWithholdRejected:
         withhold_rejected(_EDGES, rejected, {}, "public.sheet")
 
         assert before == _EDGES
+
+
+def _authored(column: str, target: str, target_column: str, **extra: Any) -> dict[str, Any]:
+    return {"column": [column], "target_table": target, "target_column": [target_column], **extra}
+
+
+class TestWithHumanEdges:
+    """An annotation entry with no verdict that matches no emitted edge is a human-authored edge."""
+
+    def test_an_edge_a_human_added_joins_the_source_tagged_annotated(self) -> None:
+        own = [_authored("vault_id", "public.vault", "id", note="the storage vault")]
+        shown = with_human_edges(_EDGES, {"public.sheet": own}, "public.sheet")
+
+        assert shown is not None
+        assert shown["refers_to"][-1] == {
+            "column": ["vault_id"],
+            "target_table": "public.vault",
+            "target_column": ["id"],
+            "detection": "annotated",
+            "note": "the storage vault",
+        }
+        assert shown["referenced_by"] == _EDGES["referenced_by"]
+
+    def test_the_target_sees_it_as_incoming(self) -> None:
+        authored = {"public.accession": [_authored("sheet_ref", "public.sheet", "id")]}
+        shown = with_human_edges(_EDGES, authored, "public.sheet")
+
+        assert shown is not None
+        assert shown["referenced_by"][-1] == {
+            "referencer_table": "public.accession",
+            "column": ["id"],
+            "referencer_column": ["sheet_ref"],
+            "detection": "annotated",
+        }
+
+    def test_a_note_on_an_emitted_edge_rides_on_it_and_adds_no_edge(self) -> None:
+        own = [_authored("herbarium_id", "public.herbarium", "id", note="always set")]
+        shown = with_human_edges(_EDGES, {"public.sheet": own}, "public.sheet")
+
+        assert shown is not None
+        assert len(shown["refers_to"]) == 2
+        assert shown["refers_to"][0]["note"] == "always set"
+        assert shown["refers_to"][0]["detection"] == "declared"
+        assert "note" not in _EDGES["refers_to"][0]
+
+    def test_a_path_valued_entry_keeps_its_paths_on_both_sides(self) -> None:
+        entry = _authored("traits", "public.sheet", "id", path=["sheet_ref"])
+        shown = with_human_edges(_EDGES, {"public.sheet": [entry]}, "public.sheet")
+
+        assert shown is not None
+        assert shown["refers_to"][-1]["path"] == ["sheet_ref"]
+        assert shown["referenced_by"][-1]["referencer_path"] == ["sheet_ref"]
+
+    def test_a_verdict_entry_and_an_unaddressed_one_add_nothing(self) -> None:
+        own = [
+            _verdict("vault_id", "public.vault", "id"),
+            {"column": ["vault_id"], "target_table": "public.vault", "note": "no target column"},
+        ]
+
+        assert with_human_edges(_EDGES, {"public.sheet": own}, "public.sheet") is _EDGES
+
+    def test_no_relationships_file_stays_none(self) -> None:
+        own = [_authored("vault_id", "public.vault", "id")]
+
+        assert with_human_edges(None, {"public.sheet": own}, "public.sheet") is None

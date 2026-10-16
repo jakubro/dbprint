@@ -8,10 +8,12 @@ import re
 from pathlib import Path
 from typing import Any, ClassVar
 
+import pytest
 import yaml
 
 from dbprint.engine import AssemblyOptions, assemble_context, assemble_structured_context
 from dbprint.engine.context_assembler import (
+    Purpose,
     TableArtifacts,
     _escape_cell,
     _markdown_catalog_only_columns,
@@ -320,7 +322,9 @@ def _seed_two_table_print(tmp_path: Path, notes: str | None = None) -> Path:
 
 
 class TestConnectionNotes:
-    """SPEC 2.7.3: `manifest.annotations.yaml` carries once, only when rendering >1 table."""
+    """SPEC 2.7.3: `manifest.annotations.yaml` carries once - in the header over several tables,
+    in its own section over one.
+    """
 
     def test_notes_appear_once_in_a_multi_table_render(self, tmp_path: Path) -> None:
         print_root = _seed_two_table_print(tmp_path, notes="Warehouse-wide fact.")
@@ -365,19 +369,87 @@ class TestConnectionNotes:
 
         assert "Unreadable: manifest_annotations (present on disk, failed to parse)" in result.text
 
-    def test_a_single_table_render_carries_no_connection_notes(self, tmp_path: Path) -> None:
-        """A single-table render has no connection-wide slot; the fact is out of scope for it."""
-
+    @pytest.mark.parametrize("purpose", ["profile", "query"])
+    def test_a_single_table_render_carries_the_notes_once(
+        self,
+        tmp_path: Path,
+        purpose: Purpose,
+    ) -> None:
         print_root = _seed_two_table_print(tmp_path, notes="Warehouse-wide fact.")
-        result = assemble_context(
+        text = assemble_context(
             TWO_TABLE_MANIFEST,
             print_root,
             ["herbarium.public.collector"],
-            AssemblyOptions(),
+            AssemblyOptions(purpose=purpose),
             "primary",
+        ).text
+
+        assert "## Connection notes\n\nWarehouse-wide fact." in text
+        assert text.count("Warehouse-wide fact.") == 1
+
+    def test_the_notes_precede_the_ddl_under_profile_and_the_joins_under_query(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        print_root = _seed_two_table_print(tmp_path, notes="Warehouse-wide fact.")
+
+        def render(purpose: Purpose) -> str:
+            return assemble_context(
+                TWO_TABLE_MANIFEST,
+                print_root,
+                ["herbarium.public.collector"],
+                AssemblyOptions(purpose=purpose),
+                "primary",
+            ).text
+
+        profile, query = render("profile"), render("query")
+
+        assert profile.index("## Connection notes") < profile.index("## DDL")
+        assert query.index("## DDL") < query.index("## Connection notes") < query.index("## Joins")
+
+    def test_a_single_table_payload_carries_them_as_a_key(self, tmp_path: Path) -> None:
+        print_root = _seed_two_table_print(tmp_path, notes="Warehouse-wide fact.")
+        payload = assemble_structured_context(
+            TWO_TABLE_MANIFEST,
+            print_root,
+            "herbarium.public.collector",
+            AssemblyOptions(purpose="query"),
         )
 
-        assert "Warehouse-wide fact." not in result.text
+        assert payload["connection_notes"] == "Warehouse-wide fact."
+
+    def test_include_annotations_false_omits_them_everywhere(self, tmp_path: Path) -> None:
+        print_root = _seed_two_table_print(tmp_path, notes="Warehouse-wide fact.")
+        options = AssemblyOptions(include_annotations=False)
+        one = assemble_context(
+            TWO_TABLE_MANIFEST,
+            print_root,
+            ["herbarium.public.collector"],
+            options,
+            "primary",
+        ).text
+        both = assemble_context(
+            TWO_TABLE_MANIFEST,
+            print_root,
+            ["herbarium.public.collector", "herbarium.public.specimen_loan"],
+            options,
+            "primary",
+        ).text
+
+        assert "Warehouse-wide fact." not in one + both
+
+    def test_a_corrupt_file_is_reported_on_a_single_table_payload(self, tmp_path: Path) -> None:
+        print_root = _seed_two_table_print(tmp_path, notes=None)
+        (print_root / "manifest.annotations.yaml").write_text("not: [valid: yaml")
+        payload = assemble_structured_context(
+            TWO_TABLE_MANIFEST,
+            print_root,
+            "herbarium.public.collector",
+            AssemblyOptions(),
+        )
+
+        assert "manifest_annotations" in payload["_corrupted"]
+        assert "connection_notes" not in payload
 
 
 FULL_PROVENANCE_MANIFEST: dict[str, object] = {
@@ -389,7 +461,7 @@ FULL_PROVENANCE_MANIFEST: dict[str, object] = {
     "default_collation": "en_US.utf8",
     "redaction_rules_configured": 2,
     "selectors": {"include": ["herbarium.public.*"], "exclude": []},
-    "statistics_params": {"percentiles": [5, 25, 75, 95]},
+    "profile": {"statistics": {"percentiles": [5, 25, 75, 95]}},
     "tables": {
         **MANIFEST["tables"],
         "herbarium.public.specimen_loan": {
@@ -488,13 +560,16 @@ class TestProvenance:
         assert "Redaction configured" not in result.text
 
 
-class TestStatisticsParamsOverride:
-    """A table-level `statistics_params` override is never silently applied."""
+class TestProfileOverride:
+    """A table-level `profile` override is never silently applied."""
 
     def test_a_differing_table_override_is_stated_on_that_table(self, tmp_path: Path) -> None:
         manifest: dict[str, Any] = copy.deepcopy(FULL_PROVENANCE_MANIFEST)
-        manifest["statistics_params"] = {"top_n_values": 10}
-        manifest["tables"]["herbarium.public.collector"]["statistics_params"] = {"top_n_values": 3}
+        manifest["profile"] = {"statistics": {"top_n_values": 10}, "timeline": {"enabled": True}}
+        manifest["tables"]["herbarium.public.collector"]["profile"] = {
+            "statistics": {"top_n_values": 3},
+            "timeline": {"enabled": False},
+        }
         print_root = _seed_full_provenance_print(tmp_path)
         (print_root / "manifest.yaml").write_text(yaml.safe_dump(manifest))
         result = assemble_context(
@@ -505,12 +580,14 @@ class TestStatisticsParamsOverride:
             "primary",
         )
 
-        assert "Statistics params override: top_n_values=3" in result.text
+        assert "Profile override: statistics.top_n_values=3, timeline.enabled=false" in result.text
 
     def test_an_identical_override_states_nothing(self, tmp_path: Path) -> None:
         manifest: dict[str, Any] = copy.deepcopy(FULL_PROVENANCE_MANIFEST)
-        manifest["statistics_params"] = {"top_n_values": 10}
-        manifest["tables"]["herbarium.public.collector"]["statistics_params"] = {"top_n_values": 10}
+        manifest["profile"] = {"statistics": {"top_n_values": 10}}
+        manifest["tables"]["herbarium.public.collector"]["profile"] = {
+            "statistics": {"top_n_values": 10},
+        }
         print_root = _seed_full_provenance_print(tmp_path)
         (print_root / "manifest.yaml").write_text(yaml.safe_dump(manifest))
         result = assemble_context(
@@ -521,7 +598,7 @@ class TestStatisticsParamsOverride:
             "primary",
         )
 
-        assert "Statistics params override" not in result.text
+        assert "Profile override" not in result.text
 
 
 SCOPED_MANIFEST: dict[str, object] = {
@@ -651,7 +728,7 @@ class TestScopeQualifier:
         """A count is unreadable without it, so it rides the section nothing drops."""
 
         root = _seed_scoped_print(tmp_path, {"rows_scanned": 400_000, "sample": 0.1})
-        text = _render_scoped(root, budget=40)
+        text = _render_scoped(root, budget=60)
 
         assert "Scanned: 400000 of 4000000 rows (10%)" in text
         assert "## Cardinality & key columns" not in text
@@ -841,7 +918,7 @@ class TestRelationshipsMarkdown:
             relationship_annotations=relationship_annotations,
             missing=(),
             corrupted={},
-            statistics_params_override=None,
+            profile_override=None,
         )
 
     def test_a_declared_refers_to_edge_states_its_detection_and_action(self) -> None:
@@ -988,7 +1065,7 @@ class TestObservedRendering:
             relationship_annotations=None,
             missing=(),
             corrupted={},
-            statistics_params_override=None,
+            profile_override=None,
         )
 
     def test_every_distinct_value_compared_reads_exact(self) -> None:
@@ -1125,7 +1202,7 @@ class TestNullPatternsMarkdown:
             relationship_annotations=None,
             missing=(),
             corrupted={},
-            statistics_params_override=None,
+            profile_override=None,
         )
 
     @staticmethod
@@ -2670,7 +2747,7 @@ def _seed_print_with_a_sampled_column(tmp_path: Path) -> Path:
 
 
 class TestTheQueryValueTableShowsWhatAPredicateCanUse:
-    """An exhaustive list whole, a sampled one cut to its most frequent, an uncovered one absent."""
+    """An exhaustive list whole, a sampled one cut to its most frequent, a numeric one to outliers."""
 
     def test_a_sampled_list_shows_five_categories_and_their_own_share(self, tmp_path: Path) -> None:
         text = _query(
@@ -2687,7 +2764,7 @@ class TestTheQueryValueTableShowsWhatAPredicateCanUse:
         assert "Uppsala" not in row
         assert "75% - a sample of the most frequent values" in row
 
-    def test_a_column_with_values_but_no_coverage_has_no_row(self, tmp_path: Path) -> None:
+    def test_a_numeric_list_shows_only_values_above_an_even_spread(self, tmp_path: Path) -> None:
         """A numeric list is a frequency sample with no stated share (SPEC 2.2.3) - not a domain."""
 
         text = _query(
@@ -2695,8 +2772,10 @@ class TestTheQueryValueTableShowsWhatAPredicateCanUse:
             "herbarium.public.collector",
             MANIFEST,
         )
+        row = _row_for(text, "seed_count")
 
-        assert "| seed_count |" not in text
+        assert row.startswith("| seed_count | 42 (3) | 3.2% - frequent values, not a domain |")
+        assert "7 (2)" not in row
         assert "coverage not published" not in text
 
     def test_a_member_of_an_unlisted_value_stands_as_its_own_row(self, tmp_path: Path) -> None:
@@ -2737,7 +2816,8 @@ class TestTheQueryValueTableShowsWhatAPredicateCanUse:
         ]
         assert institution["coverage"] == 0.8  # noqa: RUF069 - the expected value is an exact literal
         assert institution["shown_coverage"] == 0.75  # noqa: RUF069 - the expected value is an exact literal
-        assert "seed_count" not in payload["values"]
+        assert payload["values"]["seed_count"]["entries"] == [{"value": 42, "count": 3}]
+        assert "coverage" not in payload["values"]["seed_count"]
         assert "shown_coverage" not in payload["values"]["rank"]
 
 
@@ -3150,7 +3230,7 @@ def _bare_artifacts(statistics: dict[str, Any]) -> TableArtifacts:
         relationship_annotations=None,
         missing=(),
         corrupted={},
-        statistics_params_override=None,
+        profile_override=None,
     )
 
 
@@ -3378,9 +3458,9 @@ class TestARejectedEdgeIsWithheld:
         ]
 
 
-def test_a_manifest_whose_statistics_params_is_not_a_mapping_still_renders(tmp_path: Path) -> None:
+def test_a_manifest_whose_profile_is_not_a_mapping_still_renders(tmp_path: Path) -> None:
     print_root = _seed_print(tmp_path)
-    manifest: dict[str, Any] = {**copy.deepcopy(MANIFEST), "statistics_params": "default"}
+    manifest: dict[str, Any] = {**copy.deepcopy(MANIFEST), "profile": "default"}
 
     text = assemble_context(
         manifest,
@@ -3391,3 +3471,477 @@ def test_a_manifest_whose_statistics_params_is_not_a_mapping_still_renders(tmp_p
     ).text
 
     assert "# Table: herbarium.public.collector" in text
+
+
+def _seed_human_edge(tmp_path: Path, **entry: Any) -> tuple[Path, dict[str, Any]]:
+    """`accession` adds an edge into `collector` that no `relationships.yaml` emits."""
+
+    print_root = _seed_print(tmp_path)
+    manifest: dict[str, Any] = copy.deepcopy(MANIFEST)
+    accession_dir = print_root / "herbarium" / "public" / "accession"
+    accession_dir.mkdir(parents=True)
+    (accession_dir / "ddl.sql").write_text("CREATE TABLE accession (recorded_by uuid);\n")
+    (accession_dir / "relationships.yaml").write_text(
+        yaml.safe_dump({"format_version": 1, "table": "herbarium.public.accession"}),
+    )
+    authored = {
+        "column": ["recorded_by"],
+        "target_table": "herbarium.public.collector",
+        "target_column": ["collector_id"],
+        "note": "the collector who\nlogged the accession",
+        **entry,
+    }
+    (accession_dir / "relationships.annotations.yaml").write_text(
+        yaml.safe_dump({"format_version": 1, "refers_to": [authored]}),
+    )
+    manifest["tables"]["herbarium.public.accession"] = {
+        "type": "table",
+        "path": "herbarium/public/accession",
+        "artifacts": {
+            "ddl": "ddl.sql",
+            "relationships": "relationships.yaml",
+            "relationships_annotations": "relationships.annotations.yaml",
+        },
+        "columns": 1,
+        "profiled_at": "2026-06-09T00:00:00Z",
+    }
+
+    return print_root, manifest
+
+
+class TestAHumanAuthoredEdgeReachesBothSides:
+    """SPEC 2.7.2's human-authored edge is listed beside the measured ones, tagged annotated."""
+
+    _LINE = "- recorded_by -> herbarium.public.collector.collector_id (annotated)"
+    _NOTE = "note: the collector who logged the accession"
+
+    def test_the_source_joins_list_it_with_its_note(self, tmp_path: Path) -> None:
+        print_root, manifest = _seed_human_edge(tmp_path)
+        text = _query(print_root, "herbarium.public.accession", manifest)
+
+        assert f"{self._LINE}; {self._NOTE}" in text
+        assert "- annotated: named by a human" in text
+
+    def test_the_target_joins_list_it_incoming(self, tmp_path: Path) -> None:
+        print_root, manifest = _seed_human_edge(tmp_path)
+        text = _query(print_root, "herbarium.public.collector", manifest)
+
+        assert "- collector_id <- herbarium.public.accession.recorded_by (annotated)" in text
+
+    def test_the_profile_relationships_carry_it(self, tmp_path: Path) -> None:
+        print_root, manifest = _seed_human_edge(tmp_path)
+        text = assemble_context(
+            manifest,
+            print_root,
+            ["herbarium.public.accession"],
+            AssemblyOptions(),
+            "primary",
+        ).text
+
+        assert "- -> herbarium.public.collector.collector_id (annotated); via: recorded_by" in text
+        assert f"  {self._NOTE}" in text
+
+    def test_the_structured_payload_tags_it_annotated(self, tmp_path: Path) -> None:
+        print_root, manifest = _seed_human_edge(tmp_path)
+        payload = assemble_structured_context(
+            manifest,
+            print_root,
+            "herbarium.public.accession",
+            AssemblyOptions(),
+        )
+
+        assert payload["relationships"]["refers_to"] == [
+            {
+                "column": ["recorded_by"],
+                "target_table": "herbarium.public.collector",
+                "target_column": ["collector_id"],
+                "detection": "annotated",
+                "note": "the collector who\nlogged the accession",
+            },
+        ]
+
+    def test_a_path_valued_endpoint_is_written_with_its_path(self, tmp_path: Path) -> None:
+        print_root, manifest = _seed_human_edge(tmp_path, path=["collector", "ref"])
+        text = _query(print_root, "herbarium.public.accession", manifest)
+
+        assert (
+            "- recorded_by (path collector.ref) -> herbarium.public.collector.collector_id "
+            "(annotated)"
+        ) in text
+
+
+def test_a_corrupt_notes_file_is_reported_over_several_tables_without_annotations(
+    tmp_path: Path,
+) -> None:
+    print_root = _seed_two_table_print(tmp_path, notes=None)
+    (print_root / "manifest.annotations.yaml").write_text("not: [valid: yaml")
+    text = assemble_context(
+        TWO_TABLE_MANIFEST,
+        print_root,
+        ["herbarium.public.collector", "herbarium.public.specimen_loan"],
+        AssemblyOptions(include_annotations=False),
+        "primary",
+    ).text
+
+    assert "Unreadable: manifest_annotations (present on disk, failed to parse)" in text
+
+
+def _coded_artifacts(
+    description: str | None = None,
+    annotations: dict[str, dict[str, Any]] | None = None,
+) -> TableArtifacts:
+    a = _bare_artifacts(
+        {
+            "row_count": 40,
+            "columns": {
+                "rank": {
+                    "classification": "categorical",
+                    "values": [{"value": "F", "count": 30}, {"value": "R", "count": 10}],
+                    "values_coverage": 1.0,
+                },
+                "frozen": {
+                    "classification": "boolean",
+                    "values": [{"value": True, "count": 40}],
+                    "values_coverage": 1.0,
+                },
+            },
+        },
+    )
+    a.description = description
+    a.annotations = annotations
+
+    return a
+
+
+def _query_text(a: TableArtifacts) -> str:
+    from dbprint.engine.context_assembler import _query_sections
+
+    return "\n\n".join(s.text for s in _query_sections(a, AssemblyOptions(purpose="query"), None))
+
+
+class TestAPrintWithoutMeaningsSaysSo:
+    """Values with no description or note read as complete unless the reply says otherwise."""
+
+    def test_an_undocumented_table_states_it_under_both_purposes(self) -> None:
+        from dbprint.engine.context_assembler import _profile_sections
+
+        profile = _profile_sections(_coded_artifacts(), AssemblyOptions(), {}, None)
+
+        assert "Meanings: not documented here" in _query_text(_coded_artifacts())
+        assert "Meanings: not documented here" in profile[0].text
+
+    def test_a_complete_coded_list_without_notes_marks_its_row(self) -> None:
+        text = _query_text(_coded_artifacts())
+
+        assert _row_for(text, "rank").endswith(
+            "the whole domain; meanings: not documented here |  |",
+        )
+        assert "meanings: not documented here" not in _row_for(text, "frozen")
+
+    def test_the_structured_reply_carries_both_facts(self) -> None:
+        from dbprint.engine.context_assembler import _structured_parts
+
+        header, candidates = _structured_parts(_coded_artifacts(), AssemblyOptions(purpose="query"))
+        values = dict(candidates)["values"]
+
+        assert header["meanings_documented"] is False
+        assert values["rank"]["meanings_documented"] is False
+        assert "meanings_documented" not in values["frozen"]
+
+    def test_a_value_note_documents_the_column_and_the_table(self) -> None:
+        notes = {"rank": {"values": [{"value": "F", "note": "field-collected"}]}}
+        text = _query_text(_coded_artifacts(annotations=notes))
+
+        assert "Meanings:" not in text
+        assert "meanings: not documented here" not in text
+
+    def test_a_column_note_documents_the_column(self) -> None:
+        text = _query_text(_coded_artifacts(annotations={"rank": {"note": "F field, R reared"}}))
+
+        assert "meanings: not documented here" not in text
+
+    def test_a_description_documents_the_table_but_not_an_unnoted_code_list(self) -> None:
+        from dbprint.engine.context_assembler import _structured_parts
+
+        a = _coded_artifacts(description="One row per accession.\n")
+        header, _ = _structured_parts(a, AssemblyOptions())
+
+        assert "Meanings:" not in _query_text(a)
+        assert "meanings: not documented here" in _row_for(_query_text(a), "rank")
+        assert "meanings_documented" not in header
+
+
+def _frequency_artifacts(column: dict[str, Any]) -> TableArtifacts:
+    return _bare_artifacts({"row_count": 1000, "columns": {"matures_at": column}})
+
+
+_SENTINEL_DATE: dict[str, Any] = {
+    "classification": "temporal",
+    "nullable": True,
+    "null_count": 0,
+    "null_rate": 0.0,
+    "cardinality": 900,
+    "values": [
+        {"value": "2099-12-31T00:00:00", "count": 80},
+        {"value": "2020-03-01T00:00:00", "count": 3},
+        {"value": "2020-03-02T00:00:00", "count": 2},
+    ],
+}
+
+
+class TestTheQueryPurposeShowsAFrequentNumericOrDateValue:
+    """A sentinel on a numeric or date column is a predicate's business, though no domain is."""
+
+    def test_a_dominant_date_shows_with_its_share_and_no_domain_claim(self) -> None:
+        text = _query_text(_frequency_artifacts(_SENTINEL_DATE))
+        row = _row_for(text, "matures_at")
+
+        assert row == (
+            "| matures_at | '2099-12-31T00:00:00' (80) | 8% - frequent values, not a domain | none |"
+        )
+
+    def test_values_no_more_frequent_than_an_even_spread_show_nothing(self) -> None:
+        spread = {
+            **_SENTINEL_DATE,
+            "cardinality": 40,
+            "values": [{"value": f"2020-03-{d:02d}T00:00:00", "count": 25} for d in range(1, 21)],
+        }
+        text = _query_text(_frequency_artifacts(spread))
+
+        assert "| matures_at |" not in text
+        assert "matures_at (none)" in text
+
+    def test_a_numeric_sentinel_shows_and_a_rare_value_does_not(self) -> None:
+        column = {
+            **_SENTINEL_DATE,
+            "classification": "numeric",
+            "values": [{"value": -1, "count": 60}, {"value": 17, "count": 4}],
+        }
+
+        assert "| -1 (60) | 6% - frequent values" in _query_text(_frequency_artifacts(column))
+
+    def test_the_structured_reply_carries_the_entries_and_no_coverage(self) -> None:
+        from dbprint.engine.context_assembler import _structured_parts
+
+        _, candidates = _structured_parts(
+            _frequency_artifacts(_SENTINEL_DATE),
+            AssemblyOptions(purpose="query"),
+        )
+        block = dict(candidates)["values"]["matures_at"]
+
+        assert block["entries"] == [{"value": "2099-12-31T00:00:00", "count": 80}]
+        assert block["coverage_statement"] == "frequent values, not a domain"
+        assert block["shown_coverage"] == 0.08  # noqa: RUF069 - the expected value is an exact literal
+        assert "coverage" not in block
+
+
+def _seed_lineage_print(tmp_path: Path, derived_from: list[dict[str, Any]]) -> tuple[Path, dict]:
+    """`curator_profile.email` derives from `collector.email`, which carries the notes."""
+
+    root = tmp_path / "prints" / "primary"
+    manifest: dict[str, Any] = {"format_version": 1, "connection": "primary", "tables": {}}
+    email = {"classification": "text", "nullable": False, "null_count": 0, "null_rate": 0.0}
+    files = {
+        "collector": {
+            "statistics.annotations.yaml": {
+                "format_version": 1,
+                "columns": {
+                    "email": {
+                        "note": "Case-insensitive: two rows differing only in case are one person.",
+                        "values": [{"value": "x@example.org", "note": "placeholder"}],
+                    },
+                },
+            },
+        },
+        "curator_profile": {
+            "statistics.annotations.yaml": {
+                "format_version": 1,
+                "columns": {"email": {"derived_from": derived_from}},
+            },
+        },
+    }
+
+    for table, extra in files.items():
+        table_dir = root / "arboretum" / "seedbank" / table
+        table_dir.mkdir(parents=True)
+        (table_dir / "ddl.sql").write_text(f"CREATE TABLE {table} (email text);\n")
+        (table_dir / "statistics.yaml").write_text(
+            yaml.safe_dump({"row_count": 4, "columns": {"email": email}}),
+        )
+
+        for name, body in extra.items():
+            (table_dir / name).write_text(yaml.safe_dump(body))
+
+        manifest["tables"][f"arboretum.seedbank.{table}"] = {
+            "type": "table",
+            "path": f"arboretum/seedbank/{table}",
+            "artifacts": {
+                "ddl": "ddl.sql",
+                "statistics": "statistics.yaml",
+                "statistics_annotations": "statistics.annotations.yaml",
+            },
+            "row_count": 4,
+            "columns": 1,
+        }
+
+    (root / "manifest.yaml").write_text(yaml.safe_dump(manifest))
+
+    return root, manifest
+
+
+_SOURCE = {"table": "arboretum.seedbank.collector", "column": "email"}
+
+
+def _parse_lineage_into(root: Path, table: str, column: str, sources: list[dict[str, str]]) -> None:
+    path = root / "arboretum" / "seedbank" / table / "statistics.yaml"
+    statistics = yaml.safe_load(path.read_text())
+    statistics["columns"][column]["derived_from"] = sources
+    path.write_text(yaml.safe_dump(statistics))
+
+
+class TestAParsedSourceNoteReachesTheDerivedColumn:
+    """SPEC 2.2.4 `derived_from`, producer-written, layered under the annotation's own."""
+
+    def test_parsed_lineage_alone_carries_the_note(self, tmp_path: Path) -> None:
+        root, manifest = _seed_lineage_print(tmp_path, [_SOURCE])
+        (
+            root / "arboretum" / "seedbank" / "curator_profile" / "statistics.annotations.yaml"
+        ).unlink()
+        del manifest["tables"]["arboretum.seedbank.curator_profile"]["artifacts"][
+            "statistics_annotations"
+        ]
+        _parse_lineage_into(root, "curator_profile", "email", [_SOURCE])
+        text = _query(root, "arboretum.seedbank.curator_profile", manifest)
+        payload = assemble_structured_context(
+            manifest,
+            root,
+            "arboretum.seedbank.curator_profile",
+            AssemblyOptions(format="json", purpose="query"),
+        )
+
+        assert "- email (from arboretum.seedbank.collector.email): Case-insensitive:" in text
+        assert [s["source"] for s in payload["inherited_notes"]["email"]] == [
+            "arboretum.seedbank.collector.email",
+        ]
+
+    def test_an_author_list_replaces_the_parsed_one(self, tmp_path: Path) -> None:
+        root, manifest = _seed_lineage_print(
+            tmp_path,
+            [{"table": "arboretum.seedbank.vault", "column": "email"}],
+        )
+        _parse_lineage_into(root, "curator_profile", "email", [_SOURCE])
+
+        assert "(from " not in _query(root, "arboretum.seedbank.curator_profile", manifest)
+
+    def test_an_empty_author_list_suppresses_the_parsed_one(self, tmp_path: Path) -> None:
+        root, manifest = _seed_lineage_print(tmp_path, [])
+        _parse_lineage_into(root, "curator_profile", "email", [_SOURCE])
+
+        assert "(from " not in _query(root, "arboretum.seedbank.curator_profile", manifest)
+
+    def test_a_sources_own_parsed_lineage_is_not_followed(self, tmp_path: Path) -> None:
+        """The collector's note reaches curator_profile; curator_profile's own source is ignored."""
+
+        root, manifest = _seed_lineage_print(tmp_path, [_SOURCE])
+        _parse_lineage_into(
+            root,
+            "collector",
+            "email",
+            [{"table": "arboretum.seedbank.curator_profile", "column": "email"}],
+        )
+        text = _query(root, "arboretum.seedbank.curator_profile", manifest)
+
+        assert text.count("(from ") == 1
+
+
+class TestASourceNoteReachesTheDerivedColumn:
+    """SPEC 2.7.1 `derived_from`: a pitfall written on a source follows its data downstream."""
+
+    def test_the_query_dictionary_carries_the_source_notes_labelled(self, tmp_path: Path) -> None:
+        root, manifest = _seed_lineage_print(tmp_path, [_SOURCE])
+        text = _query(root, "arboretum.seedbank.curator_profile", manifest)
+
+        assert (
+            "- email (from arboretum.seedbank.collector.email): Case-insensitive: two rows "
+            "differing only in case are one person.; 'x@example.org' = placeholder"
+        ) in text
+        assert "Meanings:" not in text
+
+    def test_the_structured_reply_carries_them_as_inherited_notes(self, tmp_path: Path) -> None:
+        root, manifest = _seed_lineage_print(tmp_path, [_SOURCE])
+        payload = assemble_structured_context(
+            manifest,
+            root,
+            "arboretum.seedbank.curator_profile",
+            AssemblyOptions(format="json", purpose="query"),
+        )
+
+        assert payload["inherited_notes"] == {
+            "email": [
+                {
+                    "source": "arboretum.seedbank.collector.email",
+                    "note": "Case-insensitive: two rows differing only in case are one person.",
+                    "values": [{"value": "x@example.org", "note": "placeholder"}],
+                },
+            ],
+        }
+
+    def test_a_source_the_print_lacks_carries_nothing(self, tmp_path: Path) -> None:
+        root, manifest = _seed_lineage_print(
+            tmp_path,
+            [{"table": "arboretum.seedbank.vault", "column": "email"}],
+        )
+        text = _query(root, "arboretum.seedbank.curator_profile", manifest)
+
+        assert "(from " not in text
+        assert "Meanings: not documented here" in text
+
+    def test_no_annotations_means_no_inherited_notes(self, tmp_path: Path) -> None:
+        root, manifest = _seed_lineage_print(tmp_path, [_SOURCE])
+        text = _query(
+            root,
+            "arboretum.seedbank.curator_profile",
+            manifest,
+            include_annotations=False,
+        )
+
+        assert "(from " not in text
+
+    def test_a_source_column_gone_from_its_statistics_carries_nothing(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The note outlives its column; `check` reports it as `annotations.unknown-source`."""
+
+        root, manifest = _seed_lineage_print(tmp_path, [_SOURCE])
+        source = root / "arboretum" / "seedbank" / "collector" / "statistics.yaml"
+        source.write_text(yaml.safe_dump({"row_count": 4, "columns": {"full_name": {}}}))
+        text = _query(root, "arboretum.seedbank.curator_profile", manifest)
+
+        assert "(from " not in text
+        assert "Meanings: not documented here" in text
+
+    def test_a_malformed_source_carries_nothing(self, tmp_path: Path) -> None:
+        root, manifest = _seed_lineage_print(
+            tmp_path,
+            [{"table": "arboretum.seedbank.collector", "column": ["email"]}],
+        )
+
+        assert "(from " not in _query(root, "arboretum.seedbank.curator_profile", manifest)
+
+    def test_the_profile_purpose_still_says_its_meanings_are_not_documented(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Profile renders no inherited note, so an inherited one cannot document it there."""
+
+        root, manifest = _seed_lineage_print(tmp_path, [_SOURCE])
+        text = assemble_context(
+            manifest,
+            root,
+            ["arboretum.seedbank.curator_profile"],
+            AssemblyOptions(),
+            "primary",
+        ).text
+
+        assert "Meanings: not documented here" in text

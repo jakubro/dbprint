@@ -22,6 +22,17 @@ class ClaimState:
 
 REGISTER: tuple[ClaimState, ...] = (
     ClaimState(
+        "connection_notes",
+        "Carries the connection's manifest.annotations.yaml notes to a reader of a single table, "
+        "once; a surface serving the files verbatim serves them as the manifest_annotations file.",
+    ),
+    ClaimState(
+        "human_authored_edge",
+        "Lists the edge a human added in relationships.annotations.yaml on both tables it joins, "
+        "tagged annotated - never declared, never dropped; a surface serving the files verbatim "
+        "serves it in relationships_annotations.",
+    ),
+    ClaimState(
         "extreme_number_statistics",
         "Renders each float statistic as statistics.yaml spells it - positional, never in "
         "exponent form; a structured surface carries the same number unrounded.",

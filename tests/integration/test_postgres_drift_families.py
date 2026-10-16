@@ -19,8 +19,18 @@ _CONN = "drift_conn"
 
 def _project(tmp_path: Path, creds: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> Path:
     (tmp_path / ".dbprint.yaml").write_text(
-        f"connections:\n  {_CONN}:\n    adapter: postgres\n    auto: true\n"
-        "    include: ['*.garden.*']\n    infer_relationships: false\n",
+        f"""\
+connections:
+  {_CONN}:
+    adapter: postgres
+    auto: true
+    tables:
+      include:
+      - '*.garden.*'
+    profile:
+      relationships:
+        infer: false
+""",
     )
     monkeypatch.chdir(tmp_path)
 

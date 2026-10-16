@@ -6,7 +6,10 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from dbprint.spec.absence import column_value, read_column_field
+import yaml
+
+from dbprint.spec.absence import column_value, disabled_of, read_column_field
+from dbprint.spec.artifacts import declared_artifacts, walkable_tables
 from dbprint.spec.predicate import (
     MalformedPredicate,
     inapplicable_reason,
@@ -22,6 +25,7 @@ from dbprint.spec.scope import ScanScope, list_is_table_domain, scope_of
 from .issue import Issue
 from .layout import annotated_tables
 from .progress import TableSink
+from .yaml_utils import load_yaml
 
 
 def check_entry(data: Any, path: str, tbl_fqn: str) -> list[Issue]:
@@ -77,6 +81,52 @@ def check_stale_keys(
                         "§2.7.1",
                     ),
                 )
+
+    return issues
+
+
+def check_derived_from(print_root: Path, manifest_data: dict) -> list[Issue]:
+    """Warn on a `derived_from` source naming a table or column the print does not have."""
+
+    issues: list[Issue] = []
+    tables = walkable_tables(manifest_data)
+    known: dict[str, set[str] | None] = {}
+
+    for ann_path, ann_data, _ in annotated_tables(
+        print_root,
+        manifest_data,
+        "statistics_annotations",
+        "statistics",
+    ):
+        rel = str(ann_path.relative_to(print_root))
+
+        for col_name, entry in (ann_data.get("columns") or {}).items():
+            sources = entry.get("derived_from") if isinstance(entry, dict) else None
+
+            for i, source in enumerate(sources if isinstance(sources, list) else []):
+                if not isinstance(source, dict):
+                    continue
+
+                table, column = source.get("table"), source.get("column")
+
+                if not isinstance(table, str) or not isinstance(column, str):
+                    continue  # a schema finding already names the malformed entry
+
+                if table not in known:
+                    known[table] = _source_columns(print_root, tables.get(table))
+
+                columns = known[table]
+
+                if columns is None or column not in columns:
+                    issues.append(
+                        Issue(
+                            f"{rel}::columns.{col_name}.derived_from[{i}]",
+                            "annotations.unknown-source",
+                            "warning",
+                            f"derived_from names {table}.{column}, which the print does not have.",
+                            "§2.7.1",
+                        ),
+                    )
 
     return issues
 
@@ -158,9 +208,9 @@ def check_claims(
     issues: list[Issue] = []
     fields = _annotated_columns(print_root, manifest_data, "claims", dict, on_table)
 
-    for rel, col_name, claims, col_stats, scope in fields:
+    for rel, col_name, claims, col_stats, scope, disabled in fields:
         for stat, raw in claims.items():
-            issues.extend(_check_claim(rel, col_name, stat, raw, col_stats, scope))
+            issues.extend(_check_claim(rel, col_name, stat, raw, col_stats, scope, disabled))
 
     return issues
 
@@ -172,6 +222,7 @@ def _check_claim(
     raw: Any,
     col_stats: dict[str, Any],
     scope: ScanScope | None = None,
+    disabled: frozenset[str] = frozenset(),
 ) -> list[Issue]:
     """Evaluate one `claims` predicate; emit at most one Issue.
 
@@ -194,7 +245,7 @@ def _check_claim(
     if isinstance(predicate, MalformedPredicate):
         return [_unassertable(path, predicate.reason)]
 
-    ref = resolve_stat(col_stats, stat, scope)
+    ref = resolve_stat(col_stats, stat, scope, disabled=disabled)
     inapplicable = inapplicable_reason(col_stats, col_name, stat, predicate, ref)
 
     if inapplicable is not None:
@@ -241,7 +292,7 @@ def check_value_notes(
     issues: list[Issue] = []
     fields = _annotated_columns(print_root, manifest_data, "values", list, on_table)
 
-    for rel, col_name, values, col_stats, scope in fields:
+    for rel, col_name, values, col_stats, scope, _ in fields:
         issues.extend(_check_value_notes(rel, col_name, values, col_stats, scope))
 
     return issues
@@ -300,13 +351,29 @@ def _value_unassertable(rel: str, col_name: str, i: int, reason: str) -> Issue:
     )
 
 
+def _source_columns(print_root: Path, entry: Any) -> set[str] | None:
+    if not isinstance(entry, dict) or "statistics" not in declared_artifacts(entry):
+        return None
+
+    path = print_root / entry.get("path", "") / declared_artifacts(entry)["statistics"]
+
+    try:
+        data = load_yaml(path) if path.is_file() else None
+    except yaml.YAMLError:
+        return None
+
+    columns = data.get("columns") if isinstance(data, dict) else None
+
+    return set(columns) if isinstance(columns, dict) else None
+
+
 def _annotated_columns(
     print_root: Path,
     manifest_data: dict,
     field: str,
     kind: type,
     on_table: TableSink | None,
-) -> Iterator[tuple[str, str, Any, dict[str, Any], ScanScope | None]]:
+) -> Iterator[tuple[str, str, Any, dict[str, Any], ScanScope | None, frozenset[str]]]:
     tables = annotated_tables(
         print_root,
         manifest_data,
@@ -331,4 +398,11 @@ def _annotated_columns(
             col_stats = stats_columns.get(col_name)
 
             if isinstance(col_stats, dict):
-                yield rel, col_name, entry[field], col_stats, scope_of(stats_data)
+                yield (
+                    rel,
+                    col_name,
+                    entry[field],
+                    col_stats,
+                    scope_of(stats_data),
+                    disabled_of(stats_data),
+                )

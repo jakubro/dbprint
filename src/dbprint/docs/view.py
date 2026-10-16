@@ -14,12 +14,22 @@ from typing import Any
 import inflect
 
 from dbprint.engine import AssemblyOptions, assemble_context, notes_synthesis
-from dbprint.engine.baseline import unmeasured_block_message
-from dbprint.engine.context_assembler import external_line, fk_target_map
-from dbprint.engine.relationship_graph import edge_detection, edge_key, incoming_key, rejected_edges
+from dbprint.engine.baseline import (
+    disabled_feature_message,
+    read_artifact,
+    unmeasured_block_message,
+)
+from dbprint.engine.context_assembler import external_line, fk_target_map, load_connection_notes
+from dbprint.engine.relationship_graph import (
+    edge_detection,
+    edge_key,
+    incoming_key,
+    rejected_edges,
+    with_human_edges,
+)
 from dbprint.engine.table_readings import (
-    connection_statistics_params,
-    effective_statistics_params,
+    connection_profile,
+    effective_profile,
     grain_reading,
     live_annotations,
     physical_layout,
@@ -28,7 +38,8 @@ from dbprint.engine.table_readings import (
 )
 from dbprint.engine.value_list import grouped_values, value_key, value_notes
 from dbprint.engine.yaml_dumper import spell_value
-from dbprint.spec.absence import Absence, block_value, column_value, read_table_block
+from dbprint.spec.absence import Absence, block_value, column_value, disabled_of, read_table_block
+from dbprint.spec.artifacts import declared_artifacts
 from dbprint.spec.parts import display
 from dbprint.spec.scope import (
     SCANNED_CLAUSE,
@@ -89,14 +100,13 @@ _BUCKET_ORDER: tuple[str, ...] = (
 
 
 def build_index_view(connections: list[catalogue.PrintConnection]) -> list[dict[str, Any]]:
-    """Per-connection summary for the index page: name, manifest header, table list, and the
-    tables the last run could not profile.
-    """
+    """Per-connection index summary: manifest, connection notes, tables and the unprofiled ones."""
 
     return [
         {
             "name": c.name,
             "manifest": c.manifest,
+            "notes": load_connection_notes(c.root, read_artifact)[0],
             "tables": c.tables,
             "failed_tables": c.failed_tables,
         }
@@ -115,7 +125,7 @@ def build_schema_view(conn: catalogue.PrintConnection, schema: str) -> dict[str,
     n_edges = 0
 
     for name in tables:
-        relationships = catalogue.load_relationships(conn, name)
+        relationships = catalogue.load_artifact(conn, name, "relationships")
 
         for r in (relationships or {}).get("refers_to") or []:
             if r.get("target_table") in tables:
@@ -131,7 +141,7 @@ def build_table_view(
     """Compose everything the table page renders from one table's parsed artifacts."""
 
     statistics = artifacts.statistics
-    relationships = artifacts.relationships
+    relationships = with_human_edges(artifacts.relationships, _authored(conn), artifacts.fqn)
     columns = (statistics or {}).get("columns")
     columns = columns if isinstance(columns, dict) else {}
     row_count = _row_count(statistics, artifacts.entry)
@@ -148,9 +158,9 @@ def build_table_view(
     null_patterns = null_patterns_view(statistics) if statistics else None
     annotated = (artifacts.statistics_annotations or {}).get("columns")
     annotations = live_annotations(annotated if isinstance(annotated, dict) else None, statistics)
-    statistics_params = effective_statistics_params(
-        connection_statistics_params(conn.manifest),
-        artifacts.entry.get("statistics_params"),
+    profile = effective_profile(
+        connection_profile(conn.manifest),
+        artifacts.entry.get("profile"),
     )
     column_rows = [
         column_view(
@@ -161,7 +171,7 @@ def build_table_view(
             annotations,
             targets,
             null_patterns,
-            statistics_params,
+            profile,
             scope,
             (artifacts.relationships_annotations or {}).get("refers_to"),
         )
@@ -198,6 +208,7 @@ def build_table_view(
         "entry": artifacts.entry,
         "context": context_view(conn, [artifacts.fqn]),
         "adapter": conn.manifest.get("adapter"),
+        "has_connection_notes": load_connection_notes(conn.root, read_artifact)[0] is not None,
         "unprofiled_notice": catalogue.unprofiled_note(conn, artifacts.fqn),
         "missing_artifacts_notice": missing_artifacts_notice(artifacts.missing),
         "corrupted_artifacts_notice": corrupted_artifacts_notice(artifacts.corrupted),
@@ -210,6 +221,7 @@ def build_table_view(
         "merging": merging_view(statistics) if statistics else None,
         "dependencies": dependencies_view(statistics) if statistics else [],
         "unmeasured": unmeasured_view(statistics) if statistics else {},
+        "disabled": disabled_view(statistics) if statistics else {},
         "timeline": timeline_view(statistics) if statistics else None,
         "depends_on": depends_on,
         "columns_empty_notice": columns_empty_notice(statistics),
@@ -466,6 +478,12 @@ def unmeasured_view(statistics: dict[str, Any]) -> dict[str, str]:
         return {}
 
     return {name: unmeasured_block_message(name) for name in named if isinstance(name, str)}
+
+
+def disabled_view(statistics: dict[str, Any]) -> dict[str, str]:
+    """Each measurement the file's `disabled` list names, with its wording (SPEC 2.2.21)."""
+
+    return {name: disabled_feature_message(name) for name in sorted(disabled_of(statistics))}
 
 
 def missing_artifacts_notice(missing: tuple[str, ...]) -> str | None:
@@ -796,12 +814,12 @@ def column_view(
     annotations: dict[str, dict[str, Any]],
     targets: dict[str, str],
     null_patterns: dict[str, Any] | None = None,
-    statistics_params: dict[str, Any] | None = None,
+    profile: dict[str, Any] | None = None,
     scope: ScanScope | None = None,
     relationship_annotations: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Everything the table page needs to render one column's row and expanded detail. `notes`
-    reuses `engine.notes_synthesis.synthesize` in `hints_only` mode, shaped by `statistics_params`.
+    reuses `engine.notes_synthesis.synthesize` in `hints_only` mode, shaped by the table's `profile`.
     """
 
     fk_targets = fk_target_map(relationships, relationship_annotations).get(name)
@@ -835,7 +853,7 @@ def column_view(
             col,
             fk_targets,
             hints_only=True,
-            statistics_params=statistics_params,
+            profile=profile,
             scope=scope,
         ).text,
         # Not "values": Jinja resolves `.values` to the dict's bound method before item access.
@@ -901,6 +919,7 @@ def relationship_rows(
                 "path": entry.get("path"),
                 "target_path": entry.get("target_path"),
                 "observed": _observed_view(entry),
+                "note": entry.get("note"),
                 "rejected": rejection is not None,
                 "rejected_note": rejection.get("note") if rejection else None,
             },
@@ -918,7 +937,10 @@ def relationship_rows(
                 "detection": edge_detection(entry),
                 "on_delete": entry.get("on_delete"),
                 "constraint_name": entry.get("constraint_name"),
+                "path": entry.get("path"),
+                "referencer_path": entry.get("referencer_path"),
                 "observed": _observed_view(entry),
+                "note": entry.get("note"),
                 "rejected": rejection is not None,
                 "rejected_note": rejection.get("note") if rejection else None,
             },
@@ -986,6 +1008,16 @@ def _plural_variants(name: str) -> list[str]:
     plural = _INFLECT.plural_noun(name)
 
     return [plural] if plural and plural != name else []
+
+
+def _authored(conn: catalogue.PrintConnection) -> dict[str, list[Any] | None]:
+    return {
+        fqn: (catalogue.load_artifact(conn, fqn, "relationships_annotations") or {}).get(
+            "refers_to",
+        )
+        for fqn, entry in conn.tables.items()
+        if "relationships_annotations" in declared_artifacts(entry)
+    }
 
 
 def _incoming_rejection(

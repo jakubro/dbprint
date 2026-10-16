@@ -712,8 +712,8 @@ class TestColumnView:
 
         assert "FK: seedbank.cultivar.cultivar_id (declared)" in rendered["notes"]
 
-    def test_statistics_params_reaches_the_configured_sample_size_hedge(self) -> None:
-        """`engine.context_assembler` threads the manifest's `statistics_params` (SPEC 2.5) into
+    def test_the_profile_reaches_the_configured_sample_size_hedge(self) -> None:
+        """`engine.context_assembler` threads the manifest's `profile` (SPEC 2.5) into
         `synthesize` to reach the "N configured" hedge; the docs page must pass them too.
         """
 
@@ -731,7 +731,7 @@ class TestColumnView:
             None,
             {},
             {},
-            statistics_params={"looks_like_sample_size": 500},
+            profile={"looks_like": {"sample_size": 500}},
         )
 
         assert "500 configured" in rendered["notes"]

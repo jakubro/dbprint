@@ -68,8 +68,7 @@ def list_command(
 
     - `0`: ok
     - `1`: a connection could not be summarised - its manifest is missing or
-      unparseable, or its `rules` narrow one of its tables both by a predicate
-      and by a fraction. Other connections are still summarised
+      unparseable. Other connections are still summarised
 
     **Examples:**
 

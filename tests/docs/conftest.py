@@ -42,12 +42,14 @@ def rich_conn(tmp_path: Path) -> ConnectionConfig:
         "connection": "primary",
         "adapter": "postgres",
         "dbprint_version": "0.2.0",
-        "statistics_params": {
-            "enumeration_threshold": 50,
-            "top_n_values": 30,
-            "top_n_null_patterns": 20,
-            "looks_like_sample_size": 1000,
-            "percentiles": [1, 25, 50, 75, 99],
+        "profile": {
+            "statistics": {
+                "enumeration_threshold": 50,
+                "top_n_values": 30,
+                "percentiles": [1, 25, 50, 75, 99],
+            },
+            "looks_like": {"enabled": True, "sample_size": 1000},
+            "null_patterns": {"enabled": True, "top_n": 20},
         },
         "selectors": {"include": ["seedbank.*"], "exclude": []},
         "redaction_rules_configured": 1,

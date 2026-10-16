@@ -15,6 +15,7 @@ from dbprint.config import ConnectionConfig
 from dbprint.docs import catalogue, view, web
 from tests.fixtures.adversarial import (
     APPROXIMATE_ROW_COUNT_TABLE,
+    CONNECTION_NOTE,
     DECLARED_MISSING_KIND,
     DECLARED_MISSING_TABLE,
     DELIMITER_COLUMN,
@@ -26,6 +27,9 @@ from tests.fixtures.adversarial import (
     FUTURE_DATED_COLUMN,
     GRAIN_NO_OUTCOME_TABLE,
     GRAMMAR_VALUE,
+    HUMAN_EDGE_COLUMN,
+    HUMAN_EDGE_NOTE,
+    HUMAN_EDGE_TARGET,
     INCOMPLETE_GRAIN_TABLE,
     LINE_BREAK_VALUE,
     NEVER_DECLARED_KIND,
@@ -58,6 +62,8 @@ COVERS = frozenset(
         "unevaluated_diff_table",
         "empty_columns_map",
         "column_with_several_edges",
+        "connection_notes",
+        "human_authored_edge",
         "orphan_spelling",
         "percentile_inside_range",
         "grain_search_without_outcome",
@@ -342,3 +348,29 @@ def test_the_notes_name_every_standing_edge(adversarial_print: AdversarialPrint)
 
     assert "FK: public.cultivar.id (declared), public.wide_lookup.a (measured)" in text
     assert "public.batch.id (inferred)" not in text.split("Relationships", 1)[0]
+
+
+def test_a_human_authored_edge_reaches_both_tables_tagged_annotated(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    source = _page_text(adversarial_print, SEVERAL_EDGES_TABLE)
+    target = _page_text(adversarial_print, HUMAN_EDGE_TARGET)
+    row = re.compile(rf"refers to\s+{HUMAN_EDGE_COLUMN}\s+{re.escape(HUMAN_EDGE_TARGET)}\s+")
+
+    assert row.search(source)
+    assert HUMAN_EDGE_NOTE in source
+    assert re.search(rf"referenced by\s+\S+\s+{re.escape(SEVERAL_EDGES_TABLE)}\s+", target)
+    assert "annotated" in target.split("referenced by", 1)[1]
+
+
+def test_connection_notes_are_reachable_from_a_table_page(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    client = web.create_app([_conn(adversarial_print)]).test_client()
+    index = client.get("/").data.decode()
+    page = client.get(f"/t/{_conn(adversarial_print).name}/{SEVERAL_EDGES_TABLE}").data.decode()
+    anchor = f"notes-{_conn(adversarial_print).name}"
+
+    assert f'id="{anchor}"' in index
+    assert html.unescape(index).count(CONNECTION_NOTE) == 1
+    assert f'#{anchor}"' in page

@@ -14,16 +14,17 @@ from dbprint.config.connections import env_var_name
 
 
 _PROJECT = """\
-version: 1
 connections:
   garden:
     adapter: duckdb
 """
 _NARROWED = """\
-    exclude: ["garden.main.curator"]
-    redact:
-      - columns: ["garden.main.curator.email"]
-        with: drop
+    tables:
+      exclude: ["garden.main.curator"]
+    profile:
+      redact:
+        - columns: ["garden.main.curator.email"]
+          with: drop
 """
 
 

@@ -30,15 +30,17 @@ EXIT_GENERIC = 1
 EXIT_DRIFT = 3
 
 HASH_RULE = """\
-    redact:
-      - columns: ["*.email"]
-        with: hash
+    profile:
+      redact:
+        - columns: ["*.email"]
+          with: hash
 """
 
 MASK_RULE = """\
-    redact:
-      - columns: ["*.received_at"]
-        with: mask
+    profile:
+      redact:
+        - columns: ["*.received_at"]
+          with: mask
 """
 
 BOUNDS_ASSERTIONS = """\

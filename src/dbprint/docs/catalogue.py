@@ -129,8 +129,8 @@ def load_table(conn: PrintConnection, fqn: str) -> TableArtifacts | None:
     )
 
 
-def load_relationships(conn: PrintConnection, fqn: str) -> dict[str, Any] | None:
-    """One table's `relationships.yaml`, without reading its other artifacts."""
+def load_artifact(conn: PrintConnection, fqn: str, kind: str) -> dict[str, Any] | None:
+    """One table's YAML artifact of `kind`, without reading its other artifacts."""
 
     entry = conn.tables.get(fqn)
 
@@ -140,7 +140,7 @@ def load_relationships(conn: PrintConnection, fqn: str) -> dict[str, Any] | None
     table_dir = table_directory(conn.root, fqn, entry)
     artifacts = declared_artifacts(entry)
 
-    return _read_yaml(table_dir, artifacts, "relationships")
+    return _read_yaml(table_dir, artifacts, kind)
 
 
 def schema_key(table_name: str) -> str:

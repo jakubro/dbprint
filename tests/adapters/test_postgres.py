@@ -24,6 +24,7 @@ from dbprint.adapters.identifiers import Identity, UnknownTable
 from dbprint.adapters.postgres import DIALECT, PostgresAdapter, PostgresConnectionError, introspect
 from dbprint.adapters.postgres.connection import ConnectionParams, exec_query
 from dbprint.adapters.postgres.ddl import extract_ddl, normalize
+from dbprint.config import ProfileConfig, TablesConfig
 from dbprint.spec.distribution import classify as classify_distribution
 from tests._engine_run import conformance_errors
 from tests._prints import connection_config
@@ -559,8 +560,10 @@ class TestPhysicalColumnIdentity:
         self._seed_mixed_case(postgres_test_db)
         conn = connection_config(
             output=tmp_path,
-            include=(f"{postgres_test_db['database']}.public.curator",),
-            redact=(RedactRule(sensitivity=("personal_name",), with_="mask"),),
+            tables=TablesConfig(include=(f"{postgres_test_db['database']}.public.curator",)),
+            profile=ProfileConfig(
+                redact=(RedactRule(sensitivity=("personal_name",), with_="mask"),),
+            ),
         )
         adapter = PostgresAdapter(postgres_test_db)
         Engine(adapter, conn, tmp_path).generate()
@@ -756,7 +759,7 @@ class TestCollation:
         self._seed(postgres_test_db)
         conn = connection_config(
             output=tmp_path,
-            include=(f"{postgres_test_db['database']}.public.labels",),
+            tables=TablesConfig(include=(f"{postgres_test_db['database']}.public.labels",)),
         )
         adapter = PostgresAdapter(postgres_test_db)
         Engine(adapter, conn, tmp_path).generate()

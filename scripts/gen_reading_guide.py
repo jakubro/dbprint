@@ -326,7 +326,9 @@ _TRAPS = (
         "about the schema — a consumer MAY use either as a join candidate, never as "
         "cardinality-guaranteed, and SHOULD prefer a `declared` edge over both where one "
         "exists (SPEC 2.3) — `relationships.annotations.yaml` records where a human has "
-        "since rejected an inferred one."
+        "since rejected an inferred one, and where a human has added an edge the producer "
+        "could not emit (SPEC 2.7.2): a reader carries that one tagged `annotated`, a "
+        "human's word with nothing measured behind it."
     ),
     (
         "**`cardinality` is collation-relative.** Two prints of one logical schema, taken "
@@ -419,6 +421,14 @@ _TRAPS = (
         "treat that field as unknown, never as zero, none, or a property of the data. An "
         "artifact with no marker anywhere is not thereby complete — a producer that dropped a "
         "measurement silently looks identical."
+    ),
+    (
+        "**A measurement named in `disabled` was switched off, not measured.** The file's "
+        "`disabled` list names what configuration turned off for this table — `looks_like`, "
+        "`null_patterns`, `parts`, `relationships.infer`, `sketches`, `timeline` — and every "
+        "field or block such a measurement produces is absent for that reason alone. Read each "
+        "as unknown, never as none: an absent `null_patterns` there says nothing about nulls, "
+        'and an absent `looks_like` is not "no pattern" (SPEC 2.2.21).'
     ),
     (
         "**A timeline gap is not a zero.** `timeline.buckets` lists only a day/week/month "
@@ -599,7 +609,9 @@ _QUERY_WRITING_PARAGRAPHS = (
         "`inferred` or `measured` (SPEC 2.3): an inferred edge is a guess from a column name, a "
         "measured one a value containment seen at the read, neither a constraint, so prefer a "
         "declared edge where one exists; each column's `values` with its counts and `values_coverage`; "
-        "and the column notes in `statistics.annotations.yaml`. Leave the rest of "
+        "the column notes in `statistics.annotations.yaml`; and the `notes` in "
+        "`manifest.annotations.yaml` at the print root (SPEC 2.7.3), where a fact many tables "
+        "share — what a code means, which unit a timestamp is in — is written once. Leave the rest of "
         "`statistics.yaml` — counts, ratios, percentiles, distributions — unread: they describe "
         "the data, not what a predicate needs."
     ),

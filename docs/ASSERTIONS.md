@@ -177,7 +177,7 @@ The following stats from SPEC §2.2 are assertable:
 | `classification` | enum | one of the SPEC §3.1 values |
 | `distribution` | enum | one of `uniform`, `imbalanced`, `dominant_value`, `long_tail` |
 | `accepted_values` | set | the column's `values` MUST be a subset of the asserted set; requires an exhaustive list over the whole table — never one from a file carrying `scope` (SPEC §2.2.8) |
-| `looks_like` | pattern | matches `inferred.looks_like`; absent on a `categorical`/`text`/`foreign_key_candidate` column with non-null values, it reads as no pattern (SPEC §4.1.2) and fails the predicate |
+| `looks_like` | pattern | matches `inferred.looks_like`; absent on a `categorical`/`text`/`foreign_key_candidate` column with non-null values, it reads as no pattern (SPEC §4.1.2) and fails the predicate — unless the file's `disabled` names `looks_like` (SPEC §2.2.21) |
 | `candidate_key` | scalar | boolean; matches `inferred.candidate_key`; absent on a column carrying `cardinality_ratio`, it reads as `false` (SPEC §4.2, §7.2) |
 | `range.min` | scalar, range | type-matched: numeric, or an ISO 8601 date, instant or time of day, quoted or YAML-native, compared by value |
 | `range.max` | scalar, range | type-matched: numeric, or an ISO 8601 date, instant or time of day, quoted or YAML-native, compared by value |
@@ -185,7 +185,7 @@ The following stats from SPEC §2.2 are assertable:
 | `freshness.classification` | enum | one of `live`, `stale`, `dormant` |
 | `freshness.max_age_days` | scalar, range | integer >= 0 |
 
-Stats marked R or O in the SPEC §2.2.3 field matrix for the column's classification MAY be asserted. Stats marked "must not emit" for the column's classification (e.g., asserting `percentiles.p99` on a `boolean` column) MUST emit `assertion.inapplicable-stat` as a warning and skip the predicate. An **O** field whose absence is itself the verdict (SPEC §7.2 — `candidate_key`, `looks_like`) is evaluated against the value its absence states, not skipped. A field the column's own `unmeasured` list names was not measured this run: the predicate is skipped as `assertion.inapplicable-stat`, its detail naming the stat unmeasured.
+Stats marked R or O in the SPEC §2.2.3 field matrix for the column's classification MAY be asserted. Stats marked "must not emit" for the column's classification (e.g., asserting `percentiles.p99` on a `boolean` column) MUST emit `assertion.inapplicable-stat` as a warning and skip the predicate. An **O** field whose absence is itself the verdict (SPEC §7.2 — `candidate_key`, `looks_like`) is evaluated against the value its absence states, not skipped. A field the column's own `unmeasured` list names was not measured this run: the predicate is skipped as `assertion.inapplicable-stat`, its detail naming the stat unmeasured. A field belonging to a measurement the file's `disabled` list names (SPEC §2.2.21) was never attempted: the predicate is skipped the same way, its detail saying the measurement is switched off for the table — including an absent verdict field, which then states nothing.
 
 ### 2.5 Evaluation source
 
@@ -223,6 +223,7 @@ The predicate form is identical in both modes. Only the source of evidence diffe
 | `looks_like: numeric_string` on a numeric SQL type | `assertion.inapplicable-stat` warning — SPEC §4.1.5 never publishes that verdict there |
 | `row_count` on a `catalog_only` object | `assertion.inapplicable-stat` warning — no query was issued to count it |
 | Predicate over a stat the column's `unmeasured` names | `assertion.inapplicable-stat` warning; the detail says the read failed this run |
+| Predicate over a stat a measurement in the file's `disabled` covers (`looks_like` with `disabled: [looks_like]`) | `assertion.inapplicable-stat` warning; the detail says the measurement is switched off for this table |
 | Predicate over cell values on a redacted column | `assertion.redacted-stat` warning; skip the predicate. The subjects are `accepted_values`, `range` with its bounds, `percentiles` with its keys, and a temporal column's `freshness.max_age_days` — a redacted column emits a placeholder or a digest for the first three under `mask` and `hash` and omits them under `drop` (SPEC §2.2.9), and floors `max_age_days` to the nearest 90 days under every primitive including `drop`, so evaluating any of them would compare the assertion against a stand-in rather than the real measurement. Every other measurement on that column stays assertable, including `freshness.classification`, which is derived from the true, uncoarsened age |
 
 ---

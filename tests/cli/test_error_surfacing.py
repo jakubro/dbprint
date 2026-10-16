@@ -388,6 +388,7 @@ class TestAnUnparseableCredentialsFile:
         assert _PASSWORD not in result.output
         assert "invalid YAML" in result.stderr
         assert "line 3" in result.stderr
+        assert result.exit_code == 1
 
     def test_the_json_envelope_carries_no_credential(
         self,

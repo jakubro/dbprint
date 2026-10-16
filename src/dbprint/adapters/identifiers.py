@@ -312,9 +312,10 @@ def _table_message(fqn: str, reason: str, detail: str) -> str:
         f"  Reason: {reason}\n"
         f"  Detail: {detail!r}\n"
         f"  Resolution: Either rename the identifier in the database, OR "
-        f"exclude it via .dbprint.yaml selectors:\n"
-        f"    exclude:\n"
-        f'      - "{fqn}"'
+        f"exclude it in .dbprint.yaml:\n"
+        f"    tables:\n"
+        f"      exclude:\n"
+        f'        - "{fqn}"'
     )
 
 
@@ -324,7 +325,8 @@ def _column_message(fqn: str, key: str, previous: str, spelling: str) -> str:
         f"  Reason: case-collides-with-{previous}\n"
         f"  Detail: {spelling!r}\n"
         f"  Resolution: Either rename one of the columns in the database, OR "
-        f"exclude the table via .dbprint.yaml selectors:\n"
-        f"    exclude:\n"
-        f'      - "{fqn}"'
+        f"exclude the table in .dbprint.yaml:\n"
+        f"    tables:\n"
+        f"      exclude:\n"
+        f'        - "{fqn}"'
     )

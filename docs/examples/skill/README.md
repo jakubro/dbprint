@@ -1,4 +1,4 @@
-# dbprint context skill - install guide
+# dbprint skills - install guide
 
 This directory contains a markdown skill that teaches an AI agent to open a committed print before it queries a database: which tool answers which question, and what the number it gets back does and does not cover. It names the MCP tools, and falls back to `dbprint context` in a shell where no server is connected.
 
@@ -25,6 +25,10 @@ They are complements rather than alternatives — the skill tells an agent which
 
 1. Open Cline settings and locate the Custom Instructions section.
 2. Paste the contents of `dbprint.md`. Cline applies it on every session.
+
+## The annotation skill
+
+`dbprint-annotate.md` is a second skill, for writing a print rather than reading it: it has an agent write `description.md` and the annotation files from the code that writes each table and read-only queries, put every checkable statement into `claims`, and finish by running `dbprint annotate <table> --check` until no annotation finding remains. `dbprint annotate <table>` prints the same steps with one table's context and open questions attached, ready to pipe into an agent CLI. Install it the same way as the reading skill, in a `dbprint-annotate` skill directory of its own in Claude Code, or beside `dbprint.md` in any other client. It needs read-only database access, which the reading skill does not.
 
 ## Installing in any other client
 

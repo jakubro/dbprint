@@ -586,3 +586,24 @@ class TestTheContextTab:
         assert "Adapter: postgres<br />" in web._render_context(
             "# Table: t\nAdapter: postgres\nGrain: id\n",
         )
+
+
+def test_a_target_path_alone_still_renders_on_the_edge(rich_conn: ConnectionConfig) -> None:
+    annotations = rich_conn.print_root / "seedbank" / "batch" / "relationships.annotations.yaml"
+    data = yaml.safe_load(annotations.read_text())
+    data["refers_to"].append(
+        {
+            "column": ["cultivar_id"],
+            "target_table": "seedbank.cultivar",
+            "target_column": ["traits"],
+            "target_path": ["code"],
+        },
+    )
+    annotations.write_text(yaml.safe_dump(data))
+    client = web.create_app([rich_conn]).test_client()
+
+    batch = html.unescape(client.get("/t/primary/seedbank.batch").data.decode())
+    cultivar = html.unescape(client.get("/t/primary/seedbank.cultivar").data.decode())
+
+    assert "via (column) -> code" in batch
+    assert "via (column) -> code" in cultivar

@@ -21,7 +21,9 @@ connections:
   primary:
     adapter: postgres
     output: prints
-    max_age_days: 7
+    profile:
+      freshness:
+        max_age_days: 7
 """
 
 
@@ -82,7 +84,7 @@ def _seed_real(
         "connection": connection,
         "adapter": "postgres",
         "dbprint_version": "0.1.0",
-        "statistics_params": source_manifest["statistics_params"],
+        "profile": source_manifest["profile"],
         "selectors": source_manifest["selectors"],
         "redaction_rules_configured": 0,
         "default_collation": source_manifest["default_collation"],
@@ -131,10 +133,16 @@ connections:
   primary:
     adapter: postgres
     output: prints
-    max_age_days: 30
+    profile:
+      freshness:
+        max_age_days: 30
     rules:
-      - include: ["arboretum.seedbank.accession"]
-        max_age_days: 1
+    - profile:
+        freshness:
+          max_age_days: 1
+      match:
+        tables:
+        - arboretum.seedbank.accession
 """
 
 
@@ -227,35 +235,48 @@ class TestPerTableThresholdReachesCheck:
         assert payload["stale_entries"] == []
 
 
-CASCADE_YAML = """\
+REFUSING_YAML = """\
 connections:
   good:
     adapter: postgres
     auto: true
     output: prints
-    max_age_days: 7
+    profile:
+      freshness:
+        max_age_days: 7
   bad:
     adapter: postgres
     auto: true
     output: prints
-    max_age_days: 7
-    rules:
-      - include: ["*"]
-        sample: 0.1
-      - include: ["arboretum.seedbank.taxon"]
-        filter: "taxon_id > 0"
+    profile:
+      freshness:
+        max_age_days: 7
 """
+
+
+def _record_threshold(tmp_path: Path, connection: str, fqn: str, days: float) -> None:
+    path = tmp_path / "prints" / connection / "manifest.yaml"
+    manifest = yaml.safe_load(path.read_text())
+    manifest["tables"][fqn]["max_age_days"] = days
+    path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+
 
 SIZE_GATED_YAML = """\
 connections:
   primary:
     adapter: postgres
     output: prints
-    max_age_days: 7
+    profile:
+      freshness:
+        max_age_days: 7
     rules:
-      - include: ["arboretum.seedbank.accession"]
+    - profile:
+        freshness:
+          max_age_days: 30
+      match:
+        tables:
+        - arboretum.seedbank.accession
         min_rows: 1000000
-        max_age_days: 30
 """
 
 CASCADE_AND_SIZE_GATED_YAML = """\
@@ -264,15 +285,33 @@ connections:
     adapter: postgres
     auto: true
     output: prints
-    max_age_days: 7
+    profile:
+      freshness:
+        max_age_days: 7
     rules:
-      - include: ["arboretum.seedbank.accession"]
+    - profile:
+        freshness:
+          max_age_days: 30
+      match:
+        tables:
+        - arboretum.seedbank.accession
         min_rows: 1000000
-        max_age_days: 30
-      - include: ["*"]
-        sample: 0.1
-      - include: ["arboretum.seedbank.taxon"]
-        filter: "taxon_id > 0"
+    - profile:
+        read:
+          tables:
+            mode: sample
+            fraction: 0.1
+      match:
+        tables:
+        - '*'
+    - profile:
+        read:
+          tables:
+            mode: filter
+            filter: taxon_id > 0
+      match:
+        tables:
+        - arboretum.seedbank.taxon
 """
 
 NAME_ONLY_YAML = """\
@@ -280,10 +319,16 @@ connections:
   primary:
     adapter: postgres
     output: prints
-    max_age_days: 7
+    profile:
+      freshness:
+        max_age_days: 7
     rules:
-      - include: ["arboretum.seedbank.accession"]
-        max_age_days: 30
+    - profile:
+        freshness:
+          max_age_days: 30
+      match:
+        tables:
+        - arboretum.seedbank.accession
 """
 
 CONNECTION_CEILING_ONLY_YAML = """\
@@ -291,8 +336,13 @@ connections:
   primary:
     adapter: postgres
     output: prints
-    max_age_days: 7
-    max_rows_scanned: 1000000000
+    profile:
+      freshness:
+        max_age_days: 7
+      read:
+        tables:
+          mode: sample
+          max_rows: 1000000000
 """
 
 RULE_CEILING_ONLY_YAML = """\
@@ -300,11 +350,20 @@ connections:
   primary:
     adapter: postgres
     output: prints
-    max_age_days: 7
+    profile:
+      freshness:
+        max_age_days: 7
     rules:
-      - include: ["arboretum.seedbank.accession"]
-        max_rows_scanned: 1000000000
-        max_age_days: 30
+    - profile:
+        read:
+          tables:
+            mode: sample
+            max_rows: 1000000000
+        freshness:
+          max_age_days: 30
+      match:
+        tables:
+        - arboretum.seedbank.accession
 """
 
 MIXED_YAML = """\
@@ -312,178 +371,22 @@ connections:
   primary:
     adapter: postgres
     output: prints
-    max_age_days: 7
-    max_rows_scanned: 1000000000
+    profile:
+      freshness:
+        max_age_days: 7
+      read:
+        tables:
+          mode: sample
+          max_rows: 1000000000
     rules:
-      - include: ["arboretum.seedbank.accession"]
+    - profile:
+        freshness:
+          max_age_days: 30
+      match:
+        tables:
+        - arboretum.seedbank.accession
         min_rows: 1000000
-        max_age_days: 30
 """
-
-
-class TestContradictoryCascadeOffline:
-    """A cascade narrowing one table two ways fails that table, not the command.
-
-    `settings_for` needs a table name to see the collision, so a config can be contradictory
-    for one table and settled for every other one in the connection.
-    """
-
-    @staticmethod
-    def _seed(tmp_path: Path, committed_print: Path) -> None:
-        (tmp_path / ".dbprint.yaml").write_text(CASCADE_YAML)
-        when = datetime.now(UTC)
-        _seed_real(tmp_path, committed_print, "good", ("arboretum.seedbank.accession",), when)
-        _seed_real(
-            tmp_path,
-            committed_print,
-            "bad",
-            ("arboretum.seedbank.accession", "arboretum.seedbank.taxon"),
-            when,
-        )
-
-    def test_the_refused_table_is_named_with_both_rules(
-        self,
-        tmp_path: Path,
-        committed_print: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        self._seed(tmp_path, committed_print)
-        monkeypatch.chdir(tmp_path)
-        result = CliRunner().invoke(main, ["check", "--format", "json"])
-        payload = {entry["connection"]: entry for entry in json.loads(result.stdout)}
-
-        not_run = payload["bad"]["not_run"]
-
-        assert [entry["subject"] for entry in not_run] == ["arboretum.seedbank.taxon"]
-        assert "rules[0]" in not_run[0]["cause"]
-        assert "rules[1]" in not_run[0]["cause"]
-        assert payload["bad"]["exit_code"] == 1
-        assert result.exit_code == 1
-
-    def test_the_other_tables_in_that_connection_are_still_judged(
-        self,
-        tmp_path: Path,
-        committed_print: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """One table's contradictory rules say nothing about its neighbours."""
-
-        self._seed(tmp_path, committed_print)
-        monkeypatch.chdir(tmp_path)
-        result = CliRunner().invoke(main, ["check", "--format", "json"])
-        payload = {entry["connection"]: entry for entry in json.loads(result.stdout)}
-
-        assert payload["bad"]["summary"]["not_run_count"] == 1
-        assert payload["bad"]["stale_entries"] == []
-        assert payload["bad"]["summary"]["errors"] == 0
-
-    def test_a_clean_connection_still_reports(
-        self,
-        tmp_path: Path,
-        committed_print: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """`check` renders after its loop, so one failure cannot suppress the rest."""
-
-        self._seed(tmp_path, committed_print)
-        monkeypatch.chdir(tmp_path)
-        result = CliRunner().invoke(main, ["check", "--format", "json"])
-        payload = {entry["connection"]: entry for entry in json.loads(result.stdout)}
-
-        assert payload["good"]["exit_code"] == 0
-        assert payload["good"]["not_run"] == []
-
-    def test_the_human_report_says_what_did_not_run(
-        self,
-        tmp_path: Path,
-        committed_print: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        self._seed(tmp_path, committed_print)
-        monkeypatch.chdir(tmp_path)
-        result = CliRunner().invoke(main, ["check"])
-
-        assert "1 check did not run" in result.output
-        assert "arboretum.seedbank.taxon" in result.output
-        assert "Connection: good" in result.output
-
-    def test_an_explicit_override_still_reports_the_cascade_without_failing(
-        self,
-        tmp_path: Path,
-        committed_print: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """An explicit override reports the cascade as a warning, not a failure; exit stays 0."""
-
-        self._seed(tmp_path, committed_print)
-        monkeypatch.chdir(tmp_path)
-        result = CliRunner().invoke(main, ["check", "--max-age", "7d", "--format", "json"])
-        payload = {entry["connection"]: entry for entry in json.loads(result.stdout)}
-        not_run = payload["bad"]["not_run"]
-
-        assert result.exit_code == 0
-        assert [entry["subject"] for entry in not_run] == ["arboretum.seedbank.taxon"]
-        assert not_run[0]["severity"] == "warning"
-        assert "rules[0]" in not_run[0]["cause"]
-        assert "rules[1]" in not_run[0]["cause"]
-        assert "arboretum.seedbank.taxon" in result.stderr
-
-    def test_the_human_report_does_not_print_a_warning_under_the_fail_heading(
-        self,
-        tmp_path: Path,
-        committed_print: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        self._seed(tmp_path, committed_print)
-        monkeypatch.chdir(tmp_path)
-        result = CliRunner().invoke(main, ["check", "--max-age", "7d"])
-
-        assert "NOTE: 1 check reported, exit unaffected" in result.output
-        assert "FAIL: 1 check did not run" not in result.output
-        assert "arboretum.seedbank.taxon" in result.output
-
-    def test_the_size_gate_warning_stays_suppressed_under_override_with_a_cascade(
-        self,
-        tmp_path: Path,
-        committed_print: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """A size-gated rule's fallback does not happen under an override, cascade or not."""
-
-        (tmp_path / ".dbprint.yaml").write_text(CASCADE_AND_SIZE_GATED_YAML)
-        when = datetime.now(UTC)
-        _seed_real(
-            tmp_path,
-            committed_print,
-            "bad",
-            ("arboretum.seedbank.accession", "arboretum.seedbank.taxon"),
-            when,
-        )
-        monkeypatch.chdir(tmp_path)
-        result = CliRunner().invoke(main, ["check", "--max-age", "7d", "--format", "json"])
-
-        assert "min_rows" not in result.stderr
-        assert result.exit_code == 0
-
-    def test_a_recorded_threshold_keeps_the_cascade_out_of_it(
-        self,
-        tmp_path: Path,
-        committed_print: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The fallback is the only path that resolves rules, so a recorded value skips it."""
-
-        self._seed(tmp_path, committed_print)
-        manifest_path = tmp_path / "prints" / "bad" / "manifest.yaml"
-        manifest = yaml.safe_load(manifest_path.read_text())
-        manifest["tables"]["arboretum.seedbank.taxon"]["max_age_days"] = 30
-        manifest_path.write_text(yaml.safe_dump(manifest))
-        monkeypatch.chdir(tmp_path)
-        result = CliRunner().invoke(main, ["check", "--format", "json"])
-        payload = {entry["connection"]: entry for entry in json.loads(result.stdout)}
-
-        assert result.exit_code == 0
-        assert payload["bad"]["not_run"] == []
 
 
 class TestSizeGatedRuleOffline:
@@ -646,9 +549,10 @@ class TestRedactionNotApplied:
         _seed_clean(tmp_path, committed_print)
         (tmp_path / ".dbprint.yaml").write_text(
             PROJECT_YAML
-            + "    redact:\n"
-            + "      - columns: ['arboretum.seedbank.accession.accession_id']\n"
-            + "        with: mask\n",
+            + "    profile:\n"
+            + "      redact:\n"
+            + "        - columns: ['arboretum.seedbank.accession.accession_id']\n"
+            + "          with: mask\n",
         )
         monkeypatch.chdir(tmp_path)
 
@@ -920,7 +824,7 @@ class TestTheCauseReachesStderr:
         committed_print: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        (tmp_path / ".dbprint.yaml").write_text(CASCADE_YAML)
+        (tmp_path / ".dbprint.yaml").write_text(REFUSING_YAML)
         _seed_real(
             tmp_path,
             committed_print,
@@ -928,6 +832,7 @@ class TestTheCauseReachesStderr:
             ("arboretum.seedbank.accession", "arboretum.seedbank.taxon"),
             datetime.now(UTC),
         )
+        _record_threshold(tmp_path, "bad", "arboretum.seedbank.taxon", 1.5)
         monkeypatch.chdir(tmp_path)
         result = CliRunner().invoke(main, ["check"])
 
@@ -940,7 +845,7 @@ class TestTheCauseReachesStderr:
         committed_print: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        (tmp_path / ".dbprint.yaml").write_text(CASCADE_YAML)
+        (tmp_path / ".dbprint.yaml").write_text(REFUSING_YAML)
         _seed_real(
             tmp_path,
             committed_print,
@@ -948,6 +853,7 @@ class TestTheCauseReachesStderr:
             ("arboretum.seedbank.accession", "arboretum.seedbank.taxon"),
             datetime.now(UTC),
         )
+        _record_threshold(tmp_path, "bad", "arboretum.seedbank.taxon", 1.5)
         monkeypatch.chdir(tmp_path)
         result = CliRunner().invoke(main, ["check", "--format", "json"])
 

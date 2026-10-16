@@ -434,7 +434,7 @@ def _project_yaml(
 
     connection: dict[str, Any] = {"adapter": "postgres", "auto": True, "output": "prints"}
     project: dict[str, Any] = {
-        "defaults": {"max_age_days": 7, "statistics": {}, "diff": {}},
+        "defaults": {"profile": {"freshness": {"max_age_days": 7}}, "diff": {}},
         "connections": {"primary": connection},
     }
 
@@ -476,7 +476,7 @@ def _two_connection_yaml(*, coarse: float, fine: float) -> str:
     """Two connections differing only in the threshold each configures."""
 
     project: dict[str, Any] = {
-        "defaults": {"max_age_days": 7, "statistics": {}, "diff": {}},
+        "defaults": {"profile": {"freshness": {"max_age_days": 7}}, "diff": {}},
         "connections": {
             "coarse": {
                 "adapter": "postgres",

@@ -17,6 +17,7 @@ from dbprint.adapters import (
 )
 from dbprint.adapters.duckdb import DuckdbAdapter
 from dbprint.adapters.duckdb import stats as duckdb_stats
+from dbprint.config import ProfileConfig
 from dbprint.config.project import ConnectionConfig, RedactRule
 from dbprint.conformance import validate_print
 from dbprint.engine import Engine
@@ -337,7 +338,7 @@ def _duckdb_columns(
         name="garden",
         adapter="duckdb",
         output=tmp_path / "prints",
-        redact=redact,
+        profile=ProfileConfig(redact=redact),
     )
 
     Engine(DuckdbAdapter({"database": str(database)}), conn, tmp_path).generate()

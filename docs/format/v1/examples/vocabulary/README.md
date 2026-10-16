@@ -6,14 +6,14 @@ Same golden-comparison discipline as `production/`: `tests/conformance/test_refe
 
 ## Source
 
-One schema, one table: `public.shapes`, 40 rows, one column per demonstrated pattern plus its `row_id` primary key. Every value is a published test vector, a standard registry entry, or an invented placeholder — never framed as data observed in the wild: Luhn-valid non-issuable card numbers, the documentation IBANs ISO 13616 and Wikipedia's own worked examples use, RFC 4122's example UUID inside a URN, locally-administered MAC addresses (RFC 7042's documentation range), IANA zone names, ISO 4217 currency codes, and hand-built JWTs carrying no real signing key, semantic version strings in their tag-prefixed and prerelease/build forms, published ISBN/EAN/UPC test identifiers, VINs satisfying the federal VIN regulation's own check digit (49 C.F.R. 565.15), IMEIs whose Reporting Body Identifier is genuinely allocated (GSMA's own IMEI allocation guidelines), and epoch-second instants chosen to avoid `isbn`'s own check digit by coincidence, invented tax-reference numbers naming no real jurisdiction's scheme, invented birth dates, standard ABO/Rh blood-type codes, abstract placeholder group labels — never a real ethnicity, religion or other protected-category name — and byte strings that are a file signature followed by one invented byte. Each column cycles three such values across its 40 rows, which is why every column classifies `categorical` with `cardinality: 3` and an exhaustive, `values_coverage: 1.0` value list — the small-fixture case `production/` demonstrates the *classification* mechanics of at greater length; this tree only needs a categorical column to carry each pattern's value.
+One schema, one table: `public.shapes`, 40 rows, one column per demonstrated pattern plus its `row_id` primary key. Every value is a published test vector, a standard registry entry, or an invented placeholder — never framed as data observed in the wild: Luhn-valid non-issuable card numbers, the documentation IBANs ISO 13616 and Wikipedia's own worked examples use, RFC 4122's example UUID inside a URN, locally-administered MAC addresses (RFC 7042's documentation range), IANA zone names, ISO 4217 currency codes, and hand-built JWTs carrying no real signing key, semantic version strings in their tag-prefixed and prerelease/build forms, published ISBN/EAN/UPC test identifiers, VINs satisfying the federal VIN regulation's own check digit (49 C.F.R. 565.15), IMEIs whose Reporting Body Identifier is genuinely allocated (GSMA's own IMEI allocation guidelines), and epoch-second instants chosen to avoid `isbn`'s own check digit by coincidence, invented tax-reference numbers naming no real jurisdiction's scheme, invented birth dates, standard ABO/Rh blood-type codes, abstract placeholder group labels — never a real ethnicity, religion or other protected-category name — and byte strings that are a file signature followed by one invented byte. Each column cycles three such values across its 40 rows — five for `pan`, `book_code`, `barcode` and `device_id`, since a checksum pattern needs five distinct values to claim one (SPEC 4.1.3) — which is why every column classifies `categorical` with `cardinality: 3` or `5` and an exhaustive, `values_coverage: 1.0` value list — the small-fixture case `production/` demonstrates the *classification* mechanics of at greater length; this tree only needs a categorical column to carry each pattern's value.
 
 ## What's demonstrated
 
 | Column | `looks_like` | Values |
 |---|---|---|
 | `row_id` | `numeric_string` | Row ordinal — the same pattern `production/` demonstrates on every surrogate key |
-| `pan` | `card_number` | Three Luhn-valid, non-issuable test card numbers — also `sensitivity: financial_account`, from the shape alone (see below) |
+| `pan` | `card_number` | Five Luhn-valid, non-issuable test card numbers — also `sensitivity: financial_account`, from the shape alone (see below) |
 | `iban_value` | `iban` | ISO 13616 documentation IBANs (Germany, UK, France), check digits valid on all three — also `sensitivity: financial_account`, from the shape alone (see below) |
 | `bic_value` | `bic` | An 8-character and an 11-character (branch-suffixed) BIC, both valid shapes |
 | `digest` | `hex` | Two `#`-prefixed hex triplets and one bare 7-character hex string — SPEC 4.1's `#`-prefix is optional, not required |
@@ -25,10 +25,10 @@ One schema, one table: `public.shapes`, 40 rows, one column per demonstrated pat
 | `currency` | `currency_code` | Three active ISO 4217 alpha codes |
 | `bearer_token` | `jwt` | Three HS256-shaped tokens with distinct payloads, each a real base64url-encoded JOSE header carrying `alg` |
 | `package_version` | `semver` | A tag-prefixed release, a numeric prerelease, and an alphabetic prerelease-plus-build form — the three arms this pattern was added to cover |
-| `book_code` | `isbn` | A 13-digit ISBN, a 10-digit ISBN, and a 10-digit ISBN with an `X` check character |
-| `barcode` | `ean` | Two 13-digit EANs (one also Luhn-valid — the worked collision `isbn`/`ean` outranking `card_number` exists for) and a UPC-A |
+| `book_code` | `isbn` | Two 13-digit ISBNs and three 10-digit ISBNs, one with an `X` check character |
+| `barcode` | `ean` | Two 13-digit EANs (one also Luhn-valid — the worked collision `isbn`/`ean` outranking `card_number` exists for), a UPC-A and two EAN-8s |
 | `vehicle_id` | `vin` | Three VINs valid under the federal VIN regulation (49 C.F.R. 565.15), one with an `X` check digit |
-| `device_id` | `imei` | Three Luhn-valid IMEIs with allocated Reporting Body Identifiers, one inside JCB's card-issuer range — the value a `card_number` IIN table would still misclaim |
+| `device_id` | `imei` | Five Luhn-valid IMEIs with allocated Reporting Body Identifiers, one inside JCB's card-issuer range — the value a `card_number` IIN table would still misclaim |
 | `logged_at` | `iso8601_datetime` | Three ISO 8601 datetime strings, distinct from `date_of_birth`'s bare-date shape below — a pattern no `production/` column reaches, since every native timestamp there classifies `temporal` and SPEC 4.1.5 runs no detection on that classification |
 | `jpeg_bytes` | `jpeg` | Three `BYTEA` values opening with the JPEG signature — listed as lowercase hex, and read by their leading bytes rather than as text |
 | `gif_bytes` | `gif` | Three `BYTEA` values opening with `GIF89a` |
@@ -44,7 +44,7 @@ Every value above was checked individually against `detect()` before being writt
 |---|---|---|
 | `event_timestamp` | `seconds` | Three consecutive epoch-second instants, chosen to avoid `isbn`'s own check digit — each still reports `looks_like: numeric_string` unchanged |
 
-This is `epoch_unit`'s **per-value evidence rule** (SPEC 4.5.2), which reaches `categorical` the same way `looks_like` does. The rule's other half — the **bounds rule** over a `numeric` column's `range` — needs a cardinality above the enumeration threshold (50), which this table's 40 rows cannot carry without breaking every other column's `cardinality: 3` demonstration; it is proven instead by the engine test suite (`tests/engine/test_orchestrator.py::TestEpochUnit`).
+This is `epoch_unit`'s **per-value evidence rule** (SPEC 4.5.2), which reaches `categorical` the same way `looks_like` does. The rule's other half — the **bounds rule** over a `numeric` column's `range` — needs a cardinality above the enumeration threshold (50), which this table's 40 rows cannot carry without breaking every other column's small-cardinality demonstration; it is proven instead by the engine test suite (`tests/engine/test_orchestrator.py::TestEpochUnit`).
 
 ## Also demonstrated: `sensitivity: national_id`
 

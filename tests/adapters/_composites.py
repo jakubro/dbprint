@@ -16,7 +16,7 @@ from dbprint.adapters import (
 )
 from dbprint.adapters.base import ColumnParts
 from dbprint.adapters.duckdb import DuckdbAdapter
-from dbprint.config import StatisticsConfig
+from dbprint.config import PartsProfile, ProfileConfig, StatisticsConfig, TablesConfig
 from dbprint.config.project import ConnectionConfig, RedactRule
 from dbprint.engine import Engine
 from tests._engine_run import conformance_errors
@@ -64,7 +64,7 @@ def snowflake(*statements: str, column_types: dict[str, str] | None = None) -> A
 def duckdb_print(
     tmp_path: Path,
     *statements: str,
-    statistics: StatisticsConfig | None = None,
+    parts: PartsProfile | None = None,
     redact: tuple[RedactRule, ...] = (),
 ) -> dict[str, dict[str, Any]]:
     tmp_path.mkdir(parents=True, exist_ok=True)
@@ -79,9 +79,8 @@ def duckdb_print(
         name="garden",
         adapter="duckdb",
         output=tmp_path / "prints",
-        redact=redact,
         redaction_salt=_SALT,
-        statistics=statistics or StatisticsConfig(),
+        profile=ProfileConfig(redact=redact, parts=parts or PartsProfile()),
     )
     Engine(DuckdbAdapter({"database": str(database)}), conn, tmp_path).generate()
     errors = conformance_errors(tmp_path / "prints" / "garden")
@@ -105,8 +104,8 @@ def generate(
         name="primary",
         adapter=name,
         output=tmp_path,
-        include=(include,),
-        redact=redact,
+        tables=TablesConfig(include=(include,)),
+        profile=ProfileConfig(redact=redact),
     )
 
     try:

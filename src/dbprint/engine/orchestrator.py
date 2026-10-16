@@ -7,19 +7,17 @@ diverging at the "write or not" boundary per ARCHITECTURE 3.
 from __future__ import annotations
 
 import copy
+import glob
 import itertools
 import logging
 import time
 import traceback
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
-from decimal import Decimal
 from pathlib import Path
-from typing import Any, Literal, cast
-
-import yaml
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from dbprint.adapters import trace_context
 from dbprint.adapters.base import (
@@ -54,11 +52,18 @@ from dbprint.adapters.base import (
 )
 from dbprint.adapters.errors import QueryFailed
 from dbprint.adapters.identifiers import IdentifierRejected, reject_column_collisions
-from dbprint.config import ConfigError, ConnectionConfig, TableSettings, selectors
+from dbprint.config import ConfigError, ConnectionConfig, ProfileConfig, TableSettings, selectors
 from dbprint.config.duration import format_duration_seconds
+from dbprint.config.read import ObjectKind
 from dbprint.spec import artifact_yaml
-from dbprint.spec.absence import SAMPLED_CLASSIFICATIONS, block_value, emits, sample_verdicts
-from dbprint.spec.artifact_yaml import ArtifactLoader
+from dbprint.spec.absence import (
+    SAMPLED_CLASSIFICATIONS,
+    block_value,
+    disabled_of,
+    emits,
+    sample_verdicts,
+)
+from dbprint.spec.artifact_yaml import ExactLoader
 from dbprint.spec.artifacts import (
     DDL_FILENAME,
     DESCRIPTION_FILENAME,
@@ -88,6 +93,7 @@ from dbprint.spec.classification import (
 )
 from dbprint.spec.coverage import coverage_share, is_incoherent
 from dbprint.spec.epoch import bounds_epoch_unit, sample_epoch_unit
+from dbprint.spec.fqn import split as split_fqn
 from dbprint.spec.looks_like import detect_with_evidence
 from dbprint.spec.parts import KEYS, last_member, parent, pools_floats
 from dbprint.spec.redaction import (
@@ -134,14 +140,15 @@ from .carried import (
     freshness,
     plan_carry,
     redaction_mismatches,
+    relineaged_statistics,
     resolved_part_redaction,
     resolved_redaction,
 )
 from .catalog_only import described_without_query
 from .manifest_builder import (
     ManifestTableEntry,
-    profiling_params_dict,
-    statistics_params_dict,
+    profile_delta,
+    profile_dict,
 )
 from .manifest_builder import build as build_manifest
 from .pool import SessionPool
@@ -170,6 +177,10 @@ from .result import (
 from .staging import RunStage, StageRefused
 from .value_resolution import spelling_groups
 from .yaml_dumper import dump_yaml as _dump_yaml
+
+
+if TYPE_CHECKING:
+    from .lineage import DbtManifest, SourceColumn
 
 
 _LOG = logging.getLogger(__name__)
@@ -216,6 +227,10 @@ class ListingSharesNothingWithBaseline(Exception):
             f"connection's path or database and the role's grants; if every table really was "
             f"dropped, rerun generate with --confirm-all-removed.",
         )
+
+
+class _LineageUnavailable(Exception):
+    pass
 
 
 class Engine:
@@ -283,6 +298,22 @@ class Engine:
         prints_root = self._conn.print_root
         committed = CommittedPrint.load(prints_root)
         emitter = _ProgressEmitter(req.on_progress, self._conn.name)
+        lineage_source: DbtManifest | None = None
+
+        if self._conn.dbt_manifest is not None and not req.dry_run:
+            try:
+                lineage_source = self._load_lineage_source(self._conn.dbt_manifest)
+            except _LineageUnavailable as exc:
+                failure = _connection_error_generate(
+                    self._conn.name,
+                    generated_at,
+                    started,
+                    exc,
+                    exit_code=EXIT_GENERIC,
+                )
+                self._log_connection(0, failure.elapsed_ms, failure.exit_code)
+
+                return failure
 
         emitter.connecting("start")
 
@@ -316,9 +347,21 @@ class Engine:
                     emitter=emitter,
                     fail_fast=req.fail_fast,
                     confirm_all_removed=req.confirm_all_removed,
+                    lineage_source=lineage_source,
                 )
             except ListingSharesNothingWithBaseline as exc:
                 failure = _connection_error_generate(self._conn.name, generated_at, started, exc)
+                self._log_connection(0, failure.elapsed_ms, failure.exit_code)
+
+                return failure
+            except ConfigError as exc:
+                failure = _connection_error_generate(
+                    self._conn.name,
+                    generated_at,
+                    started,
+                    exc,
+                    exit_code=EXIT_GENERIC,
+                )
                 self._log_connection(0, failure.elapsed_ms, failure.exit_code)
 
                 return failure
@@ -381,6 +424,29 @@ class Engine:
             not_attempted=not_attempted,
             sketch_failures=sketch_failures,
         )
+
+    def estimate_row_count(self, fqn: str) -> int | None:
+        """The catalog's current row-count estimate for one table, read live.
+
+        None for a view or an unlisted name; raises `ConnectFailed` when the database is unreachable.
+        """
+
+        try:
+            self._adapter.connect()
+        except Exception as exc:
+            raise ConnectFailed(_one_line(exc, self._conn.run.statement_timeout)) from exc
+
+        try:
+            # Listing registers the identity every later statement addresses the table by.
+            listed = self._adapter.list_tables(include=[glob.escape(fqn)], exclude=[])
+            table = next((t for t in listed if t.fqn == fqn), None)
+
+            if table is None or table.type == "view":
+                return None
+
+            return self._adapter.estimate_row_count(fqn)
+        finally:
+            self._adapter.close()
 
     def compute_diff(self, request: DiffRequest | None = None) -> DiffResult:
         """Run extract -> graph -> diff and return the diff dict alone, writing nothing to disk.
@@ -445,10 +511,14 @@ class Engine:
                     generated_at=generated_at,
                     emitter=emitter,
                 )
-            except (ListingSharesNothingWithBaseline, IdentifierRejected) as exc:
-                refused = isinstance(exc, IdentifierRejected)
+            except (ListingSharesNothingWithBaseline, IdentifierRejected, ConfigError) as exc:
+                refused = not isinstance(exc, ListingSharesNothingWithBaseline)
                 exit_code = EXIT_GENERIC if refused else EXIT_CONNECTION
-                cause = _refusal_text(exc, committed) if refused else str(exc)
+                cause = (
+                    _refusal_text(exc, committed)
+                    if isinstance(exc, IdentifierRejected)
+                    else str(exc)
+                )
                 elapsed_ms = int((time.monotonic() - started) * 1000)
                 self._log_connection(0, elapsed_ms, exit_code)
 
@@ -521,6 +591,7 @@ class Engine:
         emitter: _ProgressEmitter | None = None,
         fail_fast: bool = False,
         confirm_all_removed: bool = False,
+        lineage_source: DbtManifest | None = None,
     ) -> _ExtractionOutcome:
         """Run list_tables -> per-table extract -> relationship graph -> diff compute.
 
@@ -529,15 +600,15 @@ class Engine:
 
         emitter = emitter or _ProgressEmitter(None, self._conn.name)
         # Constant for the whole run; a config with no size condition issues no estimate.
-        read_row_counts = self._conn.rules_read_row_counts
+        read_row_counts = self._conn.reads_row_counts
         # Constant for the whole run too (SPEC 2.2.2) - one catalog scalar, reused for every
         # column's omit-if-matches comparison and the manifest's own record.
         default_collation = self._adapter.default_collation()
 
         emitter.listing("start")
         tables = self._adapter.list_tables(
-            include=list(self._conn.include),
-            exclude=list(self._conn.exclude),
+            include=list(self._conn.tables.include),
+            exclude=list(self._conn.tables.exclude),
         )
 
         skipped_namespaces = self._adapter.skipped_namespaces()
@@ -574,6 +645,7 @@ class Engine:
             )
 
         tables = _apply_cli_narrowing(tables, cli_include, cli_exclude)
+        self._refuse_remote_reads(tables)
         emitter.listing("done", len(tables))
         scope = _run_scope(self._conn, cli_include, cli_exclude)
         in_scope = [fqn for fqn in committed.tables if scope.covers(fqn)]
@@ -600,6 +672,7 @@ class Engine:
                 default_collation=default_collation,
                 dependencies_map=dependencies_map,
                 unlisted_namespaces=tuple(skipped.name for skipped in skipped_namespaces),
+                lineage_source=lineage_source,
             )
         finally:
             self._close_pool(pool)
@@ -621,6 +694,7 @@ class Engine:
         default_collation: str,
         dependencies_map: dict[str, tuple[str, ...]] | None,
         unlisted_namespaces: tuple[str, ...],
+        lineage_source: DbtManifest | None = None,
     ) -> _ExtractionOutcome:
         prints_root = self._conn.print_root
         matched_fqns = tuple(t.fqn for t in tables)
@@ -730,6 +804,9 @@ class Engine:
                 sketch_failures = self._write_key_sketches(per_table_meta, pool, emitter=emitter)
                 carried_proposals = self._add_value_derived_edges(per_table_meta, carried)
                 self._write_normalized_cardinalities(per_table_meta, pool, owner)
+
+                if lineage_source is not None:
+                    self._write_lineage(per_table_meta, carry, lineage_source, stage)
         finally:
             # Every extracted table's materialized sample outlives extraction for
             # `_write_normalized_cardinalities` to read, so it is released here regardless.
@@ -794,8 +871,8 @@ class Engine:
             matched_fqns=matched_fqns,
             carry=carry,
             resolved_thresholds=resolved_thresholds,
-            include=tuple(self._conn.include),
-            exclude=tuple(self._conn.exclude),
+            include=tuple(self._conn.tables.include),
+            exclude=tuple(self._conn.tables.exclude),
             default_collation=default_collation,
             sketch_failures=sketch_failures,
             failed_tables=failed_tables,
@@ -803,7 +880,7 @@ class Engine:
 
     def _open_pool(self) -> SessionPool[Engine]:
         workers = [self]
-        wanted = self._conn.parallelism
+        wanted = self._conn.run.parallelism
 
         for _ in range(wanted - 1):
             session = self._adapter.new_session()
@@ -814,7 +891,7 @@ class Engine:
                 _LOG.warning(
                     "connection %r: an extra session could not open: %s",
                     self._conn.name,
-                    _one_line(exc, self._conn.statement_timeout),
+                    _one_line(exc, self._conn.run.statement_timeout),
                 )
                 continue
 
@@ -876,10 +953,10 @@ class Engine:
         tbl_dir = prints_root / Path(*tbl.namespace_path)
         row_count_estimate: int | None = None
 
-        # Its own `try`: a catalog read that raises has to fail this table, not the run.
-        # A plain view has no row-count estimate, so no size condition can govern it; an external
-        # or opt-in-only object no rule opts in is never read, so its estimate would decide nothing.
-        unread = (tbl.external or tbl.opt_in_only) and not self._opts_in(tbl.fqn)
+        # Its own `try`: a raising catalog read fails this table, not the run. No estimate for a
+        # view, nor for an object never read - unless a `min_rows` rule could change its mode.
+        kind: ObjectKind = "views" if _kind(tbl.type) == "view" else "tables"
+        unread = not self._reads(tbl) and not self._conn.min_rows_decides_mode(tbl.fqn, kind)
 
         if read_row_counts and tbl.type != "view" and not unread:
             try:
@@ -891,7 +968,7 @@ class Engine:
                         fqn=tbl.fqn,
                         status="failed",
                         elapsed_ms=int((time.monotonic() - started) * 1000),
-                        **_error_fields(exc, self._conn.statement_timeout),
+                        **_error_fields(exc, self._conn.run.statement_timeout),
                     ),
                     None,
                     None,
@@ -902,33 +979,12 @@ class Engine:
             # declined-to-sample table is not mistaken for one the config never matched.
             if row_count_estimate is None and self._conn.size_conditions_name(tbl.fqn):
                 _LOG.warning(
-                    "no row-count estimate for %r; rules carrying `min_rows` or a "
-                    "`max_rows_scanned` ceiling do not apply to it",
+                    "no row-count estimate for %r; rules carrying `match.min_rows` or a "
+                    "`read.tables.max_rows` ceiling do not apply to it",
                     tbl.fqn,
                 )
 
-        # A cascade narrowing one table two ways says nothing about the rest; that table fails.
-        try:
-            settings = self._conn.settings_for(tbl.fqn, row_count_estimate)
-        except ConfigError as exc:
-            return (
-                TableResult(
-                    fqn=tbl.fqn,
-                    status="failed",
-                    elapsed_ms=int((time.monotonic() - started) * 1000),
-                    **_error_fields(exc, self._conn.statement_timeout),
-                ),
-                None,
-                None,
-                (),
-            )
-
-        # config does not log (GUIDELINES); the engine is the one place that may warn.
-        if settings.ceiling_yielded:
-            _LOG.warning(
-                "table %r: a row-count ceiling yields to its filter, which already narrows it",
-                tbl.fqn,
-            )
+        settings = self._conn.settings_for(tbl.fqn, _kind(tbl.type), row_count_estimate)
 
         verdict = (
             None
@@ -983,7 +1039,7 @@ class Engine:
                     status="failed",
                     elapsed_ms=int((time.monotonic() - started) * 1000),
                     reason=verdict.reason if verdict is not None else None,
-                    **_error_fields(exc, self._conn.statement_timeout),
+                    **_error_fields(exc, self._conn.run.statement_timeout),
                 ),
                 None,
                 settings.max_age_days,
@@ -1029,6 +1085,15 @@ class Engine:
         row_count_estimate: int | None = None,
         dependencies_map: dict[str, tuple[str, ...]] | None = None,
     ) -> _PerTableContext:
+        if not settings.profile.looks_like.enabled and any(
+            rule.looks_like for rule in self._conn.profile.redact
+        ):
+            raise ValueError(
+                f"table {tbl.fqn!r} switches looks_like off while a redact rule selects columns "
+                f"by looks_like, which would then never match; switch looks_like on for it, or "
+                f"select those columns by name or sensitivity",
+            )
+
         with _operation("extract_ddl"):
             ddl = self._adapter.extract_ddl(tbl.fqn)
 
@@ -1060,12 +1125,14 @@ class Engine:
             _LOG.warning(
                 "introspect_relationships failed for %r: %s",
                 tbl.fqn,
-                _one_line(exc.cause, self._conn.statement_timeout),
+                _one_line(exc.cause, self._conn.run.statement_timeout),
             )
             relationships = []
             relationships_known = False
 
-        relationships = relationships + self._inferred_edges(tbl.fqn, relationships, inventory)
+        if settings.profile.relationships.infer:
+            relationships = relationships + self._inferred_edges(tbl.fqn, relationships, inventory)
+
         eligible_target = self._eligible_target(tbl.fqn, inventory)
 
         try:
@@ -1077,7 +1144,7 @@ class Engine:
             _LOG.warning(
                 "introspect_indexes failed for %r: %s",
                 tbl.fqn,
-                _one_line(exc.cause, self._conn.statement_timeout),
+                _one_line(exc.cause, self._conn.run.statement_timeout),
             )
             indexes = []
             indexes_known = False
@@ -1091,32 +1158,34 @@ class Engine:
             _LOG.warning(
                 "extract_comments failed for %r: %s",
                 tbl.fqn,
-                _one_line(exc.cause, self._conn.statement_timeout),
+                _one_line(exc.cause, self._conn.run.statement_timeout),
             )
             comments = CommentsMeta(table=None, columns={})
             comments_known = False
 
         if described_without_query(
-            tbl.type,
-            read_rows=settings.read_rows,
+            settings.mode,
+            explicit=settings.explicit,
             has_columns=bool(columns),
+            view=tbl.type == "view",
             external=tbl.external,
             opt_in_only=tbl.opt_in_only,
         ):
             # Nothing is queried, so the file says so (SPEC 2.2.15) rather than going
             # unwritten; the columns above are the catalog's.
             catalog_layout = self._catalog_layout(tbl)
-            view_fk_source_columns = frozenset(c for fk in relationships for c in fk.column)
-            view_statistics_yaml = _serialize_catalog_only_statistics(
+            catalog_fk_source_columns = frozenset(c for fk in relationships for c in fk.column)
+            catalog_statistics_yaml = _serialize_catalog_only_statistics(
                 tbl.fqn,
                 tbl.type,
                 generated_at,
                 columns,
-                view_fk_source_columns,
+                catalog_fk_source_columns,
                 settings.statistics.enumeration_threshold,
                 depends_on,
                 external=tbl.external,
                 physical_layout=catalog_layout,
+                disabled=settings.profile.disabled(),
             )
 
             return _PerTableContext(
@@ -1128,12 +1197,13 @@ class Engine:
                 indexes=indexes,
                 comments=comments,
                 ddl=ddl,
-                statistics_yaml=view_statistics_yaml,
-                statistics_payload=_reread_statistics(view_statistics_yaml),
+                statistics_yaml=catalog_statistics_yaml,
+                statistics_payload=_reread_statistics(catalog_statistics_yaml),
                 profiled_at=generated_at,
                 row_count=None,
                 row_count_estimate=row_count_estimate,
                 max_age_days=settings.max_age_days,
+                profile=settings.profile,
                 eligible_target=eligible_target,
                 has_description=False,
                 has_statistics_annotations=False,
@@ -1145,17 +1215,10 @@ class Engine:
 
         fk_source_columns = frozenset(c for fk in relationships for c in fk.column)
 
-        if tbl.type == "view" and settings.sample is not None:
-            raise ValueError(
-                f"view {tbl.fqn!r}: {settings.sample_rule or 'a rule'} sets sample "
-                f"{settings.sample}, and a sampling clause binds to a table, not a view. Narrow "
-                f"the view with a filter rule instead.",
-            )
-
-        if tbl.type == "view" and self._conn.size_conditions_name(tbl.fqn):
+        if tbl.type == "view" and self._conn.min_rows_conditions_name(tbl.fqn):
             _LOG.warning(
-                "view %r has no row-count estimate; rules carrying `min_rows` or a "
-                "`max_rows_scanned` ceiling do not apply to it, so it is read whole",
+                "view %r has no row-count estimate; rules carrying `match.min_rows` do not apply "
+                "to it",
                 tbl.fqn,
             )
 
@@ -1173,7 +1236,7 @@ class Engine:
             _LOG.warning(
                 "introspect_physical_layout failed for %r: %s",
                 tbl.fqn,
-                _one_line(exc.cause, self._conn.statement_timeout),
+                _one_line(exc.cause, self._conn.run.statement_timeout),
             )
             physical_layout = None
             physical_layout_known = False
@@ -1187,7 +1250,7 @@ class Engine:
             _LOG.warning(
                 "introspect_merging failed for %r: %s",
                 tbl.fqn,
-                _one_line(exc.cause, self._conn.statement_timeout),
+                _one_line(exc.cause, self._conn.run.statement_timeout),
             )
             merging = None
             merging_known = False
@@ -1203,14 +1266,14 @@ class Engine:
             _LOG.warning(
                 "introspect_unique_keys failed for %r: %s",
                 tbl.fqn,
-                _one_line(exc.cause, self._conn.statement_timeout),
+                _one_line(exc.cause, self._conn.run.statement_timeout),
             )
             declared_keys = None
 
         scope = _table_scope(settings, count_exactly=tbl.type == "view")
         # A sampling construct redraws per statement, so a sampled table is copied once and every
         # call reads the copy (SPEC 2.2.8 keeps `scope`); on success it is released later, not here.
-        read_scope = self._materialize_scope(tbl.fqn, scope)
+        read_scope = self._materialize_scope(tbl.fqn, scope, materialize=settings.materialize)
 
         # A materialized copy is a plain table filled by one SELECT a session `final` never reaches.
         if merging is not None and read_scope is not None and read_scope.materialized is not None:
@@ -1225,7 +1288,7 @@ class Engine:
                     read_scope,
                 )
 
-            _warn_degraded_phase_a(tbl.fqn, phase_a, self._conn.statement_timeout)
+            _warn_degraded_phase_a(tbl.fqn, phase_a, self._conn.run.statement_timeout)
             base = phase_a.stats
             # SPEC 2.2.4: every later pass reads measured columns only, so no block claims
             # anything about a column phase A could not measure.
@@ -1261,17 +1324,19 @@ class Engine:
 
             stats = dict(phase_b.stats)
             unread = unsampled | set(phase_b.unmeasured)
-            _warn_degraded_blocks(tbl.fqn, stats, self._conn.statement_timeout)
+            _warn_degraded_blocks(tbl.fqn, stats, self._conn.run.statement_timeout)
             _warn_degraded_phase_b(
                 tbl.fqn,
                 [c.name for c in measured if c.name in unread],
                 [*(detected[n].sample_error for n in sorted(unsampled)), *phase_b.failures],
-                self._conn.statement_timeout,
+                self._conn.run.statement_timeout,
             )
 
             if degraded:
                 null_patterns = None
                 null_patterns_known = False
+            elif not settings.profile.null_patterns.enabled:
+                null_patterns, null_patterns_known = None, True
             else:
                 try:
                     with _operation("compute_null_patterns"):
@@ -1287,7 +1352,7 @@ class Engine:
                     _LOG.warning(
                         "compute_null_patterns failed for %r: %s",
                         tbl.fqn,
-                        _one_line(exc.cause, self._conn.statement_timeout),
+                        _one_line(exc.cause, self._conn.run.statement_timeout),
                     )
                     null_patterns = None
                     null_patterns_known = False
@@ -1329,6 +1394,7 @@ class Engine:
                 detected,
                 physical_layout,
                 read_scope,
+                enabled=settings.profile.timeline.enabled,
             )
 
             populated_windows = self._compute_populated_windows(
@@ -1369,7 +1435,7 @@ class Engine:
 
         enriched = self._with_types(tbl.fqn, measured, enriched, read_scope)
 
-        if settings.statistics.max_parts > 0:
+        if settings.profile.parts.enabled:
             enriched = self._with_parts(
                 tbl.fqn,
                 measured,
@@ -1410,6 +1476,7 @@ class Engine:
             ),
             merging=merging,
             external=tbl.external,
+            disabled=settings.profile.disabled(),
         )
 
         return _PerTableContext(
@@ -1427,6 +1494,7 @@ class Engine:
             row_count=counts.row_count,
             row_count_estimate=row_count_estimate,
             max_age_days=settings.max_age_days,
+            profile=settings.profile,
             rows_scanned=counts.rows_scanned,
             scope=scope,
             read_scope=read_scope,
@@ -1457,7 +1525,7 @@ class Engine:
         sets `keys_known=False`, and the warning here is its only record.
         """
 
-        if not self._conn.infer_relationships:
+        if not self._conn.any_infers:
             return {}
 
         pool = pool or SessionPool([self])
@@ -1569,7 +1637,7 @@ class Engine:
     ) -> list[ForeignKeyMeta]:
         """Edges the naming rule derives for one table, stamped `inferred`."""
 
-        if not self._conn.infer_relationships or not inventory or fqn not in inventory:
+        if not inventory or fqn not in inventory:
             return []
 
         edges = inference.infer_foreign_keys(inventory[fqn], inventory, declared)
@@ -1581,13 +1649,12 @@ class Engine:
         fqn: str,
         inventory: dict[str, inference.TableInventory] | None,
     ) -> bool | None:
-        """Whether this table could ever be an inferred edge's target (SPEC 2.3.8).
+        """Whether this table could ever be an inferred edge's target (SPEC 2.3.8); None when no table infers.
 
-        None when the pre-pass never ran (`infer_relationships: false`) - the same guard
-        as `_inferred_edges`, so the two never disagree.
+        A table with its own inference off stays a target: dropping it could unambiguate another stem.
         """
 
-        if not self._conn.infer_relationships or not inventory or fqn not in inventory:
+        if not inventory or fqn not in inventory:
             return None
 
         return inference.can_be_target(inventory[fqn])
@@ -1620,7 +1687,7 @@ class Engine:
             _LOG.warning(
                 "table %r: the document type counts could not be read; `types` is omitted: %s",
                 fqn,
-                _one_line(exc.cause, self._conn.statement_timeout),
+                _one_line(exc.cause, self._conn.run.statement_timeout),
             )
 
             return enriched
@@ -1670,7 +1737,7 @@ class Engine:
                     "published: %s",
                     fqn,
                     col.name,
-                    _one_line(exc.cause, self._conn.statement_timeout),
+                    _one_line(exc.cause, self._conn.run.statement_timeout),
                 )
 
                 continue
@@ -1709,7 +1776,13 @@ class Engine:
 
         # A column first measured here never ran detection, which skips an unsupported column.
         if classification == "composite" and inferred is None:
-            sensitivity = detect_sensitivity(col.physical_name or col.name, [], None)
+            sensitivity = detect_sensitivity(
+                col.physical_name or col.name,
+                [],
+                None,
+                classification=classification,
+                table=split_fqn(fqn)[-1],
+            )
             inferred = Inferred(sensitivity=sensitivity) if sensitivity is not None else None
 
         column_inferred = (
@@ -1805,13 +1878,25 @@ class Engine:
         looks_like = None
 
         if classification in SAMPLED_CLASSIFICATIONS and samples:
-            looks_like = detect_with_evidence(samples).pattern
+            looks_like = detect_with_evidence(
+                samples,
+                column_name=last_member(part.path) or col.name,
+                classification=classification,
+                cardinality=stats.cardinality,
+                rows=occurrences - stats.null_count,
+            ).pattern
 
             if looks_like == "numeric_string" and is_numeric_type(stats.sql_type):
                 looks_like = None
 
         sensitivity = (
-            detect_sensitivity(last_member(part.path) or col.name, samples, looks_like)
+            detect_sensitivity(
+                last_member(part.path) or col.name,
+                samples,
+                looks_like,
+                classification=classification,
+                table=split_fqn(fqn)[-1],
+            )
             if classification != "unsupported"
             else None
         )
@@ -1902,8 +1987,11 @@ class Engine:
             # Sampling is what `looks_like` costs, so it is gated on the classifications
             # SPEC 4.1.5 names; `sensitivity` reads catalog metadata plus the sample if drawn.
             sample_error = None
+            sampled = (
+                classification in SAMPLED_CLASSIFICATIONS and settings.profile.looks_like.enabled
+            )
 
-            if classification in SAMPLED_CLASSIFICATIONS:
+            if sampled:
                 try:
                     with _operation("sample_values"):
                         samples = self._adapter.sample_values(
@@ -1916,9 +2004,15 @@ class Engine:
                 except _OperationFailed as exc:
                     sample_error = exc.cause if isinstance(exc.cause, Exception) else exc
 
-            if sample_error is None and classification in SAMPLED_CLASSIFICATIONS:
+            if sample_error is None and sampled:
                 try:
-                    match = detect_with_evidence(samples)
+                    match = detect_with_evidence(
+                        samples,
+                        column_name=col.physical_name or col.name,
+                        classification=classification,
+                        cardinality=stats.cardinality,
+                        rows=counts.rows_scanned - stats.null_count,
+                    )
                     looks_like_value = match.pattern
                     epoch_unit_value = sample_epoch_unit(samples)
                 except Exception as exc:  # noqa: BLE001 - contain to this column, not the table
@@ -1960,6 +2054,8 @@ class Engine:
                         col.physical_name or col.name,
                         samples,
                         looks_like_value,
+                        classification=classification,
+                        table=split_fqn(fqn)[-1],
                     )
                 except Exception as exc:  # noqa: BLE001 - contain to this column, not the table
                     _LOG.warning("sensitivity detection failed for %s.%s: %s", fqn, col.name, exc)
@@ -2065,7 +2161,7 @@ class Engine:
                 _LOG.warning(
                     "probe_grain failed for %r: %s",
                     fqn,
-                    _one_line(exc.cause, self._conn.statement_timeout),
+                    _one_line(exc.cause, self._conn.run.statement_timeout),
                 )
 
                 return Grain(keys=keys, search_exhausted=None), False
@@ -2114,7 +2210,7 @@ class Engine:
             _LOG.warning(
                 "probe_dependencies failed for %r: %s",
                 fqn,
-                _one_line(exc.cause, self._conn.statement_timeout),
+                _one_line(exc.cause, self._conn.run.statement_timeout),
             )
 
             return (), False
@@ -2138,17 +2234,14 @@ class Engine:
         detected: dict[str, _ColumnDetection],
         physical_layout: PhysicalLayout | None,
         scope: TableScope | None,
+        *,
+        enabled: bool,
     ) -> Timeline | None:
         """SPEC 2.2.16: the anchor column's activity, bucketed at an adaptive unit - skipped under
         a `scope` or an empty table, a bucketed count over a sample not being a timeline.
         """
 
-        if (
-            not self._conn.compute_timeline
-            or scope is not None
-            or counts.row_count == 0
-            or counts.rows_scanned == 0
-        ):
+        if not enabled or scope is not None or counts.row_count == 0 or counts.rows_scanned == 0:
             return None
 
         column = _choose_timeline_anchor(columns, base, counts, detected, physical_layout)
@@ -2176,7 +2269,7 @@ class Engine:
             _LOG.warning(
                 "probe_timeline failed for %r: %s",
                 fqn,
-                _one_line(exc.cause, self._conn.statement_timeout),
+                _one_line(exc.cause, self._conn.run.statement_timeout),
             )
 
             return None
@@ -2238,7 +2331,7 @@ class Engine:
             _LOG.warning(
                 "compute_populated_windows failed for %r: %s",
                 fqn,
-                _one_line(exc.cause, self._conn.statement_timeout),
+                _one_line(exc.cause, self._conn.run.statement_timeout),
             )
 
             return {}
@@ -2257,19 +2350,60 @@ class Engine:
             _LOG.warning(
                 "introspect_physical_layout failed for %r: %s",
                 tbl.fqn,
-                _one_line(exc.cause, self._conn.statement_timeout),
+                _one_line(exc.cause, self._conn.run.statement_timeout),
             )
 
             return None
 
-    def _opts_in(self, fqn: str) -> bool:
-        # A table whose rules conflict reads as opted in, so the settings read below fails it.
-        try:
-            return self._conn.settings_for(fqn).read_rows
-        except ConfigError:
-            return True
+    def _refuse_remote_reads(self, tables: list[TableMeta]) -> None:
+        """Refuse, before any table is queried, a rule's explicit read of an external table on an
+        adapter whose read of one reaches another live system.
+        """
 
-    def _materialize_scope(self, fqn: str, scope: TableScope | None) -> TableScope | None:
+        if not self._adapter.EXTERNAL_READ_REFUSED:
+            return
+
+        for tbl in tables:
+            if not tbl.external:
+                continue
+
+            for rule in reversed(self._conn.rules):
+                mode = rule.written_mode("tables")
+
+                if mode is None or not rule.matches_name(tbl.fqn):
+                    continue
+
+                if mode != "catalog":
+                    message = (
+                        f"{rule.label}.profile.read.tables.mode: {mode} is not valid for "
+                        f"external table {tbl.fqn!r} on {self._conn.adapter} - reading it "
+                        f"reaches another system; describe it from the catalog"
+                    )
+
+                    raise ConfigError(message)
+
+                break
+
+    def _reads(self, tbl: TableMeta) -> bool:
+        """Whether `tbl` is queried at all, resolved by name alone."""
+
+        settings = self._conn.settings_for(tbl.fqn, _kind(tbl.type))
+
+        return not described_without_query(
+            settings.mode,
+            explicit=settings.explicit,
+            has_columns=True,
+            external=tbl.external,
+            opt_in_only=tbl.opt_in_only,
+        )
+
+    def _materialize_scope(
+        self,
+        fqn: str,
+        scope: TableScope | None,
+        *,
+        materialize: bool,
+    ) -> TableScope | None:
         """The scope every statistics statement reads: one copied draw, or `scope` itself.
 
         Only a drawn fraction is copied, and only where the connection permits the write. An
@@ -2279,14 +2413,14 @@ class Engine:
         if scope is None or scope.sample is None:
             return scope
 
-        if not self._conn.materialize_sample:
+        if not materialize:
             if not self._adapter.SAMPLE_FALLBACK_COHERENT:
                 raise SampleFallbackIncoherent(
                     f"table {fqn!r}: connection {self._conn.name!r} ({self._conn.adapter}) "
-                    f"sets materialize_sample: false, and this adapter's per-statement "
-                    f"sampling construct cannot be seeded into agreement across statements. "
-                    f"Set materialize_sample: true for this connection, or narrow with a "
-                    f"filter instead of a sample fraction.",
+                    f"reads it with read.tables.materialize: false, and this adapter's "
+                    f"per-statement sampling construct cannot be seeded into agreement across "
+                    f"statements. Set read.tables.materialize: true for this table's rule, or "
+                    f"narrow with mode: filter instead of a sample.",
                 )
 
             return scope
@@ -2294,14 +2428,14 @@ class Engine:
         try:
             return self._adapter.materialize_scope(fqn, scope)
         except Exception as exc:  # refuse or degrade, per adapter coherence
-            cause = _one_line(exc, self._conn.statement_timeout)
+            cause = _one_line(exc, self._conn.run.statement_timeout)
 
             if not self._adapter.SAMPLE_FALLBACK_COHERENT:
                 raise SampleFallbackIncoherent(
                     f"table {fqn!r}: connection {self._conn.name!r} ({self._conn.adapter}) "
                     f"could not materialize its sample of {scope.sample} ({cause}), and this "
                     f"adapter's per-statement fallback cannot be seeded into agreement across "
-                    f"statements. Narrow with a filter instead of a sample fraction.",
+                    f"statements. Narrow with mode: filter instead of a sample.",
                 ) from exc
 
             _LOG.warning(
@@ -2373,7 +2507,7 @@ class Engine:
             lambda cols, ctx: _widened_sketch_candidates(
                 cols,
                 ctx.unique_keys,
-                self._conn.sketch_all_columns,
+                ctx.profile.sketches.columns == "all",
             ),
         )
 
@@ -2391,6 +2525,7 @@ class Engine:
                 not payload
                 or isinstance(payload.get("scope"), dict)
                 or payload.get("catalog_only") is True
+                or not ctx.profile.sketches.enabled
             ):
                 # No statistics, scoped (no reproducible sketch, SPEC 2.2.14), or nothing
                 # was queried at all (SPEC 2.2.15) - a sketch needs a live read either way.
@@ -2501,7 +2636,7 @@ class Engine:
                     )
             except Exception as exc:  # noqa: BLE001 - run-all-then-report; this column only
                 cause = exc.cause if isinstance(exc, _OperationFailed) else exc
-                error_text = _one_line(cause, self._conn.statement_timeout)
+                error_text = _one_line(cause, self._conn.run.statement_timeout)
                 failures.append(SketchFailure(table=fqn, column=column, error=error_text))
                 table_error = table_error or error_text
                 continue
@@ -2533,12 +2668,12 @@ class Engine:
         per_table_meta: dict[str, _PerTableContext],
         carried: Mapping[str, CommittedTable],
     ) -> dict[str, list[ForeignKeyMeta]]:
-        """SPEC 2.3: propose an edge from measured value containment alone, no query issued.
+        """SPEC 2.3: propose an edge from measured value containment, no query issued.
 
         Carried children's proposals are returned, not joined; two carried tables never compare.
         """
 
-        threshold = self._conn.statistics.enumeration_threshold
+        threshold = self._conn.profile.statistics.enumeration_threshold
         children: list[inference.SketchCandidate] = []
         parents: list[inference.SketchCandidate] = []
         existing: set[tuple[str, str, str, str]] = set()
@@ -2578,6 +2713,9 @@ class Engine:
                     committed_column.sql_type,
                     cardinality,
                     sketch,
+                    declared_key=column in declared,
+                    candidate_key=committed_column.candidate_key,
+                    dense=_dense_sequence(committed_column.sql_type, committed_column.stats),
                 )
 
                 if column in declared or committed_column.candidate_key:
@@ -2617,7 +2755,16 @@ class Engine:
 
                 inferred = col_payload.get("inferred")
                 candidate_key = isinstance(inferred, dict) and inferred.get("candidate_key") is True
-                candidate = inference.SketchCandidate(fqn, column, sql_type, cardinality, sketch)
+                candidate = inference.SketchCandidate(
+                    fqn,
+                    column,
+                    sql_type,
+                    cardinality,
+                    sketch,
+                    declared_key=column in single_col_keys,
+                    candidate_key=candidate_key,
+                    dense=_dense_sequence(sql_type, col_payload),
+                )
 
                 if column in single_col_keys or candidate_key:
                     parents.append(candidate)
@@ -2635,6 +2782,121 @@ class Engine:
                 carried_children[child_fqn] = kept
 
         return carried_children
+
+    def _load_lineage_source(self, path: Path) -> DbtManifest:
+        try:
+            from . import lineage  # function-scoped: sqlglot ships in the optional [dbt] extra
+        except ImportError as exc:
+            message = (
+                "sqlglot is not installed. Install dbprint with the [dbt] extra: "
+                "`pip install dbprint[dbt]`."
+            )
+
+            raise _LineageUnavailable(message) from exc
+
+        try:
+            source = lineage.load_manifest(path)
+        except lineage.ManifestUnreadable as exc:
+            raise _LineageUnavailable(str(exc)) from exc
+
+        if source.schema_version > lineage.NEWEST_KNOWN_SCHEMA_VERSION:
+            _LOG.warning(
+                "connection %r: dbt manifest v%d is newer than v%d; reading it as v%d",
+                self._conn.name,
+                source.schema_version,
+                lineage.NEWEST_KNOWN_SCHEMA_VERSION,
+                lineage.NEWEST_KNOWN_SCHEMA_VERSION,
+            )
+
+        if (
+            source.adapter_type
+            and source.adapter_type not in lineage.DBT_ADAPTERS[self._conn.adapter]
+        ):
+            _LOG.warning(
+                "connection %r: dbt manifest was built for %r, not %r; relations may not map",
+                self._conn.name,
+                source.adapter_type,
+                self._conn.adapter,
+            )
+
+        return source
+
+    def _write_lineage(
+        self,
+        per_table_meta: dict[str, _PerTableContext],
+        carry: CarrySet,
+        source: DbtManifest,
+        stage: RunStage,
+    ) -> None:
+        """SPEC 2.2.4 `derived_from`: each printed model column's direct sources, written into
+        this run's files and into a carried fresh table's where its traced list changed.
+        """
+
+        from . import lineage
+
+        columns: dict[str, list[str]] = {c.table.fqn: list(c.table.columns) for c in carry.carried}
+
+        for fqn, ctx in per_table_meta.items():
+            payload_columns = (ctx.statistics_payload or {}).get("columns")
+
+            if isinstance(payload_columns, dict):
+                columns[fqn] = list(payload_columns)
+
+        if not columns:
+            return
+
+        depth = len(split_fqn(next(iter(columns))))
+        reading = lineage.trace(source, vendor=self._conn.adapter, depth=depth, columns=columns)
+        traced_columns = sum(len(table) for table in reading.tables.values())
+        _LOG.info(
+            "connection %r: lineage: %d of %d models parsed, %d of %d columns traced",
+            self._conn.name,
+            reading.models_parsed,
+            reading.models_eligible,
+            traced_columns,
+            sum(len(names) for names in columns.values()),
+        )
+
+        if source.models and not reading.models_eligible:
+            _LOG.warning(
+                "connection %r: lineage: no model in the dbt manifest names a printed table - "
+                "was it compiled for another target?",
+                self._conn.name,
+            )
+
+        for unique_id, cause in reading.unparsed:
+            _LOG.warning(
+                "connection %r: lineage: %s not parsed: %s",
+                self._conn.name,
+                unique_id,
+                cause,
+            )
+
+        for fqn, ctx in per_table_meta.items():
+            if ctx.statistics_yaml is None or not (traced := reading.tables.get(fqn)):
+                continue
+
+            _rewrite_statistics(
+                ctx,
+                {
+                    name: {"derived_from": _derived_from(sources)}
+                    for name, sources in traced.items()
+                },
+            )
+
+        for carried_table in carry.carried:
+            table = carried_table.table
+
+            if carried_table.reason != "fresh" or table.statistics_text is None:
+                continue
+
+            wanted = {
+                name: _derived_from(sources)
+                for name, sources in reading.tables.get(table.fqn, {}).items()
+            }
+
+            if (rewritten := relineaged_statistics(table.statistics_text, wanted)) is not None:
+                stage.write(table.directory, {STATISTICS_FILENAME: rewritten})
 
     def _write_normalized_cardinalities(
         self,
@@ -2702,7 +2964,7 @@ class Engine:
                     "compute_normalized_cardinality failed for %r.%r: %s",
                     ctx.fqn,
                     column,
-                    _one_line(cause, self._conn.statement_timeout),
+                    _one_line(cause, self._conn.run.statement_timeout),
                 )
                 continue
 
@@ -2730,10 +2992,9 @@ class Engine:
             adapter_kind=self._conn.adapter,
             entries=entries,
             generated_at=generated_at,
-            statistics_params=statistics_params_dict(self._conn.statistics),
-            profiling_params=profiling_params_dict(self._conn),
+            profile=profile_dict(self._conn.profile),
             selectors=diff_module.DiffSelectors(include=outcome.include, exclude=outcome.exclude),
-            redaction_rules_configured=len(self._conn.redact),
+            redaction_rules_configured=len(self._conn.profile.redact),
             default_collation=outcome.default_collation,
             failed_tables=outcome.failed_tables,
             has_manifest_annotations=(prints_root / MANIFEST_ANNOTATIONS_FILENAME).is_file(),
@@ -2844,6 +3105,7 @@ class _PerTableContext:
     row_count: int | None
     row_count_estimate: int | None = None
     max_age_days: int | None = None
+    profile: ProfileConfig = field(default_factory=ProfileConfig)
     rows_scanned: int | None = None
     scope: TableScope | None = None
     # The materialized copy `scope` was read through, kept alive past extraction so
@@ -2899,15 +3161,14 @@ def _join_key_candidates(
 def _widened_sketch_candidates(
     columns_payload: dict[str, Any],
     unique_keys: tuple[UniqueKeyMeta, ...],
-    sketch_all_columns: bool,
+    all_columns: bool,
 ) -> set[str]:
     """SPEC 2.2.14's MAY-set: declared-unique, exhaustive-sized, or a measured candidate key.
 
-    `sketch_all_columns` replaces the three conditions with every column. Type and exclusion
-    filtering (redacted, unsketchable, scope, catalog-only) happens in the caller, not here.
+    `all_columns` widens it to every column; the caller filters type, redaction, scope, catalog-only.
     """
 
-    if sketch_all_columns:
+    if all_columns:
         return set(columns_payload)
 
     out = {uk.columns[0] for uk in unique_keys if len(uk.columns) == 1} & set(columns_payload)
@@ -3124,6 +3385,10 @@ class _ProgressEmitter:
 
 
 # Helpers.
+
+
+class ConnectFailed(RuntimeError):
+    """The database could not be reached for a live read."""
 
 
 class SampleFallbackIncoherent(RuntimeError):
@@ -3759,6 +4024,12 @@ def _timeline_unit(span_days: int | None) -> Literal["day", "week", "month"]:
     return "month"
 
 
+def _kind(table_type: str | None) -> Literal["table", "view"]:
+    """A plain view reads under `read.views`; a table or materialized view under `read.tables`."""
+
+    return "view" if table_type == "view" else "table"
+
+
 def _table_scope(settings: TableSettings, *, count_exactly: bool = False) -> TableScope | None:
     """Row-level narrowing in force for one table, or None for a full scan."""
 
@@ -3786,6 +4057,7 @@ def _serialize_statistics(
     unmeasured: tuple[str, ...] = (),
     merging: TableMerging | None = None,
     external: bool = False,
+    disabled: tuple[str, ...] = (),
 ) -> str:
     columns_payload: dict[str, Any] = {}
     narrows = scope is not None and scope.narrows
@@ -3946,6 +4218,9 @@ def _serialize_statistics(
     if depends_on is not None:
         payload["depends_on"] = list(depends_on)
 
+    if disabled:
+        payload["disabled"] = list(disabled)
+
     # SPEC 2.2.1: only blocks this run owed and missed - never one already structurally absent.
     if named := sorted(b for b in unmeasured if payload.get(b) is None):
         payload["unmeasured"] = named
@@ -3978,6 +4253,7 @@ def _serialize_catalog_only_statistics(
     *,
     external: bool = False,
     physical_layout: PhysicalLayout | None = None,
+    disabled: tuple[str, ...] = (),
 ) -> str:
     """The statistics artifact for an object nothing was queried for (SPEC 2.2.15).
 
@@ -4031,6 +4307,9 @@ def _serialize_catalog_only_statistics(
     # emitted here, unlike a measurement such as `dependencies`. Absent means could not ask.
     if depends_on is not None:
         payload["depends_on"] = list(depends_on)
+
+    if disabled:
+        payload["disabled"] = list(disabled)
 
     payload["columns"] = columns_payload
 
@@ -4659,10 +4938,7 @@ def _build_manifest_entries(
     """
 
     carried = {c.table.fqn: c for c in outcome.carry.carried}
-    blocks = {
-        "statistics_params": statistics_params_dict(conn.statistics),
-        "profiling_params": profiling_params_dict(conn),
-    }
+    base = profile_dict(conn.profile)
     entries: list[ManifestTableEntry] = []
 
     for fqn in outcome.matched_fqns:
@@ -4675,11 +4951,13 @@ def _build_manifest_entries(
                 carried_entry(
                     carried.pop(fqn),
                     resolved_max_age_days=outcome.resolved_thresholds.get(fqn),
-                    **blocks,
+                    profile=base,
                 ),
             )
 
-    entries.extend(carried_entry(c, resolved_max_age_days=None, **blocks) for c in carried.values())
+    entries.extend(
+        carried_entry(c, resolved_max_age_days=None, profile=base) for c in carried.values()
+    )
 
     return entries
 
@@ -4689,6 +4967,9 @@ def _entry_from_context(
     ctx: _PerTableContext,
     conn: ConnectionConfig,
 ) -> ManifestTableEntry:
+    settings = conn.settings_for(fqn, _kind(ctx.type), ctx.row_count_estimate)
+    catalog_only = block_value(ctx.statistics_payload, "catalog_only") is True
+
     return ManifestTableEntry(
         fqn=fqn,
         type=ctx.type,
@@ -4704,31 +4985,9 @@ def _entry_from_context(
         columns=len(ctx.columns),
         profiled_at=ctx.profiled_at,
         max_age_days=ctx.max_age_days,
-        statistics_params=_statistics_override(conn, fqn, ctx.row_count_estimate),
-        max_rows_scanned=(
-            None
-            if ctx.type == "view" or block_value(ctx.statistics_payload, "catalog_only") is True
-            else conn.settings_for(fqn, ctx.row_count_estimate).max_rows_scanned
-        ),
+        profile=profile_delta(profile_dict(settings.profile), profile_dict(conn.profile)),
+        max_rows_scanned=None if ctx.type == "view" or catalog_only else settings.max_rows_scanned,
     )
-
-
-def _statistics_override(
-    conn: ConnectionConfig,
-    fqn: str,
-    row_count_estimate: int | None,
-) -> dict[str, Any] | None:
-    """This table's `StatisticsConfig`, only where it differs from the connection default.
-
-    `row_count_estimate` must be the catalog estimate `settings_for` resolved against (SPEC
-    2.5) - the profiled count can sit the other side of a `min_rows` threshold.
-    """
-
-    resolved = statistics_params_dict(conn.settings_for(fqn, row_count_estimate).statistics)
-    default = statistics_params_dict(conn.statistics)
-    diff = {key: value for key, value in resolved.items() if value != default[key]}
-
-    return diff or None
 
 
 def _manifest_unchanged(manifest: dict[str, Any], baseline: Mapping[str, Any] | None) -> bool:
@@ -4750,8 +5009,8 @@ def _run_scope(
     """The scope this run applied: the connection's own lists plus the CLI's narrowing."""
 
     return diff_module.DiffSelectors(
-        include=tuple(conn.include),
-        exclude=tuple(conn.exclude),
+        include=tuple(conn.tables.include),
+        exclude=tuple(conn.tables.exclude),
         cli_include=cli_include,
         cli_exclude=cli_exclude,
     )
@@ -4800,7 +5059,7 @@ def _redaction_failure(
         "failed": "not re-read - fix the failure and rerun",
     }[carried.reason]
 
-    if not selectors.match(carried.table.fqn, list(conn.include), list(conn.exclude)):
+    if not selectors.match(carried.table.fqn, list(conn.tables.include), list(conn.tables.exclude)):
         return (
             f"{carried.table.fqn} publishes columns the current redact rules would publish "
             f"otherwise: {columns}; the connection's selectors exclude it - include it again, "
@@ -4811,6 +5070,23 @@ def _redaction_failure(
         f"{carried.table.fqn} publishes columns the current redact rules would publish "
         f"otherwise: {columns}; {remedy}, or run `dbprint generate --force`"
     )
+
+
+def _dense_sequence(sql_type: str, column: Mapping[str, Any]) -> bool:
+    bounds = column.get("range")
+
+    if sketch_kind(sql_type) != "integer" or column.get("cardinality_method") != "exact":
+        return False
+
+    if not isinstance(bounds, dict):
+        return False
+
+    low, high, cardinality = bounds.get("min"), bounds.get("max"), column.get("cardinality")
+
+    if not all(isinstance(v, int) and not isinstance(v, bool) for v in (low, high, cardinality)):
+        return False
+
+    return high - low + 1 == cardinality
 
 
 def _declared_single_keys(statistics: Mapping[str, Any]) -> set[str]:
@@ -5006,13 +5282,13 @@ def _failed_tables(
         result.fqn
         for result in results
         if result.status == "failed"
-        and selectors.match(result.fqn, list(conn.include), list(conn.exclude))
+        and selectors.match(result.fqn, list(conn.tables.include), list(conn.tables.exclude))
     }
     carried = {
         fqn
         for fqn in committed.failed_tables
         if not run_scope.covers(fqn)
-        and selectors.match(fqn, list(conn.include), list(conn.exclude))
+        and selectors.match(fqn, list(conn.tables.include), list(conn.tables.exclude))
     }
 
     return tuple(sorted(failed | carried))
@@ -5205,6 +5481,7 @@ def _table_state_from_context(
     state.row_count_method = row_count_method if isinstance(row_count_method, str) else None
     state.scoped = isinstance(ctx.statistics_payload.get("scope"), dict)
     state.catalog_only = ctx.statistics_payload.get("catalog_only") is True
+    state.disabled = disabled_of(ctx.statistics_payload)
 
     # An empty payload leaves grain/physical_layout at the None default - "no data
     # contributed", as for every statistics-derived field. A view carries `grain: {keys: []}`
@@ -5231,13 +5508,17 @@ def _table_state_from_context(
     return state
 
 
+def _derived_from(sources: Sequence[SourceColumn]) -> list[dict[str, str]]:
+    return [{"table": source.table, "column": source.column} for source in sources]
+
+
 def _rewrite_statistics(ctx: _PerTableContext, added: dict[str, dict[str, Any]]) -> None:
     """Rewrite `statistics.yaml` with post-pass fields, from the written text rather than the
     float-read comparison copy, which has already lost digits past binary64.
     """
 
     assert ctx.statistics_yaml is not None
-    exact = artifact_yaml.load(ctx.statistics_yaml, loader=_ExactLoader)
+    exact = artifact_yaml.load(ctx.statistics_yaml, loader=ExactLoader)
 
     for column, fields in added.items():
         exact["columns"][column].update(fields)
@@ -5247,22 +5528,6 @@ def _rewrite_statistics(ctx: _PerTableContext, added: dict[str, dict[str, Any]])
     ctx.statistics_payload = _reread_statistics(ctx.statistics_yaml)
     assert ctx.stage is not None
     ctx.stage.write(ctx.tbl_dir, {STATISTICS_FILENAME: ctx.statistics_yaml})
-
-
-class _ExactLoader(ArtifactLoader):
-    pass
-
-
-def _construct_exact_float(loader: ArtifactLoader, node: yaml.ScalarNode) -> Any:
-    text = loader.construct_scalar(node)
-
-    try:
-        return Decimal(text.replace("_", ""))
-    except ArithmeticError:
-        return loader.construct_yaml_float(node)
-
-
-_ExactLoader.add_constructor("tag:yaml.org,2002:float", _construct_exact_float)
 
 
 def _reread_statistics(statistics_yaml: str) -> dict[str, Any]:

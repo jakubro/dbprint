@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from dbprint.config import ConfigError, ConnectionConfig
+from dbprint.config import ConnectionConfig
 from dbprint.spec.temporal_age import negative_max_age_refusal
 
 
@@ -37,10 +37,7 @@ class OfflineThresholds:
 def resolve(conn: ConnectionConfig, manifest: dict[str, Any] | None) -> OfflineThresholds:
     """Settle every entry's threshold: the one it records, else what its rules resolve to.
 
-    Fallback is per entry, not per manifest: a partial re-extract leaves entries carrying
-    the field beside inherited ones that do not. A non-numeric `max_age_days` is treated as
-    absent; one SPEC 2.5 forbids (negative, or not whole) is refused, as is a table whose own
-    rules raise - refusals are per table, so one bad config cannot drop a neighbour's verdict.
+    Per entry: a non-numeric value reads as absent, and one SPEC 2.5 forbids refuses that table alone.
     """
 
     resolved: dict[str, float] = {}
@@ -63,11 +60,8 @@ def resolve(conn: ConnectionConfig, manifest: dict[str, Any] | None) -> OfflineT
 
             continue
 
-        try:
-            resolved[fqn] = float(conn.settings_for(fqn).max_age_days)
-        except ConfigError as exc:
-            refused[fqn] = str(exc)
-            continue
+        kind = "view" if entry_type == "view" else "table"
+        resolved[fqn] = float(conn.settings_for(fqn, kind).max_age_days)
 
         # No size condition governs a view, or an unqueried object - the entry with no `row_count`.
         if (
@@ -96,6 +90,6 @@ def size_gate_warning(connection_name: str, size_gated: Sequence[str]) -> str:
 
     return (
         f"{connection_name}: no row count is available without a database, so rules carrying "
-        f"`min_rows` did not apply to {tables}. Their thresholds come from the rules matching "
+        f"`match.min_rows` did not apply to {tables}. Their thresholds come from the rules matching "
         f"by name alone, or from the connection."
     )

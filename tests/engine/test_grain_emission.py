@@ -19,7 +19,7 @@ from dbprint.adapters import (
     MockTable,
     UniqueKeyMeta,
 )
-from dbprint.config import ConnectionConfig, RuleConfig
+from dbprint.config import ConnectionConfig, ProfileConfig, RelationshipsProfile, RuleConfig
 from dbprint.engine import Engine, GenerateRequest
 from dbprint.engine.context_assembler import AssemblyOptions, assemble
 from tests._engine_run import artifact
@@ -288,7 +288,7 @@ def _regenerate(tmp_path: Path, unique_keys: list[UniqueKeyMeta]) -> None:
         name="w",
         adapter="postgres",
         output=tmp_path,
-        infer_relationships=False,
+        profile=ProfileConfig(relationships=RelationshipsProfile(infer=False)),
     )
     fixture = _fixture(unique_keys, set(), None, 1000, "base")
     Engine(MockAdapter(fixture), conn, tmp_path).generate(GenerateRequest(force=True))
@@ -305,13 +305,17 @@ def _generate(
     row_count: int = 1000,
     mode: str = "base",
 ) -> dict[str, Any]:
-    rules = (RuleConfig(sample=sample),) if sample is not None else ()
+    rules = (
+        (RuleConfig(profile={"read": {"tables": {"mode": "sample", "fraction": sample}}}),)
+        if sample is not None
+        else ()
+    )
     conn = ConnectionConfig(
         name="w",
         adapter="postgres",
         output=tmp_path,
-        infer_relationships=False,
         rules=rules,
+        profile=ProfileConfig(relationships=RelationshipsProfile(infer=False)),
     )
     fixture = _fixture(
         unique_keys,

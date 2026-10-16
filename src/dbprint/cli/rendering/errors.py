@@ -35,7 +35,7 @@ def no_tables_matched_text(
     The CLI pair is reported beside the config's, never folded into it: it can only narrow.
     """
 
-    parts = [f"include={list(conn.include)}", f"exclude={list(conn.exclude)}"]
+    parts = [f"include={list(conn.tables.include)}", f"exclude={list(conn.tables.exclude)}"]
 
     if cli_include:
         parts.append(f"--include={list(cli_include)}")

@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 import yaml
 
-from dbprint.config import ConnectionConfig
+from dbprint.config import ConnectionConfig, RuleMatch
 from dbprint.config.project import RuleConfig
 from dbprint.engine import AssemblyOptions, Purpose, assemble_context, assemble_structured_context
 from dbprint.mcp import McpError, ServedConnections, dispatch, paging
@@ -192,7 +192,7 @@ class TestEveryListReplyIsPaged:
         path = primary_conn.output / primary_conn.name / "manifest.yaml"
         manifest = yaml.safe_load(path.read_text())
         fqn = next(iter(manifest["tables"]))
-        manifest["tables"][fqn]["statistics_params"] = {"note": 'xé"' * 15_000}
+        manifest["tables"][fqn]["profile"] = {"note": 'xé"' * 15_000}
         path.write_text(yaml.safe_dump(manifest))
 
         pages = self._walk(_state_for(primary_conn), "get_manifest", {"pattern": fqn})
@@ -1163,7 +1163,12 @@ class TestListTablesFreshness:
         _edit_manifest_entries(primary_conn, arboretum__seedbank__taxon={"max_age_days": None})
         gated = replace(
             primary_conn,
-            rules=(RuleConfig(include=("arboretum.seedbank.taxon",), min_rows=10, max_age_days=3),),
+            rules=(
+                RuleConfig(
+                    match=RuleMatch(tables=("arboretum.seedbank.taxon",), min_rows=10),
+                    profile={"freshness": {"max_age_days": 3}},
+                ),
+            ),
         )
 
         result = _dict_result(_state_for(gated), "list_tables", {"detail": True})
@@ -1547,7 +1552,6 @@ class TestSearchColumns:
             "institution_email",
             "street_address",
             "vernacular_name",
-            "site_name",
         }
         # collector_id carries no sensitivity, so the wildcard must not match its absence.
         assert "collector_id" not in cols

@@ -15,7 +15,6 @@ from dbprint.config.connections import env_var_name
 
 
 _PROJECT = """\
-version: 1
 connections:
   plots:
     adapter: duckdb
@@ -111,7 +110,7 @@ def test_a_print_from_an_earlier_release_leaves_once_deleted_by_hand(project: Pa
     (project / ".dbprint.yaml").write_text(
         _PROJECT.replace(
             "  plots:\n    adapter: duckdb\n",
-            '  plots:\n    adapter: duckdb\n    exclude: ["plots.main.beds.v2"]\n',
+            '  plots:\n    adapter: duckdb\n    tables: {exclude: ["plots.main.beds.v2"]}\n',
         ),
     )
     carried = _run("generate", "--no-tui")[0]

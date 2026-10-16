@@ -12,6 +12,7 @@ from typing import Any, cast
 
 from dbprint.adapters import Adapter
 from dbprint.config import ConnectionConfig, resolve_connection
+from dbprint.config.connections import CredentialsFileInvalid
 from dbprint.config.project import REDACTION_SALT_KEY, bind_redaction_salt
 from dbprint.engine import Engine
 from .adapter_registry import get_adapter_class
@@ -66,6 +67,8 @@ def build_engine(conn_config: ConnectionConfig, project_root: Path) -> EngineSet
             optional_keys=[*adapter_class.OPTIONAL_KEYS, REDACTION_SALT_KEY],
             path_keys=list(adapter_class.PATH_KEYS),
         )
+    except CredentialsFileInvalid:
+        raise
     except Exception as exc:
         raise ConnectionSetupError(str(exc)) from exc
 
@@ -77,7 +80,7 @@ def build_engine(conn_config: ConnectionConfig, project_root: Path) -> EngineSet
 
     # The ABC cannot type the constructor: adapters take credentials, MockAdapter a fixture.
     adapter_ctor = cast(Any, adapter_class)
-    adapter = adapter_ctor(credentials, statement_timeout=conn_config.statement_timeout)
+    adapter = adapter_ctor(credentials, statement_timeout=conn_config.run.statement_timeout)
 
     return EngineSetup(
         adapter=adapter,

@@ -12,7 +12,7 @@ from dbprint.adapters import ClickhouseAdapter, DatabricksAdapter, PostgresAdapt
 from dbprint.adapters.base import PartSource, key_literal
 from dbprint.adapters.dialect import Vendor
 from dbprint.adapters.sql_layout import derived, select_from
-from dbprint.config import StatisticsConfig
+from dbprint.config import PartsProfile
 from dbprint.config.project import RedactRule
 from tests.adapters._composites import duckdb_print, generate, parts_of, psql, snowflake
 from tests.adapters._credentials import DATABRICKS_CREDS
@@ -89,7 +89,7 @@ class TestDuckdb:
             tmp_path,
             "CREATE TABLE gauge (gauge_no INTEGER, wide MAP(VARCHAR, INTEGER))",
             "INSERT INTO gauge SELECT i, MAP {'k' || i: i} FROM range(1000) r(i)",
-            statistics=StatisticsConfig(max_parts=5),
+            parts=PartsProfile(max=5),
         )["gauge"]["wide"]
 
         assert len(wide["parts"]) == 5
@@ -130,14 +130,14 @@ class TestDuckdb:
             tmp_path,
             "CREATE TABLE gauge (gauge_no INTEGER, solo MAP(VARCHAR, INTEGER))",
             "INSERT INTO gauge SELECT i, MAP {'a': i} FROM range(10) r(i)",
-            statistics=StatisticsConfig(max_parts=1),
+            parts=PartsProfile(max=1),
         )["gauge"]["solo"]
 
         assert solo["parts"] == {}
         assert solo["parts_found"] == 2
 
     def test_descent_off_leaves_the_map_unsupported(self, tmp_path: Path) -> None:
-        labels = duckdb_print(tmp_path, *_LABELS, statistics=StatisticsConfig(max_parts=0))
+        labels = duckdb_print(tmp_path, *_LABELS, parts=PartsProfile(enabled=False))
 
         assert labels["gauge"]["labels"]["classification"] == "unsupported"
         assert "parts" not in labels["gauge"]["labels"]

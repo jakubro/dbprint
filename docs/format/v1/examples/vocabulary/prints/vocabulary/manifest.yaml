@@ -2,25 +2,39 @@ format_version: 1
 generated_at: '2026-03-09T14:27:36Z'
 connection: vocabulary
 adapter: postgres
-dbprint_version: 0.12.0
-statistics_params:
-  enumeration_threshold: 50
-  top_n_values: 20
-  top_n_null_patterns: 20
-  looks_like_sample_size: 1000
-  percentiles:
-  - 1
-  - 25
-  - 50
-  - 75
-  - 99
-  max_parts: 20
-  max_part_depth: 3
-profiling_params:
-  infer_relationships: true
-  sketch_all_columns: false
-  compute_timeline: true
-  materialize_sample: true
+dbprint_version: 0.13.0
+profile:
+  read:
+    tables:
+      mode: full
+    views:
+      mode: catalog
+  statistics:
+    enumeration_threshold: 50
+    top_n_values: 20
+    percentiles:
+    - 1
+    - 25
+    - 50
+    - 75
+    - 99
+  looks_like:
+    enabled: true
+    sample_size: 1000
+  null_patterns:
+    enabled: true
+    top_n: 20
+  parts:
+    enabled: true
+    max: 20
+    max_depth: 3
+  timeline:
+    enabled: true
+  sketches:
+    enabled: true
+    columns: required
+  relationships:
+    infer: true
 selectors:
   include:
   - '*'

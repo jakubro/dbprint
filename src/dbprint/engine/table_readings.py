@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from dbprint.spec import profile as spec_profile
 from dbprint.spec.absence import block_value, column_value
 from dbprint.spec.scope import ScanScope, rows_scanned
 from dbprint.spec.value_text import spell_percent
@@ -81,21 +82,18 @@ def scanned_row_share(coverage: Any) -> str | None:
     return "every scanned row" if coverage >= 1 else f"{spell_percent(coverage)} of scanned rows"
 
 
-def connection_statistics_params(manifest: Mapping[str, Any]) -> dict[str, Any]:
-    """The manifest's connection-level `statistics_params`; a value that is not a mapping is none."""
+def connection_profile(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    """The manifest's connection-level `profile`; a value that is not a mapping is none."""
 
-    params = manifest.get("statistics_params")
+    profile = manifest.get("profile")
 
-    return params if isinstance(params, dict) else {}
+    return profile if isinstance(profile, dict) else {}
 
 
-def effective_statistics_params(
-    connection_params: Mapping[str, Any],
-    table_params: Any,
-) -> dict[str, Any]:
-    """`connection_params` overridden key by key by one table's own (SPEC 2.5)."""
+def effective_profile(connection: Mapping[str, Any], table_profile: Any) -> dict[str, Any]:
+    """`connection` overlaid block by block with one table's own `profile` delta (SPEC 2.5)."""
 
-    return {**connection_params, **(table_params if isinstance(table_params, dict) else {})}
+    return spec_profile.effective_profile(connection, table_profile)
 
 
 def saturation(

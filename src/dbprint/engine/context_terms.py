@@ -97,11 +97,24 @@ TERMS: Mapping[str, Term] = {
         "over the rows scanned",
         "the claim holds for the rows read; one unread row could falsify it for the table",
     ),
+    "meanings_table": Term(
+        "Meanings",
+        "not documented here = no table narrative and no column or value note says what this "
+        "table's values mean; read codes, units and defaults from the code that writes it",
+        "meanings_documented: false",
+    ),
+    "meanings": Term(
+        "meanings",
+        "not documented here = the column's values are a complete list of codes no note "
+        "explains; read what each means from the code that writes the table",
+        "values.<column>.meanings_documented: false",
+    ),
     "grain": Term("Grain", "the columns whose values identify a row", "grain"),
     "annotated": Term(
         "annotated",
-        "named by a human in statistics.annotations.yaml, not measured",
-        "statistics.annotations.yaml grain",
+        "named by a human - a key in statistics.annotations.yaml, an edge in "
+        "relationships.annotations.yaml - not measured",
+        "detection: annotated on an edge, grain_annotations for a key",
     ),
     "timeline": Term(
         "Timeline",
@@ -143,6 +156,13 @@ TERMS: Mapping[str, Term] = {
         "the listed values: every distinct value on a complete list, else the most frequent "
         "with their share of the non-null scanned rows",
         "values",
+    ),
+    "frequent_values": Term(
+        "frequent values, not a domain",
+        "on a numeric or date column, each value holding at least 1% of the non-null scanned "
+        "rows and twice an even spread's share, at most 5, with the share they hold together; "
+        "any other value may also occur",
+        "values.<column>.shown_coverage",
     ),
     "values_complete": Term(
         "values (complete)",
@@ -236,6 +256,12 @@ TERMS: Mapping[str, Term] = {
         "unmeasured",
         "fields this run tried and failed to measure; their values are unknown, not absent",
         "unmeasured",
+    ),
+    "switched_off": Term(
+        "switched off",
+        "configuration turned this measurement off for this table; its absence says nothing "
+        "about the data",
+        "disabled",
     ),
     "unrepresentable": Term(
         "unrepresentable",

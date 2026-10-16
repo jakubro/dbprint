@@ -16,7 +16,7 @@ from dbprint.adapters.base import PartSource
 from dbprint.adapters.dialect import Vendor
 from dbprint.adapters.duckdb import DuckdbAdapter
 from dbprint.adapters.sql_layout import select_from
-from dbprint.config import StatisticsConfig
+from dbprint.config import PartsProfile, ProfileConfig
 from dbprint.config.project import ConnectionConfig, RedactRule
 from dbprint.conformance import validate_print
 from dbprint.engine import Engine
@@ -92,14 +92,14 @@ class TestDuckdb:
         assert parts[".items[*].qty"]["occurrences"] == 1
 
     def test_the_cap_keeps_the_key_set_and_counts_every_part(self, tmp_path: Path) -> None:
-        payload = _duckdb_events(tmp_path, statistics=StatisticsConfig(max_parts=5))
+        payload = _duckdb_events(tmp_path, parts=PartsProfile(max=5))
 
         assert len(payload["parts"]) == 5
         assert "[keys]" in payload["parts"]
         assert payload["parts_found"] == 14
 
     def test_descent_off_still_publishes_the_type_mix(self, tmp_path: Path) -> None:
-        payload = _duckdb_events(tmp_path, statistics=StatisticsConfig(max_parts=0))
+        payload = _duckdb_events(tmp_path, parts=PartsProfile(enabled=False))
 
         assert payload["classification"] == "json"
         assert payload["types"]["OBJECT"] == 3
@@ -332,16 +332,16 @@ def test_the_document_reads_speak_their_own_dialect(vendor: Vendor, sql_type: st
 
 def _duckdb_events(
     tmp_path: Path,
-    statistics: StatisticsConfig | None = None,
+    parts: PartsProfile | None = None,
     redact: tuple[RedactRule, ...] = (),
 ) -> dict[str, Any]:
-    return _duckdb_documents(tmp_path, list(_EVENTS), statistics=statistics, redact=redact)
+    return _duckdb_documents(tmp_path, list(_EVENTS), parts=parts, redact=redact)
 
 
 def _duckdb_documents(
     tmp_path: Path,
     rows: list[str | None],
-    statistics: StatisticsConfig | None = None,
+    parts: PartsProfile | None = None,
     redact: tuple[RedactRule, ...] = (),
 ) -> dict[str, Any]:
     tmp_path.mkdir(parents=True, exist_ok=True)
@@ -357,9 +357,8 @@ def _duckdb_documents(
         name="garden",
         adapter="duckdb",
         output=tmp_path / "prints",
-        redact=redact,
         redaction_salt=_SALT,
-        statistics=statistics or StatisticsConfig(),
+        profile=ProfileConfig(redact=redact, parts=parts or PartsProfile()),
     )
     Engine(DuckdbAdapter({"database": str(database)}), conn, tmp_path).generate()
     errors = conformance_errors(tmp_path / "prints" / "garden")

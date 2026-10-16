@@ -16,6 +16,7 @@ from dbprint.adapters import Adapter
 from dbprint.adapters.clickhouse import ClickhouseAdapter
 from dbprint.adapters.databricks import DatabricksAdapter
 from dbprint.adapters.duckdb import DuckdbAdapter
+from dbprint.config import ProfileConfig
 from dbprint.config.project import ConnectionConfig, RedactRule, StatisticsConfig
 from dbprint.engine import Engine
 from tests._engine_run import conformance_errors
@@ -91,7 +92,7 @@ def test_emails_inside_a_nested_struct_never_reach_the_print(tmp_path: Path) -> 
         name="garden",
         adapter="duckdb",
         output=tmp_path / "prints",
-        redact=(RedactRule(looks_like=("email",), with_="drop"),),
+        profile=ProfileConfig(redact=(RedactRule(looks_like=("email",), with_="drop"),)),
     )
 
     Engine(DuckdbAdapter({"database": str(database)}), conn, tmp_path).generate()

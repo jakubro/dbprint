@@ -16,12 +16,19 @@ import yaml
 
 from dbprint import __version__ as DBPRINT_VERSION
 from dbprint.adapters.base import TableMeta
-from dbprint.config import ConnectionConfig, StatisticsConfig, TableSettings
+from dbprint.config import ConnectionConfig, ProfileConfig, TableSettings
 from dbprint.spec import artifact_yaml
-from dbprint.spec.absence import Absence, block_value, column_value, read_table_block
+from dbprint.spec.absence import (
+    Absence,
+    block_value,
+    column_value,
+    disabled_of,
+    read_table_block,
+)
 from dbprint.spec.artifacts import declared_artifacts, walkable_tables
 from dbprint.spec.fqn import split as split_fqn
 from dbprint.spec.parts import display
+from dbprint.spec.profile import effective_profile
 from dbprint.spec.statistics_matrix import forbids
 from . import diff as diff_module
 from .baseline import (
@@ -31,9 +38,15 @@ from .baseline import (
 )
 from .catalog_only import described_without_query
 from .freshness import age_days, is_stale, parse_profiled_at
-from .manifest_builder import ManifestTableEntry, profiling_params_dict, statistics_params_dict
+from .manifest_builder import (
+    ManifestTableEntry,
+    normalized_profile,
+    profile_delta,
+    profile_dict,
+)
 from .relationship_graph import IncomingFk, edge_detection
 from .result import TableResult
+from .yaml_dumper import dump_yaml
 
 
 _LOG = logging.getLogger(__name__)
@@ -72,15 +85,14 @@ class CommittedColumn:
 class RecordedSettings:
     """What the committed print records about how a table was profiled.
 
-    Both params blocks are the connection's overlaid with the entry's override; a bare stamp is UTC.
+    `profile` is the effective one, None when the manifest predates it; a bare stamp is UTC.
     """
 
     dbprint_version: str | None = None
     profiled_at: Any = None
     profiled_instant: datetime | None = None
     max_age_days: int | None = None
-    statistics_params: Mapping[str, Any] = field(default_factory=dict)
-    profiling_params: Mapping[str, Any] = field(default_factory=dict)
+    profile: Mapping[str, Any] | None = None
     max_rows_scanned: int | None = None
     scope: Any = None
 
@@ -104,6 +116,7 @@ class CommittedTable:
     referenced_by: tuple[IncomingFk, ...] = ()
     state: diff_module.TableState | None = None
     last_run_failed: bool = False
+    statistics_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -123,8 +136,7 @@ class CommittedPrint:
         if manifest is None:
             return cls()
 
-        connection_params = manifest.get("statistics_params")
-        connection_profiling = manifest.get("profiling_params")
+        connection_profile = manifest.get("profile")
         default_collation = manifest.get("default_collation")
         failed = failed_tables(manifest)
         tables = {
@@ -134,8 +146,7 @@ class CommittedPrint:
                     fqn,
                     entry,
                     manifest.get("dbprint_version"),
-                    connection_params if isinstance(connection_params, dict) else {},
-                    connection_profiling if isinstance(connection_profiling, dict) else {},
+                    connection_profile if isinstance(connection_profile, dict) else None,
                     default_collation if isinstance(default_collation, str) else None,
                 ),
                 last_run_failed=fqn in failed,
@@ -336,9 +347,10 @@ def freshness(
 
     committed_marker = block_value(table.statistics or {}, "catalog_only") is True
     expected_marker = described_without_query(
-        table.entry.get("type"),
-        read_rows=settings.read_rows,
+        settings.mode,
+        explicit=settings.explicit,
         has_columns=bool(table.columns),
+        view=table.entry.get("type") == "view",
         external=external,
         opt_in_only=opt_in_only,
     )
@@ -361,28 +373,18 @@ def carried_entry(
     carried: CarriedTable,
     *,
     resolved_max_age_days: int | None,
-    statistics_params: Mapping[str, Any] | None = None,
-    profiling_params: Mapping[str, Any] | None = None,
+    profile: Mapping[str, Any] | None = None,
 ) -> ManifestTableEntry:
     """The next manifest entry of a carried table.
 
-    `profiled_at` and the ceiling ride over; the overrides rebase onto this run's connection blocks.
+    `profiled_at` and the ceiling ride over; the delta rebases onto this run's connection profile.
     """
 
     recorded = carried.table.recorded
     entry = _entry_from_payload(carried.table.fqn, carried.table.entry)
 
-    if statistics_params is not None:
-        entry = replace(
-            entry,
-            statistics_params=_rebased(recorded.statistics_params, statistics_params),
-        )
-
-    if profiling_params is not None and recorded.profiling_params:
-        entry = replace(
-            entry,
-            profiling_params=_rebased(recorded.profiling_params, profiling_params),
-        )
+    if profile is not None and recorded.profile is not None:
+        entry = replace(entry, profile=profile_delta(recorded.profile, profile))
 
     if carried.reason == "out_of_scope" or resolved_max_age_days is None:
         return entry
@@ -511,13 +513,14 @@ def _load_table(
     fqn: str,
     entry: dict[str, Any],
     dbprint_version: Any,
-    connection_params: dict[str, Any],
-    connection_profiling: dict[str, Any],
+    connection_profile: dict[str, Any] | None,
     default_collation: str | None,
 ) -> CommittedTable:
     directory = prints_root / entry.get("path", "")
     artifacts = declared_artifacts(entry)
-    statistics = _read(directory / artifacts["statistics"]) if "statistics" in artifacts else None
+    statistics_path = directory / artifacts["statistics"] if "statistics" in artifacts else None
+    statistics_text = _text(statistics_path) if statistics_path is not None else None
+    statistics = _parse(statistics_text, statistics_path) if statistics_path is not None else None
     relationships = (
         _read(directory / artifacts["relationships"]) if "relationships" in artifacts else None
     )
@@ -539,11 +542,10 @@ def _load_table(
         profiled_at=entry.get("profiled_at"),
         profiled_instant=parse_profiled_at(entry.get("profiled_at")),
         max_age_days=entry.get("max_age_days"),
-        statistics_params=_overlay(connection_params, entry.get("statistics_params")),
-        profiling_params=(
-            _overlay(connection_profiling, entry.get("profiling_params"))
-            if connection_profiling
-            else {}
+        profile=(
+            effective_profile(connection_profile, entry.get("profile"))
+            if connection_profile is not None
+            else None
         ),
         max_rows_scanned=entry.get("max_rows_scanned"),
         scope=scope,
@@ -562,7 +564,31 @@ def _load_table(
         refers_to=tuple(e for e in refers_to if isinstance(e, dict)),
         referenced_by=_incoming(relationships),
         state=state,
+        statistics_text=statistics_text,
     )
+
+
+def relineaged_statistics(
+    statistics_text: str,
+    wanted: Mapping[str, list[dict[str, str]]],
+) -> str | None:
+    """A committed `statistics.yaml` with only `derived_from` brought to `wanted`, or None if equal."""
+
+    exact = artifact_yaml.load(statistics_text, loader=artifact_yaml.ExactLoader)
+    changed = False
+
+    for name, column in (exact.get("columns") or {}).items():
+        if not isinstance(column, dict) or column.get("derived_from") == wanted.get(name):
+            continue
+
+        if name in wanted:
+            column["derived_from"] = wanted[name]
+        else:
+            del column["derived_from"]
+
+        changed = True
+
+    return dump_yaml(exact) if changed else None
 
 
 def _changed_settings(
@@ -570,84 +596,80 @@ def _changed_settings(
     settings: TableSettings,
     conn: ConnectionConfig,
 ) -> str:
-    recorded = table.recorded
-    scope = recorded.scope if isinstance(recorded.scope, dict) else {}
-    catalog_only = block_value(table.statistics or {}, "catalog_only") is True
-    # A view has no row-count estimate, so no ceiling governed it whether or not it was read.
-    ceiling = (
-        None if catalog_only or table.entry.get("type") == "view" else settings.max_rows_scanned
-    )
-    current_params = statistics_params_dict(settings.statistics)
-    # A key a print predates reads as its default, so adding one re-profiles nothing.
-    recorded_params = {
-        **statistics_params_dict(StatisticsConfig()),
-        **recorded.statistics_params,
-    }
-    changed_params = sorted(
-        key
-        for key in current_params.keys() | recorded_params.keys()
-        if current_params.get(key) != recorded_params.get(key)
-    )
+    recorded = table.recorded.profile
 
-    if changed_params:
-        return f"statistics_params ({', '.join(changed_params)})"
+    if recorded is None:
+        return "profile (not recorded)"
 
-    if not catalog_only and settings.filter != scope.get("filter"):
-        return "filter"
+    if changed := profile_changes(recorded, settings.profile, table.entry.get("type")):
+        return f"profile ({', '.join(changed)})"
 
-    if not catalog_only and ceiling is None and settings.sample != scope.get("sample"):
-        return "sample"
-
-    if ceiling != recorded.max_rows_scanned:
-        return "max_rows_scanned"
-
-    switches = [
-        key
-        for key, value in profiling_params_dict(conn).items()
-        if _switch_governs(key, settings, catalog_only)
-        and recorded.profiling_params.get(key) != value
-    ]
-
-    if switches:
-        return f"profiling_params ({', '.join(switches)})"
-
-    redaction = redaction_mismatches(table, conn)
-
-    if redaction:
+    if redaction := redaction_mismatches(table, conn):
         return f"redaction ({', '.join(m.column for m in redaction)})"
 
     return ""
 
 
-def _switch_governs(key: str, settings: TableSettings, catalog_only: bool) -> bool:
-    if catalog_only:
-        return key == "infer_relationships"
+def profile_changes(
+    recorded: Mapping[str, Any],
+    current: ProfileConfig,
+    object_type: Any,
+) -> list[str]:
+    """The leaf paths where a recorded effective profile differs from `current`, sorted.
 
-    if key == "materialize_sample":
-        return settings.sample is not None
+    A leaf the recording predates reads as its default (SPEC 2.5).
+    """
 
-    if key in {"sketch_all_columns", "compute_timeline"}:
-        return settings.sample is None and settings.filter is None
+    # An object reads under one block; the other kind's never touched it.
+    other = "tables" if object_type == "view" else "views"
+    now = _leaves(profile_dict(current))
+    before = _leaves(_with_defaults(recorded))
 
-    return True
+    return sorted(
+        path
+        for path in now.keys() | before.keys()
+        if not path.startswith(f"read.{other}.") and now.get(path) != before.get(path)
+    )
 
 
-def _overlay(block: Mapping[str, Any], override: Any) -> dict[str, Any]:
-    return {**block, **(override if isinstance(override, dict) else {})}
+def _with_defaults(recorded: Mapping[str, Any]) -> dict[str, Any]:
+    """`recorded` with every leaf it predates read as its default (SPEC 2.5)."""
+
+    merged: dict[str, Any] = {}
+
+    for name, block in profile_dict(ProfileConfig()).items():
+        own = recorded.get(name)
+        merged[name] = {**block, **own} if isinstance(own, Mapping) else block
+
+    return normalized_profile(merged)
 
 
-def _rebased(recorded: Mapping[str, Any], block: Mapping[str, Any]) -> dict[str, Any] | None:
-    differing = {key: value for key, value in recorded.items() if block.get(key) != value}
+def _leaves(tree: Mapping[str, Any], prefix: str = "") -> dict[str, Any]:
+    out: dict[str, Any] = {}
 
-    return differing or None
+    for key, value in tree.items():
+        if isinstance(value, Mapping):
+            out.update(_leaves(value, f"{prefix}{key}."))
+        else:
+            out[f"{prefix}{key}"] = value
+
+    return out
 
 
 def _read(path: Path) -> dict[str, Any] | None:
-    if not path.is_file():
+    return _parse(_text(path), path)
+
+
+def _text(path: Path) -> str | None:
+    return path.read_text(encoding="utf-8") if path.is_file() else None
+
+
+def _parse(text: str | None, path: Path) -> dict[str, Any] | None:
+    if text is None:
         return None
 
     try:
-        data = artifact_yaml.load(path.read_text(encoding="utf-8"))
+        data = artifact_yaml.load(text)
     except yaml.YAMLError:
         return None
 
@@ -750,6 +772,7 @@ def _hydrate_statistics(state: diff_module.TableState, data: Mapping[str, Any]) 
     state.row_count_method = row_count_method if isinstance(row_count_method, str) else None
     state.scoped = isinstance(data.get("scope"), dict)
     state.catalog_only = data.get("catalog_only") is True
+    state.disabled = disabled_of(data)
     state.external = data.get("external") is True
     state.grain = diff_module.grain_from_block(data.get("grain"))
     # SPEC 2.2.1: a block the baseline names unmeasured contributes nothing to compare - hydrating
@@ -794,7 +817,7 @@ def _text_or_none(value: Any) -> str | None:
 def _entry_from_payload(fqn: str, payload: Mapping[str, Any]) -> ManifestTableEntry:
     artifacts = payload.get("artifacts")
     artifacts = artifacts if isinstance(artifacts, dict) else {}
-    statistics_params = payload.get("statistics_params")
+    profile = payload.get("profile")
 
     return ManifestTableEntry(
         fqn=fqn,
@@ -809,11 +832,6 @@ def _entry_from_payload(fqn: str, payload: Mapping[str, Any]) -> ManifestTableEn
         columns=payload.get("columns", 0),
         profiled_at=payload.get("profiled_at", ""),
         max_age_days=payload.get("max_age_days"),
-        statistics_params=statistics_params if isinstance(statistics_params, dict) else None,
+        profile=profile if isinstance(profile, dict) else None,
         max_rows_scanned=payload.get("max_rows_scanned"),
-        profiling_params=(
-            payload.get("profiling_params")
-            if isinstance(payload.get("profiling_params"), dict)
-            else None
-        ),
     )

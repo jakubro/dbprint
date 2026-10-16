@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Literal
 
@@ -25,7 +26,13 @@ from .progress import VALIDATION_PASSES, TableSink, ValidationProgress, Validati
 from .yaml_utils import load_yaml
 
 
-__all__ = ["Issue", "ValidationProgress", "ValidationTick", "validate_print"]
+__all__ = [
+    "Issue",
+    "ValidationProgress",
+    "ValidationTick",
+    "issues_for_table",
+    "validate_print",
+]
 
 
 def validate_print(
@@ -128,6 +135,7 @@ def validate_print(
                 issues.extend(ddl.check(ddl_path, _rel(print_root, ddl_path)))
 
     issues.extend(relationships.check_reciprocity(print_root, manifest_data, on_table=sinks[2]))
+    issues.extend(relationships.check_disabled_edges(print_root, manifest_data))
     issues.extend(
         relationships.check_observed_arithmetic(print_root, manifest_data, on_table=sinks[3]),
     )
@@ -146,6 +154,7 @@ def validate_print(
     # Findings are known only once every pass above has run, so this tick fires after the fact.
     edge_claims_issues = relationship_annotations.check_claims(print_root, manifest_data)
     issues.extend(edge_claims_issues)
+    issues.extend(column_annotations.check_derived_from(print_root, manifest_data))
 
     if on_table is not None:
         findings = _findings_by_table(issues, tables)
@@ -248,6 +257,14 @@ def _pass_sink(
     return sink
 
 
+def issues_for_table(issues: Iterable[Issue], manifest_data: dict, table: str) -> list[Issue]:
+    """The issues attributed to `table` by the longest table-directory prefix of their path."""
+
+    dir_to_fqn = _table_directories(manifest_data.get("tables") or {})
+
+    return sorted(issue for issue in issues if _table_of(issue, dir_to_fqn) == table)
+
+
 def _findings_by_table(
     issues: list[Issue],
     tables: dict[str, dict],
@@ -256,22 +273,31 @@ def _findings_by_table(
     `Issue.path`; a connection-level file attributes to none, and `error` outranks `warning`.
     """
 
-    dir_to_fqn = {entry.get("path", ""): fqn for fqn, entry in tables.items() if entry.get("path")}
+    dir_to_fqn = _table_directories(tables)
     counts: dict[str, int] = {}
     worst: dict[str, Literal["error", "warning"]] = {}
 
     for issue in issues:
-        parts = issue.path.split("/")
+        fqn = _table_of(issue, dir_to_fqn)
 
-        for n in range(len(parts) - 1, 0, -1):
-            fqn = dir_to_fqn.get("/".join(parts[:n]))
+        if fqn is not None:
+            counts[fqn] = counts.get(fqn, 0) + 1
 
-            if fqn is not None:
-                counts[fqn] = counts.get(fqn, 0) + 1
-
-                if issue.severity == "error" or fqn not in worst:
-                    worst[fqn] = issue.severity
-
-                break
+            if issue.severity == "error" or fqn not in worst:
+                worst[fqn] = issue.severity
 
     return {fqn: (count, worst.get(fqn)) for fqn, count in counts.items()}
+
+
+def _table_directories(tables: dict[str, dict]) -> dict[str, str]:
+    return {entry.get("path", ""): fqn for fqn, entry in tables.items() if entry.get("path")}
+
+
+def _table_of(issue: Issue, dir_to_fqn: dict[str, str]) -> str | None:
+    parts = issue.path.split("/")
+
+    for n in range(len(parts) - 1, 0, -1):
+        if (fqn := dir_to_fqn.get("/".join(parts[:n]))) is not None:
+            return fqn
+
+    return None

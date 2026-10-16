@@ -91,7 +91,7 @@ class TestLoadRelationships:
     def test_reads_relationships_alone(self, rich_conn: ConnectionConfig) -> None:
         conn = catalogue.load_connections([rich_conn])[0]
 
-        relationships = catalogue.load_relationships(conn, "seedbank.batch")
+        relationships = catalogue.load_artifact(conn, "seedbank.batch", "relationships")
 
         assert relationships is not None
         assert relationships["refers_to"][0]["target_table"] == "seedbank.cultivar"

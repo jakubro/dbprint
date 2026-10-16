@@ -95,22 +95,23 @@ _TABLE_KIND_DESCRIPTION = {
         "and value lists"
     ),
     "statistics": (
-        "statistics.yaml as written, including each column's sketch payload. "
+        "The table's statistics file as written, including each column's sketch. "
         "get_table_context returns these statistics with scope, redaction and unmeasured "
         "fields applied; read this file raw only for the sketch"
     ),
     "relationships": (
-        "relationships.yaml without the edges a human rejected in relationships_annotations. "
-        "get_table_context lists the same edges as its Joins list, each with its detection"
+        "The table's joins file, without the joins a person rejected in "
+        "relationships_annotations. get_table_context lists the same joins as its Joins "
+        "list, each with its detection, plus the joins a person added there"
     ),
-    "description": "Human-authored description.md. get_table_context includes it",
+    "description": "The table's prose description, written by people. get_table_context has it",
     "statistics_annotations": (
-        "Human-authored column notes. get_table_context includes them, and "
+        "Column and value notes people wrote. get_table_context includes them, and "
         "search_columns `text` searches them"
     ),
     "relationships_annotations": (
-        "Human-authored notes on relationships, including the edges a human rejected; no "
-        "other resource or tool lists a rejected edge"
+        "Notes people wrote on joins, including the joins a person rejected and the "
+        "ones a person added; no other resource or tool lists a rejected join"
     ),
 }
 
@@ -447,9 +448,9 @@ def _enumerate_connection(conn: ConnectionConfig, read: ArtifactReader) -> list[
             uri=f"dbprint://{conn.name}/manifest",
             name=f"{conn.name} manifest",
             description=(
-                f"Manifest index for connection {conn.name}. list_tables with detail: true "
-                f"projects it per table with a freshness verdict; get_manifest returns it "
-                f"filtered by pattern"
+                f"Index of the tables in connection {conn.name}'s print. list_tables with "
+                f"detail: true projects it per table with a freshness verdict; get_manifest "
+                f"returns it filtered by pattern"
             ),
             mime_type=_KIND_MIME["manifest"],
         ),
@@ -457,8 +458,8 @@ def _enumerate_connection(conn: ConnectionConfig, read: ArtifactReader) -> list[
             uri=f"dbprint://{conn.name}/diff",
             name=f"{conn.name} diff",
             description=(
-                f"What changed between the last two runs for connection {conn.name}, without "
-                f"events about an edge a human rejected. get_diff returns it filtered by table or "
+                f"What changed between the last two prints of connection {conn.name}, without "
+                f"events about a join a person rejected. get_diff returns it filtered by table or "
                 f"kind"
             ),
             mime_type=_KIND_MIME["diff"],
@@ -479,7 +480,10 @@ def _enumerate_connection(conn: ConnectionConfig, read: ArtifactReader) -> list[
             ResourceEntry(
                 uri=f"dbprint://{conn.name}/manifest_annotations",
                 name=f"{conn.name} connection notes",
-                description=("Human-authored notes on the whole connection; no tool returns them"),
+                description=(
+                    "Notes people wrote on the whole database; get_table_context carries "
+                    "them on every table it reads"
+                ),
                 mime_type=_KIND_MIME["manifest_annotations"],
             ),
         )

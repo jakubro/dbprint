@@ -21,8 +21,10 @@ from tests._prints import SHAPE_PROBE_COLUMNS, exact_stats, mock_table, unmeasur
 
 PROJECT_TWO_CONNECTIONS_YAML = """\
 defaults:
-  max_age_days: 7
-  statistics: {}
+  profile:
+    freshness:
+      max_age_days: 7
+    statistics: {}
   diff: {}
 connections:
   a:

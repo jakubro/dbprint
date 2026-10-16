@@ -20,6 +20,7 @@ from dbprint.spec.drift import (
     Data,
     column_field_rule,
 )
+from dbprint.spec.profile import COLUMN_FIELDS_OF
 from dbprint.spec.redaction import NOT_COMPARED_UNDER_REDACTION, is_redacted
 from dbprint.spec.v1 import FORMAT_VERSION
 
@@ -104,6 +105,8 @@ class TableState:
     depends_on: tuple[str, ...] | None = None
     # The connection default an implicit column collation resolves to (SPEC 2.2.2).
     default_collation: str | None = None
+    # The measurements this side's statistics.yaml names switched off (SPEC 2.2.21).
+    disabled: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -414,7 +417,14 @@ def _diff_table(fqn: str, before: TableState, after: TableState) -> list[dict[st
         out.extend(_diff_column_catalog_facts(fqn, before, after))
 
     if before.relationships is not None and after.relationships is not None:
-        out.extend(_diff_relationships(fqn, before.relationships, after.relationships))
+        out.extend(
+            _diff_relationships(
+                fqn,
+                before.relationships,
+                after.relationships,
+                infers="relationships.infer" not in before.disabled | after.disabled,
+            ),
+        )
 
     if before.indexes is not None and after.indexes is not None:
         out.extend(_diff_indexes(fqn, before.indexes, after.indexes))
@@ -492,6 +502,7 @@ def _diff_table(fqn: str, before: TableState, after: TableState) -> list[dict[st
                 before.columns,
                 after.columns,
                 scoped=before.scoped or after.scoped,
+                disabled=before.disabled | after.disabled,
             ),
         )
 
@@ -612,14 +623,17 @@ def _diff_relationships(
     fqn: str,
     before: list[FkState],
     after: list[FkState],
+    *,
+    infers: bool = True,
 ) -> list[dict[str, Any]]:
-    """SPEC 2.6.6: a `detection: measured` edge produces no event, on either side - `diff` never
-    runs the sketch pass one depends on, so every such edge would report as removed.
+    """SPEC 2.6.6: a measured edge never produces an event (`diff` runs no sketch pass), nor does
+    an inferred one where either side switched inference off (SPEC 2.2.21).
     """
 
     out: list[dict[str, Any]] = []
-    before = [fk for fk in before if fk.detection != "measured"]
-    after = [fk for fk in after if fk.detection != "measured"]
+    skipped = {"measured"} if infers else {"measured", "inferred"}
+    before = [fk for fk in before if fk.detection not in skipped]
+    after = [fk for fk in after if fk.detection not in skipped]
     before_by_key = {_fk_key(fk): fk for fk in before}
     after_by_key = {_fk_key(fk): fk for fk in after}
 
@@ -877,20 +891,24 @@ def _diff_statistics(
     after_cols: dict[str, ColumnState],
     *,
     scoped: bool,
+    disabled: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Per-column stat-by-stat comparison for columns present in both sides.
 
-    `scoped` is table-grain - either side's population moved - not per-column.
+    `scoped` and `disabled` (either side's switched-off measurements) are table-grain.
     """
 
     out: list[dict[str, Any]] = []
     shared_cols = sorted(set(before_cols) & set(after_cols))
+    off = frozenset(field for name in disabled for field in COLUMN_FIELDS_OF.get(name, ()))
 
     for col in shared_cols:
         b = before_stats.get(col, {})
         a = after_stats.get(col, {})
-        out.extend(_diff_one_column_stats(fqn, col, b, a, scoped=scoped))
-        out.extend(_diff_parts(fqn, col, b, a, scoped=scoped))
+        out.extend(_diff_one_column_stats(fqn, col, b, a, scoped=scoped, off=off))
+
+        if "parts" not in disabled:
+            out.extend(_diff_parts(fqn, col, b, a, scoped=scoped, off=off))
 
     return out
 
@@ -902,11 +920,11 @@ def _diff_parts(
     after: dict[str, Any],
     *,
     scoped: bool,
+    off: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Each part both sides list, compared as its own block (SPEC 2.6.6).
 
-    A part only one side lists is never reported: under `max_parts` a path leaving the kept set
-    is not a removal, and `parts_found` moving is what reports a real change in the count.
+    A part only one side lists is never reported: under `parts.max` it is no removal.
     """
 
     before_parts = column_value(before, "parts")
@@ -929,6 +947,7 @@ def _diff_parts(
                     _projected_part(a),
                     scoped=scoped,
                     part=path,
+                    off=off,
                 ),
             )
 
@@ -989,6 +1008,7 @@ def _diff_one_column_stats(
     *,
     scoped: bool,
     part: str | None = None,
+    off: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     # A missing `cardinality_method` reads as exact, so a baseline predating the field keeps
     # comparing instead of silently stopping.
@@ -1005,6 +1025,26 @@ def _diff_one_column_stats(
     # which of the two still holds a plain literal is not a fact the comparison can establish.
     redacted = is_redacted(before) or is_redacted(after)
 
+    # A descent switched off on one side leaves a nested column `unsupported` there, every
+    # descent-derived count with it: the two sides describe different columns.
+    classifications = {_get_path(before, "classification"), _get_path(after, "classification")}
+
+    if "parts" in off and classifications == {"composite", "unsupported"}:
+        return []
+
+    # With no sample, sensitivity rests on the name and no `prose` verdict exempts the values.
+    looks_like_knock_on = (
+        {"inferred.sensitivity"}
+        | (
+            _VALUE_LIST_STATS
+            if "prose"
+            in {_get_path(before, "inferred.looks_like"), _get_path(after, "inferred.looks_like")}
+            else set()
+        )
+        if "inferred.looks_like" in off
+        else set()
+    )
+
     for path in sorted(paths):
         head = path.split(".")[0]
 
@@ -1014,6 +1054,12 @@ def _diff_one_column_stats(
             continue
 
         if head in unmeasured or _unmeasured(before, path) or _unmeasured(after, path):
+            continue
+
+        if head in off or ".".join(path.split(".")[:2]) in off:
+            continue
+
+        if path in looks_like_knock_on:
             continue
 
         if redacted and head in _REDACTED_EXCLUDED_STATS:
@@ -1050,6 +1096,11 @@ def _diff_one_column_stats(
         out.append(event)
 
     return out
+
+
+_VALUE_LIST_STATS = frozenset(
+    {"values", "values_coverage", "values_coverage_method", "distribution"},
+)
 
 
 def _is_data(path: str) -> bool:

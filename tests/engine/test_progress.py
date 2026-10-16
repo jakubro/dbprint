@@ -21,6 +21,7 @@ from dbprint.adapters import (
     ValueCount,
 )
 from dbprint.adapters.base import ColumnProgress, PhaseB
+from dbprint.config import RelationshipsProfile
 from dbprint.config.project import ConnectionConfig
 from dbprint.engine import DiffRequest, Engine, GenerateRequest, ProgressEvent
 from dbprint.spec.sketch import SketchKind
@@ -196,7 +197,13 @@ class TestEventSequence:
 
     def test_infer_relationships_off_emits_no_inventory_phase(self, tmp_path: Path) -> None:
         fixture = {"public.t": _table("public", "t")}
-        conn_config = replace(_conn_config(tmp_path), infer_relationships=False)
+        conn_config = replace(
+            _conn_config(tmp_path),
+            profile=replace(
+                _conn_config(tmp_path).profile,
+                relationships=RelationshipsProfile(infer=False),
+            ),
+        )
         events: list[ProgressEvent] = []
         Engine(MockAdapter(fixture), conn_config, tmp_path).generate(
             GenerateRequest(force=True, on_progress=events.append),

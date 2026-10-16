@@ -19,7 +19,7 @@ from dbprint.adapters.base import PartSource
 from dbprint.adapters.dialect import Vendor
 from dbprint.adapters.duckdb import DuckdbAdapter
 from dbprint.adapters.sql_layout import select_from
-from dbprint.config import StatisticsConfig
+from dbprint.config import PartsProfile, StatisticsConfig
 from dbprint.config.project import RedactRule
 from tests.adapters._composites import duckdb_print, generate, parts_of, psql, snowflake
 from tests.adapters._credentials import DATABRICKS_CREDS
@@ -62,7 +62,7 @@ class TestDuckdb:
         shallow = duckdb_print(
             tmp_path / "shallow",
             *statements,
-            statistics=StatisticsConfig(max_part_depth=1),
+            parts=PartsProfile(max_depth=1),
         )["reading"]["grid"]
 
         assert grid["parts"]["[*]"]["classification"] == "composite"
@@ -144,7 +144,7 @@ class TestDuckdb:
             tmp_path,
             "CREATE TABLE seed_lot (lot_no INTEGER, tags VARCHAR[])",
             "INSERT INTO seed_lot VALUES (1, ['gift'])",
-            statistics=StatisticsConfig(max_parts=0),
+            parts=PartsProfile(enabled=False),
         )["seed_lot"]["tags"]
 
         assert tags["classification"] == "unsupported"

@@ -66,8 +66,7 @@ FIELD_RULES: dict[tuple[Artifact, str], Rule] = {
     ("manifest", "connection"): _PROVENANCE,
     ("manifest", "adapter"): _PROVENANCE,
     ("manifest", "dbprint_version"): _PROVENANCE,
-    ("manifest", "statistics_params"): _CONFIGURATION,
-    ("manifest", "profiling_params"): _CONFIGURATION,
+    ("manifest", "profile"): _CONFIGURATION,
     ("manifest", "redaction_rules_configured"): _CONFIGURATION,
     ("manifest", "manifest_annotations"): _HUMAN,
     ("manifest", "failed_tables"): Uncompared(
@@ -88,8 +87,7 @@ FIELD_RULES: dict[tuple[Artifact, str], Rule] = {
     ("manifest", "tables.*.profiled_at"): _CLOCK,
     ("manifest", "tables.*.max_age_days"): _CONFIGURATION,
     ("manifest", "tables.*.max_rows_scanned"): _CONFIGURATION,
-    ("manifest", "tables.*.statistics_params"): _CONFIGURATION,
-    ("manifest", "tables.*.profiling_params"): _CONFIGURATION,
+    ("manifest", "tables.*.profile"): _CONFIGURATION,
     ("statistics", "format_version"): _PROVENANCE,
     ("statistics", "table"): Uncompared("the table's identity, compared through the manifest key"),
     ("statistics", "profiled_at"): _CLOCK,
@@ -98,6 +96,7 @@ FIELD_RULES: dict[tuple[Artifact, str], Rule] = {
     ("statistics", "external"): Shape(("external_changed",)),
     ("statistics", "scope"): Marker("a narrowed read; scan-scale counts stop comparing"),
     ("statistics", "unmeasured"): Marker("a block that could not be read has no reading"),
+    ("statistics", "disabled"): Marker("a switched-off measurement has no reading to compare"),
     ("statistics", "row_count"): Data(("table_row_count_changed",)),
     ("statistics", "row_count_method"): Uncompared("payload of `table_row_count_changed`"),
     ("statistics", "grain"): Shape(("grain_changed",)),
@@ -118,6 +117,9 @@ FIELD_RULES: dict[tuple[Artifact, str], Rule] = {
     ("statistics", "columns.*.collation"): Shape(("column_collation_changed",)),
     ("statistics", "columns.*.physical_layout_key"): Uncompared(
         "restates `physical_layout.keys` (SPEC 2.2.11), compared there",
+    ),
+    ("statistics", "columns.*.derived_from"): Uncompared(
+        "parsed from a transformation tool's compiled SQL, not read from the database",
     ),
     ("statistics", "columns.*.classification"): _STATISTIC,
     ("statistics", "columns.*.null_count"): _STATISTIC,

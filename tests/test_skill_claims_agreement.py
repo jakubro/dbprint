@@ -12,12 +12,16 @@ import json
 import re
 from typing import get_args
 
+import yaml
+from jsonschema import Draft202012Validator
+
 from dbprint.mcp.resources import ResourceKind
 from dbprint.mcp.tools import TOOL_DEFINITIONS
 from tests._scripts import REPO_ROOT
 
 
 SKILL_PATH = REPO_ROOT / "docs/examples/skill/dbprint.md"
+ANNOTATE_SKILL_PATH = REPO_ROOT / "docs/examples/skill/dbprint-annotate.md"
 CLI_DOCS_PATH = REPO_ROOT / "docs/CLI.md"
 RELATIONSHIPS_SCHEMA_PATH = REPO_ROOT / "src/dbprint/spec/v1/relationships.schema.json"
 _SCHEMA_PATHS = (
@@ -45,6 +49,9 @@ _FIELD_CLAIMS = (
 # The command surface it points a shell at, checked against the generated reference rather
 # than the CLI itself - that file is rendered from `--help` and golden-tested against it.
 _CLI_CLAIMS = ("dbprint context", "dbprint generate", "dbprint check", "--max-age")
+
+_ANNOTATE_CLI_CLAIMS = (("generate", "--force"), ("annotate", "--check"), ("context", "--purpose"))
+_YAML_FENCE = re.compile(r"```yaml\n# ([a-z_.]+)\n(.*?)```", re.DOTALL)
 
 _TOOL_SHAPED = re.compile(r"^(?:get|list|search)_[a-z_]+$")
 _BACKTICKED = re.compile(r"`([^`]+)`")
@@ -106,6 +113,41 @@ def test_the_command_surface_the_skill_names_exists() -> None:
     for fragment in _CLI_CLAIMS:
         assert fragment in skill, f"{fragment!r} listed here but absent from the skill"
         assert fragment in reference, f"the skill names {fragment!r}, the CLI no longer has it"
+
+
+def test_the_annotation_skill_names_only_commands_that_exist() -> None:
+    skill = ANNOTATE_SKILL_PATH.read_text()
+    reference = CLI_DOCS_PATH.read_text()
+
+    for command, flag in _ANNOTATE_CLI_CLAIMS:
+        section = reference.split(f"## `dbprint {command}`", 1)[1].split("\n## `", 1)[0]
+
+        assert f"dbprint {command}" in skill, f"{command!r} listed here but absent from the skill"
+        assert flag in skill, f"{flag!r} listed here but absent from the skill"
+        assert flag in section, f"the skill passes {flag!r} to {command!r}, which has no such flag"
+
+
+def test_every_annotation_file_the_skill_shows_is_valid() -> None:
+    """An example that fails its own schema teaches the reader to write a rejected file."""
+
+    fences = _YAML_FENCE.findall(ANNOTATE_SKILL_PATH.read_text())
+
+    assert {name for name, _ in fences} == {
+        "statistics.annotations.yaml",
+        "relationships.annotations.yaml",
+    }
+
+    for name, body in fences:
+        schema = json.loads(
+            (
+                REPO_ROOT
+                / "src/dbprint/spec/v1"
+                / name.replace(".annotations.yaml", "_annotations.schema.json")
+            ).read_text(),
+        )
+        errors = list(Draft202012Validator(schema).iter_errors(yaml.safe_load(body)))
+
+        assert not errors, (name, [e.message for e in errors])
 
 
 def _backticked() -> set[str]:

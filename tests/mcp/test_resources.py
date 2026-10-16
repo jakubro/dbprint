@@ -749,9 +749,9 @@ class TestTheRelationshipsResourceWithholdsRejectedEdges:
         listed = {e.uri: e.description for e in enumerate_for(_state(primary_conn))}
         prefix = f"dbprint://production/{_TRIAL}"
 
-        assert "without the edges a human rejected" in listed[f"{prefix}/relationships"]
+        assert "without the joins a person rejected" in listed[f"{prefix}/relationships"]
         assert (
-            "no other resource or tool lists a rejected edge"
+            "no other resource or tool lists a rejected join"
             in listed[f"{prefix}/relationships_annotations"]
         )
 

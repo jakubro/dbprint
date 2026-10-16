@@ -32,6 +32,17 @@ _UNMEASURED_BLOCK_MESSAGE = {
     "dependencies": "this run did not measure it, so no dependency between columns is ruled out.",
 }
 
+_DISABLED_CONSEQUENCE = {
+    "looks_like": (
+        'no column\'s value shape was detected; an absent looks_like is not "no pattern"'
+    ),
+    "null_patterns": 'which columns are null on the same rows is unknown, not "none"',
+    "parts": "no nested column was described part by part",
+    "relationships.infer": "no foreign key was inferred from its column names",
+    "sketches": "no value sketch was taken and no join was measured from one",
+    "timeline": "its activity over time and each column's populated span are unknown",
+}
+
 
 def read_artifact(path: Path) -> Any:
     """Parse one artifact file afresh."""
@@ -156,6 +167,14 @@ def unmeasured_block_message(name: str) -> str:
         name,
         "this run did not measure it; its content is unknown.",
     )
+
+
+def disabled_feature_message(name: str) -> str:
+    """How every surface words a measurement the file's `disabled` list names (SPEC 2.2.21)."""
+
+    consequence = _DISABLED_CONSEQUENCE.get(name, "its reading is unknown, not absent")
+
+    return f"not measured: switched off for this table, so {consequence}."
 
 
 def unprofiled_message(fqn: str) -> str:

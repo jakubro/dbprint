@@ -9,6 +9,7 @@ from typing import Any
 import yaml
 
 from dbprint.adapters import RedshiftAdapter
+from dbprint.config import RuleMatch
 from dbprint.config.project import RuleConfig
 from dbprint.engine import Engine
 from tests._curator import conn_config
@@ -136,7 +137,13 @@ def test_an_opted_in_external_table_is_profiled(
     redshift_scratch_db: Any,
     tmp_path: Path,
 ) -> None:
-    conn = _conn(tmp_path, RuleConfig(include=(REMOTE,), read_rows=True))
+    conn = _conn(
+        tmp_path,
+        RuleConfig(
+            match=RuleMatch(tables=(REMOTE,)),
+            profile={"read": {"tables": {"mode": "full"}}},
+        ),
+    )
     Engine(_adapter(_seeded(redshift_scratch_db)), conn, tmp_path).generate()
     statistics = _statistics(tmp_path)
 

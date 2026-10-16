@@ -404,10 +404,10 @@ def test_manifest_without_a_recorded_threshold_is_conformant(print_dir: Path) ->
     assert conformance_errors(print_dir) == []
 
 
-def test_manifest_missing_statistics_params_errors(print_dir: Path) -> None:
+def test_manifest_missing_profile_errors(print_dir: Path) -> None:
     target = print_dir / "manifest.yaml"
     data = _load_yaml_file(target)
-    del data["statistics_params"]
+    del data["profile"]
     _write_yaml_file(target, data)
 
     issues = validate_print(print_dir)
@@ -415,6 +415,81 @@ def test_manifest_missing_statistics_params_errors(print_dir: Path) -> None:
 
     assert match, _codes(issues)
     assert match[0].severity == "error"
+
+
+class TestProfileBlocksAreWhole:
+    """SPEC 2.5: a recorded profile block is written whole, so overlaying it drops nothing."""
+
+    def _profile_issues(self, print_dir: Path, profile: Any) -> list[Issue]:
+        target = print_dir / "manifest.yaml"
+        data = _load_yaml_file(target)
+        data["tables"]["arboretum.seedbank.taxon"]["profile"] = profile
+        _write_yaml_file(target, data)
+
+        return [i for i in validate_print(print_dir) if ".profile" in i.path]
+
+    def test_a_partial_table_block_names_the_entry_block_and_missing_keys(
+        self,
+        print_dir: Path,
+    ) -> None:
+        issues = self._profile_issues(print_dir, {"statistics": {"top_n_values": 3}})
+
+        assert {i.code for i in issues} == {"schema.missing-required-field"}
+        assert {i.path.split("manifest.yaml", 1)[1] for i in issues} == {
+            "::tables.arboretum.seedbank.taxon.profile.statistics",
+        }
+        assert sorted(i.detail for i in issues) == [
+            "'enumeration_threshold' is a required property",
+            "'percentiles' is a required property",
+        ]
+
+    def test_a_whole_table_block_conforms(self, print_dir: Path) -> None:
+        whole = {"enumeration_threshold": 50, "top_n_values": 3, "percentiles": [1, 50, 99]}
+
+        assert self._profile_issues(print_dir, {"statistics": whole}) == []
+
+    def test_a_switched_off_feature_is_whole_as_enabled_false(self, print_dir: Path) -> None:
+        assert self._profile_issues(print_dir, {"parts": {"enabled": False}}) == []
+
+    def test_a_switched_on_feature_needs_its_parameters(self, print_dir: Path) -> None:
+        issues = self._profile_issues(print_dir, {"parts": {"enabled": True, "max": 5}})
+
+        assert [i.detail for i in issues] == ["'max_depth' is a required property"]
+
+    @pytest.mark.parametrize(
+        ("block", "message"),
+        [
+            ({"mode": "sample", "materialize": True}, "'fraction' is a required property"),
+            ({"mode": "sample", "fraction": 0.5}, "'materialize' is a required property"),
+            ({"mode": "filter"}, "'filter' is a required property"),
+        ],
+    )
+    def test_a_read_block_needs_its_modes_parameters(
+        self,
+        print_dir: Path,
+        block: dict[str, Any],
+        message: str,
+    ) -> None:
+        issues = self._profile_issues(print_dir, {"read": {"tables": block}})
+
+        assert [i.detail for i in issues] == [message]
+
+    def test_a_sample_bounded_both_ways_errors(self, print_dir: Path) -> None:
+        block = {"mode": "sample", "fraction": 0.5, "max_rows": 10, "materialize": True}
+
+        assert self._profile_issues(print_dir, {"read": {"tables": block}}) != []
+
+    def test_a_connection_profile_missing_a_block_errors(self, print_dir: Path) -> None:
+        target = print_dir / "manifest.yaml"
+        data = _load_yaml_file(target)
+        del data["profile"]["sketches"]
+        _write_yaml_file(target, data)
+
+        issues = [i for i in validate_print(print_dir) if "'sketches'" in i.detail]
+
+        assert [(i.code, i.path.split("manifest.yaml", 1)[1]) for i in issues] == [
+            ("schema.missing-required-field", "::profile"),
+        ]
 
 
 def test_manifest_missing_selectors_errors(print_dir: Path) -> None:

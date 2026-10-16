@@ -606,6 +606,9 @@ clickhouse = [
 databricks = [
     { name = "databricks-sql-connector" },
 ]
+dbt = [
+    { name = "sqlglot" },
+]
 dev = [
     { name = "chdb" },
     { name = "clickhouse-connect" },
@@ -703,6 +706,7 @@ requires-dist = [
     { name = "rich-click", specifier = ">=1.9.9" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.16.10" },
     { name = "snowflake-connector-python", marker = "extra == 'snowflake'", specifier = ">=4.8.0" },
+    { name = "sqlglot", marker = "extra == 'dbt'", specifier = ">=30.21.0" },
     { name = "sqlglot", marker = "extra == 'dev'", specifier = ">=30.21.0" },
     { name = "starlette", marker = "extra == 'mcp'", specifier = ">=1.7.0" },
     { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.85" },
@@ -710,7 +714,7 @@ requires-dist = [
     { name = "uvicorn", marker = "extra == 'mcp'", specifier = ">=0.54.0" },
     { name = "waitress", marker = "extra == 'docs'", specifier = ">=3.0.2" },
 ]
-provides-extras = ["bigquery", "clickhouse", "databricks", "dev", "docs", "duckdb", "mcp", "mysql", "postgres", "redshift", "snowflake"]
+provides-extras = ["bigquery", "clickhouse", "databricks", "dbt", "dev", "docs", "duckdb", "mcp", "mysql", "postgres", "redshift", "snowflake"]
 
 [[package]]
 name = "delta-spark"

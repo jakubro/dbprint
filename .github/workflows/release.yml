@@ -34,3 +34,27 @@ jobs:
 
       - name: Publish
         run: uv publish --trusted-publishing always
+
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_linux_amd64.tar.gz \
+            | tar xz mcp-publisher
+
+      - name: Stamp the tagged version into server.json
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          jq --arg v "$version" \
+            '.version = $v | .packages[0].version = $v
+             | (.packages[0].runtimeArguments[] | select(.name == "--with") | .value) = "dbprint[mcp]==\($v)"' \
+            server.json > server.json.tmp
+          mv server.json.tmp server.json
+
+      - name: Publish to the MCP Registry
+        run: |
+          ./mcp-publisher login github-oidc
+          # The registry verifies ownership against PyPI, which can lag a just-uploaded version.
+          for attempt in 1 2 3 4 5; do
+            ./mcp-publisher publish && exit 0
+            sleep 30
+          done
+          exit 1

@@ -61,6 +61,12 @@ MATCH_THRESHOLD = 0.95
 # SPEC 4.1.3: the floor a near-miss must clear to publish at all - a producer constant, never
 # configuration, so two prints stay comparable on it.
 NEAR_MISS_FLOOR = 0.50
+# SPEC 4.1.3: distinct values a checksum pattern needs - one run in ten passes Luhn by chance.
+CHECKSUM_DISTINCT_FLOOR = 5
+# SPEC 4.1.3: distinct values below which `country_code` also needs a country word in the name.
+COUNTRY_CODE_DISTINCT_FLOOR = 8
+# SPEC 4.1.3: average rows per value at which a categorical column is a closed list, never prose.
+ENUMERATION_ROWS_PER_VALUE = 5
 
 
 _UUID_RE = re.compile(
@@ -78,6 +84,9 @@ _MAC_ADDRESS_RE = re.compile(
 )
 _BASE64_STD = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 _BASE64_URLSAFE = re.compile(r"^[A-Za-z0-9_\-]+={0,2}$")
+_ALPHANUMERIC_RE = re.compile(r"^[A-Za-z0-9]+$")
+# A lowercase vendor prefix, an underscore, then the id - `lot_K4m9...`, `seedlot_Hx7R...`.
+_PREFIXED_ID_RE = re.compile(r"^[a-z][a-z0-9]{0,7}_[A-Za-z0-9]{8,}$")
 # base64url alphabet, no padding - RFC 7515's compact serialization never pads a segment.
 _JWT_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_-]*$")
 _NUMERIC_STRING_RE = re.compile(r"^-?\d+(\.\d+)?$")
@@ -102,7 +111,7 @@ _SEMVER_RE = re.compile(
     r"(?:\+[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*)?$",
 )
 
-# ISO 3166-1 alpha-2. A closed set, so membership is the whole test.
+# ISO 3166-1 alpha-2; on a short sample membership needs the column name too (SPEC 4.1.3).
 _COUNTRY_CODES_ALPHA2 = frozenset(
     """
     AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ
@@ -296,18 +305,36 @@ class LooksLikeMatch:
     candidate_share: float | None = None
 
 
-def detect(values: Iterable[object]) -> LooksLike | None:
-    """Return the pattern assigned to >= 95% of the sample, or None.
+def detect(
+    values: Iterable[object],
+    *,
+    column_name: str | None = None,
+    classification: str | None = None,
+    cardinality: int | None = None,
+    rows: int | None = None,
+) -> LooksLike | None:
+    """Return the pattern assigned to >= 95% of the sample, or None (SPEC 4.1.1, 4.1.3).
 
-    Each value is coerced with `str()` (a binary value is read by its leading bytes) and assigned
-    exactly one pattern - the first in priority order - before anything is counted; the denominator is the whole sample,
-    including values that matched nothing (SPEC 4.1.1, 4.1.3).
+    The keywords carry the column's name, classification, distinct count and non-null rows.
     """
 
-    return detect_with_evidence(values).pattern
+    return detect_with_evidence(
+        values,
+        column_name=column_name,
+        classification=classification,
+        cardinality=cardinality,
+        rows=rows,
+    ).pattern
 
 
-def detect_with_evidence(values: Iterable[object]) -> LooksLikeMatch:
+def detect_with_evidence(
+    values: Iterable[object],
+    *,
+    column_name: str | None = None,
+    classification: str | None = None,
+    cardinality: int | None = None,
+    rows: int | None = None,
+) -> LooksLikeMatch:
     """Like `detect`, but also returns the draw size and the winning pattern's tally - without
     them a two-of-two match reads identically to a ten-thousand-of-ten-thousand one.
     """
@@ -317,7 +344,10 @@ def detect_with_evidence(values: Iterable[object]) -> LooksLikeMatch:
     if not sample:
         return LooksLikeMatch(None, 0, 0)
 
-    assigned: Counter[LooksLike] = Counter(p for p in map(_assign_any, sample) if p is not None)
+    withheld = _withheld(sample, column_name, classification, cardinality, rows)
+    assigned: Counter[LooksLike] = Counter(
+        p for p in (_assign_any(v, withheld) for v in sample) if p is not None
+    )
 
     for pattern in _ORDER:
         if assigned[pattern] / len(sample) >= MATCH_THRESHOLD:
@@ -349,23 +379,67 @@ def _best_scoring(assigned: Counter[LooksLike]) -> tuple[LooksLike | None, int]:
     return best, best_count
 
 
-def _assign_any(value: object) -> LooksLike | None:
-    if isinstance(value, (bytes, bytearray, memoryview)):
+def _withheld(
+    sample: list[object],
+    column_name: str | None,
+    classification: str | None,
+    cardinality: int | None,
+    rows: int | None,
+) -> frozenset[LooksLike]:
+    # The draw is of distinct values (SPEC 4.1.2): its size is the distinct count the floors read.
+    withheld: set[LooksLike] = set()
+
+    if len(sample) < CHECKSUM_DISTINCT_FLOOR:
+        withheld |= _CHECKSUM_PATTERNS
+
+    if len(sample) < COUNTRY_CODE_DISTINCT_FLOOR and not _names_a_country(column_name):
+        withheld.add("country_code")
+
+    if (
+        classification == "categorical"
+        and cardinality
+        and rows is not None
+        and rows >= ENUMERATION_ROWS_PER_VALUE * cardinality
+    ):
+        withheld.add("prose")
+
+    return frozenset(withheld)
+
+
+def _names_a_country(column_name: str | None) -> bool:
+    if column_name is None:
+        return False
+
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", column_name)
+
+    return not _COUNTRY_WORDS.isdisjoint(re.split(r"[^a-z0-9]+", spaced.lower()))
+
+
+def _assign_any(value: object, withheld: frozenset[LooksLike] = frozenset()) -> LooksLike | None:
+    if isinstance(value, _BINARY_TYPES):
         head = bytes(value[:8])
 
         return next((kind for kind, magic in _BINARY_KINDS if head.startswith(magic)), None)
 
-    return _assign(value if isinstance(value, str) else str(value))
+    return _assign(value if isinstance(value, str) else str(value), withheld)
 
 
-def _assign(value: str) -> LooksLike | None:
+def _assign(value: str, withheld: frozenset[LooksLike] = frozenset()) -> LooksLike | None:
     """The first pattern in priority order this value matches, if any."""
 
     for pattern, matcher in _PRIORITY:
+        if pattern in withheld or (pattern == "timezone" and _withheld_code(value, withheld)):
+            continue
+
         if matcher(value):
             return pattern
 
     return None
+
+
+def _withheld_code(value: str, withheld: frozenset[LooksLike]) -> bool:
+    # IANA keeps `GB` and `NZ` as zone aliases; a withheld country code must not become a zone.
+    return "country_code" in withheld and _match_country_code(value)
 
 
 def _match_uuid(s: str) -> bool:
@@ -453,14 +527,12 @@ def _match_jwt(s: str) -> bool:
 
 
 def _match_base64(s: str) -> bool:
-    """Length, alphabet, real padding, a case mixture, and a clean decode.
+    """Length, alphabet, real padding, a case mixture and a clean decode (SPEC 4.1.1).
 
-    An unpadded URL-safe candidate is accepted only where its length is already a multiple of
-    four; padding a short remainder would admit any label not congruent to 1 mod 4. Requiring
-    both cases separates an encoded token from a lowercase word or an all-uppercase code.
+    A letters-and-digits-only value must also decode to text or a known file signature.
     """
 
-    if len(s) < 16:
+    if len(s) < 16 or _PREFIXED_ID_RE.match(s):
         return False
 
     if not (_BASE64_STD.match(s) or _BASE64_URLSAFE.match(s)):
@@ -474,13 +546,25 @@ def _match_base64(s: str) -> bool:
             if len(s) % 4 != 0:
                 return False
 
-            base64.urlsafe_b64decode(s)
+            decoded = base64.urlsafe_b64decode(s)
         else:
-            base64.b64decode(s, validate=True)
+            decoded = base64.b64decode(s, validate=True)
     except (ValueError, TypeError):
         return False
 
-    return True
+    return not _ALPHANUMERIC_RE.match(s) or _decodes_to_data(decoded)
+
+
+def _decodes_to_data(decoded: bytes) -> bool:
+    if any(decoded.startswith(magic) for _, magic in _BINARY_KINDS):
+        return True
+
+    try:
+        text = decoded.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+
+    return all(c.isprintable() or c in "\t\n\r" for c in text)
 
 
 def _match_latlon(s: str) -> bool:
@@ -530,13 +614,12 @@ def _match_content_type(s: str) -> bool:
 
 
 def _match_path(s: str) -> bool:
-    """A POSIX path, excluding a value that also parses as a network block.
-
-    CIDR notation (`10.0.0.0/8`) satisfies `_PATH_RE`'s segment-slash-segment shape, so a
-    network block reports nothing rather than the wrong pattern.
-    """
+    """A POSIX path; a slash date, a fraction and a CIDR block are not (SPEC 4.1.1)."""
 
     if not _PATH_RE.match(s):
+        return False
+
+    if all(segment.isdecimal() for segment in s.split("/") if segment):
         return False
 
     try:
@@ -814,6 +897,10 @@ _PRIORITY: tuple[tuple[LooksLike, Callable[[str], bool]], ...] = (
     *_STRUCTURAL,
     ("prose", _match_prose),
 )
+
+_BINARY_TYPES = (bytes, bytearray, memoryview)
+_CHECKSUM_PATTERNS: frozenset[LooksLike] = frozenset({"isbn", "ean", "imei", "card_number"})
+_COUNTRY_WORDS = frozenset({"country", "countries", "nation", "nations", "nationality"})
 
 # SPEC 4.1.1's file signatures; no two share a prefix, so their order resolves nothing.
 _BINARY_KINDS: tuple[tuple[LooksLike, bytes], ...] = (

@@ -54,7 +54,7 @@ def synthesize(
     fk_targets: list[str] | None = None,
     *,
     hints_only: bool = False,
-    statistics_params: dict[str, Any] | None = None,
+    profile: dict[str, Any] | None = None,
     scope: ScanScope | None = None,
     row_count: int | None = None,
 ) -> Rendered:
@@ -64,14 +64,14 @@ def synthesize(
     """
 
     classification = column_value(column_stats, "classification") or "unsupported"
-    params = statistics_params or {}
+    params = profile or {}
 
     facts = _fk_note(classification, fk_targets)
 
     if not hints_only:
         redaction = _redaction_primitive(column_stats)
         total = _non_null(column_stats, row_count, scope)
-        rows = _non_null_rows(column_stats, row_count, scope)
+        rows = non_null_rows(column_stats, row_count, scope)
         facts += _base_template(
             classification,
             column_stats,
@@ -133,6 +133,27 @@ def null_share(stats: dict[str, Any], scope: ScanScope | None) -> str | None:
         return qualify("none", scope) if column_value(stats, "nullable") is True else None
 
     return spell_percent(null_rate)
+
+
+def non_null_rows(
+    stats: dict[str, Any],
+    row_count: int | None,
+    scope: ScanScope | None,
+) -> int | None:
+    """A part's occurrences, the rows scanned, else the table's row count, less the nulls.
+
+    None where none of them is readable.
+    """
+
+    occurrences = column_value(stats, "occurrences")
+    population = occurrences if isinstance(occurrences, int) else rows_scanned(stats, scope)
+    population = population if isinstance(population, int) else row_count
+    nulls = column_value(stats, "null_count")
+
+    if not isinstance(population, int) or isinstance(population, bool):
+        return None
+
+    return population - (nulls if isinstance(nulls, int) else 0)
 
 
 def _fact(text: str, *keys: str) -> Rendered:
@@ -726,7 +747,7 @@ def _looks_like_suffix(
         and not isinstance(sampled, bool)
         and not isinstance(matched, bool)
     )
-    sample_size = (params or {}).get("looks_like_sample_size")
+    sample_size = ((params or {}).get("looks_like") or {}).get("sample_size")
     has_configured = isinstance(sample_size, int) and not isinstance(sample_size, bool)
 
     if has_evidence and has_configured:
@@ -833,31 +854,10 @@ def _coverage_method_suffix(stats: dict[str, Any]) -> list[Rendered]:
     return [_fact("coverage bounded", "coverage_bounded")] if bounded else []
 
 
-def _non_null_rows(
-    stats: dict[str, Any],
-    row_count: int | None,
-    scope: ScanScope | None,
-) -> int | None:
-    """A part's occurrences, the rows scanned, else the table's row count, less the nulls.
-
-    None where none of them is readable.
-    """
-
-    occurrences = column_value(stats, "occurrences")
-    population = occurrences if isinstance(occurrences, int) else rows_scanned(stats, scope)
-    population = population if isinstance(population, int) else row_count
-    nulls = column_value(stats, "null_count")
-
-    if not isinstance(population, int) or isinstance(population, bool):
-        return None
-
-    return population - (nulls if isinstance(nulls, int) else 0)
-
-
 def _non_null(stats: dict[str, Any], row_count: int | None, scope: ScanScope | None) -> int | None:
     """Non-null rows a share is taken against, or None where nothing states them.
 
-    A complete list's sum (SPEC 2.2.5), a truncated one's sum over its coverage, else `_non_null_rows`.
+    A complete list's sum (SPEC 2.2.5), a truncated one's sum over its coverage, else `non_null_rows`.
     """
 
     listed = sum(count for _, count in _value_entries(stats))
@@ -869,7 +869,7 @@ def _non_null(stats: dict[str, Any], row_count: int | None, scope: ScanScope | N
     if isinstance(coverage, (int, float)) and not isinstance(coverage, bool) and 0 < coverage < 1:
         return max(round(listed / coverage), listed)
 
-    return _non_null_rows(stats, row_count, scope)
+    return non_null_rows(stats, row_count, scope)
 
 
 def _grouped_entries(
