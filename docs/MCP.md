@@ -171,6 +171,8 @@ Resource entries returned by `resources/list` include `uri`, `name` (human-reada
 
 ## 4. Tools
 
+Every tool in `tools/list` carries `annotations` with all four behaviour hints as explicit booleans: `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: false`. No tool writes anything, and every tool reads only the served prints and the packaged reference documents.
+
 ### 4.1 `get_table_context`
 
 Returns an assembled context fragment for one table, formatted for direct insertion into an LLM prompt — the tool to read before writing SQL against a table (`purpose: query`) or answering a question about its data (`purpose: profile`). Nothing is dropped to fit a client: a context larger than a page is paged (§4.8), section by section. Under `profile` the Markdown Notes summarise a value list that is not the column's whole domain as its 5 most frequent values, each with its share of the non-null scanned rows and the share the five cover together; json and yaml carry the list whole.

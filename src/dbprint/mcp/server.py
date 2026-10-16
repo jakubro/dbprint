@@ -24,6 +24,7 @@ from mcp.types import (
     TextContent,
     TextResourceContents,
     Tool,
+    ToolAnnotations,
 )
 from mcp.types import Resource as McpResource
 
@@ -143,7 +144,12 @@ def build_server(state: ServedConnections) -> Server:
 
         return ListToolsResult(
             tools=[
-                Tool(name=t.name, description=t.description, input_schema=t.input_schema)
+                Tool(
+                    name=t.name,
+                    description=t.description,
+                    input_schema=t.input_schema,
+                    annotations=ToolAnnotations.model_validate(t.annotations.wire()),
+                )
                 for t in definitions
             ],
             next_cursor=next_cursor,

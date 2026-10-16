@@ -590,6 +590,32 @@ class TestToolDescriptionsReachTheWire:
         }
 
 
+class TestToolHintsReachTheWire:
+    """MCP.md 4: every listed tool declares all four behaviour hints as booleans."""
+
+    def test_every_tool_is_declared_read_only_and_closed_world(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        async def _run() -> dict[str, dict[str, object]]:
+            async with Client(build_server(_state_for(primary_conn))) as client:
+                listed = await client.list_tools()
+
+                return {
+                    t.name: t.annotations.model_dump(by_alias=True) if t.annotations else {}
+                    for t in listed.tools
+                }
+
+        hints = anyio.run(_run)
+
+        assert len(hints) == 7
+        for name, declared in hints.items():
+            assert declared["readOnlyHint"] is True, name
+            assert declared["destructiveHint"] is False, name
+            assert declared["idempotentHint"] is True, name
+            assert declared["openWorldHint"] is False, name
+
+
 class TestToolFormatShapesReachTheWire:
     """MCP.md 4.1: the wire payload for each format, not just the handler's return value."""
 

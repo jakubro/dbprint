@@ -71,7 +71,10 @@ class TestRootHelp:
 
     def test_has_workflow_section(self) -> None:
         flat = _flat()
-        assert "Typical workflow" in flat
+        assert (
+            "Typical workflow: init -> generate -> annotate (per table) -> diff (ad-hoc) "
+            "or check (CI gate)."
+        ) in flat
         assert "SPEC.md" in flat
 
 

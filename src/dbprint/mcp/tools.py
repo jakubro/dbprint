@@ -92,16 +92,42 @@ TOOL_NAMES = (
 
 
 @dataclass(frozen=True)
+class ToolHints:
+    """Behaviour hints advertised as a tool's `annotations` in tools/list."""
+
+    read_only: bool
+    destructive: bool
+    idempotent: bool
+    open_world: bool
+
+    def wire(self) -> dict[str, bool]:
+        """Return the hints under their MCP wire names."""
+
+        return {
+            "readOnlyHint": self.read_only,
+            "destructiveHint": self.destructive,
+            "idempotentHint": self.idempotent,
+            "openWorldHint": self.open_world,
+        }
+
+
+@dataclass(frozen=True)
 class ToolDef:
     """Static tool definition advertised in tools/list."""
 
     name: str
     description: str
     input_schema: dict[str, Any]
+    annotations: ToolHints
+
+
+# Closed-world even under a remote --project: the locator is resolved before the server starts.
+_READ_ONLY = ToolHints(read_only=True, destructive=False, idempotent=True, open_world=False)
 
 
 TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
     ToolDef(
+        annotations=_READ_ONLY,
         name="get_table_context",
         description=(
             "Read one table. Call it before writing SQL against a table, with "
@@ -203,6 +229,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
         },
     ),
     ToolDef(
+        annotations=_READ_ONLY,
         name="list_tables",
         description=(
             "List a connection's tables, optionally narrowed by an fnmatch pattern over "
@@ -249,6 +276,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
         },
     ),
     ToolDef(
+        annotations=_READ_ONLY,
         name="search_columns",
         description=(
             "Find columns across every table - the first call when the table holding a "
@@ -346,6 +374,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
         },
     ),
     ToolDef(
+        annotations=_READ_ONLY,
         name="resolve_value",
         description=(
             "Resolve a phrase, a code or a spelling against one column's published "
@@ -406,6 +435,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
         },
     ),
     ToolDef(
+        annotations=_READ_ONLY,
         name="get_manifest",
         description=(
             "Return the print's index for a connection - its tables and the files each "
@@ -442,6 +472,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
         },
     ),
     ToolDef(
+        annotations=_READ_ONLY,
         name="get_diff",
         description=(
             "Answer what changed between the database's last two prints: "
@@ -484,6 +515,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
         },
     ),
     ToolDef(
+        annotations=_READ_ONLY,
         name="get_reference",
         description=(
             "Look up the dbprint format specification or the assertion DSL "
@@ -533,7 +565,12 @@ def list_page(cursor: str | None) -> tuple[list[ToolDef], str | None]:
         del first
         reply: dict[str, Any] = {
             "tools": [
-                {"name": d.name, "description": d.description, "inputSchema": d.input_schema}
+                {
+                    "name": d.name,
+                    "description": d.description,
+                    "inputSchema": d.input_schema,
+                    "annotations": d.annotations.wire(),
+                }
                 for _, d in (paging.entry(unit) for unit in units)
             ],
         }

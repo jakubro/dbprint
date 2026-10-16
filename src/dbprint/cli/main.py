@@ -59,8 +59,8 @@ def main(ctx: click.Context, debug: bool) -> None:
     The commands below scaffold a project, profile the database, and verify or
     consume the committed prints.
 
-    **Typical workflow:** `init` -> `generate` -> `diff` (ad-hoc) or `check`
-    (CI gate).
+    **Typical workflow:** `init` -> `generate` -> `annotate` (per table) ->
+    `diff` (ad-hoc) or `check` (CI gate).
 
     Run `dbprint COMMAND --help` for per-command usage. The on-disk format is
     specified in `SPEC.md`, which ships inside the package and is published at
