@@ -98,7 +98,7 @@ An added join takes the same shape without `verdict`, its `note` naming the code
 A newly created per-table annotation file is invisible until the next run records it in the manifest, so regenerate first, then check the table:
 
 ```console
-$ dbprint generate --force
+$ dbprint generate
 $ dbprint annotate <table> --check
 ```
 

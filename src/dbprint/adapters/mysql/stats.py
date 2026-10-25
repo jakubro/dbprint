@@ -25,7 +25,14 @@ from dbprint.spec.rounding import (
 from dbprint.spec.spatial import Extent, Geometry
 from .connection import DIALECT, Cursor, exec_query
 from .introspect import table_rows_estimate
-from .rendering import render_binary, render_domain, render_text, temporal_shape
+from .rendering import (
+    mean_expression,
+    render_binary,
+    render_domain,
+    render_text,
+    sum_expression,
+    temporal_shape,
+)
 from .. import statements
 from ..base import (
     BaseStats,
@@ -56,6 +63,7 @@ from ..base import (
     measure_columns,
     measures_length,
     numeric_block_from_row,
+    numeric_row,
     phase_a_cost,
     profile_over,
     row_count_or_none,
@@ -316,27 +324,23 @@ def probe_timeline(
         table_source(identity, scope),
         cn,
         _timeline_bucket_expr(cn, col.classified_type, unit),
-        render_domain("bkt.bucket_start", col.classified_type, already_utc=True),
+        render_domain("bkt.bucket_start", col.classified_type),
     )
 
 
 def _timeline_bucket_expr(cn: str, sql_type: str, unit: str) -> str:
     """Truncation expression for `probe_timeline`'s GROUP BY key (SPEC 2.2.16): MySQL has no
-    `date_trunc`, a TIMESTAMP normalizes to UTC first, and the bucket keeps the anchor's domain.
+    `date_trunc`, and the bucket keeps the anchor's domain.
     """
 
-    is_timestamp = temporal_shape(sql_type) == "timestamp_tz"
     is_date_only = temporal_shape(sql_type) == "date"
-    normalized = f"CONVERT_TZ({cn}, @@session.time_zone, '+00:00')" if is_timestamp else cn
 
     if unit == "day":
-        truncated = f"CAST({normalized} AS DATE)"
+        truncated = f"CAST({cn} AS DATE)"
     elif unit == "week":
-        truncated = f"DATE_SUB(CAST({normalized} AS DATE), INTERVAL WEEKDAY({normalized}) DAY)"
+        truncated = f"DATE_SUB(CAST({cn} AS DATE), INTERVAL WEEKDAY({cn}) DAY)"
     else:
-        truncated = (
-            f"DATE_SUB(CAST({normalized} AS DATE), INTERVAL (DAYOFMONTH({normalized}) - 1) DAY)"
-        )
+        truncated = f"DATE_SUB(CAST({cn} AS DATE), INTERVAL (DAYOFMONTH({cn}) - 1) DAY)"
 
     return truncated if is_date_only else f"CAST({truncated} AS DATETIME)"
 
@@ -551,7 +555,7 @@ def _fetch_value_list(
 ) -> ValueList:
     """Ordered value list, its coverage, and whether it enumerates the column.
 
-    A TIMESTAMP routes through the same UTC-pinning renderer as `range`.
+    A TIMESTAMP renders through the same renderer as `range`, in the UTC session.
     """
 
     cn = source_column(col, DIALECT)
@@ -586,14 +590,21 @@ def _fetch_numeric_block(
 ) -> NumericBlock:
     cn = source_column(col, DIALECT)
     value = _RANKED_VALUE
-    select_parts = [
-        f"MIN({value}) AS mn",
-        f"MAX({value}) AS mx",
-        f"AVG({value}) AS avg_val",
-        f"SUM({value}) AS sum_val",
-        *_percentile_select(config.percentiles),
-    ]
-    row = exec_query(cursor, select_from(select_parts, _ranked(source, cn))).fetchone()
+
+    def read(aggregates: bool) -> Any:
+        mean = mean_expression(value, col.classified_type) if aggregates else "NULL"
+        total = sum_expression(value, col.classified_type) if aggregates else "NULL"
+        select_parts = [
+            f"MIN({value}) AS mn",
+            f"MAX({value}) AS mx",
+            f"{mean} AS avg_val",
+            f"{total} AS sum_val",
+            *_percentile_select(config.percentiles),
+        ]
+
+        return exec_query(cursor, select_from(select_parts, _ranked(source, cn))).fetchone()
+
+    row, failure = numeric_row(read)
 
     return numeric_block_from_row(
         row,
@@ -610,6 +621,7 @@ def _fetch_numeric_block(
             config,
             measured_value,
         ),
+        failure=failure,
     )
 
 

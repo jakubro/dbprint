@@ -13,18 +13,15 @@ import yaml
 from dbprint.config import ConnectionConfig
 from dbprint.engine.baseline import (
     ArtifactReader,
+    contained,
     failed_tables,
     read_manifest,
     table_directory,
 )
 from dbprint.engine.context_assembler import incoming_rejections
-from dbprint.engine.relationship_graph import (
-    edge_detection,
-    edge_key,
-    rejected_edges,
-    withhold_rejected,
-)
+from dbprint.engine.relationship_graph import withhold_rejected
 from dbprint.engine.yaml_dumper import dump_yaml
+from dbprint.spec import authored
 from dbprint.spec.artifacts import (
     ARTIFACT_FILENAMES,
     DIFF_FILENAME,
@@ -34,6 +31,7 @@ from dbprint.spec.artifacts import (
     declared_artifacts,
     walkable_tables,
 )
+from dbprint.spec.edges import edge_key, rejected_edges
 from dbprint.spec.fqn import join as join_fqn
 from . import errors, paging
 from .reference import ReferenceDocument, read_document
@@ -319,12 +317,20 @@ def _read_whole(state: ServedConnections, uri: str) -> ReadResult:
     print_root = conn.print_root
 
     if ref.kind == "manifest":
-        return _read_text(print_root / MANIFEST_FILENAME, _KIND_MIME["manifest"], state.files.read)
+        manifest_path = print_root / MANIFEST_FILENAME
+
+        if manifest_path.is_file() and not contained(print_root, manifest_path):
+            raise errors.malformed_manifest(
+                str(manifest_path),
+                "it resolves outside the connection root",
+            )
+
+        return _read_text(manifest_path, _KIND_MIME["manifest"], state.files.read)
 
     if ref.kind == "diff":
         diff_path = print_root / DIFF_FILENAME
 
-        if not diff_path.is_file():
+        if not diff_path.is_file() or not contained(print_root, diff_path):
             raise errors.no_diff_available(str(diff_path))
 
         whole = _read_text(diff_path, _KIND_MIME["diff"], state.files.read)
@@ -334,7 +340,7 @@ def _read_whole(state: ServedConnections, uri: str) -> ReadResult:
     if ref.kind == "reading":
         reading_path = print_root / READING_GUIDE_FILENAME
 
-        if not reading_path.is_file():
+        if not reading_path.is_file() or not contained(print_root, reading_path):
             raise errors.no_reading_guide_available(str(reading_path))
 
         return _read_text(reading_path, _KIND_MIME["reading"], state.files.read)
@@ -342,7 +348,7 @@ def _read_whole(state: ServedConnections, uri: str) -> ReadResult:
     if ref.kind == "manifest_annotations":
         path = print_root / _CONNECTION_LEVEL_FILE["manifest_annotations"]
 
-        if path.is_file():
+        if path.is_file() and contained(print_root, path):
             return _read_text(path, _KIND_MIME["manifest_annotations"], state.files.read)
 
         # The same declared-vs-never-declared split as the per-table optional kinds (SPEC 2.5,
@@ -475,7 +481,9 @@ def _enumerate_connection(conn: ConnectionConfig, read: ArtifactReader) -> list[
         ),
     ]
 
-    if (print_root / _CONNECTION_LEVEL_FILE["manifest_annotations"]).is_file():
+    notes = print_root / _CONNECTION_LEVEL_FILE["manifest_annotations"]
+
+    if notes.is_file() and contained(print_root, notes):
         out.append(
             ResourceEntry(
                 uri=f"dbprint://{conn.name}/manifest_annotations",
@@ -572,7 +580,12 @@ def _without_rejected_edges(
     own_name = declared_artifacts(entry).get("relationships_annotations")
     own_path = table_directory(print_root, fqn, entry) / own_name if own_name else None
     incoming, consulted = incoming_rejections(manifest, print_root, fqn, raw, read)
-    shown = withhold_rejected(raw, _own_rejections(own_path, read), incoming, fqn)
+    shown = withhold_rejected(
+        raw,
+        _own_rejections(own_path, read, raw.get("refers_to")),
+        incoming,
+        fqn,
+    )
 
     if shown is raw:
         return whole
@@ -599,7 +612,7 @@ def diff_without_rejected(
 
     changes = [c for c in (data.get("changes") or []) if isinstance(c, dict)]
     tables = walkable_tables(manifest) if manifest else {}
-    verdicts: dict[str, tuple[dict[tuple[Any, ...], Any], set[tuple[Any, ...]]]] = {}
+    verdicts: dict[str, dict[tuple[Any, ...], Any]] = {}
     consulted: list[Path] = []
     kept: list[dict[str, Any]] = []
 
@@ -613,14 +626,13 @@ def diff_without_rejected(
         if source not in verdicts:
             verdicts[source] = _source_verdicts(print_root, source, tables[source], consulted, read)
 
-        rejected, declared = verdicts[source]
         key = (
             tuple(change.get("source_column") or ()),
             change.get("target_table"),
             tuple(change.get("target_column") or ()),
         )
 
-        if key not in rejected or key in declared:
+        if key not in verdicts[source]:
             kept.append(change)
 
     shown = {**data, "changes": kept}
@@ -666,26 +678,23 @@ def _source_verdicts(
     entry: dict[str, Any],
     consulted: list[Path],
     read: ArtifactReader,
-) -> tuple[dict[tuple[Any, ...], Any], set[tuple[Any, ...]]]:
+) -> dict[tuple[Any, ...], Any]:
     table_dir = table_directory(print_root, source, entry)
     artifacts = declared_artifacts(entry)
-    rejected: dict[tuple[Any, ...], Any] = {}
-    declared: set[tuple[Any, ...]] = set()
 
-    if "relationships_annotations" in artifacts:
-        path = table_dir / artifacts["relationships_annotations"]
-        consulted.append(path)
-        rejected = _own_rejections(path, read)
+    if "relationships_annotations" not in artifacts:
+        return {}
 
-    if rejected and "relationships" in artifacts:
-        path = table_dir / artifacts["relationships"]
-        consulted.append(path)
-        edges = (parsed_mapping(path, read) or {}).get("refers_to") or []
-        declared = {
-            edge_key(e) for e in edges if isinstance(e, dict) and edge_detection(e) == "declared"
-        }
+    path = table_dir / artifacts["relationships_annotations"]
+    consulted.append(path)
+    edges: Any = None
 
-    return rejected, declared
+    if "relationships" in artifacts:
+        relationships_path = table_dir / artifacts["relationships"]
+        consulted.append(relationships_path)
+        edges = (parsed_mapping(relationships_path, read) or {}).get("refers_to")
+
+    return _own_rejections(path, read, edges)
 
 
 def parsed_mapping(path: Path, read: ArtifactReader) -> dict[str, Any] | None:
@@ -702,7 +711,11 @@ def parsed_mapping(path: Path, read: ArtifactReader) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def _own_rejections(path: Path | None, read: ArtifactReader) -> dict[tuple[Any, ...], Any]:
+def _own_rejections(
+    path: Path | None,
+    read: ArtifactReader,
+    refers_to: Any,
+) -> dict[tuple[Any, ...], Any]:
     if path is None or not path.is_file():
         return {}
 
@@ -711,9 +724,14 @@ def _own_rejections(path: Path | None, read: ArtifactReader) -> dict[tuple[Any, 
     except yaml.YAMLError:
         return {}
 
-    entries = data.get("refers_to") if isinstance(data, dict) else None
+    admitted = authored.admitted("relationships_annotations", data)
 
-    return rejected_edges(entries if isinstance(entries, list) else None)
+    if admitted is None:
+        return {}
+
+    edges = {edge_key(e): e for e in refers_to or [] if isinstance(e, dict)}
+
+    return rejected_edges(admitted["refers_to"], edges)
 
 
 def _read_unchanged(path: Path) -> tuple[str, str]:

@@ -692,6 +692,30 @@ class TestValueDerivedEdges:
 
         assert infer_value_derived_edges([child], [parent], existing) == {}
 
+    @pytest.mark.parametrize("dense", [True, False])
+    def test_a_child_with_an_asserted_parent_proposes_no_measured_edge(self, dense: bool) -> None:
+        child = _candidate("public.a", "taxon_id", (2, 3))
+        parents = [
+            _candidate("public.taxon", "taxon_id", (1, 2, 3, 4)),
+            _candidate("public.trial", "trial_id", (1, 2, 3, 4, 5), dense=dense),
+        ]
+        existing = frozenset({("public.a", "taxon_id", "public.taxon", "taxon_id")})
+        asserted = frozenset({("public.a", "taxon_id")})
+
+        assert infer_value_derived_edges([child], parents, existing, asserted) == {}
+
+    def test_another_column_of_the_same_table_still_proposes(self) -> None:
+        children = [
+            _candidate("public.a", "taxon_id", (2, 3)),
+            _candidate("public.a", "batch_id", (2, 3)),
+        ]
+        parent = _candidate("public.trial", "trial_id", (1, 2, 3, 4, 5), dense=True)
+        asserted = frozenset({("public.a", "taxon_id")})
+
+        out = infer_value_derived_edges(children, [parent], frozenset(), asserted)
+
+        assert [fk.column for fk in out["public.a"]] == [("batch_id",)]
+
     def test_several_parents_are_ordered_by_table_then_column(self) -> None:
         child = _candidate("public.a", "linked_ref", (2, 3))
         parents = [

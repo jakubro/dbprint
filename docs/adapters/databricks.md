@@ -26,7 +26,7 @@ Unity Catalog's `information_schema` is privilege-**filtered**, not privilege-**
 
 ## Unity Catalog vs. the fallback
 
-`connect()` probes once with `SELECT 1 FROM information_schema.tables WHERE 1 = 0`; **any** failure — not one specific driver error — is read as "no Unity Catalog", and the connection is not retried. That flag then routes four operations for the rest of the run:
+Opening the connection probes once with `SELECT 1 FROM information_schema.tables WHERE 1 = 0`; **any** failure — not one specific driver error — is read as "no Unity Catalog", and the probe is not retried. The answer then decides these for the rest of the run:
 
 | On the fallback path (no Unity Catalog) | Reason |
 |---|---|
@@ -36,7 +36,7 @@ Unity Catalog's `information_schema` is privilege-**filtered**, not privilege-**
 | Ordinals are positional, not catalog-stated | same limitation |
 | A materialized view is not distinguishable from a table | enumeration is `SHOW SCHEMAS` then per-schema `SHOW TABLES` cross-referenced against `SHOW VIEWS`, which does not carry a matview marker |
 
-On Unity Catalog, `table_type` maps eight documented values; a ninth raises `UnmappedTableType` rather than silently dropping the object. Defaults and per-column collations come from a best-effort `DESCRIBE TABLE EXTENDED ... AS JSON`: a refused statement leaves every column on that table without an override, and a collation is published only where it differs from the table's own default. A foreign key whose target lives in another catalog keeps its catalog segment, giving a three-segment `target_table`.
+On Unity Catalog, `table_type` maps eight documented values; a ninth stops the run with `unrecognised table_type` rather than silently dropping the object. Defaults and per-column collations come from a best-effort `DESCRIBE TABLE EXTENDED ... AS JSON`: a refused statement leaves every column on that table without an override, and a collation is published only where it differs from the table's own default. A foreign key whose target lives in another catalog keeps its catalog segment, giving a three-segment `target_table`.
 
 ## Sampling
 
@@ -52,7 +52,7 @@ Databricks reproduces the sampled fraction reliably — the measured coherence a
 
 Only one thing makes dbprint write, and only under one condition: `profile.read.tables.materialize` is on by default, and it fires **only for a table read in `sample` mode** — by a `fraction`, or by a `max_rows` ceiling that resolves below the table's size, at whatever level the ceiling is set. A project that narrows nothing, which is what `dbprint init` scaffolds, never writes. A `filter` is a predicate rather than a fraction and never materializes.
 
-Where it does fire, the drawn rows are copied once into a session-lifetime temporary table — `CREATE TEMPORARY TABLE <name> AS SELECT * FROM (SELECT * FROM <table> TABLESAMPLE (p PERCENT))` — and every statistics statement for that table reads the copy. Where `CREATE TEMPORARY TABLE` is unavailable (a Dedicated cluster is the usual cause), dbprint warns and degrades to reading the un-materialized `TABLESAMPLE` directly, since `SAMPLE_FALLBACK_COHERENT` is `true` on this engine — the measured reproducibility above is what makes that degrade safe rather than silently wrong.
+Where it does fire, the drawn rows are copied once into a session-lifetime temporary table — `CREATE TEMPORARY TABLE <name> AS SELECT * FROM (SELECT * FROM <table> TABLESAMPLE (p PERCENT))` — and every statistics statement for that table reads the copy. Where `CREATE TEMPORARY TABLE` is unavailable (a Dedicated cluster is the usual cause), dbprint warns and degrades to reading the un-materialized `TABLESAMPLE` directly, since a seeded `TABLESAMPLE ... REPEATABLE` reads the same rows in every statement on this engine — the measured reproducibility above is what makes that degrade safe rather than silently wrong.
 
 ## Identifiers
 
@@ -70,7 +70,7 @@ A `FOREIGN` table, federated by query or by catalog, is listed with `external: t
 
 ## Row count and cost
 
-`DESCRIBE TABLE EXTENDED ... AS JSON` reads `statistics.num_rows`; any failure returns `None` rather than falling back to `COUNT(*)` — a silent full scan being judged worse than an absent estimate. Every statement here runs on the connection's SQL warehouse, so the cost is warehouse compute time rather than bytes billed. DDL comes from `SHOW CREATE TABLE`, and is not a byte-exact round trip: Databricks filters table properties out of its own output.
+`DESCRIBE TABLE EXTENDED ... AS JSON` reads `statistics.num_rows`, the statistic `ANALYZE TABLE ... COMPUTE STATISTICS` or predictive optimization last collected, so it is as current as that collection; any failure returns `None` rather than falling back to `COUNT(*)` — a silent full scan being judged worse than an absent estimate. Every statement here runs on the connection's SQL warehouse, so the cost is warehouse compute time rather than bytes billed. DDL comes from `SHOW CREATE TABLE`, and is not a byte-exact round trip: Databricks filters table properties out of its own output.
 
 ## Temporal percentiles
 

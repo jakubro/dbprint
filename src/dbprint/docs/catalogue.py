@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import yaml
 
@@ -19,7 +20,7 @@ from dbprint.engine.baseline import (
     table_directory,
     unprofiled_message,
 )
-from dbprint.spec import artifact_yaml
+from dbprint.spec import artifact_yaml, authored
 from dbprint.spec.artifacts import declared_artifacts, walkable_tables
 from dbprint.spec.fqn import join as join_fqn
 from dbprint.spec.fqn import split as split_fqn
@@ -164,11 +165,9 @@ def nav_tree(connections: list[PrintConnection]) -> dict[str, PrefixTree]:
 
 
 def table_target(conn_name: str, fqn: str) -> str:
-    """The URL path for one table's page."""
+    """The URL path for one table's page, both segments percent-encoded."""
 
-    from urllib.parse import quote
-
-    return f"/t/{conn_name}/{quote(fqn)}"
+    return f"/t/{quote(conn_name, safe='')}/{quote(fqn, safe='')}"
 
 
 def leaf_targets(conn: PrintConnection, current: str) -> dict[str, str]:
@@ -252,6 +251,10 @@ def _read_yaml(
         return None
 
     data, is_corrupted = _read_yaml_status(table_dir / filename)
+
+    if kind in authored.AUTHORED_KINDS and data is not None:
+        data = authored.admitted(kind, data)
+        is_corrupted = data is None
 
     if is_corrupted and corrupted is not None:
         corrupted.append(kind)

@@ -2047,13 +2047,29 @@ def test_eligible_target_rejects_a_non_boolean() -> None:
     assert "schema.type-mismatch" in {i.code for i in check_relationships(payload, "t")}
 
 
-def test_relationships_measured_detection_is_schema_valid(print_dir: Path) -> None:
-    """The reference example's own measured edge (accession.seed_count) validates clean."""
+def _with_a_measured_edge(print_dir: Path) -> tuple[Path, dict[str, Any]]:
+    """The inferred `germination_by_taxon_mv.taxon_id` edge relabelled `measured`, both ends."""
 
-    target = print_dir / "arboretum/seedbank/accession/relationships.yaml"
+    target = print_dir / "arboretum/seedbank/germination_by_taxon_mv/relationships.yaml"
     data = _load_yaml_file(target)
-    measured = [e for e in data["refers_to"] if e.get("detection") == "measured"]
-    assert measured, "reference example expected to carry a measured edge"
+    entry = next(e for e in data["refers_to"] if e["column"] == ["taxon_id"])
+    entry["detection"] = "measured"
+    _write_yaml_file(target, data)
+    taxon = print_dir / "arboretum/seedbank/taxon/relationships.yaml"
+    incoming = _load_yaml_file(taxon)
+    mirror = next(
+        e
+        for e in incoming["referenced_by"]
+        if e["referencer_table"] == "arboretum.seedbank.germination_by_taxon_mv"
+    )
+    mirror["detection"] = "measured"
+    _write_yaml_file(taxon, incoming)
+
+    return target, data
+
+
+def test_relationships_measured_detection_is_schema_valid(print_dir: Path) -> None:
+    _with_a_measured_edge(print_dir)
 
     errors = conformance_errors(print_dir)
     assert errors == []
@@ -2064,8 +2080,7 @@ def test_relationships_measured_edge_relabeled_declared_still_needs_on_delete(
 ) -> None:
     """Widening the enum does not loosen `declared`'s own on_delete/on_update requirement."""
 
-    target = print_dir / "arboretum/seedbank/accession/relationships.yaml"
-    data = _load_yaml_file(target)
+    target, data = _with_a_measured_edge(print_dir)
     entry = next(e for e in data["refers_to"] if e.get("detection") == "measured")
     entry["detection"] = "declared"
     _write_yaml_file(target, data)

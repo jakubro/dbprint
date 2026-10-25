@@ -59,14 +59,14 @@ class TestEmptyDiff:
             "Modified (external)",
             "Modified (statistics)",
             "Modified (relationships)",
-            "Modified (indexes)",
             "Added",
             "Removed",
         ):
             assert label in text
 
-        # Every section renders the (none) marker on empty diff.
-        assert text.count("(none)") == 12
+        # Every rendered section shows the (none) marker; no v1 diff compares indexes.
+        assert "Modified (indexes)" not in text
+        assert text.count("(none)") == 11
 
     def test_footer_emitted(self) -> None:
         text = render_human_text(_empty_diff(), _options())
@@ -506,7 +506,7 @@ class TestRelationshipsDualDirection:
             ],
         )
         text = render_human_text(diff, _options())
-        section = text.split("Modified (relationships):")[1].split("Modified (indexes):")[0]
+        section = text.split("Modified (relationships):")[1].split("Added:")[0]
         edge_lines = [line for line in section.splitlines() if "->" in line or "<-" in line]
 
         assert len(edge_lines) == 1
@@ -750,7 +750,10 @@ class TestEveryKindRenders:
 
         text = render_human_text(_diff_with([event]), _options(threshold_override=0.0))
 
-        assert text.count("(none)") == 11, f"{kind} rendered in no section"
+        # The indexes section appears only when it has an event to show.
+        expected = 11 if kind.startswith("index_") else 10
+
+        assert text.count("(none)") == expected, f"{kind} rendered in no section"
 
 
 class TestNumberSpelling:

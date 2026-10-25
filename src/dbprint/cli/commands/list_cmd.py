@@ -12,7 +12,7 @@ import rich_click as click
 from rich.console import Console
 
 from dbprint.config.resolution import ConnectionResolutionError, resolve
-from dbprint.engine import EXIT_GENERIC, EXIT_OK, thresholds
+from dbprint.engine import EXIT_GENERIC, EXIT_OK, thresholds, worst_exit
 from dbprint.engine.baseline import (
     failed_tables,
     read_manifest,
@@ -104,7 +104,7 @@ def list_command(
                 fmt_lower,
                 entries,
             )
-            overall_exit = max(overall_exit, EXIT_GENERIC)
+            overall_exit = worst_exit(overall_exit, EXIT_GENERIC)
             continue
 
         manifest = read.manifest
@@ -114,7 +114,7 @@ def list_command(
         # describe fewer tables than `table_count` names; the connection is skipped whole.
         if resolved.refused:
             _drop(conn_config.name, list(resolved.refused.values()), mode, fmt_lower, entries)
-            overall_exit = max(overall_exit, EXIT_GENERIC)
+            overall_exit = worst_exit(overall_exit, EXIT_GENERIC)
             continue
 
         if resolved.size_gated:

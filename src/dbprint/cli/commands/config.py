@@ -5,14 +5,19 @@ Read-only: nothing here writes a file, and only `explain --online` opens a conne
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import rich_click as click
+import yaml
 
 from dbprint.config import ConnectionConfig, ProjectConfig
 from dbprint.config.resolution import ConnectionResolutionError, resolve_connections
 from dbprint.engine import EXIT_CONNECTION, EXIT_GENERIC, ConnectFailed
-from dbprint.engine.baseline import read_manifest
+from dbprint.engine.baseline import ManifestRead, read_artifact, read_manifest, table_directory
 from dbprint.engine.explain import explain
-from ..engine_setup import ConnectionSetupError, build_engine
+from dbprint.spec.absence import block_value
+from dbprint.spec.artifacts import declared_artifacts
+from ..engine_setup import ConnectionSetupError, build_engine, interruptible
 from ..options import project_option, refuse_if_remote, resolve_project
 from ..rendering.explain_data import render_explanation
 
@@ -61,8 +66,9 @@ def explain_command(
     - `CONNECTION`: connection to explain; resolved from `.dbprint.yaml` when omitted (the
       `auto: true` set, or the sole connection). A single argument that names no connection is
       read as `TABLE`.
-    - `TABLE`: fully qualified name, e.g. `arboretum.seedbank.accession`. Omitted, the
-      connection's own profile and its rule list are printed.
+    - `TABLE`: fully qualified name, e.g. `arboretum.seedbank.accession`, matched
+      case-insensitively, as rules are. Omitted, the connection's own profile and its rule list
+      are printed.
 
     **Exit codes:**
 
@@ -87,23 +93,28 @@ def explain_command(
 
     conn = _one_connection(ctx, project_config, connection)
     estimate = None
+    # Producers lowercase every identifier segment (SPEC 1.3), so generate only resolves this one.
+    table = table.lower() if table is not None else None
 
     if online and table is None:
         click.echo("note: --online has no table to estimate; ignored", err=True)
     elif online and table is not None:
         try:
-            setup = build_engine(conn, project_config.project_root)
-            estimate = setup.engine.estimate_row_count(table)
+            with interruptible():
+                setup = build_engine(conn, project_config.project_root)
+                estimate = setup.engine.estimate_row_count(table)
         except (ConnectionSetupError, ConnectFailed) as exc:
             click.echo(f"error: {exc}", err=True)
             ctx.exit(EXIT_CONNECTION)
 
+    manifest = read_manifest(conn.print_root)
     explanation = explain(
         conn,
         table,
-        read_manifest(conn.print_root),
+        manifest,
         estimate=estimate,
         online=online and table is not None,
+        external=_printed_external(conn.print_root, manifest, table),
     )
     click.echo(render_explanation(explanation), nl=False)
 
@@ -128,3 +139,21 @@ def _one_connection(
         ctx.exit(EXIT_GENERIC)
 
     return next(c for c in resolved.connections if c.name == resolved.default)
+
+
+def _printed_external(print_root: Path, manifest: ManifestRead, fqn: str | None) -> bool:
+    if fqn is None:
+        return False
+
+    entry = (manifest.manifest or {}).get("tables", {}).get(fqn)
+    name = declared_artifacts(entry).get("statistics") if isinstance(entry, dict) else None
+
+    if not isinstance(entry, dict) or not isinstance(name, str):
+        return False
+
+    try:
+        statistics = read_artifact(table_directory(print_root, fqn, entry) / name)
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return False
+
+    return isinstance(statistics, dict) and block_value(statistics, "external") is True

@@ -7,12 +7,12 @@ from __future__ import annotations
 from functools import partial
 from typing import assert_never
 
-from dbprint.spec.classification import base_type
+from dbprint.spec.classification import base_type, is_floating_type
 from dbprint.spec.sketch import SketchKind
 from ..base import TemporalShape, lookup_operand, lookup_temporal_shape
 
 
-# TIMESTAMP is stored UTC and converted to the session `time_zone` on read; DATETIME is naive.
+# TIMESTAMP is stored UTC and read in the session `time_zone`, pinned to UTC; DATETIME is naive.
 _SHAPES: dict[str, TemporalShape] = {
     "date": "date",
     "time": "time",
@@ -31,6 +31,31 @@ _OPERANDS: dict[str, str] = {}
 render_operand = partial(lookup_operand, _OPERANDS)
 
 
+def finite_value(expr: str, sql_type: str) -> str:
+    """`expr` unchanged: MySQL's FLOAT and DOUBLE hold no NaN or infinity."""
+
+    del sql_type
+
+    return expr
+
+
+def sum_expression(expr: str, sql_type: str) -> str:
+    """`SUM` over `expr`; MySQL already sums an exact type as `DECIMAL`."""
+
+    del sql_type
+
+    return f"SUM({expr})"
+
+
+def mean_expression(expr: str, sql_type: str) -> str:
+    """The mean of `expr`: `AVG` on a floating type, else the exact sum over the count."""
+
+    if is_floating_type(sql_type):
+        return f"AVG({expr})"
+
+    return f"CAST({sum_expression(expr, sql_type)} AS DOUBLE) / NULLIF(COUNT({expr}), 0)"
+
+
 def render_text(expr: str, sql_type: str) -> str:
     """`expr` as the engine's own text - the string a string-like column's `length` and
     `empty_count` are measured over, and the value it publishes (SPEC 2.2.4).
@@ -43,23 +68,16 @@ def render_text(expr: str, sql_type: str) -> str:
 temporal_shape = partial(lookup_temporal_shape, _SHAPES)
 
 
-def render_domain(expr: str, sql_type: str, *, already_utc: bool = False) -> str:
-    """SQL text rendering `expr` per SPEC 2.2.4, which lets MySQL omit a UTC value's `Z`.
-
-    `already_utc` skips a second, shifting conversion of an expression already converted.
-    """
+def render_domain(expr: str, sql_type: str) -> str:
+    """SQL text rendering `expr` per SPEC 2.2.4, which lets MySQL omit a UTC value's `Z`."""
 
     shape = temporal_shape(sql_type)
 
     match shape:
         case "date":
             return f"DATE_FORMAT({expr}, '%Y-%m-%d')"
-        case "timestamp":
+        case "timestamp" | "timestamp_tz":
             return _stripped(f"DATE_FORMAT({expr}, '{_INSTANT_PICTURE}')")
-        case "timestamp_tz":
-            source = expr if already_utc else f"CONVERT_TZ({expr}, @@session.time_zone, '+00:00')"
-
-            return _stripped(f"DATE_FORMAT({source}, '{_INSTANT_PICTURE}')")
         case "time" | "time_tz":
             return _stripped(f"TIME_FORMAT({expr}, '%H:%i:%s.%f')")
         case "year":

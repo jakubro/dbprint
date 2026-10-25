@@ -575,14 +575,12 @@ def pgvector(postgres_cluster: PostgresCluster) -> PostgresCluster:
 def duckdb_spatial() -> None:
     """duckdb's `spatial` extension, loadable by any connection the test opens."""
 
-    before = _containment.snapshot()
-    ensure_duckdb_spatial()
+    # duckdb looks for extensions only under its own home directory, so the install lands there;
+    # claimed first, or another worker's containment check can see it appear mid-install.
+    for root in _containment.PRIVATE_ROOTS:
+        _claim(f"appeared::{root}::.duckdb")
 
-    # duckdb looks for extensions only under its own home directory, so the install lands there.
-    for root, names in _containment.escaped(before, _containment.snapshot()).items():
-        for name in names:
-            if name == ".duckdb":
-                _claim(f"appeared::{root}::{name}")
+    ensure_duckdb_spatial()
 
 
 def _start_postgres() -> dict[str, str]:
@@ -806,6 +804,8 @@ def _start_mariadb() -> dict[str, str]:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
+                # A daylight-saving SYSTEM zone, as a default install on such a host runs.
+                env={**os.environ, "TZ": "America/New_York"},
             )
 
             _wait_for_mysql("127.0.0.1", port, timeout=30.0)

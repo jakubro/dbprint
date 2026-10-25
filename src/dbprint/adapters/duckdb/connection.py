@@ -62,6 +62,16 @@ class Connection(FactoryConnection):
     def _open_failure(self, exc: Exception) -> str:
         return f"could not open duckdb database {self.params.database!r}: {exc}"
 
+    def close(self) -> None:
+        # A statement duckdb cancelled on SIGINT can keep running, and close() would wait for it.
+        if self._cursor is not None:
+            try:
+                self._cursor.interrupt()
+            except Exception:  # noqa: BLE001, S110 - close-time failure is uninteresting
+                pass
+
+        super().close()
+
     def _opened(self, cursor: Any, /) -> Any:
         limit = self.params.statement_timeout
 
@@ -72,6 +82,18 @@ def exec_query(cursor: Cursor, sql: str, params: Any = None) -> Cursor:
     """Run a query and return the cursor; DEBUG-traces the text and params as a pair."""
 
     return driver.execute(_LOG, _is_timeout, cursor, sql, params)
+
+
+def ends_in_query(cursor: Any, sql: str) -> bool:
+    """True when `sql`'s last statement returns a query result, as duckdb itself classifies it.
+
+    duckdb answers a `SET`, a transaction statement or DDL with a status relation of its own,
+    so a result set alone does not say the statement was a query.
+    """
+
+    kinds = cursor.extract_statements(sql)[-1].expected_result_type
+
+    return [kind.name for kind in kinds] == ["QUERY_RESULT"]
 
 
 def _default_cursor_factory(params: ConnectionParams) -> Any:

@@ -19,6 +19,7 @@ from dbprint.engine import (
     assemble_context,
     assemble_context_payloads,
     context_terms,
+    worst_exit,
 )
 from ..options import project_option, resolve_project
 from ..rendering import resolve_render_mode
@@ -214,11 +215,13 @@ def context_command(
 
         if included == 0:
             click.echo(f"{conn_config.name}: budget too small to include any table.", err=True)
-            overall_exit = max(overall_exit, EXIT_GENERIC)
+            overall_exit = worst_exit(overall_exit, EXIT_GENERIC)
             continue
 
         if chunk is None:
-            entries.append({"connection": conn_config.name, "tables": payloads.payloads})
+            entries.append(
+                {"connection": conn_config.name, **payloads.header, "tables": payloads.payloads},
+            )
         else:
             chunks.append(chunk)
 

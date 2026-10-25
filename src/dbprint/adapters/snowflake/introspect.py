@@ -35,6 +35,7 @@ from ..identifiers import (
     quote,
     select_tables,
     table_meta,
+    unquote,
 )
 from ..sql_layout import listed, split_top_level
 
@@ -69,6 +70,7 @@ _SYSTEM_DATABASE = "SNOWFLAKE"
 _SHOW_DATABASES_NAME = 1
 
 # SHOW output is a fixed result-set shape, not a view, so this module reads it positionally.
+# `SHOW INDEXES` is the exception, read by name: its documented columns give no reliable order.
 
 # Offsets in the shared `SHOW PRIMARY KEYS`/`SHOW UNIQUE KEYS` shape: created_on, database,
 # schema, table, column, key_sequence, constraint_name, rely, comment.
@@ -269,49 +271,28 @@ def relationships(cursor: Cursor, identity: Identity) -> list[ForeignKeyMeta]:
 
 
 def indexes(cursor: Cursor, identity: Identity) -> list[IndexMeta]:
-    """Secondary indexes via INFORMATION_SCHEMA.INDEXES + INDEX_COLUMNS.
+    """Secondary indexes via `SHOW INDEXES`, whose `columns` lists key columns only.
 
-    Only hybrid tables have them, so a standard table yields an empty list; `key_sequence`
-    carries the in-index column order.
+    Only hybrid tables have them. A unique one always backs a PRIMARY KEY or UNIQUE constraint,
+    which `unique_keys` reports instead.
     """
 
-    rows = exec_query(
-        cursor,
-        f"""
-        SELECT
-          idx.name,
-          idx.is_unique,
-          icl.name
+    result = exec_query(cursor, f"SHOW INDEXES IN TABLE {identity.quoted()}")
+    names = [column[0] for column in result.description]
+    out: list[IndexMeta] = []
 
-        FROM
-          {_info_schema(identity.parts[0], "indexes")} idx
-          JOIN {_info_schema(identity.parts[0], "index_columns")} icl ON
-            icl.table_catalog = idx.table_catalog
-            AND icl.table_schema = idx.table_schema
-            AND icl.table_name = idx.table_name
-            AND icl.index_name = idx.name
+    for row in result.fetchall():
+        index = dict(zip(names, row, strict=True))
+        columns = _show_list(str(index["columns"]))
 
-        WHERE
-          idx.table_catalog = ?
-          AND idx.table_schema = ?
-          AND idx.table_name = ?
+        if _is_true(index["is_unique"]) or not columns:
+            continue
 
-        ORDER BY
-          idx.name, icl.key_sequence
-        """,
-        identity.parts,
-    ).fetchall()
+        out.append(
+            IndexMeta(name=fold(str(index["name"])), columns=columns, unique=False, type="btree"),
+        )
 
-    grouped: dict[str, tuple[bool, list[str]]] = {}
-
-    for index_name, is_unique, column_name in rows:
-        _unique, index_columns = grouped.setdefault(index_name, (_is_true(is_unique), []))
-        index_columns.append(fold(column_name))
-
-    return [
-        IndexMeta(name=fold(name), columns=tuple(cols), unique=unique, type="btree")
-        for name, (unique, cols) in grouped.items()
-    ]
+    return sorted(out, key=lambda idx: idx.name)
 
 
 def comments(cursor: Cursor, identity: Identity) -> CommentsMeta:
@@ -522,6 +503,13 @@ def _is_true(value: Any) -> bool:
         return value.strip().upper() in ("YES", "TRUE", "Y")
 
     return bool(value)
+
+
+def _show_list(value: str) -> tuple[str, ...]:
+    inner = value.strip().removeprefix("[").removesuffix("]")
+    parts = (part.strip() for part in split_top_level(inner, DIALECT.quote_char))
+
+    return tuple(fold(unquote(part, DIALECT)) for part in parts if part)
 
 
 def _info_schema(database: str, view: str) -> str:

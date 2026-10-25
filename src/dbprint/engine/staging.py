@@ -10,11 +10,14 @@ import logging
 import os
 import shutil
 import threading
+from collections.abc import Collection, Sequence
 from pathlib import Path
 from typing import IO, Any
 
+from dbprint.adapters import interrupt
 from dbprint.spec.artifacts import MANIFEST_FILENAME
-from .writer import validate_artifact_name, write_atomic
+from .baseline import contained, escaping_links
+from .writer import WriterError, validate_artifact_name, write_atomic
 
 
 STAGE_DIRNAME = ".dbprint-run"
@@ -25,7 +28,9 @@ _LOG = logging.getLogger(__name__)
 
 
 class StageRefused(RuntimeError):
-    """Another run holds the connection's stage, or the stage and the print root are on two filesystems."""
+    """Another run holds the connection's stage, the stage and the print root are on two
+    filesystems, or a link would carry the run's writes outside them.
+    """
 
 
 class RunStage:
@@ -36,13 +41,30 @@ class RunStage:
         self.directory = prints_root.parent / STAGE_DIRNAME / prints_root.name
         self._lock = lock
         self._removals: dict[str, tuple[str, ...]] = {}
+        self._written: set[str] = set()
         self._mutex = threading.Lock()
+        self.escaping_links: frozenset[str] = frozenset()
 
     @classmethod
     def open(cls, prints_root: Path) -> RunStage:
         """Lock the connection, recover whatever an earlier run left, and start an empty stage."""
 
         root = prints_root.parent / STAGE_DIRNAME
+
+        if not contained(prints_root.parent, root):
+            raise StageRefused(
+                f"{str(root)!r} is a symlink leading outside {str(prints_root.parent)!r}; "
+                f"generate writes nothing through it",
+            )
+
+        for own in (
+            root / ".gitignore",
+            root / f"{prints_root.name}.lock",
+            root / prints_root.name,
+        ):
+            if own.is_symlink():
+                raise StageRefused(f"{str(own)!r} is a symlink; generate writes nothing through it")
+
         root.mkdir(parents=True, exist_ok=True)
         (root / ".gitignore").write_text("*\n", encoding="utf-8")
         lock = (root / f"{prints_root.name}.lock").open("ab")
@@ -68,15 +90,41 @@ class RunStage:
             )
 
         stage = cls(prints_root, lock)
-        stage._recover()
+
+        try:
+            stage._recover()
+        except StageRefused:
+            lock.close()
+
+            raise
+
         stage.directory.mkdir(parents=True)
+        stage.escaping_links = escaping_links(prints_root)
 
         return stage
 
     def write(self, directory: Path, artifacts: dict[str, str | bytes]) -> None:
-        """Stage `artifacts` for `directory`, a directory under the print root."""
+        """Stage `artifacts` for `directory`, a directory under the print root.
 
-        write_atomic(self.directory / directory.relative_to(self.prints_root), artifacts)
+        Raises `WriterError` when `directory` leads outside the print root or nowhere, through
+        one of `escaping_links` at or above it or by any other route, and when the write fails.
+        """
+
+        rel = directory.relative_to(self.prints_root)
+
+        if link := _link_among(rel.parts, self.escaping_links):
+            raise WriterError(f"{link} is a symlink to a directory outside the connection root")
+
+        if route := route_out(self.prints_root, rel.parts):
+            raise WriterError(f"{route} leads outside the connection root or nowhere")
+
+        try:
+            write_atomic(self.directory / rel, artifacts)
+        except OSError as exc:
+            raise WriterError(f"failed staging {rel.as_posix()}: {exc}") from exc
+
+        with self._mutex:
+            self._written.update((rel / name).as_posix() for name in artifacts)
 
     def remove(self, directory: Path, names: tuple[str, ...]) -> None:
         """Record the named producer files of `directory` for deletion at commit."""
@@ -88,17 +136,19 @@ class RunStage:
             self._removals[directory.relative_to(self.prints_root).as_posix()] = names
 
     def commit(self) -> None:
-        """Move every staged file into the print root, the manifest last, then apply removals."""
+        """Move every completed write into the print root, the manifest last, then apply removals.
 
-        staged = [
-            p.relative_to(self.directory).as_posix()
-            for p in self.directory.rglob("*")
-            if p.is_file() and p.name != _MARKER
-        ]
-        writes = sorted(staged, key=_commit_order)
+        Raises `Interrupted`, committing nothing, once the run has been interrupted, and
+        `StageRefused` when a directory a move passes through, or a connection-root file it
+        replaces, leads outside the print root.
+        """
+
+        interrupt.raise_if_requested()
+        writes = sorted(self._written, key=_commit_order)
         removals = sorted(
             f"{directory}/{name}" for directory, names in self._removals.items() for name in names
         )
+        self._refuse_routes_out([*writes, *removals])
         marker = self.directory / _MARKER
         _write_synced(marker, json.dumps({"writes": writes, "removals": removals}))
         self._apply(writes, removals)
@@ -123,6 +173,7 @@ class RunStage:
 
         if marker.is_file():
             plan = json.loads(marker.read_text(encoding="utf-8"))
+            self._refuse_routes_out([*plan["writes"], *plan["removals"]])
             self._apply(plan["writes"], plan["removals"])
             _LOG.warning(
                 "connection %r: finished committing an interrupted run",
@@ -137,6 +188,27 @@ class RunStage:
             )
 
         shutil.rmtree(self.directory)
+
+    def _refuse_routes_out(self, rels: list[str]) -> None:
+        links = escaping_links(self.prints_root)
+
+        for rel in rels:
+            parts = rel.split("/")
+
+            # The rename replaces a link at a table file's own name; at the root it is refused.
+            through = parts[:-1] or parts
+
+            if link := _link_among(through, links):
+                raise StageRefused(
+                    f"{link} is a symlink leading outside the connection root "
+                    f"{str(self.prints_root)!r}; generate writes nothing through it",
+                )
+
+            if route := route_out(self.prints_root, through):
+                raise StageRefused(
+                    f"{route} leads outside the connection root or nowhere "
+                    f"{str(self.prints_root)!r}; generate writes nothing through it",
+                )
 
     def _apply(self, writes: list[str], removals: list[str]) -> None:
         for rel in [w for w in writes if w != _MANIFEST]:
@@ -167,6 +239,27 @@ class RunStage:
             final = self.prints_root / rel
             final.parent.mkdir(parents=True, exist_ok=True)
             os.replace(staged, final)
+
+
+def route_out(prints_root: Path, parts: Sequence[str]) -> str | None:
+    """The shortest leading run of `parts` that resolves outside `prints_root` or ends in a
+    dangling link, or None.
+    """
+
+    for depth in range(1, len(parts) + 1):
+        path = prints_root.joinpath(*parts[:depth])
+
+        if not contained(prints_root, path) or (path.is_symlink() and not path.exists()):
+            return "/".join(parts[:depth])
+
+    return None
+
+
+def _link_among(parts: Sequence[str], links: Collection[str]) -> str | None:
+    return next(
+        (path for depth in range(1, len(parts) + 1) if (path := "/".join(parts[:depth])) in links),
+        None,
+    )
 
 
 def _device(path: Path) -> int:

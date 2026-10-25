@@ -48,7 +48,7 @@ def build_site(
 
     _prepare_output(output, force=force)
 
-    app = create_app(connections)
+    app = create_app(connections, static=True)
     client = app.test_client()
     conns = catalogue.load_connections(connections)
 

@@ -142,9 +142,7 @@ class TestTableDirectories:
                 "Bad Dir",
                 "layout.invalid-path-segment",
                 "error",
-                "Path segment 'Bad Dir' fails the allowlist regex '^[a-z0-9_][a-z0-9_-]*$'. A table "
-                "an earlier release printed under this name is refused now: exclude it, delete this "
-                "directory, and the next generate drops its entry.",
+                "Path segment 'Bad Dir' fails the allowlist regex '^[a-z0-9_][a-z0-9_-]*$'.",
                 "§1.5.1",
             ),
         ]

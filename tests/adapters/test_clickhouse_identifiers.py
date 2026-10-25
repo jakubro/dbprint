@@ -17,6 +17,8 @@ from dbprint.adapters.identifiers import IdentifierRejected
 class _Cursor:
     """Returns one `system.tables` row per fixture name and records every statement bound."""
 
+    description: Any = (("value",),)
+
     def __init__(self, rows: list[tuple[Any, ...]]) -> None:
         self._rows = rows
         self.bound: list[tuple[str, Any]] = []

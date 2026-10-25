@@ -490,13 +490,18 @@ def distinct_values(
               {column} IS NOT NULL{conjunct}
           ) drw
         ORDER BY
-          {dialect.seed_hash.format(seed=dialect.placeholder, value="drw.v")}
+          {seed_order(dialect, seed, "drw.v")}
         LIMIT {int(n)}
         """,
-        (str(seed),),
     ).fetchall()
 
     return [r[0] for r in rows]
+
+
+def seed_order(dialect: Dialect, seed: int, value: str) -> str:
+    """The seeded draw order over `value`; the seed is a literal, as the statement binds nothing."""
+
+    return dialect.seed_hash.format(seed=f"'{int(seed)}'", value=value)
 
 
 def typed_distinct_values(

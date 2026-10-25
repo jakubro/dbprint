@@ -2,7 +2,8 @@
 
 `Engine` is the orchestrator; `GenerateResult`, `TableResult`, `SummaryCounts` and
 `DiffSummary` are its return types. The `EXIT_*` constants are the whole exit-code
-vocabulary, including codes only the CLI returns.
+vocabulary, including codes only the CLI returns; `worst_exit` combines several by
+`EXIT_PRECEDENCE`, never by their integers.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from .result import (
     EXIT_GENERIC,
     EXIT_OK,
     EXIT_PARTIAL,
+    EXIT_PRECEDENCE,
     EXIT_STALENESS,
     EXIT_TOTAL_FAILURE,
     DiffRequest,
@@ -44,6 +46,7 @@ from .result import (
     SketchFailure,
     SummaryCounts,
     TableResult,
+    worst_exit,
 )
 
 
@@ -54,6 +57,7 @@ __all__ = [
     "EXIT_GENERIC",
     "EXIT_OK",
     "EXIT_PARTIAL",
+    "EXIT_PRECEDENCE",
     "EXIT_STALENESS",
     "EXIT_TOTAL_FAILURE",
     "AssemblyOptions",
@@ -84,4 +88,5 @@ __all__ = [
     "open_questions",
     "parse_duration",
     "structured_context_sections",
+    "worst_exit",
 ]

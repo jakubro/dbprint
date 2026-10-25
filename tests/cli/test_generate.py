@@ -17,11 +17,13 @@ from dbprint.adapters import (
 )
 from dbprint.cli import run_log
 from dbprint.cli.main import main
-from tests._cli import AUTO_PROJECT_YAML, credential_env, patch_registry
+from tests._cli import AUTO_PROJECT_YAML, STUB_CREDENTIALS, credential_env, patch_registry
 from tests._prints import columns, mock_table
 
 
+EXIT_GENERIC = 1
 EXIT_DRIFT = 3
+EXIT_CONNECTION = 4
 
 
 def _fixture_multi() -> dict[str, MockTable]:
@@ -134,6 +136,110 @@ class TestGenerateHappyPath:
             runner.invoke(main, ["generate", "--no-tui", "--dry-run"])
 
         assert not (tmp_path / "prints" / "primary" / "manifest.yaml").exists()
+
+
+class TestAnUnreadableManifest:
+    def test_conflict_markers_exit_one_naming_the_file_and_keep_the_print(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _setup_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        for k, v in credential_env().items():
+            monkeypatch.setenv(k, v)
+
+        runner = CliRunner()
+
+        with _patch_registry():
+            runner.invoke(main, ["generate", "--no-tui"])
+            manifest_path = tmp_path / "prints" / "primary" / "manifest.yaml"
+            text = manifest_path.read_text(encoding="utf-8")
+            manifest_path.write_text(
+                f"<<<<<<< HEAD\n{text}=======\n{text}>>>>>>> b\n",
+                encoding="utf-8",
+            )
+            corrupt = manifest_path.read_bytes()
+            result = runner.invoke(main, ["generate", "--no-tui", "--force"])
+
+        assert result.exit_code == 1, result.output
+        assert "manifest.yaml" in result.stderr
+        assert manifest_path.read_bytes() == corrupt
+        table_dir = tmp_path / "prints" / "primary" / "public" / "t"
+        assert {"ddl.sql", "statistics.yaml"} <= {p.name for p in table_dir.iterdir()}
+
+
+class TestAConnectionWhoseStageCannotOpen:
+    def test_fails_alone_the_next_connection_commits_and_the_failure_decides_the_exit(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        (tmp_path / ".dbprint.yaml").write_text(
+            "connections:\n"
+            "  primary:\n    adapter: postgres\n    auto: true\n    output: herbarium\n"
+            "  secondary:\n    adapter: postgres\n    auto: true\n    output: prints\n",
+        )
+        (tmp_path / "herbarium").mkdir()
+        (tmp_path / "herbarium" / ".dbprint-run").write_text("not a directory\n")
+        monkeypatch.chdir(tmp_path)
+
+        for name in ("primary", "secondary"):
+            for k, v in credential_env(name).items():
+                monkeypatch.setenv(k, v)
+
+        with _patch_registry():
+            result = CliRunner().invoke(main, ["generate", "--no-tui"])
+
+        assert "primary" in result.stderr
+        assert (tmp_path / "prints" / "secondary" / "manifest.yaml").is_file()
+        assert not (tmp_path / "herbarium" / "primary").exists()
+        assert result.exit_code == EXIT_GENERIC, result.output
+
+
+class _UnreachableAlphaFailingBeta(MockAdapter):
+    """`alpha` cannot be reached; every table `beta` lists fails to extract."""
+
+    REQUIRED_KEYS = ("host", "port", "database", "user", "password")
+
+    def __init__(self, credentials: dict[str, str], **_options: object) -> None:
+        super().__init__(_fixture_multi())
+        self._database = credentials["database"]
+
+    def connect(self) -> None:
+        if self._database == "alpha":
+            raise ConnectionError("alpha does not answer")
+
+        super().connect()
+
+    def extract_ddl(self, fqn: str) -> str:
+        raise TypeError(f"{fqn} cannot be read")
+
+
+class TestConnectionsCombineByPrecedence:
+    def test_an_unreachable_connection_outranks_another_that_profiled_nothing(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        (tmp_path / ".dbprint.yaml").write_text(
+            "connections:\n"
+            "  alpha:\n    adapter: postgres\n    auto: true\n    output: prints\n"
+            "  beta:\n    adapter: postgres\n    auto: true\n    output: prints\n",
+        )
+        monkeypatch.chdir(tmp_path)
+
+        for name in ("alpha", "beta"):
+            for k, v in credential_env(name, {**STUB_CREDENTIALS, "database": name}).items():
+                monkeypatch.setenv(k, v)
+
+        with patch_registry({"postgres": _UnreachableAlphaFailingBeta}):
+            result = CliRunner().invoke(main, ["generate", "--no-tui"])
+
+        assert "alpha does not answer" in result.stderr
+        assert "no tables were profiled" in result.stderr
+        assert result.exit_code == EXIT_CONNECTION, result.output
 
 
 class TestResolutionErrors:

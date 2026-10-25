@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from pathlib import Path
 
 import yaml
@@ -9,8 +10,12 @@ import yaml
 from dbprint.spec.artifacts import (
     ARTIFACT_FILENAMES,
     CANONICAL_ARTIFACTS,
+    DIFF_FILENAME,
+    MANIFEST_ANNOTATIONS_FILENAME,
     MANIFEST_FILENAME,
+    READING_GUIDE_FILENAME,
     declared_artifacts,
+    outside_print,
     walkable_tables,
 )
 from dbprint.spec.fqn import directory_segments
@@ -19,6 +24,34 @@ from dbprint.spec.profile import DISABLEABLE, effective_profile, switched_off
 from .issue import Issue
 from .progress import TableSink
 from .yaml_utils import load_yaml
+
+
+def check_outside_print(manifest_data: dict, links: Collection[str]) -> list[Issue]:
+    """SPEC 2.5: an entry or a connection-root file leading outside the connection root."""
+
+    issues = [
+        Issue(
+            f"manifest.yaml::tables.{fqn}.path",
+            "manifest.path-outside-print",
+            "error",
+            f"No consumer follows {fqn}: {cause}.",
+            "§2.5",
+        )
+        for fqn, cause in outside_print(manifest_data, links).items()
+    ]
+    issues.extend(
+        Issue(
+            name,
+            "manifest.path-outside-print",
+            "error",
+            f"{name} is a symlink to a file outside the connection root; no consumer reads it.",
+            "§2.5",
+        )
+        for name in _CONNECTION_ROOT_FILES
+        if name in links
+    )
+
+    return issues
 
 
 def check_manifest_annotations_presence(print_root: Path, manifest_data: dict) -> list[Issue]:
@@ -66,7 +99,7 @@ def check(
         tbl_path_str = tbl_entry.get("path", "")
         tbl_dir = print_root / tbl_path_str
 
-        if tbl_path_str and split_fqn(tbl_fqn) != directory_segments(tbl_path_str):
+        if tbl_path_str and split_fqn(str(tbl_fqn)) != directory_segments(tbl_path_str):
             issues.append(
                 Issue(
                     f"manifest.yaml::tables.{tbl_fqn}.path",
@@ -182,6 +215,13 @@ def check(
             )
 
     return issues
+
+
+_CONNECTION_ROOT_FILES = (
+    DIFF_FILENAME,
+    READING_GUIDE_FILENAME,
+    MANIFEST_ANNOTATIONS_FILENAME,
+)
 
 
 def _check_profile_disabled(

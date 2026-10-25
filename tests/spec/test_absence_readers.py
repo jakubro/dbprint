@@ -42,7 +42,7 @@ _NOT_READERS = {
 }
 
 _READS_ANOTHER_DOCUMENT: dict[tuple[str, str, str], str] = {
-    ("assertions/parser.py", "_parse_tables", "row_count"): ".dbprint.yaml predicate key",
+    ("assertions/parser.py", "_parse_row_count", "row_count"): ".dbprint.yaml predicate key",
     ("conformance/column_annotations.py", "check_grain_annotations", "grain"): "annotation file",
     **{
         ("engine/carried.py", "_columns", key): "hydrates a committed column verbatim"
@@ -317,7 +317,7 @@ def _rendered(surface: str, column: dict[str, Any]) -> str:
     if surface == "hints":
         return notes_synthesis.synthesize(column, hints_only=True).text
 
-    view = column_view("c", column, 600, None, {}, {})
+    view = column_view("c", column, 600, None, {})
 
     return " ".join(str(value) for value in view.values())
 
@@ -333,7 +333,7 @@ def test_no_rendering_claims_what_an_absent_field_would_have_said(surface: str, 
 
 
 def test_the_notes_and_the_docs_page_name_an_unmeasured_field() -> None:
-    view = column_view("c", _LOST_VALUES, 600, None, {}, {})
+    view = column_view("c", _LOST_VALUES, 600, None, {})
 
     assert "unmeasured" in notes_synthesis.synthesize(_LOST_VALUES).text
     assert "values" in (view["unmeasured"] or ())

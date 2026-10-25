@@ -30,7 +30,9 @@ Seven outcomes from `check`, ordered so a pipeline can decide how much each one 
 | `5` | partial extraction — the committed manifest names a table the last `generate` could not profile, or (`--online`) the connection was reached but some tables could not be re-extracted; the ones that were are still compared and reported |
 | `6` | assertion — a data-quality assertion failed |
 
-Across several connections the top-level exit is the highest of the per-connection codes, and within one connection the highest code among its outcomes wins the same way. So while the manifest names a table the last `generate` could not profile, offline `check` returns at least `5` until a `generate` profiles it, and a malformed print, a stale one or drift reads as `5`. A pipeline that switches on the number reads `--format json`, which lists every issue.
+Drift covers what a committed print can be compared on. Column defaults, indexes and comments are recorded only in `ddl.sql`, which the comparison does not read, so a change to one of them alone is not drift: neither `check --online` nor `generate` reports it ([tracking drift](drift.md)).
+
+When several outcomes apply — within one connection or across connections — the exit code is the first of `1`, `4`, `5`, `6`, `3`, `2` that does: a result that cannot be trusted or a table that was not read outranks the state of a trustworthy print. So while the manifest names a table the last `generate` could not profile, offline `check` returns `5` over a stale print or drift until a `generate` profiles it, and a malformed print reads as `1` whatever else holds. A pipeline that needs every cause reads `--format json`, which lists every issue.
 
 One more code exists in the family and `check` never returns it: `7`, total failure, which `dbprint generate` uses when every table it touched failed. A pipeline treating any non-zero as fatal does not care; one that switches on the number should not expect `7` from a gate job.
 
@@ -93,7 +95,7 @@ For the online job, install the extra for your engine and supply credentials thr
 
 The online job needs a database reachable from the runner and the read privileges your engine's adapter page lists — [duckdb](../adapters/duckdb.md), [PostgreSQL](../adapters/postgres.md), [MySQL](../adapters/mysql.md), [ClickHouse](../adapters/clickhouse.md), [Redshift](../adapters/redshift.md), [Snowflake](../adapters/snowflake.md), [Databricks](../adapters/databricks.md), [BigQuery](../adapters/bigquery.md). PostgreSQL additionally needs `pg_dump` on `PATH`, at least the server's major version.
 
-It also needs the temporary-table privilege from that page if anything in scope resolves to a fraction. `--online` re-extracts, so any table read in `sample` mode — by `fraction`, or by a `max_rows` ceiling at any level that resolves below its size — makes the job write a temporary table. Without the privilege the job still passes, but each statistic for those tables is measured over its own draw.
+It also needs the temporary-table privilege from that page if anything in scope resolves to a fraction. `--online` re-extracts, so any table read in `sample` mode — by `fraction`, or by a `max_rows` ceiling at any level that resolves below its size — makes the job write a temporary table. Without the privilege PostgreSQL, duckdb and Databricks read the seeded sample directly, with a warning; MySQL, Snowflake, ClickHouse, Redshift and BigQuery fail those tables instead, and the job exits `5`.
 
 ## Exit codes from `generate`
 
@@ -102,11 +104,13 @@ A scheduled regenerate job switches on a different set, since `generate` connect
 | Code | Meaning |
 |---|---|
 | `0` | ok |
-| `1` | generic |
-| `3` | schema drift was recorded against the previous print |
-| `4` | connection — the database could not be reached, or `pg_dump` is missing |
+| `1` | generic — the configuration does not load, or the committed `manifest.yaml` cannot be read or followed, or is missing beside existing prints; nothing is written |
+| `3` | schema drift was recorded against the previous print — or there was none: a first run records every table as added |
+| `4` | connection — the database could not be reached, `pg_dump` is missing, or the target lists none of the committed tables |
 | `5` | partial — some tables failed; the rest were written |
 | `7` | total failure — every table it touched failed |
+
+When several apply — within one connection or across connections — the exit code is the first of `1`, `4`, `7`, `5`, `3` that does.
 
 `3` reports *schema* movement only. A statistic that moved lands in `diff.yaml` without changing the exit code, so a job that gates on data movement reads the artifact rather than the status.
 
@@ -136,7 +140,7 @@ primary	arboretum.public.taxon_names	ok	- rows	0.1s
 primary	arboretum.public.accession	sketched	0.0s
 primary	arboretum.public.collector	sketched	0.0s
 primary	arboretum.public.taxon	sketched	0.0s
-primary	summary	4 ok / 0 failed / 0 skipped	932ms
+primary	summary	4 ok / 0 failed / 0 skipped	0.9s
 ```
 
 `-q` silences stderr progress on every command — `generate`, `diff` and `check` all put it there, so a pipeline reaching for `-q` to quieten a log never affects a command's own stdout payload.
@@ -149,7 +153,7 @@ primary	summary	4 ok / 0 failed / 0 skipped	932ms
 |---|---|
 | `connection` | the connection name |
 | `manifest_present` | whether a committed manifest was found at all |
-| `exit_code` | this connection's own code, before the run-wide maximum is taken |
+| `exit_code` | this connection's own code, before the connections are combined |
 | `default_max_age_days` | the connection's configured threshold |
 | `issues` | conformance findings |
 | `stale_entries` | tables past their recorded threshold |

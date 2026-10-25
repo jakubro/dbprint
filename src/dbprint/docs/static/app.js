@@ -114,8 +114,14 @@ function enhanceTable(table) {
     for (const key of [...groups.keys()].sort()) {
       const header = document.createElement("tr");
       header.className = "group-header";
-      const label = key.replace(/_/g, "\u00A0");
-      header.innerHTML = `<td colspan="${span}"><strong>${label}</strong> <span class="muted">(${groups.get(key).length})</span></td>`;
+      const cell = header.insertCell();
+      cell.colSpan = span;
+      const label = cell.appendChild(document.createElement("strong"));
+      label.textContent = key.replace(/_/g, "\u00A0");
+      cell.append(" ");
+      const count = cell.appendChild(document.createElement("span"));
+      count.className = "muted";
+      count.textContent = `(${groups.get(key).length})`;
       tbody.appendChild(header);
       groups.get(key).forEach((r) => tbody.appendChild(r));
     }

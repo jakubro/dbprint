@@ -8,14 +8,17 @@ from __future__ import annotations
 import ast
 import re
 from pathlib import Path
-from typing import Any, LiteralString, cast
+from typing import Any, Literal, LiteralString, cast
 
 import duckdb
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 import dbprint.adapters as adapters_package
 from dbprint.adapters import ClickhouseAdapter, DuckdbAdapter, SnowflakeAdapter, identifiers
 from dbprint.adapters.base import materialized_name, seed_from_fqn
+from dbprint.adapters.dialect import Dialect
 from dbprint.adapters.identifiers import IdentifierRejected
 from dbprint.cli.adapter_registry import ADAPTERS
 from dbprint.config import TablesConfig
@@ -49,6 +52,7 @@ _SHARED_NAMES = frozenset(
         "reject_column_collisions",
         "string_literal",
         "table_meta",
+        "unquote",
     },
 )
 
@@ -64,9 +68,22 @@ def test_no_adapter_module_folds_quotes_or_splits_a_name_by_hand() -> None:
     assert hits == []
 
 
+@given(st.text(), st.sampled_from(['"', "`"]))
+def test_unquote_inverts_quote(name: str, mark: Literal['"', "`"]) -> None:
+    dialect = Dialect(vendor="postgres", paramstyle="pyformat", quote_char=mark)
+
+    assert identifiers.unquote(identifiers.quote(name, dialect), dialect) == name
+
+
+@pytest.mark.parametrize("name", ["Code", "lot", "(lower(Code))", '"half'])
+def test_unquote_leaves_a_name_without_the_quote_pair(name: str) -> None:
+    dialect = Dialect(vendor="duckdb", paramstyle="qmark", quote_char='"')
+
+    assert identifiers.unquote(name, dialect) == name
+
+
 _KEYWORD_FOLDS = {
     ("bigquery/introspect.py", "list_tables"): "a table-type keyword",
-    ("credentials.py", "masked"): "a table-option keyword",
     ("bigquery/introspect.py", "columns"): "an IS_NULLABLE keyword",
     ("bigquery/introspect.py", "physical_layout"): "an is-partitioning keyword",
     ("bigquery/introspect.py", "_layout_key"): "an is-hidden keyword",
@@ -76,7 +93,6 @@ _KEYWORD_FOLDS = {
     ("duckdb/connection.py", "from_credentials"): "a read-only credential flag",
     ("mysql/introspect.py", "relationships"): "a referential-action keyword",
     ("mysql/introspect.py", "indexes"): "an index-type keyword",
-    ("mysql/introspect.py", "comments"): "a storage-engine keyword",
     ("mysql/connection.py", "_opened"): "a server-flavour keyword",
     ("mysql/introspect.py", "list_tables"): "a storage-engine keyword",
     ("redshift/adapter.py", "_databases"): "matches a configured name to the stored spelling",

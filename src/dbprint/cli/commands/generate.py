@@ -19,9 +19,10 @@ from dbprint.engine import (
     GenerateRequest,
     GenerateResult,
     ProgressCallback,
+    worst_exit,
 )
 from dbprint.engine.result import DiffSummary, SummaryCounts
-from ..engine_setup import ConnectionSetupError, build_engine
+from ..engine_setup import ConnectionSetupError, build_engine, interruptible
 from ..options import project_option, refuse_if_remote, resolve_project
 from ..rendering import (
     build_progress_renderer,
@@ -134,16 +135,22 @@ def generate_command(
     **Exit codes:**
 
     - `0`: ok (also when every matched table was already current, so nothing was profiled)
-    - `1`: generic
-    - `3`: schema drift (the database's shape moved relative to the baseline -
-      a table, column, relationship, index or comment). Statistics that moved
-      are recorded in `diff.yaml` but do not set this code;
-      `dbprint check --online` reports both
+    - `1`: generic (also when the committed manifest.yaml cannot be read or followed, or is
+      missing beside existing prints; nothing is written)
+    - `3`: schema drift (a table, column or relationship moved relative to the
+      baseline; a first run has no baseline, so every table is added). Column
+      defaults, indexes and comments are not compared: v1 records them only in
+      `ddl.sql`, which the diff does not read. Statistics that moved are
+      recorded in `diff.yaml` but do not set this code; `dbprint check --online`
+      reports both
     - `4`: connection (also when the target lists none of the committed tables in scope, a
       wrong path or missing grants; `--confirm-all-removed` records a real total removal)
     - `5`: partial (some tables failed, others succeeded or were skipped; or every
       table succeeded but the sketch pass that runs after them did not)
     - `7`: total failure (no table was profiled)
+
+    When several apply - within a connection or across connections - the exit code is the
+    first of `1`, `4`, `7`, `5`, `3` that does.
 
     **Examples:**
 
@@ -192,7 +199,7 @@ def generate_command(
         log_handler = install_log_handler(renderer)
 
         try:
-            with renderer if renderer is not None else contextlib.nullcontext():
+            with renderer if renderer is not None else contextlib.nullcontext(), interruptible():
                 for conn_config in connections:
                     # try/finally makes the flush structural, so a branch added here inherits it.
                     try:
@@ -257,7 +264,7 @@ def generate_command(
         for text in deferred:
             emit_error(text)
 
-        exit_code = max(exit_codes) if exit_codes else EXIT_OK
+        exit_code = worst_exit(*exit_codes)
         log_run_summary(exit_code)
         ctx.exit(exit_code)
     finally:

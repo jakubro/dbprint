@@ -591,7 +591,7 @@ class TestCountInvariants:
 
     @pytest.mark.parametrize(
         "field",
-        ["zero_count", "negative_count", "empty_count", "quantized_count"],
+        ["zero_count", "negative_count", "non_finite_count", "empty_count", "quantized_count"],
     )
     def test_a_degenerate_count_beyond_the_non_null_rows(self, field: str) -> None:
         assert _counts({"null_count": 2, field: 9}) == [
@@ -816,6 +816,122 @@ class TestValueOrder:
         values = [{"value": {"b": 1}, "count": 1}, {"value": {"a": 1}, "count": 1}]
 
         assert st._check_value_order({"values": values}, _C) == _UNORDERED
+
+
+class TestRedactedLiterals:
+    """A marker promises its primitive was applied to every literal it governs (SPEC 2.2.9)."""
+
+    DIGEST = "0f3a9c51d2e7b846"
+    LEAKED = "p0@seedbank.example"
+
+    def _found(self, col: dict[str, Any], *, part: bool = False) -> list[Issue]:
+        column = {"parts": {".contact": {"occurrences": 10, **col}}} if part else col
+        issues = st.check({"row_count": 10, "columns": {"c": column}}, _P, "s.t")
+
+        return [i for i in issues if i.code == "stats.redacted-literal-published"]
+
+    @pytest.mark.parametrize(
+        "col",
+        [
+            {
+                "redacted": "mask",
+                "values": [{"value": "[redacted]", "count": 4}],
+                "range": {"min": "[redacted]", "max": "[redacted]", "span_days": 90},
+                "percentiles": {"p50": "[redacted]", "p99": None},
+            },
+            {
+                "redacted": "hash",
+                "values": [{"value": DIGEST, "count": 4}, {"value": "4501238876543210"}],
+                "range": {"min": DIGEST, "max": None},
+            },
+            {"redacted": "drop", "values": [{"count": 4}, {"count": 1}]},
+            {"redacted": "mask"},
+            {"values": [{"value": LEAKED, "count": 4}], "range": {"min": 1, "max": 9}},
+            {"redacted": "shred", "values": [{"value": LEAKED, "count": 4}]},
+        ],
+    )
+    def test_a_marker_its_literals_keep_is_clean(self, col: dict[str, Any]) -> None:
+        assert self._found(col) == []
+
+    @pytest.mark.parametrize(
+        ("col", "field", "count"),
+        [
+            (
+                {"redacted": "mask", "range": {"min": 40000, "max": 62586.5}},
+                "range",
+                2,
+            ),
+            (
+                {"redacted": "mask", "percentiles": {"p01": 40100, "p50": "[redacted]"}},
+                "percentiles",
+                1,
+            ),
+            (
+                {"redacted": "mask", "values": [{"value": "Kew"}, {"value": "Wakehurst"}]},
+                "values",
+                2,
+            ),
+            (
+                {"redacted": "hash", "values": [{"value": LEAKED}, {"value": DIGEST}]},
+                "values",
+                1,
+            ),
+            ({"redacted": "hash", "range": {"min": 3, "max": DIGEST}}, "range", 1),
+            ({"redacted": "hash", "values": [{"value": "[redacted]"}]}, "values", 1),
+            ({"redacted": "hash", "values": [{"value": DIGEST.upper()}]}, "values", 1),
+            ({"redacted": "hash", "values": [{"value": DIGEST[:15]}]}, "values", 1),
+            ({"redacted": "drop", "values": [{"value": "GB", "count": 3}]}, "values", 1),
+        ],
+    )
+    def test_a_literal_the_primitive_withholds_is_reported_per_field(
+        self,
+        col: dict[str, Any],
+        field: str,
+        count: int,
+    ) -> None:
+        for part in (False, True):
+            found = self._found(dict(col), part=part)
+
+            assert [i.path for i in found] == [f"{_C}.parts[.contact]" if part else _C]
+            assert found[0].detail.startswith(f"{field} carries {count} literal(s) a redacted=")
+            assert found[0].spec_ref == "§2.2.9"
+
+    def test_one_issue_per_field(self) -> None:
+        col = {
+            "redacted": "mask",
+            "values": [{"value": "Kew"}],
+            "range": {"min": 40000, "max": 62586.5},
+            "percentiles": {"p50": 51000},
+        }
+
+        assert [i.detail.split(" ", 1)[0] for i in self._found(col)] == [
+            "percentiles",
+            "range",
+            "values",
+        ]
+
+    def test_the_detail_names_the_required_form_and_never_the_literal(self) -> None:
+        found = self._found({"redacted": "hash", "values": [{"value": self.LEAKED}]})
+
+        assert found[0].detail == (
+            "values carries 1 literal(s) a redacted='hash' column withholds; each MUST be 16 "
+            "lowercase hexadecimal characters."
+        )
+        assert self.LEAKED not in found[0].detail
+
+    def test_a_spelling_of_on_a_marked_column_is_this_code_alone(self) -> None:
+        col = {
+            "redacted": "mask",
+            "values": [{"value": "[redacted]"}, {"value": "[redacted]", "spelling_of": "Kew"}],
+        }
+        issues = [
+            i
+            for i in st.check({"row_count": 10, "columns": {"c": col}}, _P, "s.t")
+            if "spelling" in i.code or "redacted" in i.code
+        ]
+
+        assert [i.code for i in issues] == ["stats.redacted-literal-published"]
+        assert "Kew" not in issues[0].detail
 
 
 class TestSpellingGroups:
@@ -1383,6 +1499,42 @@ class TestMean:
     )
     def test_a_mean_that_is_not_compared(self, col: dict[str, Any]) -> None:
         assert st._check_mean_containment(col, _C) == []
+
+
+class TestNonFiniteStatistic:
+    def test_each_non_finite_numeric_statistic_is_named_once(self) -> None:
+        col = {
+            "classification": "numeric",
+            "range": {"min": float("-inf"), "max": float("nan")},
+            "percentiles": {"p50": 1.0, "p99": float("inf")},
+            "mean": float("nan"),
+            "sum": float("inf"),
+        }
+
+        assert [i.detail for i in st._check_non_finite_statistic(col, _C)] == [
+            "range.min=-inf is not a finite number; numeric statistics read finite values only.",
+            "range.max=nan is not a finite number; numeric statistics read finite values only.",
+            "percentiles.p99=inf is not a finite number; numeric statistics read finite values only.",
+            "mean=nan is not a finite number; numeric statistics read finite values only.",
+            "sum=inf is not a finite number; numeric statistics read finite values only.",
+        ]
+
+    def test_a_nan_mean_is_not_also_outside_its_range(self) -> None:
+        col = {"classification": "numeric", "mean": float("nan"), "range": {"min": 0, "max": 9}}
+        codes = [i.code for i in st.check({"row_count": 5, "columns": {"c": col}}, _P, "s.t")]
+
+        assert "stats.non-finite-statistic" in codes
+        assert "stats.mean-outside-range" not in codes
+
+    @pytest.mark.parametrize(
+        "col",
+        [
+            {"classification": "numeric", "range": {"min": 0, "max": 9.5}, "mean": 2, "sum": 10},
+            {"classification": "categorical", "range": {"min": 0, "max": float("nan")}},
+        ],
+    )
+    def test_finite_or_non_numeric_statistics_pass(self, col: dict[str, Any]) -> None:
+        assert st._check_non_finite_statistic(col, _C) == []
 
 
 class TestLengthAndCardinalityOrder:

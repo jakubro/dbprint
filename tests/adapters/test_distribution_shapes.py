@@ -404,7 +404,7 @@ class TestNoStatementIsAddedForValues:
 
         assert stats.values
         assert stats.values[0].count == 96
-        assert statements == 4
+        assert statements == 3
 
 
 class TestTheOverFetchBoundary:
@@ -486,9 +486,14 @@ class TestPercentileAgreement:
             adapter = _adapter(vendor, request, SHAPES["imbalanced"])
 
             try:
-                percentile_sets[vendor] = _profile(adapter)[column].percentiles
+                percentiles = _profile(adapter)[column].percentiles or {}
             finally:
                 adapter.close()
+
+            # ClickHouse has no zoneless timestamp: its DateTime publishes the same instant marked `Z`.
+            percentile_sets[vendor] = {
+                k: v.removesuffix("Z") if isinstance(v, str) else v for k, v in percentiles.items()
+            }
 
         first = percentile_sets[VENDORS[0]]
         assert all(other == first for other in percentile_sets.values()), percentile_sets
@@ -529,7 +534,7 @@ class TestMeanAndSumPublishCentreOfMass:
         stats, statements = _profile_counted(request, _rows(self._COUNTS))
 
         assert stats.mean is not None
-        assert statements == 4
+        assert statements == 3
 
 
 class TestExactIntegerTotals:
@@ -797,7 +802,7 @@ class TestDegenerateCensus:
             before = len(recorder.statements)
             adapter.compute_statistics(table.fqn, columns, CONFIG, frozenset())
 
-            assert len(recorder.statements) - before == 4
+            assert len(recorder.statements) - before == 3
         finally:
             adapter.close()
 
@@ -1068,7 +1073,7 @@ class TestQuantizedCount:
             before = len(recorder.statements)
             adapter.compute_statistics(table.fqn, columns, CONFIG, frozenset())
 
-            assert len(recorder.statements) - before == 6
+            assert len(recorder.statements) - before == 5
         finally:
             adapter.close()
 
@@ -1260,7 +1265,7 @@ class TestLength:
             stats = adapter.compute_statistics(table.fqn, columns, CONFIG, frozenset())[1]
 
             assert stats["s"].length is not None
-            assert len(recorder.statements) - before == 3
+            assert len(recorder.statements) - before == 2
         finally:
             adapter.close()
 

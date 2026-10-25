@@ -24,10 +24,13 @@ from dbprint.spec.spatial import Extent, Geometry
 from .connection import DIALECT, exec_query
 from .introspect import estimate_row_count
 from .rendering import (
+    finite_value,
+    mean_expression,
     render_binary,
     render_domain,
     render_operand,
     render_text,
+    sum_expression,
     temporal_shape,
     utc_instant,
 )
@@ -62,6 +65,7 @@ from ..base import (
     measure_columns,
     measures_length,
     numeric_block_from_row,
+    numeric_row,
     phase_a_cost,
     profile_over,
     run_phase_a,
@@ -487,11 +491,12 @@ def _phase_a_statement(
         select_parts.append(f"COUNT(1) - COUNT({cn}) AS null_{a}")
 
         if is_numeric_type(col.classified_type):
+            fv = finite_value(cn, col.classified_type)
             select_parts.extend(
                 (
                     f"COALESCE(SUM(CASE WHEN {cn} = 0 THEN 1 ELSE 0 END), 0) AS zero_{a}",
-                    f"COALESCE(SUM(CASE WHEN {cn} < 0 THEN 1 ELSE 0 END), 0) AS neg_{a}",
-                    f"COALESCE(SUM(CASE WHEN {cn} = FLOOR({cn}) THEN 1 ELSE 0 END), 0) AS quant_{a}",
+                    f"COALESCE(SUM(CASE WHEN {fv} < 0 THEN 1 ELSE 0 END), 0) AS neg_{a}",
+                    f"COALESCE(SUM(CASE WHEN {fv} = FLOOR({fv}) THEN 1 ELSE 0 END), 0) AS quant_{a}",
                 ),
             )
         elif measures_length(col.classified_type, _is_unsupported):
@@ -631,15 +636,24 @@ def _fetch_numeric_block(
     values: bool = True,
 ) -> NumericBlock:
     cn = render_operand(source_column(col, DIALECT), col.classified_type)
+    fv = finite_value(cn, col.classified_type)
     levels = ", ".join(str(p / 100.0) for p in config.percentiles)
-    select_parts = [
-        f"MIN({cn}) AS mn",
-        f"MAX({cn}) AS mx",
-        f"AVG(CAST({cn} AS DOUBLE)) AS avg_val",
-        f"SUM({cn}) AS sum_val",
-        f"PERCENTILE({cn}, ARRAY({levels})) AS pcts",
-    ]
-    row = exec_query(cursor, select_from(select_parts, source)).fetchone()
+
+    def read(aggregates: bool) -> Any:
+        mean = mean_expression(fv, col.classified_type) if aggregates else "NULL"
+        total = sum_expression(fv, col.classified_type) if aggregates else "NULL"
+        select_parts = [
+            f"MIN({fv}) AS mn",
+            f"MAX({fv}) AS mx",
+            f"{mean} AS avg_val",
+            f"{total} AS sum_val",
+            f"PERCENTILE({fv}, ARRAY({levels})) AS pcts",
+            *([f"COUNT({fv}) AS fin_val", f"COUNT({cn}) AS nn_val"] if fv != cn else []),
+        ]
+
+        return exec_query(cursor, select_from(select_parts, source)).fetchone()
+
+    row, failure = numeric_row(read)
 
     return numeric_block_from_row(
         row,
@@ -656,6 +670,9 @@ def _fetch_numeric_block(
             config,
             measured_value,
         ),
+        finite=row[5] if row and fv != cn else None,
+        non_null=row[6] if row and fv != cn else None,
+        failure=failure,
     )
 
 
@@ -682,23 +699,29 @@ def _fetch_temporal_block(
     rendered_min = render_domain(f"MIN({cn})", col.classified_type)
     rendered_max = render_domain(f"MAX({cn})", col.classified_type)
 
-    # Integer microseconds, not DOUBLE epochs: a float rounds away the last microseconds of a
-    # century-wide span (SPEC 2.2.4).
-    max_micros = f"UNIX_MICROS(CAST(MAX({cn}) AS TIMESTAMP))"
-    min_micros = f"UNIX_MICROS(CAST(MIN({cn}) AS TIMESTAMP))"
+    # Integer microseconds, never a float epoch (SPEC 2.2.4). TIMESTAMPDIFF reads session-zone wall
+    # clocks, so only a naive type takes it; a zone-aware one differences its epoch.
+    span_days = (
+        f"DATEDIFF(MAX({cn}), MIN({cn}))"
+        if not day_aligned
+        else f"(UNIX_MICROS(MAX({cn})) - UNIX_MICROS(MIN({cn}))) DIV 86400000000"
+        if temporal_shape(col.classified_type) == "timestamp_tz"
+        else f"TIMESTAMPDIFF(MICROSECOND, MIN({cn}), MAX({cn})) DIV 86400000000"
+    )
 
     agg_select = [
         f"{rendered_min} AS mn",
         f"{rendered_max} AS mx",
-        f"({max_micros} - {min_micros}) DIV 86400000000 AS span_days",
+        f"{span_days} AS span_days",
         # PERCENTILE and PERCENTILE_APPROX move an instant through a double and PERCENTILE_DISC
         # refuses a timestamp (measured), so the nearest rank is picked from the values instead.
         f"ARRAY_SORT(COLLECT_LIST({cn})) AS dbprint_sorted",
     ]
 
     if day_aligned:
+        utc = utc_instant(cn, col.classified_type)
         agg_select.append(
-            f"COALESCE(SUM(CASE WHEN {cn} = DATE_TRUNC('DAY', {cn}) THEN 1 ELSE 0 END), 0) AS quant",
+            f"COALESCE(SUM(CASE WHEN {utc} = DATE_TRUNC('DAY', {utc}) THEN 1 ELSE 0 END), 0) AS quant",
         )
 
     ranked = [

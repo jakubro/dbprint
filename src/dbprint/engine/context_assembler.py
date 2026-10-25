@@ -14,9 +14,9 @@ from typing import Any, Literal
 
 import yaml
 
+from dbprint.spec import authored
 from dbprint.spec.absence import block_value, column_value, disabled_of
 from dbprint.spec.artifacts import (
-    DDL_FILENAME,
     DESCRIPTION_FILENAME,
     MANIFEST_ANNOTATIONS_FILENAME,
     RELATIONSHIPS_ANNOTATIONS_FILENAME,
@@ -24,10 +24,13 @@ from dbprint.spec.artifacts import (
     declared_artifacts,
     walkable_tables,
 )
-from dbprint.spec.parts import display, parent, parse
+from dbprint.spec.classification import compute_null_rate
+from dbprint.spec.edges import edge_detection, edge_key, rejected_edges
+from dbprint.spec.parts import display, member, parent, parse
 from dbprint.spec.scope import (
     ScanScope,
     coverage_statement,
+    qualify,
     reply_scope,
     rows_scanned,
     scope_line,
@@ -37,6 +40,7 @@ from dbprint.spec.value_text import spell_number, spell_percent
 from . import context_terms, notes_synthesis, table_readings
 from .baseline import (
     ArtifactReader,
+    contained,
     disabled_feature_message,
     failed_tables,
     missing_artifacts,
@@ -47,13 +51,7 @@ from .baseline import (
 )
 from .context_terms import TERMS
 from .notes_synthesis import Rendered
-from .relationship_graph import (
-    edge_detection,
-    edge_key,
-    rejected_edges,
-    with_human_edges,
-    withhold_rejected,
-)
+from .relationship_graph import incoming_key, with_human_edges, withhold_rejected
 from .table_readings import grain_reading
 from .token_budget import Section, make_section, select, tokens_of, truncation_marker
 from .value_list import grouped_values, value_key, value_notes
@@ -150,6 +148,8 @@ class PayloadResult:
     payloads: list[dict[str, Any]]
     tables_included: int
     truncated: tuple[str, ...]
+    # The connection's `connection_notes` and `_corrupted`, which ride the wrapper, not a table.
+    header: dict[str, Any] = field(default_factory=dict)
 
 
 OpenQuestionKind = Literal["description", "codes", "frequent_value", "edge"]
@@ -186,10 +186,8 @@ def assemble(
     if len(loaded) == 1:
         _attach_connection_notes(loaded[0], print_root, read)
 
-    if options.format == "json":
-        return _assemble_json(loaded, options)
-    elif options.format == "yaml":
-        return _assemble_yaml(loaded, options)
+    if options.format in ("json", "yaml"):
+        return _assemble_structured(loaded, options, connection_name, print_root, read)
     else:
         return _assemble_markdown(
             loaded,
@@ -210,20 +208,22 @@ def assemble_payloads(
 ) -> PayloadResult:
     """The per-table structured payloads the json and yaml formats carry, before rendering.
 
-    A multi-connection caller wraps these, so the connection name rides the wrapper (MCP.md 4.1).
+    A multi-connection caller wraps these, so the connection name and `header` ride the wrapper.
     """
 
     if not tables:
         return PayloadResult(payloads=[], tables_included=0, truncated=())
 
     loaded = [_load_table_artifacts(manifest, print_root, fqn, read_artifact) for fqn in tables]
+    header = _connection_keys(print_root, options, read_artifact)
+    payloads, included, truncated = _budgeted_structured_payloads(loaded, options, header)
 
-    if len(loaded) == 1:
-        _attach_connection_notes(loaded[0], print_root, read_artifact)
-
-    payloads, included, truncated = _budgeted_structured_payloads(loaded, options)
-
-    return PayloadResult(payloads=payloads, tables_included=included, truncated=truncated)
+    return PayloadResult(
+        payloads=payloads,
+        tables_included=included,
+        truncated=truncated,
+        header=header,
+    )
 
 
 def ranked_sections(
@@ -338,10 +338,10 @@ def fk_target_map(
 ) -> dict[str, list[str]]:
     """Every `refers_to` edge per source column, surest first, less rejected ones (SPEC 2.7.2).
 
-    A composite edge is listed under each member column, its own columns in front.
+    A composite or path-valued edge is listed under each member column, its own endpoint in front.
     """
 
-    rejected = rejected_edges(relationship_annotations)
+    rejected = rejected_edges(relationship_annotations, _by_edge_key(relationships))
     out: dict[str, list[str]] = {}
 
     for entry in _ranked((relationships or {}).get("refers_to")):
@@ -349,11 +349,10 @@ def fk_target_map(
             continue
 
         cols = [str(c) for c in entry.get("column") or []]
-        target = f"{entry.get('target_table') or ''}.{_join_columns(entry.get('target_column'))}"
-        label = f"{target} ({edge_detection(entry)})"
+        label = f"{_target(entry)} ({edge_detection(entry)})"
 
-        if len(cols) > 1:
-            label = f"{_join_columns(cols)} -> {label}"
+        if len(cols) > 1 or entry.get("path"):
+            label = f"{_endpoint(entry, 'column', 'path')} -> {label}"
 
         for column in cols:
             out.setdefault(column, []).append(label)
@@ -695,8 +694,8 @@ def _markdown_joins(a: TableArtifacts) -> list[Rendered]:
         )
         facts = [line]
 
-        if (column := _single_column(entry)) in shares:
-            facts.append(_nulls_fact(shares[column][0]))
+        if (share := _referencing_null_share(a, entry, shares)) is not None:
+            facts.append(_nulls_fact(share[0]))
 
         lines.append(notes_synthesis.join_facts([*facts, *_note_fact(entry)]))
 
@@ -741,7 +740,49 @@ def _note_fact(entry: dict[str, Any]) -> list[Rendered]:
 def _referencing_columns(a: TableArtifacts) -> set[str]:
     refers_to, _ = _edges(a)
 
-    return {column for entry in refers_to if (column := _single_column(entry)) is not None}
+    return {
+        column
+        for entry in refers_to
+        if not entry.get("path") and (column := _single_column(entry)) is not None
+    }
+
+
+def _referencing_null_share(
+    a: TableArtifacts,
+    entry: dict[str, Any],
+    shares: dict[str, tuple[str, float]],
+) -> tuple[str, float] | None:
+    """The referencing endpoint's null share, spelled and raw; a path key's from its part (SPEC
+    2.2.18): NULL where the column is null, the key absent or a JSON `null`; no part, no figure.
+    """
+
+    column = _single_column(entry)
+    keys = entry.get("path")
+
+    if not keys:
+        return shares.get(column) if column is not None else None
+
+    statistics = a.statistics or {}
+    col = (statistics.get("columns") or {}).get(column)
+    parts = column_value(col, "parts") if isinstance(col, dict) else None
+    key_part = parts.get("".join(member(str(k)) for k in keys)) if isinstance(parts, dict) else None
+
+    if not isinstance(col, dict) or not isinstance(key_part, dict):
+        return None
+
+    scope = scope_of(statistics)
+    population = rows_scanned(col, scope)
+    population = population if population is not None else block_value(statistics, "row_count")
+    occurrences = column_value(key_part, "occurrences")
+    key_nulls = column_value(key_part, "null_count")
+
+    if not isinstance(occurrences, int) or not isinstance(population, int) or not population:
+        return None
+
+    null_rows = population - occurrences + (key_nulls if isinstance(key_nulls, int) else 0)
+    rate = compute_null_rate(null_rows, population)
+
+    return (spell_percent(rate) if null_rows else qualify("none", scope)), rate
 
 
 def _single_column(entry: dict[str, Any]) -> str | None:
@@ -1290,7 +1331,7 @@ def _corrupted_summary(corrupted: dict[str, str]) -> str:
     only the kinds.
     """
 
-    return f"Unreadable: {', '.join(corrupted)} (present on disk, failed to parse)"
+    return f"Unreadable: {', '.join(corrupted)} (present on disk, malformed)"
 
 
 def _scope_summary(statistics: dict[str, Any]) -> Rendered:
@@ -1637,15 +1678,16 @@ def _markdown_parts(a: TableArtifacts, options: AssemblyOptions) -> list[Rendere
         if not isinstance(parts, dict):
             continue
 
-        scanned = rows_scanned(col, scope) or row_count
+        counted = rows_scanned(col, scope)
+        scanned = counted if counted is not None else row_count
 
         for path, block in parts.items():
             if not isinstance(block, dict):
                 continue
 
-            notes = notes_synthesis.synthesize(block, None, profile={}, scope=None)
+            notes = notes_synthesis.synthesize(block, None, profile={}, scope=scope)
 
-            if present := _presence(name, path, block, parts, scanned):
+            if present := _presence(name, path, block, parts, scanned, scoped=counted is not None):
                 notes = notes_synthesis.join_facts(
                     [notes, Rendered(present, frozenset({"present"}))],
                 )
@@ -1673,11 +1715,15 @@ def _presence(
     block: dict[str, Any],
     parts: dict[str, Any],
     scanned: int | None,
+    *,
+    scoped: bool,
 ) -> str | None:
     """A member's presence over its population: rows for a top-level member, else parent instances.
 
-    The row share sits beside it where no array or map step sits above.
+    The row share sits beside it under no array or map step, named `rows scanned` on a scoped read.
     """
+
+    rows = "rows scanned" if scoped else "rows"
 
     steps = parse(path)
     occurrences = column_value(block, "occurrences")
@@ -1688,7 +1734,7 @@ def _presence(
     up = parent(path)
 
     if up is None:
-        return f"present: {spell_percent(occurrences / scanned)} of rows" if scanned else None
+        return f"present: {spell_percent(occurrences / scanned)} of {rows}" if scanned else None
 
     holder = parts.get(up)
 
@@ -1705,7 +1751,7 @@ def _presence(
     text = f"present: {spell_percent(occurrences / population)} of {display(column, up)}"
 
     if scanned and all(step.kind == "member" for step in steps):
-        text += f" ({spell_percent(occurrences / scanned)} of rows)"
+        text += f" ({spell_percent(occurrences / scanned)} of {rows})"
 
     return text
 
@@ -2023,6 +2069,21 @@ def _load_artifact(
     return None, "parses, but is not a mapping"
 
 
+def load_annotations(
+    path: Path,
+    kind: str,
+    read: ArtifactReader,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """`_load_artifact`, withholding a body that fails admission (SPEC 2.7) with its reason."""
+
+    data, reason = _load_artifact(path, read)
+
+    if data is not None and (problem := authored.malformation(kind, data)) is not None:
+        return None, f"does not match its schema (SPEC 2.7): {problem}"
+
+    return authored.admitted(kind, data) if data is not None else None, reason
+
+
 def load_connection_notes(
     print_root: Path,
     read: ArtifactReader,
@@ -2031,7 +2092,12 @@ def load_connection_notes(
     `(None, None)` covers absent and empty alike; a non-`None` reason is present but unreadable.
     """
 
-    mapping, reason = _load_artifact(print_root / MANIFEST_ANNOTATIONS_FILENAME, read)
+    path = print_root / MANIFEST_ANNOTATIONS_FILENAME
+
+    if path.is_file() and not contained(print_root, path):
+        return None, None
+
+    mapping, reason = load_annotations(path, "manifest_annotations", read)
 
     if mapping is None:
         return None, reason
@@ -2039,6 +2105,25 @@ def load_connection_notes(
     notes = mapping.get("notes")
 
     return (notes.strip() if isinstance(notes, str) and notes.strip() else None), None
+
+
+def _connection_keys(
+    print_root: Path,
+    options: AssemblyOptions,
+    read: ArtifactReader,
+) -> dict[str, Any]:
+    """The structured counterpart of the Markdown header's notes block (SPEC 2.7.3)."""
+
+    notes, reason = load_connection_notes(print_root, read)
+    keys: dict[str, Any] = {}
+
+    if notes and options.include_annotations:
+        keys["connection_notes"] = notes
+
+    if reason is not None:
+        keys["_corrupted"] = {"manifest_annotations": reason}
+
+    return keys
 
 
 def _attach_connection_notes(a: TableArtifacts, print_root: Path, read: ArtifactReader) -> None:
@@ -2106,8 +2191,8 @@ def _load_table_artifacts(
     table_path = table_directory(print_root, fqn, entry)
     artifacts = declared_artifacts(entry)
 
-    ddl_path = table_path / artifacts.get("ddl", DDL_FILENAME)
-    ddl = ddl_path.read_text(encoding="utf-8") if ddl_path.is_file() else ""
+    ddl_path = table_path / artifacts["ddl"] if "ddl" in artifacts else None
+    ddl = ddl_path.read_text(encoding="utf-8") if ddl_path and ddl_path.is_file() else ""
 
     statistics = None
     corrupted: dict[str, str] = {}
@@ -2138,8 +2223,9 @@ def _load_table_artifacts(
     annotated_grain = None
 
     if "statistics_annotations" in artifacts:
-        stats_ann, stats_ann_reason = _load_artifact(
+        stats_ann, stats_ann_reason = load_annotations(
             table_path / artifacts["statistics_annotations"],
+            "statistics_annotations",
             read,
         )
 
@@ -2152,8 +2238,9 @@ def _load_table_artifacts(
     relationship_annotations = None
 
     if "relationships_annotations" in artifacts:
-        rel_ann, rel_ann_reason = _load_artifact(
+        rel_ann, rel_ann_reason = load_annotations(
             table_path / artifacts["relationships_annotations"],
+            "relationships_annotations",
             read,
         )
 
@@ -2163,7 +2250,7 @@ def _load_table_artifacts(
         relationship_annotations = _relationship_annotation_entries(rel_ann)
 
     table_profile = entry.get("profile")
-    own_rejections = rejected_edges(relationship_annotations)
+    own_rejections = rejected_edges(relationship_annotations, _by_edge_key(relationships))
     incoming, _ = incoming_rejections(manifest, print_root, fqn, relationships, read)
     authored, _ = authored_relationship_annotations(manifest, print_root, read)
     shown = with_human_edges(
@@ -2277,7 +2364,11 @@ def _live_source_annotations(
         return {}
 
     annotated = _annotation_columns(
-        _load_artifact(directory / artifacts["statistics_annotations"], read)[0],
+        load_annotations(
+            directory / artifacts["statistics_annotations"],
+            "statistics_annotations",
+            read,
+        )[0],
     )
     statistics = (
         _load_artifact(directory / artifacts["statistics"], read)[0]
@@ -2358,9 +2449,16 @@ def incoming_rejections(
 
         path = table_directory(print_root, referencer, entry) / name
         consulted.append(path)
-        annotations, _ = _load_artifact(path, read)
+        annotations, _ = load_annotations(path, "relationships_annotations", read)
 
-        for key, rejection in rejected_edges(_relationship_annotation_entries(annotations)).items():
+        rows = {
+            incoming_key(edge, fqn): edge
+            for edge in (relationships or {}).get("referenced_by") or []
+            if isinstance(edge, dict) and edge.get("referencer_table") == referencer
+        }
+        annotated = _relationship_annotation_entries(annotations)
+
+        for key, rejection in rejected_edges(annotated, rows).items():
             if key[1] == fqn:
                 out[(referencer, *key)] = rejection
 
@@ -2388,7 +2486,9 @@ def authored_relationship_annotations(
 
         path = table_directory(print_root, table, entry) / name
         consulted.append(path)
-        out[table] = _relationship_annotation_entries(_load_artifact(path, read)[0])
+        out[table] = _relationship_annotation_entries(
+            load_annotations(path, "relationships_annotations", read)[0],
+        )
 
     return out, tuple(consulted)
 
@@ -2566,7 +2666,11 @@ def _structured_joins(a: TableArtifacts) -> dict[str, Any]:
                 e,
                 ("column", "path", "target_table", "target_column", "target_path", "note"),
             )
-            | ({"null_rate": shares[c][1]} if (c := _single_column(e)) in shares else {})
+            | (
+                {"null_rate": share[1]}
+                if (share := _referencing_null_share(a, e, shares)) is not None
+                else {}
+            )
             for e in refers_to
         ],
         "referenced_by": [
@@ -2702,41 +2806,38 @@ def _measure_for_budget(value: Any) -> str:
     return value if isinstance(value, str) else json.dumps(value, default=str)
 
 
-def _assemble_json(artifacts: list[TableArtifacts], options: AssemblyOptions) -> AssemblyResult:
-    """JSON output: array of per-table objects (single object if exactly one)."""
+def _assemble_structured(
+    artifacts: list[TableArtifacts],
+    options: AssemblyOptions,
+    connection_name: str | None,
+    print_root: Path,
+    read: ArtifactReader,
+) -> AssemblyResult:
+    """One document: a table's object bare, several wrapped in `connection`, notes and `tables`."""
 
-    payloads, included, truncated = _budgeted_structured_payloads(artifacts, options)
-    body: Any = payloads[0] if len(payloads) == 1 else payloads
-    text = json.dumps(body, indent=2, default=str, sort_keys=False)
+    if len(artifacts) == 1:
+        payloads, included, truncated = _budgeted_structured_payloads(artifacts, options)
+        body: dict[str, Any] = payloads[0]
+    else:
+        header = _connection_keys(print_root, options, read)
+        payloads, included, truncated = _budgeted_structured_payloads(artifacts, options, header)
+        body = {"connection": connection_name, **header, "tables": payloads}
 
-    return AssemblyResult(
-        text=text + "\n",
-        tables_included=included,
-        truncated=truncated,
-    )
+    if options.format == "json":
+        text = json.dumps(body, indent=2, default=str, sort_keys=False) + "\n"
+    else:
+        text = yaml.safe_dump_all([body], sort_keys=False, default_flow_style=False)
 
-
-def _assemble_yaml(artifacts: list[TableArtifacts], options: AssemblyOptions) -> AssemblyResult:
-    """YAML output: multi-document stream, one document per table."""
-
-    payloads, included, truncated = _budgeted_structured_payloads(artifacts, options)
-    text = yaml.safe_dump_all(payloads, sort_keys=False, default_flow_style=False)
-
-    return AssemblyResult(
-        text=text,
-        tables_included=included,
-        truncated=truncated,
-    )
+    return AssemblyResult(text=text, tables_included=included, truncated=truncated)
 
 
 def _budgeted_structured_payloads(
     artifacts: list[TableArtifacts],
     options: AssemblyOptions,
+    header: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], int, tuple[str, ...]]:
-    """Per-table payloads under an even split of the total budget.
-
-    These formats carry no document header, so the split is `budget // len(artifacts)`; a
-    split that floors to zero excludes every table from `tables_included`.
+    """Per-table payloads under an even split of the budget left after the `header` keys; a split
+    that floors to zero excludes every table from `tables_included`.
     """
 
     if options.budget is None:
@@ -2744,7 +2845,8 @@ def _budgeted_structured_payloads(
 
         return payloads, len(artifacts), ()
 
-    per_table_budget = options.budget // len(artifacts)
+    header_tokens = tokens_of(_measure_for_budget(header)) if header else 0
+    per_table_budget = max(options.budget - header_tokens, 0) // len(artifacts)
     payloads = []
     truncated: list[str] = []
 
@@ -2758,3 +2860,9 @@ def _budgeted_structured_payloads(
     included = len(artifacts) if per_table_budget > 0 else 0
 
     return payloads, included, tuple(truncated)
+
+
+def _by_edge_key(relationships: dict[str, Any] | None) -> dict[tuple[Any, ...], Any]:
+    return {
+        edge_key(e): e for e in (relationships or {}).get("refers_to") or [] if isinstance(e, dict)
+    }

@@ -16,15 +16,22 @@ from dbprint.spec.classification import (
     is_numeric_type,
     is_spatial_type,
 )
-from dbprint.spec.percentiles import coherent_percentiles
 from dbprint.spec.rounding import (
     measured_value,
     round_statistic,
 )
 from dbprint.spec.spatial import Extent, Geometry
 from .connection import DIALECT, exec_query
-from .introspect import row_count_hint
-from .rendering import render_binary, render_operand, render_text, temporal_shape
+from .introspect import estimate_row_count, row_count_hint
+from .rendering import (
+    finite_value,
+    mean_expression,
+    render_binary,
+    render_operand,
+    render_text,
+    sum_expression,
+    temporal_shape,
+)
 from .. import statements
 from ..base import (
     ArrayReads,
@@ -52,6 +59,8 @@ from ..base import (
     key_literal,
     materialized_name,
     measures_length,
+    numeric_block_from_row,
+    numeric_row,
     phase_a_cost,
     pre_classify,
     profile_over,
@@ -60,6 +69,7 @@ from ..base import (
     spatial_column_stats,
     temporal_with_top_n,
 )
+from ..errors import QueryFailed
 from ..identifiers import SOURCE_ALIAS, Identity
 from ..sql_layout import derived, select_from
 from ..statements import column_alias
@@ -98,8 +108,14 @@ def compute_base(
     identity: Identity,
     columns: list[ColumnMeta],
     scope: TableScope | None = None,
+    *,
+    required_filter: bool = False,
 ) -> tuple[TableCounts, PhaseA]:
-    """Phase A: the table's counts plus per-column null_count and cardinality."""
+    """Phase A: the table's counts plus per-column null_count and cardinality.
+
+    A table that refuses an unfiltered read takes its row count from `PARTITIONS` alone, where no
+    partition row means no rows; the unfiltered count fallback would be refused.
+    """
 
     if not columns:
         return TableCounts(row_count=0, rows_scanned=0), PhaseA({})
@@ -119,7 +135,11 @@ def compute_base(
         identity.quoted(),
         rows_scanned,
         scope,
-        lambda: row_count_hint(cursor, project, identity),
+        (
+            partial(_partitions_row_count, cursor, project, identity)
+            if required_filter
+            else lambda: row_count_hint(cursor, project, identity)
+        ),
     )
 
     return TableCounts(row_count, rows_scanned, row_count_method), phase_a
@@ -188,9 +208,23 @@ def compute_columns(
         return {col.name: assemble(col, blocks.get(col.name, {})) for col in cols}
 
     def measure(col: ColumnMeta) -> ColumnStats:
-        blocks = _fetch_phase_b_batch(cursor, identity, source, [col], base, pre_by_col)
+        def read(aggregates: bool) -> dict[str, dict[str, Any]]:
+            return _fetch_phase_b_batch(
+                cursor,
+                identity,
+                source,
+                [col],
+                base,
+                pre_by_col,
+                aggregates=aggregates,
+            )
 
-        return assemble(col, blocks.get(col.name, {}))
+        if pre_by_col[col.name] != "numeric":
+            return assemble(col, read(True).get(col.name, {}))
+
+        blocks, failure = numeric_row(read)
+
+        return assemble(col, {**blocks.get(col.name, {}), "failure": failure})
 
     def assemble(col: ColumnMeta, block: dict[str, Any]) -> ColumnStats:
         if on_column is not None:
@@ -374,13 +408,14 @@ def probe_timeline(
     col = {c.name: c for c in columns}[column]
     cn = identity.source_column(column)
     truncate = _timeline_truncation(col.classified_type)
+    zone = ", 'UTC'" if truncate == "TIMESTAMP_TRUNC" else ""
 
     return statements.timeline(
         partial(exec_query, cursor),
         DIALECT,
         table_source(identity, scope),
         cn,
-        f"{truncate}({cn}, {_TIMELINE_DATE_PARTS[unit]})",
+        f"{truncate}({cn}, {_TIMELINE_DATE_PARTS[unit]}{zone})",
         "bkt.bucket_start",
     )
 
@@ -569,11 +604,12 @@ def _phase_a_statement(
         select_parts.append(f"COUNTIF({cn} IS NULL) AS dbprint_null_{a}")
 
         if is_numeric_type(col.classified_type):
+            fv = finite_value(cn, col.classified_type)
             select_parts.extend(
                 (
                     f"COUNTIF({cn} = 0) AS dbprint_zero_{a}",
-                    f"COUNTIF({cn} < 0) AS dbprint_neg_{a}",
-                    f"COUNTIF({cn} = CAST({cn} AS INT64)) AS dbprint_quant_{a}",
+                    f"COUNTIF({fv} < 0) AS dbprint_neg_{a}",
+                    f"COUNTIF({fv} = CAST({fv} AS INT64)) AS dbprint_quant_{a}",
                 ),
             )
         elif measures_length(col.classified_type, _is_unsupported):
@@ -659,9 +695,13 @@ def _fetch_phase_b_batch(
     columns: list[ColumnMeta],
     base: dict[str, BaseStats],
     pre_by_col: dict[str, str],
+    *,
+    aggregates: bool = True,
 ) -> dict[str, dict[str, Any]]:
     """One statement covering every column's Phase B scalar aggregates - a flat `select_parts`
     list plus a per-column `plan`, so the single returned row slices back apart positionally.
+
+    Without `aggregates`, a numeric column's mean and sum are NULL.
     """
 
     select_parts: list[str] = []
@@ -683,16 +723,23 @@ def _fetch_phase_b_batch(
             plan["length_p95"] = True
 
         if pre == "numeric":
+            fv = finite_value(cn, col.classified_type)
+            mean = mean_expression(fv, col.classified_type) if aggregates else "NULL"
+            total = sum_expression(fv, col.classified_type) if aggregates else "NULL"
             select_parts.extend(
                 [
-                    f"MIN({cn}) AS mn_{a}",
-                    f"MAX({cn}) AS mx_{a}",
-                    f"AVG({cn}) AS avg_{a}",
-                    f"SUM({cn}) AS sum_{a}",
-                    f"APPROX_QUANTILES({cn}, 100) AS qs_{a}",
+                    f"MIN({fv}) AS mn_{a}",
+                    f"MAX({fv}) AS mx_{a}",
+                    f"{mean} AS avg_{a}",
+                    f"{total} AS sum_{a}",
+                    f"APPROX_QUANTILES({fv}, 100) AS qs_{a}",
                 ],
             )
-            plan["numeric"] = True
+
+            if fv != cn:
+                select_parts.extend([f"COUNT({fv}) AS fin_{a}", f"COUNT({cn}) AS nn_{a}"])
+
+            plan.update(numeric=True, finite=fv != cn)
         elif pre == "temporal":
             shape = temporal_shape(col.classified_type)
             time_only = shape in ("time", "time_tz")
@@ -723,7 +770,9 @@ def _fetch_phase_b_batch(
             if day_aligned:
                 # TIMESTAMP and DATETIME share no common type under `=`, so the midnight
                 # constructor is chosen by whether this column is tz-aware or naive.
-                midnight = f"TIMESTAMP(DATE({cn}))" if is_tz else f"DATETIME(DATE({cn}))"
+                midnight = (
+                    f"TIMESTAMP(DATE({cn}, 'UTC'), 'UTC')" if is_tz else f"DATETIME(DATE({cn}))"
+                )
                 select_parts.append(f"COUNTIF({cn} = {midnight}) AS quant_{a}")
 
             plan.update(
@@ -760,6 +809,10 @@ def _fetch_phase_b_batch(
         if col_plan.get("numeric"):
             block["mn"], block["mx"], block["avg"], block["sum"], block["qs"] = row[idx : idx + 5]
             idx += 5
+
+            if col_plan["finite"]:
+                block["fin"], block["nn"] = row[idx : idx + 2]
+                idx += 2
 
         if col_plan.get("temporal"):
             block["mn"] = row[idx]
@@ -883,8 +936,15 @@ def _numeric_block(
     values: bool = True,
 ) -> NumericBlock:
     cn = identity.source_column(col.name)
-    distribution, frequencies, listed = (
-        _approximate_distribution_via_top_n(
+    quantiles = block.get("qs") or []
+
+    return numeric_block_from_row(
+        (block.get("mn"), block.get("mx"), block.get("avg"), block.get("sum")),
+        [quantiles[p] for p in config.percentiles] if quantiles else [],
+        config,
+        None
+        if not values
+        else lambda: _approximate_distribution_via_top_n(
             cursor,
             source,
             cn,
@@ -892,33 +952,10 @@ def _numeric_block(
             non_null,
             config,
             measured_value,
-        )
-        if values
-        else (None, None, None)
-    )
-    quantiles = block.get("qs") or []
-    rng = Range(
-        min=round_statistic(block.get("mn"), exact_int=True),
-        max=round_statistic(block.get("mx"), exact_int=True),
-    )
-    percentiles = coherent_percentiles(
-        {
-            f"p{p:02d}": round_statistic(quantiles[p])
-            for p in config.percentiles
-            if p < len(quantiles)
-        },
-        rng.min,
-        rng.max,
-    )
-
-    return (
-        rng,
-        percentiles,
-        distribution,
-        frequencies,
-        listed,
-        round_statistic(block.get("avg")),
-        round_statistic(block.get("sum"), exact_int=True),
+        ),
+        finite=block.get("fin"),
+        non_null=block.get("nn"),
+        failure=block.get("failure"),
     )
 
 
@@ -965,3 +1002,17 @@ def _temporal(
 
 def _is_unsupported(sql_type: str) -> bool:
     return base_type(sql_type) in _UNSUPPORTED_TYPES
+
+
+def _partitions_row_count(cursor: Cursor, project: str, identity: Identity) -> int:
+    try:
+        return estimate_row_count(cursor, project, identity) or 0
+    except QueryFailed as exc:
+        if exc.timed_out:
+            raise
+
+        raise ValueError(
+            f"table {identity.fqn!r} requires a partition filter (require_partition_filter), so "
+            f"its row count is read from INFORMATION_SCHEMA.PARTITIONS alone, and that read "
+            f"failed: {exc}",
+        ) from exc

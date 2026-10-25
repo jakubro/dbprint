@@ -14,8 +14,8 @@ from types import MappingProxyType, ModuleType
 from typing import Any, ClassVar, Protocol, Self
 
 from dbprint.config.duration import format_duration_seconds
-from . import trace_context
-from .errors import QueryFailed
+from . import interrupt, trace_context
+from .errors import NoResultSet, QueryFailed
 
 
 type CursorFactory[P] = Callable[[P], Any]
@@ -23,6 +23,8 @@ type CursorFactory[P] = Callable[[P], Any]
 
 class Cursor(Protocol):
     """DB-API-compatible cursor surface used by the adapters."""
+
+    description: Any
 
     def execute(self, sql: str, params: Any = ...) -> Any: ...
 
@@ -42,7 +44,7 @@ def traced(
 ) -> Any:
     """`run()`'s result, DEBUG-traced with `sql` and `params` as a pair.
 
-    Raises `QueryFailed` wrapping the driver's error, marked `timed_out` where `is_timeout` says so.
+    Raises `QueryFailed` (`timed_out` per `is_timeout`), or `Interrupted` for a Ctrl-C.
     """
 
     started = time.monotonic()
@@ -50,6 +52,9 @@ def traced(
     try:
         result = run()
     except Exception as exc:
+        if interrupt.caused_by_interrupt(exc):
+            raise interrupt.Interrupted from exc
+
         failure = QueryFailed(exc, sql, params, timed_out=is_timeout(exc))
         trace_context.log_failure(logger, started, failure)
 
@@ -66,18 +71,47 @@ def execute(
     cursor: Cursor,
     sql: str,
     params: Any = None,
+    *,
+    unescapes_percent: bool = False,
 ) -> Cursor:
-    """Run `sql` on `cursor` through `traced` and return the cursor; no params means none bound."""
+    """Run `sql` on `cursor` through `traced` and return the cursor; empty params mean none bound.
+
+    `unescapes_percent` names a driver that turns `%%` into `%` even with nothing bound.
+    """
 
     def run() -> Cursor:
-        if params is None:
-            cursor.execute(sql)
+        if not params:
+            cursor.execute(sql.replace("%", "%%") if unescapes_percent else sql)
         else:
             cursor.execute(sql, params)
 
         return cursor
 
     return traced(logger, is_timeout, run, sql, params)
+
+
+def last_rows(cursor: Any) -> list[tuple[Any, ...]]:
+    """The last result set's rows as tuples, every earlier result read past via PEP 249 `nextset`.
+
+    Raises NoResultSet when the last statement returned no result set (no `description`).
+    """
+
+    rows = _current_rows(cursor)
+    nextset = getattr(cursor, "nextset", None)
+
+    while nextset is not None:
+        try:
+            if not nextset():
+                break
+        except NotImplementedError:
+            break
+
+        rows = _current_rows(cursor)
+
+    if rows is None:
+        raise NoResultSet
+
+    return rows
 
 
 def import_extra(module: str, package: str, extra: str, error: type[Exception]) -> ModuleType:
@@ -215,3 +249,8 @@ class FactoryConnection:
 
     def _opened(self, cursor: Any, /) -> Any:
         return cursor
+
+
+def _current_rows(cursor: Any) -> list[tuple[Any, ...]] | None:
+    # Read before the next `nextset()`: mysql-connector's last one clears `description`.
+    return [tuple(row) for row in cursor.fetchall()] if cursor.description else None

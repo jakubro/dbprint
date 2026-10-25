@@ -4,7 +4,7 @@ credentials dict; every method asserts the connection is open before delegating.
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from . import connection as connection_module
 from . import ddl as ddl_module
@@ -25,6 +25,7 @@ from ..base import (
 )
 from ..dialect import Dialect
 from ..driver import CursorFactory
+from ..errors import NoResultSet
 from ..identifiers import IdentityRegistry
 
 
@@ -67,3 +68,11 @@ class DuckdbAdapter(SqlAdapter):
         listed = self._register(selected)
 
         return listed
+
+    def execute_query(self, sql: str) -> list[tuple[Any, ...]]:
+        rows = super().execute_query(sql)
+
+        if not connection_module.ends_in_query(self._cursor, sql):
+            raise NoResultSet
+
+        return rows

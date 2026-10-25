@@ -194,6 +194,12 @@ def malformed_manifest(path: str, detail: str) -> McpError:
     return McpError(-32603, f"{path}: {detail}")
 
 
+def malformed_artifact(path: str, detail: str) -> McpError:
+    """An annotation file parsed but fails admission, so no reader below it uses it (SPEC 2.7)."""
+
+    return McpError(-32603, f"{path}: {detail}")
+
+
 def malformed_uri(uri: str) -> McpError:
     """The caller supplied a URI outside the dbprint:// scheme."""
 

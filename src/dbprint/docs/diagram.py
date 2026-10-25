@@ -6,9 +6,9 @@ Mermaid's `maxTextSize`, which a connection-wide graph can exceed.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Collection
 from typing import Any
-from urllib.parse import quote
 
 from dbprint.spec.fqn import split as split_fqn
 from . import catalogue
@@ -21,6 +21,8 @@ _ARROW_BY_DETECTION = {"declared": "-->|", "inferred": "-.->|", "measured": "==>
 # `depends_on` (SPEC 2.2.17) is a different relation - object grain, not a foreign key - so it
 # gets an open-circle head rather than reading as a fourth detection value.
 _DEPENDS_ON_ARROW = "--o|"
+
+_PLAIN_RE = re.compile(r"[^A-Za-z0-9 _.,-]")
 
 
 def build(
@@ -52,7 +54,7 @@ def build(
 
     printed = sorted(t for t in tables if t == name or t in in_print)
     lines = ["flowchart LR"]
-    lines += [f'  {node_ids[t]}["{t}"]' for t in sorted(tables.difference(printed))]
+    lines += [f'  {node_ids[t]}["{_text(t)}"]' for t in sorted(tables.difference(printed))]
     _emit_subgraphs(lines, catalogue.prefix_tree(printed), node_ids, counter=[0])
 
     rejected_links: list[int] = []
@@ -61,7 +63,7 @@ def build(
 
     for r in refers_to:
         arrow = _ARROW_BY_DETECTION.get(r.get("detection"), "-.->|")
-        cols = ", ".join(r.get("column") or [])
+        cols = _text(", ".join(r.get("column") or []))
         lines.append(f'  {node_ids[name]} {arrow}"{cols}"| {node_ids[r["target_table"]]}')
 
         if r.get("rejected"):
@@ -71,7 +73,7 @@ def build(
 
     for r in referenced_by:
         arrow = _ARROW_BY_DETECTION.get(r.get("detection"), "-.->|")
-        cols = ", ".join(r.get("referencer_column") or [])
+        cols = _text(", ".join(r.get("referencer_column") or []))
         lines.append(f'  {node_ids[r["referencer_table"]]} {arrow}"{cols}"| {node_ids[name]}')
 
         if r.get("rejected"):
@@ -85,7 +87,8 @@ def build(
         link_index += 1
 
     for t in printed:
-        lines.append(f'  click {node_ids[t]} "/t/{conn_name}/{quote(t)}" "{t}"')
+        target = catalogue.table_target(conn_name, t)
+        lines.append(f'  click {node_ids[t]} "{target}" "{_text(t)}"')
 
     lines.append("  classDef current fill:#4a90d922,stroke:#4a90d9,stroke-width:2px;")
     lines.append(f"  class {node_ids[name]} current;")
@@ -112,10 +115,16 @@ def _emit_subgraphs(
     """Recursively wrap a prefix tree's groups in nested Mermaid subgraph blocks."""
 
     for t in tree.leaves:
-        lines.append(f'  {node_ids[t]}["{split_fqn(t)[-1]}"]')
+        lines.append(f'  {node_ids[t]}["{_text(split_fqn(t)[-1])}"]')
 
     for group_name, subtree in tree.groups.items():
         counter[0] += 1
-        lines.append(f'  subgraph sg{counter[0]}["{group_name}"]')
+        lines.append(f'  subgraph sg{counter[0]}["{_text(group_name)}"]')
         _emit_subgraphs(lines, subtree, node_ids, counter)
         lines.append("  end")
+
+
+def _text(name: str) -> str:
+    """Encode `name` as label text: Mermaid shows `#<code>;` as the character, so none ends it."""
+
+    return _PLAIN_RE.sub(lambda m: f"#{ord(m[0])};", name)

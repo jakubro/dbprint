@@ -27,6 +27,10 @@ DIALECT = Dialect(
 )
 
 _LOG = logging.getLogger(__name__)
+_CLEAR_NO_BACKSLASH_ESCAPES = (
+    "SET SESSION sql_mode = TRIM(BOTH ',' FROM "
+    "REPLACE(CONCAT(',', @@SESSION.sql_mode, ','), ',NO_BACKSLASH_ESCAPES,', ','))"
+)
 
 _UNKNOWN_SYSTEM_VARIABLE = 1193
 
@@ -97,10 +101,25 @@ class Connection(FactoryConnection):
         self._conn = connection
         cursor = connection.cursor(buffered=True)
         self.mariadb = "mariadb" in str(connection.server_info).lower()
+        error = _import_connector().Error
+
+        # A TIMESTAMP reads as the session zone's wall clock, and no expression recovers the
+        # instant once a daylight-saving zone repeats an hour; `'+00:00'` needs no zone tables.
+        try:
+            cursor.execute("SET time_zone = '+00:00'")
+        except error as exc:
+            raise MysqlConnectionError(f"could not set time_zone: {exc}") from exc
+
+        # A key read back from the data is spelled into SQL with backslash escapes, which this
+        # mode would turn into a literal's end; every other mode the session carries is kept.
+        try:
+            cursor.execute(_CLEAR_NO_BACKSLASH_ESCAPES)
+        except error as exc:
+            raise MysqlConnectionError(
+                f"could not clear NO_BACKSLASH_ESCAPES from sql_mode: {exc}",
+            ) from exc
 
         if self.params.statement_timeout is not None:
-            error = _import_connector().Error
-
             try:
                 _limit_statements(cursor, self.params.statement_timeout, error)
             except error as exc:

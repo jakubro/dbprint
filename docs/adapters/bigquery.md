@@ -52,17 +52,21 @@ AS SELECT * FROM (SELECT * FROM <table> TABLESAMPLE SYSTEM (p PERCENT)) src
 
 The profiling role needs create rights in that dataset (`roles/bigquery.dataEditor` above), and `CREATE OR REPLACE` means an orphaned copy from an earlier interrupted run cannot wedge a later one. The scratch prefix is excluded from enumeration, so a copy is never profiled as a table of its own. Release is `DROP TABLE IF EXISTS`; when the drop itself fails, the run warns that the copy outlives this run and is not session-scoped — the 6-hour expiration is what bounds its storage in that case, not any cleanup dbprint performs.
 
-`read.tables.materialize: false` never falls back on BigQuery: `SAMPLE_FALLBACK_COHERENT` is `false` here, so a `sample`-scoped table with the write disabled is refused before any statement runs, the same as on ClickHouse or Redshift.
+`read.tables.materialize: false` never falls back on BigQuery: an unseeded `TABLESAMPLE` never reads the same rows twice, so a `sample`-scoped table with the write disabled is refused before any statement runs, the same as on ClickHouse or Redshift.
 
 ## Identifiers
 
-BigQuery is case-sensitive while the format addresses objects by lowercased paths, so the adapter carries an identity object holding the physical `(dataset, table)` and a lowercase-to-physical column map. `list_tables` is the only point where both forms are visible and **must run first** — looking up an unlisted table raises `UnknownTable` rather than falling back to a lowercased path, which would filter the catalog for a name that does not exist. Dataset and table names are folded for the artifact path; the physical spelling is kept for every query. The rule check refuses a case collision the same way as every other lowercasing adapter, at table grain and, for two columns folding to one key, at column grain (SPEC 1.5.2).
+BigQuery is case-sensitive while the format addresses objects by lowercased paths, so dbprint records each table's physical dataset and table name, and each column's physical spelling, when it lists the dataset, and addresses the table only by those — never by a lowercased name the catalog does not hold. Dataset and table names are folded for the artifact path; the physical spelling is kept for every query. The rule check refuses a case collision the same way as every other lowercasing adapter, at table grain and, for two columns folding to one key, at column grain (SPEC 1.5.2).
 
 ## Table kinds
 
 A table clone is profiled as a table; the print names no base table. An external table is listed with `external: true` (SPEC 2.2.20) and a snapshot as a plain `table`; unless a matching rule writes its `read.tables.mode`, it is described from `INFORMATION_SCHEMA` alone. A snapshot is skipped by default for cost: its rows never change, so profiling it would bill a full read of a past state on every run. Other table types are not listed.
 
 Read that way, either is profiled like a table. An external table bills every statement for the bytes it reads, results from sources other than Cloud Storage are not cached, and a dry run may report 0 bytes; `mode: sample` is the cheapest way to profile one, since `TABLESAMPLE` reads a subset of its files.
+
+## Tables that require a partition filter
+
+A partitioned table created with `OPTIONS (require_partition_filter = TRUE)` refuses every query without a predicate on its partitioning column. dbprint reads the option while listing and describes such a table from `INFORMATION_SCHEMA` alone unless a rule reads it in `filter` mode, warning on every run with the rule to add. The filter must hold a predicate on the partitioning column alone — `_PARTITIONTIME` or `_PARTITIONDATE` on an ingestion-time partitioned table — which is what BigQuery requires. Under it, `row_count` comes from `INFORMATION_SCHEMA.PARTITIONS`, where no partition row means no rows, and the table carries no sketch. A view or materialized view reading such a table inherits the requirement and is not detected, so read it in `catalog` mode or with a `filter`.
 
 ## Namespaces
 

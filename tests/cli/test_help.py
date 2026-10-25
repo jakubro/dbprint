@@ -114,6 +114,18 @@ class TestContextArgument:
         assert "--all for every table" in flat
 
 
+class TestExitThreeStatesWhatDriftCovers:
+    @pytest.mark.parametrize("command", ["generate", "check"])
+    def test_the_uncompared_kinds_are_named(self, command: str) -> None:
+        assert "Column defaults, indexes and comments are not compared" in _flat(command)
+
+    def test_generate_names_the_first_run_and_no_index_or_comment_drift(self) -> None:
+        flat = _flat("generate")
+
+        assert "first run" in flat
+        assert "index or comment" not in flat
+
+
 class TestShortHelp:
     def test_root_short_help_matches_long(self) -> None:
         runner = CliRunner()

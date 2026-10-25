@@ -9,14 +9,16 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterator
+from dataclasses import replace
+from functools import partial
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, LiteralString, cast
 from unittest.mock import patch
 
 import pytest
 import yaml
 
-from dbprint.adapters import ColumnStats, StatisticsConfig, TableCounts, TableScope
+from dbprint.adapters import ColumnStats, StatisticsConfig, TableCounts, TableScope, pg_catalog
 from dbprint.adapters import base as adapters_base
 from dbprint.adapters.base import PhaseB
 from dbprint.adapters.errors import QueryFailed
@@ -25,6 +27,7 @@ from dbprint.adapters.postgres import DIALECT, PostgresAdapter, PostgresConnecti
 from dbprint.adapters.postgres.connection import ConnectionParams, exec_query
 from dbprint.adapters.postgres.ddl import extract_ddl, normalize
 from dbprint.config import ProfileConfig, TablesConfig
+from dbprint.config.project import RuleConfig, RuleMatch
 from dbprint.spec.distribution import classify as classify_distribution
 from tests._engine_run import conformance_errors
 from tests._prints import connection_config
@@ -1123,6 +1126,117 @@ class TestEdgeCases:
             adapter.close()
 
 
+class TestExpressionAndIncludedMembers:
+    """SPEC 2.2.12: a key's members are all columns, and an index lists its key columns only."""
+
+    def _read(self, credentials: dict[str, str], ddl: str, table: str) -> tuple[list, list]:
+        with pg_connect(credentials) as conn:
+            for statement in ddl.strip().split(";\n"):
+                conn.execute(cast(LiteralString, statement))
+
+        adapter = _connected(credentials)
+        fqn = f"{credentials['database']}.public.{table}"
+
+        try:
+            keys = [g.columns for g in adapter.introspect_unique_keys(fqn)]
+            indexes = {i.name: i.columns for i in adapter.introspect_indexes(fqn)}
+        finally:
+            adapter.close()
+
+        return keys, sorted(indexes.items())
+
+    def test_a_unique_index_over_an_expression_declares_no_key(
+        self,
+        postgres_test_db: dict[str, str],
+    ) -> None:
+        keys, indexes = self._read(
+            postgres_test_db,
+            """
+            CREATE TABLE public.cultivar (code text NOT NULL, label text);
+            CREATE UNIQUE INDEX cultivar_code_ux ON public.cultivar (lower(code))
+            """,
+            "cultivar",
+        )
+
+        assert (keys, indexes) == ([], [])
+
+    def test_a_unique_index_mixing_a_column_and_an_expression_declares_no_key(
+        self,
+        postgres_test_db: dict[str, str],
+    ) -> None:
+        keys, _ = self._read(
+            postgres_test_db,
+            """
+            CREATE TABLE public.botanist (id int PRIMARY KEY, herbarium_id int, email text);
+            CREATE UNIQUE INDEX botanist_email_ux ON public.botanist (herbarium_id, lower(email))
+            """,
+            "botanist",
+        )
+
+        assert keys == [("id",)]
+
+    def test_an_included_column_is_never_part_of_a_key(
+        self,
+        postgres_test_db: dict[str, str],
+    ) -> None:
+        keys, _ = self._read(
+            postgres_test_db,
+            """
+            CREATE TABLE public.vault (id int NOT NULL, shelf text, code text, rack int);
+            CREATE UNIQUE INDEX vault_id_ux ON public.vault (id) INCLUDE (shelf);
+            ALTER TABLE public.vault ADD CONSTRAINT vault_code_uq UNIQUE (code) INCLUDE (rack)
+            """,
+            "vault",
+        )
+
+        assert sorted(keys) == [("code",), ("id",)]
+
+    def test_a_plain_bare_unique_index_still_declares_its_key(
+        self,
+        postgres_test_db: dict[str, str],
+    ) -> None:
+        keys, _ = self._read(
+            postgres_test_db,
+            """
+            CREATE TABLE public.taxon (code text NOT NULL);
+            CREATE UNIQUE INDEX taxon_code_ux ON public.taxon (code)
+            """,
+            "taxon",
+        )
+
+        assert keys == [("code",)]
+
+    def test_a_secondary_index_lists_its_key_columns_only(
+        self,
+        postgres_test_db: dict[str, str],
+    ) -> None:
+        _, indexes = self._read(
+            postgres_test_db,
+            """
+            CREATE TABLE public.vault (id int PRIMARY KEY, rack int, shelf text);
+            CREATE INDEX vault_rack_ix ON public.vault (rack) INCLUDE (shelf);
+            CREATE INDEX vault_expr_ix ON public.vault ((rack + 1));
+            CREATE INDEX vault_mixed_ix ON public.vault (shelf, (rack + 1))
+            """,
+            "vault",
+        )
+
+        assert indexes == [("vault_mixed_ix", ("shelf",)), ("vault_rack_ix", ("rack",))]
+
+    def test_an_attnum_naming_no_live_column_is_refused_rather_than_dropped(
+        self,
+        postgres_test_db: dict[str, str],
+    ) -> None:
+        with pg_connect(postgres_test_db) as conn:
+            conn.execute("CREATE TABLE public.seed_lot (id int, gone int, rank text)")
+            conn.execute("ALTER TABLE public.seed_lot DROP COLUMN gone")
+            row = conn.execute("SELECT 'public.seed_lot'::regclass::oid").fetchone()
+            relid = int(row[0]) if row else 0
+
+            with pytest.raises(ValueError, match=rf"attnums \[2, 9\] of relation {relid} "):
+                pg_catalog.attnums_to_names(partial(exec_query, conn), relid, [1, 2, 3, 9])
+
+
 class TestPhysicalLayout:
     """The declared partition key via `pg_get_partkeydef`, on the parent relation only."""
 
@@ -1427,6 +1541,77 @@ class TestPartitionChildExclusion:
             adapter.close()
 
 
+_PARTITIONED_FKS = """
+CREATE TABLE public.herbarium (id int, rank text, PRIMARY KEY (id, rank)) PARTITION BY LIST (rank);
+CREATE TABLE public.herbarium_us PARTITION OF public.herbarium FOR VALUES IN ('us');
+CREATE TABLE public.herbarium_eu PARTITION OF public.herbarium FOR VALUES IN ('eu');
+CREATE INDEX herbarium_rank_ix ON public.herbarium (rank);
+CREATE TABLE public.viability_check (id int PRIMARY KEY, herbarium_id int, rank text,
+  FOREIGN KEY (herbarium_id, rank) REFERENCES public.herbarium (id, rank));
+CREATE TABLE public.field_round (id int, herbarium_id int, rank text, PRIMARY KEY (id, rank),
+  FOREIGN KEY (herbarium_id, rank) REFERENCES public.herbarium (id, rank)) PARTITION BY LIST (rank);
+CREATE TABLE public.field_round_us PARTITION OF public.field_round FOR VALUES IN ('us')
+"""
+
+
+class TestPartitionedForeignKeys:
+    """A key into or out of a partitioned table is declared once; PostgreSQL's copies are not."""
+
+    def _targets(self, credentials: dict[str, str], table: str, *statements: str) -> list[str]:
+        with pg_connect(credentials) as conn:
+            for statement in (*_PARTITIONED_FKS.strip().split(";\n"), *statements):
+                conn.execute(cast(LiteralString, statement))
+
+        adapter = _connected(credentials)
+
+        try:
+            fks = adapter.introspect_relationships(f"{credentials['database']}.public.{table}")
+        finally:
+            adapter.close()
+
+        return [fk.target_table.rsplit(".", 1)[-1] for fk in fks]
+
+    @pytest.mark.parametrize("referencer", ["viability_check", "field_round"])
+    def test_one_edge_to_the_parent(
+        self,
+        postgres_test_db: dict[str, str],
+        referencer: str,
+    ) -> None:
+        assert self._targets(postgres_test_db, referencer) == ["herbarium"]
+
+    def test_a_partition_added_later_adds_no_edge(self, postgres_test_db: dict[str, str]) -> None:
+        added = (
+            "CREATE TABLE public.herbarium_ap PARTITION OF public.herbarium FOR VALUES IN ('ap')"
+        )
+
+        assert self._targets(postgres_test_db, "viability_check", added) == ["herbarium"]
+
+    def test_a_detached_partition_publishes_its_own_key_once(
+        self,
+        postgres_test_db: dict[str, str],
+    ) -> None:
+        detach = "ALTER TABLE public.field_round DETACH PARTITION public.field_round_us"
+
+        assert self._targets(postgres_test_db, "field_round_us", detach) == ["herbarium"]
+
+    def test_the_parent_reports_only_its_own_keys_and_indexes(
+        self,
+        postgres_test_db: dict[str, str],
+    ) -> None:
+        self._targets(postgres_test_db, "viability_check")
+        adapter = _connected(postgres_test_db)
+        fqn = f"{postgres_test_db['database']}.public.herbarium"
+
+        try:
+            keys = [(k.columns, k.primary) for k in adapter.introspect_unique_keys(fqn)]
+            indexes = [i.name for i in adapter.introspect_indexes(fqn)]
+        finally:
+            adapter.close()
+
+        assert keys == [(("id", "rank"), True)]
+        assert indexes == ["herbarium_rank_ix"]
+
+
 class TestPgDumpMissing:
     def test_raises_when_pg_dump_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import dbprint.adapters.postgres.connection as connection_mod
@@ -1677,6 +1862,164 @@ class TestApproximateCardinality:
 
         assert stats["id"].cardinality == 500
         assert stats["id"].cardinality_method == "exact"
+
+
+class TestInheritanceParentStatistics:
+    """A parent's statements read every descendant, so its catalog figures describe them too."""
+
+    @staticmethod
+    def _run(creds: dict[str, str], *statements: str) -> None:
+        with pg_connect(creds) as conn:
+            conn.execute("CREATE SCHEMA IF NOT EXISTS seedbank")
+
+            for statement in statements:
+                conn.execute(cast(LiteralString, statement))
+
+    @staticmethod
+    def _read(creds: dict[str, str], table: str) -> tuple[int | None, int | None, str | None]:
+        from dbprint.config import StatisticsConfig
+
+        fqn = f"{creds['database']}.seedbank.{table}"
+        adapter = _connected(creds)
+
+        try:
+            estimate = adapter.estimate_row_count(fqn)
+
+            with patch.object(adapters_base, "APPROXIMATE_THRESHOLD", 10):
+                _, computed = adapter.compute_statistics(
+                    fqn,
+                    adapter.introspect_columns(fqn),
+                    StatisticsConfig(),
+                    frozenset(),
+                )
+        finally:
+            adapter.close()
+
+        return estimate, computed["rank"].cardinality, computed["rank"].cardinality_method
+
+    _TREE = (
+        "CREATE TABLE seedbank.field_log (id int NOT NULL, rank text NOT NULL)",
+        "CREATE TABLE seedbank.field_round () INHERITS (seedbank.field_log)",
+        "CREATE TABLE seedbank.field_site () INHERITS (seedbank.field_round)",
+        "INSERT INTO seedbank.field_log SELECT g, 'r' || (g % 10) FROM generate_series(1, 300) g",
+        (
+            "INSERT INTO seedbank.field_round "
+            "SELECT g, 'round_' || (g % 100) FROM generate_series(301, 600) g"
+        ),
+        (
+            "INSERT INTO seedbank.field_site "
+            "SELECT g, 'site_' || (g % 5) FROM generate_series(601, 700) g"
+        ),
+        "ANALYZE seedbank.field_log",
+        "ANALYZE seedbank.field_round",
+        "ANALYZE seedbank.field_site",
+    )
+
+    def test_a_parent_reads_the_inherited_estimates_of_its_whole_tree(
+        self,
+        postgres_test_db: dict[str, str],
+    ) -> None:
+        self._run(postgres_test_db, *self._TREE)
+
+        assert self._read(postgres_test_db, "field_log") == (700, 115, "approximate")
+
+    def test_an_empty_child_never_analyzed_counts_nothing(
+        self,
+        postgres_test_db: dict[str, str],
+    ) -> None:
+        self._run(
+            postgres_test_db,
+            *self._TREE,
+            "CREATE TABLE seedbank.seed_lot () INHERITS (seedbank.field_log) "
+            "WITH (autovacuum_enabled = false)",
+        )
+
+        assert self._read(postgres_test_db, "field_log") == (700, 115, "approximate")
+
+    def test_a_loaded_child_never_analyzed_leaves_no_estimate(
+        self,
+        postgres_test_db: dict[str, str],
+    ) -> None:
+        self._run(
+            postgres_test_db,
+            "CREATE TABLE seedbank.fieldwork (id int NOT NULL, rank text NOT NULL)",
+            "INSERT INTO seedbank.fieldwork SELECT g, 'r' || (g % 10) FROM generate_series(1, 300) g",
+            "ANALYZE seedbank.fieldwork",
+            "CREATE TABLE seedbank.fieldwork_backlog () INHERITS (seedbank.fieldwork) "
+            "WITH (autovacuum_enabled = false)",
+            "INSERT INTO seedbank.fieldwork_backlog "
+            "SELECT g, 'backlog_' || (g % 100) FROM generate_series(301, 600) g",
+        )
+
+        assert self._read(postgres_test_db, "fieldwork") == (None, 110, "exact")
+
+    def test_a_parent_analyzed_before_its_child_existed_is_counted(
+        self,
+        postgres_test_db: dict[str, str],
+    ) -> None:
+        self._run(
+            postgres_test_db,
+            "CREATE TABLE seedbank.orchard (id int NOT NULL, rank text NOT NULL)",
+            "INSERT INTO seedbank.orchard SELECT g, 'r' || (g % 10) FROM generate_series(1, 300) g",
+            "ANALYZE seedbank.orchard",
+            "CREATE TABLE seedbank.orchard_row () INHERITS (seedbank.orchard)",
+            "INSERT INTO seedbank.orchard_row "
+            "SELECT g, 'row_' || (g % 100) FROM generate_series(301, 600) g",
+            "ANALYZE seedbank.orchard_row",
+        )
+
+        assert self._read(postgres_test_db, "orchard") == (600, 110, "exact")
+
+    def test_a_parent_whose_last_child_was_dropped_reads_its_own_row(
+        self,
+        postgres_test_db: dict[str, str],
+    ) -> None:
+        self._run(
+            postgres_test_db,
+            "CREATE TABLE seedbank.nursery (id int NOT NULL, rank text NOT NULL)",
+            "CREATE TABLE seedbank.nursery_bed () INHERITS (seedbank.nursery)",
+            "INSERT INTO seedbank.nursery SELECT g, 'r' || (g % 10) FROM generate_series(1, 300) g",
+            "INSERT INTO seedbank.nursery_bed "
+            "SELECT g, 'bed_' || (g % 100) FROM generate_series(301, 600) g",
+            "ANALYZE seedbank.nursery",
+            "DROP TABLE seedbank.nursery_bed",
+        )
+
+        assert self._read(postgres_test_db, "nursery") == (300, 10, "approximate")
+
+    def test_a_plain_table_reads_its_own_figures(self, postgres_test_db: dict[str, str]) -> None:
+        self._run(
+            postgres_test_db,
+            "CREATE TABLE seedbank.batch (id int NOT NULL, rank text NOT NULL)",
+            "INSERT INTO seedbank.batch SELECT g, 'r' || (g % 10) FROM generate_series(1, 300) g",
+            "ANALYZE seedbank.batch",
+        )
+
+        assert self._read(postgres_test_db, "batch") == (300, 10, "approximate")
+
+    def test_a_partitioned_table_reads_its_own_figures_once_analyzed(
+        self,
+        postgres_test_db: dict[str, str],
+    ) -> None:
+        self._run(
+            postgres_test_db,
+            "CREATE TABLE seedbank.sowing_trial (id int NOT NULL, rank text NOT NULL) "
+            "PARTITION BY RANGE (id)",
+            "CREATE TABLE seedbank.sowing_trial_early PARTITION OF seedbank.sowing_trial "
+            "FOR VALUES FROM (1) TO (301)",
+            "CREATE TABLE seedbank.sowing_trial_late PARTITION OF seedbank.sowing_trial "
+            "FOR VALUES FROM (301) TO (1000)",
+            "INSERT INTO seedbank.sowing_trial "
+            "SELECT g, 'r' || (g % 7) FROM generate_series(1, 600) g",
+            "ANALYZE seedbank.sowing_trial_early",
+            "ANALYZE seedbank.sowing_trial_late",
+        )
+
+        assert self._read(postgres_test_db, "sowing_trial") == (None, 7, "exact")
+
+        self._run(postgres_test_db, "ANALYZE seedbank.sowing_trial")
+
+        assert self._read(postgres_test_db, "sowing_trial") == (600, 7, "approximate")
 
 
 class TestStaleEstimateCannotUnboundTheRead:
@@ -2331,3 +2674,74 @@ def _taken_at_in_two_zones(
             read.append(first)
 
     return read[0], read[1]
+
+
+class TestPercentInReadText:
+    """A `%` in a column, a filter or a JSON key reaches psycopg in a statement that binds nothing."""
+
+    @staticmethod
+    def _seed(creds: dict[str, str]) -> None:
+        with pg_connect(creds) as conn:
+            conn.execute(
+                'CREATE TABLE public.germination_trial ("germinated%" text, reading jsonb)',
+            )
+            conn.execute(
+                "INSERT INTO public.germination_trial "
+                "SELECT (ARRAY['low', 'mid', 'high'])[g % 3 + 1], "
+                "jsonb_build_object('moisture%', (ARRAY['dry', 'damp', 'wet'])[g % 3 + 1]) "
+                "FROM generate_series(1, 60) g",
+            )
+            conn.execute("CREATE TABLE public.curator (surname text)")
+            conn.execute(
+                "INSERT INTO public.curator "
+                "SELECT (ARRAY['Linden', 'Larch', 'Rowan'])[g % 3 + 1] FROM generate_series(1, 60) g",
+            )
+            conn.execute("CREATE TABLE public.field_round (id int, site text)")
+            conn.execute(
+                "INSERT INTO public.field_round "
+                "SELECT g, (ARRAY['north', 'south'])[g % 2 + 1] FROM generate_series(1, 60) g",
+            )
+
+    @staticmethod
+    def _filtered(fqn: str, predicate: str) -> RuleConfig:
+        return RuleConfig(
+            match=RuleMatch(tables=(fqn,)),
+            profile={"read": {"tables": {"mode": "filter", "filter": predicate}}},
+        )
+
+    def test_every_column_key_and_filtered_table_is_measured(
+        self,
+        postgres_test_db: dict[str, str],
+        tmp_path: Path,
+    ) -> None:
+        from dbprint.engine import Engine
+
+        self._seed(postgres_test_db)
+        database = postgres_test_db["database"]
+        conn = replace(
+            connection_config(
+                output=tmp_path,
+                tables=TablesConfig(include=(f"{database}.public.*",)),
+            ),
+            rules=(
+                self._filtered(f"{database}.public.curator", "surname LIKE 'L%'"),
+                self._filtered(f"{database}.public.field_round", "id % 2 = 0"),
+            ),
+        )
+        Engine(PostgresAdapter(postgres_test_db), conn, tmp_path).generate()
+        root = tmp_path / "primary" / database / "public"
+
+        def columns(table: str) -> dict[str, Any]:
+            return yaml.safe_load((root / table / "statistics.yaml").read_text())["columns"]
+
+        trial = columns("germination_trial")
+        part = trial["reading"]["parts"]['["moisture%"]']
+        round_ = columns("field_round")
+
+        assert {v["value"] for v in trial["germinated%"]["values"]} == {"low", "mid", "high"}
+        assert "unmeasured" not in trial["germinated%"]
+        assert {v["value"] for v in part["values"]} == {"dry", "damp", "wet"}
+        assert {v["value"] for v in columns("curator")["surname"]["values"]} == {"Linden", "Larch"}
+        assert round_["site"]["values"]
+        assert "unmeasured" not in round_["id"]
+        assert round_["site"]["rows_scanned"] == 30

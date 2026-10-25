@@ -187,3 +187,28 @@ EXIT_CONNECTION = 4
 EXIT_PARTIAL = 5
 EXIT_ASSERTION = 6
 EXIT_TOTAL_FAILURE = 7
+
+# Worst first: a result that cannot be trusted or a unit that did nothing outranks a code that
+# describes a trustworthy print's state, whatever the integers say.
+EXIT_PRECEDENCE: tuple[int, ...] = (
+    EXIT_GENERIC,
+    EXIT_CONNECTION,
+    EXIT_TOTAL_FAILURE,
+    EXIT_PARTIAL,
+    EXIT_ASSERTION,
+    EXIT_DRIFT,
+    EXIT_STALENESS,
+    EXIT_OK,
+)
+
+
+def worst_exit(*codes: int) -> int:
+    """Return the code among `codes` that comes first in `EXIT_PRECEDENCE`; `EXIT_OK` for none.
+
+    Raises `ValueError` for a code outside the vocabulary.
+    """
+
+    if unknown := set(codes) - set(EXIT_PRECEDENCE):
+        raise ValueError(f"not an exit code: {sorted(unknown)}")
+
+    return next((code for code in EXIT_PRECEDENCE if code in codes), EXIT_OK)

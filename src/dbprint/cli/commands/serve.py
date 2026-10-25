@@ -61,7 +61,8 @@ def serve_command(
     for editor and agent integration. Requires the `[mcp]` extra
     (`pip install dbprint[mcp]`); exits 1 with an install hint when it is
     missing. Serves the resolved connection set read-only - no database
-    connection. stdio transport by default; HTTP binds to loopback only.
+    connection. stdio transport by default; HTTP binds to loopback only and
+    answers only a loopback `Host`.
     The project resolves from the working directory unless `--project`
     names another.
 

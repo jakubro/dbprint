@@ -86,6 +86,25 @@ class TestLoadTable:
         assert artifacts.relationships is None
         assert artifacts.corrupted == ("relationships",)
 
+    def test_an_annotation_file_off_its_schema_is_withheld_as_corrupt(
+        self,
+        rich_conn: ConnectionConfig,
+    ) -> None:
+        table_dir = rich_conn.output / "primary" / "seedbank" / "batch"
+        (table_dir / "relationships.annotations.yaml").write_text(
+            "format_version: 1\nrefers_to: 7\n",
+        )
+        conn = catalogue.load_connections([rich_conn])[0]
+        conn.tables["seedbank.batch"].setdefault("artifacts", {})["relationships_annotations"] = (
+            "relationships.annotations.yaml"
+        )
+
+        artifacts = catalogue.load_table(conn, "seedbank.batch")
+
+        assert artifacts is not None
+        assert artifacts.relationships_annotations is None
+        assert "relationships_annotations" in artifacts.corrupted
+
 
 class TestLoadRelationships:
     def test_reads_relationships_alone(self, rich_conn: ConnectionConfig) -> None:
@@ -150,3 +169,13 @@ class TestLeafTargets:
         targets = catalogue.leaf_targets(conn, "a.collector")
 
         assert targets["collector"] == "/t/c/a.collector"
+
+
+class TestTableTarget:
+    def test_a_reserved_character_in_either_segment_is_percent_encoded(self) -> None:
+        assert catalogue.table_target('seed "bank"', 'seedbank.a "b') == (
+            "/t/seed%20%22bank%22/seedbank.a%20%22b"
+        )
+
+    def test_a_dotted_fqn_is_left_as_it_is(self) -> None:
+        assert catalogue.table_target("primary", "seedbank.batch") == "/t/primary/seedbank.batch"

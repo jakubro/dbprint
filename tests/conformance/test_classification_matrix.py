@@ -11,6 +11,7 @@ import pytest
 
 from dbprint.conformance import statistics
 from dbprint.conformance.schema_validation import check_statistics
+from dbprint.spec.redaction import Primitive, redact_value
 
 
 PATH = "public/t/statistics.yaml"
@@ -448,7 +449,7 @@ class TestBoundsAreConditionalOnDrop:
     def test_a_substituting_primitive_keeps_them(
         self,
         classification: str,
-        primitive: str,
+        primitive: Primitive,
     ) -> None:
         """Only `drop` removes a field; the other two replace the literal in place."""
 
@@ -490,6 +491,43 @@ class TestBoundsAreConditionalOnDrop:
         column["values"] = [{"count": 10}]
 
         assert _errors(_payload(classification, column)) == []
+
+
+class TestNumericStatisticsAreConditionalOnAFiniteValue:
+    """A numeric column whose every scanned value is NaN or infinite has no bounds, mean or sum."""
+
+    def test_a_column_of_non_finite_values_omits_them(self) -> None:
+        column = _column("numeric")
+        del column["range"], column["percentiles"], column["mean"], column["sum"]
+        column["non_finite_count"] = 10
+
+        assert _errors(_payload("numeric", column)) == []
+
+    def test_a_column_of_non_finite_values_may_not_carry_them(self) -> None:
+        column = _column("numeric")
+        column["non_finite_count"] = 10
+        forbidden = [
+            i
+            for i in statistics.check(_payload("numeric", column), PATH, FQN)
+            if i.code == "stats.forbidden-field-for-classification"
+        ]
+
+        assert {i.spec_ref for i in forbidden} == {"§2.2.4"}
+
+    def test_one_finite_value_still_owes_them(self) -> None:
+        column = _column("numeric")
+        del column["range"], column["percentiles"], column["mean"], column["sum"]
+        column["non_finite_count"] = 9
+
+        assert "stats.missing-required-field-for-classification" in _codes(
+            _payload("numeric", column),
+        )
+
+    def test_a_redacted_column_may_not_count_them(self) -> None:
+        column = _marked(_column("numeric"), "mask")
+        column["non_finite_count"] = 1
+
+        assert check_statistics(_payload("numeric", column), PATH) != []
 
 
 class TestTheValueListIsConditionalOnProse:
@@ -936,12 +974,34 @@ def _prose(classification: str) -> dict[str, Any]:
     return column
 
 
-def _marked(column: dict[str, Any], primitive: str) -> dict[str, Any]:
-    """Apply a marker as a producer would: every statistic computed from what the values are
-    leaves with it (SPEC 2.2.9).
+def _marked(column: dict[str, Any], primitive: Primitive) -> dict[str, Any]:
+    """Apply a marker as a producer would: every literal is substituted or dropped, and every
+    statistic computed from what the values are leaves with it (SPEC 2.2.9).
     """
 
     column["redacted"] = primitive
+
+    for entry in column.get("values", []):
+        if primitive == "drop":
+            entry.pop("value", None)
+        else:
+            entry["value"] = redact_value(entry["value"], primitive, "seedbank-salt")
+
+    if primitive == "drop":
+        column.pop("range", None)
+        column.pop("percentiles", None)
+    else:
+        bounds = column.get("range", {})
+
+        for key in ("min", "max"):
+            if bounds.get(key) is not None:
+                bounds[key] = redact_value(bounds[key], primitive, "seedbank-salt")
+
+        if "percentiles" in column:
+            column["percentiles"] = {
+                key: redact_value(value, primitive, "seedbank-salt")
+                for key, value in column["percentiles"].items()
+            }
 
     for field in (
         "mean",
@@ -963,10 +1023,7 @@ def _marked(column: dict[str, Any], primitive: str) -> dict[str, Any]:
 def _dropped(classification: str) -> dict[str, Any]:
     """A column of `classification` as a producer emits it under `redacted: drop`."""
 
-    column = _marked(_column(classification), "drop")
-    del column["range"], column["percentiles"]
-
-    return column
+    return _marked(_column(classification), "drop")
 
 
 def _errors(payload: dict[str, Any]) -> list[Any]:

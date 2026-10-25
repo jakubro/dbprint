@@ -6,13 +6,20 @@ disk, so a page reflects the latest `generate`.
 
 from __future__ import annotations
 
+import html
+import re
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
+from urllib.parse import urlsplit
+from xml.etree.ElementTree import Element
 
 import markdown
-from flask import Flask, abort, render_template
+from flask import Flask, abort, render_template, request
 from jinja2 import ChainableUndefined
+from markdown.treeprocessors import Treeprocessor
+from markdown.util import AMP_SUBSTITUTE
 from markupsafe import Markup
 
 from dbprint.config import ConnectionConfig
@@ -21,8 +28,9 @@ from . import catalogue, view
 
 
 NBSP = chr(0xA0)
-_CONTEXT_INERT_PATTERNS = (
-    "html",
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "[::1]"})
+_LIVE_SCHEMES = frozenset({"", "http", "https", "mailto"})
+_LINK_PATTERNS = (
     "reference",
     "link",
     "image_link",
@@ -34,15 +42,20 @@ _CONTEXT_INERT_PATTERNS = (
 )
 
 
-def create_app(connections: list[ConnectionConfig]) -> Flask:
-    """Build the docs Flask app over `connections` - the CLI's already-resolved set."""
+def create_app(connections: list[ConnectionConfig], *, static: bool = False) -> Flask:
+    """Build the docs Flask app over `connections` - the CLI's already-resolved set.
+
+    `static` renders for a built site, which states no time relative to the moment it was built.
+    """
 
     app = Flask(__name__)
     app.jinja_env.undefined = ChainableUndefined  # absent keys render blank
+    cast(dict[str, Any], app.jinja_env.globals)["static_site"] = static
     app.config["DOCS_CONNECTIONS"] = list(connections)
 
     _register_filters(app)
     _register_routes(app)
+    app.before_request(_refuse_a_foreign_host)
 
     return app
 
@@ -100,12 +113,9 @@ def _register_routes(app: Flask) -> None:
 
 
 def _sidebar_context(connections: list[catalogue.PrintConnection]) -> dict[str, Any]:
-    """Nav tree and each connection's on-disk root."""
+    """Nav tree for the sidebar."""
 
-    return {
-        "nav": catalogue.nav_tree(connections),
-        "conn_roots": {c.name: str(c.root) for c in connections},
-    }
+    return {"nav": catalogue.nav_tree(connections)}
 
 
 def _register_filters(app: Flask) -> None:
@@ -118,10 +128,13 @@ def _register_filters(app: Flask) -> None:
     app.add_template_filter(_relative_time, "relative")
 
 
-def _render_markdown(text: str | None) -> Markup | str:
-    """Render Markdown text as safe HTML."""
+def _render_markdown(text: str | None, mentions: Mapping[str, str] | None = None) -> Markup | str:
+    """Render user Markdown as HTML: raw HTML shown as text, only web, mail and relative links live.
 
-    return Markup(markdown.markdown(text, extensions=["tables", "fenced_code"])) if text else ""
+    A mention of a key of `mentions` in the rendered prose links to its href.
+    """
+
+    return Markup(_renderer(links=True, mentions=mentions).convert(text)) if text else ""
 
 
 def _render_context(text: str) -> Markup:
@@ -130,13 +143,7 @@ def _render_context(text: str) -> Markup:
     The fragment quotes database values: a stored `<script>` or `[x](javascript:...)` stays text.
     """
 
-    renderer = markdown.Markdown(extensions=["tables", "fenced_code", "nl2br"])
-    renderer.preprocessors.deregister("html_block")
-
-    for pattern in _CONTEXT_INERT_PATTERNS:
-        renderer.inlinePatterns.deregister(pattern)
-
-    return Markup(renderer.convert(text))
+    return Markup(_renderer(links=False, extensions=("nl2br",)).convert(text))
 
 
 def _non_breaking(text: str | None) -> str | None:
@@ -220,3 +227,99 @@ def _relative_time(value: Any) -> Any:
 
 def _is_number(value: Any) -> bool:
     return isinstance(value, int | float | Decimal) and not isinstance(value, bool)
+
+
+def _refuse_a_foreign_host() -> None:
+    """400 for any `Host` but a loopback name; Flask's `TRUSTED_HOSTS` cannot admit `[::1]`."""
+
+    if re.sub(r":\d+$", "", request.host).lower() not in LOOPBACK_HOSTS:
+        abort(400)
+
+
+def _renderer(
+    *,
+    links: bool,
+    extensions: tuple[str, ...] = (),
+    mentions: Mapping[str, str] | None = None,
+) -> markdown.Markdown:
+    renderer = markdown.Markdown(extensions=["tables", "fenced_code", *extensions])
+    renderer.preprocessors.deregister("html_block")
+    renderer.inlinePatterns.deregister("html")
+
+    if mentions:
+        renderer.treeprocessors.register(_LinkMentions(renderer, mentions), "mentions", -5)
+
+    if links:
+        renderer.treeprocessors.register(_DropRefusedTargets(renderer), "refuse_targets", -10)
+    else:
+        for pattern in _LINK_PATTERNS:
+            renderer.inlinePatterns.deregister(pattern)
+
+    return renderer
+
+
+class _LinkMentions(Treeprocessor):
+    def __init__(self, md: markdown.Markdown, mentions: Mapping[str, str]) -> None:
+        super().__init__(md)
+        self._mentions = mentions
+
+    def run(self, root: Element) -> None:
+        self._link(root)
+
+    def _link(self, element: Element) -> None:
+        element.text, children = self._split(element.text)
+
+        for child in list(element):
+            href = self._mentions.get(child.text or "") if child.tag == "code" else None
+
+            if href is not None and len(child) == 0:
+                anchor = Element("a", {"href": href})
+                anchor.append(child)
+                anchor.tail, child.tail = child.tail, None
+                child = anchor
+            elif child.tag not in ("a", "pre", "code"):
+                self._link(child)
+
+            child.tail, after = self._split(child.tail)
+            children += [child, *after]
+
+        element[:] = children
+
+    def _split(self, text: str | None) -> tuple[str | None, list[Element]]:
+        if not text:
+            return text, []
+
+        leading = ""
+        anchors: list[Element] = []
+
+        for run, href in view.mention_segments(text, self._mentions):
+            if href is not None:
+                anchors.append(Element("a", {"href": href}))
+                anchors[-1].text = run
+            elif anchors:
+                anchors[-1].tail = (anchors[-1].tail or "") + run
+            else:
+                leading += run
+
+        return leading, anchors
+
+
+class _DropRefusedTargets(Treeprocessor):
+    def run(self, root: Element) -> None:
+        for element in root.iter():
+            for attribute in ("href", "src"):
+                target = element.get(attribute)
+
+                if target is not None and not _live_target(target):
+                    del element.attrib[attribute]
+
+
+def _live_target(target: str) -> bool:
+    # Judged as the browser reads it: character references decoded (an automail link arrives
+    # with its `&` stashed), then split the way a browser strips control characters.
+    decoded = html.unescape(target.replace(AMP_SUBSTITUTE, "&"))
+
+    try:
+        return urlsplit(decoded).scheme in _LIVE_SCHEMES
+    except ValueError:
+        return False

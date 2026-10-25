@@ -64,6 +64,7 @@ COLUMN_FIELDS: frozenset[str] = frozenset(
         "sum",
         "zero_count",
         "negative_count",
+        "non_finite_count",
         "empty_count",
         "quantized_count",
         "length",
@@ -199,6 +200,7 @@ _STATED_BY_ABSENCE: dict[str, tuple[Any, str, str]] = {
     "redacted": (None, "no redact rule covers the column", "§2.2.9"),
     "unmeasured": ([], "every field the column should carry was measured", "§2.2.4"),
     "unrepresentable": ([], "no emitted bound lies outside years 0001-9999", "§2.2.4"),
+    "non_finite_count": (0, "no NaN or infinity was scanned", "§2.2.4"),
     "rows_scanned": (None, "the file carries no scope, so row_count is the population", "§2.2.8"),
 }
 
@@ -221,7 +223,9 @@ def disabled_of(statistics: Mapping[str, Any]) -> frozenset[str]:
 
     named = read_table_block(statistics, "disabled").value
 
-    return frozenset(n for n in named or () if n in DISABLEABLE)
+    return (
+        frozenset(n for n in named if n in DISABLEABLE) if isinstance(named, list) else frozenset()
+    )
 
 
 def read_column_field(

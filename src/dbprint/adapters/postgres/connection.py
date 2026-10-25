@@ -88,6 +88,16 @@ class Connection:
                 driver.connect_failure("Postgres", self.params, exc),
             ) from exc
 
+        setting = self._conn.execute("SHOW standard_conforming_strings").fetchone()
+
+        if setting is None or setting[0] != "on":
+            self.close()
+
+            raise PostgresConnectionError(
+                "standard_conforming_strings is not on for this session, though it was requested "
+                "at connect; a connection pooler may have dropped the start-up option",
+            )
+
     def close(self) -> None:
         if self._conn is not None:
             self._conn.close()
@@ -105,7 +115,8 @@ class Connection:
 
 
 def exec_query(conn: psycopg.Connection, query: str, params: Any = None) -> psycopg.Cursor:
-    """Run a dynamically-built SQL query; the `LiteralString` cast rests on catalog-only input.
+    """Run a dynamically-built SQL query; the `LiteralString` cast rests on catalog-only input
+    and a session-pinned string-literal grammar (`standard_conforming_strings = on`).
 
     Traces the statement at DEBUG: text and parameters as a pair, never merged.
     """
@@ -149,11 +160,13 @@ def _import_psycopg() -> Any:
 
 
 def _session_options(statement_timeout: int | None) -> dict[str, str]:
-    # Sent in the startup packet, so the limit costs no round trip of its own.
-    if statement_timeout is None:
-        return {}
+    # Sent in the startup packet, so neither setting costs a round trip of its own.
+    options = ["-c standard_conforming_strings=on"]
 
-    return {"options": f"-c statement_timeout={statement_timeout * 1000}"}
+    if statement_timeout is not None:
+        options.append(f"-c statement_timeout={statement_timeout * 1000}")
+
+    return {"options": " ".join(options)}
 
 
 def _is_timeout(exc: BaseException) -> bool:

@@ -30,9 +30,17 @@ def _print(
     table_dir = root / path
     table_dir.mkdir(parents=True, exist_ok=True)
     (table_dir / "relationships.yaml").write_text(yaml.safe_dump({"refers_to": refers_to}))
-    (table_dir / "relationships.annotations.yaml").write_text(yaml.safe_dump(annotations))
+    (table_dir / "relationships.annotations.yaml").write_text(
+        yaml.safe_dump(_admissible(annotations)),
+    )
 
     return {"tables": {"s.t": {"path": path, "artifacts": dict(_BOTH)}}}
+
+
+def _admissible(annotations: Any) -> Any:
+    """The `format_version` the schema requires, around a body naming only what its test reads."""
+
+    return {"format_version": 1, **annotations} if isinstance(annotations, dict) else annotations
 
 
 def _unknown(index: int = 0, rel: str = _ANN) -> Issue:
@@ -67,6 +75,11 @@ class TestVerdicts:
             ),
         ]
 
+    def test_a_verdict_on_an_edge_stating_no_detection_reads_inferred(self, tmp_path: Path) -> None:
+        manifest = _print(tmp_path, [_EDGE], {"refers_to": [{**_EDGE, "verdict": "rejected"}]})
+
+        assert ra.check_verdicts(tmp_path, manifest) == []
+
     def test_a_verdict_on_an_inferred_edge_passes(self, tmp_path: Path) -> None:
         emitted = [{**_EDGE, "detection": "inferred"}]
         manifest = _print(tmp_path, emitted, {"refers_to": [{**_EDGE, "verdict": "rejected"}]})
@@ -93,21 +106,21 @@ class TestVerdicts:
 
         assert ra.check_verdicts(tmp_path, manifest) == [_unknown()]
 
-    def test_an_address_whose_target_columns_are_not_a_list_matches_nothing(
+    def test_an_address_whose_target_columns_are_not_a_list_withholds_the_file(
         self,
         tmp_path: Path,
     ) -> None:
-        emitted = [{**_EDGE, "detection": "inferred"}, {**_EDGE, "target_column": "id"}]
-        annotated = {**_EDGE, "target_column": "id", "verdict": "rejected"}
-        manifest = _print(tmp_path, emitted, {"refers_to": [annotated]})
+        emitted = [{**_EDGE, "detection": "declared"}, {**_EDGE, "target_column": "id"}]
+        annotated = [{**_EDGE, "verdict": "rejected"}, {**_EDGE, "target_column": "id"}]
+        manifest = _print(tmp_path, emitted, {"refers_to": annotated})
 
-        assert ra.check_verdicts(tmp_path, manifest) == [_unknown()]
+        assert ra.check_verdicts(tmp_path, manifest) == []
 
     def test_every_entry_is_read_past_one_that_is_not_a_mapping(self, tmp_path: Path) -> None:
         manifest = _print(
             tmp_path,
             ["edge", {**_EDGE, "detection": "declared"}],
-            {"refers_to": ["x", {**_EDGE, "verdict": "rejected"}]},
+            {"refers_to": [{**_EDGE, "verdict": "rejected"}]},
         )
 
         assert [i.code for i in ra.check_verdicts(tmp_path, manifest)] == [
@@ -157,7 +170,7 @@ class TestEveryTableIsVisited:
                     )
                     (table_dir / "relationships.yaml").write_text(text)
                     (table_dir / "relationships.annotations.yaml").write_text(
-                        yaml.safe_dump(annotated),
+                        yaml.safe_dump(_admissible(annotated)),
                     )
 
             tables[f"s.{name}"] = {"path": f"s/{name}", "artifacts": artifacts}
@@ -185,13 +198,13 @@ class TestEveryTableIsVisited:
 
 def _claim(tmp_path: Path, stat: Any, raw: Any, observed: dict[str, Any] | None) -> list[Issue]:
     edge = dict(_EDGE) if observed is None else {**_EDGE, "observed": observed}
-    manifest = _print(tmp_path, [edge], {"refers_to": ["x", {**_EDGE, "claims": {stat: raw}}]})
+    manifest = _print(tmp_path, [edge], {"refers_to": [{**_EDGE, "claims": {stat: raw}}]})
 
     return ra.check_claims(tmp_path, manifest)
 
 
 def _claim_issue(stat: str, code: str, detail: str) -> Issue:
-    return Issue(f"{_ANN}::refers_to[1].claims.{stat}", code, "warning", detail, "§2.7.2")
+    return Issue(f"{_ANN}::refers_to[0].claims.{stat}", code, "warning", detail, "§2.7.2")
 
 
 class TestClaims:
@@ -249,11 +262,7 @@ class TestClaims:
         tmp_path: Path,
     ) -> None:
         edge = {**_EDGE, "observed": {"containment": 0.5}}
-        entries = [
-            {**_EDGE, "claims": "none"},
-            dict(_EDGE),
-            {**_EDGE, "claims": {"observed.containment": 1.0}},
-        ]
+        entries = [dict(_EDGE), {**_EDGE, "claims": {"observed.containment": 1.0}}]
         manifest = _print(tmp_path, ["edge", edge], {"refers_to": entries})
 
         assert [i.code for i in ra.check_claims(tmp_path, manifest)] == [
@@ -281,3 +290,24 @@ class TestTheAnnotationFileItself:
 
     def test_a_body_that_is_not_a_mapping_is_left_to_the_schema(self) -> None:
         assert ra.check_entry(["refers_to"], "r.yaml", "s.t") == []
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        {**_EDGE, "target_table": ["s.u"], "verdict": "rejected"},
+        {**_EDGE, "claims": "none"},
+        "not an entry",
+    ],
+)
+@pytest.mark.parametrize("check", [ra.check_verdicts, ra.check_claims])
+def test_a_file_failing_admission_is_read_by_no_pass(
+    tmp_path: Path,
+    malformed: Any,
+    check: Any,
+) -> None:
+    emitted = [{**_EDGE, "detection": "declared", "observed": {"containment": 0.5}}]
+    stale = {**_EDGE, "verdict": "rejected", "claims": {"observed.containment": 1.0}}
+
+    assert check(tmp_path, _print(tmp_path, emitted, {"refers_to": [stale]})) != []
+    assert check(tmp_path, _print(tmp_path, emitted, {"refers_to": [stale, malformed]})) == []

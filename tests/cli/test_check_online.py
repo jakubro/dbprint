@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import duckdb
 import pytest
 import yaml
 from click.testing import CliRunner, Result
@@ -27,6 +28,8 @@ from dbprint.adapters import (
 )
 from dbprint.cli import run_log
 from dbprint.cli.main import main
+from dbprint.config.connections import env_var_name
+from dbprint.engine import EXIT_ASSERTION, EXIT_CONNECTION, EXIT_GENERIC
 from tests._cli import credential_env, patch_registry
 from tests._prints import (
     SHAPE_PROBE_COLUMNS,
@@ -468,9 +471,9 @@ class TestDuplicateQueryName:
 
 
 class TestConformanceAndAssertionErrorsCoOccur:
-    """ASSERTIONS.md 6.3: exit is the MAX across independently-evaluated conditions."""
+    """ASSERTIONS.md 6.3: both are reported; the exit code follows the precedence."""
 
-    def test_exit_is_the_max_of_both(
+    def test_the_conformance_error_decides_the_exit_and_both_are_reported(
         self,
         tmp_path: Path,
         committed_print: Path,
@@ -497,7 +500,148 @@ class TestConformanceAndAssertionErrorsCoOccur:
 
         assert payload["summary"]["errors"] > 0
         assert any(i["code"] == "assertion.row-count-mismatch" for i in payload["assertion_issues"])
-        assert result.exit_code == 6
+        assert result.exit_code == EXIT_GENERIC
+
+
+class TestTheExitCodeFollowsThePrecedence:
+    """A result that cannot be trusted outranks the state of a trustworthy print."""
+
+    ROW_COUNT_ASSERTION = """\
+    assertions:
+      tables:
+        fixture.shape_probe:
+          row_count: {min: 9999}
+"""
+    REDACT = """\
+    profile:
+      redact:
+        - columns: ['fixture.shape_probe.probe_id']
+          with: drop
+"""
+
+    def test_an_unreachable_database_outranks_an_offline_assertion_failure(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        (tmp_path / ".dbprint.yaml").write_text(_project_with_assertions(self.ROW_COUNT_ASSERTION))
+        _seed_clean_print(tmp_path, committed_print)
+        monkeypatch.chdir(tmp_path)
+
+        result = _invoke_online(monkeypatch, _UnreachableAdapter, "--format", "json")
+        payload = json.loads(result.stdout)[0]
+
+        assert result.exit_code == EXIT_CONNECTION
+        assert [i["code"] for i in payload["assertion_issues"]] == ["assertion.row-count-mismatch"]
+
+    def test_a_privacy_error_outranks_drift_and_the_drift_is_still_reported(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        (tmp_path / ".dbprint.yaml").write_text(_project_with_assertions(self.REDACT))
+        _seed_clean_print(tmp_path, committed_print)
+        monkeypatch.chdir(tmp_path)
+
+        result = _invoke_online(monkeypatch, _ExtraColumnAdapter, "--format", "json")
+        payload = json.loads(result.stdout)[0]
+
+        assert result.exit_code == EXIT_GENERIC
+        assert "privacy.redaction-not-applied" in {i["code"] for i in payload["issues"]}
+        assert "drift.schema-changed" in {i["code"] for i in payload["drift_issues"]}
+
+
+class TestASwitchedOffMeasurementOnline:
+    """The online phase reads a switched-off `looks_like` as the offline one does (SPEC 2.2.21)."""
+
+    def _issues(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        profile: str,
+        expected: str = "email",
+    ) -> tuple[int, list[tuple[str, str]]]:
+        con = duckdb.connect(str(tmp_path / "seedbank.duckdb"))
+
+        for table in ("collector", "botanist"):
+            con.execute(
+                f"CREATE TABLE {table} AS SELECT i AS id, "
+                f"'{table}' || i || '@seedbank.example' AS email FROM range(200) t(i)",
+            )
+
+        con.close()
+        (tmp_path / ".dbprint.yaml").write_text(
+            "connections:\n  main:\n    adapter: duckdb\n"
+            + profile
+            + "    assertions:\n      tables:\n"
+            + f"        seedbank.main.collector:\n          columns:\n"
+            f"            email: {{looks_like: {expected}}}\n"
+            + "        seedbank.main.botanist:\n          columns:\n"
+            "            email: {looks_like: email}\n",
+        )
+        monkeypatch.setenv(env_var_name("main", "database"), str(tmp_path / "seedbank.duckdb"))
+        monkeypatch.chdir(tmp_path)
+
+        assert CliRunner().invoke(main, ["generate", "--no-tui"]).exit_code == 3
+
+        result = CliRunner().invoke(main, ["check", "--online", "--format", "json"])
+        payload = json.loads(result.stdout)[0]
+        issues = [(i["code"], i["path"].split(".")[5]) for i in payload["assertion_issues"]]
+
+        return result.exit_code, sorted(issues)
+
+    def test_a_connection_wide_switch_is_inapplicable_in_both_phases(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        code, issues = self._issues(
+            tmp_path,
+            monkeypatch,
+            "    profile:\n      looks_like: {enabled: false}\n",
+        )
+
+        assert code == 0
+        assert issues == [
+            ("assertion.inapplicable-stat", "botanist"),
+            ("assertion.inapplicable-stat", "botanist"),
+            ("assertion.inapplicable-stat", "collector"),
+            ("assertion.inapplicable-stat", "collector"),
+        ]
+
+    def test_a_switch_on_one_table_leaves_the_other_evaluated(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        code, issues = self._issues(
+            tmp_path,
+            monkeypatch,
+            "    rules:\n"
+            "      - match: {tables: [seedbank.main.collector]}\n"
+            "        profile: {looks_like: {enabled: false}}\n",
+        )
+
+        assert code == 0
+        assert issues == [
+            ("assertion.inapplicable-stat", "collector"),
+            ("assertion.inapplicable-stat", "collector"),
+        ]
+
+    def test_a_wrong_pattern_with_the_measurement_on_still_fails_in_both_phases(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        code, issues = self._issues(tmp_path, monkeypatch, "", expected="phone")
+
+        assert code == EXIT_ASSERTION
+        assert issues == [
+            ("assertion.looks-like-mismatch", "collector"),
+            ("assertion.looks-like-mismatch", "collector"),
+        ]
 
 
 class TestOfflineAssertionErrorDoesNotSuppressOnline:
@@ -573,6 +717,71 @@ class TestOfflineAssertionErrorDoesNotSuppressOnline:
 
         assert codes_seen == ["assertion.malformed-block"]
         assert payload["summary"]["assertion_errors"] == 1
+
+
+class TestAMisspelledBlockKeyFailsTheGate:
+    BLOCK = """\
+    assertions:
+      table:
+        fixture.shape_probe:
+          row_count: {min: 1}
+"""
+
+    def _run(self, tmp_path: Path, committed_print: Path, *args: str) -> tuple[int, list[dict]]:
+        (tmp_path / ".dbprint.yaml").write_text(_project_with_assertions(self.BLOCK))
+        _seed_clean_print(tmp_path, committed_print)
+
+        with _patch_registry():
+            result = CliRunner().invoke(main, ["check", *args, "--format", "json"])
+
+        return result.exit_code, json.loads(result.stdout)[0]["assertion_issues"]
+
+    @pytest.mark.parametrize("args", [(), ("--online",)], ids=["offline", "online"])
+    def test_it_exits_6_naming_the_key_once(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        args: tuple[str, ...],
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+
+        for k, v in credential_env().items():
+            monkeypatch.setenv(k, v)
+
+        code, issues = self._run(tmp_path, committed_print, *args)
+
+        assert code == 6
+        assert [(i["code"], i["path"]) for i in issues] == [
+            ("assertion.malformed-block", "assertions.primary.table"),
+        ]
+
+
+class TestALastStatementWithNoResultSet:
+    def test_is_an_execution_error_on_duckdb(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        con = duckdb.connect(str(tmp_path / "garden.duckdb"))
+        con.execute("CREATE TABLE plot AS SELECT i AS id FROM range(3) r(i)")
+        con.close()
+        monkeypatch.setenv(env_var_name("garden", "database"), str(tmp_path / "garden.duckdb"))
+        monkeypatch.chdir(tmp_path)
+        project = (
+            "connections:\n  garden:\n    adapter: duckdb\n    auto: true\n"
+            "    assertions:\n      queries:\n        - name: trailing_set\n"
+            "          sql: SELECT 1 WHERE false; SET threads = 1\n          expect: empty\n"
+        )
+        (tmp_path / ".dbprint.yaml").write_text(project)
+        assert CliRunner().invoke(main, ["generate", "--no-tui"]).exit_code in (0, 3)
+
+        result = CliRunner().invoke(main, ["check", "--online", "--format", "json"])
+        issues = json.loads(result.stdout)[0]["assertion_issues"]
+
+        assert result.exit_code == 6
+        assert [i["code"] for i in issues] == ["assertion.sql-execution-error"]
+        assert "no result set" in issues[0]["detail"]
 
 
 def _seed_print_with_cardinality(tmp_path: Path, committed_print: Path, cardinality: int) -> Path:

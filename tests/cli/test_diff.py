@@ -114,6 +114,32 @@ def _patch_registry(adapter_class: type) -> Any:
 
 
 class TestNoBaseline:
+    def test_outranks_another_connection_that_cannot_be_set_up(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        (tmp_path / ".dbprint.yaml").write_text(
+            AUTO_PROJECT_YAML + "  secondary:\n    adapter: postgres\n    auto: true\n"
+            "    output: prints\n",
+        )
+        monkeypatch.chdir(tmp_path)
+
+        for k, v in credential_env("secondary").items():
+            monkeypatch.setenv(k, v)
+
+        with _patch_registry(_MockPostgresAdapterBase):
+            assert CliRunner().invoke(main, ["generate", "secondary", "--no-tui"]).exit_code == 3
+
+        for k in credential_env("secondary"):
+            monkeypatch.delenv(k)
+
+        with _patch_registry(_MockPostgresAdapterBase):
+            result = CliRunner().invoke(main, ["diff", "--no-tui"])
+
+        assert f"No committed prints at {tmp_path / 'prints' / 'primary'}/" in result.stderr
+        assert result.exit_code == 1, result.output
+
     def test_returns_exit_one_with_hard_error_message(
         self,
         tmp_path: Path,

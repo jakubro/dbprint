@@ -87,7 +87,8 @@ class Connection(FactoryConnection):
 def exec_query(cursor: Cursor, sql: str, params: Any = None) -> Cursor:
     """Run a query and return the cursor; DEBUG-traces the text and params as a pair."""
 
-    return driver.execute(_LOG, _is_timeout, cursor, sql, params)
+    # google-cloud-bigquery's DB-API `_format_operation` reads `%%` as `%` on an unbound statement too.
+    return driver.execute(_LOG, _is_timeout, cursor, sql, params, unescapes_percent=True)
 
 
 def _default_cursor_factory(params: ConnectionParams) -> Any:

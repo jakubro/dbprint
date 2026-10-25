@@ -4,10 +4,8 @@ identifier resolves case-insensitively, so `physical_name` is carried for the re
 
 from __future__ import annotations
 
-import re
-
 from dbprint.spec.fqn import join as join_fqn
-from .connection import Cursor, exec_query
+from .connection import DIALECT, Cursor, exec_query
 from ..base import (
     ColumnMeta,
     CommentsMeta,
@@ -17,7 +15,7 @@ from ..base import (
     TableMeta,
     UniqueKeyMeta,
 )
-from ..identifiers import Identity, column_meta, fold, select_tables, table_meta
+from ..identifiers import Identity, column_meta, fold, select_tables, table_meta, unquote
 
 
 _Candidate = tuple[TableMeta, tuple[str, str, str]]
@@ -151,9 +149,9 @@ def relationships(cursor: Cursor, identity: Identity) -> list[ForeignKeyMeta]:
 
     return [
         ForeignKeyMeta(
-            column=tuple(source_columns),
+            column=tuple(fold(name) for name in source_columns),
             target_table=join_fqn([fold(part) for part in (database, schema, target_table)]),
-            target_column=tuple(target_columns),
+            target_column=tuple(fold(name) for name in target_columns),
             on_delete="NO ACTION",
             on_update="NO ACTION",
             constraint_name=name,
@@ -164,7 +162,8 @@ def relationships(cursor: Cursor, identity: Identity) -> list[ForeignKeyMeta]:
 
 def indexes(cursor: Cursor, identity: Identity) -> list[IndexMeta]:
     """Secondary, non-unique indexes only (SPEC 2.6.7) - constraints and bare indexes live in
-    separate catalog functions that never overlap, so no exclusion join is needed.
+    separate catalog functions that never overlap, so no exclusion join is needed. An index
+    lists its column members; one with none is not reported.
     """
 
     database, schema, table = identity.parts
@@ -173,7 +172,7 @@ def indexes(cursor: Cursor, identity: Identity) -> list[IndexMeta]:
         """
         SELECT
           idx.index_name,
-          idx.sql
+          CAST(idx.expressions AS VARCHAR[]) AS members
         FROM
           DUCKDB_INDEXES() idx
         WHERE
@@ -187,14 +186,20 @@ def indexes(cursor: Cursor, identity: Identity) -> list[IndexMeta]:
         (database, schema, table),
     ).fetchall()
 
-    return [
-        IndexMeta(name=fold(name), columns=tuple(_index_columns(sql)), unique=False, type="art")
-        for name, sql in rows
-    ]
+    out: list[IndexMeta] = []
+
+    for name, members in rows:
+        if columns := tuple(c for c in map(_member_column, members) if c is not None):
+            out.append(IndexMeta(name=fold(name), columns=columns, unique=False, type="art"))
+
+    return out
 
 
 def unique_keys(cursor: Cursor, identity: Identity) -> list[UniqueKeyMeta]:
-    """Declared-unique column groups: primary key, unique constraints, bare unique indexes."""
+    """Declared-unique column groups: primary key, unique constraints, bare unique indexes.
+
+    A unique index with any expression member declares no key (SPEC 2.2.12).
+    """
 
     database, schema, table = identity.parts
     out: list[UniqueKeyMeta] = []
@@ -220,14 +225,17 @@ def unique_keys(cursor: Cursor, identity: Identity) -> list[UniqueKeyMeta]:
 
     for constraint_type, column_names in constraint_rows:
         out.append(
-            UniqueKeyMeta(columns=tuple(column_names), primary=constraint_type == "PRIMARY KEY"),
+            UniqueKeyMeta(
+                columns=tuple(fold(name) for name in column_names),
+                primary=constraint_type == "PRIMARY KEY",
+            ),
         )
 
     index_rows = exec_query(
         cursor,
         """
         SELECT
-          idx.sql
+          CAST(idx.expressions AS VARCHAR[]) AS members
         FROM
           DUCKDB_INDEXES() idx
         WHERE
@@ -242,8 +250,11 @@ def unique_keys(cursor: Cursor, identity: Identity) -> list[UniqueKeyMeta]:
         (database, schema, table),
     ).fetchall()
 
-    for (sql,) in index_rows:
-        out.append(UniqueKeyMeta(columns=tuple(_index_columns(sql)), primary=False))
+    for (members,) in index_rows:
+        columns = [c for c in map(_member_column, members) if c is not None]
+
+        if len(columns) == len(members):
+            out.append(UniqueKeyMeta(columns=tuple(columns), primary=False))
 
     return out
 
@@ -317,8 +328,11 @@ def comments(cursor: Cursor, identity: Identity) -> CommentsMeta:
 
 
 def row_count_estimate(cursor: Cursor, identity: Identity) -> int:
-    """`estimated_size` from `duckdb_tables()`; -1 for a view or an unknown table - a view
-    carries no such column, matching SPEC 2.2.15's never-queried, never-estimated rule.
+    """The table's exact row count; -1 for a view or an unknown table, which is never queried
+    (SPEC 2.2.15).
+
+    `estimated_size` keeps counting deleted rows until a whole row group empties, while a
+    `COUNT(1)` is answered from row-group counts and deletion markers, reading no column data.
     """
 
     database, schema, table = identity.parts
@@ -326,7 +340,7 @@ def row_count_estimate(cursor: Cursor, identity: Identity) -> int:
         cursor,
         """
         SELECT
-          tbl.estimated_size
+          1
         FROM
           DUCKDB_TABLES() tbl
         WHERE
@@ -337,23 +351,13 @@ def row_count_estimate(cursor: Cursor, identity: Identity) -> int:
         (database, schema, table),
     ).fetchone()
 
-    if not row or row[0] is None:
+    if not row:
         return -1
 
-    return int(row[0])
+    return int(exec_query(cursor, f"SELECT COUNT(1) FROM {identity.quoted()} src").fetchone()[0])
 
 
-_INDEX_COLUMNS_RE = re.compile(r"\(([^)]+)\)")
-
-
-def _index_columns(create_sql: str) -> list[str]:
-    """Column list from a `CREATE [UNIQUE] INDEX ... ON tbl (cols)` statement's own text -
-    `duckdb_indexes().expressions` renders as a repr-like string, not a real array.
-    """
-
-    match = _INDEX_COLUMNS_RE.search(create_sql or "")
-
-    if not match:
-        return []
-
-    return [fold(c.strip().strip('"')) for c in match.group(1).split(",") if c.strip()]
+def _member_column(member: str) -> str | None:
+    # duckdb renders a column member as its identifier, quoted only where it must be, and
+    # every other member wrapped in parentheses.
+    return None if member.startswith("(") else fold(unquote(member, DIALECT))

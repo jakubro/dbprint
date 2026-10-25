@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from unittest.mock import patch
@@ -78,6 +79,61 @@ class TestRollback:
 
         assert (tbl_dir / "ddl.sql").read_text() == "PRIOR\n"
         assert list(tbl_dir.glob("*.tmp")) == []
+
+    def test_a_rename_failing_part_way_leaves_no_new_artifact(self, tmp_path: Path) -> None:
+        tbl_dir = tmp_path / "t"
+        real = os.replace
+
+        def second_fails(src: Path, dst: Path) -> None:
+            if Path(dst).name == "statistics.yaml":
+                raise OSError("simulated replace failure")
+
+            real(src, dst)
+
+        with (
+            patch("dbprint.engine.writer.os.replace", side_effect=second_fails),
+            pytest.raises(WriterError),
+        ):
+            write_atomic(tbl_dir, {"ddl.sql": "NEW\n", "statistics.yaml": "s\n"})
+
+        assert sorted(p.name for p in tbl_dir.iterdir()) == []
+
+    def test_a_temp_that_cannot_be_removed_still_leaves_no_new_artifact(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        tbl_dir = tmp_path / "t"
+        real_replace, real_unlink = os.replace, Path.unlink
+
+        def second_fails(src: Path, dst: Path) -> None:
+            if Path(dst).name == "statistics.yaml":
+                raise OSError("simulated replace failure")
+
+            real_replace(src, dst)
+
+        def temp_stays(path: Path, missing_ok: bool = False) -> None:
+            if path.suffix == ".tmp":
+                raise PermissionError("simulated unlink failure")
+
+            real_unlink(path, missing_ok=missing_ok)
+
+        with (
+            patch("dbprint.engine.writer.os.replace", side_effect=second_fails),
+            patch.object(Path, "unlink", temp_stays),
+            pytest.raises(OSError),
+        ):
+            write_atomic(tbl_dir, {"ddl.sql": "NEW\n", "statistics.yaml": "s\n"})
+
+        assert not (tbl_dir / "ddl.sql").exists()
+
+    def test_a_directory_that_cannot_be_created_names_itself(self, tmp_path: Path) -> None:
+        (tmp_path / "public").write_text("a file where the schema directory belongs\n")
+        tbl_dir = tmp_path / "public" / "curator"
+
+        with pytest.raises(WriterError, match=re.escape(f"failed creating {tbl_dir}")):
+            write_atomic(tbl_dir, {"ddl.sql": "CREATE TABLE curator (id int);\n"})
+
+        assert [p.name for p in tmp_path.rglob("*.tmp")] == []
 
 
 class TestDescriptionPreservation:

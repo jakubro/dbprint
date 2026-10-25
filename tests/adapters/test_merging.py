@@ -245,6 +245,8 @@ def test_a_replication_prefix_is_not_part_of_the_family(engine: str, expected: s
 
 
 class _RowCursor:
+    description: Any = (("value",),)
+
     def __init__(self, row: tuple[Any, ...]) -> None:
         self._row = row
 

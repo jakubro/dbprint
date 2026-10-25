@@ -3344,3 +3344,52 @@ connections:
     assert (settings.mode, settings.sample) == ("full", None)
     assert conn.resolve_profile("a.b").values["read"]["tables"] == {"mode": "full"}
     assert conn.settings_for("a.c", "table").sample == 0.2  # noqa: RUF069 - the expected value is an exact literal
+
+
+class TestTheBuiltInMaterialize:
+    """A sample's unwritten `materialize` resolves once, at the end of the fold, as a built-in."""
+
+    def _conn(self, tmp_path: Path, body: str) -> ConnectionConfig:
+        _write_config(tmp_path, body)
+
+        return load_project(tmp_path).connections["w"]
+
+    def test_a_defaults_sample_credits_the_built_in(self, tmp_path: Path) -> None:
+        conn = self._conn(
+            tmp_path,
+            "defaults:\n  profile:\n    read:\n      tables: {mode: sample, fraction: 0.1}\n"
+            "connections:\n  w:\n    adapter: postgres\n",
+        )
+        resolved = conn.resolve_profile("public.herbarium")
+
+        assert resolved.values["read"]["tables"]["materialize"] is True
+        assert resolved.origins[("read", "tables", "materialize")] == "built-in default"
+        assert conn.settings_for("public.herbarium", "table").materialize is True
+
+    def test_a_rule_switching_to_sample_lists_the_materialize_generate_applies(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        conn = self._conn(
+            tmp_path,
+            "connections:\n  w:\n    adapter: postgres\n    rules:\n"
+            "    - match: {tables: ['*']}\n"
+            "      profile: {read: {tables: {mode: sample, fraction: 0.1}}}\n",
+        )
+        resolved = conn.resolve_profile("public.herbarium")
+
+        assert resolved.values["read"]["tables"]["materialize"] is True
+        assert resolved.origins[("read", "tables", "materialize")] == "built-in default"
+        assert conn.settings_for("public.herbarium", "table").materialize is True
+
+    def test_a_written_materialize_keeps_its_layer(self, tmp_path: Path) -> None:
+        conn = self._conn(
+            tmp_path,
+            "connections:\n  w:\n    adapter: postgres\n    profile:\n      read:\n"
+            "        tables: {mode: sample, fraction: 0.1, materialize: false}\n",
+        )
+        resolved = conn.resolve_profile("public.herbarium")
+
+        assert resolved.values["read"]["tables"]["materialize"] is False
+        assert resolved.origins[("read", "tables", "materialize")] == "connections.w.profile"
+        assert conn.settings_for("public.herbarium", "table").materialize is False

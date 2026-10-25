@@ -10,8 +10,8 @@ import json
 import re
 import zoneinfo
 from collections import Counter
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Literal
 
@@ -67,13 +67,15 @@ CHECKSUM_DISTINCT_FLOOR = 5
 COUNTRY_CODE_DISTINCT_FLOOR = 8
 # SPEC 4.1.3: average rows per value at which a categorical column is a closed list, never prose.
 ENUMERATION_ROWS_PER_VALUE = 5
+# SPEC 4.1.1's `email` rule without its anchors, for a search inside a longer value.
+EMAIL_ADDRESS = r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"
 
 
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-7][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
     re.IGNORECASE,
 )
-_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
+_EMAIL_RE = re.compile(f"^{EMAIL_ADDRESS}$")
 _URL_RE = re.compile(r"^https?://[^\s]+$")
 # RFC 8141: urn:<namespace-id>:<namespace-specific-string>, case-insensitive.
 _URN_RE = re.compile(r"^urn:[A-Za-z0-9][A-Za-z0-9-]{0,30}:\S+$", re.IGNORECASE)
@@ -303,6 +305,7 @@ class LooksLikeMatch:
     matched: int
     candidate: LooksLike | None = None
     candidate_share: float | None = None
+    assigned: Mapping[LooksLike, int] = field(default_factory=dict)
 
 
 def detect(
@@ -349,17 +352,49 @@ def detect_with_evidence(
         p for p in (_assign_any(v, withheld) for v in sample) if p is not None
     )
 
+    tally = dict(assigned)
+
     for pattern in _ORDER:
         if assigned[pattern] / len(sample) >= MATCH_THRESHOLD:
-            return LooksLikeMatch(pattern, len(sample), assigned[pattern])
+            return LooksLikeMatch(pattern, len(sample), assigned[pattern], assigned=tally)
 
     candidate, candidate_count = _best_scoring(assigned)
     candidate_share = candidate_count / len(sample) if candidate is not None else 0.0
 
     if candidate is not None and candidate_share >= NEAR_MISS_FLOOR:
-        return LooksLikeMatch(None, len(sample), 0, candidate, round(candidate_share, 6))
+        share = round(candidate_share, 6)
 
-    return LooksLikeMatch(None, len(sample), 0)
+        return LooksLikeMatch(None, len(sample), 0, candidate, share, assigned=tally)
+
+    return LooksLikeMatch(None, len(sample), 0, assigned=tally)
+
+
+def is_jwt(s: str) -> bool:
+    """RFC 7515 compact serialization whose header decodes to a JOSE object.
+
+    The signature may be empty (the `alg: none` unsecured form) and is never decoded.
+    """
+
+    parts = s.split(".")
+
+    if len(parts) != 3:
+        return False
+
+    header, payload, _signature = parts
+
+    if not header or not payload:
+        return False
+
+    if not (_JWT_SEGMENT_RE.match(header) and _JWT_SEGMENT_RE.match(payload)):
+        return False
+
+    try:
+        decoded = base64.urlsafe_b64decode(header + "=" * (-len(header) % 4))
+        parsed = json.loads(decoded)
+    except (ValueError, TypeError):
+        return False
+
+    return isinstance(parsed, dict) and "alg" in parsed
 
 
 def _best_scoring(assigned: Counter[LooksLike]) -> tuple[LooksLike | None, int]:
@@ -495,35 +530,6 @@ def _match_hex(s: str) -> bool:
         return False
 
     return any(c in "abcdefABCDEF" for c in s)
-
-
-def _match_jwt(s: str) -> bool:
-    """RFC 7515 compact serialization whose header decodes to a JOSE object.
-
-    Three dot-segments; the signature may be empty (the `alg: none` unsecured form) and is
-    never decoded. The header decode is what separates a JWT from any other dotted token.
-    """
-
-    parts = s.split(".")
-
-    if len(parts) != 3:
-        return False
-
-    header, payload, _signature = parts
-
-    if not header or not payload:
-        return False
-
-    if not (_JWT_SEGMENT_RE.match(header) and _JWT_SEGMENT_RE.match(payload)):
-        return False
-
-    try:
-        decoded = base64.urlsafe_b64decode(header + "=" * (-len(header) % 4))
-        parsed = json.loads(decoded)
-    except (ValueError, TypeError):
-        return False
-
-    return isinstance(parsed, dict) and "alg" in parsed
 
 
 def _match_base64(s: str) -> bool:
@@ -880,7 +886,7 @@ _STRUCTURAL: tuple[tuple[LooksLike, Callable[[str], bool]], ...] = (
     ("timezone", _match_timezone),
     ("json", _match_json),
     ("hex", _match_hex),
-    ("jwt", _match_jwt),
+    ("jwt", is_jwt),
     ("vin", _match_vin),
     ("base64", _match_base64),
     ("latlon", _match_latlon),

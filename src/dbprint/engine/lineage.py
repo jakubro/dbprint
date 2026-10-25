@@ -96,6 +96,10 @@ def load_manifest(path: Path) -> DbtManifest:
         message = f"dbt manifest {path}: not valid JSON: {exc}"
 
         raise ManifestUnreadable(message) from exc
+    except RecursionError as exc:
+        message = f"dbt manifest {path}: nested too deeply to read"
+
+        raise ManifestUnreadable(message) from exc
 
     metadata = data.get("metadata") if isinstance(data, dict) else None
     metadata = metadata if isinstance(metadata, dict) else {}
@@ -174,7 +178,7 @@ def trace(
     for model in manifest.models:
         try:
             target = _fqn(_relation_parts(model.relation_name, vendor), depth)
-        except (SqlglotError, ValueError) as exc:
+        except Exception as exc:  # noqa: BLE001 - run-all-then-report; sqlglot fails this model only
             eligible += 1
             unparsed.append((model.unique_id, _cause(exc)))
 
@@ -187,7 +191,7 @@ def trace(
 
         try:
             traced = _trace_model(model, target, vendor=vendor, depth=depth, schema=schema)
-        except (SqlglotError, ValueError) as exc:
+        except Exception as exc:  # noqa: BLE001 - run-all-then-report; sqlglot fails this model only
             unparsed.append((model.unique_id, _cause(exc)))
 
             continue
@@ -246,7 +250,12 @@ def _trace_model(
 
 
 def _cause(exc: Exception) -> str:
-    return str(exc).strip().splitlines()[0] if str(exc).strip() else ""
+    first = str(exc).strip().splitlines()[0] if str(exc).strip() else ""
+
+    if isinstance(exc, SqlglotError):
+        return first
+
+    return f"{type(exc).__name__}: {first}" if first else type(exc).__name__
 
 
 def _relation_parts(relation_name: str, vendor: str) -> list[str]:

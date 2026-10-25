@@ -114,8 +114,8 @@ class TestTheExampleTeachesTheFieldsItIsTheDemonstrationOf:
 
         assert checked == {"mask", "drop", "hash"}, f"not all primitives exercised: {checked}"
 
-    def test_a_marker_sits_only_where_a_literal_was_published(self) -> None:
-        """A marker on a column that emitted no cell value announces a redaction of nothing."""
+    def test_every_marked_column_publishes_a_literal(self) -> None:
+        """This print holds no covered column without a cell value, so every marker replaces one."""
 
         for name, column in _marked_columns():
             assert any(key in column for key in ("values", "range", "percentiles")), name
@@ -133,7 +133,7 @@ class TestTheExampleTeachesTheFieldsItIsTheDemonstrationOf:
         assert enumerated, "no column pairs an exhaustive value list with a `looks_like`"
 
     def test_every_classification_the_spec_defines_appears(self) -> None:
-        """examples/README.md claims all nine; assert against the spec's own set, not a count."""
+        """examples/README.md claims every one; assert against the spec's own set, not a count."""
 
         present = {
             column["classification"]

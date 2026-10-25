@@ -10,6 +10,7 @@ from dbprint.config.project import ResolvedProfile, RuleMatch
 from dbprint.spec.profile import effective_profile
 from .baseline import ManifestRead, unusable_manifest_message
 from .carried import profile_changes
+from .catalog_only import sizes_by_estimate
 
 
 CountSource = Literal["print", "database", "none"]
@@ -45,6 +46,7 @@ def explain(
     *,
     estimate: int | None = None,
     online: bool = False,
+    external: bool = False,
 ) -> TableExplanation:
     """Explain `fqn` under `conn`: offline against the print's recorded count, else `estimate`."""
 
@@ -69,11 +71,8 @@ def explain(
     entry = (manifest.manifest or {}).get("tables", {}).get(fqn)
     entry = entry if isinstance(entry, dict) else None
     object_type = entry.get("type") if entry is not None else None
-    count, source = _row_count(entry, estimate, online=online)
-
-    # A queried view records a row_count, yet generate never tests a size rule against a view.
-    if object_type == "view":
-        count, source = None, "none"
+    sized = sizes_by_estimate(conn, fqn, object_type, external=external)
+    count, source = _row_count(entry, estimate, online=online) if sized else (None, "none")
 
     kind = "view" if object_type == "view" else "table"
     settings = conn.settings_for(fqn, kind, count)
@@ -99,7 +98,7 @@ def explain(
         row_count=count,
         count_source=source,
         profiled_at=entry.get("profiled_at") if entry is not None else None,
-        note=_note(manifest, conn.name, entry, object_type, source, online=online),
+        note=_note(manifest, conn.name, entry, object_type, source, sized=sized, online=online),
         profile=conn.resolve_profile(fqn, count),
         ceiling=(
             (settings.max_rows_scanned, settings.sample)
@@ -134,6 +133,7 @@ def _note(
     object_type: str | None,
     source: CountSource,
     *,
+    sized: bool,
     online: bool,
 ) -> str | None:
     if manifest.manifest is None and not online:
@@ -144,6 +144,9 @@ def _note(
 
     if object_type == "view":
         return "a view has no row-count estimate: size rules never apply"
+
+    if not sized:
+        return "described from the catalog alone, so generate takes no row-count estimate for it"
 
     if source == "none":
         return "the database returned no estimate" if online else "the print records no row count"

@@ -19,7 +19,7 @@ from typing import Any
 import duckdb
 import pytest
 
-from dbprint.adapters import Adapter, StatisticsConfig
+from dbprint.adapters import Adapter, StatisticsConfig, identifiers
 from dbprint.adapters import base as base_module
 from dbprint.adapters import driver as adapter_driver
 from dbprint.adapters.base import TableScope
@@ -100,6 +100,9 @@ NARROW_TABLES = ["*.curator", "*.herbarium"]
 
 # A filter the user writes is kept verbatim (SPEC 2.2.8), so the style guard swaps it out first.
 SENTINEL_FILTER = "lower('x') = 'x'"
+
+# The local Spark substrate runs only the `information_schema`-absent fallback, which binds nothing.
+UNBOUND_SUBSTRATES = frozenset({"databricks"})
 
 
 @pytest.fixture
@@ -323,10 +326,37 @@ class TestDialectConformance:
         placeholder = sweep.dialect.placeholder
         missing = [sql for sql, _ in recorder.bound if placeholder not in sql]
 
-        assert recorder.bound, f"{sweep.vendor} bound no parameters; the check would be vacuous."
+        if sweep.vendor in UNBOUND_SUBSTRATES:
+            assert not recorder.bound, f"{sweep.vendor} binds parameters; drop the exemption."
+        else:
+            assert recorder.bound, f"{sweep.vendor} bound no parameters; the check is vacuous."
+
         assert not missing, (
             f"{sweep.vendor} binds parameters without its declared {placeholder!r} placeholder: "
             + "; ".join(repr(" ".join(sql.split())) for sql in missing)
+        )
+
+    def test_no_bound_statement_carries_a_column_or_the_filter(self, sweep: Sweep) -> None:
+        recorder = sweep.run(wide=True)
+        texts = {SENTINEL_FILTER} | {
+            identifiers.quote(column.physical_name or column.name, sweep.dialect)
+            for table in sweep.adapter.list_tables(include=["*"], exclude=[])
+            for column in sweep.adapter.introspect_columns(table.fqn)
+        }
+        offenders = [
+            next(line.strip() for line in sql.splitlines() if line.strip())
+            for sql, _ in recorder.bound
+            if any(text in sql for text in texts)
+        ]
+
+        if sweep.vendor in UNBOUND_SUBSTRATES:
+            assert not recorder.bound, f"{sweep.vendor} binds parameters; drop the exemption."
+        else:
+            assert recorder.bound, f"{sweep.vendor} bound no parameters; the check is vacuous."
+
+        assert not offenders, (
+            f"{sweep.vendor} binds parameters on a statement carrying a column or the filter: "
+            + "; ".join(offenders)
         )
 
     def test_no_statement_carries_another_paramstyles_placeholder(self, sweep: Sweep) -> None:
@@ -462,6 +492,11 @@ class TestGuardIsNotVacuous:
             ("SELECT * FROM `db`.`t`", "postgres", "`"),
             ("SELECT n_distinct FROM pg_stats WHERE tablename = %s", "mysql", "pg_stats"),
             ("SELECT * FROM t SAMPLE ROW (50 ROWS)", "mysql", "sample row ("),
+            (
+                "SELECT con.conname FROM pg_constraint con WHERE con.conparentid = 0",
+                "redshift",
+                "conparentid",
+            ),
         ],
     )
     def test_foreign_fragment_is_reported(
@@ -679,10 +714,18 @@ def _capture_connect_kwargs(
         pass
 
     class _StubCursor:
+        def execute(self, sql: str, params: Any = None) -> None: ...
+
+        def fetchone(self) -> tuple[str]:
+            return ("on",)
+
         def close(self) -> None: ...
 
     class _StubConnection:
         def cursor(self, **kwargs: Any) -> _StubCursor:
+            return _StubCursor()
+
+        def execute(self, sql: str, params: Any = None) -> _StubCursor:
             return _StubCursor()
 
         def close(self) -> None: ...

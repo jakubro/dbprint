@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
-from dbprint.docs import diagram
+from dbprint.docs import catalogue, diagram, view
 
 
 _PRINT = frozenset(
@@ -109,6 +110,20 @@ class TestBuild:
         }
 
         source = diagram.build("seedbank.accession", relationships, "primary", in_print=_PRINT)
+
+        assert source is not None
+        assert "linkStyle" not in source
+
+    def test_a_verdict_on_a_declared_edge_mutes_no_link(self) -> None:
+        edge = {"column": ["taxon_id"], "target_table": "seedbank.taxon", "target_column": ["id"]}
+        rows = view.relationship_rows(
+            catalogue.PrintConnection(name="x", root=Path("/nonexistent"), manifest={}, tables={}),
+            "seedbank.accession",
+            {"refers_to": [{**edge, "detection": "declared"}], "referenced_by": []},
+            {"refers_to": [{**edge, "verdict": "rejected"}]},
+        )
+
+        source = diagram.build("seedbank.accession", rows, "primary", in_print=_PRINT)
 
         assert source is not None
         assert "linkStyle" not in source
@@ -236,3 +251,62 @@ class TestBuild:
         assert 'n0["archive.2025.old beds"]' in source
         assert 'subgraph sg1["seedbank"]' in source
         assert "archive" not in source.split('n0["archive.2025.old beds"]', 1)[1]
+
+
+_STATEMENT_RES = [
+    re.compile(pattern)
+    for pattern in (
+        r"flowchart LR",
+        r'  n\d+\["[^"]*"\]',
+        r'  subgraph sg\d+\["[^"]*"\]',
+        r"  end",
+        r'  n\d+ (?:-->|-\.->|==>|--o)\|"[^"]*"\| n\d+',
+        r'  click n\d+ "[^"\s]*" "[^"]*"',
+        r"  classDef current fill:#4a90d922,stroke:#4a90d9,stroke-width:2px;",
+        r"  class n\d+ current;",
+        r"  linkStyle \d+ [^\n]*;",
+    )
+]
+_HOSTILE_COLUMN = 'g"| n0; n7["evil"]; click n7 href "javascript:alert(3)"; n0 -->|"x'
+_HOSTILE_TABLE = 'archive."]; n9["x"]; %%{init: {"securityLevel": "loose"}}%%'
+
+
+def _decoded(label: str) -> str:
+    return re.sub(r"#(\d+);", lambda m: chr(int(m[1])), label)
+
+
+class TestHostileNames:
+    """A column, table or schema name from a print cannot add a node, a link or a statement."""
+
+    def _source(self, name: str = "seedbank.accession") -> str:
+        relationships = {
+            "refers_to": [
+                {
+                    "column": [_HOSTILE_COLUMN],
+                    "target_table": _HOSTILE_TABLE,
+                    "detection": "declared",
+                },
+            ],
+            "referenced_by": [],
+        }
+        source = diagram.build(name, relationships, "primary", in_print={*_PRINT, name})
+
+        assert source is not None
+
+        return source
+
+    def test_every_line_is_one_of_the_builders_statements(self) -> None:
+        lines = self._source('seedbank"]; n8["x.accession').splitlines()
+
+        assert [line for line in lines if not any(r.fullmatch(line) for r in _STATEMENT_RES)] == []
+
+    def test_each_label_shows_the_whole_name(self) -> None:
+        source = self._source('seedbank"].accession')
+        labels = {_decoded(label) for label in re.findall(r'"([^"]*)"', source)}
+
+        assert {_HOSTILE_COLUMN, _HOSTILE_TABLE, 'seedbank"]', "accession"} <= labels
+
+    def test_only_a_printed_table_is_clicked_and_its_target_carries_no_quote(self) -> None:
+        targets = re.findall(r'  click n\d+ "([^"]*)"', self._source())
+
+        assert targets == ["/t/primary/seedbank.accession"]

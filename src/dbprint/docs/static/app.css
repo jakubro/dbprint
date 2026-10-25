@@ -11,8 +11,7 @@ a { color: inherit; }
   overflow-y: auto; border-right: 1px solid #8883; padding: 1rem; font-size: .85rem; box-sizing: border-box;
 }
 .sidebar-title { font-weight: 600; }
-.sidebar-root { font-size: .7rem; word-break: break-all; margin: .1rem 0 .6rem; }
-.nav-conn { font-weight: 600; text-transform: uppercase; font-size: .7rem; letter-spacing: .03em; color: #777a; margin: 1rem 0 .1rem; }
+.nav-conn { font-weight: 600; text-transform: uppercase; font-size: .7rem; letter-spacing: .03em; color: #777a; margin: 1rem 0 .6rem; }
 .nav-conn:first-child { margin-top: 0; }
 .nav-tree { margin-left: -.75rem; }
 .nav-group { margin-left: .75rem; }

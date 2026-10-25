@@ -8,7 +8,7 @@ Your coding agent reads your migrations and your models, so it gets the shape of
 
 dbprint turns that knowledge into plain text committed in your repository:
 
-- **It measures the database once.** Each table's DDL, its joins — declared, and inferred where the schema declares none — and per-column statistics: null shares, complete value lists with every spelling, ranges, distributions, value shapes and more. On any of eight engines.
+- **It measures the database once.** Each table's DDL, its joins — declared, and inferred where the schema declares none — and per-column statistics: null shares, complete value lists with every spelling, ranges, distributions, value shapes and more. On PostgreSQL, MySQL, Snowflake, BigQuery, Databricks, Redshift, ClickHouse or duckdb.
 - **An agent writes down what the numbers mean.** `dbprint annotate` hands an agent one table's measurements and the questions they leave open — what a code means, what a sentinel date stands for, which rows a report leaves out — and the agent answers them from your code and read-only queries, into files dbprint never overwrites. `dbprint annotate --check` flags a note the data contradicts.
 - **Every later session reads it offline.** Through an MCP server, a packaged skill or `dbprint context`, with no database connection and no credentials at the agent. Because it is text in git, a schema or data change shows up in review, and `dbprint check` gates it in CI.
 
@@ -115,7 +115,7 @@ and [connect your agent](#connecting-an-agent) to the result.
 ## What it does to your database
 
 - **It reads.** A role that can `SELECT` the tables you profile is enough; each engine's adapter page, linked from [your first print](https://jakubro.github.io/dbprint/start/), lists the exact grants. The one write is a temporary copy of a sampled table's drawn rows, gone when the session ends (on BigQuery, when its expiration passes), and only when you sample — [`read.tables.materialize`](https://github.com/jakubro/dbprint/blob/main/docs/CONFIG.md) turns it off.
-- **It publishes real values.** Value lists, ranges and percentiles are cell values, and they land in your repository. Nothing is withheld by default: [redaction](https://jakubro.github.io/dbprint/guide/redaction/) masks, drops or hashes them by column name, by detected sensitivity (`personal_name`, `national_id`, ...) or by shape, keeping every count.
+- **It publishes real values.** Value lists, ranges and percentiles are cell values, and they land in your repository. Nothing is withheld by default: [redaction](https://jakubro.github.io/dbprint/guide/redaction/) masks, drops or hashes them by column name, by detected sensitivity (`personal_name`, `national_id`, ...) or by shape, keeping every count. A password or key written into the schema itself — a view body, a default, a comment — is masked in `ddl.sql` on every run, whatever the rules say.
 - **It costs one profiling run, then what you choose to re-run.** A table is re-read when its print is older than its freshness threshold or its settings changed; sampling, row filters and catalog-only reads bound the cost on a warehouse — see [choosing what to profile](https://jakubro.github.io/dbprint/guide/scoping/).
 
 ## What a print looks like
@@ -226,7 +226,7 @@ prints/<connection>/
   reading.md                       # generated guide - how to read the rest of the print
   diff.yaml                        # machine-readable drift from the last run
   manifest.annotations.yaml        # optional, connection-level notes you write
-  <schema>/<table>/
+  <namespace>/<table>/             # one directory per FQN segment, e.g. arboretum/seedbank/accession/
     ddl.sql                        # native DDL, normalized for stable diffs
     statistics.yaml                # column distributions
     relationships.yaml             # declared + inferred foreign keys
@@ -282,16 +282,16 @@ dbprint list --project https://github.com/jakubro/dbprint/blob/main/docs/format/
 dbprint context arboretum.seedbank.accession --project https://github.com/jakubro/dbprint#main:docs/format/v1/examples/production
 ```
 
-dbprint clones it for you and asks for no credentials of its own — your existing SSH agent or credential helper covers a private repository. It's read-only: commands that write or connect live to a database (`generate`, `diff`, `check --online`) refuse a remote locator; every other command works against it exactly as it does locally.
+dbprint clones it for you and asks for no credentials of its own — your existing SSH agent or credential helper covers a private repository. It's read-only: every command that connects to a database — `generate`, `diff`, and the `--online` forms of `check` and `config explain` — refuses a remote locator; every other command works against it exactly as it does locally.
 
 ## Beyond the basics
 
-- **Semantic inference.** Every column gets one of 8 classifications. Text, categorical and foreign-key columns get one of 38 shape patterns (`uuid`, `email`, `phone`, `ip`, `country_code`, ...), published with the sample size and match count behind the verdict. Columns that hold data that must not leave the database get a `sensitivity` axis (`personal_name`, `postal_address`, `national_id`, `credential`, ...). Columns effectively unique (cardinality ratio >= 0.9999) are marked `candidate_key`, with a `candidate_key_exception` alongside whenever that threshold admits measured or estimated duplicates rather than true uniqueness. Foreign keys your schema never declared are inferred from naming and stamped `detection: inferred`.
+- **Semantic inference.** Every column gets a classification (`categorical`, `numeric`, `temporal`, `foreign_key_candidate`, `json`, ...). Text, categorical and foreign-key columns are matched against a closed set of shape patterns (`uuid`, `email`, `phone`, `ip`, `country_code`, ...), published with the sample size and match count behind the verdict. Columns that hold data that must not leave the database get a `sensitivity` axis (`personal_name`, `postal_address`, `national_id`, `credential`, ...). Columns effectively unique (cardinality ratio >= 0.9999) are marked `candidate_key`, with a `candidate_key_exception` alongside whenever that threshold admits measured or estimated duplicates rather than true uniqueness. Foreign keys your schema never declared are inferred from naming and stamped `detection: inferred`.
 - **Redaction.** Withhold cell values with `mask`, `drop`, or `hash` (salted), targeting columns by glob *or* by inferred sensitivity *or* by shape — so a `personal_name` column added next quarter is covered by a rule written today. Counts, cardinality and distributions survive intact; only literals are withheld. The salt lives with your credentials, never in the committed config.
 - **Assertions.** Write data-quality checks in YAML against any statistic, or as raw SQL. Statistic assertions are evaluated against the committed print by plain `dbprint check`, with no database in reach; SQL assertions need `dbprint check --online`. See [`docs/ASSERTIONS.md`](https://github.com/jakubro/dbprint/blob/main/docs/ASSERTIONS.md).
 - **CI exit codes.** `0` ok, `1` malformed print or unusable config, `2` stale, `3` drift, `4` connection failure, `5` partial run, `6` assertion failure, `7` total failure. `diff`, `check` and `context` all speak `--format json|yaml`.
 - **Scoped profiling.** Per-table rules can sample (seeded from the table name, where the engine supports seeding), apply a row filter, or change what's measured — gated on table size, so one rule covers every fact table you haven't named yet. A table read this way carries a `scope` block and a per-column `rows_scanned`, and every count in the file is denominated in the rows actually read, never silently in the whole table.
-- **MCP server.** `dbprint serve` exposes 7 tools — `get_table_context`, `list_tables`, `search_columns`, `resolve_value`, `get_manifest`, `get_diff`, `get_reference` — plus every artifact as a resource. It reads the committed print only and never opens a database connection. See [`docs/MCP.md`](https://github.com/jakubro/dbprint/blob/main/docs/MCP.md).
+- **MCP server.** `dbprint serve` exposes the tools `get_table_context`, `list_tables`, `search_columns`, `resolve_value`, `get_manifest`, `get_diff`, `get_reference` — plus every artifact as a resource. It reads the committed print only and never opens a database connection. See [`docs/MCP.md`](https://github.com/jakubro/dbprint/blob/main/docs/MCP.md).
 - **Markdown skills.** For clients that take markdown rules or custom instructions, a drop-in skill file tells an agent what a committed print answers, which tool answers it, and what each number covers — no process to run. A second skill has an agent write the annotation files from the code that writes each table and read-only queries, checked with `dbprint annotate --check`. Both sit at [`docs/examples/skill/`](https://github.com/jakubro/dbprint/tree/main/docs/examples/skill) so you can read them before installing anything.
 - **dbt lineage.** Point a connection's `dbt_manifest` at a compiled dbt `manifest.json` and `generate` records each model column's source columns as `derived_from`, so a note written once on a source column reaches every model built from it (the `[dbt]` extra). See [`docs/CONFIG.md`](https://github.com/jakubro/dbprint/blob/main/docs/CONFIG.md).
 - **Token-budgeted context.** `dbprint context arboretum.seedbank.accession --budget 4000` fits the Markdown view into a token budget, dropping the lowest-priority sections first.
@@ -300,7 +300,7 @@ dbprint clones it for you and asks for no credentials of its own — your existi
 
 | Project | What it does | How dbprint differs |
 |---|---|---|
-| [dryrun](https://github.com/boringSQL/dryrun) | Offline Postgres schema snapshot + MCP server + linting | Nearest thing to this. Its snapshot is a compressed binary bundle you mark `binary` in `.gitattributes`; dbprint's artifact is line-diffable YAML with a published spec, across eight databases |
+| [dryrun](https://github.com/boringSQL/dryrun) | Offline Postgres schema snapshot + MCP server + linting | Nearest thing to this. Its snapshot is a compressed binary bundle you mark `binary` in `.gitattributes`; dbprint's artifact is line-diffable YAML with a published spec, across every engine it reads |
 | [dbt-profiler](https://github.com/data-mie/dbt-profiler) | Column profiles committed as dbt YAML / Markdown | dbt projects only. No DDL, no relationship graph, no semantic inference or redaction |
 | Live-connection MCP servers (dbhub, postgres-mcp, Supabase, Neon) | Query and introspect a database at agent runtime | They need credentials at the agent, every session. dbprint profiles once, commits the result, and serves it with no database in reach |
 | [tbls](https://github.com/k1LoW/tbls), [SchemaSpy](https://github.com/schemaspy/schemaspy) | Schema documentation and ER diagrams for humans | Structure only, no data distributions. `dbprint docs serve` renders the same browsable pages and FK diagrams over a print's measured columns |
@@ -319,7 +319,7 @@ dbprint clones it for you and asks for no credentials of its own — your existi
 
 The format is specified in [`docs/format/v1/SPEC.md`](https://github.com/jakubro/dbprint/blob/main/docs/format/v1/SPEC.md).
 
-Seven JSON Schemas ship inside the installed package at [`src/dbprint/spec/v1/`](https://github.com/jakubro/dbprint/tree/main/src/dbprint/spec/v1) — four for the generated artifacts, three for the annotation files you write — and the conformance validator is a public API with no database, config or CLI required:
+The JSON Schemas ship inside the installed package at [`src/dbprint/spec/v1/`](https://github.com/jakubro/dbprint/tree/main/src/dbprint/spec/v1) — one for each generated artifact and each annotation file you write — and the conformance validator is a public API with no database, config or CLI required:
 
 ```python
 from dbprint.conformance import validate_print

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from dbprint.config import selectors as selectors_module
-from dbprint.spec.absence import Absence, column_value, read_column_field
+from dbprint.spec.absence import SAMPLED_CLASSIFICATIONS, Absence, column_value, read_column_field
 from dbprint.spec.drift import (
     DATA_CHANGE_KINDS,
     NON_NUMERIC_STATS,
@@ -503,6 +503,7 @@ def _diff_table(fqn: str, before: TableState, after: TableState) -> list[dict[st
                 after.columns,
                 scoped=before.scoped or after.scoped,
                 disabled=before.disabled | after.disabled,
+                flipped=before.disabled ^ after.disabled,
             ),
         )
 
@@ -892,10 +893,12 @@ def _diff_statistics(
     *,
     scoped: bool,
     disabled: frozenset[str] = frozenset(),
+    flipped: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Per-column stat-by-stat comparison for columns present in both sides.
 
-    `scoped` and `disabled` (either side's switched-off measurements) are table-grain.
+    `scoped`, `disabled` (either side's switched-off measurements) and `flipped` (switched on one
+    side only) are table-grain.
     """
 
     out: list[dict[str, Any]] = []
@@ -905,10 +908,15 @@ def _diff_statistics(
     for col in shared_cols:
         b = before_stats.get(col, {})
         a = after_stats.get(col, {})
-        out.extend(_diff_one_column_stats(fqn, col, b, a, scoped=scoped, off=off))
+        rederived = bool(flipped)
+        out.extend(
+            _diff_one_column_stats(fqn, col, b, a, scoped=scoped, off=off, rederived=rederived),
+        )
 
         if "parts" not in disabled:
-            out.extend(_diff_parts(fqn, col, b, a, scoped=scoped, off=off))
+            out.extend(
+                _diff_parts(fqn, col, b, a, scoped=scoped, off=off, rederived=rederived),
+            )
 
     return out
 
@@ -921,6 +929,7 @@ def _diff_parts(
     *,
     scoped: bool,
     off: frozenset[str] = frozenset(),
+    rederived: bool = False,
 ) -> list[dict[str, Any]]:
     """Each part both sides list, compared as its own block (SPEC 2.6.6).
 
@@ -948,6 +957,7 @@ def _diff_parts(
                     scoped=scoped,
                     part=path,
                     off=off,
+                    rederived=rederived,
                 ),
             )
 
@@ -974,6 +984,7 @@ _POPULATION_ABSOLUTE_STATS = frozenset(
         "sum",
         "zero_count",
         "negative_count",
+        "non_finite_count",
         "empty_count",
         "quantized_count",
         # A distinct-value count under folding (SPEC 2.2.4), so it scales with the scanned set
@@ -1009,6 +1020,7 @@ def _diff_one_column_stats(
     scoped: bool,
     part: str | None = None,
     off: frozenset[str] = frozenset(),
+    rederived: bool = False,
 ) -> list[dict[str, Any]]:
     # A missing `cardinality_method` reads as exact, so a baseline predating the field keeps
     # comparing instead of silently stopping.
@@ -1017,7 +1029,8 @@ def _diff_one_column_stats(
         column_value(after, "cardinality_method") or "exact",
     )
     out: list[dict[str, Any]] = []
-    paths = _stat_paths(before) | _stat_paths(after)
+    before_paths, after_paths = _stat_paths(before), _stat_paths(after)
+    paths = before_paths | after_paths
     # SPEC 2.2.4: a field either side declares unmeasured has no reading to compare - and only the
     # artifact's own marker can tell a hydrated baseline's failed read from a value that moved.
     unmeasured = _unmeasured_of(before) | _unmeasured_of(after)
@@ -1042,6 +1055,20 @@ def _diff_one_column_stats(
             else set()
         )
         if "inferred.looks_like" in off
+        else set()
+    )
+    # A switch flipped between the sides re-derives the classification, and with it every field
+    # one classification alone carries; a sample on one side only moves name-only sensitivity too.
+    rederived_out = (
+        {"classification"}
+        | (paths - (before_paths & after_paths))
+        | (
+            {"inferred.sensitivity"}
+            if (_get_path(before, "classification") in SAMPLED_CLASSIFICATIONS)
+            != (_get_path(after, "classification") in SAMPLED_CLASSIFICATIONS)
+            else set()
+        )
+        if rederived
         else set()
     )
 
@@ -1074,6 +1101,9 @@ def _diff_one_column_stats(
         if path in _PRESENCE_GATED_STATS and (path not in before or path not in after):
             continue
 
+        if path in rederived_out:
+            continue
+
         b = _get_path(before, path)
         a = _get_path(after, path)
 
@@ -1087,7 +1117,12 @@ def _diff_one_column_stats(
 
         event.update({"stat": path, "before": b, "after": a})
 
-        if _is_numeric_stat(path) and isinstance(b, (int, float)) and isinstance(a, (int, float)):
+        if (
+            _is_numeric_stat(path)
+            and isinstance(b, (int, float))
+            and isinstance(a, (int, float))
+            and not any(isinstance(v, float) and not math.isfinite(v) for v in (a, b))
+        ):
             event["delta"] = a - b
 
             if b != 0:

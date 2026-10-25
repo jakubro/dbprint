@@ -8,6 +8,7 @@ by chance. Pure: no I/O, no state.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
 from decimal import Decimal
 from typing import Literal
@@ -39,9 +40,12 @@ def bounds_epoch_unit(minimum: object, maximum: object) -> EpochUnit | None:
 
 
 def sample_epoch_unit(values: Iterable[object]) -> EpochUnit | None:
-    """Return the unit at least `looks_like`'s `MATCH_THRESHOLD` of sampled values agree on."""
+    """Return the unit at least `looks_like`'s `MATCH_THRESHOLD` of sampled values agree on.
 
-    sample = list(values)
+    A NaN or an infinity is no instant and no evidence against one, so it leaves the sample.
+    """
+
+    sample = [v for v in values if not _non_finite(v)]
 
     if not sample:
         return None
@@ -75,6 +79,13 @@ def _share(integral: list[int], window: tuple[int, int], denominator: int) -> fl
     return matches / denominator
 
 
+def _non_finite(value: object) -> bool:
+    if isinstance(value, Decimal):
+        return not value.is_finite()
+
+    return isinstance(value, float) and not math.isfinite(value)
+
+
 def _as_integral(value: object) -> int | None:
     """The value as an `int`, or None when it is not a whole number.
 
@@ -89,7 +100,7 @@ def _as_integral(value: object) -> int | None:
         return value
 
     if isinstance(value, (float, Decimal)):
-        return int(value) if value == int(value) else None
+        return int(value) if not _non_finite(value) and value == int(value) else None
 
     if isinstance(value, str):
         s = value.removeprefix("-")

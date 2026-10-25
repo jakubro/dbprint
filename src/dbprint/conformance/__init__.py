@@ -8,6 +8,7 @@ from typing import Literal
 
 import yaml
 
+from dbprint.spec import authored
 from dbprint.spec.artifacts import DIFF_FILENAME, MANIFEST_ANNOTATIONS_FILENAME, MANIFEST_FILENAME
 from . import (
     column_annotations,
@@ -57,6 +58,9 @@ def validate_print(
 
     issues.extend(format_version.check(manifest_data, MANIFEST_FILENAME))
     issues.extend(schema_validation.check_manifest(manifest_data, MANIFEST_FILENAME))
+    links = layout.escaping_links(print_root, manifest_data)
+    issues.extend(manifest.check_outside_print(manifest_data, links))
+    manifest_data = {**manifest_data, "tables": layout.walkable_tables(manifest_data, links)}
 
     tables = layout.walkable_tables(manifest_data)
     total = len(tables)
@@ -87,6 +91,7 @@ def validate_print(
                     tbl_dir,
                     artifacts["statistics"],
                     tbl_fqn,
+                    kind="statistics",
                     schema_checker=schema_validation.check_statistics,
                     content_checker=statistics.check,
                 ),
@@ -99,6 +104,7 @@ def validate_print(
                     tbl_dir,
                     artifacts["relationships"],
                     tbl_fqn,
+                    kind="relationships",
                     schema_checker=schema_validation.check_relationships,
                     content_checker=relationships.check_entry,
                 ),
@@ -111,6 +117,7 @@ def validate_print(
                     tbl_dir,
                     artifacts["statistics_annotations"],
                     tbl_fqn,
+                    kind="statistics_annotations",
                     schema_checker=schema_validation.check_statistics_annotations,
                     content_checker=column_annotations.check_entry,
                 ),
@@ -123,6 +130,7 @@ def validate_print(
                     tbl_dir,
                     artifacts["relationships_annotations"],
                     tbl_fqn,
+                    kind="relationships_annotations",
                     schema_checker=schema_validation.check_relationships_annotations,
                     content_checker=relationship_annotations.check_entry,
                 ),
@@ -176,7 +184,7 @@ def validate_print(
 
     manifest_annotations_path = print_root / MANIFEST_ANNOTATIONS_FILENAME
 
-    if manifest_annotations_path.is_file():
+    if manifest_annotations_path.is_file() and MANIFEST_ANNOTATIONS_FILENAME not in links:
         rel = MANIFEST_ANNOTATIONS_FILENAME
 
         try:
@@ -191,7 +199,7 @@ def validate_print(
 
     diff_path = print_root / DIFF_FILENAME
 
-    if diff_path.is_file():
+    if diff_path.is_file() and DIFF_FILENAME not in links:
         rel = DIFF_FILENAME
 
         try:
@@ -213,6 +221,8 @@ def _check_artifact(
     tbl_dir: Path,
     filename: str,
     tbl_fqn: str,
+    *,
+    kind: str,
     schema_checker,
     content_checker,
 ) -> list[Issue]:
@@ -231,7 +241,10 @@ def _check_artifact(
 
     issues.extend(format_version.check(data, rel))
     issues.extend(schema_checker(data, rel))
-    issues.extend(content_checker(data, rel, tbl_fqn))
+
+    # An annotation file failing admission is read by no one, its own content checks included.
+    if kind not in authored.AUTHORED_KINDS or authored.admitted(kind, data) is not None:
+        issues.extend(content_checker(data, rel, tbl_fqn))
 
     return issues
 

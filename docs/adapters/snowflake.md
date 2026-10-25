@@ -52,7 +52,7 @@ Check the role's grants before concluding the selectors are wrong.
 
 ### The undocumented grant behind `depends_on`
 
-`introspect_view_dependencies` issues two statements: `information_schema.tables` to seed every view, then `snowflake.account_usage.object_dependencies` filtered to the connected database — an account-wide catalog that lags **up to three hours** behind a newly created view. Reading it needs a grant no other statement on this page requires:
+The view-dependency read issues two statements: `information_schema.tables` to seed every view, then `snowflake.account_usage.object_dependencies` filtered to the connected database — an account-wide catalog that lags **up to three hours** behind a newly created view. Reading it needs a grant no other statement on this page requires:
 
 ```sql
 GRANT DATABASE ROLE SNOWFLAKE.OBJECT_VIEWER TO ROLE dbprint_ro;
@@ -83,12 +83,12 @@ Where it does fire, the drawn rows are copied once into a session-lifetime tempo
 
 No extra grant is required for it. Snowflake exempts temporary tables from the `CREATE TABLE` privilege, and the schema the copy lands in is one the role already holds `USAGE` on.
 
-Where the write is refused anyway — a managed-access schema, or a policy that blocks it — the run does not fail the connection, but it does refuse that table. `SAMPLE_FALLBACK_COHERENT` is `false` on Snowflake: a fixed-size sample cannot be seeded, so an unmaterialized draw can never be trusted to agree across statements, and the table is refused rather than degraded:
+Where the write is refused anyway — a managed-access schema, or a policy that blocks it — the run does not fail the connection, but it does refuse that table. A fixed-size sample cannot be seeded on Snowflake, so an unmaterialized draw can never be trusted to agree across statements, and the table is refused rather than degraded:
 
 ```
 table 'arboretum.seedbank.germination_trial': connection 'primary' (snowflake) could not
 materialize its sample of 0.25 (<cause>), and this adapter's per-statement fallback cannot be
-seeded into agreement across statements. Narrow with a filter instead of a sample fraction.
+seeded into agreement across statements. Narrow with mode: filter instead of a sample.
 ```
 
 Setting `read.tables.materialize: false` on a `sample`-mode table is refused the same way, before any statement runs.
@@ -112,6 +112,10 @@ An external table is listed with `external: true` (SPEC 2.2.20) and, unless a ma
 ## Namespaces
 
 `database` is optional. Omitted, the session has no current database; the connection reads every database `SHOW DATABASES` lists for the role — which needs no extra grant and no warehouse — less `SNOWFLAKE`, and reads each through its own `"<database>".INFORMATION_SCHEMA`. A configured name is matched to the spelling Snowflake stores. With no database, an unqualified name in `dbprint check --online` SQL assertions has nothing to resolve against. The grants below are per database, and a database the role cannot read is skipped with a warning. View dependencies are read per database holding a selected object; one whose dependency read fails is named in a warning and its views omit `depends_on` for that run.
+
+## The row-count estimate
+
+A table's size, and a sampled table's `row_count`, come from `information_schema.tables.row_count`, the number of rows Snowflake documents for the table; a sampled table publishes `row_count_method: approximate`.
 
 ## Statement timeout
 

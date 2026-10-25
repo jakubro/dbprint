@@ -210,6 +210,12 @@ TERMS: Mapping[str, Term] = {
         "share of non-null scanned rows holding a negative value",
         "negative_count",
     ),
+    "non_finite": Term(
+        "non-finite",
+        "share of non-null scanned rows holding NaN or an infinity; every other numeric statistic "
+        "excludes them",
+        "non_finite_count",
+    ),
     "empty_strings": Term(
         "empty strings",
         "share of non-null scanned rows holding the empty string",
@@ -328,7 +334,10 @@ TERMS: Mapping[str, Term] = {
     ),
     "present": Term(
         "present",
-        "share of the named population holding this member: rows, or instances of the parent part",
+        (
+            "share of the named population holding this member: rows (the rows scanned, on a "
+            "table read in part), or instances of the parent part"
+        ),
         "occurrences",
     ),
     "srid": Term("srid", "the spatial reference systems the geometries carry", "geometry.srids"),

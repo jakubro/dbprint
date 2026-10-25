@@ -378,6 +378,7 @@ def _numeric_notes(
         (
             ("zero_count", "zeros", "zeros"),
             ("negative_count", "negatives", "negatives"),
+            ("non_finite_count", "non-finite", "non_finite"),
             *([] if whole else [("quantized_count", "whole numbers", "whole_numbers")]),
         ),
     )

@@ -170,6 +170,34 @@ class TestAcceptedValues:
         assert "ZA" in issues[0].detail
 
 
+class TestALiteralOfTheWrongTypeIsMalformed:
+    def test_a_number_set_on_a_string_column(self) -> None:
+        aset = _set(
+            {
+                "arboretum.seedbank.accession": TablePredicates(
+                    "arboretum.seedbank.accession",
+                    columns={"provenance_country": {"accepted_values": [1, 2]}},
+                ),
+            },
+        )
+        issues = evaluate_statistic_assertions(aset, "primary", _stats_for())
+
+        assert [i.code for i in issues] == ["assertion.malformed-predicate"]
+
+    def test_a_boolean_null_count_bound(self) -> None:
+        aset = _set(
+            {
+                "arboretum.seedbank.accession": TablePredicates(
+                    "arboretum.seedbank.accession",
+                    columns={"provenance_country": {"null_count": {"max": False}}},
+                ),
+            },
+        )
+        issues = evaluate_statistic_assertions(aset, "primary", _stats_for())
+
+        assert [i.code for i in issues] == ["assertion.malformed-predicate"]
+
+
 class TestAcceptedValuesUnderScope:
     """A list complete over the rows scanned is not the table's domain (SPEC 2.2.8)."""
 

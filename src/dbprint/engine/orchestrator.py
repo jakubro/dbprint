@@ -10,15 +10,18 @@ import copy
 import glob
 import itertools
 import logging
+import os
 import time
 import traceback
 from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from dbprint import __version__ as DBPRINT_VERSION
 from dbprint.adapters import trace_context
 from dbprint.adapters.base import (
     Adapter,
@@ -41,6 +44,7 @@ from dbprint.adapters.base import (
     PhaseA,
     PhysicalLayout,
     Populated,
+    RequiredFilter,
     TableCounts,
     TableMerging,
     TableMeta,
@@ -54,7 +58,6 @@ from dbprint.adapters.errors import QueryFailed
 from dbprint.adapters.identifiers import IdentifierRejected, reject_column_collisions
 from dbprint.config import ConfigError, ConnectionConfig, ProfileConfig, TableSettings, selectors
 from dbprint.config.duration import format_duration_seconds
-from dbprint.config.read import ObjectKind
 from dbprint.spec import artifact_yaml
 from dbprint.spec.absence import (
     SAMPLED_CLASSIFICATIONS,
@@ -77,6 +80,7 @@ from dbprint.spec.artifacts import (
     STATISTICS_ANNOTATIONS_FILENAME,
     STATISTICS_FILENAME,
 )
+from dbprint.spec.catalog_secrets import mask_ddl, mask_text
 from dbprint.spec.classification import (
     Classification,
     classify,
@@ -92,10 +96,12 @@ from dbprint.spec.classification import (
     is_string_like_type,
 )
 from dbprint.spec.coverage import coverage_share, is_incoherent
+from dbprint.spec.edges import edge_detection
 from dbprint.spec.epoch import bounds_epoch_unit, sample_epoch_unit
+from dbprint.spec.fqn import join as join_fqn
 from dbprint.spec.fqn import split as split_fqn
-from dbprint.spec.looks_like import detect_with_evidence
-from dbprint.spec.parts import KEYS, last_member, parent, pools_floats
+from dbprint.spec.looks_like import LooksLike, detect_with_evidence
+from dbprint.spec.parts import KEYS, enclosing_chain, last_member, parent, pools_floats
 from dbprint.spec.redaction import (
     WITHHELD_UNDER_REDACTION,
     Primitive,
@@ -144,7 +150,7 @@ from .carried import (
     resolved_part_redaction,
     resolved_redaction,
 )
-from .catalog_only import described_without_query
+from .catalog_only import described_without_query, sizes_by_estimate
 from .manifest_builder import (
     ManifestTableEntry,
     profile_delta,
@@ -173,9 +179,11 @@ from .result import (
     SummaryCounts,
     TableResult,
     TableStatus,
+    worst_exit,
 )
-from .staging import RunStage, StageRefused
+from .staging import RunStage, StageRefused, route_out
 from .value_resolution import spelling_groups
+from .writer import WriterError
 from .yaml_dumper import dump_yaml as _dump_yaml
 
 
@@ -205,6 +213,8 @@ _DEPENDENCY_SEARCH_CAP = 300
 _DEPENDENCY_STRENGTH_THRESHOLD = 0.95
 
 _LOW_CARDINALITY_CLASSIFICATIONS = {"categorical", "boolean"}
+
+_ROOT_WRITES = frozenset({MANIFEST_FILENAME, DIFF_FILENAME, READING_GUIDE_FILENAME})
 
 # SPEC 2.2.2's universal fields: required on every column, so never named unmeasured.
 _UNIVERSAL_FIELDS = frozenset({"sql_type", "nullable", "null_count", "null_rate", "classification"})
@@ -271,7 +281,7 @@ class Engine:
         # Opened before the baseline is read, so a roll-forward is what the baseline sees.
         try:
             stage = RunStage.open(prints_root)
-        except StageRefused as exc:
+        except (StageRefused, OSError) as exc:
             failure = _connection_error_generate(
                 self._conn.name,
                 generated_at,
@@ -299,6 +309,19 @@ class Engine:
         committed = CommittedPrint.load(prints_root)
         emitter = _ProgressEmitter(req.on_progress, self._conn.name)
         lineage_source: DbtManifest | None = None
+        refusal = committed.refusal(prints_root, self._conn.name)
+
+        if refusal is not None:
+            failure = _connection_error_generate(
+                self._conn.name,
+                generated_at,
+                started,
+                ValueError(refusal),
+                exit_code=EXIT_GENERIC,
+            )
+            self._log_connection(0, failure.elapsed_ms, failure.exit_code)
+
+            return failure
 
         if self._conn.dbt_manifest is not None and not req.dry_run:
             try:
@@ -376,6 +399,17 @@ class Engine:
                 self._log_connection(0, failure.elapsed_ms, failure.exit_code)
 
                 return failure
+            except (StageRefused, WriterError) as exc:
+                failure = _connection_error_generate(
+                    self._conn.name,
+                    generated_at,
+                    started,
+                    exc,
+                    exit_code=EXIT_GENERIC,
+                )
+                self._log_connection(0, failure.elapsed_ms, failure.exit_code)
+
+                return failure
 
             per_table_results = outcome.per_table_results
             diff_dict = outcome.diff_dict
@@ -385,15 +419,27 @@ class Engine:
             # A truncated run saw only part of the database, so it commits nothing at all.
             # Keyed on tables left unattempted, not on whether the loop broke (ARCHITECTURE.md 9).
             if stage is not None and not outcome.not_attempted:
-                entries = self._write_manifest_artifacts(
-                    prints_root,
-                    outcome,
-                    committed,
-                    generated_at,
-                    stage,
-                )
-                _sweep_undeclared(prints_root, entries, stage)
-                stage.commit()
+                try:
+                    entries = self._write_manifest_artifacts(
+                        prints_root,
+                        outcome,
+                        committed,
+                        generated_at,
+                        stage,
+                    )
+                    _sweep_undeclared(prints_root, entries, stage)
+                    stage.commit()
+                except (OSError, StageRefused, WriterError) as exc:
+                    failure = _connection_error_generate(
+                        self._conn.name,
+                        generated_at,
+                        started,
+                        exc,
+                        exit_code=EXIT_GENERIC,
+                    )
+                    self._log_connection(0, failure.elapsed_ms, failure.exit_code)
+
+                    return failure
 
             emitter.finalizing("done", len(per_table_results))
         finally:
@@ -428,7 +474,7 @@ class Engine:
     def estimate_row_count(self, fqn: str) -> int | None:
         """The catalog's current row-count estimate for one table, read live.
 
-        None for a view or an unlisted name; raises `ConnectFailed` when the database is unreachable.
+        None where the name is unlisted or generate takes no estimate; `ConnectFailed` if unreachable.
         """
 
         try:
@@ -441,7 +487,14 @@ class Engine:
             listed = self._adapter.list_tables(include=[glob.escape(fqn)], exclude=[])
             table = next((t for t in listed if t.fqn == fqn), None)
 
-            if table is None or table.type == "view":
+            if table is None or not sizes_by_estimate(
+                self._conn,
+                fqn,
+                table.type,
+                external=table.external,
+                opt_in_only=table.opt_in_only,
+                requires_filter=table.required_filter is not None,
+            ):
                 return None
 
             return self._adapter.estimate_row_count(fqn)
@@ -464,6 +517,7 @@ class Engine:
         if committed.manifest is None:
             elapsed_ms = int((time.monotonic() - started) * 1000)
             self._log_connection(0, elapsed_ms, EXIT_GENERIC)
+            unusable = committed.unusable_message(self._conn.name)
 
             return DiffResult(
                 connection_name=self._conn.name,
@@ -471,7 +525,7 @@ class Engine:
                 target_scanned_tables=0,
                 elapsed_ms=elapsed_ms,
                 exit_code=EXIT_GENERIC,
-                failed_tables=(),
+                failed_tables=(unusable,) if unusable is not None else (),
             )
 
         emitter = _ProgressEmitter(req.on_progress, self._conn.name)
@@ -595,7 +649,8 @@ class Engine:
     ) -> _ExtractionOutcome:
         """Run list_tables -> per-table extract -> relationship graph -> diff compute.
 
-        Writes only into `stage`; a baseline-disjoint listing raises unless `confirm_all_removed`.
+        Writes only into `stage`; a baseline-disjoint listing raises unless `confirm_all_removed`,
+        and a link leading a connection-wide write outside the print root raises `StageRefused`.
         """
 
         emitter = emitter or _ProgressEmitter(None, self._conn.name)
@@ -652,6 +707,12 @@ class Engine:
 
         if in_scope and not confirm_all_removed and not {t.fqn for t in tables} & set(in_scope):
             raise ListingSharesNothingWithBaseline(len(in_scope), self._target)
+
+        if stage is not None and (shared := _connection_wide_links(stage, tables)):
+            raise StageRefused(
+                f"{shared[0]} is a symlink leading outside the connection root "
+                f"{str(self._conn.print_root)!r}; generate writes nothing through it",
+            )
 
         # Only now: every session reads the identities `list_tables` just registered.
         pool = self._open_pool()
@@ -953,12 +1014,15 @@ class Engine:
         tbl_dir = prints_root / Path(*tbl.namespace_path)
         row_count_estimate: int | None = None
 
-        # Its own `try`: a raising catalog read fails this table, not the run. No estimate for a
-        # view, nor for an object never read - unless a `min_rows` rule could change its mode.
-        kind: ObjectKind = "views" if _kind(tbl.type) == "view" else "tables"
-        unread = not self._reads(tbl) and not self._conn.min_rows_decides_mode(tbl.fqn, kind)
-
-        if read_row_counts and tbl.type != "view" and not unread:
+        # Its own `try`: a raising catalog read fails this table, not the run.
+        if read_row_counts and sizes_by_estimate(
+            self._conn,
+            tbl.fqn,
+            tbl.type,
+            external=tbl.external,
+            opt_in_only=tbl.opt_in_only,
+            requires_filter=tbl.required_filter is not None,
+        ):
             try:
                 with _operation("estimate_row_count"):
                     row_count_estimate = self._adapter.estimate_row_count(tbl.fqn)
@@ -986,6 +1050,9 @@ class Engine:
 
         settings = self._conn.settings_for(tbl.fqn, _kind(tbl.type), row_count_estimate)
 
+        if tbl.required_filter is not None and settings.mode != "filter":
+            _warn_required_filter(tbl.fqn, tbl.required_filter)
+
         verdict = (
             None
             if force
@@ -996,6 +1063,7 @@ class Engine:
                 conn=self._conn,
                 external=tbl.external,
                 opt_in_only=tbl.opt_in_only,
+                requires_filter=tbl.required_filter is not None,
             )
         )
 
@@ -1046,19 +1114,39 @@ class Engine:
                 settings.matched_rules,
             )
 
-        if stage is not None:
-            emitter.table_phase(index, total, tbl.fqn, "write")
-            artifacts: dict[str, str | bytes] = {DDL_FILENAME: ctx.ddl}
+        try:
+            has_description = (tbl_dir / DESCRIPTION_FILENAME).is_file()
+            has_statistics_annotations = (tbl_dir / STATISTICS_ANNOTATIONS_FILENAME).is_file()
+            has_relationships_annotations = (tbl_dir / RELATIONSHIPS_ANNOTATIONS_FILENAME).is_file()
 
-            if ctx.statistics_yaml is not None:
-                artifacts[STATISTICS_FILENAME] = ctx.statistics_yaml
-            stage.write(tbl_dir, artifacts)
+            if stage is not None:
+                emitter.table_phase(index, total, tbl.fqn, "write")
+                artifacts: dict[str, str | bytes] = {DDL_FILENAME: ctx.ddl}
+
+                if ctx.statistics_yaml is not None:
+                    artifacts[STATISTICS_FILENAME] = ctx.statistics_yaml
+                stage.write(tbl_dir, artifacts)
+        except (OSError, WriterError) as exc:
+            self._release_scope(tbl.fqn, ctx.read_scope)
+
+            return (
+                TableResult(
+                    fqn=tbl.fqn,
+                    status="failed",
+                    elapsed_ms=int((time.monotonic() - started) * 1000),
+                    reason=verdict.reason if verdict is not None else None,
+                    **_write_error_fields(exc, tbl.fqn, tbl_dir.relative_to(prints_root)),
+                ),
+                None,
+                settings.max_age_days,
+                settings.matched_rules,
+            )
 
         ctx.tbl_dir = tbl_dir
         ctx.stage = stage
-        ctx.has_description = (tbl_dir / DESCRIPTION_FILENAME).is_file()
-        ctx.has_statistics_annotations = (tbl_dir / STATISTICS_ANNOTATIONS_FILENAME).is_file()
-        ctx.has_relationships_annotations = (tbl_dir / RELATIONSHIPS_ANNOTATIONS_FILENAME).is_file()
+        ctx.has_description = has_description
+        ctx.has_statistics_annotations = has_statistics_annotations
+        ctx.has_relationships_annotations = has_relationships_annotations
 
         return (
             TableResult(
@@ -1095,7 +1183,7 @@ class Engine:
             )
 
         with _operation("extract_ddl"):
-            ddl = self._adapter.extract_ddl(tbl.fqn)
+            ddl = mask_ddl(self._adapter.extract_ddl(tbl.fqn))
 
         # ALWAYS on a view or matview, never on a plain table. Absent from the map means the
         # producer could not ask; present means the catalog answered, `()` included.
@@ -1151,7 +1239,7 @@ class Engine:
 
         try:
             with _operation("extract_comments"):
-                comments = self._adapter.extract_comments(tbl.fqn)
+                comments = _masked_comments(self._adapter.extract_comments(tbl.fqn))
 
             comments_known = True
         except _OperationFailed as exc:
@@ -1170,6 +1258,7 @@ class Engine:
             view=tbl.type == "view",
             external=tbl.external,
             opt_in_only=tbl.opt_in_only,
+            requires_filter=tbl.required_filter is not None,
         ):
             # Nothing is queried, so the file says so (SPEC 2.2.15) rather than going
             # unwritten; the columns above are the catalog's.
@@ -1730,6 +1819,13 @@ class Engine:
                         settings.statistics,
                         counts,
                         scope,
+                        withholds_keys=partial(
+                            self._withholds_keys,
+                            fqn,
+                            col,
+                            column,
+                            settings,
+                        ),
                     )
             except _OperationFailed as exc:
                 _LOG.warning(
@@ -1765,26 +1861,7 @@ class Engine:
         generated_at: str,
         rows_scanned: int,
     ) -> _EnrichedColumnStats:
-        classification = classify(
-            sql_type=col.classified_type,
-            cardinality=column.stats.cardinality,
-            has_declared_fk=False,
-            enumeration_threshold=settings.statistics.enumeration_threshold,
-            has_parts=True,
-        )
-        inferred = column.inferred
-
-        # A column first measured here never ran detection, which skips an unsupported column.
-        if classification == "composite" and inferred is None:
-            sensitivity = detect_sensitivity(
-                col.physical_name or col.name,
-                [],
-                None,
-                classification=classification,
-                table=split_fqn(fqn)[-1],
-            )
-            inferred = Inferred(sensitivity=sensitivity) if sensitivity is not None else None
-
+        classification, inferred = _descended_detection(fqn, col, column, settings)
         column_inferred = (
             (inferred.sensitivity, inferred.looks_like) if inferred is not None else (None, None)
         )
@@ -1820,12 +1897,35 @@ class Engine:
                 fqn,
                 col,
                 part,
-                column_inferred,
                 has_parts=part.path in parents,
                 settings=settings,
                 generated_at=generated_at,
             )
             for part in found.parts
+        ]
+        detections = {
+            part.path: (
+                (part.enriched.inferred.sensitivity, part.enriched.inferred.looks_like)
+                if part.enriched.inferred is not None
+                else (None, None)
+            )
+            for part in parts
+        }
+        parts = [
+            replace(
+                part,
+                enriched=replace(
+                    part.enriched,
+                    redaction=resolved_part_redaction(
+                        self._conn,
+                        join_fqn((fqn, col.name)),
+                        part.enriched.classification,
+                        column_inferred,
+                        enclosing_chain(part.path, detections),
+                    ),
+                ),
+            )
+            for part in parts
         ]
         keyed = {part.path for part in found.parts if part.keyed}
         open_key_sets = {
@@ -1846,65 +1946,56 @@ class Engine:
             size=found.size,
         )
 
+    def _withholds_keys(
+        self,
+        fqn: str,
+        col: ColumnMeta,
+        column: _EnrichedColumnStats,
+        settings: TableSettings,
+        key_set: PartStats,
+        enclosing: tuple[PartStats, ...],
+    ) -> bool:
+        """Whether `key_set` resolves a marker, judged as `_descended` will judge it once read."""
+
+        _, inferred = _descended_detection(fqn, col, column, settings)
+        column_inferred = (
+            (inferred.sensitivity, inferred.looks_like) if inferred is not None else (None, None)
+        )
+        detected = {
+            part.path: _part_detection(fqn, col, part, part is not key_set, settings)
+            for part in (*enclosing, key_set)
+        }
+        detections = {
+            path: (inferred.sensitivity, inferred.looks_like)
+            if inferred is not None
+            else (None, None)
+            for path, (_, _, inferred) in detected.items()
+        }
+
+        return (
+            resolved_part_redaction(
+                self._conn,
+                join_fqn((fqn, col.name)),
+                detected[key_set.path][1],
+                column_inferred,
+                enclosing_chain(key_set.path, detections),
+            )
+            is not None
+        )
+
     def _enriched_part(
         self,
         fqn: str,
         col: ColumnMeta,
         part: PartStats,
-        column_inferred: tuple[str | None, str | None],
         *,
         has_parts: bool,
         settings: TableSettings,
         generated_at: str,
     ) -> _EnrichedPart:
         occurrences = part.occurrences
-        stats = replace(
-            part.stats,
-            null_rate=compute_null_rate(part.stats.null_count, occurrences),
-            cardinality_ratio=(
-                compute_cardinality_ratio(part.stats.cardinality, occurrences)
-                if part.stats.cardinality is not None
-                else None
-            ),
-        )
-        classification = classify(
-            sql_type=stats.sql_type,
-            cardinality=stats.cardinality,
-            has_declared_fk=False,
-            enumeration_threshold=settings.statistics.enumeration_threshold,
-            has_parts=has_parts,
-        )
-        samples = list(part.samples)
-        looks_like = None
-
-        if classification in SAMPLED_CLASSIFICATIONS and samples:
-            looks_like = detect_with_evidence(
-                samples,
-                column_name=last_member(part.path) or col.name,
-                classification=classification,
-                cardinality=stats.cardinality,
-                rows=occurrences - stats.null_count,
-            ).pattern
-
-            if looks_like == "numeric_string" and is_numeric_type(stats.sql_type):
-                looks_like = None
-
-        sensitivity = (
-            detect_sensitivity(
-                last_member(part.path) or col.name,
-                samples,
-                looks_like,
-                classification=classification,
-                table=split_fqn(fqn)[-1],
-            )
-            if classification != "unsupported"
-            else None
-        )
-        inferred = (
-            Inferred(looks_like=looks_like, sensitivity=sensitivity)
-            if looks_like is not None or sensitivity is not None
-            else None
-        )
+        stats, classification, inferred = _part_detection(fqn, col, part, has_parts, settings)
+        looks_like = inferred.looks_like if inferred is not None else None
         freshness = (
             _derive_freshness(stats.range.max, generated_at)
             if classification == "temporal" and stats.range is not None
@@ -1919,13 +2010,6 @@ class Engine:
             stats=_fill_empty_value_shape(stats, classification),
             classification=classification,
             inferred=inferred,
-            redaction=resolved_part_redaction(
-                self._conn,
-                f"{fqn}.{col.name}",
-                classification,
-                column_inferred,
-                (sensitivity, looks_like),
-            ),
             freshness=freshness,
         )
         _stamp_values_coverage_method(fqn, occurrences, {part.path: enriched})
@@ -2004,6 +2088,8 @@ class Engine:
                 except _OperationFailed as exc:
                     sample_error = exc.cause if isinstance(exc.cause, Exception) else exc
 
+            assigned: Mapping[LooksLike, int] = {}
+
             if sample_error is None and sampled:
                 try:
                     match = detect_with_evidence(
@@ -2013,6 +2099,7 @@ class Engine:
                         cardinality=stats.cardinality,
                         rows=counts.rows_scanned - stats.null_count,
                     )
+                    assigned = match.assigned
                     looks_like_value = match.pattern
                     epoch_unit_value = sample_epoch_unit(samples)
                 except Exception as exc:  # noqa: BLE001 - contain to this column, not the table
@@ -2053,7 +2140,7 @@ class Engine:
                     sensitivity = detect_sensitivity(
                         col.physical_name or col.name,
                         samples,
-                        looks_like_value,
+                        assigned=assigned,
                         classification=classification,
                         table=split_fqn(fqn)[-1],
                     )
@@ -2384,19 +2471,6 @@ class Engine:
 
                 break
 
-    def _reads(self, tbl: TableMeta) -> bool:
-        """Whether `tbl` is queried at all, resolved by name alone."""
-
-        settings = self._conn.settings_for(tbl.fqn, _kind(tbl.type))
-
-        return not described_without_query(
-            settings.mode,
-            explicit=settings.explicit,
-            has_columns=True,
-            external=tbl.external,
-            opt_in_only=tbl.opt_in_only,
-        )
-
     def _materialize_scope(
         self,
         fqn: str,
@@ -2439,8 +2513,9 @@ class Engine:
                 ) from exc
 
             _LOG.warning(
-                "table %r: could not materialize its sample of %s (%s); each statistic for it "
-                "is measured over its own draw of the rows",
+                "table %r: could not materialize its sample of %s (%s); every statement reads "
+                "the seeded sample directly, so a write between two of them reaches one and not "
+                "the other",
                 fqn,
                 scope.sample,
                 cause,
@@ -2772,7 +2847,13 @@ class Engine:
                 if cardinality > threshold:
                     children.append(candidate)
 
-        proposed = inference.infer_value_derived_edges(children, parents, frozenset(existing))
+        asserted = frozenset((fqn, column) for fqn, column, _, _ in existing)
+        proposed = inference.infer_value_derived_edges(
+            children,
+            parents,
+            frozenset(existing),
+            asserted,
+        )
         carried_children: dict[str, list[ForeignKeyMeta]] = {}
 
         for child_fqn, edges in proposed.items():
@@ -2987,6 +3068,13 @@ class Engine:
         """
 
         entries = _build_manifest_entries(outcome, self._conn)
+        recorded = committed.manifest.get("dbprint_version") if committed.manifest else None
+        # A carried table keeps the release that wrote it, so the next run covering it re-reads it.
+        stamp = (
+            recorded
+            if outcome.carry.carried and isinstance(recorded, str) and recorded
+            else DBPRINT_VERSION
+        )
         manifest_dict = build_manifest(
             connection_name=self._conn.name,
             adapter_kind=self._conn.adapter,
@@ -2996,6 +3084,7 @@ class Engine:
             selectors=diff_module.DiffSelectors(include=outcome.include, exclude=outcome.exclude),
             redaction_rules_configured=len(self._conn.profile.redact),
             default_collation=outcome.default_collation,
+            dbprint_version=stamp,
             failed_tables=outcome.failed_tables,
             has_manifest_annotations=(prints_root / MANIFEST_ANNOTATIONS_FILENAME).is_file(),
         )
@@ -3470,6 +3559,31 @@ def _error_fields(
     }
 
 
+def _write_error_fields(exc: Exception, fqn: str, directory: Path) -> dict[str, str | None]:
+    """A failed write of one table's own files, worded so failures sharing a cause group."""
+
+    cause = exc.__cause__ if isinstance(exc, WriterError) and exc.__cause__ else exc
+
+    if isinstance(cause, OSError) and cause.errno is not None:
+        error = f"{type(cause).__name__}: [Errno {cause.errno}] {cause.strerror}"
+    else:
+        error = f"{type(cause).__name__}: {cause}"
+
+    return {
+        "error": error,
+        "error_operation": None,
+        "error_detail": (
+            f"  Directory: {directory.as_posix()}/\n"
+            "  Resolution: exclude the table in .dbprint.yaml until its directory can be "
+            "written:\n"
+            "    tables:\n"
+            "      exclude:\n"
+            f'        - "{fqn}"'
+        ),
+        "error_traceback": "".join(traceback.format_exception(exc)),
+    }
+
+
 def _one_line(cause: BaseException, statement_timeout: int | None = None) -> str:
     """`<ExcType>: <message>` - QueryFailed already renders exactly that form - or, for a statement
     the connection's own limit cancelled, `timed out after <limit>`.
@@ -3611,6 +3725,8 @@ def _warn_degraded_blocks(
             if "range" in named
             else "spatial statistics"
             if "extent" in named
+            else "mean and sum"
+            if "sum" in named
             else "top values"
         )
         reason = _one_line(cause, statement_timeout)
@@ -4070,7 +4186,7 @@ def _serialize_statistics(
 
     for name, e in enriched.items():
         col_dict: dict[str, Any] = {
-            "sql_type": e.stats.sql_type,
+            "sql_type": mask_ddl(e.stats.sql_type),
             "nullable": e.stats.nullable,
             "null_count": e.stats.null_count,
             "null_rate": e.stats.null_rate,
@@ -4170,9 +4286,9 @@ def _serialize_statistics(
         payload["merging"] = {
             "engine": merging.engine,
             "key": [
-                {"expression": key.expression, "column": key.column}
+                {"expression": mask_ddl(key.expression), "column": key.column}
                 if key.column is not None
-                else {"expression": key.expression}
+                else {"expression": mask_ddl(key.expression)}
                 for key in merging.keys
             ],
             "one_row_per_key": merging.one_row_per_key,
@@ -4234,12 +4350,19 @@ def _physical_layout_block(layout: PhysicalLayout) -> dict[str, Any]:
     return {
         "mechanism": layout.mechanism,
         "keys": [
-            {"expression": key.expression, "column": key.column}
+            {"expression": mask_ddl(key.expression), "column": key.column}
             if key.column is not None
-            else {"expression": key.expression}
+            else {"expression": mask_ddl(key.expression)}
             for key in layout.keys
         ],
     }
+
+
+def _masked_comments(comments: CommentsMeta) -> CommentsMeta:
+    return CommentsMeta(
+        table=None if comments.table is None else mask_text(comments.table),
+        columns={name: mask_text(text) for name, text in comments.columns.items()},
+    )
 
 
 def _serialize_catalog_only_statistics(
@@ -4272,7 +4395,7 @@ def _serialize_catalog_only_statistics(
             catalog_only=True,
         )
         col_dict: dict[str, Any] = {
-            "sql_type": col.sql_type,
+            "sql_type": mask_ddl(col.sql_type),
             "nullable": col.nullable,
             "classification": classification,
         }
@@ -4344,6 +4467,96 @@ def _drop_forbidden_fields(
         )
 
 
+def _part_detection(
+    fqn: str,
+    col: ColumnMeta,
+    part: PartStats,
+    has_parts: bool,
+    settings: TableSettings,
+) -> tuple[ColumnStats, Classification, Inferred | None]:
+    occurrences = part.occurrences
+    stats = replace(
+        part.stats,
+        null_rate=compute_null_rate(part.stats.null_count, occurrences),
+        cardinality_ratio=(
+            compute_cardinality_ratio(part.stats.cardinality, occurrences)
+            if part.stats.cardinality is not None
+            else None
+        ),
+    )
+    classification = classify(
+        sql_type=stats.sql_type,
+        cardinality=stats.cardinality,
+        has_declared_fk=False,
+        enumeration_threshold=settings.statistics.enumeration_threshold,
+        has_parts=has_parts,
+    )
+    samples = list(part.samples)
+    looks_like = None
+    assigned: Mapping[LooksLike, int] = {}
+
+    if classification in SAMPLED_CLASSIFICATIONS and samples:
+        match = detect_with_evidence(
+            samples,
+            column_name=last_member(part.path) or col.name,
+            classification=classification,
+            cardinality=stats.cardinality,
+            rows=occurrences - stats.null_count,
+        )
+        looks_like = match.pattern
+        assigned = match.assigned
+
+        if looks_like == "numeric_string" and is_numeric_type(stats.sql_type):
+            looks_like = None
+
+    sensitivity = (
+        detect_sensitivity(
+            last_member(part.path) or col.name,
+            samples,
+            assigned=assigned,
+            classification=classification,
+            table=split_fqn(fqn)[-1],
+        )
+        if classification != "unsupported"
+        else None
+    )
+    inferred = (
+        Inferred(looks_like=looks_like, sensitivity=sensitivity)
+        if looks_like is not None or sensitivity is not None
+        else None
+    )
+
+    return stats, classification, inferred
+
+
+def _descended_detection(
+    fqn: str,
+    col: ColumnMeta,
+    column: _EnrichedColumnStats,
+    settings: TableSettings,
+) -> tuple[str, Inferred | None]:
+    classification = classify(
+        sql_type=col.classified_type,
+        cardinality=column.stats.cardinality,
+        has_declared_fk=False,
+        enumeration_threshold=settings.statistics.enumeration_threshold,
+        has_parts=True,
+    )
+    inferred = column.inferred
+
+    # A column first measured here never ran detection, which skips an unsupported column.
+    if classification == "composite" and inferred is None:
+        sensitivity = detect_sensitivity(
+            col.physical_name or col.name,
+            [],
+            classification=classification,
+            table=split_fqn(fqn)[-1],
+        )
+        inferred = Inferred(sensitivity=sensitivity) if sensitivity is not None else None
+
+    return classification, inferred
+
+
 def _spells_hidden_key(path: str, keyed: set[str], open_key_sets: set[str]) -> bool:
     """Whether `path` spells, at any step, a map key - a cell value - whose key set is withheld."""
 
@@ -4363,7 +4576,7 @@ def _part_block(fqn: str, column: str, part: _EnrichedPart, salt: str | None) ->
 
     e = part.enriched
     block: dict[str, Any] = {
-        "sql_type": e.stats.sql_type,
+        "sql_type": mask_ddl(e.stats.sql_type),
         "null_count": e.stats.null_count,
         "null_rate": e.stats.null_rate,
         "classification": e.classification,
@@ -4515,6 +4728,9 @@ def _emitted_extras(e: _EnrichedColumnStats, salt: str | None = None):
     if s.negative_count is not None:
         yield "negative_count", s.negative_count
 
+    if s.non_finite_count is not None:
+        yield "non_finite_count", s.non_finite_count
+
     if s.empty_count is not None:
         yield "empty_count", s.empty_count
 
@@ -4599,6 +4815,10 @@ def _mark_unmeasured(
 
     if (col_dict.get("inferred") or {}).get("looks_like") == "prose":
         owed -= {"values", "values_coverage", "distribution"}
+
+    # SPEC 2.2.4: only a visible `non_finite_count` shows the bounds unowed; withheld, they are unmeasured.
+    if "non_finite_count" in col_dict and "range" not in col_dict:
+        owed -= {"range", "percentiles"}
 
     if named := sorted(f for f in owed if not emits(col_dict, f)):
         col_dict["unmeasured"] = named
@@ -5147,7 +5367,7 @@ def _incoming_from_carried(
                     referencer_column=tuple(entry["column"]),
                     on_delete=entry.get("on_delete"),
                     on_update=entry.get("on_update"),
-                    detection=relationship_graph.edge_detection(entry),
+                    detection=edge_detection(entry),
                     constraint_name=entry.get("constraint_name"),
                 )
             except (KeyError, TypeError):
@@ -5244,7 +5464,7 @@ def _serialize_carried_relationships(
 def _edge_fields(entry: Mapping[str, Any]) -> dict[str, Any]:
     """A refers_to entry's own fields, `observed` dropped, in the order a producer writes them."""
 
-    detection = relationship_graph.edge_detection(entry)
+    detection = edge_detection(entry)
 
     return _without_none(
         {
@@ -5344,18 +5564,15 @@ def _compute_diff_dict(
 
 
 def _baseline_path(conn: ConnectionConfig, project_root: Path) -> str:
-    """Where the baseline prints sit, relative to the project root.
+    """Where the baseline prints sit, relative to the project root (SPEC 2.6.2), symlinks resolved.
 
-    `conn.output` is absolute after config load, and an absolute path means nothing to a
-    reader while leaking the producing machine's layout into a published artifact.
+    Absolute only across Windows drives, where no relative spelling exists.
     """
 
-    location = conn.print_root
-
     try:
-        return str(location.relative_to(project_root))
+        return Path(os.path.relpath(conn.print_root.resolve(), project_root.resolve())).as_posix()
     except ValueError:
-        return str(location)
+        return conn.print_root.as_posix()
 
 
 def _empty_diff_dict(
@@ -5406,20 +5623,17 @@ def _summarize_diff(diff_dict: dict[str, Any]) -> _DiffResult:
     )
 
 
-_ASSERTION_FILE_FIELDS = ("row_count", "catalog_only", "scope", "unmeasured")
-
-
 def _statistics_payload_for_assertions(ctx: _PerTableContext) -> dict[str, Any]:
-    """The statistics artifact this run would write, as a statistic assertion reads one.
-
-    The assertions.statistic evaluator consumes the committed statistics.yaml shape, so online
-    mode hands it this and no predicate re-reads disk.
-    """
+    """The statistics artifact this run would write, as a statistic assertion reads one."""
 
     payload = ctx.statistics_payload
-    carried = {k: payload[k] for k in _ASSERTION_FILE_FIELDS if k in payload}
 
-    return {"table": ctx.fqn, "type": ctx.type, **carried, "columns": payload.get("columns") or {}}
+    return {
+        **payload,
+        "table": ctx.fqn,
+        "type": ctx.type,
+        "columns": payload.get("columns") or {},
+    }
 
 
 def _table_state_from_context(
@@ -5435,9 +5649,9 @@ def _table_state_from_context(
     state.columns = {
         c.name: diff_module.ColumnState(
             name=c.name,
-            sql_type=c.sql_type,
+            sql_type=mask_ddl(c.sql_type),
             nullable=c.nullable,
-            default=c.default,
+            default=None if c.default is None else mask_ddl(c.default),
             physical_name=(written.get(c.name) or {}).get("physical_name"),
             collation=(written.get(c.name) or {}).get("collation"),
         )
@@ -5584,27 +5798,39 @@ def _derive_generate_exit_code(
     schema_drift: bool,
     has_sketch_failures: bool,
 ) -> int:
-    """Worst outcome wins; total failure is distinct from partial.
+    """Worst outcome wins, by `EXIT_PRECEDENCE`; total failure is distinct from partial.
 
     Total failure means every table this run touched failed; a skipped table's print is
     already current, so skipped-plus-failed stays partial and all-skipped is EXIT_OK. Only a
     change of shape reaches EXIT_DRIFT, and a sketch-only failure takes EXIT_PARTIAL ahead.
     """
 
-    if summary.failed and not (summary.ok or summary.skipped):
-        return EXIT_TOTAL_FAILURE
-    elif summary.failed or has_sketch_failures:
-        return EXIT_PARTIAL
-    elif schema_drift:
-        return EXIT_DRIFT
-    else:
-        return EXIT_OK
+    earned = {
+        EXIT_TOTAL_FAILURE: summary.failed and not (summary.ok or summary.skipped),
+        EXIT_PARTIAL: summary.failed or has_sketch_failures,
+        EXIT_DRIFT: schema_drift,
+    }
+
+    return worst_exit(*(code for code, holds in earned.items() if holds))
 
 
 def _names_any(table: CommittedTable, fqns: set[str]) -> bool:
     return any(entry.get("target_table") in fqns for entry in table.refers_to) or any(
         edge.referencer_table in fqns for edge in table.referenced_by
     )
+
+
+def _connection_wide_links(stage: RunStage, tables: list[TableMeta]) -> list[str]:
+    directories = {Path(*t.namespace_path).as_posix() for t in tables}
+    walked = {
+        link
+        for link in stage.escaping_links
+        if link in _ROOT_WRITES
+        or (link not in directories and any(d.startswith(f"{link}/") for d in directories))
+    }
+    above = {route_out(stage.prints_root, t.namespace_path[:-1]) for t in tables}
+
+    return sorted(walked | {route for route in above if route is not None})
 
 
 def _sweep_undeclared(
@@ -5639,6 +5865,19 @@ def _sweep_undeclared(
             )
         else:
             _LOG.warning("removed %r, which the manifest no longer declares", where)
+
+
+def _warn_required_filter(fqn: str, required: RequiredFilter) -> None:
+    column = required.column or "<partitioning column>"
+    _LOG.warning(
+        "table %r requires a partition filter (%s), so it is described from the catalog alone; "
+        "to profile it, add: rules: [{match: {tables: [%r]}, profile: {read: {tables: "
+        '{mode: filter, filter: "%s >= ..."}}}}]',
+        fqn,
+        required.option,
+        fqn,
+        column,
+    )
 
 
 def _refusal_text(exc: IdentifierRejected, committed: CommittedPrint) -> str:

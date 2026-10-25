@@ -7,7 +7,12 @@ from decimal import Decimal
 import pytest
 
 from dbprint.spec.normalization import fold
-from dbprint.spec.redaction import apply_redaction_rule, coarsen_day_count, redact_value
+from dbprint.spec.redaction import (
+    apply_redaction_rule,
+    coarsen_day_count,
+    is_digest,
+    redact_value,
+)
 
 
 @pytest.mark.parametrize(("days", "expected"), [(0, 0), (89, 0), (90, 90), (179, 90), (180, 180)])
@@ -48,6 +53,26 @@ def test_a_digest_without_a_salt_is_refused(salt: str | None) -> None:
 
 def test_a_mask_substitutes_the_placeholder() -> None:
     assert redact_value("alice", "mask", None) == "[redacted]"
+
+
+@pytest.mark.parametrize("value", ["alice", 7, Decimal("1.50"), True, "", "[redacted]"])
+def test_every_digest_has_the_digest_form(value: object) -> None:
+    assert is_digest(redact_value(value, "hash", "pepper"))
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "[redacted]",
+        "62d0a49769945fd",
+        "62d0a49769945fd4a",
+        "62D0A49769945FD4",
+        6200049769945004,
+        None,
+    ],
+)
+def test_anything_else_is_not_a_digest(value: object) -> None:
+    assert not is_digest(value)
 
 
 def test_withholding_tolerates_a_field_already_absent() -> None:

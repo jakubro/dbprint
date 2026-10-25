@@ -159,6 +159,23 @@ class TestCarriedTables:
         ]
         assert after["profiled_at"] == yaml.safe_load(before)["profiled_at"]
 
+    def test_a_fresh_table_whose_statistics_will_not_parse_is_re_read(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        manifest = _manifest(tmp_path, SQL)
+        _generate(tmp_path, manifest)
+        path = tmp_path / "w" / "public" / "curator_profile" / "statistics.yaml"
+        text = path.read_text()
+        path.write_text(f"<<<<<<< HEAD\n{text}=======\n{text}>>>>>>> other\n")
+
+        result = _generate(tmp_path, manifest)
+
+        assert result.exit_code == 0
+        assert _columns(tmp_path)["email"]["derived_from"] == [
+            {"table": "public.collector", "column": "email"},
+        ]
+
     def test_an_unconfigured_run_leaves_committed_lineage_alone(self, tmp_path: Path) -> None:
         _generate(tmp_path, _manifest(tmp_path, SQL))
         path = tmp_path / "w" / "public" / "curator_profile" / "statistics.yaml"

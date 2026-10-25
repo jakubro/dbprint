@@ -1,8 +1,8 @@
 """`dbprint check` - offline + --online CI gate over committed prints.
 
 The online phase runs only when the offline half found the print fit to compare: not a
-conformance error, not stale. Top-level exit code = max across every evaluated check
-(ASSERTIONS.md 6.3).
+conformance error, not stale. Top-level exit code = the first of every evaluated check's codes
+in `EXIT_PRECEDENCE` (ASSERTIONS.md 6.3).
 """
 
 from __future__ import annotations
@@ -45,6 +45,7 @@ from dbprint.engine import (
     SummaryCounts,
     TableResult,
     thresholds,
+    worst_exit,
 )
 from dbprint.engine.baseline import failed_tables, read_manifest
 from dbprint.engine.carried import CommittedPrint, redaction_mismatches
@@ -54,7 +55,7 @@ from dbprint.spec import artifact_yaml
 from dbprint.spec.artifacts import declared_artifacts, walkable_tables
 from dbprint.spec.drift import DATA_CHANGE_KINDS
 from dbprint.spec.fqn import directory as fqn_directory
-from ..engine_setup import ConnectionSetupError, build_engine
+from ..engine_setup import ConnectionSetupError, build_engine, interruptible
 from ..options import project_option, refuse_if_remote, resolve_project
 from ..rendering import (
     build_progress_renderer,
@@ -136,7 +137,6 @@ def check_command(
       detect drift - both a change of shape and a moved statistic - and
       evaluate SQL assertions.
 
-    The reported exit code is the worst across every evaluated check.
     `--online` writes one run log to `~/.dbprint/logs/<project-slug>/`, keeping
     the 3 most recent; the offline default writes nothing.
 
@@ -154,7 +154,8 @@ def check_command(
     - `2`: staleness
     - `3`: drift (`--online`) - the committed print no longer matches the
       database, including a statistic that moved (`generate` sets this code for
-      a change of shape only)
+      a change of shape only). Column defaults, indexes and comments are not
+      compared
     - `4`: connection (`--online`, the database could not be reached, or it lists none of the
       committed tables in scope - `generate --confirm-all-removed` records a real total removal)
     - `5`: partial extraction - the committed manifest names a table the last
@@ -162,6 +163,9 @@ def check_command(
       reached but some tables could not be re-extracted; the ones that did are
       still compared and reported normally
     - `6`: assertion failure
+
+    When several apply - within a connection or across connections - the exit code is the
+    first of `1`, `4`, `5`, `6`, `3`, `2` that does.
 
     **Examples:**
 
@@ -249,7 +253,7 @@ def check_command(
         else:
             render_human(results, stream)
 
-        top = max((r.exit_code for r in results), default=EXIT_OK)
+        top = worst_exit(*(r.exit_code for r in results))
 
         if online:
             log_run_summary(top)
@@ -349,21 +353,21 @@ def _check_one(
     exit_moving_not_run = any(entry.severity == "error" for entry in refused)
 
     if has_errors or exit_moving_not_run or redaction_issues:
-        offline_exit = max(offline_exit, EXIT_GENERIC)
+        offline_exit = worst_exit(offline_exit, EXIT_GENERIC)
 
     # The same code `generate` returned when it could not profile these tables (SPEC 2.5).
     if unprofiled:
-        offline_exit = max(offline_exit, EXIT_PARTIAL)
+        offline_exit = worst_exit(offline_exit, EXIT_PARTIAL)
 
     if stale:
-        offline_exit = max(offline_exit, EXIT_STALENESS)
+        offline_exit = worst_exit(offline_exit, EXIT_STALENESS)
 
     # A conformance error or staleness leaves nothing worth comparing; a refused table does
     # not, so reading `offline_exit` here would cost the whole connection its drift check.
     offline_blocks_online = has_errors or bool(stale)
 
     # Offline statistic assertions run independent of `has_errors`, so a conformance error
-    # and an assertion error can co-occur under the exit-code MAX rule.
+    # and an assertion error can co-occur under the exit-code precedence.
     assertion_issues = _evaluate_offline_statistic_assertions(
         conn_config,
         print_root,
@@ -384,7 +388,8 @@ def _check_one(
     if online and offline_blocks_online:
         online_disposition = "refused"
     elif online:
-        outcome = _run_online(conn_config, project_root, renderer)
+        with interruptible():
+            outcome = _run_online(conn_config, project_root, renderer)
         online_drift = outcome.drift
         online_assertion_issues = outcome.statistic + outcome.sql
         connection_failed = outcome.connection_failed
@@ -420,22 +425,22 @@ def _check_one(
     exit_code = offline_exit
 
     if connection_failed:
-        exit_code = max(exit_code, EXIT_CONNECTION)
+        exit_code = worst_exit(exit_code, EXIT_CONNECTION)
 
     # A refused config is structural, not a connection failure: no retry changes the answer.
     if config_refused:
-        exit_code = max(exit_code, EXIT_GENERIC)
+        exit_code = worst_exit(exit_code, EXIT_GENERIC)
 
     # A partial scan sits between a clean run and one that reached nothing; the tables that
     # did extract still contribute their own drift/assertion codes below.
     if partial_scan:
-        exit_code = max(exit_code, EXIT_PARTIAL)
+        exit_code = worst_exit(exit_code, EXIT_PARTIAL)
 
     if drift_present:
-        exit_code = max(exit_code, EXIT_DRIFT)
+        exit_code = worst_exit(exit_code, EXIT_DRIFT)
 
     if has_assertion_error:
-        exit_code = max(exit_code, EXIT_ASSERTION)
+        exit_code = worst_exit(exit_code, EXIT_ASSERTION)
 
     result = CheckResult(
         connection_name=conn_config.name,

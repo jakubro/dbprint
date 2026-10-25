@@ -412,6 +412,12 @@ class TestTheNullsFact:
 
         assert synthesize(s, scope=scope) == "numeric; nulls: none over the rows scanned"
 
+    def test_a_parts_null_share_under_scope_is_its_own_and_unqualified(self) -> None:
+        scope = scope_of({"scope": {"rows_scanned": 90, "sample": 0.1}})
+        part = _stats("categorical", occurrences=50, null_count=10, null_rate=0.2)
+
+        assert synthesize(part, scope=scope) == "nulls: 20%"
+
     def test_a_share_near_every_row_never_reads_as_every_row(self) -> None:
         s = _stats("numeric", nullable=True, null_count=9996, null_rate=0.9996)
 

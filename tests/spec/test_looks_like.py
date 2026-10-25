@@ -11,7 +11,7 @@ import json
 import uuid
 from datetime import date
 from decimal import Decimal
-from typing import get_args
+from typing import ClassVar, get_args
 
 import pytest
 
@@ -599,7 +599,7 @@ class TestFinancialIdentifiers:
 
     @pytest.mark.parametrize(
         "value",
-        ["DE89370400440532013000", "SK3112000000198742637541"],
+        ["DE89370400440532013000", "FR1420041010050500013M02606"],
     )
     def test_a_valid_iban_is_detected(self, value: str) -> None:
         assert detect(_repeat(value)) == "iban"
@@ -607,7 +607,7 @@ class TestFinancialIdentifiers:
     def test_a_spaced_iban_is_detected(self) -> None:
         """Spaces are stripped before the mod-97 check runs (SPEC 4.1.1)."""
 
-        compact = "SK3112000000198742637541"
+        compact = "FR1420041010050500013M02606"
         spaced = " ".join(compact[i : i + 4] for i in range(0, len(compact), 4))
 
         assert detect(_repeat(spaced)) == "iban"
@@ -1327,8 +1327,11 @@ def test_a_value_every_structural_shape_rejects_can_still_be_refused_as_prose() 
 @pytest.mark.parametrize(
     ("values", "expected"),
     [
-        (["a@b.co", "zzz"], LooksLikeMatch(None, 2, 0, "email", 0.5)),
-        (["a@b.co", "c@d.co", "zzz"], LooksLikeMatch(None, 3, 0, "email", 0.666667)),
+        (["a@b.co", "zzz"], LooksLikeMatch(None, 2, 0, "email", 0.5, {"email": 1})),
+        (
+            ["a@b.co", "c@d.co", "zzz"],
+            LooksLikeMatch(None, 3, 0, "email", 0.666667, {"email": 2}),
+        ),
         (["zzz", "yyy"], LooksLikeMatch(None, 2, 0)),
     ],
 )
@@ -1337,6 +1340,27 @@ def test_a_near_miss_carries_its_candidate_and_share(
     expected: LooksLikeMatch,
 ) -> None:
     assert detect_with_evidence(values) == expected
+
+
+class TestTheTally:
+    """`assigned` counts each sampled value once, for the pattern SPEC 4.1.4's priority gives it."""
+
+    PANS: ClassVar[list[str]] = [
+        "4111111111111111",
+        "5500005555555559",
+        "4012888888881881",
+        "6011111111111117",
+    ]
+
+    def test_a_value_counts_for_one_pattern_only(self) -> None:
+        pans = [*self.PANS, "378282246310005"]
+
+        assert detect_with_evidence(pans).assigned == {"card_number": 5}
+
+    def test_a_withheld_pattern_tallies_nothing(self) -> None:
+        """Under five distinct values `card_number` is withheld (SPEC 4.1.3) before the count."""
+
+        assert "card_number" not in detect_with_evidence(self.PANS).assigned
 
 
 class TestBinaryContentKinds:

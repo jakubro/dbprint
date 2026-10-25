@@ -159,6 +159,34 @@ class TestMarkdown:
         )
         assert "## DDL" not in result.text
 
+    @pytest.mark.parametrize("declared", [None, "../outside.sql"], ids=["undeclared", "renamed"])
+    def test_a_ddl_the_entry_does_not_declare_is_never_read(
+        self,
+        tmp_path: Path,
+        declared: str | None,
+    ) -> None:
+        print_root = _seed_print(tmp_path)
+        ddl = print_root / "herbarium" / "public" / "collector" / "ddl.sql"
+        ddl.unlink()
+        (tmp_path / "outside.sql").write_text("-- SENTINEL-OUTSIDE\n")
+        ddl.symlink_to(tmp_path / "outside.sql")
+        manifest: dict[str, Any] = copy.deepcopy(MANIFEST)
+        artifacts = manifest["tables"]["herbarium.public.collector"]["artifacts"]
+        artifacts.pop("ddl")
+
+        if declared is not None:
+            artifacts["ddl"] = declared
+
+        result = assemble_context(
+            manifest,
+            print_root,
+            ["herbarium.public.collector"],
+            AssemblyOptions(),
+            "primary",
+        )
+
+        assert "SENTINEL-OUTSIDE" not in result.text
+
     def test_no_stats_omits_cardinality_table(self, tmp_path: Path) -> None:
         print_root = _seed_print(tmp_path)
         opts = AssemblyOptions(include_stats=False)
@@ -222,7 +250,7 @@ class TestCorruptArtifact:
             "primary",
         )
 
-        assert "Unreadable: statistics (present on disk, failed to parse)" in result.text
+        assert "Unreadable: statistics (present on disk, malformed)" in result.text
         assert "## Cardinality & key columns" not in result.text
         assert "Missing:" not in result.text
 
@@ -367,7 +395,7 @@ class TestConnectionNotes:
             "primary",
         )
 
-        assert "Unreadable: manifest_annotations (present on disk, failed to parse)" in result.text
+        assert "Unreadable: manifest_annotations (present on disk, malformed)" in result.text
 
     @pytest.mark.parametrize("purpose", ["profile", "query"])
     def test_a_single_table_render_carries_the_notes_once(
@@ -1259,7 +1287,7 @@ class TestNullPatternsMarkdown:
 
 class TestAPartsPresenceNamesItsPopulation:
     @staticmethod
-    def _presences() -> list[str]:
+    def _presences(scope: dict[str, Any] | None = None) -> list[str]:
         from dbprint.engine.context_assembler import _markdown_parts
 
         parts = {
@@ -1275,6 +1303,9 @@ class TestAPartsPresenceNamesItsPopulation:
             "columns": {"field_log": {"classification": "json", "null_count": 20, "parts": parts}},
         }
 
+        if scope is not None:
+            a.statistics["scope"] = scope
+
         return [
             line.text.rsplit("; ", 1)[-1].rstrip(" |")
             for line in _markdown_parts(a, AssemblyOptions())
@@ -1289,6 +1320,15 @@ class TestAPartsPresenceNamesItsPopulation:
 
     def test_a_member_under_an_array_states_no_row_share(self) -> None:
         assert "present: 57.1% of field_log.readings[*]" in self._presences()
+
+    def test_on_a_table_read_in_part_a_top_level_member_is_a_share_of_rows_scanned(self) -> None:
+        assert "present: 60% of rows scanned" in self._presences({"rows_scanned": 100})
+
+    def test_on_a_table_read_in_part_the_row_share_names_rows_scanned(self) -> None:
+        presences = self._presences({"rows_scanned": 100, "filter": "id < 100"})
+
+        assert "present: 66.7% of field_log.site (40% of rows scanned)" in presences
+        assert "present: 57.1% of field_log.readings[*]" in presences
 
 
 class TestRelationshipsAreRanked:
@@ -1487,19 +1527,119 @@ class TestStructured:
         assert "statistics" in parsed
         assert "ddl" in parsed
 
-    def test_yaml_multi_document_for_multi_table(self, tmp_path: Path) -> None:
+    def test_yaml_over_several_tables_is_one_document(self, tmp_path: Path) -> None:
         print_root = _seed_print(tmp_path)
-        opts = AssemblyOptions(format="yaml")
-        # Reuse the same table twice to exercise the multi-doc path
         result = assemble_context(
             MANIFEST,
             print_root,
             ["herbarium.public.collector", "herbarium.public.collector"],
-            opts,
+            AssemblyOptions(format="yaml"),
             "primary",
         )
         docs = list(yaml.safe_load_all(result.text))
-        assert len(docs) == 2
+
+        assert len(docs) == 1
+        assert docs[0]["connection"] == "primary"
+        assert [t["table"] for t in docs[0]["tables"]] == ["herbarium.public.collector"] * 2
+
+
+_TWO_TABLES = ["herbarium.public.collector", "herbarium.public.specimen_loan"]
+
+
+class TestConnectionNotesInStructuredOutput:
+    """SPEC 2.7.3's notes ride once on the connection object over several tables, never a table."""
+
+    def _assemble(self, print_root: Path, fmt: str, **options: Any) -> dict[str, Any]:
+        text = assemble_context(
+            TWO_TABLE_MANIFEST,
+            print_root,
+            _TWO_TABLES,
+            AssemblyOptions(format=fmt, **options),
+            "primary",
+        ).text
+        docs = list(yaml.safe_load_all(text)) if fmt == "yaml" else [json.loads(text)]
+
+        assert len(docs) == 1
+
+        return docs[0]
+
+    @pytest.mark.parametrize("fmt", ["json", "yaml"])
+    def test_the_notes_ride_the_connection_object(self, tmp_path: Path, fmt: str) -> None:
+        doc = self._assemble(_seed_two_table_print(tmp_path, notes="Every date is UTC."), fmt)
+
+        assert list(doc) == ["connection", "connection_notes", "tables"]
+        assert doc["connection_notes"] == "Every date is UTC."
+        assert [t["table"] for t in doc["tables"]] == _TWO_TABLES
+        assert all("connection_notes" not in t for t in doc["tables"])
+
+    def test_no_notes_file_leaves_connection_and_tables(self, tmp_path: Path) -> None:
+        doc = self._assemble(_seed_two_table_print(tmp_path), "json")
+
+        assert list(doc) == ["connection", "tables"]
+
+    def test_no_annotations_drops_the_notes(self, tmp_path: Path) -> None:
+        print_root = _seed_two_table_print(tmp_path, notes="Every date is UTC.")
+        doc = self._assemble(print_root, "json", include_annotations=False)
+
+        assert "connection_notes" not in doc
+
+    @pytest.mark.parametrize("include_annotations", [True, False])
+    def test_a_corrupt_notes_file_is_reported_on_the_connection(
+        self,
+        tmp_path: Path,
+        include_annotations: bool,
+    ) -> None:
+        print_root = _seed_two_table_print(tmp_path)
+        (print_root / "manifest.annotations.yaml").write_text("notes: [unclosed")
+        doc = self._assemble(print_root, "json", include_annotations=include_annotations)
+
+        assert "manifest_annotations" in doc["_corrupted"]
+        assert all("manifest_annotations" not in t.get("_corrupted", {}) for t in doc["tables"])
+
+    def test_one_table_keeps_its_bare_object_with_the_notes(self, tmp_path: Path) -> None:
+        print_root = _seed_two_table_print(tmp_path, notes="Every date is UTC.")
+        text = assemble_context(
+            TWO_TABLE_MANIFEST,
+            print_root,
+            ["herbarium.public.collector"],
+            AssemblyOptions(format="json"),
+            "primary",
+        ).text
+
+        assert json.loads(text)["connection_notes"] == "Every date is UTC."
+
+    def test_the_budget_pays_for_the_notes_before_the_split(self, tmp_path: Path) -> None:
+        notes = "A shared fact. " * 80
+        with_notes = _seed_two_table_print(tmp_path / "a", notes=notes)
+        without = _seed_two_table_print(tmp_path / "b")
+        options = AssemblyOptions(format="json", budget=400)
+
+        def stats_size(print_root: Path) -> int:
+            text = assemble_context(
+                TWO_TABLE_MANIFEST,
+                print_root,
+                _TWO_TABLES,
+                options,
+                "primary",
+            ).text
+
+            return len(json.dumps(json.loads(text)["tables"]))
+
+        assert stats_size(with_notes) < stats_size(without)
+
+    def test_payloads_carry_the_connection_keys_beside_the_tables(self, tmp_path: Path) -> None:
+        from dbprint.engine.context_assembler import assemble_payloads
+
+        print_root = _seed_two_table_print(tmp_path, notes="Every date is UTC.")
+        result = assemble_payloads(
+            TWO_TABLE_MANIFEST,
+            print_root,
+            ["herbarium.public.collector"],
+            AssemblyOptions(format="json"),
+        )
+
+        assert result.header == {"connection_notes": "Every date is UTC."}
+        assert "connection_notes" not in result.payloads[0]
 
 
 class TestStructuredBudget:
@@ -1863,9 +2003,7 @@ class TestAnnotations:
         assert "## Annotations" not in result.text
         assert "## Description" in result.text
         # The parse failure is stated, not silently dropped alongside the missing section.
-        assert (
-            "Unreadable: statistics_annotations (present on disk, failed to parse)" in result.text
-        )
+        assert "Unreadable: statistics_annotations (present on disk, malformed)" in result.text
 
     @staticmethod
     def _seed_annotations(tmp_path: Path, columns: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
@@ -2205,10 +2343,7 @@ class TestAnnotations:
             "primary",
         )
 
-        assert (
-            "Unreadable: relationships_annotations (present on disk, failed to parse)"
-            in result.text
-        )
+        assert "Unreadable: relationships_annotations (present on disk, malformed)" in result.text
 
     def test_a_corrupt_artifact_reaches_the_structured_header(self, tmp_path: Path) -> None:
         """The markdown path already names a corrupt artifact - `--format json`/`yaml` must carry
@@ -3442,7 +3577,12 @@ class TestARejectedEdgeIsWithheld:
         annotations = accession / "relationships.annotations.yaml"
         data = yaml.safe_load(annotations.read_text())
         data["refers_to"].append(
-            {"column": ["vault_id"], "target_table": "herbarium.public.vault", "note": "kept"},
+            {
+                "column": ["vault_id"],
+                "target_table": "herbarium.public.vault",
+                "target_column": ["vault_id"],
+                "note": "kept",
+            },
         )
         annotations.write_text(yaml.safe_dump(data))
         payload = assemble_structured_context(
@@ -3452,9 +3592,16 @@ class TestARejectedEdgeIsWithheld:
             AssemblyOptions(),
         )
 
-        assert payload["relationships"]["refers_to"] == []
+        assert [e["target_table"] for e in payload["relationships"]["refers_to"]] == [
+            "herbarium.public.vault",
+        ]
         assert payload["relationship_annotations"] == [
-            {"column": ["vault_id"], "target_table": "herbarium.public.vault", "note": "kept"},
+            {
+                "column": ["vault_id"],
+                "target_table": "herbarium.public.vault",
+                "target_column": ["vault_id"],
+                "note": "kept",
+            },
         ]
 
 
@@ -3583,7 +3730,7 @@ def test_a_corrupt_notes_file_is_reported_over_several_tables_without_annotation
         "primary",
     ).text
 
-    assert "Unreadable: manifest_annotations (present on disk, failed to parse)" in text
+    assert "Unreadable: manifest_annotations (present on disk, malformed)" in text
 
 
 def _coded_artifacts(
@@ -3945,3 +4092,176 @@ class TestASourceNoteReachesTheDerivedColumn:
         ).text
 
         assert "Meanings: not documented here" in text
+
+
+def _path_edge_artifacts(
+    *,
+    key_part: dict[str, Any] | None,
+    scoped: bool = False,
+) -> TableArtifacts:
+    traits: dict[str, Any] = {
+        "classification": "composite",
+        "nullable": True,
+        "null_count": 40,
+        "null_rate": 0.1,
+    }
+
+    if key_part is not None:
+        traits["parts"] = {".lineage_id": key_part}
+
+    statistics: dict[str, Any] = {
+        "row_count": 400,
+        "columns": {
+            "traits": traits,
+            "patron_id": {
+                "classification": "foreign_key_candidate",
+                "nullable": True,
+                "null_count": 100,
+                "null_rate": 0.25,
+            },
+        },
+    }
+
+    if scoped:
+        statistics["scope"] = {"sample": 0.5, "rows_scanned": 200}
+        traits["null_count"], traits["null_rate"] = 20, 0.1
+
+    a = _bare_artifacts(statistics)
+    a.relationships = {
+        "refers_to": [
+            {
+                "column": ["traits"],
+                "path": ["lineage_id"],
+                "target_table": "herbarium.public.lineage",
+                "target_column": ["lineage_id"],
+                "target_path": ["code"],
+                "detection": "annotated",
+            },
+            {
+                "column": ["patron_id"],
+                "target_table": "herbarium.public.patron",
+                "target_column": ["patron_id"],
+                "detection": "annotated",
+            },
+        ],
+    }
+
+    return a
+
+
+_KEY_PART = {"occurrences": 20, "null_count": 4}
+
+
+class TestAPathEdgeReportsItsKeysNulls:
+    """A key inside a semi-structured column is not the column: its own presence is the figure."""
+
+    def _joins(self, a: TableArtifacts) -> list[str]:
+        from dbprint.engine.context_assembler import _markdown_joins
+
+        return [r.text for r in _markdown_joins(a)]
+
+    def test_the_md_line_carries_the_share_of_rows_whose_key_reads_null(self) -> None:
+        lines = self._joins(_path_edge_artifacts(key_part=_KEY_PART))
+
+        assert lines[1] == (
+            "- traits (path lineage_id) -> herbarium.public.lineage.lineage_id (path code) "
+            "(annotated); nulls: 96%"
+        )
+        assert lines[2].endswith("(annotated); nulls: 25%")
+
+    def test_the_column_s_own_share_moves_to_the_nulls_line(self) -> None:
+        text = _query_text(_path_edge_artifacts(key_part=_KEY_PART))
+
+        assert "Nulls: traits (10%)" in text
+        assert "patron_id (25%)" not in text.split("## Joins")[0]
+
+    def test_the_structured_edge_and_nulls_map_agree(self) -> None:
+        from dbprint.engine.context_assembler import _query_candidates
+
+        candidates = dict(
+            _query_candidates(_path_edge_artifacts(key_part=_KEY_PART), AssemblyOptions()),
+        )
+        rates = [e.get("null_rate") for e in candidates["joins"]["refers_to"]]
+
+        assert rates == [0.96, 0.25]
+        assert candidates["nulls"] == {"traits": 0.1}
+
+    def test_no_listed_part_means_no_figure(self) -> None:
+        from dbprint.engine.context_assembler import _query_candidates
+
+        a = _path_edge_artifacts(key_part=None)
+        candidates = dict(_query_candidates(a, AssemblyOptions()))
+
+        assert self._joins(a)[1].endswith("(annotated)")
+        assert "null_rate" not in candidates["joins"]["refers_to"][0]
+        assert candidates["nulls"] == {"traits": 0.1}
+
+    def test_a_scoped_table_counts_over_the_rows_scanned(self) -> None:
+        full = {"occurrences": 200, "null_count": 0}
+
+        assert self._joins(_path_edge_artifacts(key_part=full, scoped=True))[1].endswith(
+            "(annotated); nulls: none over the rows scanned",
+        )
+        assert self._joins(_path_edge_artifacts(key_part=_KEY_PART, scoped=True))[1].endswith(
+            "(annotated); nulls: 92%",
+        )
+
+    def test_the_fk_label_keeps_both_paths(self) -> None:
+        a = _path_edge_artifacts(key_part=_KEY_PART)
+
+        assert fk_target_map(a.relationships) == {
+            "traits": [
+                (
+                    "traits (path lineage_id) -> herbarium.public.lineage.lineage_id (path code) "
+                    "(annotated)"
+                ),
+            ],
+            "patron_id": ["herbarium.public.patron.patron_id (annotated)"],
+        }
+
+
+class TestAMalformedAnnotationFileIsWithheld:
+    """SPEC 2.7: a file failing its schema is read by no consumer and named unreadable."""
+
+    def test_the_table_and_the_edge_s_target_both_assemble(self, tmp_path: Path) -> None:
+        print_root, manifest = _seed_human_edge(
+            tmp_path,
+            target_table=["herbarium.public.collector"],
+        )
+
+        for table in ("herbarium.public.accession", "herbarium.public.collector"):
+            payload = assemble_structured_context(manifest, print_root, table, AssemblyOptions())
+
+            assert "recorded_by" not in json.dumps(payload["relationships"])
+
+        payload = assemble_structured_context(
+            manifest,
+            print_root,
+            "herbarium.public.accession",
+            AssemblyOptions(),
+        )
+
+        assert payload["_corrupted"]["relationships_annotations"].startswith(
+            "does not match its schema (SPEC 2.7): refers_to[0].target_table: ",
+        )
+
+    def test_the_md_notice_calls_the_file_malformed(self, tmp_path: Path) -> None:
+        print_root, manifest = _seed_human_edge(tmp_path, note=5)
+        text = _query(print_root, "herbarium.public.accession", manifest)
+
+        assert "Unreadable: relationships_annotations (present on disk, malformed)" in text
+        assert "the collector who" not in text
+
+    def test_an_unquoted_date_is_read_as_the_text_check_accepts(self, tmp_path: Path) -> None:
+        print_root, manifest = _seed_human_edge(tmp_path)
+        path = print_root / "herbarium/public/accession/relationships.annotations.yaml"
+        path.write_text(
+            "format_version: 1\nrefers_to:\n- column: [recorded_by]\n"
+            "  target_table: herbarium.public.collector\n  target_column: [collector_id]\n"
+            "  note: 2024-01-01\n",
+        )
+
+        text = _query(print_root, "herbarium.public.accession", manifest)
+
+        assert "note: 2024-01-01" in text
+        assert "Unreadable" not in text

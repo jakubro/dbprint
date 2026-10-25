@@ -204,11 +204,12 @@ type = "forbidden"
 source_modules = ["dbprint.cli"]
 forbidden_modules = ["dbprint.adapters"]
 allow_indirect_imports = true
-# The adapter ABC names a parameter type and trace_context tags statements with the run's context;
-# neither constructs or reaches a concrete adapter.
+# The adapter ABC names a parameter type, trace_context tags statements with the run's context and
+# interrupt records a Ctrl-C as run state; none constructs or reaches a concrete adapter.
 ignore_imports = [
   "dbprint.cli.adapter_registry -> dbprint.adapters",
   "dbprint.cli.engine_setup -> dbprint.adapters",
+  "dbprint.cli.engine_setup -> dbprint.adapters.interrupt",
   "dbprint.cli.commands.check -> dbprint.adapters.trace_context",
   "dbprint.cli.rendering.progress -> dbprint.adapters.trace_context",
 ]

@@ -727,6 +727,22 @@ class TestStatisticChanges:
         change = next(c for c in diff["changes"] if c["kind"] == "statistic_changed")
         assert "delta" not in change
 
+    @pytest.mark.parametrize("before_mean", [float("nan"), float("inf")])
+    def test_a_non_finite_side_omits_delta(self, before_mean: float) -> None:
+        before = _table(
+            columns={"a": ColumnState("a", "double", True, None)},
+            statistics={"a": {"mean": before_mean}},
+        )
+        after = _table(
+            columns={"a": ColumnState("a", "double", True, None)},
+            statistics={"a": {"mean": 199.0}},
+        )
+        diff = _compute({"public.t": before}, {"public.t": after})
+        change = next(c for c in diff["changes"] if c["kind"] == "statistic_changed")
+        assert (change["stat"], change["after"]) == ("mean", 199.0)
+        assert "delta" not in change
+        assert "delta_pct" not in change
+
     def test_zero_before_omits_delta_pct(self) -> None:
         before = _table(
             columns={"a": ColumnState("a", "int", True, None)},
@@ -1810,6 +1826,7 @@ _COLUMN_SAMPLES: dict[str, tuple[Any, Any]] = {
     "sum": (3, 4),
     "zero_count": (0, 1),
     "negative_count": (0, 1),
+    "non_finite_count": (0, 1),
     "empty_count": (0, 1),
     "quantized_count": (0, 1),
     "length": ({"max": 3}, {"max": 4}),
@@ -1979,6 +1996,27 @@ class TestTableTypeAndCollation:
         ]
 
 
+_INTEGER_KEY = {
+    "classification": "foreign_key_candidate",
+    "null_count": 0,
+    "cardinality": 400,
+    "values": [{"value": 7, "count": 5}],
+    "values_coverage": 0.0025,
+}
+_INTEGER_NUMERIC = {
+    "classification": "numeric",
+    "null_count": 0,
+    "cardinality": 400,
+    "range": {"min": 1, "max": 400},
+    "percentiles": {"p25": 100, "p50": 200, "p75": 300},
+    "mean": 200.5,
+    "sum": 401000,
+    "zero_count": 0,
+    "negative_count": 0,
+    "quantized_count": 2000,
+}
+
+
 class TestASwitchFlipIsNotDrift:
     """SPEC 2.6.10: a field either side's `disabled` covers, or that the switch re-derived,
     produces no event.
@@ -2014,3 +2052,62 @@ class TestASwitchFlipIsNotDrift:
 
         assert self._events(before, after, frozenset({"parts"})) == []
         assert self._events(before, after, frozenset())
+
+    def _flipped(self, before: dict, after: dict, flipped: frozenset[str]) -> list[dict]:
+        cols = {"c": ColumnState("c", "integer", True, None)}
+
+        return diff_module._diff_statistics(
+            "t",
+            {"c": before},
+            {"c": after},
+            cols,
+            cols,
+            scoped=False,
+            disabled=flipped,
+            flipped=flipped,
+        )
+
+    def test_an_inference_flip_reclassifying_an_integer_key_reports_nothing(self) -> None:
+        flip = frozenset({"relationships.infer"})
+
+        assert self._flipped(_INTEGER_KEY, _INTEGER_NUMERIC, flip) == []
+        assert self._flipped(_INTEGER_NUMERIC, _INTEGER_KEY, flip) == []
+
+    def test_an_inference_flip_reclassifying_a_string_key_reports_nothing(self) -> None:
+        before = {"classification": "foreign_key_candidate", "null_count": 0, "cardinality": 400}
+        after = {**before, "classification": "text", "empty_count": 0}
+
+        assert self._flipped(before, after, frozenset({"relationships.infer"})) == []
+
+    def test_a_real_change_in_the_flip_run_still_reports(self) -> None:
+        after = {**_INTEGER_NUMERIC, "null_count": 200}
+        events = self._flipped(_INTEGER_KEY, after, frozenset({"relationships.infer"}))
+
+        assert [(e["stat"], e["before"], e["after"]) for e in events] == [("null_count", 0, 200)]
+
+    def test_with_no_flip_a_reclassification_reports_in_full(self) -> None:
+        events = self._flipped(_INTEGER_KEY, _INTEGER_NUMERIC, frozenset())
+
+        assert {e["stat"] for e in events} >= {
+            "classification",
+            "range.min",
+            "range.max",
+            "mean",
+            "sum",
+            "zero_count",
+            "values",
+            "values_coverage",
+        }
+
+    def test_a_flip_drops_the_sensitivity_only_one_sampled_side_read(self) -> None:
+        before = {**_INTEGER_KEY, "inferred": {"sensitivity": "contact"}}
+        after = {**_INTEGER_NUMERIC, "inferred": {"sensitivity": "personal_name"}}
+
+        assert self._flipped(before, after, frozenset({"relationships.infer"})) == []
+
+    def test_a_flip_keeps_a_sensitivity_change_when_both_sides_sampled(self) -> None:
+        before = {"classification": "text", "inferred": {"sensitivity": "contact"}}
+        after = {"classification": "text", "inferred": {"sensitivity": "personal_name"}}
+        events = self._flipped(before, after, frozenset({"relationships.infer"}))
+
+        assert [e["stat"] for e in events] == ["inferred.sensitivity"]

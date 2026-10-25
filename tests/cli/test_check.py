@@ -13,6 +13,7 @@ import yaml
 from click.testing import CliRunner
 
 from dbprint.cli.main import main
+from dbprint.engine import EXIT_GENERIC
 from dbprint.spec.temporal_age import freshness_classification, max_age_days
 
 
@@ -567,6 +568,29 @@ class TestRedactionNotApplied:
             ),
         ]
 
+    def test_a_stale_print_beside_it_does_not_lower_the_exit(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _seed_clean(tmp_path, committed_print, profiled_at=datetime.now(UTC) - timedelta(days=30))
+        (tmp_path / ".dbprint.yaml").write_text(
+            PROJECT_YAML
+            + "    profile:\n"
+            + "      redact:\n"
+            + "        - columns: ['arboretum.seedbank.accession.accession_id']\n"
+            + "          with: mask\n",
+        )
+        monkeypatch.chdir(tmp_path)
+
+        result = CliRunner().invoke(main, ["check", "--format", "json"])
+        payload = json.loads(result.stdout)[0]
+
+        assert result.exit_code == EXIT_GENERIC
+        assert [i["code"] for i in payload["issues"]] == ["privacy.redaction-not-applied"]
+        assert [s["table"] for s in payload["stale_entries"]] == ["arboretum.seedbank.accession"]
+
 
 class TestMissingManifest:
     def test_exit_one(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -663,7 +687,8 @@ class TestRecordedThreshold:
         result = CliRunner().invoke(main, ["check", "--format", "json"])
         payload = json.loads(result.stdout)[0]
 
-        assert result.exit_code == 2
+        # `soon` is also a schema type mismatch, a conformance error that outranks staleness.
+        assert result.exit_code == EXIT_GENERIC
         assert [s["max_age_days"] for s in payload["stale_entries"]] == [7.0]
 
 

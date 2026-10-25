@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from dbprint.spec import artifact_yaml
+from dbprint.spec import artifact_yaml, authored
 from dbprint.spec.artifact_yaml import ArtifactLoader
 
 
@@ -53,19 +52,4 @@ def load_yaml(path: Path) -> Any:
 
     text = path.read_text(encoding="utf-8")
 
-    return _normalize(artifact_yaml.load(text, loader=_SourceKeepingLoader))
-
-
-def _normalize(node: Any) -> Any:
-    if isinstance(node, datetime):
-        s = node.isoformat()
-
-        return s.replace("+00:00", "Z")
-    elif isinstance(node, date):
-        return node.isoformat()
-    elif isinstance(node, dict):
-        return {k: _normalize(v) for k, v in node.items()}
-    elif isinstance(node, list):
-        return [_normalize(v) for v in node]
-    else:
-        return node
+    return authored.iso_dates(artifact_yaml.load(text, loader=_SourceKeepingLoader))

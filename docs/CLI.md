@@ -100,8 +100,8 @@ Complete `--help` for every command, captured verbatim. This file is generated f
 
   • CONNECTION: connection to explain; resolved from .dbprint.yaml when omitted (the auto: true
     set, or the sole connection). A single argument that names no connection is read as TABLE.
-  • TABLE: fully qualified name, e.g. arboretum.seedbank.accession. Omitted, the connection's own
-    profile and its rule list are printed.
+  • TABLE: fully qualified name, e.g. arboretum.seedbank.accession, matched case-insensitively, as
+    rules are. Omitted, the connection's own profile and its rule list are printed.
 
  Exit codes:
 
@@ -153,15 +153,20 @@ Complete `--help` for every command, captured verbatim. This file is generated f
  Exit codes:
 
   • 0: ok (also when every matched table was already current, so nothing was profiled)
-  • 1: generic
-  • 3: schema drift (the database's shape moved relative to the baseline - a table, column,
-    relationship, index or comment). Statistics that moved are recorded in diff.yaml but do not set
-    this code; dbprint check --online reports both
+  • 1: generic (also when the committed manifest.yaml cannot be read or followed, or is missing
+    beside existing prints; nothing is written)
+  • 3: schema drift (a table, column or relationship moved relative to the baseline; a first run
+    has no baseline, so every table is added). Column defaults, indexes and comments are not
+    compared: v1 records them only in ddl.sql, which the diff does not read. Statistics that moved
+    are recorded in diff.yaml but do not set this code; dbprint check --online reports both
   • 4: connection (also when the target lists none of the committed tables in scope, a wrong path
     or missing grants; --confirm-all-removed records a real total removal)
   • 5: partial (some tables failed, others succeeded or were skipped; or every table succeeded but
     the sketch pass that runs after them did not)
   • 7: total failure (no table was profiled)
+
+ When several apply - within a connection or across connections - the exit code is the first of 1,
+ 4, 7, 5, 3 that does.
 
  Examples:
 
@@ -224,6 +229,8 @@ Complete `--help` for every command, captured verbatim. This file is generated f
   • 4: connection (also when the target lists none of the committed tables in scope - generate
     --confirm-all-removed records a real total removal)
   • 5: partial extraction
+
+ When several apply across connections, the exit code is the first of 1, 4, 5 that does.
 
  Examples:
 
@@ -311,8 +318,8 @@ Complete `--help` for every command, captured verbatim. This file is generated f
   • Online (--online): additionally re-extracts the live database to detect drift - both a change
     of shape and a moved statistic - and evaluate SQL assertions.
 
- The reported exit code is the worst across every evaluated check. --online writes one run log to
- ~/.dbprint/logs/<project-slug>/, keeping the 3 most recent; the offline default writes nothing.
+ --online writes one run log to ~/.dbprint/logs/<project-slug>/, keeping the 3 most recent; the
+ offline default writes nothing.
 
  Arguments:
 
@@ -326,13 +333,17 @@ Complete `--help` for every command, captured verbatim. This file is generated f
     redact rules would publish otherwise than the print does (privacy.redaction-not-applied)
   • 2: staleness
   • 3: drift (--online) - the committed print no longer matches the database, including a statistic
-    that moved (generate sets this code for a change of shape only)
+    that moved (generate sets this code for a change of shape only). Column defaults, indexes and
+    comments are not compared
   • 4: connection (--online, the database could not be reached, or it lists none of the committed
     tables in scope - generate --confirm-all-removed records a real total removal)
   • 5: partial extraction - the committed manifest names a table the last generate run could not
     profile, or (--online) the connection was reached but some tables could not be re-extracted;
     the ones that did are still compared and reported normally
   • 6: assertion failure
+
+ When several apply - within a connection or across connections - the exit code is the first of 1,
+ 4, 5, 6, 3, 2 that does.
 
  Examples:
 
@@ -487,8 +498,8 @@ Complete `--help` for every command, captured verbatim. This file is generated f
  Exposes the committed prints as Model Context Protocol resources and tools for editor and agent
  integration. Requires the [mcp] extra (pip install dbprint[mcp]); exits 1 with an install hint
  when it is missing. Serves the resolved connection set read-only - no database connection. stdio
- transport by default; HTTP binds to loopback only. The project resolves from the working directory
- unless --project names another.
+ transport by default; HTTP binds to loopback only and answers only a loopback Host. The project
+ resolves from the working directory unless --project names another.
 
  Arguments:
 
@@ -553,8 +564,9 @@ Complete `--help` for every command, captured verbatim. This file is generated f
  Usage: dbprint docs serve [OPTIONS] [CONNECTION]
 
  Serve the docs site live over HTTP, re-reading the print on every request.
- Binds loopback only. Re-reads every artifact from disk on each request, so a page reflects the
- latest generate without restarting the server.
+ Binds loopback only. Answers only a Host of 127.0.0.1, localhost or [::1] - any other gets 400 -
+ so a web page cannot reach it by rebinding its name to loopback. Re-reads every artifact from disk
+ on each request, so a page reflects the latest generate without restarting the server.
 
  Arguments:
 

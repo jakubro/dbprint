@@ -37,3 +37,28 @@ def test_an_edge_claim_of_the_wrong_type_is_unassertable() -> None:
     issues = _check_edge_claim("t/relationships.annotations.yaml", "observed.coherent", 1, edge)
 
     assert [i.code for i in issues] == ["annotations.claim-unassertable"]
+
+
+def test_a_boolean_set_claim_on_a_number_column_is_unassertable() -> None:
+    column = {
+        "sql_type": "SMALLINT",
+        "nullable": False,
+        "classification": "categorical",
+        "cardinality": 2,
+        "values": [{"value": 0, "count": 30}, {"value": 1, "count": 30}],
+        "values_coverage": 1.0,
+    }
+
+    assert _codes("accepted_values", [True, False], column) == ["annotations.claim-unassertable"]
+
+
+def test_a_boolean_range_claim_on_an_edge_is_unassertable() -> None:
+    edge = {"observed": {"coherent": True}}
+    issues = _check_edge_claim(
+        "t/relationships.annotations.yaml",
+        "observed.coherent",
+        {"min": False},
+        edge,
+    )
+
+    assert [i.code for i in issues] == ["annotations.claim-unassertable"]

@@ -25,6 +25,7 @@ _NEEDS_NO_FAILURES = {
     ("cli/commands/check.py", "_load_committed_statistics"): "reads one present table's files",
     ("cli/commands/check.py", "_summary_view"): "renders issues keyed by present tables",
     ("cli/commands/check.py", "_tables_with_errors"): "maps issues onto present tables",
+    ("cli/commands/config.py", "_printed_external"): "reads one present table's files",
     ("engine/context_assembler.py", "authored_relationship_annotations"): (
         "reads present tables' annotation files"
     ),

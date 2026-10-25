@@ -1,4 +1,4 @@
-"""`public.order_line`: a mock table whose array, document and map columns state their parts.
+"""`public.fieldwork`: a mock table whose array, document and map columns state their parts.
 
 The parts are candidates a descent would find; the engine's own walk decides which are kept.
 """
@@ -8,30 +8,31 @@ from __future__ import annotations
 from dbprint.adapters import ColumnStats, Length, ValueCount
 from dbprint.adapters.base import Distribution, Frequencies, PartStats, Range
 from dbprint.adapters.mock import MockParts
+from dbprint.spec.parts import member
 from tests._prints import columns, exact_stats, mock_table, unmeasured_stats
 
 
 ROWS = 100
 
-ORDER_LINE_COLUMNS = columns(
-    ("line_id", "integer"),
-    ("items", "STRUCT(sku VARCHAR, qty INTEGER)[]"),
+FIELDWORK_COLUMNS = columns(
+    ("fieldwork_id", "integer"),
+    ("items", "STRUCT(lot VARCHAR, seeds INTEGER)[]"),
     ("attrs", "jsonb", True),
     ("labels", "MAP(VARCHAR, VARCHAR)"),
 )
 
 
-def order_line(**parts: MockParts) -> dict[str, object]:
+def fieldwork(**parts: MockParts) -> dict[str, object]:
     """The table, with `parts` replacing the default candidates column by column."""
 
     stated = {"items": items_parts(), "attrs": attrs_parts(), "labels": labels_parts(), **parts}
 
     return {
-        "public.order_line": mock_table(
-            "public.order_line",
-            ORDER_LINE_COLUMNS,
+        "public.fieldwork": mock_table(
+            "public.fieldwork",
+            FIELDWORK_COLUMNS,
             {
-                "line_id": exact_stats(
+                "fieldwork_id": exact_stats(
                     "integer",
                     ROWS,
                     1.0,
@@ -48,11 +49,11 @@ def order_line(**parts: MockParts) -> dict[str, object]:
                     negative_count=0,
                     quantized_count=ROWS,
                 ),
-                "items": unmeasured_stats("STRUCT(sku VARCHAR, qty INTEGER)[]"),
+                "items": unmeasured_stats("STRUCT(lot VARCHAR, seeds INTEGER)[]"),
                 "attrs": exact_stats("jsonb", 40, 0.4, nullable=True),
                 "labels": unmeasured_stats("MAP(VARCHAR, VARCHAR)"),
             },
-            primary_key=("line_id",),
+            primary_key=("fieldwork_id",),
             row_count=ROWS,
             parts=stated,
         ),
@@ -67,20 +68,20 @@ def items_parts() -> MockParts:
             PartStats(
                 path="[*]",
                 occurrences=250,
-                stats=_unmeasured("STRUCT(sku VARCHAR, qty INTEGER)"),
+                stats=_unmeasured("STRUCT(lot VARCHAR, seeds INTEGER)"),
             ),
             PartStats(
-                path="[*].sku",
+                path="[*].lot",
                 occurrences=250,
                 stats=_categorical(
                     "VARCHAR",
-                    (("SKU-A", 100), ("SKU-B", 80), ("SKU-C", 70)),
+                    (("LOT-A", 100), ("LOT-B", 80), ("LOT-C", 70)),
                     length=Length(min=5, max=5, avg=5.0, p95=5.0),
                 ),
-                samples=("SKU-A", "SKU-B", "SKU-C"),
+                samples=("LOT-A", "LOT-B", "LOT-C"),
             ),
             PartStats(
-                path="[*].qty",
+                path="[*].seeds",
                 occurrences=250,
                 stats=ColumnStats(
                     sql_type="INTEGER",
@@ -119,10 +120,10 @@ def attrs_parts() -> MockParts:
                 occurrences=90,
                 stats=_categorical(
                     "VARCHAR",
-                    (("shipped", 60), ("pending", 30)),
+                    (("planted", 60), ("pending", 30)),
                     length=Length(min=7, max=7, avg=7.0, p95=7.0),
                 ),
-                samples=("shipped", "pending"),
+                samples=("planted", "pending"),
             ),
             PartStats(
                 path='["user-id"]',
@@ -158,6 +159,153 @@ def attrs_with_contact() -> MockParts:
             ),
         ),
         size=Length(min=1, max=3, avg=1.7, p95=3.0),
+    )
+
+
+def attrs_with_mostly_contact() -> MockParts:
+    """The document, plus a key whose sampled values are nine addresses and a placeholder."""
+
+    values = (*(f"grower{i}@example.invalid" for i in range(9)), "n/a")
+
+    return MockParts(
+        candidates=(
+            *attrs_parts().candidates,
+            PartStats(
+                path=".relay",
+                occurrences=40,
+                stats=_categorical(
+                    "VARCHAR",
+                    tuple((value, 4) for value in values),
+                    length=Length(min=3, max=23, avg=21.0, p95=23.0),
+                ),
+                samples=values,
+            ),
+        ),
+        size=Length(min=1, max=3, avg=1.7, p95=3.0),
+    )
+
+
+def attrs_with_vault_address() -> MockParts:
+    """The document, plus a `vault_address` object whose members spell street-address keys."""
+
+    streets = tuple(f"{i} Quietleak Road" for i in range(1, 5))
+
+    return MockParts(
+        candidates=(
+            *attrs_parts().candidates,
+            PartStats(path=".vault_address", occurrences=80, stats=_unmeasured("JSON")),
+            PartStats(
+                path=".vault_address[keys]",
+                occurrences=160,
+                stats=_categorical(
+                    "VARCHAR",
+                    (("line1", 80), ("city", 80)),
+                    length=Length(min=4, max=5, avg=4.5, p95=5.0),
+                ),
+                samples=("line1", "city"),
+            ),
+            PartStats(
+                path=".vault_address.line1",
+                occurrences=80,
+                stats=_categorical(
+                    "VARCHAR",
+                    tuple((street, 20) for street in streets),
+                    length=Length(min=15, max=15, avg=15.0, p95=15.0),
+                ),
+                samples=streets,
+                keyed=True,
+            ),
+            PartStats(
+                path=".vault_address.city",
+                occurrences=80,
+                stats=_categorical(
+                    "VARCHAR",
+                    (("Leakton", 50), ("Townleak", 30)),
+                    length=Length(min=7, max=8, avg=7.4, p95=8.0),
+                ),
+                samples=("Leakton", "Townleak"),
+                keyed=True,
+            ),
+        ),
+        size=Length(min=1, max=3, avg=2.0, p95=3.0),
+    )
+
+
+def labels_keyed_by_email() -> MockParts:
+    """A map keyed by email addresses, two keyed members and a part below the first of them."""
+
+    emails = ("grower0@example.invalid", "grower1@example.invalid")
+    first = member(emails[0])
+
+    return MockParts(
+        candidates=(
+            PartStats(
+                path="[keys]",
+                occurrences=200,
+                stats=_categorical(
+                    "VARCHAR",
+                    tuple((email, 100) for email in emails),
+                    length=Length(min=23, max=23, avg=23.0, p95=23.0),
+                ),
+                samples=emails,
+            ),
+            *(
+                PartStats(
+                    path=member(email),
+                    occurrences=100,
+                    stats=_categorical("VARCHAR", (("kg", 100),), length=Length(2, 2, 2.0, 2.0)),
+                    samples=("kg",),
+                    keyed=True,
+                )
+                for email in emails
+            ),
+            PartStats(
+                path=f"{first}.unit",
+                occurrences=100,
+                stats=_categorical("VARCHAR", (("kg", 100),), length=Length(2, 2, 2.0, 2.0)),
+                samples=("kg",),
+            ),
+        ),
+    )
+
+
+def items_with_home_address() -> MockParts:
+    """An array of records each holding a `home_address` record of two text fields."""
+
+    return MockParts(
+        candidates=(
+            PartStats(
+                path="[*]",
+                occurrences=250,
+                stats=_unmeasured("STRUCT(home_address STRUCT(line1 VARCHAR, town VARCHAR))"),
+            ),
+            PartStats(
+                path="[*].home_address",
+                occurrences=250,
+                stats=_unmeasured("STRUCT(line1 VARCHAR, town VARCHAR)"),
+            ),
+            PartStats(
+                path="[*].home_address.line1",
+                occurrences=250,
+                stats=_categorical(
+                    "VARCHAR",
+                    (("7 Wisteria Lane", 150), ("9 Wisteria Lane", 100)),
+                    length=Length(min=15, max=15, avg=15.0, p95=15.0),
+                ),
+                samples=("7 Wisteria Lane", "9 Wisteria Lane"),
+            ),
+            PartStats(
+                path="[*].home_address.town",
+                occurrences=250,
+                stats=_categorical(
+                    "VARCHAR",
+                    (("Townleak", 250),),
+                    length=Length(min=8, max=8, avg=8.0, p95=8.0),
+                ),
+                samples=("Townleak",),
+            ),
+        ),
+        size=Length(min=1, max=1, avg=1.0, p95=1.0),
     )
 
 

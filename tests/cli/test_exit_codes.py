@@ -14,10 +14,23 @@ import pytest
 from click.testing import CliRunner
 
 from dbprint.cli.main import main
+from dbprint.engine import (
+    EXIT_ASSERTION,
+    EXIT_CONNECTION,
+    EXIT_DRIFT,
+    EXIT_GENERIC,
+    EXIT_OK,
+    EXIT_PARTIAL,
+    EXIT_PRECEDENCE,
+    EXIT_STALENESS,
+    EXIT_TOTAL_FAILURE,
+    worst_exit,
+)
 from tests._scripts import REPO_ROOT
 
 
 CLI_ROOT = REPO_ROOT / "src" / "dbprint" / "cli"
+ENGINE_ROOT = REPO_ROOT / "src" / "dbprint" / "engine"
 
 # Names that hold an exit code; an integer assigned or compared to one is a literal.
 _EXIT_NAMES = frozenset({"exit_code", "exit_codes", "overall_exit", "offline_exit", "top"})
@@ -27,6 +40,25 @@ COMMANDS = ["generate", "check", "diff", "context", "init", "list", "serve"]
 
 def _cli_sources() -> list[Path]:
     return sorted(p for p in CLI_ROOT.rglob("*.py") if "__pycache__" not in p.parts)
+
+
+def _ranked_by_integer(path: Path) -> list[tuple[int, str]]:
+    """Return (line, snippet) for every `max`/`min` call whose arguments mention an exit code."""
+
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+
+    return [
+        (node.lineno, ast.unparse(node))
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"max", "min"}
+        and any(
+            _names_an_exit(inner) or (isinstance(inner, ast.Name) and inner.id.startswith("EXIT_"))
+            for argument in [*node.args, *(kw.value for kw in node.keywords)]
+            for inner in ast.walk(argument)
+        )
+    ]
 
 
 def _literal_exit_codes(path: Path) -> list[tuple[int, str]]:
@@ -131,3 +163,63 @@ class TestHelpDocumentsReachableCodes:
     @pytest.mark.parametrize("command", COMMANDS)
     def test_exit_codes_section_matches_the_reachable_set(self, command: str) -> None:
         assert _documented_codes(command) == self.REACHABLE[command]
+
+
+class TestThePrecedence:
+    def test_the_order_is_worst_first(self) -> None:
+        assert EXIT_PRECEDENCE == (1, 4, 7, 5, 6, 3, 2, 0)
+
+    @pytest.mark.parametrize(
+        ("codes", "worst"),
+        [
+            ((EXIT_STALENESS, EXIT_GENERIC), EXIT_GENERIC),
+            ((EXIT_ASSERTION, EXIT_GENERIC), EXIT_GENERIC),
+            ((EXIT_ASSERTION, EXIT_CONNECTION), EXIT_CONNECTION),
+            ((EXIT_ASSERTION, EXIT_PARTIAL), EXIT_PARTIAL),
+            ((EXIT_DRIFT, EXIT_ASSERTION), EXIT_ASSERTION),
+            ((EXIT_TOTAL_FAILURE, EXIT_CONNECTION), EXIT_CONNECTION),
+            ((EXIT_PARTIAL, EXIT_TOTAL_FAILURE), EXIT_TOTAL_FAILURE),
+            ((EXIT_DRIFT, EXIT_STALENESS, EXIT_OK), EXIT_DRIFT),
+            ((EXIT_OK, EXIT_OK), EXIT_OK),
+        ],
+    )
+    def test_the_worst_code_is_the_first_in_the_order(
+        self,
+        codes: tuple[int, ...],
+        worst: int,
+    ) -> None:
+        assert worst_exit(*codes) == worst
+
+    def test_no_code_at_all_is_ok(self) -> None:
+        assert worst_exit() == EXIT_OK
+
+    def test_a_number_outside_the_vocabulary_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="not an exit code"):
+            worst_exit(EXIT_DRIFT, 9)
+
+
+class TestNoExitCodeIsRankedByItsInteger:
+    def test_no_max_or_min_runs_over_an_exit_code(self) -> None:
+        offenders = {
+            str(p.relative_to(REPO_ROOT)): hits
+            for root in (CLI_ROOT, ENGINE_ROOT)
+            for p in sorted(root.rglob("*.py"))
+            if "__pycache__" not in p.parts and (hits := _ranked_by_integer(p))
+        }
+
+        assert offenders == {}, "max/min over exit codes - use worst_exit:\n" + "\n".join(
+            f"  {rel}:{line}  {snippet}"
+            for rel, hits in sorted(offenders.items())
+            for line, snippet in hits
+        )
+
+    def test_the_scan_would_catch_a_max(self, tmp_path: Path) -> None:
+        planted = tmp_path / "planted.py"
+        planted.write_text(
+            "def f(results, exit_code):\n"
+            "    exit_code = max(exit_code, EXIT_GENERIC)\n"
+            "    top = max((r.exit_code for r in results), default=0)\n"
+            "    width = max(len(r.name) for r in results)\n",
+        )
+
+        assert [line for line, _ in _ranked_by_integer(planted)] == [2, 3]

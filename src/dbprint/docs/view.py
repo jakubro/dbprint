@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
 import inflect
+from markdown.util import ETX, STX
 
 from dbprint.engine import AssemblyOptions, assemble_context, notes_synthesis
 from dbprint.engine.baseline import (
@@ -20,13 +22,7 @@ from dbprint.engine.baseline import (
     unmeasured_block_message,
 )
 from dbprint.engine.context_assembler import external_line, fk_target_map, load_connection_notes
-from dbprint.engine.relationship_graph import (
-    edge_detection,
-    edge_key,
-    incoming_key,
-    rejected_edges,
-    with_human_edges,
-)
+from dbprint.engine.relationship_graph import incoming_key, with_human_edges
 from dbprint.engine.table_readings import (
     connection_profile,
     effective_profile,
@@ -40,6 +36,7 @@ from dbprint.engine.value_list import grouped_values, value_key, value_notes
 from dbprint.engine.yaml_dumper import spell_value
 from dbprint.spec.absence import Absence, block_value, column_value, disabled_of, read_table_block
 from dbprint.spec.artifacts import declared_artifacts
+from dbprint.spec.edges import edge_detection, edge_key, rejected_edges
 from dbprint.spec.parts import display
 from dbprint.spec.scope import (
     SCANNED_CLAUSE,
@@ -54,6 +51,11 @@ from . import catalogue, diagram
 
 
 _INFLECT = inflect.engine()
+
+_UNLINKED_RUN_RE = re.compile(
+    rf"(?:[a-z][a-z0-9+.-]*://|www\.|mailto:)\S+|[\w.+-]+@[\w-]+(?:\.[\w-]+)+|{STX}[^{ETX}]*{ETX}",
+    re.IGNORECASE,
+)
 
 _CURRENCY_TOKENS = frozenset({"created", "updated", "modified"})
 
@@ -169,7 +171,6 @@ def build_table_view(
             _measured_row_count(statistics),
             relationships,
             annotations,
-            targets,
             null_patterns,
             profile,
             scope,
@@ -255,7 +256,8 @@ def build_table_view(
             tuple(depends_on or ()),
             in_print=conn.tables,
         ),
-        "description": linkify(artifacts.description, targets),
+        "description": artifacts.description,
+        "mentions": targets,
         "ddl": artifacts.ddl,
     }
 
@@ -503,7 +505,7 @@ def corrupted_artifacts_notice(corrupted: tuple[str, ...]) -> str | None:
     if not corrupted:
         return None
 
-    return f"Unreadable: {', '.join(corrupted)} (present on disk, failed to parse)"
+    return f"Unreadable: {', '.join(corrupted)} (present on disk, malformed)"
 
 
 def columns_empty_notice(statistics: dict[str, Any] | None) -> str | None:
@@ -812,7 +814,6 @@ def column_view(
     row_count: int | None,
     relationships: dict[str, Any] | None,
     annotations: dict[str, dict[str, Any]],
-    targets: dict[str, str],
     null_patterns: dict[str, Any] | None = None,
     profile: dict[str, Any] | None = None,
     scope: ScanScope | None = None,
@@ -842,6 +843,7 @@ def column_view(
         "null_companions": null_companions(null_patterns, name),
         "zero_count": column_value(col, "zero_count"),
         "negative_count": column_value(col, "negative_count"),
+        "non_finite_count": column_value(col, "non_finite_count"),
         "empty_count": column_value(col, "empty_count"),
         "quantized_count": column_value(col, "quantized_count"),
         "populated": column_value(col, "populated"),
@@ -860,8 +862,8 @@ def column_view(
         "value_list": values_view(col, scope),
         "range": range_view(col, scope),
         "sketch_available": sketch_available(col),
-        "parts": parts_view(name, col),
-        "annotation_note": linkify(note_md, targets),
+        "parts": parts_view(name, col, scope),
+        "annotation_note": note_md,
         "annotation_claims": sorted(claims.items()) if isinstance(claims, dict) else [],
         "annotation_values": [
             (spell_value(v.get("value")), notes[value_key(v.get("value"))])
@@ -871,7 +873,11 @@ def column_view(
     }
 
 
-def parts_view(name: str, col: dict[str, Any]) -> list[dict[str, Any]]:
+def parts_view(
+    name: str,
+    col: dict[str, Any],
+    scope: ScanScope | None,
+) -> list[dict[str, Any]]:
     """One entry per part a column lists (SPEC 2.2.18), labelled as a reader shows it."""
 
     parts = column_value(col, "parts")
@@ -883,7 +889,7 @@ def parts_view(name: str, col: dict[str, Any]) -> list[dict[str, Any]]:
         {
             "label": display(name, path),
             "classification": column_value(block, "classification") or "unsupported",
-            "notes": notes_synthesis.synthesize(block, None, hints_only=False).text,
+            "notes": notes_synthesis.synthesize(block, None, hints_only=False, scope=scope).text,
         }
         for path, block in parts.items()
         if isinstance(block, dict)
@@ -902,7 +908,10 @@ def relationship_rows(
 
     refers_to = (relationships or {}).get("refers_to") or []
     referenced_by = (relationships or {}).get("referenced_by") or []
-    rejected = rejected_edges((relationship_annotations or {}).get("refers_to"))
+    rejected = rejected_edges(
+        (relationship_annotations or {}).get("refers_to"),
+        {edge_key(e): e for e in refers_to if isinstance(e, dict)},
+    )
 
     out_rows = []
 
@@ -953,28 +962,39 @@ def relationship_rows(
     }
 
 
-def linkify(text: str | None, targets: dict[str, str]) -> str | None:
-    """Link word-boundary mentions of `targets` keys in markdown text.
+def mention_segments(text: str, targets: Mapping[str, str]) -> list[tuple[str, str | None]]:
+    """Split rendered text into runs, each with the `targets` href its whole-word mention links to.
 
-    Splits on backtick code spans first, so a mention inside one becomes a linked code span
-    rather than raw link syntax markdown will not resolve.
+    Longest key first. A match inside an address, an e-mail address or a Markdown stash
+    placeholder is passed over, since linking it would break the text around it.
     """
 
     if not text or not targets:
-        return text
+        return [(text, None)]
 
-    prose_pattern = re.compile(
+    pattern = re.compile(
         r"\b(" + "|".join(re.escape(k) for k in sorted(targets, key=len, reverse=True)) + r")\b",
     )
-    parts = re.split(r"`([^`]*)`", text)  # alternates: prose, code-inner, prose, code-inner, ...
+    passed_over = [run.span() for run in _UNLINKED_RUN_RE.finditer(text)]
+    segments: list[tuple[str, str | None]] = []
+    last = 0
 
-    for i, part in enumerate(parts):
-        if i % 2 == 0:
-            parts[i] = prose_pattern.sub(lambda m: f"[{m.group(0)}]({targets[m.group(0)]})", part)
-        else:
-            parts[i] = f"[`{part}`]({targets[part]})" if part in targets else f"`{part}`"
+    for match in pattern.finditer(text):
+        start, end = match.span()
 
-    return "".join(parts)
+        if any(begin < end and start < finish for begin, finish in passed_over):
+            continue
+
+        if start > last:
+            segments.append((text[last:start], None))
+
+        segments.append((match.group(0), targets[match.group(0)]))
+        last = end
+
+    if last < len(text):
+        segments.append((text[last:], None))
+
+    return segments
 
 
 def _plural_aliases(targets: dict[str, str]) -> dict[str, str]:
@@ -1039,11 +1059,13 @@ def _incoming_rejection(
     if referencer_artifacts is None:
         return None
 
+    key = incoming_key(entry, this_fqn)
     rejected = rejected_edges(
         (referencer_artifacts.relationships_annotations or {}).get("refers_to"),
+        {key: entry},
     )
 
-    return rejected.get(incoming_key(entry, this_fqn))
+    return rejected.get(key)
 
 
 def _observed_view(entry: dict[str, Any]) -> dict[str, Any] | None:

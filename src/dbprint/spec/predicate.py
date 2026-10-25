@@ -5,6 +5,7 @@ Each form parses raw YAML to a typed predicate, then evaluates it against an act
 
 from __future__ import annotations
 
+import math
 from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -86,6 +87,8 @@ Predicate = (
 # Parsing.
 
 
+RANGE_BOUNDS: tuple[str, str] = ("min", "max")
+
 _ENUM_STATS = frozenset({"classification", "distribution", "freshness.classification", "sql_type"})
 _SET_STATS = frozenset({"accepted_values"})
 _PATTERN_STATS = frozenset({"looks_like"})
@@ -107,6 +110,12 @@ def parse(stat: str, raw: Any) -> Predicate:
         return _parse_range(raw)
     else:
         return _parse_scalar(raw)
+
+
+def takes_range(stat: str) -> bool:
+    """True when `parse` reads a mapping under `stat` as a range predicate."""
+
+    return stat not in _SET_STATS | _PATTERN_STATS | _ENUM_STATS
 
 
 def _parse_set(raw: Any) -> Predicate:
@@ -132,10 +141,12 @@ def _parse_enum(raw: Any) -> Predicate:
 
 def _parse_range(raw: dict[str, Any]) -> Predicate:
     keys = set(raw)
-    allowed = {"min", "max"}
 
-    if not keys or not keys.issubset(allowed):
+    if not keys or not keys.issubset(RANGE_BOUNDS):
         return MalformedPredicate("range predicate accepts only min and/or max keys")
+
+    if all(raw.get(bound) is None for bound in RANGE_BOUNDS):
+        return MalformedPredicate("range predicate needs a min or a max that is not null")
 
     return RangePredicate(min=raw.get("min"), max=raw.get("max"))
 
@@ -179,7 +190,9 @@ def _eval_scalar(p: ScalarPredicate, actual: Any) -> Outcome:
             detail=f"expected {_shown(p.expected)}, actual {_shown(actual)}",
         )
 
-    if actual is not None and _type_family(actual) != _type_family(p.expected):
+    if actual is not None and (
+        _type_family(actual) != _type_family(p.expected) or isinstance(p.expected, (date, datetime))
+    ):
         return Outcome(
             passed=False,
             detail=f"expected {_shown(p.expected)}, actual {_shown(actual)} - incompatible types",
@@ -193,28 +206,51 @@ def _eval_scalar(p: ScalarPredicate, actual: Any) -> Outcome:
 
 
 def _type_family(value: Any) -> str:
-    """Coarse type grouping for scalar-predicate comparability, per ASSERTIONS.md 2.1.
-
-    bool is checked before int because it subclasses int: `nullable: 1` against `True`
-    must read as a mismatch, not as a numeric match.
-    """
+    """A literal's type family for every predicate form (ASSERTIONS.md 2.1); bool before int."""
 
     if isinstance(value, bool):
-        return "bool"
+        return "boolean"
     elif isinstance(value, (int, float, Decimal)):
         return "number"
-    elif isinstance(value, str):
+    elif isinstance(value, (str, date, datetime)):
         return "string"
     else:
         return "other"
 
 
 def _eval_range(p: RangePredicate, actual: Any) -> Outcome:
+    if any(_is_nan(bound) for bound in (p.min, p.max)):
+        return Outcome(passed=False, detail="a NaN bound orders nothing", malformed=True)
+
     if actual is None:
         return Outcome(passed=False, detail="actual value is null; range predicate cannot apply")
 
     if (reading := _temporal(actual)) is not None:
         return _eval_temporal_range(p, actual, reading)
+
+    if isinstance(actual, bool):
+        return Outcome(
+            passed=False,
+            detail=f"actual {_shown(actual)} is a boolean, which has no order - incompatible types",
+            malformed=True,
+        )
+
+    for bound in (p.min, p.max):
+        if bound is not None and (
+            isinstance(bound, (bool, date, datetime)) or _type_family(bound) != _type_family(actual)
+        ):
+            return Outcome(
+                passed=False,
+                detail=f"bound {_shown(bound)} is not comparable to actual {_shown(actual)} "
+                "- incompatible types",
+                malformed=True,
+            )
+
+    if _is_nan(actual):
+        return Outcome(
+            passed=False,
+            detail=f"actual {_shown(actual)} is not a number a bound can order",
+        )
 
     try:
         if p.min is not None and actual < p.min:
@@ -309,9 +345,9 @@ def _eval_set(p: SetPredicate, actual: Any) -> Outcome:
     """`accepted_values` - actual is the column's value list, or a bare sequence."""
 
     if isinstance(actual, dict):
-        actual_keys = set(actual.keys())
+        listed = list(actual.keys())
     elif isinstance(actual, (list, tuple, set)):
-        actual_keys = {e["value"] if isinstance(e, dict) else e for e in actual}
+        listed = [e["value"] if isinstance(e, dict) else e for e in actual]
     elif actual is None:
         return Outcome(passed=True)  # nothing to violate
     else:
@@ -321,8 +357,20 @@ def _eval_set(p: SetPredicate, actual: Any) -> Outcome:
             malformed=True,
         )
 
-    expected_set = set(p.expected)
-    extras = actual_keys - expected_set
+    asserted = [e for e in p.expected if e is not None]
+    families = {_type_family(v) for v in listed}
+
+    for element in asserted:
+        if listed and _type_family(element) not in families:
+            return Outcome(
+                passed=False,
+                detail=f"accepted_values element {_shown(element)} is a {_type_family(element)}; "
+                f"the column's values are {', '.join(sorted(families))} - incompatible types",
+                malformed=True,
+            )
+
+    accepted = {_value_key(e) for e in asserted}
+    extras = {v for v in listed if _value_key(v) not in accepted}
 
     if extras:
         return Outcome(
@@ -331,6 +379,24 @@ def _eval_set(p: SetPredicate, actual: Any) -> Outcome:
         )
 
     return Outcome(passed=True)
+
+
+def _is_nan(value: Any) -> bool:
+    return isinstance(value, float) and math.isnan(value)
+
+
+def _value_key(value: Any) -> tuple[Any, ...]:
+    # A bare digit run (`'2024'`, `'0530'`) parses as a clock time, and an unrepresentable year keys
+    # on the year alone; neither may merge two values a reader tells apart.
+    spelled = not isinstance(value, str) or "-" in value or ":" in value
+
+    if spelled and (reading := _temporal(value)) is not None and reading.key[0] == 0:
+        return ("instant", reading.kind, reading.key)
+
+    if _is_nan(value):
+        return ("number", "nan")
+
+    return (_type_family(value), value)
 
 
 def _eval_pattern(p: PatternPredicate, actual: Any) -> Outcome:

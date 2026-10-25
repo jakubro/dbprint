@@ -30,7 +30,7 @@ from ..base import (
     row_count_or_none,
 )
 from ..dialect import Dialect
-from ..driver import ServerParams
+from ..driver import ServerParams, last_rows
 from ..errors import QueryFailed
 from ..identifiers import IdentityRegistry, select_tables
 
@@ -195,10 +195,7 @@ class PostgresAdapter(PerDatabaseSqlAdapter):
         # autocommit is on at the connection level, so wrap user SQL explicitly.
         with conn.transaction():
             conn.execute(cast(LiteralString, "SET TRANSACTION READ ONLY"))
-            cursor = exec_query(conn, sql)
-            rows = cursor.fetchall()
-
-        return [tuple(row) for row in rows]
+            return last_rows(exec_query(conn, sql))
 
     # Helpers
 

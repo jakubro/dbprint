@@ -22,7 +22,15 @@ from dbprint.spec.rounding import (
 from dbprint.spec.spatial import Extent, Geometry
 from .connection import DIALECT, exec_query
 from .introspect import table_rows_estimate
-from .rendering import render_binary, render_domain, render_text, temporal_shape
+from .rendering import (
+    finite_value,
+    mean_expression,
+    render_binary,
+    render_domain,
+    render_text,
+    sum_expression,
+    temporal_shape,
+)
 from .. import statements
 from ..base import (
     BaseStats,
@@ -47,6 +55,7 @@ from ..base import (
     measure_columns,
     measures_length,
     numeric_block_from_row,
+    numeric_row,
     phase_a_cost,
     profile_over,
     row_count_or_none,
@@ -298,6 +307,9 @@ def _timeline_bucket_expr(cn: str, sql_type: str, unit: str) -> str:
     if temporal_shape(sql_type) == "date":
         return f"DATE_TRUNC('{unit}', {cn}::TIMESTAMP)"
 
+    if temporal_shape(sql_type) == "timestamp_tz":
+        return f"DATE_TRUNC('{unit}', {_utc_reading(cn, sql_type)}) AT TIME ZONE 'UTC'"
+
     return f"DATE_TRUNC('{unit}', {cn})"
 
 
@@ -427,11 +439,12 @@ def _phase_a_statement(
         select_parts.append(f"COUNT(1) - COUNT({cn}) AS null_{a}")
 
         if is_numeric_type(col.classified_type):
+            fv = finite_value(cn, col.classified_type)
             select_parts.extend(
                 (
                     f"COALESCE(SUM(CASE WHEN {cn} = 0 THEN 1 ELSE 0 END), 0) AS zero_{a}",
-                    f"COALESCE(SUM(CASE WHEN {cn} < 0 THEN 1 ELSE 0 END), 0) AS neg_{a}",
-                    f"COALESCE(SUM(CASE WHEN {cn} = TRUNC({cn}) THEN 1 ELSE 0 END), 0) AS quant_{a}",
+                    f"COALESCE(SUM(CASE WHEN {fv} < 0 THEN 1 ELSE 0 END), 0) AS neg_{a}",
+                    f"COALESCE(SUM(CASE WHEN {fv} = TRUNC({fv}) THEN 1 ELSE 0 END), 0) AS quant_{a}",
                 ),
             )
         elif measures_length(col.classified_type, _is_unsupported):
@@ -572,18 +585,28 @@ def _fetch_numeric_block(
     values: bool = True,
 ) -> NumericBlock:
     cn = source_column(col, DIALECT)
-    select_parts = [
-        f"MIN({cn}) AS mn",
-        f"MAX({cn}) AS mx",
-        f"AVG({cn}::FLOAT8) AS avg_val",
-        f"SUM({cn}) AS sum_val",
-        *_percentile_select(cn, config.percentiles),
-    ]
-    row = exec_query(cursor, select_from(select_parts, source)).fetchone()
+    fv = finite_value(cn, col.classified_type)
+    counted = [f"COUNT({fv}) AS fin_val", f"COUNT({cn}) AS nn_val"] if fv != cn else []
+
+    def read(aggregates: bool) -> Any:
+        mean = mean_expression(fv, col.classified_type) if aggregates else "NULL"
+        total = sum_expression(fv, col.classified_type) if aggregates else "NULL"
+        select_parts = [
+            f"MIN({fv}) AS mn",
+            f"MAX({fv}) AS mx",
+            f"{mean} AS avg_val",
+            f"{total} AS sum_val",
+            *counted,
+            *_percentile_select(fv, config.percentiles),
+        ]
+
+        return exec_query(cursor, select_from(select_parts, source)).fetchone()
+
+    row, failure = numeric_row(read)
 
     return numeric_block_from_row(
         row,
-        row[4:] if row else (),
+        row[4 + len(counted) :] if row else (),
         config,
         None
         if not values
@@ -596,6 +619,9 @@ def _fetch_numeric_block(
             config,
             measured_value,
         ),
+        finite=row[4] if row and counted else None,
+        non_null=row[5] if row and counted else None,
+        failure=failure,
     )
 
 
@@ -658,8 +684,9 @@ def _fetch_temporal_scalars(
         )
 
     if day_aligned:
+        utc = _utc_reading(cn, col.classified_type)
         agg_select.append(
-            f"SUM(CASE WHEN {cn} = DATE_TRUNC('day', {cn}) THEN 1 ELSE 0 END) AS quant",
+            f"SUM(CASE WHEN {utc} = DATE_TRUNC('day', {utc}) THEN 1 ELSE 0 END) AS quant",
         )
 
     percentile_renders = [
@@ -761,3 +788,9 @@ def _approximate_distribution_via_top_n(
 
 def _is_unsupported(sql_type: str) -> bool:
     return base_type(sql_type) in _UNSUPPORTED_TYPES
+
+
+def _utc_reading(expr: str, sql_type: str) -> str:
+    """A zone-aware value as its naive UTC wall clock, so truncation ignores the session zone."""
+
+    return f"({expr} AT TIME ZONE 'UTC')" if temporal_shape(sql_type) == "timestamp_tz" else expr

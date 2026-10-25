@@ -210,34 +210,34 @@ class TestAnEdge:
     ) -> None:
         """Accession's declared edges and its annotated `traits` edge are never asked."""
 
-        edges = [q.edge for q in _asked(_root(committed_print), ACCESSION) if q.kind == "edge"]
+        root = _root(committed_print)
 
-        assert edges == [
-            "taxon_id -> arboretum.seedbank.germination_trial.trial_id (measured)",
-            "taxon_id -> arboretum.seedbank.specimen_image.image_id (measured)",
+        assert [q.edge for q in _asked(root, ACCESSION) if q.kind == "edge"] == []
+        assert [q.edge for q in _asked(root, MV) if q.kind == "edge"] == [
+            "taxon_id -> arboretum.seedbank.taxon.taxon_id (inferred)",
         ]
 
     @pytest.mark.parametrize(
         "answer",
         [
-            {"note": "Coincidence of two id ranges."},
+            {"note": "One row per taxon in the view."},
             {"verdict": "rejected", "note": "Coincidence."},
         ],
         ids=["note", "rejected"],
     )
     def test_a_note_or_a_rejection_answers_it(self, committed_print: Path, answer: dict) -> None:
         root = _root(committed_print)
-        path = root / SEEDBANK / "accession" / "relationships.annotations.yaml"
-        body = yaml.safe_load(path.read_text())
-        body["refers_to"].append(
-            {
-                "column": ["taxon_id"],
-                "target_table": "arboretum.seedbank.germination_trial",
-                "target_column": ["trial_id"],
-                **answer,
-            },
+        edge = {
+            "column": ["taxon_id"],
+            "target_table": "arboretum.seedbank.taxon",
+            "target_column": ["taxon_id"],
+            **answer,
+        }
+        _write(
+            root,
+            MV,
+            "relationships.annotations.yaml",
+            {"format_version": 1, "refers_to": [edge]},
         )
-        path.write_text(yaml.safe_dump(body, sort_keys=False))
-        edges = [q.edge for q in _asked(root, ACCESSION) if q.kind == "edge"]
 
-        assert edges == ["taxon_id -> arboretum.seedbank.specimen_image.image_id (measured)"]
+        assert [q.edge for q in _asked(root, MV) if q.kind == "edge"] == []

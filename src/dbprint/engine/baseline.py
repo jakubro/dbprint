@@ -5,7 +5,7 @@ A malformed artifact degrades to absent - the smallest unit holding the defect d
 
 from __future__ import annotations
 
-import logging
+import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,11 +14,14 @@ from typing import Any, Literal
 import yaml
 
 from dbprint.spec import artifact_yaml
-from dbprint.spec.artifacts import MANIFEST_FILENAME, walkable_tables
-from dbprint.spec.fqn import directory as fqn_directory
+from dbprint.spec.artifacts import (
+    MANIFEST_FILENAME,
+    PRODUCER_ARTIFACTS,
+    opened_paths,
+    table_path,
+    walkable_tables,
+)
 
-
-_LOG = logging.getLogger(__name__)
 
 # Parses one artifact file, raising OSError or `yaml.YAMLError` as `read_artifact` does.
 ArtifactReader = Callable[[Path], Any]
@@ -57,13 +60,14 @@ ManifestState = Literal["absent", "unparseable", "malformed", "ok"]
 class ManifestRead:
     """One connection's manifest as every surface reads it; `reason` says why it is unusable.
 
-    `manifest` keeps only `walkable_tables` entries: an unusable entry drops its own table alone.
+    `manifest` keeps only `walkable_tables` entries; `dropped` names the entries it left out.
     """
 
     path: Path
     state: ManifestState
     manifest: dict[str, Any] | None = None
     reason: str | None = None
+    dropped: tuple[str, ...] = ()
 
 
 def read_manifest(print_root: Path, read: ArtifactReader = read_artifact) -> ManifestRead:
@@ -73,6 +77,9 @@ def read_manifest(print_root: Path, read: ArtifactReader = read_artifact) -> Man
 
     if not path.is_file():
         return ManifestRead(path, "absent")
+
+    if not contained(print_root, path):
+        return ManifestRead(path, "malformed", reason="it resolves outside the connection root")
 
     try:
         data = read(path)
@@ -84,7 +91,10 @@ def read_manifest(print_root: Path, read: ArtifactReader = read_artifact) -> Man
     if reason is not None:
         return ManifestRead(path, "malformed", reason=reason)
 
-    return ManifestRead(path, "ok", {**data, "tables": walkable_tables(data)})
+    walkable = walkable_tables(data, escaping_links(print_root, data))
+    dropped = tuple(sorted(str(fqn) for fqn in data.get("tables") or {} if fqn not in walkable))
+
+    return ManifestRead(path, "ok", {**data, "tables": walkable}, dropped=dropped)
 
 
 def unusable_manifest_message(read: ManifestRead, connection: str) -> str:
@@ -101,27 +111,48 @@ def unusable_manifest_message(read: ManifestRead, connection: str) -> str:
         return f"ignoring {read.path}: {read.reason}"
 
 
-def load_baseline_manifest(prints_root: Path) -> dict[str, Any] | None:
-    """Load `prints/<connection>/manifest.yaml` if present and usable; otherwise None."""
+def generate_refusal(read: ManifestRead, print_root: Path, connection: str) -> str | None:
+    """Why `generate` must not write over this baseline, or None when it is safe to.
 
-    manifest = prints_root / MANIFEST_FILENAME
+    A manifest the run cannot fully read would cost the prints of every table it does not re-read.
+    """
 
-    if not manifest.is_file():
-        return None
+    until = "generate writes nothing until then."
 
-    try:
-        data = read_artifact(manifest)
-    except yaml.YAMLError:
-        return None
+    if read.state in ("unparseable", "malformed"):
+        return (
+            f"{unusable_manifest_message(read, connection)}. Repair or restore it (a merge "
+            f"leaves conflict markers in it); {until}"
+        )
 
-    reason = manifest_shape_error(data)
+    if read.state == "ok" and read.dropped:
+        return (
+            f"{read.path} has entries generate cannot follow: {', '.join(read.dropped)} (an "
+            "entry is a mapping whose `path` is a relative string, and neither its directory nor "
+            "a file it declares leads outside the connection root; `dbprint check` names the "
+            f"cause). Repair them, or delete them to have a listed table re-read as new; {until}"
+        )
 
-    if reason is not None:
-        _LOG.warning("ignoring %s: %s", manifest, reason)
+    listed = (read.manifest or {}).get("failed_tables", [])
 
-        return None
+    if not isinstance(listed, list) or not all(isinstance(fqn, str) for fqn in listed):
+        return f"{read.path}: `failed_tables` must be a list of table names. Repair it; {until}"
 
-    return data if isinstance(data, dict) else None
+    if read.state == "absent":
+        printed = {
+            path.parent
+            for path in print_root.rglob("*")
+            if path.name in PRODUCER_ARTIFACTS and path.is_file() and path.parent != print_root
+        }
+
+        if printed:
+            return (
+                f"no manifest at {read.path}, but {len(printed)} table directories below it hold "
+                f"producer-written files. Restore it (`git checkout -- {read.path}`), or delete "
+                f"{print_root} to start the print over; {until}"
+            )
+
+    return None
 
 
 def manifest_shape_error(data: Any) -> str | None:
@@ -190,9 +221,7 @@ def table_directory(print_root: Path, fqn: str, entry: dict[str, Any]) -> Path:
     the connection root.
     """
 
-    path = entry.get("path")
-
-    return print_root / (path if isinstance(path, str) and path else fqn_directory(fqn))
+    return print_root / table_path(fqn, entry)
 
 
 def missing_artifacts(table_dir: Path, artifacts: dict[str, Any]) -> tuple[str, ...]:
@@ -204,3 +233,60 @@ def missing_artifacts(table_dir: Path, artifacts: dict[str, Any]) -> tuple[str, 
     return tuple(
         sorted(kind for kind, name in artifacts.items() if not (table_dir / name).is_file()),
     )
+
+
+def escaping_links(
+    print_root: Path,
+    manifest: Mapping[str, Any] | None = None,
+) -> frozenset[str]:
+    """The print-root-relative POSIX paths of the links below `print_root` resolving outside it.
+
+    A link to a directory inside the root is walked once more under its own path, so a link out
+    below it is found where a reader reaches it; an unreadable directory is skipped. Every path
+    an entry of `manifest` opens is resolved as well, catching a spelling no walk reaches.
+    """
+
+    root = print_root.resolve()
+    found: set[str] = set()
+    # Each directory carries the resolved directories above it, so a link back up is not walked.
+    pending: list[tuple[Path, tuple[Path, ...]]] = [(print_root, (root,))]
+
+    while pending:
+        directory, chain = pending.pop()
+
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    path = Path(entry.path)
+
+                    if entry.is_symlink() or entry.is_junction():
+                        target = path.resolve()
+
+                        if not target.is_relative_to(root):
+                            found.add(path.relative_to(print_root).as_posix())
+                        elif target.is_dir() and target not in chain:
+                            pending.append((path, (*chain, target)))
+                    elif entry.is_dir(follow_symlinks=False):
+                        pending.append((path, (*chain, chain[-1] / entry.name)))
+        except OSError:
+            continue
+
+    for fqn, entry in walkable_tables(manifest).items():
+        found.update(
+            key
+            for key, path in opened_paths(str(fqn), entry).items()
+            if not contained(print_root, print_root / path)
+        )
+
+    return frozenset(found)
+
+
+def contained(print_root: Path, path: Path) -> bool:
+    """True when `path`, links followed, lies inside `print_root`; never for one that will not
+    resolve (a NUL byte in a name).
+    """
+
+    try:
+        return path.resolve().is_relative_to(print_root.resolve())
+    except ValueError:
+        return False

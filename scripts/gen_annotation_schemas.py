@@ -176,7 +176,7 @@ _COLUMNS_PROPERTY: dict[str, Any] = {
                     "required": ["value", "note"],
                     "additionalProperties": False,
                     "properties": {
-                        "value": {},
+                        "value": {"not": {"type": ["array", "object"]}},
                         "note": {"type": "string"},
                     },
                 },

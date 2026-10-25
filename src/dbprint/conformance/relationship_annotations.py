@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from dbprint.spec.edges import verdict_binds
 from dbprint.spec.predicate import (
     MalformedPredicate,
     is_assertable_edge_stat,
@@ -67,7 +68,7 @@ def check_verdicts(
         if not isinstance(entries, list):
             continue
 
-        emitted = _emitted_edges(rel_data)
+        emitted = _emitted_edge_entries(rel_data)
         rel = str(ann_path.relative_to(print_root))
 
         for i, entry in enumerate(entries):
@@ -189,26 +190,6 @@ def _emitted_edge_entries(rel_data: dict) -> dict[tuple[Any, ...], dict[str, Any
     return out
 
 
-def _emitted_edges(rel_data: dict) -> dict[tuple[Any, ...], str]:
-    """This table's own refers_to entries, keyed by their addressing triplet.
-
-    Values are `detection` - `declared` or `inferred` - which is all a verdict check needs.
-    """
-
-    out: dict[tuple[Any, ...], str] = {}
-
-    for entry in rel_data.get("refers_to", []) or []:
-        if not isinstance(entry, dict):
-            continue
-
-        key = _address(entry)
-
-        if key is not None:
-            out[key] = entry.get("detection", "")
-
-    return out
-
-
 def _address(entry: dict[str, Any]) -> tuple[Any, ...] | None:
     column = entry.get("column")
     target_table = entry.get("target_table")
@@ -222,7 +203,7 @@ def _address(entry: dict[str, Any]) -> tuple[Any, ...] | None:
 
 def _check_one(
     entry: dict[str, Any],
-    emitted: dict[tuple[Any, ...], str],
+    emitted: dict[tuple[Any, ...], dict[str, Any]],
     where: str,
 ) -> list[Issue]:
     verdict = entry.get("verdict")
@@ -231,9 +212,9 @@ def _check_one(
         return []
 
     key = _address(entry)
-    detection = emitted.get(key) if key is not None else None
+    edge = emitted.get(key) if key is not None else None
 
-    if detection is None:
+    if edge is None:
         return [
             Issue(
                 where,
@@ -245,7 +226,7 @@ def _check_one(
             ),
         ]
 
-    if detection == "declared":
+    if not verdict_binds(edge):
         return [
             Issue(
                 where,

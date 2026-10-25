@@ -7,6 +7,7 @@ Catalog's path runs on `RecordedResponseCursor`'s rows, never against a real eng
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 import yaml
@@ -485,6 +486,8 @@ class TestPercentilesFromAnArrayCell:
 
 
 class _ArrayCellCursor:
+    description: Any = (("value",),)
+
     def __init__(self, row: tuple[object, ...]) -> None:
         self._row = row
 

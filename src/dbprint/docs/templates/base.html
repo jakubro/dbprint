@@ -34,7 +34,6 @@
     <a href="/" class="sidebar-title">dbprint catalogue</a>
     {% for conn_name, tree in (nav or {}).items() %}
       <div class="nav-conn">{{ conn_name }}</div>
-      <div class="sidebar-root muted">{{ (conn_roots or {}).get(conn_name, '') }}</div>
       <div class="nav-tree">
         {{ nav_group(tree, conn_name, '', (fqn|default(none)) if (conn|default('')) == conn_name else none,
                       (schema|default(none)) if (conn|default('')) == conn_name else none) }}
@@ -52,7 +51,7 @@
   mermaid.initialize({
     startOnLoad: false,
     theme: "neutral",
-    securityLevel: "loose",
+    securityLevel: "strict",
     themeVariables: { clusterBkg: "transparent" },
   });
 </script>

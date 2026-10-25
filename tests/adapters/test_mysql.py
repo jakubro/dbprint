@@ -133,6 +133,28 @@ class TestExecuteQueryTrace:
         assert "rows=1" in caplog.text
 
 
+class TestSeveralStatementsInOneAssertion:
+    """Every result is read, so the session stays usable and a later statement's error surfaces."""
+
+    def test_the_session_answers_the_next_query(self, mysql_test_db: dict[str, str]) -> None:
+        adapter = build_mysql(mysql_test_db)
+
+        try:
+            assert adapter.execute_query("SELECT 0; SELECT 1") == [(1,)]
+            assert adapter.execute_query("SELECT 2") == [(2,)]
+        finally:
+            adapter.close()
+
+    def test_a_later_statements_error_is_raised(self, mysql_test_db: dict[str, str]) -> None:
+        adapter = build_mysql(mysql_test_db)
+
+        try:
+            with pytest.raises(Exception, match="germination_trial"):
+                adapter.execute_query("SELECT 0; SELECT * FROM germination_trial")
+        finally:
+            adapter.close()
+
+
 class TestClassificationDispatch:
     """The adapter's pre-classification steers Phase B; it mirrors SPEC 3.2."""
 
@@ -537,15 +559,10 @@ class TestUniqueKeysFunctionalKeyParts:
             )
         ]
 
-    def test_a_purely_expression_index_reports_no_group(self) -> None:
-        """Reporting an empty group would assert uniqueness over no column.
+    def test_an_index_with_any_functional_part_reports_no_group(self) -> None:
+        """A unique `(herbarium_id, (lower(email)))` does not make `herbarium_id` unique."""
 
-        The exact ordered list also settles four narrower claims: every reported column is
-        real, the mixed index keeps its plain key part, the ordinary unique index is
-        unaffected, and the primary key is reported first.
-        """
-
-        assert self._groups() == [("id",), ("herbarium_id",), ("email",)]
+        assert self._groups() == [("id",), ("email",)]
 
 
 # Live MariaDB tests.
@@ -1037,31 +1054,26 @@ class TestFederatedDdlMasksItsPassword:
     def test_the_connection_string_keeps_user_and_host_and_masks_the_password(
         self,
         federated_db: dict[str, str],
+        tmp_path: Path,
     ) -> None:
         adapter = build_mysql(federated_db)
+        conn = ConnectionConfig(
+            name="primary",
+            adapter="mysql",
+            output=tmp_path,
+            tables=TablesConfig(include=(f"{federated_db['database']}.field_log",)),
+        )
 
         try:
-            ddl = adapter.extract_ddl(f"{federated_db['database']}.field_log")
+            Engine(adapter, conn, tmp_path).generate()
         finally:
             adapter.close()
+
+        ddl = (tmp_path / "primary" / federated_db["database"] / "field_log/ddl.sql").read_text()
 
         assert "s3cretpw" not in ddl
         assert ":[HIDDEN]@127.0.0.1:" in ddl
         assert "ENGINE=FEDERATED" in ddl
-
-    def test_a_spider_table_comment_is_masked(self) -> None:
-        cursor = StubCursor([('wrapper "mysql", user "u", password "p"', "SPIDER")])
-
-        comments = introspect_module.comments(cursor, Identity.of(("fixture", "t"), DIALECT))
-
-        assert comments.table == 'wrapper "mysql", user "u", password "[HIDDEN]"'
-
-    def test_another_engine_s_table_comment_is_kept(self) -> None:
-        cursor = StubCursor([("user:pw@x", "InnoDB")])
-
-        comments = introspect_module.comments(cursor, Identity.of(("fixture", "t"), DIALECT))
-
-        assert comments.table == "user:pw@x"
 
 
 @pytest.fixture
@@ -1530,10 +1542,9 @@ class TestSuppressionReachesTextAlone:
 
 
 class TestOutOfRangeTemporal:
-    """A zero date, or a session `time_zone` change, does not corrupt a bound.
+    """A zero date or a zero TIMESTAMP does not corrupt a bound.
 
-    `_fetch_temporal_block` renders bounds to text in SQL, because mysql-connector-python turns
-    the zero-date sentinel `0000-00-00` into `NULL` on fetch - an empty column in Python.
+    Bounds render to text in SQL: mysql-connector-python fetches the zero-date sentinel as `NULL`.
     """
 
     @staticmethod
@@ -1598,13 +1609,29 @@ class TestOutOfRangeTemporal:
         assert stats.range.max == "2020-01-01T00:59:00"
         assert stats.unrepresentable is None
 
-    def test_timestamp_rendering_is_independent_of_session_time_zone(
-        self,
-        mysql_test_db: dict[str, str],
-    ) -> None:
+    def test_zero_timestamp_profiles_and_is_marked(self, mysql_test_db: dict[str, str]) -> None:
+        _seed_timestamps(
+            mysql_test_db,
+            "zeroed",
+            [
+                "0000-00-00 00:00:00",
+                *(f"2020-01-01 {i // 60:02d}:{i % 60:02d}:00" for i in range(240)),
+            ],
+            sql_mode="",
+        )
+        stats = _timestamp_stats(mysql_test_db, "zeroed")
 
-        from typing import cast
+        assert stats.range is not None
+        assert stats.range.min == "0000-00-00T00:00:00"
+        assert stats.unrepresentable == ("min",)
 
+
+class TestFallBackHour:
+    """2026-11-01 05:30Z and 06:30Z are both 01:30 in New York, the test server's SYSTEM zone."""
+
+    _RUN = tuple(f"2026-10-31 {10 + i // 60:02d}:{i % 60:02d}:00" for i in range(80))
+
+    def test_the_server_runs_in_a_daylight_saving_zone(self, mysql_test_db: dict[str, str]) -> None:
         import mysql.connector
 
         conn = mysql.connector.connect(
@@ -1613,94 +1640,167 @@ class TestOutOfRangeTemporal:
             user=mysql_test_db["user"],
             password="",
             database=mysql_test_db["database"],
-            autocommit=True,
         )
 
         try:
-            cursor = conn.cursor(buffered=True)
-            cursor.execute("SET time_zone = '+00:00'")
-            cursor.execute("CREATE TABLE stamped (id INT, seen_at TIMESTAMP NULL)")
-            cursor.execute("INSERT INTO stamped (id, seen_at) VALUES (1, '2024-01-01 12:00:00')")
-
-            col = _column("timestamp", name="seen_at")
-
-            cursor.execute("SET time_zone = '+00:00'")
-            utc_rng, *_ = stats_module._fetch_temporal_block(
-                cast(stats_module.Cursor, cursor),
-                stats_module._source("stamped", None),
-                col,
-                1,
-                StatisticsConfig(),
-            )
-
-            cursor.execute("SET time_zone = '+05:00'")
-            shifted_rng, *_ = stats_module._fetch_temporal_block(
-                cast(stats_module.Cursor, cursor),
-                stats_module._source("stamped", None),
-                col,
-                1,
-                StatisticsConfig(),
-            )
-
-            cursor.close()
+            cursor = conn.cursor()
+            cursor.execute("SELECT @@system_time_zone")
+            row = cursor.fetchone()
         finally:
             conn.close()
 
-        assert shifted_rng.min == utc_rng.min
-        assert shifted_rng.max == utc_rng.max
+        assert isinstance(row, tuple)
+        assert row[0] in ("EST", "EDT")
 
-    def test_value_list_rendering_is_independent_of_session_time_zone(
+    def test_the_newest_value_is_its_own_instant(self, mysql_test_db: dict[str, str]) -> None:
+        _seed_timestamps(mysql_test_db, "storage_reading", [*self._RUN, "2026-11-01 05:30:00"])
+
+        stats = _timestamp_stats(mysql_test_db, "storage_reading")
+
+        assert stats.range is not None
+        assert stats.range.max == "2026-11-01T05:30:00"
+
+    def test_a_view_and_a_filter_read_the_same_instant(self, mysql_test_db: dict[str, str]) -> None:
+        _seed_timestamps(mysql_test_db, "storage_reading", [*self._RUN, "2026-11-01 05:30:00"])
+        _execute(mysql_test_db, "CREATE VIEW storage_reading_v AS SELECT * FROM storage_reading")
+
+        viewed = _timestamp_stats(mysql_test_db, "storage_reading_v")
+        filtered = _timestamp_stats(
+            mysql_test_db,
+            "storage_reading",
+            TableScope(filter="id >= 0"),
+        )
+
+        assert viewed.range is not None and filtered.range is not None
+        assert (viewed.range.max, filtered.range.max) == (
+            "2026-11-01T05:30:00",
+            "2026-11-01T05:30:00",
+        )
+
+    def test_two_instants_on_one_wall_clock_stay_two_values(
         self,
         mysql_test_db: dict[str, str],
     ) -> None:
-        """A low-cardinality TIMESTAMP's `values` must agree with `range` on the frame."""
-
-        from typing import cast
-
-        import mysql.connector
-
-        conn = mysql.connector.connect(
-            host=mysql_test_db["host"],
-            port=int(mysql_test_db["port"]),
-            user=mysql_test_db["user"],
-            password="",
-            database=mysql_test_db["database"],
-            autocommit=True,
+        _seed_timestamps(
+            mysql_test_db,
+            "curation_event",
+            ["2026-11-01 05:30:00", "2026-11-01 06:30:00"],
         )
 
+        stats = _timestamp_stats(mysql_test_db, "curation_event")
+
+        assert sorted(v.value for v in stats.values or ()) == [
+            "2026-11-01T05:30:00",
+            "2026-11-01T06:30:00",
+        ]
+
+    def test_a_percentile_and_the_span_read_utc(self, mysql_test_db: dict[str, str]) -> None:
+        values = [
+            *(f"2026-11-01 05:{m:02d}:00" for m in range(30, 60)),
+            *(f"2026-11-01 06:{m:02d}:00" for m in range(30, 59)),
+            "2026-11-02 05:30:00",
+        ]
+        _seed_timestamps(mysql_test_db, "storage_reading", values)
+
+        stats = _timestamp_stats(mysql_test_db, "storage_reading")
+
+        assert stats.range is not None
+        assert stats.range.span_days == 1
+        assert stats.percentiles is not None
+        assert stats.percentiles["p50"] == "2026-11-01T05:59:00"
+
+    def test_the_key_sketch_tells_the_two_instants_apart(
+        self,
+        mysql_test_db: dict[str, str],
+    ) -> None:
+        _seed_timestamps(
+            mysql_test_db,
+            "two_instants",
+            ["2026-11-01 05:30:00", "2026-11-01 06:30:00"],
+        )
+        _seed_timestamps(mysql_test_db, "one_instant", ["2026-11-01 05:30:00"])
+        adapter = build_mysql(mysql_test_db)
+        database = mysql_test_db["database"]
+
         try:
-            cursor = conn.cursor(buffered=True)
-            cursor.execute("SET time_zone = '+00:00'")
-            cursor.execute("CREATE TABLE stamped2 (id INT, seen_at TIMESTAMP NULL)")
-            cursor.execute(
-                "INSERT INTO stamped2 (id, seen_at) VALUES (1, '2024-01-01 12:00:00')",
+            both = adapter.compute_key_sketch(
+                f"{database}.two_instants",
+                "taken_at",
+                "timestamp",
+                "temporal",
+                16,
             )
-
-            col = _column("timestamp", name="seen_at")
-
-            cursor.execute("SET time_zone = '+00:00'")
-            utc_values, *_ = stats_module._fetch_value_list(
-                cast(stats_module.Cursor, cursor),
-                stats_module._source("stamped2", None),
-                col,
-                1,
-                StatisticsConfig(),
+            one = adapter.compute_key_sketch(
+                f"{database}.one_instant",
+                "taken_at",
+                "timestamp",
+                "temporal",
+                16,
             )
-
-            cursor.execute("SET time_zone = '+05:00'")
-            shifted_values, *_ = stats_module._fetch_value_list(
-                cast(stats_module.Cursor, cursor),
-                stats_module._source("stamped2", None),
-                col,
-                1,
-                StatisticsConfig(),
-            )
-
-            cursor.close()
         finally:
-            conn.close()
+            adapter.close()
 
-        assert shifted_values == utc_values
+        assert len(both) == 2
+        assert both != one
+
+
+def _seed_timestamps(
+    creds: dict[str, str],
+    table: str,
+    values: list[str],
+    *,
+    sql_mode: str | None = None,
+) -> None:
+    statements = [
+        "SET time_zone = '+00:00'",
+        *([f"SET SESSION sql_mode = '{sql_mode}'"] if sql_mode is not None else []),
+        f"CREATE TABLE {table} (id INT, taken_at TIMESTAMP(6) NULL)",
+        f"INSERT INTO {table} (id, taken_at) VALUES "
+        + ", ".join(f"({i}, '{v}')" for i, v in enumerate(values)),
+    ]
+    _execute(creds, *statements)
+
+
+def _execute(creds: dict[str, str], *statements: str) -> None:
+    import mysql.connector
+
+    conn = mysql.connector.connect(
+        host=creds["host"],
+        port=int(creds["port"]),
+        user=creds["user"],
+        password="",
+        database=creds["database"],
+        autocommit=True,
+    )
+
+    try:
+        cursor = conn.cursor(buffered=True)
+
+        for statement in statements:
+            cursor.execute(statement)
+
+        cursor.close()
+    finally:
+        conn.close()
+
+
+def _timestamp_stats(creds: dict[str, str], table: str, scope: TableScope | None = None) -> Any:
+    adapter = build_mysql(creds)
+    fqn = f"{creds['database']}.{table}"
+
+    try:
+        columns = adapter.introspect_columns(fqn)
+        _, phase_b = adapter.compute_statistics(
+            fqn,
+            columns,
+            StatisticsConfig(),
+            frozenset(),
+            scope=scope,
+        )
+    finally:
+        adapter.close()
+
+    return phase_b.stats["taken_at"]
 
 
 @contextmanager

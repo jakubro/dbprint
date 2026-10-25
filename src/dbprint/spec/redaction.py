@@ -48,6 +48,7 @@ FIELD_ROLES: Mapping[str, RedactionRole] = MappingProxyType(
         "length": "withheld",
         "zero_count": "withheld",
         "negative_count": "withheld",
+        "non_finite_count": "withheld",
         "empty_count": "withheld",
         "quantized_count": "withheld",
         "normalized_cardinality": "withheld",
@@ -127,6 +128,16 @@ def redact_value(value: Any, primitive: Primitive, salt: str | None) -> Any:
         return _digest(value, _salt_with_material(salt))
 
     return MASK_PLACEHOLDER
+
+
+def is_digest(value: Any) -> bool:
+    """Whether `value` has the form `hash` emits: `_HASH_LENGTH` lowercase hex characters."""
+
+    return (
+        isinstance(value, str)
+        and len(value) == _HASH_LENGTH
+        and all(c in "0123456789abcdef" for c in value)
+    )
 
 
 def _salt_with_material(salt: str | None) -> str:

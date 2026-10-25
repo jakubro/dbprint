@@ -38,6 +38,7 @@ from dbprint.spec.redaction import MASK_PLACEHOLDER, Primitive, redact_value
 from tests._curator import conn_config, curator_fixture
 from tests._engine_run import artifact, conformance_errors
 from tests._prints import columns, mock_table
+from tests._secrets import ALNUM, FORMATS, pick
 from tests.conftest import normalize_instants
 from tests.engine._prose import prose_fixture
 
@@ -95,6 +96,38 @@ def _contacts_fixture() -> dict[str, MockTable]:
     }
 
 
+def _mostly_contacts_fixture() -> dict[str, MockTable]:
+    """Nine addresses and a placeholder: a `looks_like` near miss, so `contact` comes from the
+    share of the sample its shapes hold (SPEC 4.4.4).
+    """
+
+    values = sorted([*(f"user{i}@example.com" for i in range(9)), "n/a"])
+
+    return {
+        "seedbank.collector": mock_table(
+            "seedbank.collector",
+            columns(("institution", "text")),
+            {
+                "institution": ColumnStats(
+                    sql_type="text",
+                    nullable=False,
+                    null_count=0,
+                    null_rate=0.0,
+                    cardinality=10,
+                    cardinality_ratio=0.125,
+                    cardinality_method="exact",
+                    values=tuple(ValueCount(value=v, count=8) for v in values),
+                    values_coverage=1.0,
+                    distribution="uniform",
+                ),
+            },
+            ddl="CREATE TABLE seedbank.collector (institution text);\n",
+            samples={"institution": values},
+            row_count=80,
+        ),
+    }
+
+
 def _run_contacts(tmp_path: Path, *rules: RedactRule) -> dict[str, Any]:
     conn = replace(
         conn_config(tmp_path),
@@ -103,6 +136,26 @@ def _run_contacts(tmp_path: Path, *rules: RedactRule) -> dict[str, Any]:
     Engine(MockAdapter(_contacts_fixture()), conn, tmp_path).generate()
 
     return artifact(tmp_path / "primary", "seedbank.collector")
+
+
+class TestAMostlyAddressColumn:
+    def test_a_contact_rule_masks_it(self, tmp_path: Path) -> None:
+        conn = replace(
+            conn_config(tmp_path),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                redact=(RedactRule(sensitivity=("contact",), with_="mask"),),
+            ),
+        )
+        Engine(MockAdapter(_mostly_contacts_fixture()), conn, tmp_path).generate()
+        written = tmp_path / "primary" / "seedbank" / "collector" / "statistics.yaml"
+        col = yaml.safe_load(written.read_text(encoding="utf-8"))["columns"]["institution"]
+
+        assert col["inferred"]["sensitivity"] == "contact"
+        assert "looks_like" not in col["inferred"]
+        assert col["redacted"] == "mask"
+        assert "@" not in written.read_text(encoding="utf-8")
+        assert conformance_errors(tmp_path / "primary") == []
 
 
 class TestNoRulesChangeNothing:
@@ -340,6 +393,63 @@ class TestASmallColumnIsCoveredByASensitivityRule:
 
         assert "redacted" not in col
         assert all("@" in e["value"] for e in col["values"])
+
+
+def _credential_probe() -> tuple[dict[str, MockTable], list[str]]:
+    """A framework-default secret column holding no recognised format, beside a neutral name
+    holding bcrypt hashes; every value is distinct and published, so a leak reaches the file.
+    """
+
+    tokens = sorted(pick(ALNUM, 24) for _ in range(12))
+    hashes = sorted(FORMATS["bcrypt"]() for _ in range(12))
+
+    def stats(values: list[str]) -> ColumnStats:
+        return ColumnStats(
+            sql_type="text",
+            nullable=False,
+            null_count=0,
+            null_rate=0.0,
+            cardinality=12,
+            cardinality_ratio=1.0,
+            cardinality_method="exact",
+            values=tuple(ValueCount(value=v, count=1) for v in values),
+            values_coverage=1.0,
+            distribution="uniform",
+        )
+
+    fixture = {
+        "fixture.credential_probe": mock_table(
+            "fixture.credential_probe",
+            columns(("remember_token", "text"), ("payload", "text")),
+            {"remember_token": stats(tokens), "payload": stats(hashes)},
+            ddl="CREATE TABLE fixture.credential_probe (remember_token text, payload text);\n",
+            samples={"remember_token": tokens, "payload": hashes},
+            row_count=12,
+        ),
+    }
+
+    return fixture, tokens + hashes
+
+
+class TestACredentialRuleReachesEveryCredentialRoute:
+    def test_a_named_and_a_formatted_column_are_masked(self, tmp_path: Path) -> None:
+        fixture, planted = _credential_probe()
+        conn = replace(
+            conn_config(tmp_path),
+            profile=replace(
+                conn_config(tmp_path).profile,
+                redact=(RedactRule(sensitivity=("credential",), with_="mask"),),
+            ),
+        )
+
+        Engine(MockAdapter(fixture), conn, tmp_path).generate()
+
+        written = tmp_path / "primary" / "fixture" / "credential_probe" / "statistics.yaml"
+        payload = yaml.safe_load(written.read_text(encoding="utf-8"))["columns"]
+        assert payload["remember_token"]["redacted"] == "mask"
+        assert payload["payload"]["redacted"] == "mask"
+        assert [v for v in planted if v in written.read_text(encoding="utf-8")] == []
+        assert conformance_errors(tmp_path / "primary") == []
 
 
 class TestADefaultsRuleReachesTheArtifact:

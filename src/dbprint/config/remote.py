@@ -39,6 +39,8 @@ _BARE_HTTPS_RE = re.compile(
 )
 _BARE_SSH_RE = re.compile(r"^git@[^:/]+:.+$")
 
+_LEAVING_SUBPATH_RE = re.compile(r"^(?:[/\\]|[A-Za-z]:)|(?:^|[/\\])\.\.(?:[/\\]|$)")
+
 
 @dataclass(frozen=True)
 class RemoteAddress:
@@ -56,31 +58,16 @@ def parse_address(value: str) -> RemoteAddress | None:
     """Parse `--project`'s value as a git address; `None` means it is a local path instead.
 
     Offline: the explicit `<git-url>#<ref>:<subpath>` grammar, then the three forge web URL
-    grammars, then a bare HTTPS or SSH remote.
+    grammars, then a bare HTTPS or SSH remote. Raises `ConfigError` for a remote or ref that
+    begins with `-`, and for a subpath that is absolute or climbs out with `..`.
     """
 
-    explicit = _parse_explicit(value)
+    address = _parse(value)
 
-    if explicit is not None:
-        return explicit
+    if address is not None:
+        _refuse_unsafe_parts(value, address)
 
-    for pattern in (_GITHUB_BLOB_RE, _GITLAB_BLOB_RE, _BITBUCKET_SRC_RE):
-        match = pattern.match(value)
-
-        if match:
-            owner_repo, ref, subpath = match.groups()
-            host = value.split("/", 3)[2]
-
-            return RemoteAddress(
-                remote=f"https://{host}/{owner_repo}",
-                ref=ref,
-                subpath=subpath.rstrip("/") or None,
-            )
-
-    if _BARE_HTTPS_RE.match(value) or _BARE_SSH_RE.match(value):
-        return RemoteAddress(remote=value)
-
-    return None
+    return address
 
 
 def _parse_explicit(value: str) -> RemoteAddress | None:
@@ -109,6 +96,7 @@ def materialize(
 
     The clone IS the prefetch: one fetch at first use, then at most one per `CACHE_TTL_SECONDS`.
     `on_degraded` reports a refresh that failed over a readable cache; without it, silence.
+    Raises `ConfigError` when the subpath resolves, through a symlink, outside the clone.
     """
 
     _ensure_git_available()
@@ -131,7 +119,15 @@ def materialize(
     if address.subpath is None:
         return cache_dir
 
-    return cache_dir / address.subpath
+    local = cache_dir / address.subpath
+
+    if not local.resolve().is_relative_to(cache_dir.resolve()):
+        raise ConfigError(
+            f"the subpath {address.subpath!r} resolves outside the cloned repository "
+            f"{address.remote}",
+        )
+
+    return local
 
 
 def watch_for_refresh(address: RemoteAddress) -> None:
@@ -149,6 +145,43 @@ def watch_for_refresh(address: RemoteAddress) -> None:
                 materialize(address)
 
     threading.Thread(target=_loop, daemon=True).start()
+
+
+def _parse(value: str) -> RemoteAddress | None:
+    explicit = _parse_explicit(value)
+
+    if explicit is not None:
+        return explicit
+
+    for pattern in (_GITHUB_BLOB_RE, _GITLAB_BLOB_RE, _BITBUCKET_SRC_RE):
+        match = pattern.match(value)
+
+        if match:
+            owner_repo, ref, subpath = match.groups()
+            host = value.split("/", 3)[2]
+
+            return RemoteAddress(
+                remote=f"https://{host}/{owner_repo}",
+                ref=ref,
+                subpath=subpath.rstrip("/") or None,
+            )
+
+    if _BARE_HTTPS_RE.match(value) or _BARE_SSH_RE.match(value):
+        return RemoteAddress(remote=value)
+
+    return None
+
+
+def _refuse_unsafe_parts(value: str, address: RemoteAddress) -> None:
+    for name, part in (("remote", address.remote), ("ref", address.ref)):
+        if part is not None and part.startswith("-"):
+            raise ConfigError(f"--project {value!r}: a {name} may not begin with '-'")
+
+    if address.subpath is not None and _LEAVING_SUBPATH_RE.search(address.subpath):
+        raise ConfigError(
+            f"--project {value!r}: the subpath {address.subpath!r} must be relative and stay "
+            f"inside the repository",
+        )
 
 
 def _ensure_git_available() -> None:
@@ -180,7 +213,7 @@ def _clone(cache_dir: Path, address: RemoteAddress) -> None:
     """
 
     cache_dir.parent.mkdir(parents=True, exist_ok=True)
-    _run_git([_GIT_BIN, "clone", "--quiet", address.remote, str(cache_dir)])
+    _run_git([_GIT_BIN, "clone", "--quiet", "--", address.remote, str(cache_dir)])
 
     if address.ref is None:
         return
@@ -260,7 +293,7 @@ def _refresh(cache_dir: Path, address: RemoteAddress) -> None:
     a remote locator before a clone happens at all (`cli.options.refuse_if_remote`).
     """
 
-    _run_git([*_git_in(cache_dir), "fetch", "--quiet", "origin", address.ref or "HEAD"])
+    _run_git([*_git_in(cache_dir), "fetch", "--quiet", "--", "origin", address.ref or "HEAD"])
     _run_git([*_git_in(cache_dir), "reset", "--hard", "--quiet", "FETCH_HEAD"])
 
 

@@ -81,7 +81,10 @@ def render_human_text(diff_dict: dict[str, Any], options: DiffRenderOptions) -> 
         buf.write(f"({elided} change{plural} elided below threshold)\n\n")
 
     _emit_section(buf, "Modified (relationships)", _relationship_lines_by_table(changes))
-    _emit_section(buf, "Modified (indexes)", _index_lines_by_table(changes))
+
+    if index_lines := _index_lines_by_table(changes):
+        _emit_section(buf, "Modified (indexes)", index_lines)
+
     _emit_simple_section(buf, "Added", _added_lines(changes))
     _emit_simple_section(buf, "Removed", _removed_lines(changes))
 

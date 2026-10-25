@@ -7,6 +7,7 @@ from __future__ import annotations
 from functools import partial
 from typing import assert_never
 
+from dbprint.spec.classification import base_type, is_floating_type
 from dbprint.spec.sketch import SketchKind
 from ..base import TemporalShape, lookup_operand, lookup_temporal_shape
 
@@ -20,6 +21,17 @@ _SHAPES: dict[str, TemporalShape] = {
 }
 
 _INSTANT_PICTURE = "%Y-%m-%dT%H:%M:%E6S"
+_SUMMED_AS_BIGNUMERIC = (
+    "int64",
+    "int",
+    "integer",
+    "bigint",
+    "smallint",
+    "tinyint",
+    "byteint",
+    "numeric",
+    "decimal",
+)
 
 
 # Types with no operator a statistic needs, measured through a lossless comparable form.
@@ -27,6 +39,35 @@ _OPERANDS: dict[str, str] = {"json": "TO_JSON_STRING({})", "object": "TO_JSON_ST
 
 
 render_operand = partial(lookup_operand, _OPERANDS)
+
+
+def finite_value(expr: str, sql_type: str) -> str:
+    """`expr` where finite, NULL for NaN and the infinities; unchanged on a type holding neither."""
+
+    if not is_floating_type(sql_type):
+        return expr
+
+    finite = f"NOT IS_NAN({expr}) AND NOT IS_INF({expr})"
+
+    return f"CASE WHEN {finite} THEN {expr} END"
+
+
+def sum_expression(expr: str, sql_type: str) -> str:
+    """`SUM` over `expr` as `BIGNUMERIC` where BigQuery would sum it in its own, narrower type."""
+
+    if base_type(sql_type) in _SUMMED_AS_BIGNUMERIC:
+        return f"SUM(CAST({expr} AS BIGNUMERIC))"
+
+    return f"SUM({expr})"
+
+
+def mean_expression(expr: str, sql_type: str) -> str:
+    """The mean of `expr`: `AVG` on a floating type, else the exact sum over the count."""
+
+    if is_floating_type(sql_type):
+        return f"AVG({expr})"
+
+    return f"CAST({sum_expression(expr, sql_type)} AS FLOAT64) / NULLIF(COUNT({expr}), 0)"
 
 
 def render_text(expr: str, sql_type: str) -> str:
@@ -57,7 +98,7 @@ def render_domain(expr: str, sql_type: str) -> str:
         case "timestamp":
             return _stripped(f"FORMAT_DATETIME('{_INSTANT_PICTURE}', {expr})")
         case "timestamp_tz":
-            rendered = _stripped(f"FORMAT_TIMESTAMP('{_INSTANT_PICTURE}', {expr})")
+            rendered = _stripped(f"FORMAT_TIMESTAMP('{_INSTANT_PICTURE}', {expr}, 'UTC')")
 
             return f"CONCAT({rendered}, 'Z')"
         case "year":

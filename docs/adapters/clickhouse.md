@@ -30,7 +30,7 @@ Independently of every grant above, the `readonly` server setting gates the writ
 
 ### What an under-privileged user does
 
-Missing `SELECT` on `system.data_skipping_indices` fails index enumeration for that table alone; missing `SELECT` on the table itself fails DDL and statistics together, since both read the same grant. A `readonly = 1` connection reaches every catalog read and fails only where `materialize_scope` tries to write — see "When dbprint writes" below.
+Missing `SELECT` on `system.data_skipping_indices` fails index enumeration for that table alone; missing `SELECT` on the table itself fails DDL and statistics together, since both read the same grant. A `readonly = 1` connection reaches every catalog read and fails only where the sampled copy is written — see "When dbprint writes" below.
 
 ## Sampling
 
@@ -40,23 +40,23 @@ Missing `SELECT` on `system.data_skipping_indices` fails index enumeration for t
 | Seeded | no — determinism depends on the table declaring a `SAMPLE BY` key at creation, which is out of dbprint's control |
 | `looks_like` sub-draw | fixed-size `SAMPLE n`, degrading to a direct scan when the table declares no sampling key |
 
-`list_tables` reads `system.tables.sampling_key` in the same statement that enumerates, and the adapter caches an FQN-to-samplable map from it. A sampled Snowflake- or Postgres-style row-for-row guarantee does not apply here: coherence with the rest of a sampled ClickHouse profile is population-level only.
+The listing reads each table's `sampling_key` from `system.tables` as it enumerates, so whether a table can be sampled is known before any statement reads it. The row-for-row guarantee PostgreSQL and duckdb give does not apply here: coherence with the rest of a sampled ClickHouse profile is population-level only.
 
 ## When dbprint writes
 
 Only one thing makes dbprint write, and only under one condition: `profile.read.tables.materialize` is on by default, and it fires **only for a table read in `sample` mode** — by a `fraction`, or by a `max_rows` ceiling that resolves below the table's size, at whatever level the ceiling is set. A project that narrows nothing, which is what `dbprint init` scaffolds, never writes. A `filter` is a predicate rather than a fraction and never materializes.
 
-Where it does fire, dbprint checks the samplable map from `list_tables` **before** touching the server. A table with no declared `SAMPLE BY` key (or that is not a MergeTree-family table) is refused outright:
+Where it does fire, dbprint checks that sampling key **before** touching the server. A table with no declared `SAMPLE BY` key (or that is not a MergeTree-family table) is refused outright:
 
 ```
 table 'my_db.germination_trial': connection 'primary' (clickhouse) could not materialize its
 sample of 0.25 (table 'my_db.germination_trial' declares no SAMPLE BY key (or is not a
 MergeTree-family table), so ClickHouse's SAMPLE clause is not available on it at any
 fraction.), and this adapter's per-statement fallback cannot be seeded into agreement across
-statements. Narrow with a filter instead of a sample fraction.
+statements. Narrow with mode: filter instead of a sample.
 ```
 
-Where the table is samplable, the copy is created as `CREATE TEMPORARY TABLE <name> ENGINE = MergeTree ORDER BY tuple() AS SELECT * FROM (SELECT * FROM <table> SAMPLE p)`, session-scoped, dropped as soon as the table finishes. `read.tables.materialize: false` never falls back on ClickHouse either — `SAMPLE_FALLBACK_COHERENT` is `false` here, so an unmaterialized `sample` scope on a `sample`-narrowed table is refused the same way, before any statement runs:
+Where the table is samplable, the copy is created as `CREATE TEMPORARY TABLE <name> ENGINE = MergeTree ORDER BY tuple() AS SELECT * FROM (SELECT * FROM <table> SAMPLE p)`, session-scoped, dropped as soon as the table finishes. `read.tables.materialize: false` never falls back on ClickHouse either — no unmaterialized `SAMPLE` read is guaranteed to read the same rows twice, so a `sample`-narrowed table with the copy switched off is refused the same way, before any statement runs:
 
 ```
 table 'my_db.germination_trial': connection 'primary' (clickhouse) reads it
@@ -74,7 +74,7 @@ Both path segments fold to lowercase for the FQN, and every statement addresses 
 
 ## Objects that are never listed
 
-Some engines hold no rows a read can describe, so `list_tables` leaves them out of the print — no file, no manifest entry, no `failed_tables` mark — and an `include` naming one matches nothing:
+Some engines hold no rows a read can describe, so dbprint leaves them out of the print — no file, no manifest entry, no `failed_tables` mark — and an `include` naming one matches nothing:
 
 - **Queue and stream engines** — `Kafka`, `RabbitMQ`, `NATS`, `FileLog`, `S3Queue`, `AzureQueue` and the Redis Streams engine. A read removes what it reads from the queue, so profiling one would consume messages a pipeline is waiting for; where direct reads are off, it fails every run.
 - **`Null`** — stores nothing; a read is always empty.
@@ -93,7 +93,7 @@ A rule writing any other `read.tables.mode` for it is refused before any table i
 
 ## Secrets in DDL
 
-`ddl.sql` shows every secret argument of an engine or table function as `[HIDDEN]`, and a URL's `user:password@` in the `ENGINE` clause too. Where your user profile turns `format_display_secrets_in_show_and_select` on, dbprint turns it off for its own reads; a server that refuses the override fails the table rather than publish the secret.
+`ddl.sql` shows every secret argument of an engine or table function as `[HIDDEN]`. Where your user profile turns `format_display_secrets_in_show_and_select` on, dbprint turns it off for its own reads; a server that refuses the override fails the table rather than publish the secret. A password or key written anywhere else in the DDL — a URL's `user:password@`, a default, a comment, a view body — is masked by the credential masks every adapter's DDL passes through ([SPEC 2.1.3](../format/v1/SPEC.md#213-what-must-be-stripped-per-adapter)).
 
 ## What it cannot deliver
 
@@ -119,6 +119,14 @@ A rule writing any other `read.tables.mode` for it is refused before any table i
 ## Merging engines
 
 On `ReplacingMergeTree`, `SummingMergeTree`, `AggregatingMergeTree`, `CoalescingMergeTree`, `CollapsingMergeTree` and `VersionedCollapsingMergeTree`, with or without a `Replicated` or `Shared` prefix, the print counts the stored rows, which repeat a key until a background merge combines them. `row_count`, `cardinality` and `grain` describe those rows; query with `FINAL` for the merged ones, as the table's `merging` block and `dbprint context` both say. Where your user profile sets `final`, every read is already merged and the block says `rows: merged`.
+
+## Row counts
+
+A table's size, and a sampled table's `row_count`, are `count()`, which ClickHouse answers from part metadata and, after a lightweight `DELETE`, from the deletion mask, so rows a lightweight `DELETE` removed are never counted, before or after the merge that drops them; `system.tables.total_rows` counts them until that merge. `count()` follows the session's row policies and `final` setting as every statement does. An engine whose `system.tables.total_rows` is `NULL` — `TinyLog`, a `View` — has no size, and size rules do not apply to it. A sampled table publishes `row_count_method: exact`.
+
+## Time zone
+
+Every `DateTime` and `DateTime64` value — `range`, `percentiles`, a listed value — is published as its UTC instant with a trailing `Z`, whatever zone the column declares and whatever zone the server or session runs in. Cutting a value into days happens in a frame the DDL fixes: a column declaring a zone (`DateTime('Europe/Berlin')`) has its midnights counted for `quantized_count` and its `timeline` bucketed in that zone, and a column declaring none is cut in UTC. A day bucket of a declared-zone column therefore starts at that zone's midnight, written as a UTC instant, and across a daylight-saving change two consecutive day buckets start 23 or 25 hours apart.
 
 ## Temporal percentiles
 

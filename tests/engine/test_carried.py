@@ -20,6 +20,7 @@ from dbprint.engine.carried import (
     CarriedTable,
     CommittedPrint,
     CommittedTable,
+    FreshnessVerdict,
     RecordedSettings,
     carried_entry,
     freshness,
@@ -397,3 +398,89 @@ class TestTheFailedAndNotAttemptedPaths:
         ).settle([TableResult(CURATOR, "failed", "x", 0)])
         assert carry.disposition(HERBARIUM) == "not_attempted"
         assert (root / "manifest.yaml").read_text() == before
+
+
+def _conflicted(path: Path) -> str:
+    text = path.read_text(encoding="utf-8")
+
+    return f"<<<<<<< HEAD\n{text}=======\n{text}>>>>>>> other\n"
+
+
+class TestAProducerFileThatCannotBeShownToDescribeTheTable:
+    """A listed table is fresh only while every producer file its entry declares parses."""
+
+    def _verdict(self, tmp_path: Path) -> FreshnessVerdict:
+        committed = CommittedPrint.load(tmp_path / "primary")
+        conn = conn_config(tmp_path)
+        assert committed.manifest is not None
+
+        return freshness(
+            committed.tables[CURATOR],
+            conn.settings_for(CURATOR, "table"),
+            generated_at=committed.manifest["generated_at"],
+            conn=conn,
+        )
+
+    def test_an_intact_print_is_fresh(self, tmp_path: Path) -> None:
+        _first_run(tmp_path)
+
+        assert self._verdict(tmp_path).fresh
+
+    @pytest.mark.parametrize(
+        ("name", "shape", "reason"),
+        [
+            ("statistics.yaml", "absent", "committed statistics.yaml missing or unreadable"),
+            ("statistics.yaml", "empty", "committed statistics.yaml missing or unreadable"),
+            ("statistics.yaml", "conflicted", "committed statistics.yaml missing or unreadable"),
+            ("statistics.yaml", "a list", "committed statistics.yaml missing or unreadable"),
+            (
+                "relationships.yaml",
+                "conflicted",
+                "committed relationships.yaml missing or unreadable",
+            ),
+            ("ddl.sql", "absent", "committed ddl.sql missing or unreadable"),
+        ],
+    )
+    def test_each_unusable_shape_makes_it_stale(
+        self,
+        tmp_path: Path,
+        name: str,
+        shape: str,
+        reason: str,
+    ) -> None:
+        path = _first_run(tmp_path) / "public" / "curator" / name
+
+        if shape == "absent":
+            path.unlink()
+        else:
+            text = {"empty": "", "a list": "- curator\n- herbarium\n"}.get(shape)
+            path.write_text(_conflicted(path) if text is None else text, encoding="utf-8")
+
+        verdict = self._verdict(tmp_path)
+
+        assert not verdict.fresh
+        assert verdict.reason == reason
+
+    def test_a_mapping_the_schema_would_reject_stays_fresh(self, tmp_path: Path) -> None:
+        path = _first_run(tmp_path) / "public" / "curator" / "statistics.yaml"
+        path.write_text(path.read_text(encoding="utf-8") + "not_a_field: true\n", encoding="utf-8")
+
+        assert self._verdict(tmp_path).fresh
+
+    def test_a_missing_user_file_carries_the_table(self, tmp_path: Path) -> None:
+        root = _first_run(tmp_path)
+        herbarium = root / "public" / "herbarium"
+        (herbarium / "description.md").write_text("# herbarium\n", encoding="utf-8")
+        Engine(MockAdapter(curator_fixture()), conn_config(tmp_path), tmp_path).generate()
+        (herbarium / "description.md").unlink()
+        committed = CommittedPrint.load(root)
+        scope = DiffSelectors(include=("*",), exclude=(), cli_include=(CURATOR,))
+
+        carry = plan_carry(committed, listed=[CURATOR], scope=scope).settle([])
+
+        assert committed.tables[HERBARIUM].missing_artifacts == ("description",)
+        assert carry.disposition(HERBARIUM) == "out_of_scope"
+        assert not carried_entry(
+            next(c for c in carry.carried if c.table.fqn == HERBARIUM),
+            resolved_max_age_days=None,
+        ).has_description

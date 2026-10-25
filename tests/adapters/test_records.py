@@ -121,12 +121,12 @@ def test_a_postgres_composite_counts_an_all_null_value_as_held(
 ) -> None:
     with psql(postgres_test_db) as conn:
         conn.execute("CREATE TYPE public.site_t AS (town text, code text)")
-        conn.execute("CREATE TABLE public.lot (lot_no integer, site public.site_t)")
+        conn.execute("CREATE TABLE public.seed_lot (lot_no integer, site public.site_t)")
         conn.execute(
-            "INSERT INTO public.lot VALUES (1, ROW('north', 'c1')), (2, ROW(NULL, NULL)), (3, NULL)",
+            "INSERT INTO public.seed_lot VALUES (1, ROW('north', 'c1')), (2, ROW(NULL, NULL)), (3, NULL)",
         )
 
-    site = generate(PostgresAdapter(postgres_test_db), "postgres", tmp_path, "*.lot")["site"]
+    site = generate(PostgresAdapter(postgres_test_db), "postgres", tmp_path, "*.seed_lot")["site"]
 
     assert site["classification"] == "composite"
     assert site["null_count"] == 1
@@ -141,11 +141,11 @@ def test_clickhouse_tuples_and_unions_are_descended(
 ) -> None:
     cursor = clickhouse_native_connection
     cursor.execute(
-        "CREATE TABLE seedbank.lot (lot_no UInt32, site Tuple(town String, code Nullable(String)), "
+        "CREATE TABLE seedbank.seed_lot (lot_no UInt32, site Tuple(town String, code Nullable(String)), "
         "pair Tuple(String, UInt8), tag Variant(UInt64, String), loose Dynamic) ENGINE = Memory",
     )
     cursor.execute(
-        "INSERT INTO seedbank.lot SELECT number, ('north', if(number % 2 = 0, NULL, 'c')), "
+        "INSERT INTO seedbank.seed_lot SELECT number, ('north', if(number % 2 = 0, NULL, 'c')), "
         "('a', 1), if(number < 40, number::Variant(UInt64, String), "
         "if(number < 100, 's'::Variant(UInt64, String), NULL)), "
         "multiIf(number % 3 = 0, number::Int64::Dynamic, number % 3 = 1, 'x'::Dynamic, "
@@ -155,7 +155,7 @@ def test_clickhouse_tuples_and_unions_are_descended(
         {"host": "chdb", "database": "seedbank"},
         cursor_factory=lambda _params: cursor,
     )
-    columns = generate(adapter, "clickhouse", tmp_path, "*.lot")
+    columns = generate(adapter, "clickhouse", tmp_path, "*.seed_lot")
 
     assert set(columns["site"]["parts"]) == {".town", ".code"}
     assert columns["site"]["parts"][".code"]["null_count"] == 55
@@ -174,35 +174,35 @@ def test_a_clickhouse_nested_column_is_an_array_of_records(
     cursor = clickhouse_native_connection
     cursor.execute("SET flatten_nested = 0")
     cursor.execute(
-        "CREATE TABLE seedbank.lot (lot_no UInt32, lines Nested(sku String, qty UInt8)) "
+        "CREATE TABLE seedbank.seed_lot (lot_no UInt32, items Nested(lot String, seeds UInt8)) "
         "ENGINE = MergeTree ORDER BY lot_no",
     )
-    cursor.execute("INSERT INTO seedbank.lot VALUES (1, [('a', 1), ('b', 2)]), (2, [])")
+    cursor.execute("INSERT INTO seedbank.seed_lot VALUES (1, [('a', 1), ('b', 2)]), (2, [])")
     adapter = ClickhouseAdapter(
         {"host": "chdb", "database": "seedbank"},
         cursor_factory=lambda _params: cursor,
     )
-    lines = generate(adapter, "clickhouse", tmp_path, "*.lot")["lines"]
+    items = generate(adapter, "clickhouse", tmp_path, "*.seed_lot")["items"]
 
-    assert lines["classification"] == "composite"
-    assert {"[*]", "[*].sku", "[*].qty"} <= set(lines["parts"])
-    assert lines["parts"]["[*].sku"]["occurrences"] == 2
+    assert items["classification"] == "composite"
+    assert {"[*]", "[*].lot", "[*].seeds"} <= set(items["parts"])
+    assert items["parts"]["[*].lot"]["occurrences"] == 2
 
 
 def test_a_bigquery_struct_is_descended(bigquery_test_dataset: Any) -> None:
     cursor, dataset = bigquery_test_dataset
     cursor.execute(
-        f"CREATE TABLE `{dataset}`.lot (lot_no INT64, site STRUCT<town STRING, code STRING>)",
+        f"CREATE TABLE `{dataset}`.seed_lot (lot_no INT64, site STRUCT<town STRING, code STRING>)",
     )
     cursor.execute(
-        f"INSERT INTO `{dataset}`.lot (lot_no, site) VALUES "
+        f"INSERT INTO `{dataset}`.seed_lot (lot_no, site) VALUES "
         "(1, STRUCT('north', 'c1')), (2, STRUCT('south', NULL)), (3, NULL)",
     )
     adapter = BigqueryAdapter(
         {"project": "dbprint-test", "dataset": dataset},
         cursor_factory=lambda _params: cursor,
     )
-    site = parts_of(adapter, "lot", "site")
+    site = parts_of(adapter, "seed_lot", "site")
 
     assert {p.path: p.occurrences for p in site.parts} == {".town": 2, ".code": 2}
 
@@ -210,14 +210,14 @@ def test_a_bigquery_struct_is_descended(bigquery_test_dataset: Any) -> None:
 def test_a_databricks_struct_is_descended(databricks_test_schema: Any) -> None:
     cursor = databricks_test_schema
     cursor.execute(
-        "CREATE TABLE lot (lot_no INT, site STRUCT<town: STRING, code: STRING>) USING DELTA",
+        "CREATE TABLE seed_lot (lot_no INT, site STRUCT<town: STRING, code: STRING>) USING DELTA",
     )
     cursor.execute(
-        "INSERT INTO lot VALUES (1, named_struct('town', 'north', 'code', 'c1')), "
+        "INSERT INTO seed_lot VALUES (1, named_struct('town', 'north', 'code', 'c1')), "
         "(2, named_struct('town', 'south', 'code', NULL)), (3, NULL)",
     )
     adapter = DatabricksAdapter(DATABRICKS_CREDS, cursor_factory=lambda _params: cursor)
-    site = parts_of(adapter, "lot", "site")
+    site = parts_of(adapter, "seed_lot", "site")
 
     assert {p.path: p.occurrences for p in site.parts} == {".town": 2, ".code": 2}
 

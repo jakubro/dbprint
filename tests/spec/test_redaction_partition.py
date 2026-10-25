@@ -48,6 +48,10 @@ _READS_THE_MARKER_FOR_ANOTHER_REASON: dict[tuple[str, str], str] = {
         "_normalize_table",
     ): "skips a query whose result the partition withholds",
     (
+        "engine/orchestrator.py",
+        "_mark_unmeasured",
+    ): "reads whether the withheld count is present, never withholds a field",
+    (
         "conformance/statistics.py",
         "_check_unredacted_sensitive",
     ): "warns when a cell value is published with no marker",

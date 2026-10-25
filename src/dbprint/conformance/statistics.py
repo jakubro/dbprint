@@ -26,8 +26,10 @@ from dbprint.spec.percentiles import beyond_float64_precision
 from dbprint.spec.percentiles import tolerance as percentile_tolerance
 from dbprint.spec.profile import BLOCKS_OF, COLUMN_FIELDS_OF
 from dbprint.spec.redaction import (
+    MASK_PLACEHOLDER,
     REDACTED_DAY_COUNT_GRANULARITY,
     WITHHELD_UNDER_REDACTION,
+    is_digest,
     is_redacted,
 )
 from dbprint.spec.rounding import DECIMAL_PLACES, round_statistic
@@ -124,6 +126,12 @@ _POOLED_FLOAT_FIELDS = frozenset({"values", "frequencies", "distribution"})
 # SPEC 2.2.18: a part has no join-key role, so it carries neither uniqueness verdict.
 _PART_FORBIDDEN_INFERRED = frozenset({"candidate_key", "candidate_key_exception"})
 
+_REDACTED_LITERAL_RULE = {
+    "mask": f"each MUST be the placeholder {MASK_PLACEHOLDER!r}",
+    "hash": "each MUST be 16 lowercase hexadecimal characters",
+    "drop": "under drop no values entry carries a value",
+}
+
 
 @dataclass(frozen=True)
 class _ConditionalCell:
@@ -207,6 +215,17 @@ def _no_nonzero_vector(col: dict, rows_scanned: int) -> bool:
     )
 
 
+def _no_finite_value(col: dict, rows_scanned: int) -> bool:
+    non_finite = col.get("non_finite_count")
+    null_count = col.get("null_count")
+
+    return (
+        isinstance(non_finite, int)
+        and isinstance(null_count, int)
+        and non_finite >= rows_scanned - null_count
+    )
+
+
 _CONDITIONAL_CELLS: tuple[_ConditionalCell, ...] = (
     # `drop` emits no literal, so the bound fields are absent, not placeholders (SPEC 2.2.9).
     # `freshness` is unaffected: `max_age_days` is derived, not a value read from a cell.
@@ -236,6 +255,13 @@ _CONDITIONAL_CELLS: tuple[_ConditionalCell, ...] = (
         ),
         spec_ref="§2.2.9",
         holds=lambda col, rows_scanned: is_redacted(col),
+    ),
+    _ConditionalCell(
+        classifications=frozenset({"numeric"}),
+        fields=frozenset({"range", "percentiles", "mean", "sum"}),
+        reason="the scanned set holds no finite value for a numeric statistic to read",
+        spec_ref="§2.2.4",
+        holds=_no_finite_value,
     ),
     _ConditionalCell(
         classifications=frozenset({"spatial"}),
@@ -362,6 +388,7 @@ def _check_column(
     profiled_at: Any,
     catalog_only: bool,
     part: bool = False,
+    enclosing_sensitivity: str | None = None,
 ) -> list[Issue]:
     """Every per-column check; a part reads `occurrences` as its population (SPEC 2.2.18)."""
 
@@ -393,10 +420,11 @@ def _check_column(
     issues.extend(_check_value_order(col, col_path))
     issues.extend(_check_spelling_groups(col, col_path))
     issues.extend(_check_redaction_marker(col, col_path))
+    issues.extend(_check_redacted_literals(col, col_path))
     issues.extend(_check_geometry(col, col_path, rows_scanned))
     issues.extend(_check_vector_bounds(col, col_path))
     issues.extend(_check_types_sum(col, col_path, rows_scanned))
-    issues.extend(_check_unredacted_sensitive(col, col_path))
+    issues.extend(_check_unredacted_sensitive(col, col_path, enclosing_sensitivity))
     issues.extend(_check_distribution(col, col_path))
     issues.extend(_check_frequencies_distribution(col, col_path, rows_scanned))
     issues.extend(_check_precision(col, col_path))
@@ -405,6 +433,7 @@ def _check_column(
     issues.extend(_check_percentiles_order(col, col_path))
     issues.extend(_check_percentiles_containment(col, col_path))
     issues.extend(_check_mean_containment(col, col_path))
+    issues.extend(_check_non_finite_statistic(col, col_path))
     issues.extend(_check_length_order(col, col_path))
     issues.extend(_check_normalized_cardinality_order(col, col_path))
     issues.extend(_check_looks_like_candidate(col, col_path))
@@ -482,10 +511,25 @@ def _check_parts(col: dict, col_path: str, profiled_at: Any) -> list[Issue]:
                     profiled_at=profiled_at,
                     catalog_only=False,
                     part=True,
+                    enclosing_sensitivity=_enclosing_sensitivity(col, parts, part_path),
                 ),
             )
 
     return issues
+
+
+def _enclosing_sensitivity(col: dict, parts: dict, part_path: str) -> str | None:
+    up = part_paths.parent(part_path)
+    chain = part_paths.enclosing_chain(up, parts) if up is not None else ()
+
+    for block in (*chain, col):
+        inferred = block.get("inferred") if isinstance(block, dict) else None
+        sensitivity = inferred.get("sensitivity") if isinstance(inferred, dict) else None
+
+        if isinstance(sensitivity, str):
+            return sensitivity
+
+    return None
 
 
 def _check_null_patterns(
@@ -1734,7 +1778,13 @@ def _check_count_invariants(col: dict, col_path: str, rows_scanned: int) -> list
     if isinstance(null_count, int):
         non_null = max(rows_scanned - null_count, 0)
 
-        for field in ("zero_count", "negative_count", "empty_count", "quantized_count"):
+        for field in (
+            "zero_count",
+            "negative_count",
+            "empty_count",
+            "quantized_count",
+            "non_finite_count",
+        ):
             issues.extend(_degenerate_count_issue(col_path, field, col.get(field), non_null))
 
     # Recomputed through the producer's own pure-arithmetic rules. Unlike values_coverage
@@ -1926,7 +1976,7 @@ def _check_spelling_groups(col: dict, col_path: str) -> list[Issue]:
 
     values = col.get("values")
 
-    if not isinstance(values, list):
+    if not isinstance(values, list) or is_redacted(col):
         return []
 
     entries = [e for e in values if isinstance(e, dict)]
@@ -2258,6 +2308,61 @@ def _check_redaction_marker(col: dict, col_path: str) -> list[Issue]:
     return []
 
 
+def _check_redacted_literals(col: dict, col_path: str) -> list[Issue]:
+    """A marked column or part publishes no literal its primitive withholds (SPEC 2.2.9, 2.2.4).
+
+    The detail counts the offending literals and never quotes one: check output lands in logs.
+    """
+
+    primitive = col.get("redacted")
+
+    if primitive not in ("mask", "hash", "drop"):
+        return []
+
+    values = col.get("values")
+    entries = [e for e in values if isinstance(e, dict)] if isinstance(values, list) else []
+    offending = {"spelling_of": sum("spelling_of" in e for e in entries)}
+
+    if primitive == "drop":
+        offending["values"] = sum(e.get("value") is not None for e in entries)
+    else:
+        rng = col.get("range")
+        percentiles = col.get("percentiles")
+        offending["values"] = _off_form(primitive, [e.get("value") for e in entries])
+        offending["range"] = _off_form(
+            primitive,
+            [rng.get("min"), rng.get("max")] if isinstance(rng, dict) else [],
+        )
+        offending["percentiles"] = _off_form(
+            primitive,
+            list(percentiles.values()) if isinstance(percentiles, dict) else [],
+        )
+
+    return [
+        Issue(
+            col_path,
+            "stats.redacted-literal-published",
+            "error",
+            (
+                f"spelling_of appears on {count} values entries of a redacted={primitive!r} "
+                "column; a redacted column MUST NOT emit spelling_of (§2.2.4)."
+                if field == "spelling_of"
+                else f"{field} carries {count} literal(s) a redacted={primitive!r} column "
+                f"withholds; {_REDACTED_LITERAL_RULE[primitive]}."
+            ),
+            "§2.2.9",
+        )
+        for field, count in sorted(offending.items())
+        if count
+    ]
+
+
+def _off_form(primitive: str, literals: list[Any]) -> int:
+    holds = is_digest if primitive == "hash" else lambda literal: literal == MASK_PLACEHOLDER
+
+    return sum(literal is not None and not holds(literal) for literal in literals)
+
+
 def _check_geometry(col: dict, col_path: str, rows_scanned: int) -> list[Issue]:
     """SPEC 2.2.4: each `geometry` list partitions the non-null values; an `extent` is a box."""
 
@@ -2364,18 +2469,20 @@ def _check_types_sum(col: dict, col_path: str, rows_scanned: int) -> list[Issue]
     ]
 
 
-def _check_unredacted_sensitive(col: dict, col_path: str) -> list[Issue]:
-    """SPEC 4.4.2/2.2.9: a detected `sensitivity` publishing a cell value with no marker warns.
-
-    Publication is the same four-field test (`values`/`range`/`percentiles`/`extent`) the
-    producer's marker rule uses (`orchestrator._emitted_extras`). `warning` only: the axis is
-    recall-biased (SPEC 4.4.2), so a false positive MUST NOT move the verdict or exit code.
+def _check_unredacted_sensitive(
+    col: dict,
+    col_path: str,
+    enclosing_sensitivity: str | None = None,
+) -> list[Issue]:
+    """SPEC 4.4.2/2.2.9: a block whose own or nearest enclosing `sensitivity` publishes a cell value
+    with no marker warns - only warns, since the recall-biased axis must not move the exit code.
     """
 
     inferred = col.get("inferred")
-    sensitivity = inferred.get("sensitivity") if isinstance(inferred, dict) else None
+    own = inferred.get("sensitivity") if isinstance(inferred, dict) else None
+    sensitivity = own if isinstance(own, str) else enclosing_sensitivity
 
-    if not isinstance(sensitivity, str) or col.get("redacted") is not None:
+    if sensitivity is None or col.get("redacted") is not None:
         return []
 
     published = [field for field in ("values", "range", "percentiles", "extent") if field in col]
@@ -2383,13 +2490,19 @@ def _check_unredacted_sensitive(col: dict, col_path: str) -> list[Issue]:
     if not published:
         return []
 
+    declares = (
+        f"column declares inferred.sensitivity={sensitivity!r}"
+        if isinstance(own, str)
+        else f"sits inside a column or part declaring inferred.sensitivity={sensitivity!r}"
+    )
+
     return [
         Issue(
             col_path,
             "privacy.unredacted-sensitive",
             "warning",
-            f"column declares inferred.sensitivity={sensitivity!r} and publishes "
-            f"{', '.join(published)} with no redacted primitive covering it.",
+            f"{declares} and publishes {', '.join(published)} with no redacted primitive "
+            "covering it.",
             "§4.4",
         ),
     ]
@@ -2756,7 +2869,42 @@ def _check_mean_containment(col: dict, col_path: str) -> list[Issue]:
 
 
 def _is_real_number(value: Any) -> TypeGuard[float]:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        or (isinstance(value, float) and math.isfinite(value))
+    )
+
+
+def _check_non_finite_statistic(col: dict, col_path: str) -> list[Issue]:
+    """SPEC 2.2.4: every numeric statistic reads the finite values alone, so none is NaN or inf."""
+
+    if col.get("classification") != "numeric":
+        return []
+
+    rng = col.get("range")
+    percentiles = col.get("percentiles")
+    rng = rng if isinstance(rng, dict) else {}
+    percentiles = percentiles if isinstance(percentiles, dict) else {}
+    fields = {
+        "range.min": rng.get("min"),
+        "range.max": rng.get("max"),
+        **{f"percentiles.{key}": value for key, value in percentiles.items()},
+        "mean": col.get("mean"),
+        "sum": col.get("sum"),
+    }
+
+    return [
+        Issue(
+            col_path,
+            "stats.non-finite-statistic",
+            "error",
+            f"{field}={value!r} is not a finite number; numeric statistics read finite values only.",
+            "§2.2.4",
+        )
+        for field, value in fields.items()
+        if isinstance(value, float) and not math.isfinite(value)
+    ]
 
 
 def _check_length_order(col: dict, col_path: str) -> list[Issue]:

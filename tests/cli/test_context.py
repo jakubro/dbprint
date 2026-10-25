@@ -635,3 +635,42 @@ class TestSeveralConnections:
 
         assert "# Context for connection" not in markdown.output
         assert json.loads(structured.output)["table"] == "arboretum.seedbank.accession"
+
+    def test_each_entry_carries_its_connection_s_notes_a_lone_table_included(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._two_connections(tmp_path, committed_print)
+        (committed_print / "staging" / "manifest.annotations.yaml").write_text(
+            "format_version: 1\nnotes: Every staging timestamp is UTC.\n",
+        )
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(
+            main,
+            ["context", "arboretum.seedbank.accession", "--format", "json"],
+        )
+        payload = json.loads(result.output)
+
+        assert [list(entry) for entry in payload] == [
+            ["connection", "connection_notes", "tables"],
+        ] * 2
+        assert payload[1]["connection_notes"] == "Every staging timestamp is UTC."
+        assert all("connection_notes" not in t for entry in payload for t in entry["tables"])
+
+    def test_one_connection_over_several_tables_is_one_object(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _write_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(main, ["context", "arboretum.seedbank.*", "--format", "json"])
+        payload = json.loads(result.output)
+
+        assert payload["connection"] == "production"
+        assert payload["connection_notes"]
+        assert len(payload["tables"]) > 1
+        assert all("connection_notes" not in t for t in payload["tables"])

@@ -7,9 +7,10 @@ from typing import Any
 
 import pytest
 import yaml
+from markdown.util import ETX, STX
 
 from dbprint.config import ConnectionConfig
-from dbprint.docs import catalogue, view
+from dbprint.docs import catalogue, view, web
 from dbprint.engine.table_readings import live_annotations
 from dbprint.spec.scope import scope_of
 
@@ -699,7 +700,6 @@ class TestColumnView:
             (artifacts.statistics_annotations or {}).get("columns"),
             artifacts.statistics,
         )
-        targets = catalogue.leaf_targets(found, "seedbank.batch")
 
         rendered = view.column_view(
             "cultivar_id",
@@ -707,10 +707,30 @@ class TestColumnView:
             300,
             artifacts.relationships,
             annotations,
-            targets,
         )
 
         assert "FK: seedbank.cultivar.cultivar_id (declared)" in rendered["notes"]
+
+    def test_a_path_edge_s_fk_label_names_its_key(self) -> None:
+        relationships = {
+            "refers_to": [
+                {
+                    "column": ["traits"],
+                    "path": ["lineage_id"],
+                    "target_table": "seedbank.lineage",
+                    "target_column": ["lineage_id"],
+                    "detection": "annotated",
+                },
+            ],
+        }
+        stats = {"classification": "composite", "null_count": 0, "null_rate": 0.0}
+
+        rendered = view.column_view("traits", stats, 10, relationships, {})
+
+        assert (
+            "FK: traits (path lineage_id) -> seedbank.lineage.lineage_id (annotated)"
+            in rendered["notes"]
+        )
 
     def test_the_profile_reaches_the_configured_sample_size_hedge(self) -> None:
         """`engine.context_assembler` threads the manifest's `profile` (SPEC 2.5) into
@@ -730,7 +750,6 @@ class TestColumnView:
             None,
             None,
             {},
-            {},
             profile={"looks_like": {"sample_size": 500}},
         )
 
@@ -745,7 +764,7 @@ class TestColumnView:
             "negative_count": 3,
         }
 
-        rendered = view.column_view("balance", col, None, None, {}, {})
+        rendered = view.column_view("balance", col, None, None, {})
 
         assert rendered["zero_count"] == 60
         assert rendered["negative_count"] == 3
@@ -759,36 +778,22 @@ class TestColumnView:
             "length": {"min": 2, "max": 4000, "avg": 187.4, "p95": 512.0},
         }
 
-        rendered = view.column_view("error_message", col, None, None, {}, {})
+        rendered = view.column_view("error_message", col, None, None, {})
 
         assert rendered["length"] == {"min": 2, "max": 4000, "avg": 187.4, "p95": 512.0}
 
-    def test_annotation_note_is_linkified(self, rich_conn: ConnectionConfig) -> None:
+    def test_annotation_note_links_its_mentions(self, rich_conn: ConnectionConfig) -> None:
         found = catalogue.load_connections([rich_conn])[0]
         artifacts = catalogue.load_table(found, "seedbank.batch")
         assert artifacts is not None
-        assert artifacts.statistics is not None
-        columns = artifacts.statistics["columns"]
-        annotations = live_annotations(
-            (artifacts.statistics_annotations or {}).get("columns"),
-            artifacts.statistics,
-        )
-        targets = catalogue.leaf_targets(found, "seedbank.batch")
-        targets.update({name: f"#col-{name}" for name in columns})
 
-        rendered = view.column_view(
-            "cultivar_id",
-            columns["cultivar_id"],
-            300,
-            artifacts.relationships,
-            annotations,
-            targets,
-        )
+        page = view.build_table_view(found, artifacts)
+        rendered = next(c for c in page["columns"] if c["name"] == "cultivar_id")
+        html_text = str(web._render_markdown(rendered["annotation_note"], page["mentions"]))
 
         # Both "cultivar" (a table mention) and "cultivar_id" (a column self-mention) link out.
-        assert rendered["annotation_note"] == (
-            "FK to [cultivar](/t/primary/seedbank.cultivar).[cultivar_id](#col-cultivar_id)."
-        )
+        assert '<a href="/t/primary/seedbank.cultivar">cultivar</a>' in html_text
+        assert '<a href="#col-cultivar_id">cultivar_id</a>' in html_text
         assert rendered["annotation_values"] == [("1", "the type specimen")]
         assert rendered["annotation_claims"] == [("cardinality_ratio", "> 0.1")]
 
@@ -798,7 +803,7 @@ class TestColumnView:
     ) -> None:
         col = _column(edge_case_conn, "public.legacy_dates", "external_ref")
 
-        rendered = view.column_view("external_ref", col, 200, None, {}, {})
+        rendered = view.column_view("external_ref", col, 200, None, {})
 
         assert "candidate key (measured duplicates)" in rendered["notes"]
 
@@ -809,7 +814,7 @@ class TestColumnView:
         # `phone` carries no hint, and its other facts all have dedicated cells.
         col = _column(companion_conn, "seedbank.botanist", "phone")
 
-        rendered = view.column_view("phone", col, 100, None, {}, {})
+        rendered = view.column_view("phone", col, 100, None, {})
 
         assert rendered["notes"] == ""
 
@@ -819,7 +824,7 @@ class TestColumnView:
     ) -> None:
         col = _column(degraded_conn, "seedbank.storage_reading", "logged_at")
 
-        rendered = view.column_view("logged_at", col, 300, None, {}, {})
+        rendered = view.column_view("logged_at", col, 300, None, {})
 
         assert rendered["unmeasured"] == (
             "distribution",
@@ -834,12 +839,12 @@ class TestColumnView:
     def test_a_measured_column_carries_no_names(self, rich_conn: ConnectionConfig) -> None:
         col = _column(rich_conn, "seedbank.batch", "batch_id")
 
-        assert view.column_view("batch_id", col, 300, None, {}, {})["unmeasured"] == ()
+        assert view.column_view("batch_id", col, 300, None, {})["unmeasured"] == ()
 
     def test_no_physical_name_field(self, rich_conn: ConnectionConfig) -> None:
         col = _column(rich_conn, "seedbank.batch", "cultivar_id")
 
-        rendered = view.column_view("cultivar_id", col, 300, None, {}, {})
+        rendered = view.column_view("cultivar_id", col, 300, None, {})
 
         assert "physical_name" not in rendered
 
@@ -848,7 +853,7 @@ class TestColumnView:
         patterns = view.null_patterns_view(statistics)
         col = _column(companion_conn, "seedbank.botanist", "email")
 
-        rendered = view.column_view("email", col, 100, None, {}, {}, patterns)
+        rendered = view.column_view("email", col, 100, None, {}, patterns)
 
         assert rendered["null_companions"] == ["phone"]
 
@@ -858,7 +863,7 @@ class TestColumnView:
     ) -> None:
         col = _column(rich_conn, "seedbank.batch", "cultivar_id")
 
-        rendered = view.column_view("cultivar_id", col, 300, None, {}, {})
+        rendered = view.column_view("cultivar_id", col, 300, None, {})
 
         assert rendered["null_companions"] == []
 
@@ -1034,7 +1039,34 @@ class TestRelationshipRows:
         assert rows["refers_to"][0]["rejected"] is True
         assert rows["refers_to"][0]["rejected_note"] is None
 
-    def test_in_rows_reads_the_referencer_tables_own_rejection(self, tmp_path: Path) -> None:
+    def test_a_verdict_on_a_declared_edge_marks_nothing(self) -> None:
+        edge = {"column": ["a"], "target_table": "t", "target_column": ["b"]}
+        relationships = {"refers_to": [{**edge, "detection": "declared"}], "referenced_by": []}
+        annotations = {"refers_to": [{**edge, "verdict": "rejected", "note": "a bed code here"}]}
+
+        rows = view.relationship_rows(_empty_conn(), "s.t", relationships, annotations)
+        rendered = view.column_view(
+            "a",
+            {"classification": "categorical", "null_count": 0, "null_rate": 0.0},
+            10,
+            relationships,
+            {},
+            relationship_annotations=annotations["refers_to"],
+        )
+
+        assert (rows["refers_to"][0]["rejected"], rows["refers_to"][0]["rejected_note"]) == (
+            False,
+            None,
+        )
+        assert "FK: t.b (declared)" in rendered["notes"]
+
+    @pytest.mark.parametrize(("detection", "rejected"), [("inferred", True), ("declared", False)])
+    def test_in_rows_reads_the_referencer_tables_own_rejection(
+        self,
+        tmp_path: Path,
+        detection: str,
+        rejected: bool,
+    ) -> None:
         """SPEC 2.7.2 has no `referenced_by` verdict - a rejection is authored only on the table
         owning the `refers_to` entry, so the target's page reads it from the referencer.
         """
@@ -1065,7 +1097,7 @@ class TestRelationshipRows:
                             "column": ["taxon_id"],
                             "target_table": "public.taxon",
                             "target_column": ["id"],
-                            "detection": "declared",
+                            "detection": detection,
                         },
                     ],
                     "referenced_by": [],
@@ -1075,6 +1107,7 @@ class TestRelationshipRows:
         (root / "public/accession/relationships.annotations.yaml").write_text(
             yaml.safe_dump(
                 {
+                    "format_version": 1,
                     "refers_to": [
                         {
                             "column": ["taxon_id"],
@@ -1094,33 +1127,55 @@ class TestRelationshipRows:
                     "column": ["id"],
                     "referencer_table": "public.accession",
                     "referencer_column": ["taxon_id"],
-                    "detection": "declared",
+                    "detection": detection,
                 },
             ],
         }
 
         rows = view.relationship_rows(conn, "public.taxon", taxon_relationships, None)
 
-        assert rows["referenced_by"][0]["rejected"] is True
-        assert rows["referenced_by"][0]["rejected_note"] == "name collision, not a real key"
+        # A verdict on a declared edge is void (SPEC 2.7.2): no marker, no note.
+        assert rows["referenced_by"][0]["rejected"] is rejected
+        assert rows["referenced_by"][0]["rejected_note"] == (
+            "name collision, not a real key" if rejected else None
+        )
 
 
-class TestLinkify:
-    def test_wraps_a_word_boundary_mention(self) -> None:
-        result = view.linkify("See cultivar for species.", {"cultivar": "/t/c/seedbank.cultivar"})
+class TestMentionSegments:
+    def test_a_word_boundary_mention_is_its_own_run(self) -> None:
+        assert view.mention_segments("See cultivar for species.", {"cultivar": "/c"}) == [
+            ("See ", None),
+            ("cultivar", "/c"),
+            (" for species.", None),
+        ]
 
-        assert result == "See [cultivar](/t/c/seedbank.cultivar) for species."
+    def test_the_longest_key_wins(self) -> None:
+        targets = {"cultivar": "/c", "cultivar_id": "#col-cultivar_id"}
 
-    def test_skips_a_mention_inside_a_code_span(self) -> None:
-        result = view.linkify("Use `cultivar_id`, not cultivar.", {"cultivar": "/x"})
+        assert view.mention_segments("cultivar_id", targets) == [
+            ("cultivar_id", "#col-cultivar_id"),
+        ]
 
-        assert result == "Use `cultivar_id`, not [cultivar](/x)."
+    def test_a_part_of_a_longer_word_is_not_a_mention(self) -> None:
+        assert view.mention_segments("cultivars_x", {"cultivar": "/c"}) == [("cultivars_x", None)]
 
-    def test_no_targets_returns_text_unchanged(self) -> None:
-        assert view.linkify("plain text", {}) == "plain text"
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "https://seedbank.example/cultivar/map",
+            "www.seedbank.example/cultivar",
+            "mailto:cultivar@seedbank.example",
+            "cultivar@seedbank.example",
+            f"{STX}cultivar{ETX}",
+        ],
+    )
+    def test_a_mention_inside_an_address_or_placeholder_is_passed_over(self, text: str) -> None:
+        assert view.mention_segments(f"see {text} now", {"cultivar": "/c"}) == [
+            (f"see {text} now", None),
+        ]
 
-    def test_none_text_returns_none(self) -> None:
-        assert view.linkify(None, {"a": "/b"}) is None
+    def test_no_targets_returns_the_text_as_one_run(self) -> None:
+        assert view.mention_segments("plain text", {}) == [("plain text", None)]
 
 
 class TestBuildTableView:
@@ -1167,9 +1222,10 @@ class TestBuildTableView:
         assert artifacts is not None
 
         page = view.build_table_view(found, artifacts)
+        html_text = str(web._render_markdown(page["description"], page["mentions"]))
 
         # "botanists" is no real table/column name, only the aliased plural of "botanist".
-        assert "[botanists](/t/primary/seedbank.botanist)" in page["description"]
+        assert '<a href="/t/primary/seedbank.botanist">botanists</a>' in html_text
 
     def test_empty_columns_table_composes_the_notice_instead_of_a_skyline(
         self,

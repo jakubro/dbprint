@@ -141,6 +141,7 @@ def _notes_battery() -> list[tuple[Rendered, dict[str, Any]]]:
         {"classification": "temporal", "freshness": {"classification": value}}
         for value in _family("freshness")
     ]
+    columns.append({"classification": "numeric", "null_count": 0, "non_finite_count": 1})
     scope = scope_of({"scope": {"rows_scanned": 2, "sample": 0.5}})
     out = [(synthesize(column), column) for column in columns]
     out.extend(

@@ -75,6 +75,7 @@ VENDOR_SUPPORT: dict[str, frozenset[Vendor]] = {
     "pg_namespace": frozenset({"postgres", "redshift"}),
     "pg_attribute": frozenset({"postgres", "redshift"}),
     "pg_constraint": frozenset({"postgres", "redshift"}),
+    "conparentid": frozenset({"postgres"}),
     "pg_index": frozenset({"postgres"}),
     "pg_stats": frozenset({"postgres"}),
     "reltuples": frozenset({"postgres"}),
@@ -83,7 +84,6 @@ VENDOR_SUPPORT: dict[str, frozenset[Vendor]] = {
     "information_schema.key_column_usage": frozenset(
         {"postgres", "mysql", "duckdb", "databricks", "bigquery"},
     ),
-    "information_schema.index_columns": frozenset({"snowflake"}),
     "information_schema.partitions": frozenset({"mysql", "bigquery"}),
     # Redshift's `SVV_*`/`STV_*` system views - no INFORMATION_SCHEMA equivalent for these fields.
     "svv_": frozenset({"redshift"}),
@@ -92,6 +92,7 @@ VENDOR_SUPPORT: dict[str, frozenset[Vendor]] = {
     "get_ddl(": frozenset({"snowflake"}),
     "show create table": frozenset({"mysql", "databricks"}),
     "show imported keys": frozenset({"snowflake"}),
+    "show indexes": frozenset({"snowflake"}),
     "show tables": frozenset({"snowflake", "databricks"}),
     "show table ": frozenset({"redshift"}),
     "show view ": frozenset({"redshift"}),
@@ -102,6 +103,11 @@ VENDOR_SUPPORT: dict[str, frozenset[Vendor]] = {
     "describe detail": frozenset({"databricks"}),
     # Aggregates and functions.
     "count_if(": frozenset({"snowflake", "duckdb"}),
+    # The widened totals of a numeric column's sum and mean.
+    "as bignum)": frozenset({"duckdb"}),
+    "toint256(": frozenset({"clickhouse"}),
+    "todecimal256(": frozenset({"clickhouse"}),
+    "as bignumeric)": frozenset({"bigquery"}),
     "filter (where": frozenset({"postgres", "duckdb"}),
     # Collapsing whitespace never inserts a space, so the no-space form needs its own entry.
     "filter(where": frozenset({"postgres", "duckdb"}),

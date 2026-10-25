@@ -3,18 +3,27 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, LiteralString, cast
 
 import duckdb
+import mysql.connector
 import pytest
 import yaml
 
-from dbprint.adapters import BigqueryAdapter, ClickhouseAdapter, DatabricksAdapter, PostgresAdapter
+from dbprint.adapters import (
+    BigqueryAdapter,
+    ClickhouseAdapter,
+    DatabricksAdapter,
+    PostgresAdapter,
+)
 from dbprint.adapters.base import PartSource
 from dbprint.adapters.dialect import Vendor
 from dbprint.adapters.duckdb import DuckdbAdapter
+from dbprint.adapters.mysql import connection as mysql_connection
+from dbprint.adapters.mysql.stats import DOCUMENTS as MYSQL_DOCUMENTS
 from dbprint.adapters.sql_layout import select_from
 from dbprint.config import PartsProfile, ProfileConfig
 from dbprint.config.project import ConnectionConfig, RedactRule
@@ -31,11 +40,11 @@ from tests.adapters._sql_style import alias_violations, layout_violations, viola
 _SALT = "document-test-salt"
 _EVENTS = (
     (
-        '{"status":"shipped","buyer":{"id":7,"mail":"ana@example.invalid"},"amt":1.5,'
-        '"items":[{"sku":"A1","qty":2},{"sku":"B2"}]}'
+        '{"status":"planted","collector":{"id":7,"mail":"ana@example.invalid"},"weight_g":1.5,'
+        '"items":[{"lot":"A1","seeds":2},{"lot":"B2"}]}'
     ),
-    '{"status":null,"buyer":{"id":"8"},"user-id":3,"items":[]}',
-    '{"status":"new","amt":2}',
+    '{"status":null,"collector":{"id":"8"},"user-id":3,"items":[]}',
+    '{"status":"new","weight_g":2}',
     "[1,2,3]",
     '"hello"',
     "null",
@@ -61,16 +70,16 @@ class TestDuckdb:
         assert parts["[keys]"]["null_count"] == 0
         assert parts["[keys]"]["values"] == [
             {"value": "status", "count": 3},
-            {"value": "amt", "count": 2},
-            {"value": "buyer", "count": 2},
+            {"value": "collector", "count": 2},
             {"value": "items", "count": 2},
+            {"value": "weight_g", "count": 2},
             {"value": "user-id", "count": 1},
         ]
         assert (parts[".status"]["occurrences"], parts[".status"]["null_count"]) == (3, 1)
         assert parts[".status"]["sql_type"] == "VARCHAR"
         assert parts['["user-id"]']["sql_type"] == "UBIGINT"
-        assert parts[".amt"]["sql_type"] == "DOUBLE"
-        assert [v["value"] for v in parts[".amt"]["values"]] == [1.5, 2.0]
+        assert parts[".weight_g"]["sql_type"] == "DOUBLE"
+        assert [v["value"] for v in parts[".weight_g"]["values"]] == [1.5, 2.0]
         assert parts["[*]"]["occurrences"] == 3
         assert parts["[*]"]["sql_type"] == "UBIGINT"
 
@@ -80,16 +89,16 @@ class TestDuckdb:
     ) -> None:
         parts = _duckdb_events(tmp_path)["parts"]
 
-        assert parts[".buyer.id"]["sql_type"] == "JSON"
-        assert parts[".buyer.id"]["classification"] == "json"
-        assert parts[".buyer.id"]["types"] == {"UBIGINT": 1, "VARCHAR": 1}
-        assert "values" not in parts[".buyer.id"]
-        assert parts[".buyer"]["types"] == {"OBJECT": 2}
-        assert (parts[".buyer"]["size"]["min"], parts[".buyer"]["size"]["max"]) == (1, 2)
+        assert parts[".collector.id"]["sql_type"] == "JSON"
+        assert parts[".collector.id"]["classification"] == "json"
+        assert parts[".collector.id"]["types"] == {"UBIGINT": 1, "VARCHAR": 1}
+        assert "values" not in parts[".collector.id"]
+        assert parts[".collector"]["types"] == {"OBJECT": 2}
+        assert (parts[".collector"]["size"]["min"], parts[".collector"]["size"]["max"]) == (1, 2)
         assert parts[".items"]["classification"] == "composite"
         assert parts[".items"]["empty_count"] == 1
         assert parts[".items[*]"]["occurrences"] == 2
-        assert parts[".items[*].qty"]["occurrences"] == 1
+        assert parts[".items[*].seeds"]["occurrences"] == 1
 
     def test_the_cap_keeps_the_key_set_and_counts_every_part(self, tmp_path: Path) -> None:
         payload = _duckdb_events(tmp_path, parts=PartsProfile(max=5))
@@ -143,15 +152,20 @@ class TestDuckdb:
     ) -> None:
         payload = _duckdb_events(
             tmp_path,
-            redact=(RedactRule(columns=("*.order_event.payload",), with_="mask"),),
+            redact=(RedactRule(columns=("*.curation_event.payload",), with_="mask"),),
         )
 
         assert set(payload["parts"]) == {"[keys]", "[*]"}
         assert payload["parts"]["[keys]"]["redacted"] == "mask"
         assert payload["parts"]["[*]"]["redacted"] == "mask"
-        assert payload["parts_found"] == 14
+        assert payload["parts_found"] == 7
 
-    def test_keys_and_values_that_are_emails_are_caught(self, tmp_path: Path) -> None:
+    def test_keys_and_values_that_are_emails_are_caught(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.DEBUG, logger="dbprint.adapters")
         rows = [f'{{"contact_by": {{"g{i}@example.invalid": {i}}}}}' for i in range(30)]
         payload = _duckdb_documents(
             tmp_path,
@@ -166,13 +180,17 @@ class TestDuckdb:
         assert not [
             p for p in (tmp_path / "prints").rglob("*.yaml") if "@example.invalid" in p.read_text()
         ]
+        traced = [r.getMessage() for r in caplog.records if r.getMessage().startswith("statement")]
+
+        assert traced
+        assert not [text for text in traced if "@example.invalid" in text]
 
     def test_an_unredacted_email_member_warns(self, tmp_path: Path) -> None:
         _duckdb_events(tmp_path)
         issues = validate_print(tmp_path / "prints" / "garden")
 
         assert any(
-            i.code == "privacy.unredacted-sensitive" and ".buyer.mail" in i.path for i in issues
+            i.code == "privacy.unredacted-sensitive" and ".collector.mail" in i.path for i in issues
         )
 
 
@@ -181,24 +199,103 @@ def test_a_postgres_document_reads_its_own_type_names(
     tmp_path: Path,
 ) -> None:
     with psql(postgres_test_db) as conn:
-        conn.execute("CREATE TABLE public.order_event (event_no integer, payload jsonb, raw json)")
+        conn.execute(
+            "CREATE TABLE public.curation_event (event_no integer, payload jsonb, raw json)",
+        )
 
         for number, event in enumerate(_EVENTS):
             conn.execute(
-                "INSERT INTO public.order_event VALUES (%s, %s, %s)",
+                "INSERT INTO public.curation_event VALUES (%s, %s, %s)",
                 (number, event, '{"a": 1, "a": 2}' if number == 0 else None),
             )
 
-    columns = generate(PostgresAdapter(postgres_test_db), "postgres", tmp_path, "*.order_event")
+    columns = generate(PostgresAdapter(postgres_test_db), "postgres", tmp_path, "*.curation_event")
     payload = columns["payload"]
 
     assert payload["types"] == {"object": 3, "array": 1, "null": 1, "string": 1}
     assert payload["parts"][".status"]["sql_type"] == "string"
-    assert payload["parts"][".buyer.id"]["sql_type"] == "jsonb"
-    assert payload["parts"][".buyer.id"]["types"] == {"number": 1, "string": 1}
-    assert payload["parts"][".amt"]["sql_type"] == "number"
+    assert payload["parts"][".collector.id"]["sql_type"] == "jsonb"
+    assert payload["parts"][".collector.id"]["types"] == {"number": 1, "string": 1}
+    assert payload["parts"][".weight_g"]["sql_type"] == "number"
     assert payload["parts_found"] == 14
     assert columns["raw"]["parts"]["[keys]"]["occurrences"] == 1
+
+
+_QUOTED_KEY = "a\\'b"
+
+
+def test_a_postgres_key_reads_its_own_value_with_standard_conforming_strings_off(
+    postgres_test_db: dict[str, str],
+    tmp_path: Path,
+) -> None:
+    """The session pins the grammar the doubled-quote literal is spelled for (SPEC 2.2.18)."""
+
+    with psql(postgres_test_db) as conn:
+        conn.execute("CREATE TABLE public.curation_event (event_no integer, payload jsonb)")
+
+        for number, value in enumerate(("q", "r")):
+            conn.execute(
+                "INSERT INTO public.curation_event VALUES (%s, %s)",
+                (number, json.dumps({_QUOTED_KEY: value})),
+            )
+
+        database = postgres_test_db["database"]
+        conn.execute(
+            cast(
+                LiteralString,
+                f'ALTER DATABASE "{database}" SET standard_conforming_strings = off',
+            ),
+        )
+
+    payload = generate(PostgresAdapter(postgres_test_db), "postgres", tmp_path, "*.curation_event")[
+        "payload"
+    ]
+    member = next(part for path, part in payload["parts"].items() if path != "[keys]")
+
+    assert [v["value"] for v in member["values"]] == ["q", "r"]
+
+
+def test_a_mysql_key_reads_its_own_value_when_the_server_sets_no_backslash_escapes(
+    mysql_test_db: dict[str, str],
+) -> None:
+    key = "\\' UNION ALL SELECT email FROM collector -- "
+    params = mysql_connection.ConnectionParams.from_credentials(mysql_test_db)
+
+    def escaping_off(_params: Any) -> Any:
+        connection = mysql.connector.connect(
+            host=params.host,
+            port=params.port,
+            user=params.user,
+            password=params.password,
+            database=params.database,
+            autocommit=True,
+        )
+        cursor = connection.cursor()
+        cursor.execute("SET SESSION sql_mode = CONCAT(@@SESSION.sql_mode, ',NO_BACKSLASH_ESCAPES')")
+        cursor.close()
+
+        return connection
+
+    session = mysql_connection.Connection(params, cursor_factory=escaping_off)
+    session.open()
+
+    try:
+        cursor = session.cursor
+        cursor.execute("CREATE TABLE collector (collector_id INT, email VARCHAR(64))")
+        cursor.execute("INSERT INTO collector VALUES (1, 'withheld@seedbank.example')")
+        cursor.execute("CREATE TABLE accession (accession_id INT, traits JSON)")
+        cursor.execute("INSERT INTO accession VALUES (1, JSON_OBJECT(%s, 'kept'))", (key,))
+        node = PartSource("traits", "json", "accession src", "src.traits")
+        literal = MYSQL_DOCUMENTS.literal(key, MYSQL_DOCUMENTS.key_sql_type)
+        cursor.execute(
+            select_from(["ent.v AS v"], MYSQL_DOCUMENTS.entries(node))
+            + f"\nWHERE\n  ent.k = {literal}",
+        )
+        rows = [str(v) for (v,) in cursor.fetchall()]
+    finally:
+        session.close()
+
+    assert rows == ['"kept"']
 
 
 def test_postgres_profiles_a_jsonpath_as_text_and_keeps_xml_declined(
@@ -224,17 +321,17 @@ def test_a_clickhouse_document_treats_a_null_as_absent(
 ) -> None:
     cursor = clickhouse_native_connection
     cursor.execute(
-        "CREATE TABLE seedbank.order_event (event_no UInt32, payload JSON) ENGINE = Memory",
+        "CREATE TABLE seedbank.curation_event (event_no UInt32, payload JSON) ENGINE = Memory",
     )
     cursor.execute(
-        'INSERT INTO seedbank.order_event VALUES (1, \'{"a": null, "b": 1}\'), (2, \'{"b": 2}\'), '
+        'INSERT INTO seedbank.curation_event VALUES (1, \'{"a": null, "b": 1}\'), (2, \'{"b": 2}\'), '
         '(3, \'{"b": "x", "c": {"d": [1, 2]}}\')',
     )
     adapter = ClickhouseAdapter(
         {"host": "chdb", "database": "seedbank"},
         cursor_factory=lambda _params: cursor,
     )
-    payload = generate(adapter, "clickhouse", tmp_path, "*.order_event")["payload"]
+    payload = generate(adapter, "clickhouse", tmp_path, "*.curation_event")["payload"]
 
     assert payload["types"] == {"Object": 3}
     assert ".a" not in payload["parts"]
@@ -245,16 +342,16 @@ def test_a_clickhouse_document_treats_a_null_as_absent(
 
 def test_a_bigquery_document_is_descended(bigquery_test_dataset: Any) -> None:
     cursor, dataset = bigquery_test_dataset
-    cursor.execute(f"CREATE TABLE `{dataset}`.order_event (event_no INT64, payload JSON)")
+    cursor.execute(f"CREATE TABLE `{dataset}`.curation_event (event_no INT64, payload JSON)")
     cursor.execute(
-        f"INSERT INTO `{dataset}`.order_event (event_no, payload) VALUES "
+        f"INSERT INTO `{dataset}`.curation_event (event_no, payload) VALUES "
         """(1, JSON '{"status": "new", "user-id": 3}'), (2, JSON '{"status": "old"}')""",
     )
     adapter = BigqueryAdapter(
         {"project": "dbprint-test", "dataset": dataset},
         cursor_factory=lambda _params: cursor,
     )
-    parts = {p.path: p for p in parts_of(adapter, "order_event", "payload").parts}
+    parts = {p.path: p for p in parts_of(adapter, "curation_event", "payload").parts}
 
     assert parts["[keys]"].occurrences == 3
     assert parts[".status"].stats.sql_type == "string"
@@ -263,14 +360,14 @@ def test_a_bigquery_document_is_descended(bigquery_test_dataset: Any) -> None:
 
 def test_a_databricks_variant_is_descended(databricks_test_schema: Any) -> None:
     cursor = databricks_test_schema
-    cursor.execute("CREATE TABLE order_event (event_no INT, payload VARIANT) USING DELTA")
+    cursor.execute("CREATE TABLE curation_event (event_no INT, payload VARIANT) USING DELTA")
     cursor.execute(
-        'INSERT INTO order_event SELECT 1, parse_json(\'{"status": "new", "amt": 1.5}\') '
-        'UNION ALL SELECT 2, parse_json(\'{"status": null, "amt": 2}\') '
+        'INSERT INTO curation_event SELECT 1, parse_json(\'{"status": "new", "weight_g": 1.5}\') '
+        'UNION ALL SELECT 2, parse_json(\'{"status": null, "weight_g": 2}\') '
         "UNION ALL SELECT 3, parse_json('[1, 2]')",
     )
     adapter = DatabricksAdapter(DATABRICKS_CREDS, cursor_factory=lambda _params: cursor)
-    parts = {p.path: p for p in parts_of(adapter, "order_event", "payload").parts}
+    parts = {p.path: p for p in parts_of(adapter, "curation_event", "payload").parts}
 
     assert (parts[".status"].occurrences, parts[".status"].stats.null_count) == (2, 1)
     assert parts[".status"].stats.sql_type == "STRING"
@@ -279,23 +376,23 @@ def test_a_databricks_variant_is_descended(databricks_test_schema: Any) -> None:
 
 def test_a_snowflake_variant_and_object_are_descended() -> None:
     setup = (
-        "CREATE TABLE seedbank.order_event (event_no INTEGER, payload JSON, attrs JSON)",
-        """INSERT INTO seedbank.order_event VALUES
-        (1, '{"status": "new", "lines": [{"sku": "a"}]}', '{"colour": "red"}'),
+        "CREATE TABLE seedbank.curation_event (event_no INTEGER, payload JSON, attrs JSON)",
+        """INSERT INTO seedbank.curation_event VALUES
+        (1, '{"status": "new", "items": [{"lot": "a"}]}', '{"colour": "red"}'),
         (2, '{"status": null}', '{"colour": "blue", "size": 3}'),
         (3, '[1, 2]', NULL)""",
     )
-    payload = parts_of(snowflake(*setup), "order_event", "payload").parts
+    payload = parts_of(snowflake(*setup), "curation_event", "payload").parts
     attrs = parts_of(
         snowflake(*setup, column_types={"attrs": "OBJECT"}),
-        "order_event",
+        "curation_event",
         "attrs",
     ).parts
     payload, attrs = ({p.path: p for p in parts} for parts in (payload, attrs))
 
     assert (payload[".status"].occurrences, payload[".status"].stats.null_count) == (2, 1)
     assert payload[".status"].stats.sql_type == "VARCHAR"
-    assert payload[".lines[*].sku"].occurrences == 1
+    assert payload[".items[*].lot"].occurrences == 1
     assert payload["[*]"].occurrences == 2
     assert (attrs[".colour"].occurrences, attrs[".size"].occurrences) == (2, 1)
 
@@ -347,10 +444,10 @@ def _duckdb_documents(
     tmp_path.mkdir(parents=True, exist_ok=True)
     database = tmp_path / "garden.duckdb"
     con = duckdb.connect(str(database))
-    con.execute("CREATE TABLE order_event (event_no INTEGER, payload JSON)")
+    con.execute("CREATE TABLE curation_event (event_no INTEGER, payload JSON)")
 
     for number, row in enumerate(rows):
-        con.execute("INSERT INTO order_event VALUES (?, ?)", [number, row])
+        con.execute("INSERT INTO curation_event VALUES (?, ?)", [number, row])
 
     con.close()
     conn = ConnectionConfig(
@@ -382,7 +479,7 @@ def test_a_member_changing_type_diffs_its_type_and_classification(tmp_path: Path
         ),
     }
     events = diff_module._diff_statistics(
-        "main.order_event",
+        "main.curation_event",
         diff_module.comparable_columns({"payload": before}),
         diff_module.comparable_columns({"payload": after}),
         states,

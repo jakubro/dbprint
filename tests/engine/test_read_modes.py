@@ -10,7 +10,12 @@ from typing import Any
 import pytest
 import yaml
 
-from dbprint.adapters.base import PhysicalLayout, PhysicalLayoutKey, UniqueKeyMeta
+from dbprint.adapters.base import (
+    PhysicalLayout,
+    PhysicalLayoutKey,
+    RequiredFilter,
+    UniqueKeyMeta,
+)
 from dbprint.adapters.mock import MockAdapter, MockTable
 from dbprint.config import ConnectionConfig, ReadConfig, ReadSettings, RuleMatch
 from dbprint.config.project import RuleConfig
@@ -399,3 +404,93 @@ def test_a_table_switched_from_full_to_catalog_diffs_as_unevaluated(tmp_path: Pa
     assert next(t for t in result.tables if t.fqn == TABLE).status == "ok"
     assert diff["summary"]["unevaluated_tables"] == 1
     assert diff["summary"]["unchanged_tables"] == 1
+
+
+class TestATableThatRequiresAFilter:
+    """Read only under a `filter` mode; described from the catalog, with a warning, otherwise."""
+
+    FQN = "public.curator"
+    REQUIRED = RequiredFilter("require_partition_filter", "logged_on")
+
+    def _fixture(self) -> dict[str, MockTable]:
+        fixture = curator_fixture()
+        fixture[self.FQN] = replace(fixture[self.FQN], required_filter=self.REQUIRED)
+
+        return fixture
+
+    def _run(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        *rules: RuleConfig,
+        force: bool = False,
+    ) -> tuple[_HookRecorder, list[str]]:
+        adapter = _HookRecorder(self._fixture())
+        caplog.clear()
+
+        with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
+            Engine(adapter, _opted_in(tmp_path, *rules), tmp_path).generate(
+                GenerateRequest(force=force),
+            )
+
+        return adapter, [
+            r.getMessage() for r in caplog.records if "require_partition" in r.getMessage()
+        ]
+
+    @staticmethod
+    def _mode(mode: str, **params: Any) -> RuleConfig:
+        return RuleConfig(
+            match=RuleMatch(tables=(TestATableThatRequiresAFilter.FQN,)),
+            profile={"read": {"tables": {"mode": mode, **params}}},
+        )
+
+    @pytest.mark.parametrize(
+        "rules",
+        [(), ("sample",), ("catalog",)],
+        ids=["full", "sample", "catalog"],
+    )
+    def test_any_mode_but_filter_is_described_from_the_catalog(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        rules: tuple[str, ...],
+    ) -> None:
+        configured = [
+            self._mode(m, fraction=0.5) if m == "sample" else self._mode(m) for m in rules
+        ]
+        adapter, warnings = self._run(tmp_path, caplog, *configured)
+
+        assert _statistics(tmp_path)["catalog_only"] is True
+        assert self.FQN not in adapter.statistics
+        assert len(warnings) == 1
+        assert "mode: filter" in warnings[0] and "logged_on >=" in warnings[0]
+
+    def test_a_filter_rule_reads_it(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        adapter, warnings = self._run(
+            tmp_path,
+            caplog,
+            self._mode("filter", filter="logged_on >= DATE '2026-01-01'"),
+        )
+
+        assert "catalog_only" not in _statistics(tmp_path)
+        assert self.FQN in adapter.statistics
+        assert warnings == []
+
+    def test_a_carried_run_still_warns_and_a_filter_rule_re_reads_it(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        self._run(tmp_path, caplog)
+        carried, warnings = self._run(tmp_path, caplog)
+
+        assert self.FQN not in carried.statistics
+        assert len(warnings) == 1
+
+        filtered, _ = self._run(
+            tmp_path,
+            caplog,
+            self._mode("filter", filter="logged_on >= DATE '2026-01-01'"),
+        )
+
+        assert self.FQN in filtered.statistics

@@ -7,12 +7,14 @@ scripts answers for it - the only way a table changing between two statements is
 from __future__ import annotations
 
 import copy
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import Any, ClassVar, Literal, Self
 
 from dbprint.config import StatisticsConfig
 from dbprint.config.selectors import expand
-from dbprint.spec.parts import parent
+from dbprint.spec.parts import KEYS, parent
 from dbprint.spec.sketch import SketchKind, canonical_form, low64_md5
 from .base import (
     Adapter,
@@ -31,12 +33,14 @@ from .base import (
     PhaseA,
     PhaseB,
     PhysicalLayout,
+    RequiredFilter,
     RowCountMethod,
     TableCounts,
     TableMeta,
     TableScope,
     TableType,
     UniqueKeyMeta,
+    WithholdsKeys,
     descend,
 )
 
@@ -98,6 +102,7 @@ class MockTable:
     parts: dict[str, MockParts] = field(default_factory=dict)
     external: bool = False
     opt_in_only: bool = False
+    required_filter: RequiredFilter | None = None
 
 
 class MockAdapter(Adapter):
@@ -158,6 +163,7 @@ class MockAdapter(Adapter):
                 namespace_path=self._fixture[fqn].namespace_path,
                 external=self._fixture[fqn].external,
                 opt_in_only=self._fixture[fqn].opt_in_only,
+                required_filter=self._fixture[fqn].required_filter,
             )
             for fqn in in_scope
         ]
@@ -280,6 +286,8 @@ class MockAdapter(Adapter):
         config: StatisticsConfig,
         counts: TableCounts,
         scope: TableScope | None = None,
+        *,
+        withholds_keys: WithholdsKeys | None = None,
     ) -> dict[str, ColumnParts]:
         """The fixture's stated parts, walked and chosen by the shared `descend` driver."""
 
@@ -300,14 +308,11 @@ class MockAdapter(Adapter):
             out[col.name] = descend(
                 PartSource(path="", sql_type=col.sql_type, source=col.name),
                 config,
-                children=lambda node, by_path=by_path: [
-                    PartSource(path=path, sql_type=part.stats.sql_type, source=path)
-                    for path, part in by_path.items()
-                    if _parent_path(path) == node.path
-                ],
+                children=partial(_stated_children, by_path),
                 occurrences=lambda node, by_path=by_path: by_path[node.path].occurrences,
                 profile=lambda node, _n, by_path=by_path: by_path[node.path],
                 size=stated.size,
+                withholds_keys=withholds_keys,
             )
 
         return out
@@ -525,3 +530,26 @@ def _without_value_list(stats: ColumnStats) -> ColumnStats:
 
 def _parent_path(path: str) -> str:
     return parent(path) or ""
+
+
+def _stated_children(
+    by_path: dict[str, PartStats],
+    node: PartSource,
+    withheld: Callable[[PartSource], bool],
+) -> list[PartSource]:
+    level = [
+        PartSource(path=path, sql_type=part.stats.sql_type, source=path, keyed=part.keyed)
+        for path, part in by_path.items()
+        if _parent_path(path) == node.path
+    ]
+    key_set = next((child for child in level if child.path.endswith(KEYS)), None)
+    keyed = [child for child in level if child.keyed]
+
+    if key_set is None or not keyed or not withheld(key_set):
+        return level
+
+    return [
+        replace(child, unlisted=len(keyed)) if child is key_set else child
+        for child in level
+        if not child.keyed
+    ]

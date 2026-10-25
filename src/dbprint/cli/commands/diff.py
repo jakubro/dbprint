@@ -26,10 +26,11 @@ from dbprint.engine import (
     ProgressCallback,
     SummaryCounts,
     TableResult,
+    worst_exit,
 )
 from dbprint.engine.result import DiffResult
 from dbprint.spec.artifacts import MANIFEST_FILENAME
-from ..engine_setup import ConnectionSetupError, build_engine
+from ..engine_setup import ConnectionSetupError, build_engine, interruptible
 from ..options import project_option, refuse_if_remote, resolve_project
 from ..rendering import (
     build_progress_renderer,
@@ -135,6 +136,8 @@ def diff_command(
       `generate --confirm-all-removed` records a real total removal)
     - `5`: partial extraction
 
+    When several apply across connections, the exit code is the first of `1`, `4`, `5` that does.
+
     **Examples:**
 
     - `dbprint diff`: compare all auto connections
@@ -189,7 +192,7 @@ def diff_command(
         log_handler = install_log_handler(renderer)
 
         try:
-            with renderer if renderer is not None else contextlib.nullcontext():
+            with renderer if renderer is not None else contextlib.nullcontext(), interruptible():
                 for conn_config in connections:
                     # A warning queued while this connection ran must reach its own summary on
                     # every exit branch - connection_summary() flushes one, the finally the rest.
@@ -200,7 +203,7 @@ def diff_command(
                                 f"{conn_config.print_root}/. "
                                 f"Run `dbprint generate {conn_config.name}` first.",
                             )
-                            overall_exit = max(overall_exit, EXIT_GENERIC)
+                            overall_exit = worst_exit(overall_exit, EXIT_GENERIC)
 
                             if renderer is not None:
                                 renderer.connection_summary(
@@ -216,7 +219,7 @@ def diff_command(
                             cli_exclude=exclude_patterns,
                             on_progress=renderer.on_event if renderer is not None else None,
                         )
-                        overall_exit = max(overall_exit, result.exit_code)
+                        overall_exit = worst_exit(overall_exit, result.exit_code)
 
                         if result.exit_code == EXIT_CONNECTION:
                             cause = (

@@ -12,6 +12,8 @@ from dbprint.adapters.clickhouse.introspect import list_tables
 class _Cursor:
     """Answers the listing read with no rows and records what it was bound with."""
 
+    description: Any = (("value",),)
+
     def __init__(self) -> None:
         self.bound: list[tuple[str, Any]] = []
 

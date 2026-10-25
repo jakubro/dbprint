@@ -128,6 +128,22 @@ class TestTracing:
         assert (traced.models_parsed, traced.models_eligible) == (1, 2)
         assert _sources(traced, "email") == [COLLECTOR_EMAIL]
 
+    def test_sql_nested_past_the_parser_s_recursion_limit_is_contained_to_its_model(self) -> None:
+        nested = "coalesce(" * 60 + "email" + ", '')" * 60
+        broken = _model(
+            f"select {nested} as email from arboretum.seedbank.collector",
+            relation='"arboretum"."seedbank"."curator"',
+            unique_id="model.x.bad",
+        )
+        good = _model("select email from arboretum.seedbank.collector")
+        traced = _trace(broken, good)
+
+        assert traced.unparsed == (
+            ("model.x.bad", "RecursionError: maximum recursion depth exceeded"),
+        )
+        assert (traced.models_parsed, traced.models_eligible) == (1, 2)
+        assert _sources(traced, "email") == [COLLECTOR_EMAIL]
+
     @pytest.mark.parametrize("relation", ['"unterminated', ""])
     def test_an_unreadable_relation_name_is_contained_to_its_model(self, relation: str) -> None:
         broken = _model("select 1 as x", relation=relation, unique_id="model.x.bad")
@@ -252,4 +268,14 @@ class TestLoading:
             path.write_text(body)
 
         with pytest.raises(ManifestUnreadable, match=message):
+            load_manifest(path)
+
+    def test_a_manifest_nested_past_the_json_recursion_limit_is_refused(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        path = tmp_path / "manifest.json"
+        path.write_text("[" * 100_000 + "]" * 100_000)
+
+        with pytest.raises(ManifestUnreadable, match="nested too deeply to read"):
             load_manifest(path)

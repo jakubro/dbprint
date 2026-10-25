@@ -167,3 +167,106 @@ def test_a_value_yaml_would_retype_survives_the_round_trip(
 
     assert result.exit_code == 0, result.output
     assert yaml.safe_load(result.output)["profile"]["read"]["tables"]["filter"] == "1e3 # x: y"
+
+
+@pytest.mark.parametrize("online", [False, True])
+def test_an_upper_case_table_resolves_as_its_lowercase_fqn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    online: bool,
+) -> None:
+    args = ["config", "explain", "primary", "PUBLIC.Curator", *(["--online"] if online else [])]
+
+    with patch_registry({"postgres": _Sized}):
+        result = run_cli(_project(tmp_path), monkeypatch, args, credential_env("primary"))
+
+    assert result.exit_code == 0, result.output
+    assert f"# table: {FQN} (in the print" in result.output
+    assert yaml.safe_load(result.output)["profile"]["null_patterns"]["enabled"] is False
+
+
+def _external(tmp_path: Path, statistics: str | bytes | None) -> Path:
+    root = _project(tmp_path)
+    manifest_path = root / "prints" / "primary" / "manifest.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["tables"][FQN]["artifacts"] = {"statistics": "statistics.yaml"}
+    manifest_path.write_text(yaml.safe_dump(manifest), encoding="utf-8")
+    table_dir = root / "prints" / "primary" / "public" / "curator"
+    table_dir.mkdir(parents=True)
+
+    if isinstance(statistics, bytes):
+        (table_dir / "statistics.yaml").write_bytes(statistics)
+    elif statistics is not None:
+        (table_dir / "statistics.yaml").write_text(statistics, encoding="utf-8")
+
+    return root
+
+
+EXTERNAL_STATISTICS = "format_version: 1\ntable: public.curator\ntype: table\nexternal: true\n"
+CATALOG_ALONE = (
+    "# row count: none - described from the catalog alone, so generate takes no row-count "
+    "estimate for it; size rules not applied"
+)
+
+
+def test_a_printed_external_table_is_not_sized_from_its_recorded_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _external(tmp_path, EXTERNAL_STATISTICS)
+    result = run_cli(root, monkeypatch, ["config", "explain", "primary", FQN])
+
+    assert result.exit_code == 0, result.output
+    assert CATALOG_ALONE in result.output.splitlines()
+    assert "not applied (no row count)" in result.output
+    assert yaml.safe_load(result.output)["profile"]["freshness"]["max_age_days"] == 7
+
+
+def test_online_a_printed_external_table_is_not_sized_from_the_estimate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _external(tmp_path, EXTERNAL_STATISTICS)
+
+    with patch_registry({"postgres": _Sized}):
+        result = run_cli(
+            root,
+            monkeypatch,
+            ["config", "explain", "primary", FQN, "--online"],
+            credential_env("primary"),
+        )
+
+    assert result.exit_code == 0, result.output
+    assert CATALOG_ALONE in result.output.splitlines()
+    assert yaml.safe_load(result.output)["profile"]["freshness"]["max_age_days"] == 7
+
+
+@pytest.mark.parametrize(
+    "statistics",
+    [
+        "format_version: 1\ntable: public.curator\ntype: table\n",
+        "external: [true\n",
+        "- true\n",
+        b"external: \xff\n",
+        "format_version: 1\ntable: public.curator\ntype: table\ndisabled: 5\n",
+        None,
+    ],
+    ids=[
+        "no-external-key",
+        "unparseable",
+        "not-a-mapping",
+        "not-utf-8",
+        "disabled-not-a-list",
+        "absent",
+    ],
+)
+def test_statistics_without_a_readable_external_flag_size_as_before(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    statistics: str | bytes | None,
+) -> None:
+    root = _external(tmp_path, statistics)
+    result = run_cli(root, monkeypatch, ["config", "explain", "primary", FQN])
+
+    assert result.exit_code == 0, result.output
+    assert "# row count: 5000, as the print last recorded it" in result.output

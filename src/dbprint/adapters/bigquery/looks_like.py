@@ -47,7 +47,7 @@ def sample_distinct(
         WHERE
           {cn} IS NOT NULL
         ORDER BY
-          {DIALECT.seed_hash.format(seed=f"'{seed}'", value=cn)}
+          {statements.seed_order(DIALECT, seed, cn)}
         LIMIT {int(n * statements.SAMPLE_RATE_MULTIPLIER)}
         """,
         "ovs",

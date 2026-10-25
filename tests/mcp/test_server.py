@@ -7,9 +7,11 @@ internal-error shape, hiding a handler that forgot to map its own errors.
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import socket
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -967,6 +969,146 @@ class TestHttpTransport:
 
         assert "list_tables" in names
         assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+
+
+class TestHttpTransportAnswersOnlyLoopback:
+    """A page that rebinds its own name to 127.0.0.1 reaches nothing (MCP.md 6.2)."""
+
+    def _statuses(
+        self,
+        primary_conn: ConnectionConfig,
+        caplog: pytest.LogCaptureFixture,
+        requests: dict[str, tuple[str, str, str | None, str]],
+    ) -> dict[str, int]:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+
+        async def _run() -> dict[str, int]:
+            out: dict[str, int] = {}
+
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(run_http, build_server(_state_for(primary_conn)), "127.0.0.1", port)
+                await _until_listening(port)
+                logging.getLogger("uvicorn.error").addHandler(caplog.handler)
+
+                for name, (path, host, origin, method) in requests.items():
+                    out[name] = await anyio.to_thread.run_sync(
+                        partial(
+                            _status,
+                            port,
+                            path,
+                            host.format(port=port),
+                            origin and origin.format(port=port),
+                            method,
+                        ),
+                    )
+
+                logging.getLogger("uvicorn.error").removeHandler(caplog.handler)
+                tg.cancel_scope.cancel()
+
+            return out
+
+        try:
+            return anyio.run(_run)
+        finally:
+            logging.getLogger("uvicorn.error").removeHandler(caplog.handler)
+
+    def test_a_foreign_host_origin_or_port_is_refused(
+        self,
+        primary_conn: ConnectionConfig,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        found = self._statuses(
+            primary_conn,
+            caplog,
+            {
+                "foreign host": ("/sse", "rebound.example:{port}", None, "GET"),
+                "foreign host message": (
+                    "/messages/?session_id=" + "0" * 32,
+                    "rebound.example:{port}",
+                    None,
+                    "POST",
+                ),
+                "foreign origin": ("/sse", "127.0.0.1:{port}", "http://rebound.example", "GET"),
+                "another port": ("/sse", "127.0.0.1:1", None, "GET"),
+            },
+        )
+
+        assert found == {
+            "foreign host": 421,
+            "foreign host message": 421,
+            "foreign origin": 403,
+            "another port": 421,
+        }
+        assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+
+    def test_every_loopback_name_is_served(
+        self,
+        primary_conn: ConnectionConfig,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        names = ("127.0.0.1:{port}", "localhost:{port}", "[::1]:{port}")
+        found = self._statuses(
+            primary_conn,
+            caplog,
+            {name: ("/sse", name, "http://" + name, "GET") for name in names},
+        )
+
+        assert found == dict.fromkeys(names, 200)
+
+    def test_a_session_initializes_under_every_loopback_name(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        names = ("127.0.0.1", "localhost", "[::1]")
+
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+
+        async def _run() -> dict[str, bool]:
+            served: dict[str, bool] = {}
+
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(run_http, build_server(_state_for(primary_conn)), "127.0.0.1", port)
+                await _until_listening(port)
+
+                for name in names:
+                    async with (
+                        sse_client(
+                            f"http://127.0.0.1:{port}/sse",
+                            headers={"Host": f"{name}:{port}"},
+                        ) as (read, write),
+                        ClientSession(read, write) as session,
+                    ):
+                        await session.initialize()
+                        tools = (await session.list_tools()).tools
+                        served[name] = any(tool.name == "list_tables" for tool in tools)
+
+                tg.cancel_scope.cancel()
+
+            return served
+
+        assert anyio.run(_run) == dict.fromkeys(names, True)
+
+
+def _status(port: int, path: str, host: str, origin: str | None, method: str) -> int:
+    headers = {"Host": host, **({"Origin": origin} if origin else {})}
+    body = None
+
+    if method == "POST":
+        headers["Content-Type"] = "application/json"
+        body = '{"jsonrpc": "2.0", "id": 1, "method": "ping"}'
+
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+
+    try:
+        connection.request(method, path, body=body, headers=headers)
+
+        return connection.getresponse().status
+    finally:
+        connection.close()
 
 
 async def _until_listening(port: int) -> None:

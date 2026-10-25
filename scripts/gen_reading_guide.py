@@ -296,8 +296,8 @@ def _check_vocabulary_anchors(matrix: dict[str, dict[str, str]]) -> None:
         ("duckdb", "PERCENTILE_CONT("),
         ("redshift", "PERCENTILE_CONT("),
         ("clickhouse", "quantileExactInclusive("),
-        ("databricks", "PERCENTILE({cn}"),
-        ("bigquery", "APPROX_QUANTILES({cn}"),
+        ("databricks", "PERCENTILE({fv}"),
+        ("bigquery", "APPROX_QUANTILES({fv}"),
     ):
         _require_contains(
             REPO_ROOT / f"src/dbprint/adapters/{adapter}/stats.py",
@@ -646,7 +646,10 @@ _SIGNALS_PARAGRAPHS = (
         "not a history to read across prints. A column with no entries this run is not necessarily "
         "stable: `unevaluated_tables` (SPEC 2.6.4) counts objects the diff had no basis to compare "
         "at all — a plain view, or one this run did not re-read — and those produce no events "
-        "either."
+        "either. Nor is a `0` in `columns_default_changed`, `indexes_changed` or "
+        "`comments_changed` evidence that nothing moved: column defaults, indexes and comments "
+        "are recorded only in `ddl.sql`, which the diff does not read (SPEC 2.6.10), so those "
+        "three counters are always `0`."
     ),
     (
         "`referenced_by` lists the tables whose columns reference this one. A table with a long "

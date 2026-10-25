@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
 
-from dbprint.conformance import manifest
+from dbprint.adapters import MockAdapter
+from dbprint.conformance import manifest, validate_print
 from dbprint.conformance.issue import Issue
+from dbprint.engine import Engine
+from tests._curator import conn_config, curator_fixture
 
 
 def _write(root: Path, rel: str, body: Any) -> None:
@@ -77,6 +81,17 @@ class TestEachEntryAgainstItsFiles:
 
     def test_an_entry_with_no_path_is_not_compared_with_its_key(self, tmp_path: Path) -> None:
         assert manifest.check(tmp_path, {"tables": {"s.t": {}}}) == []
+
+    def test_a_key_that_is_not_a_string_is_compared_as_its_string(self, tmp_path: Path) -> None:
+        assert manifest.check(tmp_path, {"tables": {7: {"path": "s/u"}}}) == [
+            Issue(
+                "manifest.yaml::tables.7.path",
+                "manifest.path-fqn-mismatch",
+                "error",
+                "Manifest key 7 names another table than its path 's/u'.",
+                "§1.3",
+            ),
+        ]
 
     def test_every_claimed_file_that_is_missing_is_reported(self, tmp_path: Path) -> None:
         tables = {"s.t": _entry(ddl="ddl.sql", relationships="relationships.yaml")}
@@ -249,3 +264,143 @@ class TestSelectorsAgreeWithTheDiff:
         diff_data: dict[str, Any],
     ) -> None:
         assert manifest.check_selectors_agree_with_diff(manifest_data, diff_data, "diff.yaml") == []
+
+
+class TestATablePathOutsideTheSegmentAllowlist:
+    """SPEC 1.5.1 and 2.5: a `path` is allowlisted segments joined by `/`, held by the schema."""
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "public\\curator",
+            "Public/curator",
+            "public/cur ator",
+            "public//curator",
+            "public/curator/",
+        ],
+    )
+    def test_the_schema_refuses_it(self, tmp_path: Path, path: str) -> None:
+        root = TestAnEntryLeadingOutOfThePrint._print(tmp_path)
+        TestAnEntryLeadingOutOfThePrint._edit(root, lambda entry: entry.update(path=path))
+
+        assert "schema.type-mismatch" in [
+            i.code
+            for i in validate_print(root)
+            if i.path == "manifest.yaml::tables.public.curator.path"
+        ]
+
+    def test_an_allowlisted_path_passes(self, tmp_path: Path) -> None:
+        root = TestAnEntryLeadingOutOfThePrint._print(tmp_path)
+
+        assert [
+            i for i in validate_print(root) if i.path == "manifest.yaml::tables.public.curator.path"
+        ] == []
+
+
+class TestAnEntryLeadingOutOfThePrint:
+    """`manifest.path-outside-print` per shape (SPEC 2.5, 6.3); a link inside the print is fine."""
+
+    CODE = "manifest.path-outside-print"
+
+    @staticmethod
+    def _print(tmp_path: Path) -> Path:
+        Engine(MockAdapter(curator_fixture()), conn_config(tmp_path), tmp_path).generate()
+
+        return tmp_path / "primary"
+
+    @staticmethod
+    def _edit(root: Path, change: Any) -> None:
+        path = root / "manifest.yaml"
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        change(data["tables"]["public.curator"])
+        path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    def _found(self, root: Path) -> list[Issue]:
+        return [issue for issue in validate_print(root) if issue.code == self.CODE]
+
+    def test_a_climbing_path(self, tmp_path: Path) -> None:
+        root = self._print(tmp_path)
+        self._edit(root, lambda entry: entry.update(path="../../.."))
+
+        assert [(i.path, i.detail) for i in self._found(root)] == [
+            (
+                "manifest.yaml::tables.public.curator.path",
+                "No consumer follows public.curator: its path '../../..' leaves the connection root.",
+            ),
+        ]
+
+    def test_an_absolute_path_is_reported_not_raised(self, tmp_path: Path) -> None:
+        root = self._print(tmp_path)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        self._edit(root, lambda entry: entry.update(path=str(elsewhere)))
+
+        assert [i.path for i in self._found(root)] == ["manifest.yaml::tables.public.curator.path"]
+
+    def test_a_path_that_cannot_resolve_is_reported_not_raised(self, tmp_path: Path) -> None:
+        root = self._print(tmp_path)
+        self._edit(root, lambda entry: entry.update(path="public/cur\0ator"))
+
+        assert [i.path for i in self._found(root)] == ["manifest.yaml::tables.public.curator.path"]
+
+    def test_a_backslash_named_link_is_not_taken_for_a_root_file(self, tmp_path: Path) -> None:
+        root = self._print(tmp_path)
+        (tmp_path / "outside").mkdir()
+        (root / ".\\diff.yaml").symlink_to(tmp_path / "outside")
+        self._edit(root, lambda entry: entry.update(path=".\\diff.yaml"))
+
+        assert [i.path for i in self._found(root)] == ["manifest.yaml::tables.public.curator.path"]
+
+    def test_a_linked_table_directory(self, tmp_path: Path) -> None:
+        root = self._print(tmp_path)
+        directory = root / "public" / "curator"
+        shutil.move(directory, tmp_path / "curator")
+        directory.symlink_to(tmp_path / "curator")
+
+        assert [i.detail for i in self._found(root)] == [
+            (
+                "No consumer follows public.curator: public/curator is a symlink to a directory "
+                "outside the connection root."
+            ),
+        ]
+
+    def test_a_linked_declared_file(self, tmp_path: Path) -> None:
+        root = self._print(tmp_path)
+        (tmp_path / "notes.md").write_text("# outside\n", encoding="utf-8")
+        (root / "public" / "curator" / "description.md").symlink_to(tmp_path / "notes.md")
+        self._edit(root, lambda entry: entry["artifacts"].update(description="description.md"))
+
+        issues = validate_print(root)
+
+        assert [i.detail for i in issues if i.code == self.CODE] == [
+            (
+                "No consumer follows public.curator: public/curator/description.md is a symlink "
+                "to a file outside the connection root."
+            ),
+        ]
+        assert [i for i in issues if i.code == "layout.unexpected-directory-level"] == []
+
+    def test_a_linked_connection_root_file(self, tmp_path: Path) -> None:
+        root = self._print(tmp_path)
+        (tmp_path / "guide.md").write_text("outside\n", encoding="utf-8")
+        (root / "reading.md").unlink()
+        (root / "reading.md").symlink_to(tmp_path / "guide.md")
+
+        assert [(i.path, i.detail) for i in self._found(root)] == [
+            (
+                "reading.md",
+                (
+                    "reading.md is a symlink to a file outside the connection root; no consumer "
+                    "reads it."
+                ),
+            ),
+        ]
+
+    def test_a_link_inside_the_print_is_followed(self, tmp_path: Path) -> None:
+        root = self._print(tmp_path)
+        (root / "shared").mkdir()
+        (root / "shared" / "curator.md").write_text("# curator\n", encoding="utf-8")
+        (root / "public" / "curator" / "description.md").symlink_to(root / "shared" / "curator.md")
+        self._edit(root, lambda entry: entry["artifacts"].update(description="description.md"))
+
+        assert self._found(root) == []

@@ -4,7 +4,7 @@ credentials dict; every method asserts the session is open before delegating.
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import ClassVar
 
 from . import connection as connection_module
 from . import ddl as ddl_module
@@ -141,17 +141,6 @@ class ClickhouseAdapter(SqlAdapter):
             )
 
         return stats_module.materialize(self._cursor, self._identity(fqn), scope)
-
-    def execute_query(self, sql: str) -> list[tuple[Any, ...]]:
-        """Run user-authored SQL and return all rows; SQL assertion path (ASSERTIONS.md 3) -
-        read-only is the operator's responsibility, not enforced here (ASSERTIONS.md 3.4).
-        """
-
-        cursor = self._cursor
-        cursor.execute(sql)
-        rows = cursor.fetchall()
-
-        return [tuple(row) for row in rows]
 
     def _session_shows_secrets(self) -> bool:
         if self._shows_secrets is None:

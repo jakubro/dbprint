@@ -63,8 +63,10 @@ def serve_command(
 ) -> None:
     """Serve the docs site live over HTTP, re-reading the print on every request.
 
-    Binds loopback only. Re-reads every artifact from disk on each request, so a page
-    reflects the latest `generate` without restarting the server.
+    Binds loopback only. Answers only a `Host` of `127.0.0.1`, `localhost` or `[::1]` - any
+    other gets 400 - so a web page cannot reach it by rebinding its name to loopback.
+    Re-reads every artifact from disk on each request, so a page reflects the latest
+    `generate` without restarting the server.
 
     **Arguments:**
 

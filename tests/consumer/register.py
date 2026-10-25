@@ -73,7 +73,8 @@ REGISTER: tuple[ClaimState, ...] = (
     ClaimState(
         "column_with_several_edges",
         "Names every edge a human left standing on a column with several, the surest first; "
-        "never one edge in place of the rest, and never a rejected one.",
+        "never one edge in place of the rest, and never a rejected one. A verdict addressing a "
+        "declared edge leaves it standing and unmarked.",
     ),
     ClaimState(
         "orphan_spelling",
@@ -120,6 +121,13 @@ REGISTER: tuple[ClaimState, ...] = (
         "accepted_values verdict about it carries the scanned-set clause or is downgraded.",
     ),
     ClaimState(
+        "scoped_part_list",
+        "Never presents a part's complete value list on the scoped table as the part's whole "
+        "domain, nor its presence as a share of the table's rows - every enumeration, "
+        "exhaustive/domain field, none match and presence fact about a part carries the "
+        "scanned-set clause wherever its column's does.",
+    ),
+    ClaimState(
         "scoped_candidate_key",
         "Never presents a key measured unique over the rows scanned as unique over the table.",
     ),
@@ -132,6 +140,11 @@ REGISTER: tuple[ClaimState, ...] = (
         "Renders a value carrying a table delimiter or a line break without letting it add, "
         "end or split a cell of the table the surface draws around it, or split a fact or list "
         "entry of a Markdown grammar line.",
+    ),
+    ClaimState(
+        "outside_print_entry",
+        "Never shows a byte of a file that a manifest path, an artifact name or a symlink places "
+        "outside the connection root; that table reads as absent.",
     ),
     ClaimState(
         "value_spelling",

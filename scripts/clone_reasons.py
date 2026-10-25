@@ -6,6 +6,7 @@ An optional jscpd SARIF report names both sides of each accepted clone that lack
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -18,7 +19,7 @@ if len(sys.argv) > 1:
     run = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["runs"][0]
     roots = {
         key: Path(base["uri"].removeprefix("file://"))
-        for key, base in run["originalUriBaseIds"].items()
+        for key, base in run.get("originalUriBaseIds", {}).items()
     }
 
     def _side(location: dict) -> str:
@@ -28,7 +29,7 @@ if len(sys.argv) > 1:
         )
         region = physical["region"]
 
-        return f"{path.relative_to(Path.cwd(), walk_up=True)}:{region['startLine']}-{region['endLine']}"
+        return f"{os.path.relpath(path)}:{region['startLine']}-{region['endLine']}"
 
     for result in run["results"]:
         locations[result["partialFingerprints"]["jscpdCloneHash/v1"]] = (

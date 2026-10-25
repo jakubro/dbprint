@@ -37,7 +37,7 @@ primary: could not connect to MySQL at 127.0.0.1:3306/my_db as 'dbprint_ro':
 1044 (42000): Access denied for user 'dbprint_ro'@'%' to database 'my_db'
 ```
 
-and the run exits `4` having profiled nothing. There is no partial print to inspect, which makes a missing grant here easier to diagnose than on most of the other seven engines.
+and the run exits `4` having profiled nothing. There is no partial print to inspect, which makes a missing grant here easier to diagnose than on most other engines.
 
 `SHOW VIEW` is the one grant that is easy to miss, because it is needed for exactly one thing. A view's DDL comes from `SHOW CREATE TABLE`, which MySQL gates behind `SHOW VIEW` for views specifically. Without it the tables profile normally and every view fails:
 
@@ -74,7 +74,7 @@ Where `CREATE TEMPORARY TABLES` is absent the run does not fail the whole connec
 table 'my_db.germination_trial': connection 'primary' (mysql) could not materialize its
 sample of 0.25 (ProgrammingError: 1044 (42000): Access denied for user 'dbprint_ro'@'%' to
 database 'my_db'), and this adapter's per-statement fallback cannot be seeded into agreement
-across statements. Narrow with a filter instead of a sample fraction.
+across statements. Narrow with mode: filter instead of a sample.
 ```
 
 MySQL reports the underlying cause as a plain access-denied error rather than one naming temporary tables specifically, so the parenthesized cause is worth reading in full before concluding the account lost its `SELECT` rather than `CREATE TEMPORARY TABLES`.
@@ -103,17 +103,25 @@ A `FEDERATED`, `CONNECT` or `SPIDER` table is listed with `external: true` (SPEC
 
 ## Credentials in a remote table's DDL
 
-A `FEDERATED`, `CONNECT` or `SPIDER` table keeps its remote login in its own options, and `SHOW CREATE TABLE` returns it verbatim. `ddl.sql` replaces the password with `[HIDDEN]` wherever the options carry one — a URL's `user:password@`, a `PWD=` or `Password=` value, a Spider `password`, `REMOTE_PASSWORD` — and keeps the rest of where the rows live. A `CONNECTION` naming a `CREATE SERVER` object carries no password; dbprint never reads `mysql.servers`.
-
-A print written by an earlier release may hold the password in `ddl.sql`. The first `generate` on this release re-reads every table it lists, since a print from another version is never fresh; run it with full scope so no table is carried untouched, and rotate the remote password, since every earlier commit of the print still holds it.
+A `FEDERATED`, `CONNECT` or `SPIDER` table keeps its remote login in its own options, and `SHOW CREATE TABLE` returns it verbatim. `ddl.sql` replaces the password with `[HIDDEN]` wherever the options carry one — a URL's `user:password@`, a `PWD=` or `Password=` value, a Spider `password`, `REMOTE_PASSWORD` — and keeps the rest of where the rows live. These are the credential masks every adapter's DDL passes through ([SPEC 2.1.3](../format/v1/SPEC.md#213-what-must-be-stripped-per-adapter)), so a table on any engine, a view and a comment are masked the same way. A `CONNECTION` naming a `CREATE SERVER` object carries no password; dbprint never reads `mysql.servers`.
 
 ## Namespaces
 
 `database` is optional. Omitted, the session has no default database and the connection reads every database `information_schema` shows the account, less `information_schema`, `mysql`, `performance_schema` and `sys`; a database the account cannot read is simply absent. A sampled table's copy lands in the table's own database, so `CREATE TEMPORARY TABLES` is needed on each database holding a sampled table. With no database, an unqualified name in `dbprint check --online` SQL assertions has nothing to resolve against.
 
+## Time zone
+
+dbprint sets the session `time_zone` to `+00:00` on every connection, so a `TIMESTAMP` is read as its UTC instant on every path — a view, a `filter`, a sample — including the hour a daylight-saving zone repeats, which no conversion back from local time can tell apart. `DATETIME` has no zone and reads unchanged. A `read.*.filter` predicate and `dbprint check --online` SQL run in that session too: `NOW()`, `CURDATE()`, `CURRENT_TIMESTAMP` and a string literal compared with a `TIMESTAMP` column are UTC. Write a filter's boundaries in UTC.
+
+## The row-count estimate
+
+A table's size, and a sampled table's `row_count`, come from `information_schema.tables.table_rows`. InnoDB's figure is approximate by design — MySQL documents that it may differ from the true count by as much as 40 to 50 percent — and follows deletes when InnoDB next refreshes its own statistics, so a sampled table publishes `row_count_method: approximate`.
+
 ## Statement timeout
 
 `run.statement_timeout` is applied once per session. On Oracle MySQL it is `max_execution_time`, which bounds read-only `SELECT` statements only: `SHOW CREATE TABLE`, the sample copy (`CREATE TEMPORARY TABLE ... SELECT`), `DROP` and statements inside stored programs run unbounded there. On MariaDB it is `max_statement_time`, which covers every statement but is checked at intervals, so a statement can overrun it briefly. A statement that exceeds the limit is cancelled by the server.
+
+Every session also removes `NO_BACKSLASH_ESCAPES` from its `sql_mode`, keeping every other mode, and a session that cannot fails the connection naming `sql_mode`. A JSON document key read back from the data is spelled into SQL as a string literal with backslash escapes, which that mode would turn into the literal's end.
 
 ## Parallelism
 

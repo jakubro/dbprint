@@ -138,6 +138,7 @@ FIELD_RULES: dict[tuple[Artifact, str], Rule] = {
     ("statistics", "columns.*.sum"): _STATISTIC,
     ("statistics", "columns.*.zero_count"): _STATISTIC,
     ("statistics", "columns.*.negative_count"): _STATISTIC,
+    ("statistics", "columns.*.non_finite_count"): _STATISTIC,
     ("statistics", "columns.*.empty_count"): _STATISTIC,
     ("statistics", "columns.*.quantized_count"): _STATISTIC,
     ("statistics", "columns.*.length"): _STATISTIC,
@@ -191,14 +192,14 @@ FIELD_RULES: dict[tuple[Artifact, str], Rule] = {
     ),
     ("ddl", ""): Uncompared(
         "v1 does not parse DDL: a view body, a table's catalog spelling, defaults, secondary "
-        "indexes and comments are compared only against a live read",
+        "indexes and comments are never compared",
     ),
     ("description", ""): _HUMAN,
     ("statistics_annotations", ""): _HUMAN,
     ("relationships_annotations", ""): _HUMAN,
 }
 
-# Shape kinds with no committed side to hydrate: `diff` fires them against a live read only.
+# Shape kinds a committed-prints baseline cannot hydrate, so no v1 diff fires them (SPEC 2.6.10).
 LIVE_ONLY_SHAPE_KINDS = frozenset(
     {"column_default_changed", "index_added", "index_removed", "index_modified", "comment_changed"},
 )

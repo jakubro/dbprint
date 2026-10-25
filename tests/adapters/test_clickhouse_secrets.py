@@ -1,4 +1,4 @@
-"""ClickHouse DDL is read with the server's secret masking on, and a URL engine's password masked."""
+"""ClickHouse DDL is read with the server's secret masking on, whatever the session says."""
 
 from __future__ import annotations
 
@@ -51,41 +51,7 @@ def test_a_session_that_shows_secrets_reads_with_masking_forced_on(
     )
 
 
-def test_a_url_engine_password_is_masked_whatever_the_server_returned() -> None:
-    raw = (
-        "CREATE TABLE seedbank.narrow (`id` UInt64 DEFAULT 'https://a:b@c') "
-        "ENGINE = URL('https://u:pw@h/x.csv', 'CSV')"
-    )
-
-    assert ddl_module.normalize(raw) == (
-        "CREATE TABLE seedbank.narrow (`id` UInt64 DEFAULT 'https://a:b@c') "
-        "ENGINE = URL('https://u:[HIDDEN]@h/x.csv', 'CSV')\n"
-    )
-
-
-def test_only_the_engine_arguments_are_masked() -> None:
-    raw = (
-        "CREATE TABLE seedbank.narrow (`id` UInt64) "
-        "ENGINE = URL('https://u:pw@h/x(1).csv', 'CSV') "
-        "COMMENT 'see https://a:b@c and Password=keep'"
-    )
-
-    assert ddl_module.normalize(raw) == (
-        "CREATE TABLE seedbank.narrow (`id` UInt64) "
-        "ENGINE = URL('https://u:[HIDDEN]@h/x(1).csv', 'CSV') "
-        "COMMENT 'see https://a:b@c and Password=keep'\n"
-    )
-
-
 def test_an_engine_without_arguments_is_left_as_is() -> None:
     raw = "CREATE TABLE seedbank.narrow (`id` UInt64) ENGINE = MergeTree ORDER BY id"
 
     assert ddl_module.normalize(raw) == raw + "\n"
-
-
-def test_an_escaped_quote_or_at_sign_in_an_engine_url_password_is_masked_whole() -> None:
-    raw = r"CREATE TABLE seedbank.narrow (`id` UInt64) ENGINE = URL('https://u:a\'b@c@h/x.csv', 'CSV')"
-
-    assert ddl_module.normalize(raw) == (
-        "CREATE TABLE seedbank.narrow (`id` UInt64) ENGINE = URL('https://u:[HIDDEN]@h/x.csv', 'CSV')\n"
-    )

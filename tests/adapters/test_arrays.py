@@ -77,9 +77,9 @@ class TestDuckdb:
     ) -> None:
         items = duckdb_print(
             tmp_path,
-            "CREATE TABLE order_line (line_id INTEGER, items STRUCT(sku VARCHAR, qty INTEGER)[])",
-            "INSERT INTO order_line VALUES (1, [{'sku': 'a', 'qty': 1}]), (2, [])",
-        )["order_line"]["items"]
+            "CREATE TABLE fieldwork (fieldwork_id INTEGER, items STRUCT(lot VARCHAR, seeds INTEGER)[])",
+            "INSERT INTO fieldwork VALUES (1, [{'lot': 'a', 'seeds': 1}]), (2, [])",
+        )["fieldwork"]["items"]
 
         assert items["classification"] == "composite"
         assert items["parts"]["[*]"]["classification"] in ("unsupported", "composite")

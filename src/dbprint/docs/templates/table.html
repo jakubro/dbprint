@@ -36,7 +36,7 @@
   <div class="card">
     <div class="label">metadata</div>
     <div class="big">{{ entry.type|capitalize }}</div>
-    <div class="muted">profiled <span class="badge badge-muted" title="{{ entry.profiled_at|dt }}">{{ entry.profiled_at|relative }}</span></div>
+    <div class="muted">profiled <span class="badge badge-muted" title="{{ entry.profiled_at|dt }}">{{ entry.profiled_at|dt if static_site else entry.profiled_at|relative }}</span></div>
   </div>
   <div class="card">
     <div class="label">rows</div>
@@ -174,7 +174,7 @@
 <div data-tab-panel="overview">
   {% if description %}
     <h2>Description</h2>
-    <div class="md">{{ description|md }}</div>
+    <div class="md">{{ description|md(mentions) }}</div>
   {% endif %}
 
   {% if unlisted_annotations %}
@@ -419,7 +419,7 @@
               <span class="col-name">{{ col.name }}</span>
               {% if col.collation %}<div class="muted">collation {{ col.collation }}</div>{% endif %}
               {% if col.null_companions %}<div class="muted">null with: {{ col_links(col.null_companions) }}</div>{% endif %}
-              {% if col.annotation_note %}<div class="md muted">{{ col.annotation_note|md }}</div>{% endif %}
+              {% if col.annotation_note %}<div class="md muted">{{ col.annotation_note|md(mentions) }}</div>{% endif %}
               {% for value, note in col.annotation_values %}
                 <div class="muted">{{ value }}: {{ note }}</div>
               {% endfor %}
@@ -434,12 +434,14 @@
                 {% if col.null_rate is not none %}<span class="bar-track"><span class="bar-fill" style="width:{{ (col.null_rate * 100)|round(2) }}%"></span></span>{% endif %}
                 <span class="num" title="{{ col.null_count }}">{{ col.null_count|number }}</span>
               </div>
-              {% if col.zero_count or col.negative_count or col.empty_count %}
+              {% if col.zero_count or col.negative_count or col.non_finite_count or col.empty_count %}
                 <div class="muted">
                   {% if col.zero_count %}{{ col.zero_count|number }} zero{% endif %}
                   {% if col.zero_count and col.negative_count %}&middot;{% endif %}
                   {% if col.negative_count %}{{ col.negative_count|number }} negative{% endif %}
-                  {% if (col.zero_count or col.negative_count) and col.empty_count %}&middot;{% endif %}
+                  {% if (col.zero_count or col.negative_count) and col.non_finite_count %}&middot;{% endif %}
+                  {% if col.non_finite_count %}{{ col.non_finite_count|number }} non-finite{% endif %}
+                  {% if (col.zero_count or col.negative_count or col.non_finite_count) and col.empty_count %}&middot;{% endif %}
                   {% if col.empty_count %}{{ col.empty_count|number }} empty{% endif %}
                 </div>
               {% endif %}

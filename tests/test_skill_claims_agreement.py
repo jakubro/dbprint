@@ -50,7 +50,7 @@ _FIELD_CLAIMS = (
 # than the CLI itself - that file is rendered from `--help` and golden-tested against it.
 _CLI_CLAIMS = ("dbprint context", "dbprint generate", "dbprint check", "--max-age")
 
-_ANNOTATE_CLI_CLAIMS = (("generate", "--force"), ("annotate", "--check"), ("context", "--purpose"))
+_ANNOTATE_CLI_CLAIMS = (("generate", None), ("annotate", "--check"), ("context", "--purpose"))
 _YAML_FENCE = re.compile(r"```yaml\n# ([a-z_.]+)\n(.*?)```", re.DOTALL)
 
 _TOOL_SHAPED = re.compile(r"^(?:get|list|search)_[a-z_]+$")
@@ -123,6 +123,10 @@ def test_the_annotation_skill_names_only_commands_that_exist() -> None:
         section = reference.split(f"## `dbprint {command}`", 1)[1].split("\n## `", 1)[0]
 
         assert f"dbprint {command}" in skill, f"{command!r} listed here but absent from the skill"
+
+        if flag is None:
+            continue
+
         assert flag in skill, f"{flag!r} listed here but absent from the skill"
         assert flag in section, f"the skill passes {flag!r} to {command!r}, which has no such flag"
 

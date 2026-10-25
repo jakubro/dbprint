@@ -39,7 +39,7 @@ FROM
 WHERE
   con.contype = 'f'
   AND snp.nspname = %s
-  AND scl.relname = %s
+  AND scl.relname = %s{clones}
 
 ORDER BY
   con.conname
@@ -51,11 +51,15 @@ def relationships(
     identity: Identity,
     *,
     on_unknown: FkAction | None,
+    skip_clones: bool,
 ) -> list[ForeignKeyMeta]:
     """Declared outgoing FKs, one entry per constraint (composite as arrays).
 
     An action code outside `_FK_ACTIONS` reads as `on_unknown`, or raises `KeyError` when None.
+    `skip_clones` drops the copies PostgreSQL keeps per partition, which nobody declared.
     """
+
+    statement = FOREIGN_KEYS.format(clones="\n  AND con.conparentid = 0" if skip_clones else "")
 
     out: list[ForeignKeyMeta] = []
 
@@ -69,7 +73,7 @@ def relationships(
         on_upd,
         src_relid,
         dst_relid,
-    ) in execute(FOREIGN_KEYS, identity.addressed).fetchall():
+    ) in execute(statement, identity.addressed).fetchall():
         out.append(
             ForeignKeyMeta(
                 column=tuple(attnums_to_names(execute, src_relid, list(src_attnums))),
@@ -88,6 +92,8 @@ def relationships(
 def attnums_to_names(execute: Execute, relid: int, attnums: list[int]) -> list[str]:
     """Resolve attnums for one relation into lowercased column names, order preserved - lowercase
     agrees with the `columns` map key (SPEC 2.2.1), and nothing quotes these into a statement.
+
+    Raises ValueError on an attnum naming no live column, rather than shortening the list.
     """
 
     if not attnums:
@@ -114,7 +120,10 @@ def attnums_to_names(execute: Execute, relid: int, attnums: list[int]) -> list[s
     ).fetchall()
     name_by_attnum = {int(attnum): fold(str(attname)) for attnum, attname in rows}
 
-    return [name_by_attnum[a] for a in attnums if a in name_by_attnum]
+    if unresolved := [a for a in attnums if a not in name_by_attnum]:
+        raise ValueError(f"attnums {unresolved} of relation {relid} name no live column")
+
+    return [name_by_attnum[a] for a in attnums]
 
 
 def _action(code: object, on_unknown: FkAction | None) -> FkAction:

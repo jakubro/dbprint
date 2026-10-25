@@ -6,7 +6,6 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from dbprint import __version__ as DBPRINT_VERSION
 from dbprint.adapters.base import TableType
 from dbprint.config import ProfileConfig, ReadConfig
 from dbprint.config.read import MODE_PARAMETERS
@@ -128,6 +127,7 @@ def build(
     selectors: DiffSelectors,
     redaction_rules_configured: int,
     default_collation: str,
+    dbprint_version: str,
     failed_tables: tuple[str, ...] = (),
     has_manifest_annotations: bool = False,
 ) -> dict[str, Any]:
@@ -183,7 +183,7 @@ def build(
         "generated_at": generated_at,
         "connection": connection_name,
         "adapter": adapter_kind,
-        "dbprint_version": DBPRINT_VERSION,
+        "dbprint_version": dbprint_version,
         "profile": profile,
         "selectors": {"include": list(selectors.include), "exclude": list(selectors.exclude)},
         "redaction_rules_configured": redaction_rules_configured,

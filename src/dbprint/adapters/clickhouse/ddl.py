@@ -6,7 +6,6 @@ from __future__ import annotations
 
 from .connection import Cursor, exec_query
 from .introspect import FORCE_DISPLAY_MASKING
-from ..credentials import mask_clickhouse_strings
 from ..identifiers import Identity
 from ..sql_layout import trimmed_lines
 
@@ -38,35 +37,6 @@ def extract_ddl(cursor: Cursor, identity: Identity, *, hide_secrets: bool = Fals
 
 
 def normalize(raw: str) -> str:
-    """Strip trailing whitespace per line, mask a URL password in the engine; one final newline."""
+    """Strip trailing whitespace per line; one final newline."""
 
-    head, engine, rest = raw.partition("ENGINE =")
-    start = rest.find("(")
-    end = _closing_paren(rest, start) if start != -1 and rest[:start].strip().isidentifier() else -1
-    masked = (
-        rest if end == -1 else rest[:start] + mask_clickhouse_strings(rest[start:end]) + rest[end:]
-    )
-    return trimmed_lines(head + engine + masked)
-
-
-def _closing_paren(text: str, start: int) -> int:
-    depth, quoting, index = 0, None, start
-
-    while index < len(text):
-        char = text[index]
-
-        if quoting is not None and char == "\\":
-            index += 1
-        elif quoting is not None:
-            quoting = None if char == quoting else quoting
-        elif char in "'`\"":
-            quoting = char
-        elif char in "()":
-            depth += 1 if char == "(" else -1
-
-            if depth == 0:
-                return index + 1
-
-        index += 1
-
-    return -1
+    return trimmed_lines(raw)

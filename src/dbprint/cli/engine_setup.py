@@ -6,11 +6,12 @@ gets the same check, including one added later.
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from dbprint.adapters import Adapter
+from dbprint.adapters import Adapter, interrupt
 from dbprint.config import ConnectionConfig, resolve_connection
 from dbprint.config.connections import CredentialsFileInvalid
 from dbprint.config.project import REDACTION_SALT_KEY, bind_redaction_salt
@@ -40,6 +41,12 @@ class EngineSetup:
 
     adapter: Adapter
     engine: Engine
+
+
+def interruptible() -> AbstractContextManager[None]:
+    """The span a statement-issuing command runs its engines in: Ctrl-C ends it, however reported."""
+
+    return interrupt.handling()
 
 
 class ConnectionSetupError(Exception):

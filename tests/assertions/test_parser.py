@@ -145,6 +145,16 @@ class TestQueriesParsing:
         assert [f.code for f in result.faults] == ["assertion.malformed-block"]
         assert result.faults[0].path == "queries.q1"
 
+    @pytest.mark.parametrize("expect", [False, True])
+    def test_a_boolean_expect_becomes_a_fault(self, expect: bool) -> None:
+        result = parse_block({"queries": [{"name": "q1", "sql": "x", "expect": expect}]})
+        assert result.queries == ()
+        assert [f.code for f in result.faults] == ["assertion.malformed-block"]
+
+    def test_a_float_zero_expect_is_accepted(self) -> None:
+        result = parse_block({"queries": [{"name": "q1", "sql": "x", "expect": 0.0}]})
+        assert result.queries[0].expect == "0"
+
     def test_queries_itself_non_list_becomes_a_fault_not_a_raise(self) -> None:
         """`queries:` at the top level, not one entry within it - the outer shape fault."""
 
@@ -314,6 +324,134 @@ class TestEveryFaultNamesItsPathCodeDetailAndSection:
                 "assertions.queries: duplicate name 'q' - names must be unique",
                 code="assertion.duplicate-query-name",
             ),
+        )
+
+
+def _keyed(path: str, detail: str, code: str, spec_ref: str) -> ParseFault:
+    return ParseFault(path=path, code=code, detail=detail, spec_ref=spec_ref)
+
+
+_QUERY = {"name": "q", "sql": "SELECT 0", "expect": 0}
+
+
+class TestEveryKeyTheGrammarDoesNotDefineIsAFault:
+    """ASSERTIONS.md 1.2: an unknown key is reported where it sits, with the nearest valid one."""
+
+    def test_a_block_key_close_to_a_valid_one(self) -> None:
+        assert parse_block({"table": {"seedbank.collector": {}}}).faults == (
+            _fault("table", "assertions.table: unknown key; did you mean 'tables'?"),
+        )
+
+    def test_a_block_key_close_to_nothing_lists_the_valid_ones(self) -> None:
+        assert parse_block({"zz": 1}).faults == (
+            _fault("zz", "assertions.zz: unknown key; valid keys here: queries, tables"),
+        )
+
+    def test_a_table_key(self) -> None:
+        result = parse_block(
+            {
+                "tables": {
+                    "seedbank.collector": {"row_cont": 1, "columns": {"email": {"nullable": True}}},
+                },
+            },
+        )
+
+        assert result.faults == (
+            _fault(
+                "tables.seedbank.collector.row_cont",
+                "assertions.tables.seedbank.collector.row_cont: unknown key; did you mean 'row_count'?",
+            ),
+        )
+        assert result.tables["seedbank.collector"].columns == {"email": {"nullable": True}}
+
+    @pytest.mark.parametrize(
+        ("stat", "hint"),
+        [("null_cont", "; did you mean 'null_count'?"), ("zz", "")],
+    )
+    def test_a_column_stat_outside_the_vocabulary(self, stat: str, hint: str) -> None:
+        result = parse_block(
+            {"tables": {"seedbank.collector": {"columns": {"email": {stat: 0, "nullable": True}}}}},
+        )
+        path = f"tables.seedbank.collector.columns.email.{stat}"
+
+        assert result.faults == (
+            _keyed(
+                path,
+                f"assertions.{path}: stat {stat!r} not in §2.4 vocabulary{hint}",
+                "assertion.unknown-stat",
+                "ASSERTIONS.md §2.4",
+            ),
+        )
+        assert result.tables["seedbank.collector"].columns == {"email": {"nullable": True}}
+
+    @pytest.mark.parametrize("parent", ["range", "percentiles"])
+    def test_a_bare_value_bearing_parent_is_left_to_the_evaluator(self, parent: str) -> None:
+        for body in (1, {"min": 0, "mx": 1}):
+            result = parse_block(
+                {"tables": {"seedbank.collector": {"columns": {"email": {parent: body}}}}},
+            )
+
+            assert result.faults == ()
+            assert result.tables["seedbank.collector"].columns == {"email": {parent: body}}
+
+    @pytest.mark.parametrize(
+        "where",
+        ["row_count", "columns.email.null_rate"],
+    )
+    def test_a_range_key_drops_that_predicate(self, where: str) -> None:
+        body: dict = {"columns": {"email": {}}}
+
+        if where == "row_count":
+            body["row_count"] = {"mx": 0}
+        else:
+            body["columns"]["email"]["null_rate"] = {"mx": 0}
+
+        result = parse_block({"tables": {"seedbank.collector": body}})
+        path = f"tables.seedbank.collector.{where}.mx"
+
+        assert result.faults == (
+            _keyed(
+                path,
+                f"assertions.{path}: unknown key; did you mean 'max'?",
+                "assertion.malformed-predicate",
+                "ASSERTIONS.md §2.1",
+            ),
+        )
+        assert result.tables["seedbank.collector"] == TablePredicates(
+            fqn="seedbank.collector",
+            columns={"email": {}},
+        )
+
+    def test_a_null_row_count(self) -> None:
+        result = parse_block({"tables": {"seedbank.collector": {"row_count": None}}})
+
+        assert result.faults == (
+            _keyed(
+                "tables.seedbank.collector.row_count",
+                "assertions.tables.seedbank.collector.row_count: a predicate needs a value",
+                "assertion.malformed-predicate",
+                "ASSERTIONS.md §2.1",
+            ),
+        )
+
+    def test_a_query_key_and_the_query_still_runs(self) -> None:
+        result = parse_block({"queries": [{**_QUERY, "sevrity": "warning"}]})
+
+        assert result.faults == (
+            _fault(
+                "queries.q.sevrity",
+                "assertions.queries.q.sevrity: unknown key; did you mean 'severity'?",
+            ),
+        )
+        assert [(q.name, q.severity) for q in result.queries] == [("q", "error")]
+
+    def test_a_nameless_query_is_addressed_by_its_index(self) -> None:
+        assert parse_block({"queries": [{"sql": "SELECT 0", "expect": 0, "zz": 1}]}).faults == (
+            _fault(
+                "queries[0].zz",
+                "assertions.queries[0].zz: unknown key; valid keys here: expect, name, severity, sql",
+            ),
+            _fault("queries[0]", "assertions.queries[0]: `name` is required and must be a string"),
         )
 
 

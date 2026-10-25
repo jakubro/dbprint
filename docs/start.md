@@ -45,7 +45,7 @@ connections:
         - "seedbank.*"
 ```
 
-`tables.include` is the one line worth reading twice. It decides which tables are profiled, as `fnmatch` globs over the lowercased fully-qualified name; the shape of that name is the engine's own — `database.table` on MySQL and ClickHouse, `database.schema.table` on PostgreSQL, Redshift and Snowflake, `catalog.schema.table` on Databricks. Your adapter page states the shape for your engine. Omitting it entirely profiles everything the connection can see, which on a warehouse is rarely what you want.
+`tables.include` is the one line worth reading twice. It decides which tables are profiled, as `fnmatch` globs over the lowercased fully-qualified name; the shape of that name is the engine's own — `database.table` on MySQL and ClickHouse, `database.schema.table` on PostgreSQL, Redshift, Snowflake and duckdb, `catalog.schema.table` on Databricks, `dataset.table` on BigQuery. Your adapter page states the shape for your engine. Omitting it entirely profiles everything the connection can see, which on a warehouse is rarely what you want.
 
 `auto: true` means a bare `dbprint generate` runs this connection without naming it.
 
@@ -100,7 +100,7 @@ Sketching is a second pass because it answers a different question: it summarise
 
 Piping the command somewhere gives a plain tab-separated record per event instead, which is the form a CI log should capture — `--no-tui` forces it at a terminal, and `-q` silences progress altogether. [Gating CI](guide/ci.md) shows that form.
 
-One table's failure does not stop the others: every table is attempted and the failures are reported together at the end, listed under the summary and then in full on stderr. The exit code tells you which kind of outcome you got — `0` all well, `5` some tables failed and the rest were still written, `7` every table failed. A `5` is usually a missing grant on one table; a `7` is usually the connection, or an adapter-specific prerequisite your engine's page names (a missing `pg_dump` on PostgreSQL, an absent `SAMPLE BY` key on ClickHouse). [Troubleshooting](guide/troubleshooting.md) indexes those by symptom.
+One table's failure does not stop the others: every table is attempted and the failures are reported together at the end, listed under the summary and then in full on stderr. The exit code tells you which kind of outcome you got — `0` all well, `3` the schema moved since the last run — on a first run every table is new, so `3` is expected, `4` the database could not be reached, `5` some tables failed and the rest were still written, `7` every table failed, and `1` the configuration or the committed print could not be used. A `4` is usually the credentials, or a prerequisite checked when the connection opens (a missing `pg_dump` on PostgreSQL); a `5` is usually a missing grant on one table; a `7` is usually a role that reaches the database but can read none of it, or an adapter-specific prerequisite your engine's page names (an absent `SAMPLE BY` key on ClickHouse). [Troubleshooting](guide/troubleshooting.md) indexes those by symptom.
 
 The run is read-only unless a table is narrowed to a fraction of its rows, and nothing here narrows anything — see [choosing what to profile](guide/scoping.md) for when that changes and what it needs.
 

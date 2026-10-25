@@ -1038,6 +1038,10 @@
           "type": "integer",
           "minimum": 0
         },
+        "non_finite_count": {
+          "type": "integer",
+          "minimum": 0
+        },
         "empty_count": {
           "type": "integer",
           "minimum": 0
@@ -1249,6 +1253,10 @@
           "minimum": 0
         },
         "negative_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "non_finite_count": {
           "type": "integer",
           "minimum": 0
         },
@@ -1541,6 +1549,13 @@
         {
           "not": {
             "required": [
+              "non_finite_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
               "empty_count"
             ]
           }
@@ -1770,6 +1785,13 @@
         {
           "not": {
             "required": [
+              "non_finite_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
               "empty_count"
             ]
           }
@@ -1908,6 +1930,13 @@
           "not": {
             "required": [
               "negative_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "non_finite_count"
             ]
           }
         },
@@ -2188,6 +2217,13 @@
           "not": {
             "required": [
               "negative_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "non_finite_count"
             ]
           }
         },
@@ -2519,6 +2555,13 @@
         {
           "not": {
             "required": [
+              "non_finite_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
               "empty_count"
             ]
           }
@@ -2798,6 +2841,13 @@
         {
           "not": {
             "required": [
+              "non_finite_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
               "empty_count"
             ]
           }
@@ -2982,6 +3032,13 @@
         {
           "not": {
             "required": [
+              "non_finite_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
               "empty_count"
             ]
           }
@@ -3059,7 +3116,7 @@
       ]
     },
     "BoundsUnlessDropped": {
-      "description": "range and percentiles are cell values, so a column declaring redacted: drop emits neither; every other column of these classifications emits both. See SPEC.md section 2.2.9.",
+      "description": "range and percentiles are cell values, so a column declaring redacted: drop emits neither; every other column of these classifications emits both. See SPEC.md section 2.2.9. A numeric column counting non-finite values may hold no finite one, which emits neither (section 2.2.4).",
       "if": {
         "type": "object",
         "required": [
@@ -3092,8 +3149,17 @@
       "else": {
         "if": {
           "not": {
-            "required": [
-              "unmeasured"
+            "anyOf": [
+              {
+                "required": [
+                  "unmeasured"
+                ]
+              },
+              {
+                "required": [
+                  "non_finite_count"
+                ]
+              }
             ]
           }
         },
@@ -3196,6 +3262,13 @@
           "not": {
             "required": [
               "negative_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "non_finite_count"
             ]
           }
         },
@@ -3638,6 +3711,13 @@
         {
           "not": {
             "required": [
+              "non_finite_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
               "quantized_count"
             ]
           }
@@ -3864,6 +3944,13 @@
           "not": {
             "required": [
               "negative_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "non_finite_count"
             ]
           }
         },
@@ -4097,6 +4184,13 @@
           "not": {
             "required": [
               "negative_count"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "non_finite_count"
             ]
           }
         },
@@ -4357,6 +4451,11 @@
             {
               "required": [
                 "negative_count"
+              ]
+            },
+            {
+              "required": [
+                "non_finite_count"
               ]
             },
             {

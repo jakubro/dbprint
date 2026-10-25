@@ -70,6 +70,15 @@ def test_generate_refuses_one_connection_and_profiles_the_next(project: Path) ->
     assert garden["tables"]["garden.main.bed"]["row_count"] == 45
 
 
+def test_a_refused_connection_outranks_the_next_connections_first_run(project: Path) -> None:
+    _add_dotted_table(project)
+
+    code, _ = _run("generate", "--no-tui")
+
+    assert code == 1
+    assert (project / "prints" / "garden" / "manifest.yaml").is_file()
+
+
 def test_diff_refuses_one_connection_and_compares_the_next(project: Path) -> None:
     assert _run("generate", "--no-tui")[0] in (0, 3)
     _add_dotted_table(project)

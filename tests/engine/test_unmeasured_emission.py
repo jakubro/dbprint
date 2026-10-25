@@ -23,7 +23,14 @@ from dbprint.adapters import (
     ValueCount,
 )
 from dbprint.adapters.base import PhaseA, TableCounts
-from dbprint.config import ConnectionConfig, ProfileConfig, RelationshipsProfile, SketchesProfile
+from dbprint.config import (
+    ConnectionConfig,
+    ProfileConfig,
+    RedactRule,
+    RelationshipsProfile,
+    SketchesProfile,
+    StatisticsProfile,
+)
 from dbprint.conformance.schema_validation import check_statistics
 from dbprint.conformance.statistics import check
 from dbprint.engine import Engine
@@ -73,6 +80,73 @@ class TestWhatReachesTheArtifact:
         # Both layers run over the same file in one `dbprint check`, so the schema has to
         # relax the classification's own required list wherever the marker is present.
         assert check_statistics(payload, "statistics.yaml") == []
+
+
+class TestANumericColumnHoldingNoFiniteValue:
+    """Its bounds are unowed where `non_finite_count` shows it, and unmeasured where it is withheld."""
+
+    @pytest.mark.parametrize(
+        ("primitive", "unmeasured"),
+        [(None, None), ("mask", ["percentiles", "range"]), ("drop", None)],
+    )
+    def test_the_print_conforms(
+        self,
+        tmp_path: Path,
+        primitive: str | None,
+        unmeasured: list[str] | None,
+    ) -> None:
+        redact = (RedactRule(columns=("*.gauge.reading",), with_=primitive),) if primitive else ()
+        conn = ConnectionConfig(
+            name="w",
+            adapter="postgres",
+            output=tmp_path,
+            profile=ProfileConfig(
+                relationships=RelationshipsProfile(infer=False),
+                statistics=StatisticsProfile(enumeration_threshold=2),
+                redact=redact,
+            ),
+        )
+        Engine(MockAdapter(_non_finite_fixture()), conn, tmp_path).generate()
+        reading = artifact(tmp_path / "w", "seedbank.gauge")["columns"]["reading"]
+
+        assert reading.get("unmeasured") == unmeasured
+        assert "range" not in reading
+        assert conformance_errors(tmp_path / "w") == []
+
+
+def _non_finite_fixture() -> dict[str, MockTable]:
+    stats = ColumnStats(
+        sql_type="double precision",
+        nullable=False,
+        null_count=0,
+        null_rate=0.0,
+        cardinality=3,
+        cardinality_ratio=0.0075,
+        cardinality_method="exact",
+        values=(
+            ValueCount(value=float("nan"), count=200),
+            ValueCount(value=float("-inf"), count=100),
+            ValueCount(value=float("inf"), count=100),
+        ),
+        values_coverage=1.0,
+        distribution="uniform",
+        frequencies=Frequencies(top=200, bottom=100, listed=3, total=3),
+        zero_count=0,
+        negative_count=0,
+        non_finite_count=400,
+        quantized_count=0,
+        unmeasured=("percentiles", "range"),
+    )
+
+    return {
+        "seedbank.gauge": mock_table(
+            "seedbank.gauge",
+            columns(("reading", "double precision")),
+            {"reading": stats},
+            ddl="CREATE TABLE seedbank.gauge (reading double precision);\n",
+            row_count=400,
+        ),
+    }
 
 
 class TestAColumnPhaseACouldNotMeasure:

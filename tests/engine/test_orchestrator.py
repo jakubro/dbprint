@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import logging
 import shutil
+import signal
 from collections import Counter
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -39,6 +40,7 @@ from dbprint.adapters import (
     TableScope,
     UniqueKeyMeta,
     ValueCount,
+    interrupt,
 )
 from dbprint.adapters.base import SkippedNamespace
 from dbprint.config import (
@@ -66,6 +68,11 @@ from dbprint.engine import (
     orchestrator,
 )
 from dbprint.engine.carried import CommittedPrint
+from dbprint.engine.writer import WriterError
+from dbprint.spec.absence import TABLE_BLOCKS, disabled_of
+from dbprint.spec.artifacts import DDL_FILENAME
+from dbprint.spec.predicate import ASSERTABLE_STATS, resolve
+from dbprint.spec.scope import scope_of
 from dbprint.spec.sketch import K as SPEC_SKETCH_K
 from dbprint.spec.sketch import canonical_form, decode_sketch, low64_md5
 from tests._curator import conn_config, curator_fixture, referencing_fixture
@@ -451,6 +458,29 @@ class TestHappyPath:
         kinds = {c["kind"] for c in diff["changes"]}
         assert "table_added" in kinds
         assert diff["summary"]["tables_added"] == 2
+
+
+class TestBaselinePath:
+    """SPEC 2.6.2: `baseline.path` is relative to the project root, wherever the prints sit."""
+
+    def test_baseline_path_is_relative_under_a_symlinked_project_root(self, tmp_path: Path) -> None:
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real)
+
+        Engine(MockAdapter(curator_fixture()), conn_config(real.resolve()), link).generate()
+
+        assert _baseline(real / "primary") == "primary"
+
+    def test_baseline_path_climbs_to_an_output_beside_the_project(self, tmp_path: Path) -> None:
+        project = tmp_path / "project"
+        project.mkdir()
+        shared = tmp_path / "shared"
+
+        Engine(MockAdapter(curator_fixture()), conn_config(shared), project).generate()
+
+        assert _baseline(shared / "primary") == "../shared/primary"
 
 
 class TestGeneratePathDiff:
@@ -1338,19 +1368,23 @@ class TestClassifierFaultIsolation:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         monkeypatch.setattr(
             orchestrator,
             "detect_sensitivity",
-            lambda physical_name, samples, looks_like, **_: (_ for _ in ()).throw(
+            lambda physical_name, samples, **_: (_ for _ in ()).throw(
                 ValueError("hostile value"),
             ),
         )
-        result = _build_engine(tmp_path, curator_fixture()).generate()
+
+        with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
+            result = _build_engine(tmp_path, curator_fixture()).generate()
 
         statuses = {t.fqn: t.status for t in result.tables}
         assert statuses == {"public.curator": "ok", "public.herbarium": "ok"}
         assert result.summary.failed == 0
+        assert any("hostile value" in r.getMessage() for r in caplog.records)
 
     def test_a_raising_bounds_epoch_unit_still_completes_the_table(
         self,
@@ -2763,6 +2797,144 @@ class TestCarriedEntryRequiresItsPrintOnDisk:
         assert _referencers(tmp_path.joinpath(*self.HERBARIUM)) == ["public.curator"]
 
 
+class TestACarriedTableFollowsItsFiles:
+    """A table generate does not re-read is carried on its files, not the last manifest's word."""
+
+    CURATOR = "public.curator"
+    HERBARIUM = "public.herbarium"
+
+    @staticmethod
+    def _run(tmp_path: Path, request: GenerateRequest | None = None) -> Any:
+        engine = Engine(MockAdapter(curator_fixture()), conn_config(tmp_path), tmp_path)
+
+        return engine.generate(request or GenerateRequest())
+
+    @staticmethod
+    def _dir(tmp_path: Path, name: str) -> Path:
+        return tmp_path / "primary" / "public" / name
+
+    @staticmethod
+    def _declared(tmp_path: Path, fqn: str) -> dict[str, str]:
+        return manifest(tmp_path / "primary")["tables"][fqn]["artifacts"]
+
+    @staticmethod
+    def _conflict(path: Path) -> None:
+        text = path.read_text(encoding="utf-8")
+        path.write_text(f"<<<<<<< HEAD\n{text}=======\n{text}>>>>>>> other\n", encoding="utf-8")
+
+    @staticmethod
+    def _statuses(result: Any) -> dict[str, str]:
+        return {table.fqn: table.status for table in result.tables}
+
+    def test_a_new_annotation_on_a_fresh_table_is_declared(self, tmp_path: Path) -> None:
+        self._run(tmp_path)
+        curator = self._dir(tmp_path, "curator")
+        (curator / "description.md").write_text("# curator\n")
+        (curator / "statistics.annotations.yaml").write_text("format_version: 1\n")
+
+        result = self._run(tmp_path)
+
+        assert result.exit_code == EXIT_OK
+        assert set(self._statuses(result).values()) == {"skipped"}
+        declared = self._declared(tmp_path, self.CURATOR)
+        assert declared["description"] == "description.md"
+        assert declared["statistics_annotations"] == "statistics.annotations.yaml"
+
+    def test_a_deleted_annotation_keeps_the_table_and_is_forgotten(self, tmp_path: Path) -> None:
+        self._run(tmp_path)
+        curator = self._dir(tmp_path, "curator")
+        (curator / "description.md").write_text("# curator\n")
+        self._run(tmp_path)
+        (curator / "description.md").unlink()
+
+        result = self._run(tmp_path)
+        following = self._run(tmp_path)
+
+        assert result.exit_code == EXIT_OK
+        assert (curator / "statistics.yaml").is_file()
+        assert "description" not in self._declared(tmp_path, self.CURATOR)
+        assert following.diff_summary.tables_added == 0
+
+    @pytest.mark.parametrize("name", ["statistics.yaml", "relationships.yaml"])
+    def test_a_conflicted_producer_file_on_a_fresh_table_is_re_read(
+        self,
+        tmp_path: Path,
+        name: str,
+    ) -> None:
+        self._run(tmp_path)
+        path = self._dir(tmp_path, "curator") / name
+        self._conflict(path)
+
+        result = self._run(tmp_path)
+
+        assert result.exit_code == EXIT_OK
+        assert self._statuses(result)[self.CURATOR] == "ok"
+        assert not path.read_text().startswith("<<<<<<<")
+        assert conformance_errors(tmp_path / "primary") == []
+
+    def test_a_missing_producer_file_is_re_read_not_dropped(self, tmp_path: Path) -> None:
+        self._run(tmp_path)
+        statistics = self._dir(tmp_path, "curator") / "statistics.yaml"
+        statistics.unlink()
+
+        result = self._run(tmp_path)
+        following = self._run(tmp_path)
+
+        assert self._statuses(result)[self.CURATOR] == "ok"
+        assert statistics.is_file()
+        assert following.diff_summary.tables_added == 0
+
+    def test_a_new_annotation_outside_a_narrowed_run_is_declared(self, tmp_path: Path) -> None:
+        self._run(tmp_path)
+        (self._dir(tmp_path, "herbarium") / "description.md").write_text("# herbarium\n")
+
+        result = self._run(tmp_path, GenerateRequest(cli_include=(self.CURATOR,)))
+
+        assert result.exit_code == EXIT_OK
+        assert self._declared(tmp_path, self.HERBARIUM)["description"] == "description.md"
+
+    def test_a_conflicted_file_outside_a_narrowed_run_is_left_for_a_covering_run(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        self._run(tmp_path)
+        statistics = self._dir(tmp_path, "herbarium") / "statistics.yaml"
+        self._conflict(statistics)
+
+        self._run(tmp_path, GenerateRequest(cli_include=(self.CURATOR,)))
+
+        assert statistics.read_text().startswith("<<<<<<<")
+        assert self.HERBARIUM in manifest(tmp_path / "primary")["tables"]
+
+    def test_a_narrowed_run_keeps_the_release_of_the_tables_it_carried(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        self._run(tmp_path)
+        path = tmp_path / "primary" / "manifest.yaml"
+        data = yaml.safe_load(path.read_text())
+        running = data["dbprint_version"]
+        data["dbprint_version"] = "0.0.1"
+        path.write_text(yaml.safe_dump(data, sort_keys=False))
+
+        self._run(tmp_path, GenerateRequest(cli_include=(self.CURATOR,)))
+        narrowed = manifest(tmp_path / "primary")["dbprint_version"]
+        full = self._run(tmp_path)
+
+        assert narrowed == "0.0.1"
+        assert self._statuses(full) == {self.CURATOR: "ok", self.HERBARIUM: "ok"}
+        assert manifest(tmp_path / "primary")["dbprint_version"] == running
+
+    def test_an_intact_fresh_print_is_left_byte_identical(self, tmp_path: Path) -> None:
+        self._run(tmp_path)
+        before = (tmp_path / "primary" / "manifest.yaml").read_bytes()
+
+        result = self._run(tmp_path)
+
+        assert set(self._statuses(result).values()) == {"skipped"}
+        assert (tmp_path / "primary" / "manifest.yaml").read_bytes() == before
+
+
 class TestDryRun:
     def test_dry_run_writes_nothing(self, tmp_path: Path) -> None:
         engine = _build_engine(tmp_path, curator_fixture())
@@ -3440,14 +3612,45 @@ class TestComputeDiff:
         assert herbarium_id_changes[0]["before"] is True
         assert herbarium_id_changes[0]["after"] is False
 
-    def test_drift_state_column_default_not_detected_v1_boundary(self, tmp_path: Path) -> None:
-        """A hydrated baseline's default_known is always False (diff.ColumnState) - v1 boundary."""
+    def test_defaults_indexes_and_comments_are_never_compared_v1_boundary(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A committed-prints baseline records no default, index or comment (SPEC 2.6.10)."""
 
         _build_engine(tmp_path, _curator_with_defaulted_col_fixture()).generate()
-        result = _build_engine(tmp_path, _curator_with_defaulted_col_fixture()).compute_diff()
-        assert result.exit_code == 0
-        kinds = {c["kind"] for c in result.diff["changes"]}
-        assert "column_default_changed" not in kinds
+        moved = _curator_with_defaulted_col_fixture()
+        curator = moved["public.curator"]
+        moved["public.curator"] = replace(
+            curator,
+            columns=[
+                replace(c, default="false") if c.name == "is_active" else c for c in curator.columns
+            ],
+            indexes=[
+                IndexMeta(
+                    name="curator_herbarium_idx",
+                    columns=("herbarium_id",),
+                    unique=False,
+                    type="btree",
+                ),
+            ],
+            comments=CommentsMeta(table="who curates", columns={"herbarium_id": "home herbarium"}),
+        )
+        never = {
+            "column_default_changed",
+            "index_added",
+            "index_removed",
+            "index_modified",
+            "comment_changed",
+        }
+
+        diffed = _build_engine(tmp_path, moved).compute_diff()
+        generated = _build_engine(tmp_path, moved).generate(GenerateRequest(force=True))
+        written = yaml.safe_load((tmp_path / "primary" / "diff.yaml").read_text())
+
+        assert (diffed.exit_code, generated.exit_code) == (0, 0)
+        assert not never & {c["kind"] for c in diffed.diff["changes"]}
+        assert not never & {c["kind"] for c in written["changes"]}
 
     def test_compute_diff_does_not_write_disk(self, tmp_path: Path) -> None:
         _build_engine(tmp_path, curator_fixture()).generate()
@@ -3830,6 +4033,59 @@ class TestOnlineAndOfflineReadTheSameStatistics:
         assert live["columns"] == committed["columns"]
         assert live["row_count"] == committed["row_count"]
         assert live["type"] == committed["type"]
+
+    def test_every_field_the_evaluator_reads_reaches_the_live_payload(self, tmp_path: Path) -> None:
+        """Every file-level block `spec.absence` owns, and every assertable stat, reads alike."""
+
+        conn = replace(
+            conn_config(tmp_path),
+            rules=(
+                RuleConfig(
+                    match=RuleMatch(tables=("public.curator",)),
+                    profile={
+                        "read": {"tables": {"mode": "sample", "fraction": 0.5}},
+                        "looks_like": {"enabled": False},
+                    },
+                ),
+            ),
+        )
+        Engine(MockAdapter(curator_fixture()), conn, tmp_path).generate()
+        live_payloads = Engine(MockAdapter(curator_fixture()), conn, tmp_path).compute_diff()
+        heads = {block.split(".")[0] for block in TABLE_BLOCKS} | {"table", "type", "columns"}
+
+        for fqn in ("public.curator", "public.herbarium"):
+            committed = _read_yaml(
+                tmp_path / "primary" / "public" / fqn.split(".")[1] / "statistics.yaml",
+            )
+            live = live_payloads.live_statistics[fqn]
+
+            assert {h: live[h] for h in heads - {"columns"} if h in live} == {
+                h: committed[h] for h in heads - {"columns"} if h in committed
+            }
+            assert live["columns"].keys() == committed["columns"].keys()
+
+            for name, column in committed["columns"].items():
+                for stat in ASSERTABLE_STATS:
+                    online = resolve(
+                        live["columns"][name],
+                        stat,
+                        scope_of(live),
+                        disabled=disabled_of(live),
+                    )
+                    offline = resolve(
+                        column,
+                        stat,
+                        scope_of(committed),
+                        disabled=disabled_of(committed),
+                    )
+
+                    assert (online.reading.state, online.value) == (
+                        offline.reading.state,
+                        offline.value,
+                    ), f"{fqn}.{name}.{stat}"
+
+        assert live_payloads.live_statistics["public.curator"]["disabled"] == ["looks_like"]
+        assert "scope" in live_payloads.live_statistics["public.curator"]
 
     def test_a_field_the_matrix_forbids_is_absent_from_both(self, tmp_path: Path) -> None:
         """SPEC 2.2.3 marks the cardinality trio forbidden for `unsupported`."""
@@ -5480,26 +5736,23 @@ class TestWrongShapeBaselineArtifacts:
 
         assert result.summary.failed == 0
 
-    def test_a_manifest_holding_a_sequence_runs_as_a_first_run(self, tmp_path: Path) -> None:
+    def test_a_manifest_holding_a_sequence_is_refused(self, tmp_path: Path) -> None:
         _build_engine(tmp_path, curator_fixture()).generate()
         (tmp_path / "primary" / "manifest.yaml").write_text("- one\n- two\n")
 
         result = _build_engine(tmp_path, curator_fixture()).generate()
 
-        assert result.summary.failed == 0
-        assert result.summary.ok == 2
+        assert result.exit_code == EXIT_GENERIC
+        assert result.summary.ok == 0
 
-    def test_a_manifest_whose_tables_key_is_empty_runs_as_a_first_run(
-        self,
-        tmp_path: Path,
-    ) -> None:
+    def test_a_manifest_whose_tables_key_is_empty_is_refused(self, tmp_path: Path) -> None:
         _build_engine(tmp_path, curator_fixture()).generate()
         (tmp_path / "primary" / "manifest.yaml").write_text("format_version: 1\ntables:\n")
 
         result = _build_engine(tmp_path, curator_fixture()).generate()
 
-        assert result.summary.failed == 0
-        assert result.summary.ok == 2
+        assert result.exit_code == EXIT_GENERIC
+        assert result.summary.ok == 0
 
     def test_the_ignored_artifact_is_named(
         self,
@@ -6063,6 +6316,119 @@ class _OneTableFailingAdapter(MockAdapter):
         return super().extract_ddl(fqn)
 
 
+def _conflict_markers(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    path.write_text(f"<<<<<<< HEAD\n{text}=======\n{text}>>>>>>> other\n", encoding="utf-8")
+
+
+def _replace_in(old: str, new: str) -> Any:
+    return lambda path: path.write_text(path.read_text().replace(old, new))
+
+
+def _description_linked_out(path: Path) -> None:
+    outside = path.parent.parent / "outside.md"
+    outside.write_text("# outside the print\n", encoding="utf-8")
+    (path.parent / "public" / "curator" / "description.md").symlink_to(outside)
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data["tables"]["public.curator"]["artifacts"]["description"] = "description.md"
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+
+_LEADING_OUT = {
+    "entry-path-climbs": _replace_in("path: public/curator", "path: ../../.."),
+    "entry-description-linked-out": _description_linked_out,
+}
+_UNREADABLE_MANIFESTS = {
+    **_LEADING_OUT,
+    "conflict-markers": _conflict_markers,
+    "sequence": lambda path: path.write_text("- one\n- two\n"),
+    "empty-file": lambda path: path.write_text(""),
+    "tables-without-value": lambda path: path.write_text("format_version: 1\ntables:\n"),
+    "entry-a-string": _replace_in("  public.curator:\n", "  public.curator: gone\n  x:\n"),
+    "entry-path-not-a-string": _replace_in("path: public/curator", "path: 7"),
+    "failed-tables-not-a-list": lambda path: path.write_text(
+        path.read_text() + "failed_tables: x\n",
+    ),
+    "deleted": lambda path: path.unlink(),
+}
+_GENERATE_REQUESTS = {
+    "plain": GenerateRequest(),
+    "forced-narrowed": GenerateRequest(force=True, cli_include=("public.curator",)),
+    "dry-run": GenerateRequest(dry_run=True),
+}
+
+
+class TestAGenerateOverAnUnreadableManifestWritesNothing:
+    """A baseline the run cannot fully read is refused: the sweep would delete every unread print."""
+
+    @pytest.mark.parametrize("request_name", sorted(_GENERATE_REQUESTS))
+    @pytest.mark.parametrize("corruption", sorted(_UNREADABLE_MANIFESTS))
+    def test_the_run_exits_one_and_writes_nothing(
+        self,
+        tmp_path: Path,
+        corruption: str,
+        request_name: str,
+    ) -> None:
+        _build_engine(tmp_path, curator_fixture()).generate()
+        manifest_path = tmp_path / "primary" / "manifest.yaml"
+        _UNREADABLE_MANIFESTS[corruption](manifest_path)
+        before = manifest_path.read_bytes() if manifest_path.is_file() else None
+
+        result = _build_engine(tmp_path, curator_fixture()).generate(
+            _GENERATE_REQUESTS[request_name],
+        )
+
+        assert result.exit_code == EXIT_GENERIC
+        assert result.error is not None
+        assert str(manifest_path) in result.error
+        assert (manifest_path.read_bytes() if manifest_path.is_file() else None) == before
+        assert (tmp_path / "primary" / "public" / "herbarium" / "ddl.sql").is_file()
+
+    @pytest.mark.parametrize("corruption", sorted(_LEADING_OUT))
+    def test_an_entry_leading_out_of_the_print_is_named(
+        self,
+        tmp_path: Path,
+        corruption: str,
+    ) -> None:
+        _build_engine(tmp_path, curator_fixture()).generate()
+        _LEADING_OUT[corruption](tmp_path / "primary" / "manifest.yaml")
+
+        result = _build_engine(tmp_path, curator_fixture()).generate()
+
+        assert result.exit_code == EXIT_GENERIC
+        assert "public.curator" in (result.error or "")
+        assert "leads outside the connection root" in (result.error or "")
+
+    def test_a_deleted_manifest_over_an_empty_root_is_a_first_run(self, tmp_path: Path) -> None:
+        (tmp_path / "primary").mkdir()
+
+        result = _build_engine(tmp_path, curator_fixture()).generate()
+
+        assert result.exit_code == EXIT_DRIFT
+        assert result.summary.ok == 2
+
+    def test_a_deleted_manifest_beside_user_files_only_is_a_first_run(self, tmp_path: Path) -> None:
+        directory = tmp_path / "primary" / "public" / "herbarium"
+        directory.mkdir(parents=True)
+        (directory / "description.md").write_text("# Herbarium\n")
+
+        result = _build_engine(tmp_path, curator_fixture()).generate()
+
+        assert result.exit_code == EXIT_DRIFT
+        assert result.summary.ok == 2
+        assert (directory / "description.md").read_text() == "# Herbarium\n"
+
+    def test_diff_over_an_unparseable_manifest_names_the_file(self, tmp_path: Path) -> None:
+        _build_engine(tmp_path, curator_fixture()).generate()
+        manifest_path = tmp_path / "primary" / "manifest.yaml"
+        _conflict_markers(manifest_path)
+
+        result = _build_engine(tmp_path, curator_fixture()).compute_diff()
+
+        assert result.exit_code == EXIT_GENERIC
+        assert str(manifest_path) in result.failed_tables[0]
+
+
 class TestARemovedTableLeavesNoProducerFileBehind:
     """SPEC 1.4: a table leaving the manifest takes its producer files with it; user files stay."""
 
@@ -6287,6 +6653,33 @@ class _Tripwire(MockAdapter):
         return counted
 
 
+class _ConvertingTripwire(_Tripwire):
+    """At call `trip_at`, takes a real SIGINT and reports it as an ordinary error, as duckdb does."""
+
+    def __getattribute__(self, name: str) -> Any:
+        attr = object.__getattribute__(self, name)
+
+        if name not in _ADAPTER_METHODS:
+            return attr
+
+        calls = object.__getattribute__(self, "calls")
+        trip_at = object.__getattribute__(self, "trip_at")
+        real = MockAdapter.__getattribute__(self, name)
+
+        def counted(*args: Any, **kwargs: Any) -> Any:
+            calls.append(name)
+
+            if len(calls) - 1 == trip_at:
+                try:
+                    signal.raise_signal(signal.SIGINT)
+                except KeyboardInterrupt as exc:
+                    raise RuntimeError("Query interrupted") from exc
+
+            return real(*args, **kwargs)
+
+        return counted
+
+
 class TestARunEndingBeforeItsCommitLeavesThePrintAsItWas:
     """Every early end - an interrupt at any adapter call, a failed write, a fail-fast stop -
     leaves the committed print byte-identical, and the next run reports the change it missed."""
@@ -6358,8 +6751,24 @@ class TestARunEndingBeforeItsCommitLeavesThePrintAsItWas:
 
             self._assert_untouched_and_recoverable(root, before)
 
+    def test_a_converted_interrupt_at_every_adapter_call(self, tmp_path: Path) -> None:
+        calls, _ = self._measured(tmp_path / "measure")
+
+        for index in range(len(calls) - 1):
+            root = tmp_path / str(index)
+            before = self._printed(root)
+            adapter = _ConvertingTripwire(_drifted_curator_fixture(), trip_at=index)
+
+            with pytest.raises(KeyboardInterrupt), interrupt.handling():
+                Engine(adapter, conn_config(root), root).generate(GenerateRequest(force=True))
+
+            self._assert_untouched_and_recoverable(root, before)
+
     def test_a_failed_write_at_every_staged_write(self, tmp_path: Path) -> None:
+        """A table's own first write fails that table; any other write fails the connection."""
+
         _, writes = self._measured(tmp_path / "measure")
+        first_writes = 0
 
         assert writes > 3
 
@@ -6367,26 +6776,59 @@ class TestARunEndingBeforeItsCommitLeavesThePrintAsItWas:
             root = tmp_path / str(index)
             before = self._printed(root)
             count = [0]
+            refused: list[tuple[Any, ...]] = []
 
             def failing(
                 stage: Any,
                 *args: Any,
                 _at: int = index,
                 _count: list[int] = count,
+                _refused: list[tuple[Any, ...]] = refused,
                 real: Any = orchestrator.RunStage.write,
             ) -> None:
-                if _count[0] == _at:
-                    raise OSError(errno.ENOSPC, "No space left on device")
-
                 _count[0] += 1
+
+                if _count[0] - 1 == _at:
+                    _refused.append(args)
+
+                    raise WriterError("failed writing: [Errno 28] No space left on device")
+
                 real(stage, *args)
 
-            with patch.object(orchestrator.RunStage, "write", failing), pytest.raises(OSError):
-                Engine(MockAdapter(_drifted_curator_fixture()), conn_config(root), root).generate(
-                    GenerateRequest(force=True),
-                )
+            with patch.object(orchestrator.RunStage, "write", failing):
+                result = Engine(
+                    MockAdapter(_drifted_curator_fixture()),
+                    conn_config(root),
+                    root,
+                ).generate(GenerateRequest(force=True))
 
-            self._assert_untouched_and_recoverable(root, before)
+            directory, artifacts = refused[0]
+
+            if DDL_FILENAME in artifacts:
+                first_writes += 1
+                fqn = ".".join(directory.relative_to(root / "primary").parts)
+                statuses = {table.fqn: table.status for table in result.tables}
+
+                assert result.exit_code == EXIT_PARTIAL
+                assert statuses.pop(fqn) == "failed"
+                assert set(statuses.values()) == {"ok"}
+                own = directory.relative_to(root / "primary").as_posix()
+                after = self._tree(root / "primary")
+
+                assert manifest(root / "primary")["failed_tables"] == [fqn]
+                for name in (DDL_FILENAME, "statistics.yaml"):
+                    assert after[f"{own}/{name}"] == before[f"{own}/{name}"]
+
+                assert [
+                    issue
+                    for issue in conformance_errors(root / "primary")
+                    if issue.path.startswith((own, "manifest.yaml"))
+                ] == []
+            else:
+                assert result.exit_code == EXIT_GENERIC
+                self._assert_untouched_and_recoverable(root, before)
+
+        assert first_writes == 2
 
     @pytest.mark.parametrize("failing", ["public.curator", "public.herbarium"])
     def test_a_fail_fast_stop_at_every_table(self, tmp_path: Path, failing: str) -> None:
@@ -6541,3 +6983,227 @@ def _with_a_view(fixture: dict[str, MockTable]) -> dict[str, MockTable]:
     )
 
     return fixture
+
+
+def _baseline(print_root: Path) -> str:
+    return yaml.safe_load((print_root / "diff.yaml").read_text())["baseline"]["path"]
+
+
+class TestAWriteTheFilesystemRefuses:
+    """A table whose files cannot be written fails alone; a refused stage fails its connection."""
+
+    LONG = "public.herbarium_sheet_" + "v" * 240
+
+    def _fixture(self) -> dict[str, MockTable]:
+        long_table = mock_table(self.LONG, columns(("id", "integer")), {})
+
+        return {**curator_fixture(), self.LONG: long_table}
+
+    def test_a_name_too_long_for_the_filesystem_fails_that_table(self, tmp_path: Path) -> None:
+        result = Engine(MockAdapter(self._fixture()), conn_config(tmp_path), tmp_path).generate()
+        failed = next(table for table in result.tables if table.fqn == self.LONG)
+
+        assert result.exit_code == EXIT_PARTIAL
+        assert failed.status == "failed"
+        assert (failed.error or "").startswith("OSError: [Errno 36]")
+        assert "exclude:" in (failed.error_detail or "")
+        assert self.LONG in (failed.error_detail or "")
+        assert manifest(tmp_path / "primary")["failed_tables"] == [self.LONG]
+        assert "public.curator" in manifest(tmp_path / "primary")["tables"]
+        assert conformance_errors(tmp_path / "primary") == []
+
+    def test_a_user_file_that_cannot_be_probed_stages_nothing(self, tmp_path: Path) -> None:
+        curator = tmp_path / "primary" / "public" / "curator"
+        real = Path.is_file
+
+        def unreadable(path: Path) -> bool:
+            if path == curator / "description.md":
+                raise OSError(errno.EIO, "simulated I/O error")
+
+            return real(path)
+
+        with patch.object(Path, "is_file", unreadable):
+            result = _build_engine(tmp_path, curator_fixture()).generate()
+
+        statuses = {table.fqn: table.status for table in result.tables}
+
+        assert statuses["public.curator"] == "failed"
+        assert not (curator / DDL_FILENAME).exists()
+        assert conformance_errors(tmp_path / "primary") == []
+
+    def test_a_write_failing_after_its_temps_commits_none_of_them(self, tmp_path: Path) -> None:
+        _build_engine(tmp_path, curator_fixture()).generate()
+        curator = tmp_path / "primary" / "public" / "curator"
+        before = {p.name: p.read_bytes() for p in curator.iterdir()}
+        real = Path.exists
+
+        def unreadable(path: Path, **kwargs: Any) -> bool:
+            if path.name == DDL_FILENAME and {".dbprint-run", "curator"} <= set(path.parts):
+                raise OSError(errno.EIO, "simulated I/O error")
+
+            return real(path, **kwargs)
+
+        with patch.object(Path, "exists", unreadable):
+            result = _build_engine(tmp_path, curator_fixture()).generate(
+                GenerateRequest(force=True),
+            )
+
+        assert {t.fqn: t.status for t in result.tables}["public.curator"] == "failed"
+        assert {p.name: p.read_bytes() for p in curator.iterdir()} == before
+
+    def test_a_dry_run_over_a_print_fails_it_and_writes_nothing(self, tmp_path: Path) -> None:
+        _build_engine(tmp_path, curator_fixture()).generate()
+        root = tmp_path / "primary"
+        before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+        result = Engine(MockAdapter(self._fixture()), conn_config(tmp_path), tmp_path).generate(
+            GenerateRequest(dry_run=True),
+        )
+
+        assert result.exit_code == EXIT_PARTIAL
+        assert {p: p.read_bytes() for p in root.rglob("*") if p.is_file()} == before
+
+    def test_a_stage_that_cannot_open_fails_the_connection(self, tmp_path: Path) -> None:
+        adapter = _Tripwire(curator_fixture())
+
+        with patch.object(orchestrator.RunStage, "open", side_effect=OSError(errno.EEXIST, "x")):
+            result = Engine(adapter, conn_config(tmp_path), tmp_path).generate()
+
+        assert result.exit_code == EXIT_GENERIC
+        assert adapter.calls == []
+
+    def test_a_failed_connection_root_write_fails_the_connection(self, tmp_path: Path) -> None:
+        _build_engine(tmp_path, curator_fixture()).generate()
+        root = tmp_path / "primary"
+        before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
+        real = orchestrator.RunStage.write
+
+        def failing(stage: Any, directory: Path, artifacts: dict[str, Any]) -> None:
+            if directory == root:
+                raise WriterError("failed writing: [Errno 28] No space left on device")
+
+            real(stage, directory, artifacts)
+
+        with patch.object(orchestrator.RunStage, "write", failing):
+            result = _build_engine(tmp_path, curator_fixture()).generate(
+                GenerateRequest(force=True),
+            )
+
+        assert result.exit_code == EXIT_GENERIC
+        assert {p: p.read_bytes() for p in root.rglob("*") if p.is_file()} == before
+
+
+class TestALinkOutOfThePrint:
+    """A symlink in the print leading outside it is never written through; one inside is."""
+
+    PLOT = "garden.plot"
+
+    def _with_plot(self) -> dict[str, MockTable]:
+        plot = mock_table(self.PLOT, columns(("id", "integer"), ("biome", "text")), {})
+
+        return {**curator_fixture(), self.PLOT: plot}
+
+    def _committed(self, tmp_path: Path) -> Path:
+        _build_engine(tmp_path, curator_fixture()).generate()
+
+        return tmp_path / "primary"
+
+    def test_a_new_tables_directory_linked_outside_fails_that_table(self, tmp_path: Path) -> None:
+        root = self._committed(tmp_path)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (root / "garden").mkdir()
+        (root / "garden" / "plot").symlink_to(outside)
+
+        result = _build_engine(tmp_path, self._with_plot()).generate()
+        failed = next(table for table in result.tables if table.fqn == self.PLOT)
+
+        assert result.exit_code == EXIT_PARTIAL
+        assert failed.status == "failed"
+        assert failed.error == (
+            "WriterError: garden/plot is a symlink to a directory outside the connection root"
+        )
+        assert list(outside.iterdir()) == []
+        assert self.PLOT not in manifest(root)["tables"]
+        assert {"public.curator", "public.herbarium"} <= set(manifest(root)["tables"])
+
+    def test_a_directory_above_a_new_table_linked_outside_fails_the_connection(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        root = self._committed(tmp_path)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (root / "garden").symlink_to(outside)
+        before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
+        adapter = _Tripwire(self._with_plot())
+
+        result = Engine(adapter, conn_config(tmp_path), tmp_path).generate()
+
+        assert result.exit_code == EXIT_GENERIC
+        assert (result.error or "").startswith("garden is a symlink leading outside")
+        assert "extract_ddl" not in adapter.calls
+        assert list(outside.iterdir()) == []
+        assert {p: p.read_bytes() for p in root.rglob("*") if p.is_file()} == before
+
+    def test_a_directory_above_reached_through_a_loop_fails_the_connection(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        root = self._committed(tmp_path)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (root / "garden").symlink_to(root)
+        (root / "plot").symlink_to(outside)
+        bed = mock_table("garden.plot.bed", columns(("id", "integer")), {})
+        adapter = _Tripwire({**curator_fixture(), "garden.plot.bed": bed})
+
+        result = Engine(adapter, conn_config(tmp_path), tmp_path).generate()
+
+        assert result.exit_code == EXIT_GENERIC
+        assert (result.error or "").startswith("garden/plot is a symlink leading outside")
+        assert "extract_ddl" not in adapter.calls
+        assert list(outside.iterdir()) == []
+
+    def test_a_connection_root_file_linked_outside_fails_the_connection(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        root = self._committed(tmp_path)
+        planted = tmp_path / "notes.md"
+        planted.write_text("kept\n")
+        (root / "reading.md").unlink()
+        (root / "reading.md").symlink_to(planted)
+
+        result = _build_engine(tmp_path, curator_fixture()).generate(GenerateRequest(force=True))
+
+        assert result.exit_code == EXIT_GENERIC
+        assert (result.error or "").startswith("reading.md is a symlink leading outside")
+        assert planted.read_text() == "kept\n"
+        assert (root / "reading.md").is_symlink()
+
+    def test_a_dry_run_reads_the_table_behind_the_link(self, tmp_path: Path) -> None:
+        root = self._committed(tmp_path)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (root / "garden").mkdir()
+        (root / "garden" / "plot").symlink_to(outside)
+
+        result = _build_engine(tmp_path, self._with_plot()).generate(
+            GenerateRequest(dry_run=True),
+        )
+
+        assert [table.status for table in result.tables if table.fqn == self.PLOT] == ["ok"]
+        assert list(outside.iterdir()) == []
+
+    def test_a_link_inside_the_print_is_written_through(self, tmp_path: Path) -> None:
+        root = self._committed(tmp_path)
+        shared = root / "shared-curator"
+        shutil.move(root / "public" / "curator", shared)
+        (root / "public" / "curator").symlink_to(Path("..") / "shared-curator")
+
+        result = _build_engine(tmp_path, curator_fixture()).generate(GenerateRequest(force=True))
+
+        assert result.exit_code in (EXIT_OK, EXIT_DRIFT)
+        assert (shared / DDL_FILENAME).read_text().startswith("CREATE TABLE public.curator")
+        assert conformance_errors(root) == []

@@ -50,7 +50,7 @@ for (const file of htmlFiles) {
   idsByPage.set(routeFor(file), ids);
 }
 
-// The `docs/`-relative path a repository href names, or null when it is not one of ours.
+// The `docs/`-relative path a repository href names, or null when it points anywhere else.
 function repoDocsTarget(href) {
   if (!href.startsWith(`${REPOSITORY}/`)) return null;
 

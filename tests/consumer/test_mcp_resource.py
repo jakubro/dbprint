@@ -34,11 +34,15 @@ from tests.fixtures.adversarial import (
     ORPHAN_SPELLING_COLUMN,
     ORPHAN_SPELLING_TABLE,
     ORPHAN_SPELLING_VALUE,
+    OUTSIDE_PRINT_SENTINEL,
+    OUTSIDE_PRINT_TABLE,
     PERCENTILE_INSIDE_RANGE_COLUMN,
     REDACTED_COLUMN,
     SCOPED_COMPLETE_LIST_COLUMN,
     SCOPED_KEY_COLUMN,
     SCOPED_LATEST_COLUMN,
+    SCOPED_PART_COLUMN,
+    SCOPED_PART_PATH,
     SCOPED_TABLE,
     SEVERAL_EDGES_TABLE,
     SPELLING_COLUMN,
@@ -47,6 +51,7 @@ from tests.fixtures.adversarial import (
     UNEVALUATED_TABLE,
     UNREADABLE_PROFILED_AT,
     UNREADABLE_PROFILED_TABLE,
+    VOID_VERDICT_NOTE,
     AdversarialPrint,
 )
 
@@ -70,9 +75,11 @@ COVERS = frozenset(
         "incomplete_grain_search",
         "catalog_only_table",
         "declared_missing_artifact",
+        "outside_print_entry",
         "delimiter_in_a_value",
         "value_spelling",
         "scoped_complete_list",
+        "scoped_part_list",
         "scoped_candidate_key",
         "scoped_latest_value",
         "extreme_number_statistics",
@@ -312,6 +319,7 @@ def test_a_columns_edges_are_served_less_the_rejected_one(
     targets = [e["target_table"] for e in served["refers_to"]]
 
     assert sorted(targets) == ["public.cultivar", "public.wide_lookup"]
+    assert VOID_VERDICT_NOTE not in yaml.safe_dump(served)
 
 
 def test_a_human_authored_edge_is_served_in_relationships_annotations(
@@ -342,3 +350,29 @@ def test_connection_notes_are_served_as_their_own_file(adversarial_print: Advers
     served = yaml.safe_load(mcp_resources.read(_state(adversarial_print), uri).content)
 
     assert served["notes"] == CONNECTION_NOTE
+
+
+def test_scoped_part_list_is_served_beside_its_scope(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    statistics = _statistics(adversarial_print, SCOPED_TABLE)
+    part = statistics["columns"][SCOPED_PART_COLUMN]["parts"][SCOPED_PART_PATH]
+
+    assert statistics["scope"]["rows_scanned"] == 250
+    assert part["values_coverage"] == 1.0  # noqa: RUF069 - the expected value is an exact literal
+
+
+@pytest.mark.parametrize("kind", ["ddl", "description"])
+def test_an_entry_outside_the_print_reads_as_absent(
+    adversarial_print: AdversarialPrint,
+    kind: str,
+) -> None:
+    conn = adversarial_print.conn.name
+
+    with pytest.raises(mcp_errors.McpError) as caught:
+        mcp_resources.read(
+            _state(adversarial_print),
+            f"dbprint://{conn}/{OUTSIDE_PRINT_TABLE}/{kind}",
+        )
+
+    assert OUTSIDE_PRINT_SENTINEL not in caught.value.detail

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Iterator
 from pathlib import Path
 
 import yaml
 
+from dbprint.spec import authored
 from dbprint.spec.artifacts import (
     CANONICAL_ARTIFACTS,
     DIFF_FILENAME,
@@ -15,6 +17,7 @@ from dbprint.spec.artifacts import (
     PRODUCER_ARTIFACTS,
     READING_GUIDE_FILENAME,
     declared_artifacts,
+    opened_paths,
     walkable_tables,
 )
 from .issue import Issue
@@ -23,10 +26,6 @@ from .yaml_utils import load_yaml
 
 
 PATH_SEGMENT_RE = re.compile(r"^[a-z0-9_][a-z0-9_-]*$")
-_STALE_TABLE_REMEDY = (
-    " A table an earlier release printed under this name is refused now: exclude it, delete this "
-    "directory, and the next generate drops its entry."
-)
 
 
 def check(print_root: Path) -> tuple[list[Issue], dict | None]:
@@ -43,6 +42,20 @@ def check(print_root: Path) -> tuple[list[Issue], dict | None]:
                 "error",
                 "Connection root is missing manifest.yaml.",
                 "§1.2",
+            ),
+        )
+
+        return issues, None
+
+    if not manifest_path.resolve().is_relative_to(print_root.resolve()):
+        issues.append(
+            Issue(
+                MANIFEST_FILENAME,
+                "manifest.path-outside-print",
+                "error",
+                f"{MANIFEST_FILENAME} is a symlink to a file outside the connection root; no "
+                "consumer reads it.",
+                "§2.5",
             ),
         )
 
@@ -84,13 +97,60 @@ def check(print_root: Path) -> tuple[list[Issue], dict | None]:
 
         return issues, None
 
+    followed = {
+        **manifest_data,
+        "tables": walkable_tables(manifest_data, escaping_links(print_root, manifest_data)),
+    }
     issues.extend(_check_path_segments(print_root))
-    issues.extend(_check_per_table_files(print_root, manifest_data))
+    issues.extend(_check_per_table_files(print_root, followed))
     issues.extend(_check_directory_depth(print_root, manifest_data))
     issues.extend(_check_reading_guide_present(print_root))
-    issues.extend(_check_diff_present(print_root, manifest_data))
+    issues.extend(_check_diff_present(print_root, followed))
 
     return issues, manifest_data
+
+
+def escaping_links(print_root: Path, manifest: dict | None = None) -> frozenset[str]:
+    """The print-root-relative POSIX paths of the links below `print_root` resolving outside it.
+
+    A link to a directory inside the root is walked once more under its own path, so a link out
+    below it is found where a reader reaches it; an unreadable directory is skipped. Every path
+    an entry of `manifest` opens is resolved as well, catching a spelling no walk reaches.
+    """
+
+    root = print_root.resolve()
+    found: set[str] = set()
+    # Each directory carries the resolved directories above it, so a link back up is not walked.
+    pending: list[tuple[Path, tuple[Path, ...]]] = [(print_root, (root,))]
+
+    while pending:
+        directory, chain = pending.pop()
+
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    path = Path(entry.path)
+
+                    if entry.is_symlink() or entry.is_junction():
+                        target = path.resolve()
+
+                        if not target.is_relative_to(root):
+                            found.add(path.relative_to(print_root).as_posix())
+                        elif target.is_dir() and target not in chain:
+                            pending.append((path, (*chain, target)))
+                    elif entry.is_dir(follow_symlinks=False):
+                        pending.append((path, (*chain, chain[-1] / entry.name)))
+        except OSError:
+            continue
+
+    for fqn, entry in walkable_tables(manifest).items():
+        found.update(
+            key
+            for key, path in opened_paths(str(fqn), entry).items()
+            if not _inside(root, print_root / path)
+        )
+
+    return frozenset(found)
 
 
 def annotated_tables(
@@ -102,7 +162,8 @@ def annotated_tables(
 ) -> Iterator[tuple[Path, dict, dict]]:
     """Each table's annotations path, its parsed body and its sibling artifact's parsed body.
 
-    Skips a table missing a file or with an unparseable body; `on_table` fires per walked table.
+    Skips a table missing a file, with an unparseable body, or whose annotations fail admission
+    (SPEC 2.7); `on_table` fires per walked table.
     """
 
     tables = walkable_tables(manifest_data)
@@ -130,7 +191,7 @@ def annotated_tables(
         except yaml.YAMLError:
             continue
 
-        if isinstance(ann_data, dict) and isinstance(sibling_data, dict):
+        if authored.admitted(annotations, ann_data) is not None and isinstance(sibling_data, dict):
             yield ann_path, ann_data, sibling_data
 
 
@@ -144,8 +205,7 @@ def _check_path_segments(print_root: Path) -> list[Issue]:
                     str(path.relative_to(print_root)),
                     "layout.invalid-path-segment",
                     "error",
-                    f"Path segment {path.name!r} fails the allowlist regex {PATH_SEGMENT_RE.pattern!r}."
-                    + _STALE_TABLE_REMEDY,
+                    f"Path segment {path.name!r} fails the allowlist regex {PATH_SEGMENT_RE.pattern!r}.",
                     "§1.5.1",
                 ),
             )
@@ -224,7 +284,7 @@ def _check_directory_depth(print_root: Path, manifest_data: dict) -> list[Issue]
 
     issues: list[Issue] = []
     valid_table_dirs = {
-        tuple((print_root / e.get("path", "")).resolve().parts)
+        _resolved_parts(print_root / e.get("path", ""))
         for e in walkable_tables(manifest_data).values()
     }
 
@@ -248,3 +308,17 @@ def _check_directory_depth(print_root: Path, manifest_data: dict) -> list[Issue]
         )
 
     return issues
+
+
+def _inside(root: Path, path: Path) -> bool:
+    try:
+        return path.resolve().is_relative_to(root)
+    except ValueError:
+        return False
+
+
+def _resolved_parts(path: Path) -> tuple[str, ...]:
+    try:
+        return path.resolve().parts
+    except ValueError:
+        return ()

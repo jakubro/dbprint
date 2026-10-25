@@ -433,7 +433,7 @@ class TestEmittedDialect:
 
         assert any("COUNT_IF(" in s for s in statements)
 
-    def test_comments_and_indexes_read_information_schema(
+    def test_comments_read_information_schema_and_indexes_show_indexes(
         self,
         fresh_duckdb: duckdb.DuckDBPyConnection,
     ) -> None:
@@ -446,7 +446,7 @@ class TestEmittedDialect:
             )
             for s in statements
         )
-        assert any('"memory".information_schema.indexes' in s for s in statements)
+        assert any(s.startswith('SHOW INDEXES IN TABLE "memory".') for s in statements)
 
     def test_temporal_stats_count_days_with_datediff(
         self,
@@ -882,6 +882,60 @@ class TestPhysicalIdentifierCase:
 
         assert shim.execute(f"SELECT src.{read} FROM (SELECT 1 AS {defined}) src").fetchall() == [
             (1,),
+        ]
+
+
+class TestHybridIndexes:
+    def test_an_index_lists_its_key_columns_and_no_constraint_index_is_one(self) -> None:
+        """SHOW INDEXES lists a primary key's own index too; no substrate holds a hybrid table."""
+
+        cursor = StubCursor(
+            [
+                (
+                    None,
+                    "SYS_INDEX_VAULT_PRIMARY",
+                    "KEY_VALUE_INDEX",
+                    "Y",
+                    "[VAULT_ID, SHELF_CODE]",
+                    "[]",
+                    "ACTIVE",
+                    "VAULT",
+                    "MEMORY",
+                    "SEEDBANK",
+                ),
+                (
+                    None,
+                    "VAULT_SITE_IX",
+                    "KEY_VALUE_INDEX",
+                    "N",
+                    '[SITE_NAME, "opens_at"]',
+                    "[TARGET_TEMPERATURE_C]",
+                    "ACTIVE",
+                    "VAULT",
+                    "MEMORY",
+                    "SEEDBANK",
+                ),
+            ],
+        )
+        cursor.description = [
+            ("created_on",),
+            ("name",),
+            ("kind",),
+            ("is_unique",),
+            ("columns",),
+            ("included_columns",),
+            ("status",),
+            ("table",),
+            ("database_name",),
+            ("schema_name",),
+        ]
+        indexes = snowflake_introspect.indexes(
+            cursor,
+            Identity.of(("memory", "seedbank", "vault"), DIALECT),
+        )
+
+        assert [(i.name, i.columns, i.unique) for i in indexes] == [
+            ("vault_site_ix", ("site_name", "opens_at"), False),
         ]
 
 
@@ -1406,6 +1460,8 @@ class _CannedPhaseARow:
     """A cursor stub returning one pre-chosen Phase A row - a real HLL estimate above the
     non-null count is not reproducible at small N, so the row is fed straight to the statement.
     """
+
+    description: Any = (("value",),)
 
     def __init__(self, row: tuple[int, ...]) -> None:
         self._row = row

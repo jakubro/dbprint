@@ -26,6 +26,7 @@ from dbprint.engine import (
     value_resolution,
 )
 from dbprint.engine.baseline import (
+    contained,
     failed_tables,
     read_manifest,
     table_directory,
@@ -37,6 +38,7 @@ from dbprint.engine.context_assembler import (
 from dbprint.engine.freshness import classify
 from dbprint.engine.table_readings import live_annotations
 from dbprint.engine.value_list import value_notes
+from dbprint.spec import authored
 from dbprint.spec.absence import Absence, column_value, disabled_of, read_column_field
 from dbprint.spec.artifacts import (
     DIFF_FILENAME,
@@ -146,7 +148,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
             "dropped. Under `profile`, md Notes summarise each column - a long value list "
             "shows its 5 most frequent values - while json and yaml carry the statistics "
             "whole; for json/yaml a `_corrupted` field names any of the table's print files "
-            "that failed to parse."
+            "that is malformed."
         ),
         input_schema={
             "type": "object",
@@ -295,7 +297,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
             "them returns the matched category, not just a bare column name. Paged: every "
             "reply carries the `total` matched, and `next_cursor` while more remain. A "
             "result carries `unreadable_tables` only when a table's own statistics or "
-            "annotations failed to parse, on its first page: a statistics failure drops "
+            "annotations are malformed, on its first page: a statistics failure drops "
             "that table's columns from `matches` entirely; an annotations-only failure "
             "still returns them, without the annotation. A `looks_like` search also carries "
             "`switched_off_tables` on its first page, naming each table whose looks_like "
@@ -1020,13 +1022,13 @@ def _tool_search_columns(state: ServedConnections, arguments: dict[str, Any]) ->
         statistics, stats_error = _load_statistics(state, table_dir, artifacts)
         stats_columns = _columns_of(statistics)
         scope = scope_of(statistics)
-        annotation_columns, annotation_error = _load_annotation_columns(
+        annotation_columns, annotation_error, malformed = _load_annotation_columns(
             state,
             table_dir,
             artifacts,
         )
 
-        if stats_error is not None or annotation_error is not None:
+        if stats_error is not None or annotation_error is not None or malformed is not None:
             unreadable.append(fqn)
 
         if filters.looks_like and "looks_like" in disabled_of(statistics or {}):
@@ -1044,7 +1046,7 @@ def _tool_search_columns(state: ServedConnections, arguments: dict[str, Any]) ->
                 for extra in _column_hit(col_name, col, annotation, pattern, text, filters)
             ]
             matches += [
-                _search_match(fqn, entry, col_name, block, {}, None)
+                _search_match(fqn, entry, col_name, block, {}, scope)
                 | {"part": path, "occurrences": column_value(block, "occurrences")}
                 for path, block in _parts_of(col).items()
                 if _part_hit(display(col_name, path), block, pattern, text, filters)
@@ -1182,12 +1184,21 @@ def _tool_resolve_value(state: ServedConnections, arguments: dict[str, Any]) -> 
 
     stats_columns = _columns_of(statistics)
 
-    annotation_columns, annotation_error = _load_annotation_columns(state, table_dir, artifacts)
+    annotation_columns, annotation_error, malformed = _load_annotation_columns(
+        state,
+        table_dir,
+        artifacts,
+    )
 
     if annotation_error is not None:
         annotation_path = table_dir / artifacts["statistics_annotations"]
 
         raise errors.yaml_parse_error(str(annotation_path), annotation_error)
+
+    if malformed is not None:
+        annotation_path = table_dir / artifacts["statistics_annotations"]
+
+        raise errors.malformed_artifact(str(annotation_path), malformed)
 
     if column not in stats_columns:
         raise errors.unknown_column(column, table, sorted(stats_columns))
@@ -1208,8 +1219,7 @@ def _tool_resolve_value(state: ServedConnections, arguments: dict[str, Any]) -> 
                 switched_off="parts" in disabled_of(statistics or {}),
             )
 
-        # A part counts over its own occurrences, never the table's scanned rows (SPEC 2.2.18).
-        col, scope = parts[part], None
+        col = parts[part]
 
     values = read_column_field(col, "values")
     entries = values.value if isinstance(values.value, list) else []
@@ -1311,7 +1321,7 @@ def _tool_get_diff(state: ServedConnections, arguments: dict[str, Any]) -> dict[
     conn = state.resolve(arguments.get("connection"))
     diff_path = conn.print_root / DIFF_FILENAME
 
-    if not diff_path.is_file():
+    if not diff_path.is_file() or not contained(conn.print_root, diff_path):
         raise errors.no_diff_available(str(diff_path))
 
     try:
@@ -1474,34 +1484,33 @@ def _load_annotation_columns(
     state: ServedConnections,
     table_dir: Path,
     artifacts: dict[str, str],
-) -> tuple[dict[str, dict[str, Any]], str | None]:
-    """One table's `statistics.annotations.yaml` `columns` map, plus its own parse error.
-
-    Each entry is `{note, claims}`, both optional (SPEC 2.7.1).
+) -> tuple[dict[str, dict[str, Any]], str | None, str | None]:
+    """One table's `statistics.annotations.yaml` `columns` map, its parse error, and why it fails
+    admission (SPEC 2.7) - a file with either error contributes no annotation.
     """
 
     if "statistics_annotations" not in artifacts:
-        return {}, None
+        return {}, None, None
 
     ann_path = table_dir / artifacts["statistics_annotations"]
 
     if not ann_path.is_file():
-        return {}, None
+        return {}, None, None
 
     try:
         data = state.files.read(ann_path) or {}
     except yaml.YAMLError as exc:
-        return {}, str(exc)
+        return {}, str(exc), None
 
-    if not isinstance(data, dict):
-        return {}, None
+    if (problem := authored.malformation("statistics_annotations", data)) is not None:
+        return {}, None, f"does not match its schema (SPEC 2.7): {problem}"
 
-    columns = data.get("columns")
+    columns = (authored.admitted("statistics_annotations", data) or {}).get("columns")
 
     if not isinstance(columns, dict):
-        return {}, None
+        return {}, None, None
 
-    return {name: entry for name, entry in columns.items() if isinstance(entry, dict)}, None
+    return {name: entry for name, entry in columns.items() if isinstance(entry, dict)}, None, None
 
 
 def _absent_table(

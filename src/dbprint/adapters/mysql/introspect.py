@@ -22,7 +22,6 @@ from ..base import (
     TableType,
     UniqueKeyMeta,
 )
-from ..credentials import mask_secrets
 from ..identifiers import Identity, column_meta, fold, select_tables, table_meta
 from ..sql_layout import split_top_level
 
@@ -288,8 +287,7 @@ def comments(cursor: Cursor, identity: Identity) -> CommentsMeta:
         cursor,
         """
         SELECT
-          tbl.table_comment,
-          tbl.engine
+          tbl.table_comment
         FROM
           information_schema.tables tbl
         WHERE
@@ -299,10 +297,6 @@ def comments(cursor: Cursor, identity: Identity) -> CommentsMeta:
         identity.parts,
     ).fetchone()
     table_comment = table_row[0] if table_row and table_row[0] else None
-
-    # A Spider table's comment is its connection string (SPEC 2.1.3).
-    if table_comment and str(table_row[1] or "").upper() == "SPIDER":
-        table_comment = mask_secrets(table_comment)
 
     col_rows = exec_query(
         cursor,
@@ -351,15 +345,19 @@ def unique_keys(cursor: Cursor, identity: Identity) -> list[UniqueKeyMeta]:
     ).fetchall()
 
     grouped: dict[str, list[str]] = {}
+    functional: set[str] = set()
 
     for index_name, column_name, _ in rows:
         if column_name is None:
-            # Functional/expression key part: see `indexes()`'s identical skip above.
+            # A functional key part voids the key: unlike `indexes()`, which keeps the plain
+            # parts, the plain parts alone are not unique.
+            functional.add(str(index_name))
+
             continue
 
         grouped.setdefault(str(index_name), []).append(fold(column_name))
 
-    ordered = sorted(grouped, key=lambda name: (name != "PRIMARY", name))
+    ordered = sorted(set(grouped) - functional, key=lambda name: (name != "PRIMARY", name))
 
     return [
         UniqueKeyMeta(columns=tuple(grouped[name]), primary=name == "PRIMARY") for name in ordered

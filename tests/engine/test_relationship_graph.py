@@ -11,12 +11,8 @@ import copy
 from typing import Any
 
 from dbprint.adapters.base import ForeignKeyMeta
-from dbprint.engine.relationship_graph import (
-    rejected_edges,
-    resolve,
-    with_human_edges,
-    withhold_rejected,
-)
+from dbprint.engine.relationship_graph import resolve, with_human_edges, withhold_rejected
+from dbprint.spec.edges import edge_key, rejected_edges
 
 
 def _fk(
@@ -151,9 +147,12 @@ def _verdict(column: str, target_table: str, target_column: str) -> dict[str, An
     }
 
 
+_OWN = {edge_key(e): e for e in _EDGES["refers_to"]}
+
+
 class TestWithholdRejected:
     def test_an_own_rejected_edge_is_withheld_and_the_rest_kept(self) -> None:
-        rejected = rejected_edges([_verdict("garden_id", "public.garden", "garden_code")])
+        rejected = rejected_edges([_verdict("garden_id", "public.garden", "garden_code")], _OWN)
         shown = withhold_rejected(_EDGES, rejected, {}, "public.sheet")
 
         assert shown is not None
@@ -169,18 +168,18 @@ class TestWithholdRejected:
         assert len(shown["refers_to"]) == 2
 
     def test_a_verdict_on_a_declared_edge_withholds_nothing(self) -> None:
-        rejected = rejected_edges([_verdict("herbarium_id", "public.herbarium", "id")])
+        rejected = rejected_edges([_verdict("herbarium_id", "public.herbarium", "id")], _OWN)
 
         assert withhold_rejected(_EDGES, rejected, {}, "public.sheet") is _EDGES
 
     def test_a_verdict_on_another_edge_withholds_nothing(self) -> None:
-        rejected = rejected_edges([_verdict("other_id", "public.other", "id")])
+        rejected = rejected_edges([_verdict("other_id", "public.other", "id")], _OWN)
 
         assert withhold_rejected(_EDGES, rejected, {}, "public.sheet") is _EDGES
 
     def test_the_input_is_never_mutated(self) -> None:
         before = copy.deepcopy(_EDGES)
-        rejected = rejected_edges([_verdict("garden_id", "public.garden", "garden_code")])
+        rejected = rejected_edges([_verdict("garden_id", "public.garden", "garden_code")], _OWN)
         withhold_rejected(_EDGES, rejected, {}, "public.sheet")
 
         assert before == _EDGES

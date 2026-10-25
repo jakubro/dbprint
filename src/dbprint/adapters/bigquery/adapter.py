@@ -91,6 +91,7 @@ class BigqueryAdapter(SqlAdapter):
         self._identities = IdentityRegistry(DIALECT)
         self._skipped: tuple[SkippedNamespace, ...] = ()
         self._external: frozenset[str] = frozenset()
+        self._required_filter: frozenset[str] = frozenset()
 
     def list_tables(self, include: list[str], exclude: list[str]) -> list[TableMeta]:
         datasets = (
@@ -108,6 +109,9 @@ class BigqueryAdapter(SqlAdapter):
         self._ddl_cache.update({fqn: ddl_module.normalize(ddl) for fqn, ddl in ddl_by_fqn.items()})
         listed = self._register(selected)
         self._external = frozenset(meta.fqn for meta, _ in selected if meta.external)
+        self._required_filter = frozenset(
+            meta.fqn for meta, _ in selected if meta.required_filter is not None
+        )
 
         return listed
 
@@ -187,6 +191,7 @@ class BigqueryAdapter(SqlAdapter):
             self._identity(fqn),
             columns,
             scope,
+            required_filter=fqn in self._required_filter,
         )
 
     def sample_values(

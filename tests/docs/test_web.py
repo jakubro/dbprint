@@ -7,14 +7,23 @@ import re
 import shutil
 import socket
 from datetime import UTC, datetime, timedelta
+from html.parser import HTMLParser
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 import yaml
 
 from dbprint.config import ConnectionConfig
 from dbprint.docs import web
-from dbprint.docs.web import _non_breaking, _number, _percent, _pretty_datetime, _relative_time
+from dbprint.docs.web import (
+    _non_breaking,
+    _number,
+    _percent,
+    _pretty_datetime,
+    _relative_time,
+    _render_markdown,
+)
 from dbprint.engine import AssemblyOptions, assemble_context
 from dbprint.engine.baseline import read_artifact
 from tests._cli import run_cli
@@ -70,6 +79,13 @@ class TestRoutes:
         assert "Dependencies" in body
         assert "sketch" in body  # sketch_available badge on cultivar_id
         assert "flowchart LR" in body  # relationship diagram source
+
+    def test_a_served_page_states_the_profiled_age(self, rich_conn: ConnectionConfig) -> None:
+        client = web.create_app([rich_conn]).test_client()
+
+        page = client.get("/t/primary/seedbank.batch").get_data(as_text=True)
+
+        assert re.search(r'profiled <span class="badge badge-muted" title="[^"]+">[^<]* ago<', page)
 
     def test_declared_missing_artifact_is_named_on_the_page(
         self,
@@ -319,6 +335,187 @@ class TestRoutes:
             body = client.get(path).data.decode()
             assert "cdn.jsdelivr.net" not in body
             assert not asset_load.search(body)
+
+
+_URL_ATTRIBUTES = frozenset({"href", "src", "srcdoc", "action", "formaction", "xlink:href"})
+
+
+class _Parsed(HTMLParser):
+    def __init__(self, page: str) -> None:
+        super().__init__()
+        self.elements: list[tuple[str, dict[str, str | None]]] = []
+        self.scripts: list[str] = []
+        self.text: list[str] = []
+        self._tag = ""
+        self.feed(page)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.elements.append((tag, dict(attrs)))
+        self._tag = tag
+
+    def handle_data(self, data: str) -> None:
+        (self.scripts if self._tag == "script" else self.text).append(data)
+
+    def live(self, marker: str) -> list[str]:
+        """Where `marker` reaches the page as markup or script rather than as text."""
+
+        attributes = [
+            f"{tag}[{name}]"
+            for tag, attrs in self.elements
+            for name, value in attrs.items()
+            if (name.startswith("on") or name in _URL_ATTRIBUTES) and marker in (value or "")
+        ]
+
+        return attributes + [f"script: {data[:40]}" for data in self.scripts if marker in data]
+
+    def shows(self, marker: str) -> bool:
+        return marker in "".join(self.text)
+
+
+class TestUserMarkdown:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "<script>alert('seedbank')</script>",
+            "before <b onclick=\"alert('seedbank')\">bold</b> after",
+        ],
+    )
+    def test_raw_html_shows_as_text(self, text: str) -> None:
+        parsed = _Parsed(web._render_markdown(text))
+
+        assert parsed.live("seedbank") == []
+        assert {tag for tag, _ in parsed.elements} <= {"p"}
+        assert parsed.shows("seedbank")
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "[x](javascript:alert(1))",
+            "[x](&#106;avascript:alert(1))",
+            "[x](javascript&colon;alert(1))",
+            "[x](JAVASCRIPT:alert(1))",
+            "[x](java&#9;script:alert(1))",
+            "[x][r]\n\n[r]: javascript:alert(1)",
+            "[x](data:text/html,<b>x</b>)",
+        ],
+    )
+    def test_a_refused_link_keeps_its_text_and_loses_its_target(self, text: str) -> None:
+        parsed = _Parsed(web._render_markdown(text))
+
+        assert parsed.elements[1:] == [("a", {})]
+        assert parsed.shows("x")
+
+    def test_a_refused_image_keeps_its_alt_and_loses_its_source(self) -> None:
+        parsed = _Parsed(web._render_markdown("![herbarium sheet](javascript:alert(1))"))
+
+        assert parsed.elements[1:] == [("img", {"alt": "herbarium sheet"})]
+
+    @pytest.mark.parametrize(
+        ("text", "target"),
+        [
+            ("[x](https://seedbank.example/a)", "https://seedbank.example/a"),
+            ("[x](http://seedbank.example/a)", "http://seedbank.example/a"),
+            ("[x](mailto:curator@seedbank.example)", "mailto:curator@seedbank.example"),
+            ("[x](/t/primary/seedbank.batch)", "/t/primary/seedbank.batch"),
+            ("[x](#col-batch_id)", "#col-batch_id"),
+            ("<curator@seedbank.example>", "mailto:curator@seedbank.example"),
+        ],
+    )
+    def test_a_web_mail_or_relative_link_stays_live(self, text: str, target: str) -> None:
+        anchors = [a for tag, a in _Parsed(web._render_markdown(text)).elements if tag == "a"]
+
+        assert anchors == [{"href": target}]
+
+    def test_ordinary_markdown_still_renders(self) -> None:
+        text = "*dried* seed\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```\nshelf S001\n```\n"
+        tags = {tag for tag, _ in _Parsed(web._render_markdown(text)).elements}
+
+        assert {"em", "table", "td", "pre", "code"} <= tags
+
+
+class TestPrintTextNeverRunsLive:
+    """Every page that renders a description or a note, with a print that carries markup."""
+
+    def test_a_description_and_a_column_note(self, rich_conn: ConnectionConfig) -> None:
+        table = rich_conn.print_root / "seedbank" / "batch"
+        (table / "description.md").write_text("<script>alert('seedbank-description')</script>\n")
+        annotations = yaml.safe_load((table / "statistics.annotations.yaml").read_text())
+        annotations["columns"]["cultivar_id"]["note"] = '<img src=x onerror="seedbank-note">'
+        (table / "statistics.annotations.yaml").write_text(yaml.safe_dump(annotations))
+
+        page = web.create_app([rich_conn]).test_client().get("/t/primary/seedbank.batch")
+        parsed = _Parsed(page.data.decode())
+
+        for marker in ("seedbank-description", "seedbank-note"):
+            assert parsed.live(marker) == []
+            assert parsed.shows(marker)
+
+    def test_a_grain_key_note(self, grain_note_conn: ConnectionConfig) -> None:
+        path = grain_note_conn.print_root / "seedbank" / "batch" / "statistics.annotations.yaml"
+        annotations = yaml.safe_load(path.read_text())
+        annotations["grain"]["keys"][0]["note"] = "[shelf](javascript:alert('seedbank-grain'))"
+        path.write_text(yaml.safe_dump(annotations))
+
+        page = web.create_app([grain_note_conn]).test_client().get("/t/primary/seedbank.batch")
+        parsed = _Parsed(page.data.decode())
+
+        assert parsed.live("seedbank-grain") == []
+        assert parsed.shows("shelf")
+
+    def test_a_note_beside_unreadable_statistics(self, reference_conn: ConnectionConfig) -> None:
+        root = reference_conn.output / reference_conn.name
+        manifest = yaml.safe_load((root / "manifest.yaml").read_text())
+        entry = manifest["tables"]["arboretum.seedbank.collector"]
+        entry["artifacts"]["statistics_annotations"] = "statistics.annotations.yaml"
+        (root / "manifest.yaml").write_text(yaml.safe_dump(manifest))
+        note = '<b onmouseover="seedbank-unreadable">station</b>'
+        (root / entry["path"] / "statistics.annotations.yaml").write_text(
+            yaml.safe_dump({"format_version": 1, "columns": {"email": {"note": note}}}),
+        )
+        (root / entry["path"] / "statistics.yaml").write_text("not: valid: yaml: [")
+
+        client = web.create_app([reference_conn]).test_client()
+        parsed = _Parsed(client.get("/t/production/arboretum.seedbank.collector").data.decode())
+
+        assert parsed.live("seedbank-unreadable") == []
+        assert parsed.shows("seedbank-unreadable")
+
+    def test_connection_notes_on_the_index(self, rich_conn: ConnectionConfig) -> None:
+        (rich_conn.print_root / "manifest.annotations.yaml").write_text(
+            yaml.safe_dump(
+                {"format_version": 1, "notes": "<script>alert('seedbank-connection')</script>"},
+            ),
+        )
+
+        parsed = _Parsed(web.create_app([rich_conn]).test_client().get("/").data.decode())
+
+        assert parsed.live("seedbank-connection") == []
+        assert parsed.shows("seedbank-connection")
+
+    def test_mermaid_runs_at_the_strict_level(self, rich_conn: ConnectionConfig) -> None:
+        page = web.create_app([rich_conn]).test_client().get("/t/primary/seedbank.batch")
+
+        assert 'securityLevel: "strict"' in page.data.decode()
+
+
+_APP_JS = REPO_ROOT / "src" / "dbprint" / "docs" / "static" / "app.js"
+_INNER_HTML_RE = re.compile(r"\.innerHTML\s*=\s*([^;]+);")
+
+
+def test_app_js_writes_no_data_through_inner_html() -> None:
+    """A row's `data-type` is decoded by the browser, so data written as markup parses live."""
+
+    assigned = _INNER_HTML_RE.findall(_APP_JS.read_text(encoding="utf-8"))
+
+    assert assigned, "the sweep found no innerHTML write at all"
+    assert [rhs for rhs in assigned if "${" in rhs or "+" in rhs] == []
+
+
+def test_the_inner_html_sweep_sees_an_interpolated_write() -> None:
+    planted = "header.innerHTML = `<td>${label}</td>`;\ncell.innerHTML = '<b>' + key + '</b>';"
+
+    assert len(_INNER_HTML_RE.findall(planted)) == 2
+    assert all("${" in rhs or "+" in rhs for rhs in _INNER_HTML_RE.findall(planted))
 
 
 class TestNumberFilters:
@@ -607,3 +804,152 @@ def test_a_target_path_alone_still_renders_on_the_edge(rich_conn: ConnectionConf
 
     assert "via (column) -> code" in batch
     assert "via (column) -> code" in cultivar
+
+
+class TestOnlyALoopbackHostIsAnswered:
+    """A page that rebinds its own name to loopback reaches no page of the site."""
+
+    @pytest.mark.parametrize("path", ["/", "/t/primary/seedbank.batch"])
+    def test_a_foreign_host_gets_400(self, rich_conn: ConnectionConfig, path: str) -> None:
+        client = web.create_app([rich_conn]).test_client()
+
+        assert client.get(path, headers={"Host": "rebound.example:8765"}).status_code == 400
+
+    @pytest.mark.parametrize(
+        "host",
+        ["127.0.0.1:8765", "localhost:8765", "LOCALHOST:8765", "[::1]:8765", "localhost"],
+    )
+    def test_a_loopback_host_is_served(self, rich_conn: ConnectionConfig, host: str) -> None:
+        client = web.create_app([rich_conn]).test_client()
+
+        assert client.get("/", headers={"Host": host}).status_code == 200
+
+
+class _Anchors(HTMLParser):
+    """Each `a` with its `href` and text, the deepest `a` nesting seen, and every `pre`'s text."""
+
+    def __init__(self, page: str) -> None:
+        super().__init__()
+        self.links: list[tuple[str | None, str]] = []
+        self.sources: list[str | None] = []
+        self.blocks: list[str] = []
+        self.deepest = 0
+        self._open: list[list[str]] = []
+        self._in_pre = False
+        self.feed(page)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "a":
+            self._open.append([dict(attrs).get("href") or "", ""])
+            self.deepest = max(self.deepest, len(self._open))
+        elif tag == "img":
+            self.sources.append(dict(attrs).get("src"))
+        elif tag == "pre":
+            self._in_pre = True
+            self.blocks.append("")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self._open:
+            href, text = self._open.pop()
+            self.links.append((href, text))
+        elif tag == "pre":
+            self._in_pre = False
+
+    def handle_data(self, data: str) -> None:
+        for anchor in self._open:
+            anchor[1] += data
+
+        if self._in_pre:
+            self.blocks[-1] += data
+
+
+class TestMentions:
+    """A table mention links in the rendered prose, never inside Markdown's own structure."""
+
+    MENTIONS: ClassVar[dict[str, str]] = {
+        "bed": "/t/main/db.s.bed",
+        "beds": "/t/main/db.s.bed",
+        "garden": "/t/main/db.s.garden",
+    }
+
+    def _render(self, text: str) -> _Anchors:
+        return _Anchors(str(_render_markdown(text, self.MENTIONS)))
+
+    @pytest.mark.parametrize(
+        ("text", "link"),
+        [
+            (
+                "[the site](https://seedbank.example/beds)",
+                ("https://seedbank.example/beds", "the site"),
+            ),
+            (
+                "[the bed guide](https://seedbank.example/guide)",
+                ("https://seedbank.example/guide", "the bed guide"),
+            ),
+            (
+                "[registry][reg]\n\n[reg]: https://seedbank.example/bed-registry",
+                ("https://seedbank.example/bed-registry", "registry"),
+            ),
+        ],
+    )
+    def test_a_link_keeps_its_target_and_text_whole(self, text: str, link: tuple[str, str]) -> None:
+        rendered = self._render(text)
+
+        assert rendered.links == [link]
+        assert rendered.deepest == 1
+
+    def test_an_autolink_opens_no_link_inside_itself(self) -> None:
+        rendered = self._render("<https://seedbank.example/bed>")
+
+        assert rendered.links == [("https://seedbank.example/bed", "https://seedbank.example/bed")]
+        assert rendered.deepest == 1
+
+    @pytest.mark.parametrize(
+        "text",
+        ["see https://seedbank.example/bed/map today", "write to bed@seedbank.example"],
+    )
+    def test_an_address_in_prose_stays_text(self, text: str) -> None:
+        assert self._render(text).links == []
+
+    def test_an_indented_code_block_stays_as_written(self) -> None:
+        rendered = self._render("Query:\n\n    SELECT * FROM bed\n")
+
+        assert rendered.blocks == ["SELECT * FROM bed\n"]
+        assert rendered.links == []
+
+    def test_an_image_keeps_its_source(self) -> None:
+        rendered = self._render("![bed photo](https://seedbank.example/bed.png)")
+
+        assert rendered.sources == ["https://seedbank.example/bed.png"]
+
+    def test_a_prose_mention_and_its_plural_link_to_the_table(self) -> None:
+        rendered = self._render("every garden holds one bed, and beds are numbered")
+
+        assert rendered.links == [
+            ("/t/main/db.s.garden", "garden"),
+            ("/t/main/db.s.bed", "bed"),
+            ("/t/main/db.s.bed", "beds"),
+        ]
+
+    def test_only_a_code_span_naming_the_table_exactly_is_linked(self) -> None:
+        rendered = self._render("use `bed`, not `bed_size`")
+
+        assert rendered.links == [("/t/main/db.s.bed", "bed")]
+
+    def test_no_map_links_nothing(self) -> None:
+        assert _Anchors(str(_render_markdown("one bed"))).links == []
+
+    def test_a_table_page_keeps_a_link_whose_address_names_a_table(
+        self,
+        rich_conn: ConnectionConfig,
+        tmp_path: Path,
+    ) -> None:
+        (tmp_path / "prints/primary/seedbank/batch/description.md").write_text(
+            "Sown per [the cultivar register](https://seedbank.example/cultivar-register); "
+            "see `cultivar` for species.\n",
+        )
+        page = web.create_app([rich_conn]).test_client().get("/t/primary/seedbank.batch")
+        links = _Anchors(page.get_data(as_text=True)).links
+
+        assert ("https://seedbank.example/cultivar-register", "the cultivar register") in links
+        assert ("/t/primary/seedbank.cultivar", "cultivar") in links

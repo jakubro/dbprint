@@ -19,6 +19,7 @@ _H1_RE = re.compile(r"^# ", re.MULTILINE)
 # "R (scoped)" is reached only by `rows_scanned` and is handled by name below.
 _REQUIRED = "R"
 _OPTIONAL = "O"
+_O_PILCROW = "O\u00b6"  # OPTIONAL, and withheld when the column carries a redacted marker
 _FORBIDDEN = "\u2014"  # the table's em-dash: MUST NOT emit
 _R_DAGGER = "R\u2020"  # REQUIRED unless SPEC 2.2.3's dropped-bound footnote applies
 _R_DOUBLE_DAGGER = "R\u2021"  # REQUIRED unless the prose-column footnote applies
@@ -80,7 +81,7 @@ def test_every_flat_field_agrees_with_the_module() -> None:
                 assert required, f"{where}: markdown REQUIREs it, module does not"
             elif verdict == _FORBIDDEN:
                 assert forbidden, f"{where}: markdown forbids it, module does not"
-            elif verdict == _OPTIONAL:
+            elif verdict in {_OPTIONAL, _O_PILCROW}:
                 assert not required and not forbidden, f"{where}: markdown says OPTIONAL"
             else:
                 raise AssertionError(

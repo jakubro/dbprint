@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 from unittest.mock import patch
 
 import duckdb
@@ -51,6 +52,60 @@ def adapter(con: duckdb.DuckDBPyConnection) -> Iterator[DuckdbAdapter]:
         yield a
     finally:
         a.close()
+
+
+class TestKeysAndIndexesReadTheCatalogsMembers:
+    """Constraint columns are folded, and an index's members come from the catalog, not its SQL."""
+
+    @pytest.fixture
+    def keyed(self) -> Iterator[DuckdbAdapter]:
+        connection = duckdb.connect(":memory:")
+
+        for statement in (
+            "CREATE SCHEMA seedbank",
+            (
+                'CREATE TABLE seedbank.field_site ("Id" INTEGER PRIMARY KEY, '
+                '"Cohort" VARCHAR UNIQUE, lot INTEGER, "Lot, Code" VARCHAR)'
+            ),
+            (
+                'CREATE TABLE seedbank.field_log (id INTEGER, "Mentor_Id" INTEGER '
+                'REFERENCES seedbank.field_site ("Id"))'
+            ),
+            "CREATE UNIQUE INDEX site_expr_ux ON seedbank.field_site ((\"Cohort\" || 'x'))",
+            'CREATE UNIQUE INDEX site_mixed_ux ON seedbank.field_site (lot, lower("Cohort"))',
+            'CREATE UNIQUE INDEX site_comma_ux ON seedbank.field_site ("Lot, Code")',
+            "CREATE INDEX log_expr_ix ON seedbank.field_log ((id + 1))",
+            'CREATE INDEX log_mixed_ix ON seedbank.field_log ("Mentor_Id", (id + 1))',
+        ):
+            connection.execute(statement)
+
+        a = DuckdbAdapter({"database": ":memory:"}, cursor_factory=lambda _params: connection)
+        a.connect()
+        a.list_tables(include=["*"], exclude=[])
+
+        try:
+            yield a
+        finally:
+            a.close()
+            connection.close()
+
+    def test_a_quoted_foreign_key_folds_both_sides(self, keyed: DuckdbAdapter) -> None:
+        [edge] = keyed.introspect_relationships("memory.seedbank.field_log")
+
+        assert (edge.column, edge.target_column) == (("mentor_id",), ("id",))
+
+    def test_only_an_all_column_unique_index_declares_a_key(self, keyed: DuckdbAdapter) -> None:
+        keys = [
+            (k.columns, k.primary)
+            for k in keyed.introspect_unique_keys("memory.seedbank.field_site")
+        ]
+
+        assert keys == [(("id",), True), (("cohort",), False), (("lot, code",), False)]
+
+    def test_a_secondary_index_lists_its_column_members(self, keyed: DuckdbAdapter) -> None:
+        indexes = {i.name: i.columns for i in keyed.introspect_indexes("memory.seedbank.field_log")}
+
+        assert indexes == {"log_mixed_ix": ("mentor_id",)}
 
 
 class TestFoldedAddressingReachesAMixedCaseObject:
@@ -195,6 +250,41 @@ class TestViewRowCountEstimate:
 
     def test_a_view_carries_no_row_count_estimate(self, adapter: DuckdbAdapter) -> None:
         assert adapter.estimate_row_count("memory.seedbank.active_curators_v") is None
+
+
+class TestRowCountAfterDeletes:
+    """A table rows were deleted from is sized, and published, by the rows it still holds."""
+
+    FQN = "garden.main.field_log"
+
+    @pytest.fixture
+    def thinned(self, tmp_path: Path) -> Iterator[DuckdbAdapter]:
+        con = duckdb.connect(str(tmp_path / "garden.duckdb"))
+        con.execute("CREATE TABLE field_log AS SELECT i AS id FROM range(100000) r(i)")
+        con.execute("DELETE FROM field_log WHERE id >= 1000")
+        con.execute("CHECKPOINT")
+        con.close()
+        adapter = DuckdbAdapter({"database": str(tmp_path / "garden.duckdb")})
+        adapter.connect()
+        adapter.list_tables(include=["*"], exclude=[])
+
+        try:
+            yield adapter
+        finally:
+            adapter.close()
+
+    def test_the_size_is_the_live_count(self, thinned: DuckdbAdapter) -> None:
+        assert thinned.estimate_row_count(self.FQN) == 1000
+
+    def test_a_sampled_read_publishes_the_live_count_as_exact(self, thinned: DuckdbAdapter) -> None:
+        counts, _ = thinned.compute_base_statistics(
+            self.FQN,
+            thinned.introspect_columns(self.FQN),
+            StatisticsConfig(),
+            TableScope(sample=0.5),
+        )
+
+        assert (counts.row_count, counts.row_count_method) == (1000, "exact")
 
 
 class TestSeededDrawReproduces:

@@ -34,7 +34,7 @@ from dbprint.adapters import (
     ValueCount,
 )
 from dbprint.adapters.base import PhaseA, PhaseB, batched_by_cost, row_count_or_none, run_phase_a
-from dbprint.adapters.errors import QueryFailed
+from dbprint.adapters.errors import NoResultSet, QueryFailed
 from dbprint.adapters.identifiers import IdentifierRejected
 from dbprint.cli.adapter_registry import ADAPTERS
 from dbprint.spec.classification import classify
@@ -653,6 +653,61 @@ class TestBareUniqueIndexAgreement:
         assert ("code",) not in index_columns, f"{fqn} double-reported `code` as an index"
 
 
+_LEADING_SET = {
+    "postgres": "SET LOCAL statement_timeout = '30s'",
+    "mysql": "SET @floor = 0",
+    "duckdb": "SET threads = 1",
+}
+
+
+class TestExecuteQueryAnswersWithTheLastStatement:
+    """ASSERTIONS.md 3.1: every statement runs and the last one's rows are the answer.
+
+    Run where the substrate is the driver; ClickHouse, Redshift, Databricks and BigQuery
+    substrates do not send several statements the way their drivers do.
+    """
+
+    @pytest.mark.parametrize("kind", ["postgres", "mysql", "duckdb", "snowflake"])
+    def test_two_statements_answer_with_the_second(
+        self,
+        request: pytest.FixtureRequest,
+        kind: str,
+    ) -> None:
+        adapter = _adapter_factory_for(request, kind)()
+        fqn = _herbarium_fqn(adapter)
+
+        assert adapter.execute_query(f"SELECT 0 AS warmup; SELECT count(*) FROM {fqn}") == [(3,)]
+
+    @pytest.mark.parametrize("kind", sorted(_LEADING_SET))
+    def test_a_leading_set_still_runs_before_the_query(
+        self,
+        request: pytest.FixtureRequest,
+        kind: str,
+    ) -> None:
+        adapter = _adapter_factory_for(request, kind)()
+        fqn = _herbarium_fqn(adapter)
+
+        assert adapter.execute_query(f"{_LEADING_SET[kind]}; SELECT count(*) FROM {fqn}") == [(3,)]
+
+    @pytest.mark.parametrize(
+        ("kind", "sql"),
+        [
+            *((kind, f"SELECT 1; {statement}") for kind, statement in sorted(_LEADING_SET.items())),
+            ("clickhouse", "SET max_threads = 1"),
+        ],
+    )
+    def test_a_last_statement_with_no_result_set_is_refused(
+        self,
+        request: pytest.FixtureRequest,
+        kind: str,
+        sql: str,
+    ) -> None:
+        adapter = _adapter_factory_for(request, kind)()
+
+        with pytest.raises(NoResultSet, match="no result set"):
+            adapter.execute_query(sql)
+
+
 class TestEstimateRowCount:
     """The pre-flight read that decides whether a size-conditioned rule governs a table.
 
@@ -1149,7 +1204,7 @@ class TestHashOrderedDraw:
 # The copies' own vendors: each seeds through its substrate, in its own identifier spelling.
 _SEEDED_VENDORS = ["postgres", "mysql", "snowflake"]
 
-_QUOTE = {"postgres": '"', "mysql": "`", "snowflake": '"'}
+_QUOTE = {"postgres": '"', "mysql": "`", "snowflake": '"', "duckdb": '"', "redshift": '"'}
 
 
 class TestIdentifierRejection:
@@ -1228,6 +1283,47 @@ class TestIdentifierRejection:
 
         assert herbarium in fqns
         assert curator not in fqns
+
+
+class TestAQuotedMixedCaseKeyIsFolded:
+    """SPEC 2.2.1: a key's and an edge's columns are spelled as the `columns` map keys them.
+
+    Left out: ClickHouse declares no unique key or foreign key; the Databricks substrate seeds
+    no constraint clause, OSS Delta refusing them; the BigQuery emulator has no
+    `TABLE_CONSTRAINTS` or `KEY_COLUMN_USAGE`.
+    """
+
+    @pytest.mark.parametrize("vendor", ["postgres", "mysql", "duckdb", "snowflake", "redshift"])
+    def test_keys_and_the_edge_name_the_folded_columns(
+        self,
+        vendor: str,
+        request: pytest.FixtureRequest,
+    ) -> None:
+        adapter = _adapter_factory_for(request, vendor)()
+        fqn = _sibling_of_herbarium(adapter, "field_site")
+        q = _QUOTE[vendor]
+        table = _table(vendor, "field_site")
+        _seed(
+            request,
+            vendor,
+            [
+                (
+                    f"CREATE TABLE {table} ({q}Id{q} INT PRIMARY KEY, "
+                    f"{q}Cohort{q} VARCHAR(16) NOT NULL UNIQUE, {q}Mentor_Id{q} INT, "
+                    f"FOREIGN KEY ({q}Mentor_Id{q}) REFERENCES {table} ({q}Id{q}))"
+                ),
+            ],
+        )
+        adapter.list_tables(include=["*"], exclude=[])
+
+        keys = {(k.columns, k.primary) for k in adapter.introspect_unique_keys(fqn)}
+        edges = [
+            (fk.column, fk.target_table, fk.target_column)
+            for fk in adapter.introspect_relationships(fqn)
+        ]
+
+        assert keys == {(("id",), True), (("cohort",), False)}
+        assert edges == [(("mentor_id",), fqn, ("id",))]
 
 
 class TestEmptyTable:
@@ -1837,6 +1933,16 @@ def _seed(request: pytest.FixtureRequest, vendor: str, statements: list[str]) ->
     elif vendor == "mysql":
         creds = request.getfixturevalue("mysql_test_db")
         _mysql_exec_many(int(creds["port"]), creds["database"], statements)
+    elif vendor == "duckdb":
+        con = request.getfixturevalue("duckdb_native_connection")
+
+        for statement in statements:
+            con.execute(statement)
+    elif vendor == "redshift":
+        shim = request.getfixturevalue("redshift_postgres_connection")
+
+        for statement in statements:
+            shim.execute(statement)
     else:
         shim = request.getfixturevalue("snowflake_duckdb_connection")
 

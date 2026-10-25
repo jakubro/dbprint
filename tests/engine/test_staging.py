@@ -64,6 +64,29 @@ class TestBeforeCommit:
 
         stage.close()
 
+    def test_what_a_failed_write_leaves_in_the_stage_is_never_committed(
+        self,
+        prints_root: Path,
+    ) -> None:
+        before = _tree(prints_root)
+
+        def leaves_a_temp(directory: Path, artifacts: dict[str, str | bytes]) -> None:
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "ddl.sql.tmp").write_text("half\n")
+            (directory / "ddl.sql").write_text("half\n")
+
+            raise WriterError("failed renaming temp artifacts")
+
+        stage = RunStage.open(prints_root)
+
+        with patch.object(staging, "write_atomic", leaves_a_temp), pytest.raises(WriterError):
+            stage.write(prints_root / "s" / "old", {"ddl.sql": "new\n"})
+
+        stage.commit()
+        stage.close()
+
+        assert _tree(prints_root) == before
+
     @pytest.mark.parametrize("name", ["description.md", "statistics.annotations.yaml"])
     def test_user_content_is_refused(self, prints_root: Path, name: str) -> None:
         stage = RunStage.open(prints_root)
@@ -218,6 +241,26 @@ class TestRecovery:
         ]
         assert _tree(prints_root) == _tree(reference_root)
 
+    def test_a_link_out_planted_before_the_roll_forward_is_refused_and_the_plan_kept(
+        self,
+        tmp_path: Path,
+        prints_root: Path,
+    ) -> None:
+        self._interrupted_commit(prints_root, 0)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (prints_root / "s" / "new").rmdir()
+        (prints_root / "s" / "new").symlink_to(outside)
+
+        with pytest.raises(StageRefused, match=r"^s/new is a symlink leading outside"):
+            RunStage.open(prints_root)
+
+        assert list(outside.iterdir()) == []
+        (prints_root / "s" / "new").unlink()
+        RunStage.open(prints_root).close()
+
+        assert (prints_root / "s" / "new" / "ddl.sql").read_text() == "new\n"
+
     def test_an_unmarked_stage_is_discarded(
         self,
         prints_root: Path,
@@ -258,3 +301,211 @@ class TestRefusal:
             pytest.raises(StageRefused, match="different filesystems"),
         ):
             RunStage.open(prints_root)
+
+
+class TestLinksOutOfThePrint:
+    """A directory linked outside the print root is never written through; one inside is."""
+
+    @pytest.fixture
+    def outside(self, tmp_path: Path) -> Path:
+        directory = tmp_path / "outside"
+        directory.mkdir()
+
+        return directory
+
+    @pytest.mark.parametrize("below", [(), ("partition",)])
+    def test_a_write_through_a_linked_directory_is_refused(
+        self,
+        prints_root: Path,
+        outside: Path,
+        below: tuple[str, ...],
+    ) -> None:
+        (prints_root / "s" / "plot").symlink_to(outside)
+        stage = RunStage.open(prints_root)
+
+        with pytest.raises(WriterError, match=r"^s/plot is a symlink to a directory outside"):
+            stage.write(prints_root.joinpath("s", "plot", *below), {"ddl.sql": "new\n"})
+
+        stage.commit()
+        stage.close()
+
+        assert list(outside.iterdir()) == []
+
+    def test_a_link_planted_after_the_stage_opened_is_refused_at_commit(
+        self,
+        prints_root: Path,
+        outside: Path,
+    ) -> None:
+        before = _tree(prints_root)
+        stage = RunStage.open(prints_root)
+        _stage_a_run(stage, prints_root)
+        (prints_root / "s" / "new").symlink_to(outside)
+
+        with pytest.raises(StageRefused, match=r"^s/new is a symlink leading outside"):
+            stage.commit()
+
+        stage.close()
+
+        assert list(outside.iterdir()) == []
+        assert _tree(prints_root) == before
+        assert not stage.directory.exists()
+
+    def test_a_connection_root_file_linked_outside_is_refused_at_commit(
+        self,
+        prints_root: Path,
+        outside: Path,
+    ) -> None:
+        planted = outside / "diff.yaml"
+        planted.write_text("kept\n")
+        (prints_root / "diff.yaml").symlink_to(planted)
+        stage = RunStage.open(prints_root)
+        _stage_a_run(stage, prints_root)
+
+        with pytest.raises(StageRefused, match=r"^diff\.yaml is a symlink leading outside"):
+            stage.commit()
+
+        stage.close()
+
+        assert planted.read_text() == "kept\n"
+
+    def test_a_table_file_linked_outside_is_replaced_not_written_through(
+        self,
+        prints_root: Path,
+        outside: Path,
+    ) -> None:
+        planted = outside / "ddl.sql"
+        planted.write_text("kept\n")
+        (prints_root / "s" / "old" / "ddl.sql").unlink()
+        (prints_root / "s" / "old" / "ddl.sql").symlink_to(planted)
+        stage = RunStage.open(prints_root)
+        stage.write(prints_root / "s" / "old", {"ddl.sql": "new\n"})
+        stage.commit()
+        stage.close()
+
+        assert planted.read_text() == "kept\n"
+        assert not (prints_root / "s" / "old" / "ddl.sql").is_symlink()
+        assert (prints_root / "s" / "old" / "ddl.sql").read_text() == "new\n"
+
+    def test_a_write_reaching_a_link_out_another_way_is_refused(
+        self,
+        prints_root: Path,
+        outside: Path,
+    ) -> None:
+        (prints_root / "s" / "plot").symlink_to(outside)
+        (prints_root / "s" / "again").symlink_to(prints_root / "s")
+        stage = RunStage.open(prints_root)
+
+        with pytest.raises(WriterError, match=r"^s/again/plot leads outside"):
+            stage.write(prints_root / "s" / "again" / "plot", {"ddl.sql": "new\n"})
+
+        stage.commit()
+        stage.close()
+
+        assert list(outside.iterdir()) == []
+
+    def test_a_write_routed_out_and_back_through_a_loop_is_refused(
+        self,
+        prints_root: Path,
+        outside: Path,
+    ) -> None:
+        (prints_root / "real").mkdir()
+        (prints_root / "loop").symlink_to(prints_root)
+        (prints_root / "out").symlink_to(outside)
+        (outside / "t").symlink_to(prints_root / "real")
+        stage = RunStage.open(prints_root)
+
+        with pytest.raises(WriterError, match=r"^loop/out leads outside"):
+            stage.write(prints_root / "loop" / "out" / "t", {"ddl.sql": "new\n"})
+
+        stage.commit()
+        stage.close()
+
+        assert list((prints_root / "real").iterdir()) == []
+
+    def test_a_route_out_planted_after_the_write_is_refused_at_commit(
+        self,
+        prints_root: Path,
+        outside: Path,
+    ) -> None:
+        before = _tree(prints_root)
+        stage = RunStage.open(prints_root)
+        stage.write(prints_root / "s" / "again" / "plot", {"ddl.sql": "new\n"})
+        (prints_root / "s" / "plot").symlink_to(outside)
+        (prints_root / "s" / "again").symlink_to(prints_root / "s")
+
+        with pytest.raises(StageRefused, match=r"^s/again/plot leads outside"):
+            stage.commit()
+
+        stage.close()
+
+        assert list(outside.iterdir()) == []
+        assert {k: v for k, v in _tree(prints_root).items() if "again" not in k} == {
+            k: v for k, v in before.items() if "again" not in k
+        }
+
+    def test_a_dangling_link_inside_is_refused_and_leaves_no_stuck_commit(
+        self,
+        prints_root: Path,
+    ) -> None:
+        (prints_root / "s" / "plot").symlink_to(prints_root / "gone")
+        stage = RunStage.open(prints_root)
+
+        with pytest.raises(WriterError, match=r"^s/plot leads outside the connection root"):
+            stage.write(prints_root / "s" / "plot", {"ddl.sql": "new\n"})
+
+        stage.commit()
+        stage.close()
+        again = RunStage.open(prints_root)
+        again.close()
+
+        assert not (prints_root / "gone").exists()
+
+    @pytest.mark.parametrize("name", [".gitignore", "wh.lock", "wh"])
+    def test_a_link_among_the_stages_own_files_is_refused(
+        self,
+        prints_root: Path,
+        outside: Path,
+        name: str,
+    ) -> None:
+        stage_root = prints_root.parent / ".dbprint-run"
+        stage_root.mkdir()
+        (outside / "victim").write_text("kept\n")
+        (stage_root / name).symlink_to(outside / "victim")
+
+        with pytest.raises(StageRefused, match="is a symlink"):
+            RunStage.open(prints_root)
+
+        assert (outside / "victim").read_text() == "kept\n"
+
+    def test_a_write_the_filesystem_refuses_is_a_writer_error(self, prints_root: Path) -> None:
+        stage = RunStage.open(prints_root)
+
+        with (
+            patch.object(staging, "write_atomic", side_effect=PermissionError("denied")),
+            pytest.raises(WriterError, match=r"^failed staging s/new: denied"),
+        ):
+            stage.write(prints_root / "s" / "new", {"ddl.sql": "new\n"})
+
+        stage.close()
+
+    def test_a_link_inside_the_print_root_is_written_through(self, prints_root: Path) -> None:
+        (prints_root / "shared").mkdir()
+        (prints_root / "s" / "plot").symlink_to(Path("..") / "shared")
+        stage = RunStage.open(prints_root)
+        stage.write(prints_root / "s" / "plot", {"ddl.sql": "new\n"})
+        stage.commit()
+        stage.close()
+
+        assert (prints_root / "shared" / "ddl.sql").read_text() == "new\n"
+
+    def test_a_stage_root_linked_outside_is_refused(
+        self,
+        prints_root: Path,
+        outside: Path,
+    ) -> None:
+        (prints_root.parent / ".dbprint-run").symlink_to(outside)
+
+        with pytest.raises(StageRefused, match="symlink leading outside"):
+            RunStage.open(prints_root)
+
+        assert list(outside.iterdir()) == []

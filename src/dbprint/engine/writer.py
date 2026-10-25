@@ -25,7 +25,10 @@ def write_atomic(tbl_dir: Path, artifacts: dict[str, str | bytes]) -> None:
     for name in artifacts:
         validate_artifact_name(name)
 
-    tbl_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        tbl_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise WriterError(f"failed creating {tbl_dir}: {exc}") from exc
 
     temps: list[tuple[Path, Path]] = []
 
@@ -42,11 +45,18 @@ def write_atomic(tbl_dir: Path, artifacts: dict[str, str | bytes]) -> None:
 
         temps.append((tmp, final))
 
+    fresh = {final for _, final in temps if not final.exists()}
+    renamed: list[Path] = []
+
     try:
         for tmp, final in temps:
             os.replace(tmp, final)
+            renamed.append(final)
     except OSError as exc:
-        _cleanup(t for t, _ in temps)
+        try:
+            _cleanup(final for final in renamed if final in fresh)
+        finally:
+            _cleanup(t for t, _ in temps)
 
         raise WriterError(f"failed renaming temp artifacts in {tbl_dir}: {exc}") from exc
 

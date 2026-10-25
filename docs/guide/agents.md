@@ -47,9 +47,9 @@ Most clients take a JSON block naming the command:
 }
 ```
 
-`--project` is the part worth getting right. Without it the project resolves from the working directory, and the working directory of an editor-launched server is whatever the client happened to start it in. Naming the project explicitly makes the server independent of that. It accepts a directory whose direct child is `.dbprint.yaml`, that file itself, or a git address — so a print committed to another repository can be served without cloning it by hand.
+`--project` is the part worth getting right. Without it the project resolves from the working directory, and the working directory of an editor-launched server is whatever the client happened to start it in. Naming the project explicitly makes the server independent of that. It accepts a directory whose direct child is `.dbprint.yaml`, that file itself, or a git address — so a print committed to another repository can be served without cloning it by hand. A git address's remote and ref may not begin with `-`, and its subpath must stay inside the cloned repository: relative, with no `..`, and not through a symlink that leads out.
 
-For a local socket instead of stdio, `--transport http --port 8765`. The bind address is loopback and cannot be widened.
+For a local socket instead of stdio, `--transport http --port 8765`. The bind address is loopback and cannot be widened, and the server answers only a request addressed to a loopback name, so a web page that rebinds its own name to `127.0.0.1` reaches nothing.
 
 ### What every agent reads on connect
 
@@ -76,7 +76,7 @@ The server states which tool answers which question, then how to read an answer,
 
 `looks_like` publishes the `sampled`/`matched` draw it rests on and `candidate_key` is recomputable from `cardinality_ratio`; `sensitivity` publishes no evidence at all — an agent that has learned to trust `looks_like`'s published evidence should not extend the same trust to a `sensitivity` flag with nothing behind it.
 
-### Tools — seven
+### Tools
 
 | Tool | Answers |
 |---|---|
@@ -132,7 +132,7 @@ When the fragment is over budget, dropping a whole section usually beats letting
 | `--no-annotations` | human-written notes and claims |
 | `--no-description` | the table's `description.md` |
 
-`--all` covers every table in the manifest instead of a pattern, and `--output FILE` writes to a file rather than stdout, for a pipeline assembling a prompt. `--format json` and `--format yaml` give structured output instead of Markdown; both omit each column's sketch payload, which no prompt has a use for.
+`--all` covers every table in the manifest instead of a pattern, and `--output FILE` writes to a file rather than stdout, for a pipeline assembling a prompt. `--format json` and `--format yaml` give structured output instead of Markdown; both omit each column's sketch payload, which no prompt has a use for. One table is one object; over several tables the object is the connection, carrying `connection`, its `connection_notes` and `tables`, and over several connections each connection is such an object.
 
 Connection-level notes from `manifest.annotations.yaml` reach every render: a single table carries them in its own `## Connection notes` section (`connection_notes` in json and yaml), and a render over several tables carries them once, in the document header — see [annotating a print](annotations.md).
 

@@ -170,7 +170,7 @@
       "required": ["type", "path", "artifacts", "columns", "profiled_at"],
       "properties": {
         "type": {"enum": ["table", "view", "matview"]},
-        "path": {"type": "string", "minLength": 1},
+        "path": {"type": "string", "minLength": 1, "pattern": "^[a-z0-9_][a-z0-9_-]*(/[a-z0-9_][a-z0-9_-]*)*$"},
         "artifacts": {"$ref": "#/$defs/Artifacts"},
         "row_count": {"type": "integer", "minimum": 0},
         "columns": {"type": "integer", "minimum": 0},

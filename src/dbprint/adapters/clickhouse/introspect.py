@@ -461,7 +461,11 @@ def comments(cursor: Cursor, identity: Identity, *, hide_secrets: bool = False) 
 
 
 def estimate_row_count(cursor: Cursor, identity: Identity) -> float:
-    """Catalog row-count estimate; -1 when unavailable (a plain `View` carries none)."""
+    """The table's `count()` wherever ClickHouse keeps a cheap count; -1 where it keeps none.
+
+    `total_rows` is NULL where no cheap count exists (`TinyLog`, a `View`), and otherwise keeps
+    counting rows a lightweight `DELETE` removed until a merge drops them; `count()` does not.
+    """
 
     row = exec_query(
         cursor,
@@ -480,4 +484,4 @@ def estimate_row_count(cursor: Cursor, identity: Identity) -> float:
     if not row or row[0] is None:
         return -1.0
 
-    return float(row[0])
+    return float(exec_query(cursor, f"SELECT count() FROM {identity.quoted()} src").fetchone()[0])

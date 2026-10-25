@@ -26,7 +26,16 @@ from dbprint.spec.rounding import (
 from dbprint.spec.spatial import Extent, Geometry
 from .connection import DIALECT, Cursor, exec_query
 from .introspect import estimate_row_count
-from .rendering import render_domain, render_text, stores_below_microsecond, temporal_shape
+from .rendering import (
+    finite_value,
+    frame_zone,
+    mean_expression,
+    render_domain,
+    render_text,
+    stores_below_microsecond,
+    sum_expression,
+    temporal_shape,
+)
 from .. import statements
 from ..base import (
     ArrayReads,
@@ -62,9 +71,9 @@ from ..base import (
     materialized_name,
     measure_columns,
     numeric_block_from_row,
+    numeric_row,
     phase_a_cost,
     profile_over,
-    row_count_or_none,
     run_phase_a,
     unrepresentable_fields,
     value_list_from_rows,
@@ -123,7 +132,7 @@ def compute_base(
 
     source = table_source(identity, scope)
     narrows = scope is not None and scope.narrows
-    # The catalog estimate describes the whole table, so a narrowed read counts instead.
+    # The count describes the whole table, so a narrowed read counts its own distinct values.
     estimate = estimate_row_count(cursor, identity)
     approximate = counts_approximately(estimate, narrows)
     rows_scanned, phase_a = run_phase_a(
@@ -140,7 +149,7 @@ def compute_base(
         identity.quoted(),
         rows_scanned,
         scope,
-        lambda: row_count_or_none(estimate_row_count(cursor, identity)),
+        lambda: None,
     )
 
     return TableCounts(row_count, rows_scanned, row_count_method), phase_a
@@ -428,24 +437,30 @@ def probe_timeline(
         DIALECT,
         table_source(identity, scope),
         cn,
-        _timeline_bucket_expr(cn, unit, date_only=date_only),
+        _timeline_bucket_expr(cn, unit, date_only=date_only, zone=frame_zone(col.classified_type)),
         render_domain("bkt.bucket_start", col.classified_type),
     )
 
 
-def _timeline_bucket_expr(cn: str, unit: str, *, date_only: bool) -> str:
+def _timeline_bucket_expr(cn: str, unit: str, *, date_only: bool, zone: str) -> str:
     """Native truncation function for `probe_timeline`'s GROUP BY key. See SPEC 2.2.16.
 
-    A `Date` anchor buckets as a date; widening to `DateTime` publishes a midnight it lacks.
+    A `Date` buckets as a date, never gaining a midnight; a `DateTime` at its frame's instant.
     """
 
+    if date_only:
+        if unit == "week":
+            return f"toStartOfWeek({cn}, 1)"
+
+        return f"toStartOfMonth({cn})" if unit == "month" else f"toDate({cn})"
+
     if unit == "week":
-        return f"toStartOfWeek({cn}, 1)"
+        return f"toDateTime(toStartOfWeek({cn}, 1, {zone}), {zone})"
 
     if unit == "month":
-        return f"toStartOfMonth({cn})"
+        return f"toDateTime(toStartOfMonth({cn}, {zone}), {zone})"
 
-    return f"toDate({cn})" if date_only else f"toStartOfDay({cn})"
+    return f"toStartOfDay({cn}, {zone})"
 
 
 def compute_populated_windows(
@@ -602,11 +617,12 @@ def _phase_a_statement(
         select_parts.append(f"countIf({cn} IS NULL) AS null_{a}")
 
         if is_numeric_type(col.classified_type):
+            fv = finite_value(cn, col.classified_type)
             select_parts.extend(
                 (
                     f"countIf({cn} = 0) AS zero_{a}",
-                    f"countIf({cn} < 0) AS neg_{a}",
-                    f"countIf({cn} = trunc({cn})) AS quant_{a}",
+                    f"countIf({fv} < 0) AS neg_{a}",
+                    f"countIf({fv} = trunc({fv})) AS quant_{a}",
                 ),
             )
         elif is_string_like(col.classified_type, _is_unsupported):
@@ -685,13 +701,15 @@ def _fetch_value_list(
     config: StatisticsConfig,
 ) -> ValueList:
     cn = source_column(col, DIALECT)
-    # `toString` stays the ordering key, since it decides the cutoff; a number publishes natively.
+    # The rendered text stays the ordering key, since it decides the cutoff; a number publishes natively.
     native = is_numeric_type(col.classified_type)
     rows = statements.most_frequent(
         partial(exec_query, cursor),
         DIALECT,
         source,
-        render_text(cn, col.classified_type),
+        render_domain(cn, col.classified_type)
+        if temporal_shape(col.classified_type)
+        else render_text(cn, col.classified_type),
         config,
         non_null=cn,
         group=cn,
@@ -810,19 +828,28 @@ def _fetch_numeric_block(
     values: bool = True,
 ) -> NumericBlock:
     cn = source_column(col, DIALECT)
+    fv = finite_value(cn, col.classified_type)
     keys = config.percentiles
-    select_parts = [
-        f"min({cn})",
-        f"max({cn})",
-        f"avg({cn})",
-        f"sum({cn})",
-        *_percentile_exprs(cn, keys),
-    ]
-    row = exec_query(cursor, select_from(select_parts, source)).fetchone()
+    counted = [f"count({fv})", f"count({cn})"] if fv != cn else []
+
+    def read(aggregates: bool) -> Any:
+        select_parts = [
+            f"min({fv})",
+            f"max({fv})",
+            mean_expression(fv, col.classified_type) if aggregates else "NULL",
+            sum_expression(fv, col.classified_type) if aggregates else "NULL",
+            *counted,
+            *_percentile_exprs(fv, keys),
+        ]
+
+        return exec_query(cursor, select_from(select_parts, source)).fetchone()
+
+    row, failure = numeric_row(read)
+    first = 4 + len(counted)
 
     return numeric_block_from_row(
         row,
-        row[4 : 4 + len(keys)] if row else (),
+        row[first : first + len(keys)] if row else (),
         config,
         None
         if not values
@@ -834,6 +861,9 @@ def _fetch_numeric_block(
             config,
             measured_value,
         ),
+        finite=row[4] if row and counted else None,
+        non_null=row[5] if row and counted else None,
+        failure=failure,
     )
 
 
@@ -876,15 +906,19 @@ def _fetch_temporal_block(
     select_parts = [
         render_domain(f"min({cn})", col.classified_type),
         render_domain(f"max({cn})", col.classified_type),
-        # Elapsed whole days at microsecond resolution: `dateDiff` counts unit boundaries, so a
-        # coarser unit would count a crossed boundary as a whole one (SPEC 2.2.4).
-        "0" if clock else f"intDiv(dateDiff('microsecond', min({cn}), max({cn})), 86400000000)",
+        # `dateDiff` counts unit boundaries, so days are microseconds (SPEC 2.2.4); a `Date` stays a
+        # date, since one widened to an instant passes through the session zone's daylight saving.
+        "0"
+        if clock
+        else f"dateDiff('day', min({cn}), max({cn}))"
+        if temporal_shape(col.classified_type) == "date"
+        else f"intDiv(dateDiff('microsecond', min({cn}), max({cn})), 86400000000)",
         *percentile_exprs,
     ]
 
     if day_aligned:
         select_parts.append(
-            f"countIf(toStartOfDay(toDateTime({cn})) = toDateTime({cn})) AS quant",
+            f"countIf(toStartOfDay({cn}, {frame_zone(col.classified_type)}) = {cn}) AS quant",
         )
 
     row = exec_query(cursor, select_from(select_parts, source)).fetchone()

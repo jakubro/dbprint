@@ -49,8 +49,11 @@ from dbprint.adapters import (
     UniqueKeyMeta,
     ValueCount,
 )
+from dbprint.adapters.duckdb import DIALECT as DUCKDB_DIALECT
+from dbprint.adapters.identifiers import unquote
 from tests import _substrates
 from tests._prints import columns, mock_table
+from tests.adapters._clickhouse import PyformatCursor
 from tests.conftest import MysqlCluster, PostgresCluster, _scratch_root, fresh_database, pg_connect
 
 
@@ -386,6 +389,8 @@ class StubCursor:
     `error`, when given, is raised by every `execute` once the statement is kept.
     """
 
+    description: Any = (("value",),)
+
     def __init__(
         self,
         rows: list[tuple[Any, ...]] | None = None,
@@ -437,6 +442,7 @@ class SnowflakeDialectShim:
     ) -> None:
         self._con = con
         self._rows: list[tuple[Any, ...]] | None = None
+        self._columns: tuple[str, ...] = ("value",)
         # duckdb has no clustering concept, so a test injects `cluster_by` here rather than
         # reading it off the catalog. Keyed lowercase to match what `physical_layout` compares.
         self._cluster_by = {name.lower(): value for name, value in (cluster_by or {}).items()}
@@ -461,6 +467,7 @@ class SnowflakeDialectShim:
         sql = _QUALIFIED_INFO_SCHEMA_RE.sub("information_schema.", sql)
         flat = " ".join(sql.lower().split())
         self._rows = None
+        self._columns = ("value",)
 
         if flat.startswith("show databases"):
             self._rows = self._show_databases(sql)
@@ -476,8 +483,8 @@ class SnowflakeDialectShim:
             self._rows = self._show_tables(sql)
         elif "object_dependencies" in flat:
             self._rows = self._object_dependencies(params)
-        elif "information_schema.indexes" in flat:
-            self._rows = self._indexes(params)
+        elif flat.startswith("show indexes in table"):
+            self._rows = self._show_indexes(sql)
         elif flat.startswith("select tbl.row_count from information_schema.tables tbl"):
             self._rows = self._row_count(params)
         elif flat.startswith("select tbl.comment from information_schema.tables tbl"):
@@ -520,6 +527,14 @@ class SnowflakeDialectShim:
             return [(self._table_types.get(str(params[-1]).lower(), rows[0][0]),)]
 
         return [(*row[:-1], self._table_types.get(str(row[2]).lower(), row[-1])) for row in rows]
+
+    @property
+    def description(self) -> Any:
+        """The wrapped connection's, or the canned answer's columns while one is held."""
+
+        return (
+            [(name,) for name in self._columns] if self._rows is not None else self._con.description
+        )
 
     def fetchall(self) -> list[Any]:
         return self._rows if self._rows is not None else self._con.fetchall()
@@ -579,7 +594,8 @@ class SnowflakeDialectShim:
         """Snowflake keeps a maintained row count on the table catalog entry.
 
         duckdb has no equivalent column, so the count comes from `estimated_size` - still a
-        metadata answer to the adapter, and exact, so the threshold decision runs unstubbed.
+        metadata answer to the adapter, and exact for a table no row was deleted from, so the
+        threshold decision runs unstubbed.
         """
 
         catalog, schema, table = (str(p) for p in params)
@@ -723,20 +739,50 @@ class SnowflakeDialectShim:
 
         return rows
 
-    def _indexes(self, params: Any) -> list[tuple[Any, ...]]:
-        """Expand duckdb_indexes() into the INDEXES x INDEX_COLUMNS row shape."""
+    def _show_indexes(self, sql: str) -> list[tuple[Any, ...]]:
+        """Build `SHOW INDEXES` rows from duckdb_indexes(), named as documented; duckdb has no
+        `INCLUDE`, and an expression member stays out of `columns`, as Snowflake allows none.
+        """
 
+        database, schema, table = _snowflake_name_parts(sql.split("TABLE", 1)[1].strip())
         rows = self._con.execute(
-            "SELECT index_name, is_unique, sql FROM duckdb_indexes() "
-            "WHERE database_name = ? AND schema_name = ? AND table_name = ? "
-            "ORDER BY index_name",
-            list(params),
+            "SELECT index_name, is_unique, CAST(expressions AS VARCHAR[]) FROM duckdb_indexes() "
+            "WHERE database_name = ? AND schema_name = ? AND table_name = ?",
+            [database, schema, table],
         ).fetchall()
+        self._columns = (
+            "created_on",
+            "name",
+            "kind",
+            "is_unique",
+            "columns",
+            "included_columns",
+            "status",
+            "table",
+            "database_name",
+            "schema_name",
+        )
 
         return [
-            (index_name, is_unique, column)
-            for index_name, is_unique, create_sql in rows
-            for column in _index_columns(create_sql)
+            (
+                None,
+                index_name,
+                "KEY_VALUE_INDEX",
+                "Y" if is_unique else "N",
+                "["
+                + ", ".join(
+                    unquote(member, DUCKDB_DIALECT)
+                    for member in members
+                    if not member.startswith("(")
+                )
+                + "]",
+                "[]",
+                "ACTIVE",
+                table,
+                database,
+                schema,
+            )
+            for index_name, is_unique, members in rows
         ]
 
 
@@ -888,6 +934,7 @@ def _rewrite_temporal_render(sql: str) -> str:
     """
 
     sql = _CONVERT_TIMEZONE_RE.sub(r"(\1 AT TIME ZONE 'UTC')", sql)
+    sql = sql.replace("::TIMESTAMP_NTZ", "::TIMESTAMP")
     sql = _TO_VARCHAR_TS_RE.sub(r"strftime(\1, '%Y-%m-%dT%H:%M:%S.%f')", sql)
     sql = _TO_VARCHAR_DATE_RE.sub(r"strftime(\1, '%Y-%m-%d')", sql)
     sql = _TO_VARCHAR_CLOCK_RE.sub(
@@ -981,20 +1028,6 @@ def _sampled_source_start(sql: str, end: int) -> int:
                 return index
 
     return end
-
-
-_INDEX_COLUMNS_RE = re.compile(r"\(([^)]+)\)")
-
-
-def _index_columns(create_sql: str) -> list[str]:
-    """Column list from a duckdb `CREATE INDEX ... ON tbl (cols)` statement."""
-
-    match = _INDEX_COLUMNS_RE.search(create_sql or "")
-
-    if not match:
-        return []
-
-    return [c.strip().strip('"').lower() for c in match.group(1).split(",") if c.strip()]
 
 
 @pytest.fixture
@@ -1125,7 +1158,7 @@ def clickhouse_native_connection() -> Iterator[Any]:
     _seed_contract_schema_clickhouse(conn)
 
     try:
-        yield conn.cursor()
+        yield PyformatCursor(conn.cursor())
     finally:
         conn.close()
 
@@ -1672,6 +1705,12 @@ class RedshiftDialectShim:
 
         return self
 
+    @property
+    def description(self) -> Any:
+        """The wrapped cursor's, or a one-column stand-in while a canned answer is held."""
+
+        return [("value",)] if self._rows is not None else self._cursor.description
+
     def fetchall(self) -> list[Any]:
         return self._rows if self._rows is not None else self._cursor.fetchall()
 
@@ -1911,17 +1950,9 @@ class SparkCursor:
 
 
 def _render_params(sql_text: str, params: Any, placeholder: str) -> str:
-    """Client-side stand-in for a driver's positional binding, shared by `SparkCursor` (`?`) and
-    `BigqueryEmulatorCursor` (`%s`) - each passes its own adapter's real marker.
-    """
+    """Client-side stand-in for a driver's positional binding at `placeholder` (`?`, `%s`)."""
 
-    rendered = []
-
-    for value in params:
-        if isinstance(value, str):
-            rendered.append("'" + value.replace("'", "''") + "'")
-        else:
-            rendered.append(str(value))
+    rendered = [_sql_literal(value) for value in params]
 
     parts = sql_text.split(placeholder)
 
@@ -1934,6 +1965,10 @@ def _render_params(sql_text: str, params: Any, placeholder: str) -> str:
         out += value + part
 
     return out
+
+
+def _sql_literal(value: Any) -> str:
+    return "'" + value.replace("'", "''") + "'" if isinstance(value, str) else str(value)
 
 
 @pytest.fixture(scope="session")
@@ -2172,7 +2207,8 @@ class BigqueryEmulatorCursor:
         self._rows: list[tuple[Any, ...]] = []
 
     def execute(self, sql: str, params: Any = None) -> BigqueryEmulatorCursor:
-        rendered = sql if params is None else _render_params(sql, params, "%s")
+        # google-cloud-bigquery's `_format_operation`: Python `%` when bound, `%%` -> `%` when not.
+        rendered = sql.replace("%%", "%") if not params else sql % tuple(map(_sql_literal, params))
         body = json.dumps({"query": rendered, "useLegacySql": False}).encode("utf-8")
         request = urllib.request.Request(
             f"{self._base_url}/bigquery/v2/projects/{self._project}/queries",
@@ -2273,6 +2309,95 @@ def _convert_scalar(value: Any, bq_type: str) -> Any:
         return datetime.fromisoformat(value)
 
     return value
+
+
+class PartitionFilterCursor:
+    """The emulator's cursor answering as BigQuery does for tables that require a partition filter.
+
+    The emulator records `require_partition_filter` but enforces nothing, reports no partitioning
+    column, and lacks `PARTITIONS` and `TABLES.ddl`. A statement naming a table of `partitioning`
+    without `WHERE (` and a predicate on its column is refused with BigQuery's message and kept in
+    `refused`; a `PARTITIONS` read answers the table's row count, None when empty, or is refused
+    when `partitions` is false; a catalog view the emulator lacks answers no rows.
+    """
+
+    def __init__(
+        self,
+        inner: BigqueryEmulatorCursor,
+        dataset: str,
+        partitioning: dict[str, str],
+        *,
+        partitions: bool = True,
+    ) -> None:
+        self._inner = inner
+        self._dataset = dataset
+        self._partitioning = partitioning
+        self._partitions = partitions
+        self._answer: list[tuple[Any, ...]] | None = None
+        self.refused: list[str] = []
+        self.seen: list[str] = []
+
+    def execute(self, sql: str, params: Any = None) -> PartitionFilterCursor:
+        self._answer = None
+
+        if "INFORMATION_SCHEMA.PARTITIONS" in sql:
+            if not self._partitions:
+                raise RuntimeError(f"Access Denied: {self._dataset}.INFORMATION_SCHEMA.PARTITIONS")
+
+            row = self._inner.execute(
+                f"SELECT COUNT(1) FROM `{self._dataset}`.`{params[0]}`",
+            ).fetchone()
+            self._answer = [((row[0] if row else 0) or None,)]
+
+            return self
+
+        for table, column in self._partitioning.items():
+            for found in re.finditer(rf"`{self._dataset}`\.`{table}`([^\n]*)", sql):
+                self.seen.append(sql)
+
+                if not re.match(rf"\s+WHERE\s+\(.*\b{column}\b", found.group(1)):
+                    self.refused.append(sql)
+
+                    raise RuntimeError(
+                        f"Cannot query over table '{self._dataset}.{table}' without a filter "
+                        f"that can be used for partition elimination",
+                    )
+
+        partitioning = " OR ".join(
+            f"(\\1.table_name = '{t}' AND \\1.column_name = '{c}')"
+            for t, c in self._partitioning.items()
+        )
+        sql = re.sub(
+            r"\b(\w+)\.is_partitioning_column\b",
+            f"IF({partitioning}, 'YES', \\1.is_partitioning_column)",
+            sql,
+        )
+        sql = re.sub(r"\b(\w+)\.ddl\b", r"CONCAT('CREATE TABLE ', \1.table_name, ';')", sql)
+
+        try:
+            self._inner.execute(sql, params)
+        except RuntimeError as exc:
+            if "Table not found" not in str(exc) or "INFORMATION_SCHEMA" not in str(exc):
+                raise
+
+            self._answer = []
+
+        return self
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return self._answer if self._answer is not None else self._inner.fetchall()
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        rows = self.fetchall()
+
+        return rows[0] if rows else None
+
+    def close(self) -> None:
+        return None
+
+    @property
+    def description(self) -> Any:
+        return [("total",)] if self._answer is not None else self._inner.description
 
 
 def _free_tcp_port() -> int:

@@ -7,6 +7,7 @@ filters `WHERE table_name = %s` against nothing and reports the table empty.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from dbprint.spec.fqn import join as join_fqn
@@ -18,6 +19,7 @@ from ..base import (
     IndexMeta,
     PhysicalLayout,
     PhysicalLayoutKey,
+    RequiredFilter,
     SkippedNamespace,
     TableMeta,
     TableType,
@@ -45,6 +47,8 @@ _Candidate = tuple[TableMeta, tuple[str, str]]
 # `materialize()`'s scratch prefix (`adapters.base.materialized_name`) - a BigQuery sampled copy
 # is a real dataset object, not a session temp table, so it is excluded by name, not by lifetime.
 _SCRATCH_PREFIX = "dbprint_sample_"
+
+_REQUIRE_PARTITION_FILTER = "require_partition_filter"
 
 
 def list_tables(
@@ -101,6 +105,28 @@ def list_tables(
             ddl_by_fqn[meta.fqn] = str(ddl)
 
     selected = select_tables(candidates, include, exclude)
+    required: dict[tuple[str, str], str | None] = {}
+
+    for dataset in sorted({physical[0] for _, physical in selected}):
+        required.update(
+            {
+                (dataset, name): column
+                for name, column in _required_filters(cursor, project, dataset).items()
+            },
+        )
+
+    selected = [
+        (
+            replace(
+                meta,
+                required_filter=RequiredFilter(_REQUIRE_PARTITION_FILTER, required[physical]),
+            )
+            if physical in required
+            else meta,
+            physical,
+        )
+        for meta, physical in selected
+    ]
     selected_fqns = {meta.fqn for meta, _ in selected}
 
     return (
@@ -537,6 +563,45 @@ def _dataset_tables(cursor: Cursor, project: str, dataset: str) -> list[tuple[An
                 """,
             ).fetchall()
         ]
+
+
+def _required_filters(cursor: Cursor, project: str, dataset: str) -> dict[str, str | None]:
+    """Each table in `dataset` that refuses an unfiltered read, with its partitioning column.
+
+    Hidden columns stay: an ingestion-time table's pseudo-column is its only partitioning row.
+    A refused read flags nothing, and those tables fail with BigQuery's own message.
+    """
+
+    try:
+        rows = exec_query(
+            cursor,
+            f"""
+            SELECT
+              opt.table_name,
+              col.column_name
+            FROM
+              {_info_schema(project, dataset)}.TABLE_OPTIONS opt
+              LEFT JOIN {_info_schema(project, dataset)}.COLUMNS col ON
+                col.table_name = opt.table_name
+                AND col.is_partitioning_column = 'YES'
+            WHERE
+              opt.option_name = '{_REQUIRE_PARTITION_FILTER}'
+              AND LOWER(opt.option_value) = 'true'
+            """,
+        ).fetchall()
+    except QueryFailed as exc:
+        if exc.timed_out:
+            raise
+
+        return {}
+
+    found: dict[str, str | None] = {}
+
+    for name, column in rows:
+        if column is not None or str(name) not in found:
+            found[str(name)] = None if column is None else str(column)
+
+    return found
 
 
 def _info_schema(project: str, dataset: str) -> str:

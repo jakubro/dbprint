@@ -102,6 +102,21 @@ def parent(path: str) -> str | None:
     return "".join(_spelled(step) for step in steps[:-1]) or None
 
 
+def enclosing_chain[T](path: str, readings: Mapping[str, T]) -> tuple[T, ...]:
+    """The readings of `path` and of every part it sits inside, nearest first; unlisted ones skip."""
+
+    out: list[T] = []
+    current: str | None = path
+
+    while current is not None:
+        if current in readings:
+            out.append(readings[current])
+
+        current = parent(current)
+
+    return tuple(out)
+
+
 def depth(path: str) -> int:
     """The number of steps in `path`."""
 

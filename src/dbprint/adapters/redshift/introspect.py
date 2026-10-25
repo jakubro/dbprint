@@ -231,7 +231,12 @@ def relationships(cursor: Cursor, identity: Identity) -> list[ForeignKeyMeta]:
     shape, so one composite key's rows would need reassembling across them.
     """
 
-    return pg_catalog.relationships(partial(exec_query, cursor), identity, on_unknown="NO ACTION")
+    return pg_catalog.relationships(
+        partial(exec_query, cursor),
+        identity,
+        on_unknown="NO ACTION",
+        skip_clones=False,
+    )
 
 
 def indexes(cursor: Cursor, identity: Identity) -> list[IndexMeta]:

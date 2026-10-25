@@ -9,7 +9,7 @@ $ pip install 'dbprint[docs]'
 $ dbprint docs serve
 ```
 
-That binds `127.0.0.1:8765` and serves the connections the project resolves — the same resolution `generate` uses, so a bare invocation works wherever a bare `generate` does. `--host` accepts loopback addresses only; there is nothing to authenticate because there is nothing to reach.
+That binds `127.0.0.1:8765` and serves the connections the project resolves — the same resolution `generate` uses, so a bare invocation works wherever a bare `generate` does. `--host` accepts loopback addresses only; it answers only a loopback `Host`, so a web page that rebinds its own name to `127.0.0.1` reaches nothing either.
 
 ## What the pages show
 
@@ -19,9 +19,15 @@ That binds `127.0.0.1:8765` and serves the connections the project resolves — 
 | Schema | the tables in it, with row counts and column counts |
 | Table | the full per-column surface, its relationships, and a diagram of the edges into and out of it |
 
-The table page is the one worth knowing. It carries what `statistics.yaml` carries — classification, null rate, cardinality, value lists, ranges, percentiles — beside the prose from that table's `description.md` and `statistics.annotations.yaml`, so a measurement and the note correcting it appear together rather than in two files. Value bars spell each value as `dbprint context` does — `''` for an empty string, `'NULL'` for the stored word, `NULL` only for a genuine null — and a `drop`-redacted column's bars read `(value withheld)`.
+![The index of a print: a filter box, the connection's notes, and one row per table with its type, row count, column count and when it was profiled](images/browsing-index.png)
 
-Three banners can appear above everything else, and they are deliberately distinct because absence and corruption read differently: `Missing: <kinds>` names a declared artifact that isn't on disk; `Unreadable: <kinds>` names one that is on disk but failed to parse; a catalog-only notice explains that no query was issued at all, so cardinality is not measured on this page.
+The table page is the one worth knowing. It carries what `statistics.yaml` carries — classification, null rate, cardinality, value lists, ranges, percentiles — beside the prose from that table's `description.md` and `statistics.annotations.yaml`, so a measurement and the note correcting it appear together rather than in two files. Value bars spell each value as `dbprint context` does — `''` for an empty string, `'NULL'` for the stored word, `NULL` only for a genuine null — and a `drop`-redacted column's bars read `(value withheld)`. Descriptions and notes render as Markdown; raw HTML in them shows as text, and only web, mail and relative links are live.
+
+![The top of a table page: cards for the table's rows, columns, related tables, grain, sensitive and redacted columns, cardinality and completeness, above the Overview, Columns, Relationships, DDL and Context tabs](images/browsing-table.png)
+
+![One categorical column in the Columns tab: its type, null rate and cardinality, a bar per value with its count, the share of rows those values cover, its length profile, and the annotation note under its name](images/browsing-columns.png)
+
+Three banners can appear above everything else, and they are deliberately distinct because absence and corruption read differently: `Missing: <kinds>` names a declared artifact that isn't on disk; `Unreadable: <kinds>` names one that is on disk but malformed — it failed to parse, or is an annotation file that does not match its schema; a catalog-only notice explains that no query was issued at all, so cardinality is not measured on this page.
 
 A measurement the file's `disabled` list names gets a block of its own, quoting the list and stating what is unknown because configuration switched it off for this table — an absent null-pattern table or timeline there is not a finding about the data.
 
@@ -34,7 +40,7 @@ Two sections in the overview panel read the newer per-table fields directly:
 
 ### The column table's degenerate census
 
-Beside the null-rate bar, a column carrying `zero_count`, `negative_count` or `empty_count` shows a dot-separated line — `<n> zero`, `<n> negative`, `<n> empty` — under the null figure. Each sub-count is gated on being truthy, so an explicit `0` renders nothing there, reading the same as a field the classification forbids or the run never measured. If you need to tell those apart, read `statistics.yaml` directly for that column.
+Beside the null-rate bar, a column carrying `zero_count`, `negative_count`, `non_finite_count` or `empty_count` shows a dot-separated line — `<n> zero`, `<n> negative`, `<n> non-finite`, `<n> empty` — under the null figure. Each sub-count is gated on being truthy, so an explicit `0` renders nothing there, reading the same as a field the classification forbids or the run never measured. If you need to tell those apart, read `statistics.yaml` directly for that column.
 
 Further down the same cell: `mean`/`sum` render as `mean X · sum Y` whenever either is present, each spelled as `statistics.yaml` spells it (positional, never an exponent). Every count on the page is its exact integer, never compacted to `10K`. A redacted column carries neither, nor `length` or the degenerate counts above — a marked column publishes its count profile only — so its cell shows `bounds withheld` and the counts it keeps. A `length` block renders as `length <min>-<max> · avg <avg> · p95 <p95>`.
 
@@ -42,7 +48,13 @@ Further down the same cell: `mean`/`sum` render as `mean X · sum Y` whenever ei
 
 Every edge gets a Detection badge with one of four verdicts: `declared` (a real foreign key), `measured` (proposed from two columns' own sketches, never a schema fact), `inferred` (a naming guess), or `annotated` (an edge a human added in `relationships.annotations.yaml`, listed on both tables it joins, with nothing measured behind it) — an edge carrying no `detection` at all reads as `inferred`, never defaulted upward. `declared` and `measured` are two different claims and the page never blurs them: a declared edge is a constraint the database enforces; a measured one is evidence the data happens to join cleanly today.
 
-Detail beside the badge carries whatever the edge can state — `on_delete`, a constraint name, the annotation path for a human-added edge — and, where the observed join was measured, its fanout, target coverage and containment, or `scopes not comparable` when the two sides' scopes can't be compared at all. A verdict a human annotation rejected renders `REJECTED by human annotation` on both the referencing and the referenced side.
+Detail beside the badge carries whatever the edge can state — `on_delete`, a constraint name, the annotation path for a human-added edge — and, where the observed join was measured, its fanout, target coverage and containment, or `scopes not comparable` when the two sides' scopes can't be compared at all. A verdict a human annotation rejected renders `REJECTED by human annotation` on both the referencing and the referenced side; one addressing a declared edge is void and renders nothing.
+
+![The Relationships tab: one row per edge, its direction, the columns on both sides, a detection badge, and the detail the edge carries](images/browsing-relationships.png)
+
+The Overview draws the same edges as a diagram around the current table: a solid line is `declared`, a thick one `measured`, and a dotted one `inferred` or `annotated`. A rejected edge stays on it, faded red. Every table in the print is a link to its own page.
+
+![The Overview's relationship diagram: the tables referencing the current one on the left, the tables it refers to on the right, each edge labelled with its columns](images/browsing-diagram.png)
 
 ## What a `catalog_only` table shows
 
@@ -75,7 +87,7 @@ $ dbprint docs build --output dbprint-docs
 Wrote 6 pages to dbprint-docs
 ```
 
-The output is self-contained — no CDN, no network at render time — so it works from a file share, an artifact store, or any static host.
+The output is self-contained — no CDN, no network at render time — so it works from a file share, an artifact store, or any static host. A built page depends on the print alone: it names no directory on the machine that built it, and a table's profiled time is the date itself rather than an age that would go stale once published.
 
 `build` writes a `.dbprint-docs` marker into the directory it creates, and refuses to recreate a directory that does not carry one unless you pass `--force`. That is the guard against pointing `--output` at a directory holding something else. Add the output directory to `.gitignore`: it is derived from the print, and the print is what you commit.
 

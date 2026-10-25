@@ -39,6 +39,8 @@ from tests.fixtures.adversarial import (
     ORPHAN_SPELLING_COLUMN,
     ORPHAN_SPELLING_TABLE,
     ORPHAN_SPELLING_VALUE,
+    OUTSIDE_PRINT_SENTINEL,
+    OUTSIDE_PRINT_TABLE,
     PARTIAL_AS_WHOLE,
     PERCENTILE_INSIDE_RANGE_COLUMN,
     REDACTED_COLUMN,
@@ -47,6 +49,8 @@ from tests.fixtures.adversarial import (
     SCOPED_COMPLETE_LIST_COLUMN,
     SCOPED_KEY_COLUMN,
     SCOPED_LATEST_COLUMN,
+    SCOPED_PART_COLUMN,
+    SCOPED_PART_PATH,
     SCOPED_TABLE,
     SEVERAL_EDGES_COLUMN,
     SEVERAL_EDGES_TABLE,
@@ -55,6 +59,7 @@ from tests.fixtures.adversarial import (
     TRUNCATED_FK_COLUMN,
     UNEVALUATED_TABLE,
     UNREADABLE_PROFILED_TABLE,
+    VOID_VERDICT_NOTE,
     AdversarialPrint,
 )
 
@@ -78,9 +83,11 @@ COVERS = frozenset(
         "incomplete_grain_search",
         "catalog_only_table",
         "declared_missing_artifact",
+        "outside_print_entry",
         "delimiter_in_a_value",
         "value_spelling",
         "scoped_complete_list",
+        "scoped_part_list",
         "scoped_candidate_key",
         "scoped_latest_value",
         "extreme_number_statistics",
@@ -418,6 +425,7 @@ def test_every_standing_edge_is_named_surest_first(adversarial_print: Adversaria
 
     assert "FK: public.cultivar.id (declared), public.wide_lookup.a (measured); " in row
     assert REJECTED_EDGE_TARGET not in row
+    assert VOID_VERDICT_NOTE not in _render(adversarial_print, SEVERAL_EDGES_TABLE)
 
 
 def test_a_human_authored_edge_reaches_both_tables_tagged_annotated(
@@ -441,3 +449,27 @@ def test_connection_notes_reach_a_single_table_reader_once(
 
     assert text.count(CONNECTION_NOTE) == 1
     assert "## Connection notes" in text
+
+
+def test_scoped_part_list_carries_the_clause(adversarial_print: AdversarialPrint) -> None:
+    label = f"| {SCOPED_PART_COLUMN}{SCOPED_PART_PATH} |"
+    row = next(
+        r for r in _render(adversarial_print, SCOPED_TABLE).splitlines() if r.startswith(label)
+    )
+
+    assert "values (complete over the rows scanned): " in row
+    assert "present: 100% of rows scanned" in row
+
+
+def test_an_entry_outside_the_print_reads_as_absent(adversarial_print: AdversarialPrint) -> None:
+    runner = CliRunner()
+    old_cwd = Path.cwd()
+    os.chdir(adversarial_print.conn.output.parent)
+
+    try:
+        result = runner.invoke(main, ["context", OUTSIDE_PRINT_TABLE, "--format", "md"])
+    finally:
+        os.chdir(old_cwd)
+
+    assert result.exit_code != 0
+    assert OUTSIDE_PRINT_SENTINEL not in result.output

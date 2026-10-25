@@ -24,7 +24,7 @@ The [statistics required-field matrix](reference/statistics-matrix.md) is the on
 
 ## The schemas
 
-Seven JSON Schemas, draft 2020-12, one per artifact. Each is published at its own canonical address and ships inside the wheel:
+One JSON Schema per artifact, draft 2020-12. Each is published at its own canonical address and ships inside the wheel:
 
 | Artifact | `$id` |
 |---|---|

@@ -42,10 +42,19 @@ def _print(
     table_dir.mkdir(parents=True, exist_ok=True)
     (table_dir / "statistics.yaml").write_text(yaml.safe_dump(statistics))
     (table_dir / "statistics.annotations.yaml").write_text(
-        yaml.safe_dump(annotations, sort_keys=False),
+        yaml.safe_dump(_admissible(annotations), sort_keys=False),
     )
 
     return {"tables": {"s.t": {"path": path, "artifacts": dict(_BOTH)}}}
+
+
+def _admissible(annotations: Any) -> Any:
+    """The fields the schema requires, around a body that names only what its test reads."""
+
+    if not isinstance(annotations, dict):
+        return annotations
+
+    return {"format_version": 1, "columns": {}, **annotations}
 
 
 class TestStaleKeys:
@@ -66,12 +75,12 @@ class TestStaleKeys:
 
 class TestGrainKeys:
     def test_a_grain_key_naming_an_unknown_column(self, tmp_path: Path) -> None:
-        keys = ["not a key", {"columns": "color"}, {"columns": ["color", "shade", "hue"]}]
+        keys = [{"columns": ["color"]}, {"columns": ["color", "shade", "hue"]}]
         manifest = _print(tmp_path, {"grain": {"keys": keys}})
 
         assert ca.check_grain_annotations(tmp_path, manifest) == [
             Issue(
-                f"{_ANN}::grain.keys[2]",
+                f"{_ANN}::grain.keys[1]",
                 "annotations.grain-unknown-column",
                 "warning",
                 "statistics.annotations.yaml's grain names column(s) ['shade', 'hue'], which "
@@ -90,7 +99,7 @@ class TestGrainKeys:
 
 def _claims(tmp_path: Path, column: str, claims: dict[str, Any]) -> list[Issue]:
     annotations = {
-        "columns": {"first": "not an entry", "second": {"note": "x"}, column: {"claims": claims}},
+        "columns": {"second": {"note": "x"}, column: {"claims": claims}},
     }
 
     return ca.check_claims(tmp_path, _print(tmp_path, annotations))
@@ -148,6 +157,15 @@ class TestClaims:
             _unassertable("color", "accepted_values", "accepted_values requires a list"),
         ]
 
+    def test_a_range_with_no_bound_is_never_silently_accepted(self, tmp_path: Path) -> None:
+        assert _claims(tmp_path, "color", {"null_rate": {"max": None}}) == [
+            _unassertable(
+                "color",
+                "null_rate",
+                "range predicate needs a min or a max that is not null",
+            ),
+        ]
+
     def test_a_stat_the_column_does_not_carry(self, tmp_path: Path) -> None:
         assert _claims(tmp_path, "color", {"percentiles.p50": 3}) == [
             _unassertable(
@@ -178,22 +196,17 @@ class TestValueNotes:
         statistics: dict[str, Any] = _STATS,
     ) -> list[Issue]:
         annotations = {
-            "columns": {
-                "first": "x",
-                "second": {"note": "y"},
-                "third": {"values": "z"},
-                column: {"values": values},
-            },
+            "columns": {"second": {"note": "y"}, column: {"values": values}},
         }
 
         return ca.check_value_notes(tmp_path, _print(tmp_path, annotations, statistics))
 
     def test_a_note_on_a_value_the_exhaustive_list_lacks(self, tmp_path: Path) -> None:
-        values = ["not an entry", {"value": "red", "note": "warm"}, {"value": "green", "note": "x"}]
+        values = [{"value": "red", "note": "warm"}, {"value": "green", "note": "x"}]
 
         assert self._notes(tmp_path, "color", values) == [
             Issue(
-                f"{_ANN}::columns.color.values[2]",
+                f"{_ANN}::columns.color.values[1]",
                 "annotations.unknown-value",
                 "warning",
                 "note names value 'green', which statistics.yaml's exhaustive values list does not "
@@ -203,7 +216,7 @@ class TestValueNotes:
         ]
 
     def test_every_note_on_a_redacted_column_is_unassertable(self, tmp_path: Path) -> None:
-        values = [{"value": "a", "note": "x"}, "not an entry", {"value": "b", "note": "y"}]
+        values = [{"value": "a", "note": "x"}, {"value": "b", "note": "y"}]
 
         assert self._notes(tmp_path, "code", values) == [
             Issue(
@@ -213,7 +226,7 @@ class TestValueNotes:
                 "column is redacted",
                 "§2.7.1",
             )
-            for i in (0, 2)
+            for i in (0, 1)
         ]
 
     def test_a_list_exhaustive_over_a_scoped_read_is_not_the_table_domain(
@@ -264,7 +277,7 @@ class TestEveryTableIsVisited:
                     text = statistics if isinstance(statistics, str) else yaml.safe_dump(statistics)
                     (table_dir / "statistics.yaml").write_text(text)
                     (table_dir / "statistics.annotations.yaml").write_text(
-                        yaml.safe_dump(annotated, sort_keys=False),
+                        yaml.safe_dump(_admissible(annotated), sort_keys=False),
                     )
 
             tables[f"s.{name}"] = {"path": f"s/{name}", "artifacts": artifacts}
@@ -438,3 +451,35 @@ class TestDerivedFrom:
         )
 
         assert ca.check_derived_from(tmp_path, manifest) == []
+
+
+_FINDING = {
+    "color": {"claims": {"null_count": 3}, "values": [{"value": "green", "note": "x"}]},
+    "shade": {"note": "a column the statistics lack"},
+}
+
+
+class TestAFileFailingAdmissionIsReadByNoPass:
+    """SPEC 2.7: a body that fails its schema, or keys a mapping by a non-string, is withheld."""
+
+    @pytest.mark.parametrize(
+        "malformed",
+        [
+            {"columns": {**_FINDING, "first": "not an entry"}},
+            {"columns": _FINDING, "grain": {"keys": [{"columns": [{"id": 1}]}]}},
+            {"columns": {**_FINDING, "code": {"values": [{"value": ["red"], "note": "x"}]}}},
+            {"columns": {**_FINDING, "code": {"claims": {1: 3}}}},
+            {"columns": {**_FINDING, "code": {"note": 5}}},
+        ],
+    )
+    @pytest.mark.parametrize("check", [*_CHECKS, ca.check_derived_from])
+    def test_no_annotations_finding_is_reported(
+        self,
+        tmp_path: Path,
+        malformed: dict[str, Any],
+        check: Any,
+    ) -> None:
+        assert check(tmp_path, _print(tmp_path, malformed)) == []
+
+    def test_the_same_body_admitted_is_reported(self, tmp_path: Path) -> None:
+        assert ca.check_stale_keys(tmp_path, _print(tmp_path, {"columns": _FINDING})) != []

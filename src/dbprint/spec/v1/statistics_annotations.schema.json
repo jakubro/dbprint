@@ -36,7 +36,14 @@
               ],
               "additionalProperties": false,
               "properties": {
-                "value": {},
+                "value": {
+                  "not": {
+                    "type": [
+                      "array",
+                      "object"
+                    ]
+                  }
+                },
                 "note": {
                   "type": "string"
                 }

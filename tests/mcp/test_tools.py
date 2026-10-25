@@ -1023,7 +1023,7 @@ class TestCorruptedArtifactPassesThroughUnchanged:
 
         assert isinstance(result, str)
         assert result.count("Unreadable:") == 1
-        assert "Unreadable: statistics (present on disk, failed to parse)" in result
+        assert "Unreadable: statistics (present on disk, malformed)" in result
 
 
 class TestListTables:
@@ -1657,6 +1657,55 @@ class TestGetDiff:
         assert result["summary"]["relationships_changed"] == 1
         assert result["total"] == 1
 
+    def test_a_relationship_event_about_a_declared_edge_stays_whatever_the_verdict(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        root = primary_conn.output / primary_conn.name
+        trial = "arboretum.seedbank.germination_trial"
+        table_dir = root / "arboretum/seedbank/germination_trial"
+        manifest_path = root / "manifest.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text())
+        manifest["tables"][trial]["artifacts"]["relationships_annotations"] = (
+            "relationships.annotations.yaml"
+        )
+        manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+        address = {
+            "column": ["collector_id"],
+            "target_table": "arboretum.seedbank.collector",
+            "target_column": ["collector_id"],
+        }
+        relationships = yaml.safe_load((table_dir / "relationships.yaml").read_text())
+        relationships["refers_to"] = [
+            e for e in relationships.get("refers_to") or [] if e.get("column") != ["collector_id"]
+        ] + [{**address, "detection": "declared"}]
+        (table_dir / "relationships.yaml").write_text(
+            yaml.safe_dump(relationships, sort_keys=False),
+        )
+        (table_dir / "relationships.annotations.yaml").write_text(
+            yaml.safe_dump(
+                {"format_version": 1, "refers_to": [{**address, "verdict": "rejected"}]},
+            ),
+        )
+        diff = yaml.safe_load((root / "diff.yaml").read_text())
+        diff["changes"] = [
+            {
+                "kind": "relationship_added",
+                "source_table": trial,
+                "source_column": address["column"],
+                "target_table": address["target_table"],
+                "target_column": address["target_column"],
+                "detection": "declared",
+            },
+        ]
+        diff["summary"] = {**diff.get("summary", {}), "relationships_changed": 1}
+        (root / "diff.yaml").write_text(yaml.safe_dump(diff, sort_keys=False))
+
+        result = _dict_result(_state_for(primary_conn), "get_diff", {})
+
+        assert [c["source_column"] for c in result["changes"]] == [["collector_id"]]
+        assert result["summary"]["relationships_changed"] == 1
+
 
 class TestToolDefinitions:
     def test_tool_names_match_definitions(self) -> None:
@@ -1904,6 +1953,50 @@ class TestResolveValueReadsTheStatisticsItWasPromised:
         assert "statistics.annotations.yaml" in excinfo.value.detail
         assert "YAML parse error" in excinfo.value.detail
 
+    def test_an_annotations_file_off_its_schema_names_the_bad_field(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        path = primary_conn.output / primary_conn.name / "arboretum/seedbank/germination_trial"
+        (path / "statistics.annotations.yaml").write_text("format_version: 1\ncolumns: [medium]\n")
+
+        with pytest.raises(McpError) as excinfo:
+            dispatch(
+                _state_for(primary_conn),
+                "resolve_value",
+                {
+                    "table": "arboretum.seedbank.germination_trial",
+                    "column": "medium",
+                    "text": "control",
+                },
+            )
+
+        assert excinfo.value.code == -32603
+        assert excinfo.value.detail.endswith(
+            "statistics.annotations.yaml: does not match its schema (SPEC 2.7): columns: "
+            "['medium'] is not of type 'object'",
+        )
+
+    def test_an_annotations_file_whose_root_is_a_list_is_refused(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        path = primary_conn.output / primary_conn.name / "arboretum/seedbank/germination_trial"
+        (path / "statistics.annotations.yaml").write_text("- medium\n")
+
+        with pytest.raises(McpError) as excinfo:
+            dispatch(
+                _state_for(primary_conn),
+                "resolve_value",
+                {
+                    "table": "arboretum.seedbank.germination_trial",
+                    "column": "medium",
+                    "text": "control",
+                },
+            )
+
+        assert excinfo.value.detail.endswith("root: a list, not a mapping")
+
     def test_a_table_without_a_statistics_artifact_is_unavailable(
         self,
         primary_conn: ConnectionConfig,
@@ -1979,6 +2072,17 @@ class TestAScopedFileIsReadAsScopedWhicheverSignalItCarries:
         if scanned == 0:
             email.update(cardinality=0, values=[])
 
+        email["parts"] = {
+            ".state": {
+                "classification": "categorical",
+                "occurrences": scanned,
+                "null_count": 0,
+                "cardinality": len(email["values"]),
+                "values": email["values"],
+                "values_coverage": 1.0,
+            },
+        }
+
         if block:
             statistics["scope"] = {**_SCOPE_BLOCK, "rows_scanned": scanned}
 
@@ -2041,6 +2145,73 @@ class TestAScopedFileIsReadAsScopedWhicheverSignalItCarries:
         assert "values (complete over the rows scanned): 'open' (50%), 'closed' (50%)" in md
         assert "candidate key over the rows scanned" in md
 
+    @pytest.mark.parametrize(
+        ("block", "echo", "reply_block"),
+        [(True, True, _SCOPE_BLOCK), (True, False, _SCOPE_BLOCK), (False, True, {})],
+        ids=["block-and-echo", "echo-stripped", "echo-without-block"],
+    )
+    @pytest.mark.parametrize(("text", "match"), [("refunded", "none"), ("OPEN", "stored")])
+    def test_a_parts_resolve_value_is_the_scanned_domain_too(
+        self,
+        scoped_conn: ConnectionConfig,
+        block: bool,
+        echo: bool,
+        reply_block: dict[str, Any],
+        text: str,
+        match: str,
+    ) -> None:
+        self._scope(scoped_conn, block=block, echo=echo)
+
+        reply = _dict_result(
+            _state_for(scoped_conn),
+            "resolve_value",
+            {"table": "public.curator", "column": "email", "part": ".state", "text": text},
+        )
+
+        assert (reply["match"], reply["exhaustive"]) == (match, False)
+        assert (reply["scope"], reply["row_count"]) == (reply_block, 5)
+        assert "the list is the whole domain over the rows scanned" in reply["sample_caveat"]
+
+    @pytest.mark.parametrize(
+        ("block", "echo", "reply_block"),
+        [(True, False, _SCOPE_BLOCK), (False, True, {})],
+        ids=["echo-stripped", "echo-without-block"],
+    )
+    def test_a_part_match_carries_the_scope_its_column_would(
+        self,
+        scoped_conn: ConnectionConfig,
+        block: bool,
+        echo: bool,
+        reply_block: dict[str, Any],
+    ) -> None:
+        self._scope(scoped_conn, block=block, echo=echo)
+
+        matches = _dict_result(
+            _state_for(scoped_conn),
+            "search_columns",
+            {"pattern": "email.state"},
+        )
+        part = next(m for m in matches["matches"] if m.get("part") == ".state")
+
+        assert (part["scope"], part["rows_scanned"]) == (reply_block, 2)
+
+    def test_a_part_on_an_empty_scan_is_unavailable(self, scoped_conn: ConnectionConfig) -> None:
+        self._scope(scoped_conn, block=True, echo=True, scanned=0)
+
+        reply = _dict_result(
+            _state_for(scoped_conn),
+            "resolve_value",
+            {"table": "public.curator", "column": "email", "part": ".state", "text": "open"},
+        )
+
+        assert (reply["match"], reply["scope"]["rows_scanned"], reply["row_count"]) == (
+            "unavailable",
+            0,
+            5,
+        )
+        assert reply["exhaustive"] is False
+        assert "no rows" in reply["reason"]
+
     def test_an_empty_scan_is_unavailable_and_lists_nothing(
         self,
         scoped_conn: ConnectionConfig,
@@ -2072,6 +2243,23 @@ class TestAScopedFileIsReadAsScopedWhicheverSignalItCarries:
 
         assert (reply["match"], reply["exhaustive"]) == ("none", True)
         assert "scope" not in reply
+
+    def test_an_unscoped_files_part_carries_no_scope(self, scoped_conn: ConnectionConfig) -> None:
+        self._scope(scoped_conn, block=False, echo=False)
+        state = _state_for(scoped_conn)
+
+        reply = _dict_result(
+            state,
+            "resolve_value",
+            {"table": "public.curator", "column": "email", "part": ".state", "text": "refunded"},
+        )
+        matches = _dict_result(state, "search_columns", {"pattern": "email.state"})["matches"]
+        part = next(m for m in matches if m.get("part") == ".state")
+
+        assert (reply["match"], reply["exhaustive"]) == ("none", True)
+        assert "scope" not in reply
+        assert "scope" not in part
+        assert "rows_scanned" not in part
 
 
 class TestAnUnwalkableManifestEntry:

@@ -4,7 +4,7 @@
 $ pip install 'dbprint[postgres]'
 ```
 
-The extra carries psycopg 3. PostgreSQL additionally needs the **`pg_dump` client binary on `PATH`**: DDL comes from `pg_dump --schema-only`, not from a query. The binary is probed when the connection opens, before any query runs, so a container that installs the Python package alone does not profile statistics and then fail on DDL — it fails at `connecting` with `pg_dump binary not found on PATH`, exits `4`, and writes nothing. `pg_dump` must also be at least the server's major version; an older client refuses a newer server outright, which fails every table's DDL.
+The extra carries psycopg 3. dbprint reads PostgreSQL 11 or later. PostgreSQL additionally needs the **`pg_dump` client binary on `PATH`**: DDL comes from `pg_dump --schema-only`, not from a query. The binary is probed when the connection opens, before any query runs, so a container that installs the Python package alone does not profile statistics and then fail on DDL — it fails at `connecting` with `pg_dump binary not found on PATH`, exits `4`, and writes nothing. `pg_dump` must also be at least the server's major version; an older client refuses a newer server outright, which fails every table's DDL.
 
 Fully-qualified names are `database.schema.table`, whether or not `database` is set.
 
@@ -62,7 +62,7 @@ A plain view is the exception at every rung, including the bottom one: a role ho
 | Seeded | yes, from the table's own name |
 | `looks_like` sub-draw | `TABLESAMPLE` at a computed rate, seeded |
 
-PostgreSQL is one of two engines on which a sampled print is coherent **row for row**: every statement for a sampled table reads the same rows, including the extra distinct-value draw that `inferred.looks_like` takes on top of them. duckdb gives the identical guarantee. Databricks reproduces the sampled fraction reliably but not that row-level agreement with `looks_like`; the remaining five engines can only promise coherence at the population level.
+PostgreSQL is one of two engines on which a sampled print is coherent **row for row**: every statement for a sampled table reads the same rows, including the extra distinct-value draw that `inferred.looks_like` takes on top of them. duckdb gives the identical guarantee. Databricks reproduces the sampled fraction reliably but not that row-level agreement with `looks_like`; every other engine can only promise coherence at the population level.
 
 ## When dbprint writes
 
@@ -75,16 +75,27 @@ Where `TEMPORARY` is absent the run does not fail. It warns on stderr and falls 
 ```
 table 'arboretum.seedbank.germination_trial': could not materialize its sample of 0.25
 (InsufficientPrivilege: permission denied to create temporary tables in database "my_db");
-each statistic for it is measured over its own draw of the rows
+every statement reads the seeded sample directly, so a write between two of them reaches one
+and not the other
 ```
 
-The fallback is not an equivalent path. Each statement then draws its own rows, so a column's listed value counts and the non-null figure they are a share of come from different reads, and the file can disagree with itself on a table nobody wrote to. Setting `read.tables.materialize: false` chooses that trade deliberately, which is the right call where the tool must stay strictly read-only — and the wrong one where it was chosen to avoid a grant.
+On a table nobody writes to during the run, the fallback still reads the same rows in every statement: `BERNOULLI` decides each row from the seed, so the file agrees with itself. What it gives up is protection from writes — a row inserted or deleted between two statements reaches one and not the other, where the copy would have frozen the draw, so a column's listed value counts and the non-null figure they are a share of can come from different rows. Setting `read.tables.materialize: false` chooses that trade deliberately, which is the right call where the tool must stay strictly read-only — and the wrong one on a table taking writes, where it was chosen to avoid a grant.
+
+## Partitioned tables
+
+A partitioned table is printed as its parent. Its partitions are not listed, and a foreign key into or out of it is published once, against the parent, never against the copies PostgreSQL keeps on each partition. A partition detached from its parent is an ordinary table again and publishes its own foreign keys.
 
 ## Foreign tables
 
 A foreign table is listed with `external: true` (SPEC 2.2.20). It is always described from the catalog alone: `USAGE` on its schema is enough, its DDL shows the `CREATE FOREIGN TABLE ... SERVER ... OPTIONS (...)` statement, and no statement reaches the remote server. The foreign server and its user mappings are never dumped.
 
 A rule writing any other `read.tables.mode` for it is refused before any table is read, with exit 1, because the read would reach another live database. A foreign partition is not listed, like any partition; reading its partitioned parent reads it too.
+
+## Inheritance
+
+A table with inheritance children is profiled with them, as a query against it returns them. Its approximate distinct counts come from the `pg_stats` row PostgreSQL keeps for the table and its children together, and its row estimate is the sum of `reltuples` over the table and every descendant. A child that was never analyzed and holds no pages counts nothing; any other never-analyzed child leaves the table without an estimate, so it is counted exactly and size rules do not apply to it. A table whose children carry no such `pg_stats` row has that column counted exactly too, never estimated from its own rows alone.
+
+Autovacuum does not analyze a parent whose children alone change, so its inherited figures can lag them; run `ANALYZE` on the parent to refresh them. Since PostgreSQL 18 that also analyzes every child. A partitioned table's figures come from `ANALYZE` of the partitioned table itself, which autovacuum never runs: until then it has no estimate and is counted exactly.
 
 ## Types without a comparison operator
 
@@ -110,9 +121,15 @@ A network (`inet`, `cidr`), range, multirange or `interval` column lists its val
 
 `database` is optional. Omitted, the connection first opens `postgres` and reads every database that accepts connections and is not a template. A PostgreSQL session is bound to one database, so the connection opens one session per database holding a selected table, with the same credentials, and runs every statement — `pg_dump` included — against the table's own database; a table whose database compares under a different default collation than the connection's first says so on each of its string columns. The grants below are needed in each database profiled. A database whose session will not open, or whose listing fails, is skipped with a warning. A database no `include` pattern can reach by its name is never opened at all. View dependencies are read only in databases holding a selected object; a database whose dependency read fails is named in a warning and its views omit `depends_on` for that run, while every other database's views keep theirs.
 
+## The row-count estimate
+
+A table's size, and a sampled table's `row_count`, come from `pg_class.reltuples`, which `VACUUM`, `ANALYZE` and a few DDL commands update: rows deleted since the last of them reached the table are still counted, so a sampled table publishes `row_count_method: approximate`.
+
 ## Statement timeout
 
 `run.statement_timeout` is sent as the session's own `statement_timeout` setting in the connection's start-up packet, so it bounds every statement the session runs, lock waits included, and a statement that exceeds it is cancelled by the server. `pg_dump`, which extracts each table's DDL, zeroes that setting on its own session; there the limit becomes `--lock-wait-timeout`, bounding the wait for the table lock, while the dump as a whole keeps its fixed 60-second ceiling.
+
+Every session also starts with `standard_conforming_strings = on`, and a session that does not read it back as `on` — a connection pooler that dropped the start-up option — fails the connection. A map or document key read back from the data is spelled into SQL as a string literal, and that literal is safe only under the one grammar the setting fixes.
 
 ## Parallelism
 

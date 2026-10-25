@@ -25,16 +25,28 @@ from dbprint.spec.absence import (
     disabled_of,
     read_table_block,
 )
-from dbprint.spec.artifacts import declared_artifacts, walkable_tables
+from dbprint.spec.artifacts import (
+    ARTIFACT_FILENAMES,
+    DESCRIPTION_FILENAME,
+    PRODUCER_ARTIFACTS,
+    RELATIONSHIPS_ANNOTATIONS_FILENAME,
+    STATISTICS_ANNOTATIONS_FILENAME,
+    declared_artifacts,
+    walkable_tables,
+)
+from dbprint.spec.edges import edge_detection
 from dbprint.spec.fqn import split as split_fqn
-from dbprint.spec.parts import display
+from dbprint.spec.parts import display, enclosing_chain, is_canonical
 from dbprint.spec.profile import effective_profile
 from dbprint.spec.statistics_matrix import forbids
 from . import diff as diff_module
 from .baseline import (
+    ManifestRead,
     failed_tables,
-    load_baseline_manifest,
+    generate_refusal,
     missing_artifacts,
+    read_manifest,
+    unusable_manifest_message,
 )
 from .catalog_only import described_without_query
 from .freshness import age_days, is_stale, parse_profiled_at
@@ -44,7 +56,7 @@ from .manifest_builder import (
     profile_delta,
     profile_dict,
 )
-from .relationship_graph import IncomingFk, edge_detection
+from .relationship_graph import IncomingFk
 from .result import TableResult
 from .yaml_dumper import dump_yaml
 
@@ -126,15 +138,17 @@ class CommittedPrint:
     manifest: Mapping[str, Any] | None = None
     tables: Mapping[str, CommittedTable] = field(default_factory=dict)
     failed_tables: tuple[str, ...] = ()
+    read: ManifestRead | None = None
 
     @classmethod
     def load(cls, prints_root: Path) -> CommittedPrint:
         """Parse the manifest and every artifact it declares, each file at most once."""
 
-        manifest = load_baseline_manifest(prints_root)
+        read = read_manifest(prints_root)
+        manifest = read.manifest
 
         if manifest is None:
-            return cls()
+            return cls(read=read)
 
         connection_profile = manifest.get("profile")
         default_collation = manifest.get("default_collation")
@@ -154,7 +168,19 @@ class CommittedPrint:
             for fqn, entry in walkable_tables(manifest).items()
         }
 
-        return cls(manifest=manifest, tables=tables, failed_tables=failed)
+        return cls(manifest=manifest, tables=tables, failed_tables=failed, read=read)
+
+    def refusal(self, prints_root: Path, connection: str) -> str | None:
+        """Why `generate` must not write over this print, or None when it may."""
+
+        return generate_refusal(self.read, prints_root, connection) if self.read else None
+
+    def unusable_message(self, connection: str) -> str | None:
+        """The failure naming a manifest that exists but cannot be read, or None."""
+
+        unusable = self.read is not None and self.read.state in ("unparseable", "malformed")
+
+        return unusable_manifest_message(self.read, connection) if self.read and unusable else None
 
     def baseline_states(self) -> dict[str, diff_module.TableState] | None:
         """The diff baseline: every committed table's state, None with no usable manifest."""
@@ -246,7 +272,7 @@ class CarryPlan:
         for fqn, reason in reasons:
             table = self.committed.tables[fqn]
 
-            if table.missing_artifacts:
+            if _PRODUCER_KINDS.intersection(table.missing_artifacts):
                 dispositions[fqn] = "missing_artifact"
                 missing.append(fqn)
             else:
@@ -314,10 +340,12 @@ def freshness(
     conn: ConnectionConfig,
     external: bool = False,
     opt_in_only: bool = False,
+    requires_filter: bool = False,
 ) -> FreshnessVerdict:
     """Whether the committed print of a listed table still stands for this run.
 
-    Only while young enough and recorded under the settings this run applies, redaction included.
+    Only while its producer files are on disk and parse, it is young enough, and it was recorded
+    under the settings this run applies, redaction included.
     """
 
     if table is None:
@@ -325,6 +353,12 @@ def freshness(
 
     if table.last_run_failed:
         return FreshnessVerdict(fresh=False, reason="the last run could not profile it")
+
+    if unusable := _unusable_producer_files(table):
+        return FreshnessVerdict(
+            fresh=False,
+            reason=f"committed {', '.join(unusable)} missing or unreadable",
+        )
 
     # A rule tightened since another release would leave a file this binary would not emit,
     # and carrying it forward publishes it as though this binary had.
@@ -353,6 +387,7 @@ def freshness(
         view=table.entry.get("type") == "view",
         external=external,
         opt_in_only=opt_in_only,
+        requires_filter=requires_filter,
     )
 
     if committed_marker != expected_marker:
@@ -378,10 +413,11 @@ def carried_entry(
     """The next manifest entry of a carried table.
 
     `profiled_at` and the ceiling ride over; the delta rebases onto this run's connection profile.
+    The user-authored files it declares are the ones in its directory now.
     """
 
     recorded = carried.table.recorded
-    entry = _entry_from_payload(carried.table.fqn, carried.table.entry)
+    entry = _entry_from_payload(carried.table.fqn, carried.table.entry, carried.table.directory)
 
     if profile is not None and recorded.profile is not None:
         entry = replace(entry, profile=profile_delta(recorded.profile, profile))
@@ -413,9 +449,9 @@ def resolved_part_redaction(
     qualified: str,
     classification: str | None,
     column_inferred: tuple[str | None, str | None],
-    part_inferred: tuple[str | None, str | None],
+    detections: tuple[tuple[str | None, str | None], ...],
 ) -> str | None:
-    """The primitive one part is published under: through its column or its own detections.
+    """The primitive one part is published under, through its column or its `enclosing_chain`.
 
     Each pair is `(sensitivity, looks_like)`; a part with no cell value resolves none.
     """
@@ -423,7 +459,7 @@ def resolved_part_redaction(
     if forbids(classification, "redacted"):
         return None
 
-    return conn.redaction_for_part(qualified, *column_inferred, *part_inferred)
+    return conn.redaction_for_part(qualified, *column_inferred, detections)
 
 
 def redaction_mismatches(
@@ -475,6 +511,22 @@ def _part_mismatches(
         return []
 
     out: list[RedactionMismatch] = []
+    readings = {
+        path: (
+            column_value(block, "inferred.sensitivity"),
+            column_value(block, "inferred.looks_like"),
+        )
+        for path, block in parts.items()
+        if isinstance(block, dict)
+    }
+    chains = {
+        path: (
+            enclosing_chain(path, readings)
+            if isinstance(path, str) and is_canonical(path)
+            else (reading,)
+        )
+        for path, reading in readings.items()
+    }
 
     for path, block in parts.items():
         if not isinstance(block, dict):
@@ -488,10 +540,7 @@ def _part_mismatches(
                 qualified,
                 column_value(block, "classification"),
                 (column.sensitivity, column.looks_like),
-                (
-                    column_value(block, "inferred.sensitivity"),
-                    column_value(block, "inferred.looks_like"),
-                ),
+                chains[path],
             )
             if isinstance(cardinality, int) and not isinstance(cardinality, bool)
             else None
@@ -506,6 +555,9 @@ def _part_mismatches(
 
 
 _LISTED_REASON: dict[str | None, CarryReason] = {"skipped": "fresh", "failed": "failed"}
+_PRODUCER_KINDS = frozenset(
+    kind for kind, name in ARTIFACT_FILENAMES.items() if name in PRODUCER_ARTIFACTS
+)
 
 
 def _load_table(
@@ -814,7 +866,22 @@ def _text_or_none(value: Any) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _entry_from_payload(fqn: str, payload: Mapping[str, Any]) -> ManifestTableEntry:
+def _unusable_producer_files(table: CommittedTable) -> list[str]:
+    parsed = {"statistics": table.statistics, "relationships": table.relationships}
+
+    return [
+        name
+        for kind, name in declared_artifacts(table.entry).items()
+        if kind in _PRODUCER_KINDS
+        and (kind in table.missing_artifacts or (kind in parsed and parsed[kind] is None))
+    ]
+
+
+def _entry_from_payload(
+    fqn: str,
+    payload: Mapping[str, Any],
+    directory: Path,
+) -> ManifestTableEntry:
     artifacts = payload.get("artifacts")
     artifacts = artifacts if isinstance(artifacts, dict) else {}
     profile = payload.get("profile")
@@ -825,9 +892,9 @@ def _entry_from_payload(fqn: str, payload: Mapping[str, Any]) -> ManifestTableEn
         path=payload.get("path", ""),
         has_statistics="statistics" in artifacts,
         has_relationships="relationships" in artifacts,
-        has_description="description" in artifacts,
-        has_statistics_annotations="statistics_annotations" in artifacts,
-        has_relationships_annotations="relationships_annotations" in artifacts,
+        has_description=(directory / DESCRIPTION_FILENAME).is_file(),
+        has_statistics_annotations=(directory / STATISTICS_ANNOTATIONS_FILENAME).is_file(),
+        has_relationships_annotations=(directory / RELATIONSHIPS_ANNOTATIONS_FILENAME).is_file(),
         row_count=payload.get("row_count"),
         columns=payload.get("columns", 0),
         profiled_at=payload.get("profiled_at", ""),

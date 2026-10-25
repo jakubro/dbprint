@@ -1008,3 +1008,66 @@ class TestPagedEnumeration:
             list_page(state, cursor)
 
         assert "changed" in caught.value.detail
+
+
+class TestAConnectionRootFileLinkedOutOfThePrint:
+    """A root file read by fixed name is still a path the print supplies (SPEC 2.5)."""
+
+    @staticmethod
+    def _link_out(conn: ConnectionConfig, name: str) -> Path:
+        path = conn.output / conn.name / name
+        outside = conn.output / f"outside-{name}"
+        outside.write_text("format_version: 1\nnotes: SENTINEL-OUTSIDE\n", encoding="utf-8")
+
+        if path.exists():
+            path.unlink()
+
+        path.symlink_to(outside)
+
+        return path
+
+    @pytest.mark.parametrize(
+        ("name", "kind", "message"),
+        [
+            ("reading.md", "reading", "no reading guide available"),
+            ("diff.yaml", "diff", "no diff available"),
+            ("manifest.annotations.yaml", "manifest_annotations", "manifest_annotations"),
+        ],
+    )
+    def test_it_reads_as_absent(
+        self,
+        primary_conn: ConnectionConfig,
+        name: str,
+        kind: str,
+        message: str,
+    ) -> None:
+        self._link_out(primary_conn, name)
+        state = ServedConnections(served={"production": primary_conn}, default="production")
+
+        with pytest.raises(McpError) as excinfo:
+            read(state, f"dbprint://production/{kind}")
+
+        assert "SENTINEL" not in excinfo.value.detail
+        assert message in excinfo.value.detail or name in excinfo.value.detail
+
+    def test_linked_connection_notes_are_not_listed(self, primary_conn: ConnectionConfig) -> None:
+        self._link_out(primary_conn, "manifest.annotations.yaml")
+        state = ServedConnections(served={"production": primary_conn}, default="production")
+
+        assert "dbprint://production/manifest_annotations" not in {
+            e.uri for e in enumerate_for(state)
+        }
+
+    def test_a_linked_manifest_reads_as_malformed(self, primary_conn: ConnectionConfig) -> None:
+        path = primary_conn.output / primary_conn.name / "manifest.yaml"
+        outside = primary_conn.output / "outside-manifest.yaml"
+        outside.write_bytes(path.read_bytes())
+        path.unlink()
+        path.symlink_to(outside)
+        state = ServedConnections(served={"production": primary_conn}, default="production")
+
+        with pytest.raises(McpError) as excinfo:
+            read(state, "dbprint://production/manifest")
+
+        assert excinfo.value.code == -32603
+        assert "it resolves outside the connection root" in excinfo.value.detail

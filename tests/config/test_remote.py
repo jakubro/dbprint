@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -192,6 +193,44 @@ class TestParseAddress:
 
     def test_a_hash_with_nothing_ref_shaped_after_it_is_not_an_address(self) -> None:
         assert parse_address("./weird#nocolon") is None
+
+    @pytest.mark.parametrize(
+        ("value", "refusal"),
+        [
+            ("--upload-pack=touch seed#main:.", "a remote may not begin with '-'"),
+            ("git@github.com:acme/demo.git#-dormant:.", "a ref may not begin with '-'"),
+            ("https://github.com/acme/demo/blob/-dormant/project1/", "a ref may not begin"),
+            ("git@github.com:acme/demo.git#main:/srv/seedbank", "must be relative"),
+            ("git@github.com:acme/demo.git#main:../seedbank", "must be relative"),
+            ("git@github.com:acme/demo.git#main:project1/../../seedbank", "must be relative"),
+            ("git@github.com:acme/demo.git#main:C:\\seedbank", "must be relative"),
+            ("git@github.com:acme/demo.git#main:\\seedbank", "must be relative"),
+            ("https://github.com/acme/demo/blob/main/../seedbank/", "must be relative"),
+        ],
+    )
+    def test_a_part_that_could_reach_git_as_an_option_or_leave_the_clone_is_refused(
+        self,
+        value: str,
+        refusal: str,
+    ) -> None:
+        with pytest.raises(ConfigError, match=re.escape(refusal)) as raised:
+            parse_address(value)
+
+        assert repr(value) in str(raised.value)
+
+    @pytest.mark.parametrize(
+        ("value", "subpath"),
+        [
+            ("git@github.com:acme/demo.git#main:.", "."),
+            ("git@github.com:acme/demo.git#main:seed..bank/plot", "seed..bank/plot"),
+            ("git@github.com:acme/demo.git#main:project1/.dbprint.yaml", "project1/.dbprint.yaml"),
+        ],
+    )
+    def test_a_subpath_inside_the_repository_parses(self, value: str, subpath: str) -> None:
+        address = parse_address(value)
+
+        assert address is not None
+        assert address.subpath == subpath
 
 
 class TestMaterialize:
@@ -515,6 +554,68 @@ class TestMaterialize:
         again = materialize(address)
 
         assert (again / ".dbprint.yaml").is_file()
+
+
+class TestGitNeverReadsAPartAsAnOption:
+    """Every positional a locator supplies sits past `--`; a subpath never leaves the clone."""
+
+    @pytest.fixture
+    def argv(self, monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+        calls: list[list[str]] = []
+        real = remote_module._run_git
+
+        def recording(args: list[str]) -> str:
+            calls.append(args)
+
+            return real(args)
+
+        monkeypatch.setattr(remote_module, "_run_git", recording)
+
+        return calls
+
+    def test_clone_and_fetch_take_their_positionals_after_a_separator(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        argv: list[list[str]],
+    ) -> None:
+        bare, _work = _bare_repo(tmp_path)
+        address = RemoteAddress(remote=str(bare), ref="main")
+        materialize(address)
+        monkeypatch.setattr(remote_module, "CACHE_TTL_SECONDS", 0)
+        materialize(address)
+
+        clone = next(call for call in argv if "clone" in call)
+        fetch = next(call for call in argv if "fetch" in call)
+
+        assert clone[clone.index("clone") + 1 :] == [
+            "--quiet",
+            "--",
+            str(bare),
+            str(remote_module._cache_dir_for(address)),
+        ]
+        assert fetch[fetch.index("fetch") + 1 :] == ["--quiet", "--", "origin", "main"]
+
+    def test_a_subpath_through_a_symlink_out_of_the_clone_is_refused(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        bare, work = _bare_repo(tmp_path)
+        outside = tmp_path / "seedbank"
+        outside.mkdir()
+        (outside / ".dbprint.yaml").write_text("connections: {}\n")
+        (work / "escape").symlink_to(outside)
+        (work / "alias").symlink_to("prints")
+        _run_git(["add", "escape", "alias"], cwd=work)
+        _run_git(["commit", "-m", "links"], cwd=work)
+        _run_git(["push", "--quiet", str(bare), "main:main"], cwd=work)
+
+        with pytest.raises(ConfigError, match="'escape' resolves outside the cloned repository"):
+            materialize(RemoteAddress(remote=str(bare), subpath="escape"))
+
+        inside = materialize(RemoteAddress(remote=str(bare), subpath="alias"))
+
+        assert (inside / "primary" / "manifest.yaml").is_file()
 
 
 class TestWatchForRefresh:

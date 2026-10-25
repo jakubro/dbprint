@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import shutil
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 import yaml
 
-from dbprint.engine.baseline import load_baseline_manifest
+from dbprint.engine.baseline import contained, escaping_links, generate_refusal, read_manifest
 from dbprint.engine.carried import CommittedPrint
 from dbprint.engine.diff import (
     GrainKeyState,
@@ -16,6 +18,7 @@ from dbprint.engine.diff import (
     PhysicalLayoutState,
     TableState,
 )
+from tests._links import ESCAPING, linked_tree
 
 
 def _seed_print(tmp_path: Path) -> Path:
@@ -332,7 +335,7 @@ class TestWrongShapeArtifacts:
         prints = _seed_print(tmp_path)
         (prints / "manifest.yaml").write_text("- one\n- two\n")
 
-        assert load_baseline_manifest(prints) is None
+        assert read_manifest(prints).state == "malformed"
 
     def test_manifest_whose_tables_is_a_sequence_is_no_baseline(self, tmp_path: Path) -> None:
         """Every walker below iterates `tables` as a map, so a list there is unusable."""
@@ -342,21 +345,27 @@ class TestWrongShapeArtifacts:
             yaml.safe_dump({"format_version": 1, "tables": ["public.curator"]}),
         )
 
-        assert load_baseline_manifest(prints) is None
+        assert read_manifest(prints).state == "malformed"
 
-    def test_an_ignored_manifest_is_named(
-        self,
-        tmp_path: Path,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
+    def test_an_unusable_manifest_is_named_in_the_generate_refusal(self, tmp_path: Path) -> None:
         prints = _seed_print(tmp_path)
         manifest_path = prints / "manifest.yaml"
         manifest_path.write_text("- one\n- two\n")
+        refusal = generate_refusal(read_manifest(prints), prints, "primary")
 
-        with caplog.at_level(logging.WARNING):
-            load_baseline_manifest(prints)
+        assert refusal is not None
+        assert str(manifest_path) in refusal
 
-        assert str(manifest_path) in caplog.text
+    def test_an_entry_a_reader_cannot_follow_is_named_as_dropped(self, tmp_path: Path) -> None:
+        prints = _seed_print(tmp_path)
+        manifest = yaml.safe_load((prints / "manifest.yaml").read_text())
+        manifest["tables"]["public.specimen_loan"] = {"path": 7}
+        (prints / "manifest.yaml").write_text(yaml.safe_dump(manifest))
+        read = read_manifest(prints)
+
+        assert read.state == "ok"
+        assert read.dropped == ("public.specimen_loan",)
+        assert "public.specimen_loan" in (generate_refusal(read, prints, "primary") or "")
 
     def test_a_table_entry_that_is_not_a_mapping_is_skipped(self, tmp_path: Path) -> None:
         """One unusable entry costs its own table a baseline, not its neighbours'."""
@@ -378,7 +387,7 @@ class TestWrongShapeArtifacts:
         prints = _seed_print(tmp_path)
         (prints / "manifest.yaml").write_text("format_version: 1\ntables:\n")
 
-        assert load_baseline_manifest(prints) is None
+        assert read_manifest(prints).state == "malformed"
 
     def test_an_empty_artifact_is_absent_without_comment(
         self,
@@ -549,3 +558,142 @@ def _print_without_statistics(tmp_path: Path) -> Path:
     (prints / "manifest.yaml").write_text(yaml.safe_dump(manifest))
 
     return prints
+
+
+class TestLinksOutOfThePrint:
+    """One walk finds every link below the print root that resolves outside it."""
+
+    def test_escaping_links(self, tmp_path: Path) -> None:
+        root, _ = linked_tree(tmp_path)
+
+        assert escaping_links(root) == ESCAPING
+
+    def test_a_root_that_does_not_exist_holds_none(self, tmp_path: Path) -> None:
+        assert escaping_links(tmp_path / "absent") == frozenset()
+
+    def test_contained(self, tmp_path: Path) -> None:
+        root, outside = linked_tree(tmp_path)
+
+        assert contained(root, root / "public" / "curator" / "inside.md")
+        assert not contained(root, root / "public" / "curator" / "description.md")
+        assert not contained(root, outside / "notes.md")
+
+    def test_an_entry_under_a_link_out_is_dropped(self, tmp_path: Path) -> None:
+        prints = _seed_print(tmp_path)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        shutil.move(prints / "public" / "curator", outside / "curator")
+        (prints / "public" / "curator").symlink_to(outside / "curator")
+
+        read = read_manifest(prints)
+
+        assert read.state == "ok"
+        assert read.dropped == ("public.curator",)
+        assert generate_refusal(read, prints, "primary") is not None
+
+    def test_an_entry_reached_through_a_link_inside_the_print_is_dropped(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        prints = _seed_print(tmp_path)
+        outside = tmp_path / "outside.yaml"
+        shutil.move(prints / "public" / "curator", prints / "shelf")
+        shutil.move(prints / "shelf" / "statistics.yaml", outside)
+        (prints / "shelf" / "statistics.yaml").symlink_to(outside)
+        (prints / "public" / "curator").symlink_to(prints / "shelf")
+
+        assert read_manifest(prints).dropped == ("public.curator",)
+
+    @pytest.mark.parametrize(
+        ("path", "plant"),
+        [
+            ("shelf/loop", lambda prints: (prints / "shelf" / "loop").symlink_to(prints / "shelf")),
+            ("shelf\\stack", lambda prints: (prints / "shelf\\stack").symlink_to(prints / "shelf")),
+            (".", lambda prints: (prints / "statistics.yaml").symlink_to(prints / "shelf" / "s")),
+        ],
+        ids=["link-back-up-the-tree", "backslash-in-a-name", "the-root-itself"],
+    )
+    def test_an_entry_spelled_past_the_walk_is_dropped(
+        self,
+        tmp_path: Path,
+        path: str,
+        plant: Callable[[Path], object],
+    ) -> None:
+        prints = _seed_print(tmp_path)
+        outside = tmp_path / "outside.yaml"
+        shutil.move(prints / "public" / "curator", prints / "shelf")
+        shutil.move(prints / "shelf" / "statistics.yaml", outside)
+        (prints / "shelf" / "s").symlink_to(outside)
+        (prints / "shelf" / "statistics.yaml").symlink_to(prints / "shelf" / "s")
+        plant(prints)
+        manifest = yaml.safe_load((prints / "manifest.yaml").read_text())
+        manifest["tables"]["public.curator"]["path"] = path
+        (prints / "manifest.yaml").write_text(yaml.safe_dump(manifest))
+
+        assert read_manifest(prints).dropped == ("public.curator",)
+
+    def test_an_entry_routed_out_and_back_is_dropped(self, tmp_path: Path) -> None:
+        prints = _seed_print(tmp_path)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        shutil.move(prints / "public" / "curator", prints / "shelf")
+        (prints / "shelf" / "loop").symlink_to(prints / "shelf")
+        (prints / "shelf" / "out").symlink_to(outside)
+        (outside / "back").symlink_to(prints / "shelf")
+        manifest = yaml.safe_load((prints / "manifest.yaml").read_text())
+        manifest["tables"]["public.curator"]["path"] = "shelf/loop/out/back"
+        (prints / "manifest.yaml").write_text(yaml.safe_dump(manifest))
+
+        assert read_manifest(prints).dropped == ("public.curator",)
+
+    def test_a_backslash_named_link_out_reached_and_back_inside_is_dropped(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        prints = _seed_print(tmp_path)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        shutil.move(prints / "public" / "curator", prints / "real")
+        (prints / "shelf\\out").symlink_to(outside)
+        (outside / "back").symlink_to(prints / "real")
+        manifest = yaml.safe_load((prints / "manifest.yaml").read_text())
+        manifest["tables"]["public.curator"]["path"] = "shelf\\out/back"
+        (prints / "manifest.yaml").write_text(yaml.safe_dump(manifest))
+
+        assert read_manifest(prints).dropped == ("public.curator",)
+
+    def test_a_backslash_named_directory_is_not_the_link_its_slashed_spelling_names(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        prints = _seed_print(tmp_path)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (prints / "shelf").mkdir()
+        (prints / "shelf" / "out").symlink_to(outside)
+        shutil.move(prints / "public" / "curator", prints / "shelf\\out")
+        manifest = yaml.safe_load((prints / "manifest.yaml").read_text())
+        manifest["tables"]["public.curator"]["path"] = "shelf\\out"
+        (prints / "manifest.yaml").write_text(yaml.safe_dump(manifest))
+
+        assert read_manifest(prints).dropped == ()
+
+    def test_an_entry_that_cannot_resolve_is_dropped_not_raised(self, tmp_path: Path) -> None:
+        prints = _seed_print(tmp_path)
+        manifest = yaml.safe_load((prints / "manifest.yaml").read_text())
+        manifest["tables"]["public.curator"]["path"] = "public/cur\0ator"
+        manifest["tables"][7] = {"type": "table", "artifacts": {"ddl": "ddl.sql"}}
+        (prints / "manifest.yaml").write_text(yaml.safe_dump(manifest))
+
+        assert read_manifest(prints).dropped == ("public.curator",)
+
+    def test_a_manifest_linked_out_reads_as_malformed(self, tmp_path: Path) -> None:
+        prints = _seed_print(tmp_path)
+        outside = tmp_path / "manifest.yaml"
+        shutil.move(prints / "manifest.yaml", outside)
+        (prints / "manifest.yaml").symlink_to(outside)
+
+        read = read_manifest(prints)
+
+        assert read.state == "malformed"
+        assert read.reason == "it resolves outside the connection root"

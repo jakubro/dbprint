@@ -7,7 +7,7 @@ from difflib import get_close_matches
 from typing import Any
 
 from dbprint.config import ConnectionConfig
-from dbprint.engine import EXIT_GENERIC, EXIT_OK
+from dbprint.engine import EXIT_GENERIC, EXIT_OK, worst_exit
 from dbprint.engine.baseline import (
     failed_tables,
     read_manifest,
@@ -37,7 +37,7 @@ def resolve_connections(
             messages.append(
                 f"{conn_config.name}: {unusable_manifest_message(read, conn_config.name)}",
             )
-            exit_code = max(exit_code, EXIT_GENERIC)
+            exit_code = worst_exit(exit_code, EXIT_GENERIC)
             continue
 
         if unprofiled := unprofiled_matches(manifest, target, select_all):
@@ -50,7 +50,7 @@ def resolve_connections(
             resolved_tables = resolve_tables(manifest, target, select_all)
         except NoMatch as exc:
             messages.append(str(exc))
-            exit_code = max(exit_code, EXIT_GENERIC)
+            exit_code = worst_exit(exit_code, EXIT_GENERIC)
             continue
 
         resolved.append((conn_config, manifest, resolved_tables))

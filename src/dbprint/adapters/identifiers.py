@@ -14,7 +14,7 @@ from typing import Self
 from dbprint.config.selectors import expand
 from dbprint.spec.fqn import SEPARATOR
 from dbprint.spec.fqn import join as join_fqn
-from .base import ColumnMeta, TableMeta, TableType
+from .base import ColumnMeta, RequiredFilter, TableMeta, TableType
 from .dialect import Dialect
 
 
@@ -52,6 +52,17 @@ def quote(name: str, dialect: Dialect) -> str:
     return mark + name.replace(mark, mark * 2) + mark
 
 
+def unquote(rendered: str, dialect: Dialect) -> str:
+    """`rendered` without `dialect`'s quote pair, each doubled quote undoubled; else unchanged."""
+
+    mark = dialect.quote_char
+
+    if len(rendered) >= 2 and rendered[0] == mark and rendered[-1] == mark:
+        return rendered[1:-1].replace(mark * 2, mark)
+
+    return rendered
+
+
 def qualified(quoted_name: str) -> str:
     """`quoted_name` qualified by `SOURCE_ALIAS`."""
 
@@ -82,6 +93,7 @@ def table_meta(
     *,
     external: bool = False,
     opt_in_only: bool = False,
+    required_filter: RequiredFilter | None = None,
 ) -> TableMeta:
     """The `TableMeta` a table whose catalog spells it `physical` is written under."""
 
@@ -93,6 +105,7 @@ def table_meta(
         namespace_path=path,
         external=external,
         opt_in_only=opt_in_only,
+        required_filter=required_filter,
     )
 
 

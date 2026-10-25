@@ -31,6 +31,8 @@ from dbprint.adapters import (
     Range,
     ValueCount,
 )
+from dbprint.adapters.base import PartStats
+from dbprint.adapters.mock import MockParts
 
 
 # UUIDs render at a fixed width, so every uuid-typed column's length summary is a constant.
@@ -56,6 +58,8 @@ FUTURE_DATED_COLUMN = "matures_at"
 FUTURE_DATED_RANGE_MAX = "2099-01-01T00:00:00"
 SCOPED_KEY_COLUMN = "id"
 SCOPED_COMPLETE_LIST_COLUMN = "stage"
+SCOPED_PART_COLUMN = "attrs"
+SCOPED_PART_PATH = ".stage"
 SCOPED_LATEST_COLUMN = "updated_at"
 # Its P1/P99 sit inside its min/max, so labelling them the range would hide both tails.
 PERCENTILE_INSIDE_RANGE_COLUMN = "updated_at"
@@ -68,6 +72,8 @@ APPROXIMATE_ROW_COUNT_TABLE = "public.batch"
 APPROXIMATE_ROW_COUNT = 40_000
 INCOMPLETE_GRAIN_TABLE = "public.wide_lookup"
 DECLARED_MISSING_TABLE = "public.dropped_statistics"
+OUTSIDE_PRINT_TABLE = "public.herbarium"
+OUTSIDE_PRINT_SENTINEL = "SENTINEL-OUTSIDE-THE-PRINT"
 DECLARED_MISSING_KIND = "statistics"
 # No fixture table declares one - the manifest never lists it, so it stays absent everywhere.
 NEVER_DECLARED_KIND = "description"
@@ -87,6 +93,7 @@ EXTREME_TABLE = "public.gauge"
 # Declared, inferred-and-rejected and measured edges, listed worst-first on disk.
 SEVERAL_EDGES_TABLE = "public.gauge"
 SEVERAL_EDGES_COLUMN = "sparse"
+VOID_VERDICT_NOTE = "a reused tray number, not a cultivar"
 REJECTED_EDGE_TARGET = "public.batch"
 # An edge only `relationships.annotations.yaml` carries (SPEC 2.7.2), out of the same table.
 HUMAN_EDGE_COLUMN = "status"
@@ -144,6 +151,37 @@ connections:
 """
 
 
+def _scoped_stage_part() -> MockParts:
+    """`attrs.stage`: a complete two-value list over every scanned row."""
+
+    return MockParts(
+        candidates=(
+            PartStats(
+                path=SCOPED_PART_PATH,
+                occurrences=SCOPED_ROWS_SCANNED,
+                stats=ColumnStats(
+                    sql_type="VARCHAR",
+                    nullable=True,
+                    null_count=0,
+                    null_rate=0.0,
+                    cardinality=2,
+                    cardinality_ratio=0.0,
+                    cardinality_method="exact",
+                    values=(
+                        ValueCount(value="sown", count=150),
+                        ValueCount(value="harvested", count=100),
+                    ),
+                    values_coverage=1.0,
+                    distribution="imbalanced",
+                    length=Length(min=4, max=9, avg=6.0, p95=9.0),
+                ),
+                samples=("sown", "harvested"),
+            ),
+        ),
+        size=Length(min=1, max=1, avg=1.0, p95=1.0),
+    )
+
+
 def _fixture_tables() -> dict[str, MockTable]:
     sowing_trial = mock_table(
         "public.sowing_trial",
@@ -154,6 +192,7 @@ def _fixture_tables() -> dict[str, MockTable]:
             ("matures_at", "timestamp with time zone"),
             ("stage", "text"),
             ("updated_at", "timestamp with time zone"),
+            ("attrs", "jsonb"),
         ),
         {
             "id": ColumnStats(
@@ -255,10 +294,20 @@ def _fixture_tables() -> dict[str, MockTable]:
                 percentiles={"p01": "2010-04-01", "p50": "2012-03-01", "p99": "2014-02-01"},
                 quantized_count=SCOPED_ROWS_SCANNED,
             ),
+            "attrs": ColumnStats(
+                sql_type="jsonb",
+                nullable=False,
+                null_count=0,
+                null_rate=0.0,
+                cardinality=2,
+                cardinality_ratio=0.008,
+                cardinality_method="exact",
+            ),
         },
         ddl="CREATE TABLE public.sowing_trial (id uuid PRIMARY KEY, cultivar_id uuid, "
         "email text, matures_at timestamp with time zone, stage text, "
-        "updated_at timestamp with time zone);\n",
+        "updated_at timestamp with time zone, attrs jsonb);\n",
+        parts={SCOPED_PART_COLUMN: _scoped_stage_part()},
         relationships=[
             ForeignKeyMeta(
                 column=("cultivar_id",),
@@ -623,7 +672,7 @@ def _inject_reader_only_states(print_root: Path) -> None:
 
 
 def _inject_several_edges(table_dir: Path) -> None:
-    """Give one column three edges, reject the inferred one, and add an annotation-only edge.
+    """Give one column three edges, reject two (the declared one void), add an annotation-only edge.
 
     Reciprocity forbids these shapes, hence after the gate.
     """
@@ -646,6 +695,12 @@ def _inject_several_edges(table_dir: Path) -> None:
     path.write_text(yaml.safe_dump(relationships, sort_keys=False))
     rejection = {**edge(REJECTED_EDGE_TARGET, "id", "inferred"), "verdict": "rejected"}
     del rejection["detection"]
+    void = {
+        **edge(FK_TARGET_TABLE, "id", "declared"),
+        "verdict": "rejected",
+        "note": VOID_VERDICT_NOTE,
+    }
+    del void["detection"]
     authored = {
         "column": [HUMAN_EDGE_COLUMN],
         "target_table": HUMAN_EDGE_TARGET,
@@ -654,7 +709,7 @@ def _inject_several_edges(table_dir: Path) -> None:
     }
     (table_dir / "relationships.annotations.yaml").write_text(
         yaml.safe_dump(
-            {"format_version": 1, "refers_to": [rejection, authored]},
+            {"format_version": 1, "refers_to": [rejection, void, authored]},
             sort_keys=False,
         ),
     )
@@ -669,6 +724,27 @@ def _drop_declared_statistics(print_root: Path) -> None:
 
     path = print_root / "public" / "dropped_statistics" / "statistics.yaml"
     path.unlink()
+
+
+def _inject_outside_print_entry(print_root: Path) -> None:
+    """Declare, after the gate, a table whose `path` climbs to files beside the print (SPEC 2.5)."""
+
+    outside = print_root.parent.parent / "outside_print"
+    outside.mkdir()
+    (outside / "ddl.sql").write_text(
+        f"-- {OUTSIDE_PRINT_SENTINEL}\nCREATE TABLE herbarium (id int);\n",
+    )
+    (outside / "description.md").write_text(f"# {OUTSIDE_PRINT_SENTINEL}\n")
+    path = print_root / "manifest.yaml"
+    manifest = yaml.safe_load(path.read_text())
+    manifest["tables"][OUTSIDE_PRINT_TABLE] = {
+        "type": "table",
+        "path": "../../outside_print",
+        "artifacts": {"ddl": "ddl.sql", "description": "description.md"},
+        "columns": 1,
+        "profiled_at": "2026-06-08T00:00:00Z",
+    }
+    path.write_text(yaml.safe_dump(manifest, sort_keys=False))
 
 
 def build(project_dir: Path) -> AdversarialPrint:
@@ -706,6 +782,7 @@ def build(project_dir: Path) -> AdversarialPrint:
 
     _drop_declared_statistics(print_root)
     _inject_reader_only_states(print_root)
+    _inject_outside_print_entry(print_root)
 
     conn = ConnectionConfig(
         name=CONN_NAME,

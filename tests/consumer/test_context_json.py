@@ -38,11 +38,15 @@ from tests.fixtures.adversarial import (
     ORPHAN_SPELLING_COLUMN,
     ORPHAN_SPELLING_TABLE,
     ORPHAN_SPELLING_VALUE,
+    OUTSIDE_PRINT_SENTINEL,
+    OUTSIDE_PRINT_TABLE,
     PERCENTILE_INSIDE_RANGE_COLUMN,
     REDACTED_COLUMN,
     SCOPED_COMPLETE_LIST_COLUMN,
     SCOPED_KEY_COLUMN,
     SCOPED_LATEST_COLUMN,
+    SCOPED_PART_COLUMN,
+    SCOPED_PART_PATH,
     SCOPED_TABLE,
     SEVERAL_EDGES_COLUMN,
     SEVERAL_EDGES_TABLE,
@@ -52,6 +56,7 @@ from tests.fixtures.adversarial import (
     UNEVALUATED_TABLE,
     UNREADABLE_PROFILED_AT,
     UNREADABLE_PROFILED_TABLE,
+    VOID_VERDICT_NOTE,
     AdversarialPrint,
 )
 
@@ -75,9 +80,11 @@ COVERS = frozenset(
         "incomplete_grain_search",
         "catalog_only_table",
         "declared_missing_artifact",
+        "outside_print_entry",
         "delimiter_in_a_value",
         "value_spelling",
         "scoped_complete_list",
+        "scoped_part_list",
         "scoped_candidate_key",
         "scoped_latest_value",
         "extreme_number_statistics",
@@ -303,6 +310,7 @@ def test_a_columns_edges_are_carried_less_the_rejected_one(
     ]
 
     assert sorted(targets) == ["public.cultivar", "public.wide_lookup"]
+    assert VOID_VERDICT_NOTE not in json.dumps(payload["relationships"])
 
 
 def test_a_human_authored_edge_reaches_both_tables_tagged_annotated(
@@ -325,3 +333,27 @@ def test_a_human_authored_edge_reaches_both_tables_tagged_annotated(
 
 def test_connection_notes_reach_a_single_table_reader(adversarial_print: AdversarialPrint) -> None:
     assert _payload(adversarial_print, SEVERAL_EDGES_TABLE)["connection_notes"] == CONNECTION_NOTE
+
+
+def test_scoped_part_list_rides_beside_the_top_level_scope(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    payload = _payload(adversarial_print, SCOPED_TABLE)
+    part = payload["statistics"]["columns"][SCOPED_PART_COLUMN]["parts"][SCOPED_PART_PATH]
+
+    assert payload["scope"]["rows_scanned"] == 250
+    assert part["values_coverage"] == 1.0  # noqa: RUF069 - the expected value is an exact literal
+
+
+def test_an_entry_outside_the_print_reads_as_absent(adversarial_print: AdversarialPrint) -> None:
+    runner = CliRunner()
+    old_cwd = Path.cwd()
+    os.chdir(adversarial_print.conn.output.parent)
+
+    try:
+        result = runner.invoke(main, ["context", OUTSIDE_PRINT_TABLE, "--format", "json"])
+    finally:
+        os.chdir(old_cwd)
+
+    assert result.exit_code != 0
+    assert OUTSIDE_PRINT_SENTINEL not in result.output

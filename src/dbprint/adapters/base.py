@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from decimal import Decimal
 from functools import partial
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
@@ -38,7 +40,7 @@ from dbprint.spec.coverage import coverage_share, enumeration_limit
 from dbprint.spec.distribution import Distribution, Frequencies
 from dbprint.spec.distribution import classify as classify_distribution
 from dbprint.spec.distribution import summarize as summarize_frequencies
-from dbprint.spec.parts import ELEMENT, KEYS, depth, select_parts
+from dbprint.spec.parts import ELEMENT, KEYS, depth, parent, select_parts
 from dbprint.spec.parts import member as member_step
 from dbprint.spec.percentiles import coherent_percentiles
 from dbprint.spec.rounding import UnrepresentableValue, measured_value, round_statistic
@@ -48,6 +50,8 @@ from dbprint.spec.temporal_age import FreshnessClassification
 from dbprint.spec.temporal_range import is_representable
 from dbprint.spec.value_text import scalar_text, value_order_key
 from .dialect import Dialect
+from .driver import last_rows
+from .errors import QueryFailed
 
 
 if TYPE_CHECKING:
@@ -98,6 +102,7 @@ __all__ = [
     "TemporalShape",
     "UniqueKeyMeta",
     "ValueCount",
+    "WithholdsKeys",
     "assemble_column_stats",
     "batched_by_cost",
     "declared_members",
@@ -114,6 +119,7 @@ __all__ = [
     "null_flags",
     "null_patterns_from_rows",
     "numeric_block_from_row",
+    "numeric_row",
     "phase_a_cost",
     "pre_classify",
     "profile_over",
@@ -272,10 +278,19 @@ def temporal_block_unmeasured(sql_type: str) -> tuple[str, ...]:
 
 
 @dataclass(frozen=True)
+class RequiredFilter:
+    """A vendor option refusing every read not filtered on `column` (None where unnamed)."""
+
+    option: str
+    column: str | None
+
+
+@dataclass(frozen=True)
 class TableMeta:
     """Identifies a table/view/matview and its namespace position.
 
-    `external`: rows live elsewhere (SPEC 2.2.20); `opt_in_only`: read only under an explicit mode.
+    `external`: rows live elsewhere (SPEC 2.2.20); `opt_in_only`: read only under an explicit mode;
+    `required_filter`: read only under a `filter` mode.
     """
 
     fqn: str
@@ -283,6 +298,7 @@ class TableMeta:
     namespace_path: tuple[str, ...]
     external: bool = False
     opt_in_only: bool = False
+    required_filter: RequiredFilter | None = None
 
 
 @dataclass(frozen=True)
@@ -631,6 +647,7 @@ class ColumnStats:
     sum: float | None = None
     zero_count: int | None = None
     negative_count: int | None = None
+    non_finite_count: int | None = None
     empty_count: int | None = None
     quantized_count: int | None = None
     length: Length | None = None
@@ -896,14 +913,19 @@ def order_values(entries: Iterable[ValueCount]) -> tuple[ValueCount, ...]:
 
 ValueList = tuple[tuple[ValueCount, ...], float, bool]
 TopN = tuple[Distribution, Frequencies, tuple[ValueCount, ...]]
+# Range, percentiles, distribution, frequencies, values, mean, sum, non_finite_count, unmeasured,
+# and the failure that cost the column its mean and sum.
 NumericBlock = tuple[
-    Range,
-    dict[str, Any],
+    Range | None,
+    dict[str, Any] | None,
     Distribution | None,
     Frequencies | None,
     tuple[ValueCount, ...] | None,
     float | None,
     float | None,
+    int | None,
+    tuple[str, ...],
+    BaseException | None,
 ]
 TemporalBlock = tuple[
     Range,
@@ -932,6 +954,10 @@ class PartStats:
     samples: tuple[Any, ...] = ()
     size: Length | None = None
     keyed: bool = False
+
+
+# A key set's profile and those of the parts it sits inside, outermost first -> withheld.
+WithholdsKeys = Callable[[PartStats, tuple[PartStats, ...]], bool]
 
 
 @dataclass(frozen=True)
@@ -1108,7 +1134,8 @@ class DocumentReads:
 def key_literal(key: Any, key_sql_type: str, *, backslash_escapes: bool = False) -> str:
     r"""`key` as a SQL literal of `key_sql_type`: an integer bare, a string quoted, anything else cast.
 
-    `backslash_escapes` names a dialect whose string literals treat `\` as an escape.
+    `backslash_escapes` for a dialect whose literals treat `\` as an escape; the plain form is safe
+    only under `standard_conforming_strings = on`.
     """
 
     if isinstance(key, int) and not isinstance(key, bool):
@@ -1215,26 +1242,56 @@ def descend(
     root: PartSource,
     config: StatisticsConfig,
     *,
-    children: Callable[[PartSource], list[PartSource]],
+    children: Callable[[PartSource, Callable[[PartSource], bool]], list[PartSource]],
     occurrences: Callable[[PartSource], int],
     profile: Callable[[PartSource, int], PartStats],
     size: Length | None = None,
+    withholds_keys: WithholdsKeys | None = None,
 ) -> ColumnParts:
     """Walk a column's parts to `max_part_depth`, choose them with `select_parts`, profile each.
 
-    `children` is the kind-specific step (an array's elements, a record's members, ...), so an
-    array of records composes without a step knowing about the other.
+    `children` is the kind-specific step; its `withheld` asks before any member spells a key.
     """
 
     found: dict[str, PartSource] = {}
     counts: dict[str, int] = {}
+    occurrence_memo: dict[str, int] = {}
+    profile_memo: dict[str, PartStats] = {}
     unlisted = 0
     frontier = [root]
 
+    def counted_once(node: PartSource) -> int:
+        if node.path not in occurrence_memo:
+            occurrence_memo[node.path] = occurrences(node)
+
+        return occurrence_memo[node.path]
+
+    def profiled_once(node: PartSource) -> PartStats:
+        if node.path not in profile_memo:
+            profile_memo[node.path] = profile(node, counted_once(node))
+
+        return profile_memo[node.path]
+
+    def withheld(key_set: PartSource) -> bool:
+        if withholds_keys is None:
+            return False
+
+        enclosing: list[PartSource] = []
+        current = parent(key_set.path)
+
+        while current is not None:
+            enclosing.insert(0, found[current])
+            current = parent(current)
+
+        return withholds_keys(
+            profiled_once(key_set),
+            tuple(profiled_once(node) for node in enclosing),
+        )
+
     while frontier:
-        reached = [child for node in frontier for child in children(node)]
+        reached = [child for node in frontier for child in children(node, withheld)]
         counted = [
-            (child, occurrences(child))
+            (child, counted_once(child))
             for child in reached
             if depth(child.path) <= config.max_part_depth
         ]
@@ -1250,7 +1307,7 @@ def descend(
     chosen = select_parts(counts, config.max_parts, config.max_part_depth)
 
     return ColumnParts(
-        parts=tuple(profile(found[path], counts[path]) for path in chosen),
+        parts=tuple(profiled_once(found[path]) for path in chosen),
         found=len(found) + unlisted,
         size=size,
     )
@@ -1498,12 +1555,18 @@ def assemble_column_stats(
         return replace(stats, values=values, values_coverage=coverage)
     elif pre == "numeric":
         # A suppressed numeric column is an array's pooled float elements: no list is published.
-        rng, percentiles, distribution, frequencies, values, mean, total = reads.numeric_block(
-            col,
-            non_null,
-            config,
-            values=not suppressed,
-        )
+        (
+            rng,
+            percentiles,
+            distribution,
+            frequencies,
+            values,
+            mean,
+            total,
+            non_finite,
+            unmeasured,
+            failure,
+        ) = reads.numeric_block(col, non_null, config, values=not suppressed)
 
         return replace(
             stats,
@@ -1514,6 +1577,9 @@ def assemble_column_stats(
             values=values,
             mean=mean,
             sum=total,
+            non_finite_count=non_finite,
+            unmeasured=unmeasured or None,
+            unmeasured_cause=failure,
         )
     elif pre == "temporal":
         return reads.temporal(stats, col, non_null, config)
@@ -1717,31 +1783,92 @@ def numeric_block_from_row(
     config: StatisticsConfig,
     top_n: Callable[[], TopN] | None,
     exact: Callable[[Any], Any] = lambda value: value,
+    *,
+    finite: Any = None,
+    non_null: Any = None,
+    failure: BaseException | None = None,
 ) -> NumericBlock:
     """A numeric column's block from its `(min, max, avg, sum)` row and percentiles in key order.
 
-    `exact` reads a bound or sum the driver hands back as something other than a number; with
-    no `top_n` the value list is not read and its three fields are None.
+    `finite`/`non_null` share one statement; a non-finite mean, sum or percentile is unmeasured,
+    and so is a NULL mean or sum beside a measured minimum.
     """
 
     if row is None:
-        return Range(min=None, max=None), {}, "uniform", summarize_frequencies([]), (), None, None
+        return (
+            Range(min=None, max=None),
+            {},
+            "uniform",
+            summarize_frequencies([]),
+            (),
+            None,
+            None,
+            None,
+            (),
+            failure,
+        )
+
+    counted = int(finite) if finite is not None else None
+    scanned = int(non_null) if non_null is not None else None
+    non_finite = (
+        scanned - counted
+        if counted is not None and scanned is not None and scanned > counted
+        else None
+    )
+    distribution, frequencies, values = top_n() if top_n is not None else (None, None, None)
+
+    if counted == 0:
+        unowed = ("percentiles", "range")
+
+        return (
+            None,
+            None,
+            distribution,
+            frequencies,
+            values,
+            None,
+            None,
+            non_finite,
+            unowed,
+            failure,
+        )
+
+    unmeasured: list[str] = []
+    mean, total = row[2], exact(row[3])
+    measured = row[0] is not None
+
+    if not _finite_reading(mean) or (mean is None and measured):
+        mean = None
+        unmeasured.append("mean")
+
+    if not _finite_reading(total) or (total is None and measured):
+        total = None
+        unmeasured.append("sum")
+
+    raw_percentiles = list(percentile_values)
+
+    if not all(_finite_reading(v) for v in raw_percentiles):
+        raw_percentiles = []
+        unmeasured.append("percentiles")
 
     rng = Range(
         min=round_statistic(exact(row[0]), exact_int=True),
         max=round_statistic(exact(row[1]), exact_int=True),
     )
-    percentiles = coherent_percentiles(
-        {
-            f"p{p:02d}": round_statistic(v)
-            for p, v in zip(config.percentiles, percentile_values, strict=True)
-        }
-        if len(percentile_values)
-        else {},
-        rng.min,
-        rng.max,
+    percentiles = (
+        None
+        if "percentiles" in unmeasured
+        else coherent_percentiles(
+            {
+                f"p{p:02d}": round_statistic(v)
+                for p, v in zip(config.percentiles, raw_percentiles, strict=True)
+            }
+            if raw_percentiles
+            else {},
+            rng.min,
+            rng.max,
+        )
     )
-    distribution, frequencies, values = top_n() if top_n is not None else (None, None, None)
 
     return (
         rng,
@@ -1749,9 +1876,31 @@ def numeric_block_from_row(
         distribution,
         frequencies,
         values,
-        round_statistic(row[2]),
-        round_statistic(exact(row[3]), exact_int=True),
+        round_statistic(mean),
+        round_statistic(total, exact_int=True),
+        non_finite,
+        tuple(sorted(unmeasured)),
+        failure,
     )
+
+
+def numeric_row[T](read: Callable[[bool], T]) -> tuple[T, BaseException | None]:
+    """`read(True)`'s row, or - when it raises - `read(False)`'s, the mean and sum left NULL.
+
+    A timeout or an unrepresentable value propagates instead, as does a second failure.
+    """
+
+    try:
+        return read(True), None
+    except UnrepresentableValue:
+        raise
+    except QueryFailed as exc:
+        if exc.timed_out:
+            raise
+
+        return read(False), exc
+    except Exception as exc:  # noqa: BLE001 - the totals are dropped and the read retried once
+        return read(False), exc
 
 
 def unrepresentable_fields(rng: Range, percentiles: dict[str, Any]) -> tuple[str, ...]:
@@ -1838,7 +1987,10 @@ class Adapter(ABC):
 
     @abstractmethod
     def extract_ddl(self, fqn: str) -> str:
-        """Return native-dialect DDL for the object, post-normalization (SPEC 2.1)."""
+        """Return native-dialect DDL for the object, post-normalization (SPEC 2.1).
+
+        The engine applies the credential masks of SPEC 2.1.3.
+        """
 
     @abstractmethod
     def introspect_columns(self, fqn: str) -> list[ColumnMeta]:
@@ -1858,7 +2010,11 @@ class Adapter(ABC):
 
     @abstractmethod
     def introspect_indexes(self, fqn: str) -> list[IndexMeta]:
-        """Return secondary indexes only; disjoint from `introspect_unique_keys` per SPEC 2.6.7."""
+        """Return secondary indexes only; disjoint from `introspect_unique_keys` per SPEC 2.6.7.
+
+        An index lists its key columns only - never an included column or an expression member -
+        and an index with no column member is not reported.
+        """
 
     @abstractmethod
     def introspect_unique_keys(self, fqn: str) -> list[UniqueKeyMeta]:
@@ -1866,7 +2022,9 @@ class Adapter(ABC):
 
         Catalog metadata only - no scan; at most one group is primary. Per SPEC 2.6.7:
         includes a bare unique index backing no constraint, excludes a partial unique index
-        and whatever `introspect_indexes` reports.
+        and whatever `introspect_indexes` reports. Per SPEC 2.2.12: an index with any expression
+        member declares no key - a bare unique one then appears in neither method - and an index's
+        included columns are never part of one.
         """
 
     @abstractmethod
@@ -2073,14 +2231,15 @@ class Adapter(ABC):
         config: StatisticsConfig,
         counts: TableCounts,
         scope: TableScope | None = None,
+        *,
+        withholds_keys: WithholdsKeys | None = None,
     ) -> dict[str, ColumnParts]:
         """The parts of each of `columns` this adapter descends into (SPEC 2.2.18), by name.
 
-        A column absent from the result was not descended; the engine calls this only while
-        `max_parts` is positive, and an adapter that descends into nothing keeps this default.
+        A column absent was not descended; no statement spells a key `withholds_keys` withholds.
         """
 
-        del fqn, columns, config, counts, scope
+        del fqn, columns, config, counts, scope, withholds_keys
 
         return {}
 
@@ -2146,6 +2305,8 @@ class Adapter(ABC):
     def execute_query(self, sql: str) -> list[tuple[Any, ...]]:
         """Execute user-authored read-only SQL; return row tuples, column order preserved.
 
+        Every statement runs in order on one session, and the answer is the last statement's
+        rows; `NoResultSet` when that statement returns no result set (ASSERTIONS.md 3.1).
         Read-only session per ASSERTIONS.md 3.4; errors propagate for the SQL assertion
         evaluator to turn into an Issue.
         """
@@ -2261,6 +2422,8 @@ class SqlAdapter(Adapter):
         config: StatisticsConfig,
         counts: TableCounts,
         scope: TableScope | None = None,
+        *,
+        withholds_keys: WithholdsKeys | None = None,
     ) -> dict[str, ColumnParts]:
         from .identifiers import source_column
 
@@ -2280,7 +2443,7 @@ class SqlAdapter(Adapter):
             root = PartSource("", root_type(col), source, source_column(col, self.DIALECT))
 
             if self._holds_parts(cursor, root):
-                out[col.name] = self._descended(cursor, identity, root, config)
+                out[col.name] = self._descended(cursor, identity, root, config, withholds_keys)
 
         return out
 
@@ -2290,6 +2453,7 @@ class SqlAdapter(Adapter):
         identity: Identity,
         root: PartSource,
         config: StatisticsConfig,
+        withholds_keys: WithholdsKeys | None,
     ) -> ColumnParts:
         from . import statements
 
@@ -2302,6 +2466,7 @@ class SqlAdapter(Adapter):
             occurrences=lambda node: statements.row_count_of(execute, node.source),
             profile=partial(self._profiled_part, cursor, identity, config),
             size=shape.size if shape is not None else None,
+            withholds_keys=withholds_keys,
         )
 
         if shape is None:
@@ -2427,6 +2592,7 @@ class SqlAdapter(Adapter):
         cursor: Any,
         config: StatisticsConfig,
         node: PartSource,
+        withheld: Callable[[PartSource], bool],
     ) -> list[PartSource]:
         from .identifiers import source_column
 
@@ -2442,12 +2608,12 @@ class SqlAdapter(Adapter):
         entries = self._entries(cursor, node)
 
         if entries is not None:
-            return self._map_children(cursor, config, node, entries)
+            return self._map_children(cursor, config, node, entries, withheld)
 
         documents: DocumentReads | None = getattr(self._stats, "DOCUMENTS", None)
 
         if documents is not None and documents.holds(node):
-            return self._document_children(cursor, config, node, documents)
+            return self._document_children(cursor, config, node, documents, withheld)
 
         records: RecordReads | None = getattr(self._stats, "RECORDS", None)
 
@@ -2469,6 +2635,7 @@ class SqlAdapter(Adapter):
         config: StatisticsConfig,
         node: PartSource,
         entries: MapEntries,
+        withheld: Callable[[PartSource], bool],
     ) -> list[PartSource]:
         from . import statements
         from .identifiers import SOURCE_ALIAS, source_column
@@ -2491,6 +2658,10 @@ class SqlAdapter(Adapter):
             value,
             unlisted=distinct - len(keys),
         )
+
+        if keys and withheld(key_set):
+            return [replace(key_set, unlisted=distinct)]
+
         held = [
             PartSource(
                 f"{node.path}{member_step(scalar_text(key))}",
@@ -2514,6 +2685,7 @@ class SqlAdapter(Adapter):
         config: StatisticsConfig,
         node: PartSource,
         documents: DocumentReads,
+        withheld: Callable[[PartSource], bool],
     ) -> list[PartSource]:
         from . import statements
         from .identifiers import SOURCE_ALIAS, source_column
@@ -2524,6 +2696,25 @@ class SqlAdapter(Adapter):
         execute = partial(self._driver.exec_query, cursor)
         entries = documents.entries(node)
         keys, distinct = statements.map_keys(execute, self.DIALECT, entries, config.max_parts)
+        key_set = PartSource(
+            f"{node.path}{KEYS}",
+            documents.key_sql_type,
+            derived(select_from([f"ent.k AS {named}"], entries), SOURCE_ALIAS),
+            value,
+            unlisted=distinct - len(keys),
+        )
+        elements = partial(
+            self._document_value,
+            cursor,
+            documents,
+            f"{node.path}{ELEMENT}",
+            documents.elements(node),
+            keyed=False,
+        )
+
+        if keys and withheld(key_set):
+            return [replace(key_set, unlisted=distinct), elements()]
+
         held = [
             derived(
                 select_from(["ent.v AS v"], entries)
@@ -2532,19 +2723,7 @@ class SqlAdapter(Adapter):
             )
             for key, _ in keys
         ]
-        children = (
-            [
-                PartSource(
-                    f"{node.path}{KEYS}",
-                    documents.key_sql_type,
-                    derived(select_from([f"ent.k AS {named}"], entries), SOURCE_ALIAS),
-                    value,
-                    unlisted=distinct - len(keys),
-                ),
-            ]
-            if distinct
-            else []
-        )
+        children = [key_set] if distinct else []
         children += [
             self._document_value(
                 cursor,
@@ -2556,16 +2735,7 @@ class SqlAdapter(Adapter):
             for (key, _), values in zip(keys, held, strict=True)
         ]
 
-        return [
-            *children,
-            self._document_value(
-                cursor,
-                documents,
-                f"{node.path}{ELEMENT}",
-                documents.elements(node),
-                keyed=False,
-            ),
-        ]
+        return [*children, elements()]
 
     def _document_value(
         self,
@@ -2835,14 +3005,12 @@ class SqlAdapter(Adapter):
         )
 
     def execute_query(self, sql: str) -> list[tuple[Any, ...]]:
-        """Run user-authored SQL and return all rows; SQL assertion path (ASSERTIONS.md 3).
+        """Run every statement of user-authored SQL; return the last one's rows (ASSERTIONS.md 3).
 
         Read-only is the operator's responsibility, not enforced here (ASSERTIONS.md 3.4).
         """
 
-        rows = self._driver.exec_query(self._cursor, sql).fetchall()
-
-        return [tuple(row) for row in rows]
+        return last_rows(self._driver.exec_query(self._cursor, sql))
 
     def _key_sketch(
         self,
@@ -3036,3 +3204,10 @@ def _described_apart(column: ColumnMeta) -> bool:
 
 
 _PART_VALUE = ColumnMeta(name="v", sql_type="", nullable=True, default=None, ordinal=1)
+
+
+def _finite_reading(value: Any) -> bool:
+    if isinstance(value, Decimal):
+        return value.is_finite()
+
+    return not isinstance(value, float) or math.isfinite(value)

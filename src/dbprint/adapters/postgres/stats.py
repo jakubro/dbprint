@@ -25,7 +25,16 @@ from dbprint.spec.rounding import (
 from dbprint.spec.spatial import Extent, Geometry
 from .connection import DIALECT, exec_query
 from .introspect import composite_columns, is_hstore, reltuples_estimate, vector_schema
-from .rendering import render_binary, render_domain, render_operand, render_text, temporal_shape
+from .rendering import (
+    finite_value,
+    mean_expression,
+    render_binary,
+    render_domain,
+    render_operand,
+    render_text,
+    sum_expression,
+    temporal_shape,
+)
 from .. import statements
 from ..base import (
     ArrayReads,
@@ -62,6 +71,7 @@ from ..base import (
     measure_columns,
     measures_length,
     numeric_block_from_row,
+    numeric_row,
     phase_a_cost,
     profile_over,
     row_count_or_none,
@@ -498,6 +508,9 @@ def _timeline_bucket_expr(cn: str, sql_type: str, unit: str) -> str:
     if temporal_shape(sql_type) == "date":
         return f"DATE_TRUNC('{unit}', {cn}::TIMESTAMP)"
 
+    if temporal_shape(sql_type) == "timestamp_tz":
+        return f"DATE_TRUNC('{unit}', {_utc_reading(cn, sql_type)}) AT TIME ZONE 'UTC'"
+
     return f"DATE_TRUNC('{unit}', {cn})"
 
 
@@ -632,11 +645,12 @@ def _phase_a_statement(
         )
 
         if is_numeric_type(col.classified_type):
+            fv = finite_value(cn, col.classified_type)
             select_parts.extend(
                 (
                     f"COUNT(1) FILTER (WHERE {cn} = 0) AS zero_{column_alias(col.name)}",
-                    f"COUNT(1) FILTER (WHERE {cn} < 0) AS neg_{column_alias(col.name)}",
-                    f"COUNT(1) FILTER (WHERE {cn} = TRUNC({cn})) AS quant_{column_alias(col.name)}",
+                    f"COUNT(1) FILTER (WHERE {fv} < 0) AS neg_{column_alias(col.name)}",
+                    f"COUNT(1) FILTER (WHERE {fv} = TRUNC({fv})) AS quant_{column_alias(col.name)}",
                 ),
             )
 
@@ -757,7 +771,8 @@ def _approximate_cardinality(
 ) -> int | None:
     """Distinct-count estimate from the planner, or None when it has none.
 
-    None is the absence of an estimate, not a zero count; the caller then counts exactly.
+    None is the absence of an estimate, not a zero count; the caller then counts exactly. A
+    table with inheritance children reads the row covering them, as its statements do.
     """
 
     row = exec_query(
@@ -767,10 +782,22 @@ def _approximate_cardinality(
           sts.n_distinct
         FROM
           pg_stats sts
+          JOIN pg_namespace nsp ON nsp.nspname = sts.schemaname
+          JOIN pg_class cls ON
+            cls.relnamespace = nsp.oid
+            AND cls.relname = sts.tablename
         WHERE
           sts.schemaname = %s
           AND sts.tablename = %s
           AND sts.attname = %s
+          AND sts.inherited = EXISTS (
+            SELECT
+              1
+            FROM
+              pg_inherits inh
+            WHERE
+              inh.inhparent = cls.oid
+          )
         """,
         (*identity.addressed, col_name),
     ).fetchone()
@@ -889,29 +916,38 @@ def _fetch_numeric_block(
     values: bool = True,
 ) -> NumericBlock:
     cn = _operand(col)
+    fv = finite_value(cn, col.classified_type)
+    counted = [f"COUNT({fv}) AS fin_val", f"COUNT({cn}) AS nn_val"] if fv != cn else []
     pct_select = [
-        f"PERCENTILE_CONT({p / 100.0}::DOUBLE PRECISION) WITHIN GROUP (ORDER BY {cn}) AS p_{p:02d}"
+        f"PERCENTILE_CONT({p / 100.0}::DOUBLE PRECISION) WITHIN GROUP (ORDER BY {fv}) AS p_{p:02d}"
         for p in config.percentiles
     ]
-    row = exec_query(
-        conn,
-        f"""
-        SELECT
-          MIN({cn}) AS mn,
-          MAX({cn}) AS mx,
-          AVG({cn}) AS avg_val,
-          SUM({cn}) AS sum_val,
-          {listed(pct_select, 10)}
-        FROM
-          {indented(source, 10)}
-        WHERE
-          {cn} IS NOT NULL
-        """,
-    ).fetchone()
+
+    def read(aggregates: bool) -> Any:
+        mean = mean_expression(fv, col.classified_type) if aggregates else "NULL"
+        total = sum_expression(fv, col.classified_type) if aggregates else "NULL"
+
+        return exec_query(
+            conn,
+            f"""
+            SELECT
+              MIN({fv}) AS mn,
+              MAX({fv}) AS mx,
+              {mean} AS avg_val,
+              {total} AS sum_val,
+              {listed([*counted, *pct_select], 14)}
+            FROM
+              {indented(source, 14)}
+            WHERE
+              {cn} IS NOT NULL
+            """,
+        ).fetchone()
+
+    row, failure = numeric_row(read)
 
     return numeric_block_from_row(
         row,
-        row[4:] if row else (),
+        row[4 + len(counted) :] if row else (),
         config,
         None
         if not values
@@ -924,6 +960,9 @@ def _fetch_numeric_block(
             config,
             measured_value,
         ),
+        finite=row[4] if row and counted else None,
+        non_null=row[5] if row and counted else None,
+        failure=failure,
     )
 
 
@@ -1055,11 +1094,12 @@ def _fetch_calendar_temporal_block(
     # A DATE value is always its own day-truncation (SPEC 2.2.3): the count would be a truism,
     # so `quantized_count` is omitted - judged, as the validator does, on the published type.
     day_aligned = has_day_resolution(col.sql_type)
+    utc = _utc_reading(cn, col.classified_type)
 
     agg_select = (
         [f"MIN({cn}) AS mn", f"MAX({cn}) AS mx"]
         + (
-            [f"COUNT(1) FILTER (WHERE {cn} = DATE_TRUNC('day', {cn})) AS quant"]
+            [f"COUNT(1) FILTER (WHERE {utc} = DATE_TRUNC('day', {utc})) AS quant"]
             if day_aligned
             else []
         )
@@ -1073,14 +1113,21 @@ def _fetch_calendar_temporal_block(
     ]
 
     lo, hi = f"'{_EPOCH_FLOOR}'::{cast_type}", f"'{_EPOCH_CEIL}'::{cast_type}"
-    clamped_mn = f"LEAST(GREATEST(mn, {lo}), {hi})::TIMESTAMPTZ"
-    clamped_mx = f"LEAST(GREATEST(mx, {lo}), {hi})::TIMESTAMPTZ"
+    clamped_mn = f"LEAST(GREATEST(mn, {lo}), {hi})"
+    clamped_mx = f"LEAST(GREATEST(mx, {lo}), {hi})"
+    # Each operand differences in its own type: a naive one cast to TIMESTAMPTZ would pass
+    # through the session zone and gain or lose a daylight-saving hour.
+    elapsed = (
+        f"{clamped_mx} - {clamped_mn}"
+        if date_only
+        else f"EXTRACT(DAY FROM ({clamped_mx} - {clamped_mn}))"
+    )
     # GREATEST/LEAST ignore a NULL argument rather than propagating it, so an empty column
     # would otherwise clamp to a real bound and report a span for data that does not exist.
     span_days = f"""
         CASE
           WHEN mn IS NULL THEN NULL
-          ELSE EXTRACT(DAY FROM ({clamped_mx} - {clamped_mn}))
+          ELSE {elapsed}
         END
         """
 
@@ -1195,3 +1242,9 @@ def _null_tested(col: ColumnMeta) -> str:
 
 def _operand(col: ColumnMeta) -> str:
     return render_operand(source_column(col, DIALECT), col.classified_type)
+
+
+def _utc_reading(expr: str, sql_type: str) -> str:
+    """A zone-aware value as its naive UTC wall clock, so truncation ignores the session zone."""
+
+    return f"({expr} AT TIME ZONE 'UTC')" if temporal_shape(sql_type) == "timestamp_tz" else expr

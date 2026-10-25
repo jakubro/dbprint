@@ -10,6 +10,7 @@ import pytest
 
 from dbprint.adapters import MockAdapter, MockTable
 from dbprint.config import RuleConfig, RuleMatch, TablesConfig
+from dbprint.config.project import ReadConfig, ReadSettings
 from dbprint.engine import ConnectFailed, Engine
 from dbprint.engine.baseline import ManifestRead
 from dbprint.engine.explain import explain
@@ -169,3 +170,127 @@ def test_an_unreachable_database_raises_connect_failed(tmp_path: Path) -> None:
         Engine(_Unreachable(curator_fixture()), conn_config(tmp_path), tmp_path).estimate_row_count(
             FQN,
         )
+
+
+SAMPLE_WHEN_BIG = RuleConfig(
+    match=RuleMatch(min_rows=1000),
+    profile={"read": {"tables": {"mode": "sample", "fraction": 0.5}}},
+    label="defaults.rules[1]",
+)
+
+
+def _catalog(tmp_path: Path, *rules: RuleConfig) -> Any:
+    conn = _conn(tmp_path, *rules)
+    read = ReadSettings(tables=ReadConfig(mode="catalog"))
+
+    return replace(conn, profile=replace(conn.profile, read=read))
+
+
+def test_a_catalog_only_table_is_not_sized_from_its_recorded_count(tmp_path: Path) -> None:
+    explained = explain(_catalog(tmp_path, BIG), FQN, _manifest(row_count=5000))
+
+    assert explained.row_count is None
+    assert explained.profile.rules[0].outcome == "size_unknown"
+    assert explained.note == (
+        "described from the catalog alone, so generate takes no row-count estimate for it"
+    )
+    assert explained.profile.values["freshness"]["max_age_days"] == 7
+
+
+def test_a_catalog_only_table_ignores_a_live_estimate_too(tmp_path: Path) -> None:
+    explained = explain(
+        _catalog(tmp_path, BIG),
+        FQN,
+        _manifest(row_count=5000),
+        estimate=5000,
+        online=True,
+    )
+
+    assert explained.row_count is None
+    assert explained.profile.rules[0].outcome == "size_unknown"
+
+
+def test_a_size_rule_writing_the_mode_still_sizes_a_catalog_only_table(tmp_path: Path) -> None:
+    explained = explain(_catalog(tmp_path, SAMPLE_WHEN_BIG), FQN, _manifest(row_count=5000))
+
+    assert explained.row_count == 5000
+    assert explained.profile.rules[0].outcome == "applied"
+    assert explained.profile.values["read"]["tables"]["mode"] == "sample"
+
+
+def _estimating(**table: Any) -> MockAdapter:
+    fixture = curator_fixture()
+    fixture[FQN] = replace(fixture[FQN], row_count_estimate=4321, **table)
+
+    return MockAdapter(fixture)
+
+
+def test_the_engine_takes_no_estimate_for_a_catalog_only_table(tmp_path: Path) -> None:
+    engine = Engine(_estimating(), _catalog(tmp_path, BIG), tmp_path)
+
+    assert engine.estimate_row_count(FQN) is None
+
+
+def test_the_engine_takes_no_estimate_for_an_external_table_read_by_no_rule(
+    tmp_path: Path,
+) -> None:
+    engine = Engine(_estimating(external=True), _conn(tmp_path, BIG), tmp_path)
+
+    assert engine.estimate_row_count(FQN) is None
+
+
+def test_a_size_rule_writing_the_mode_turns_the_estimate_back_on(tmp_path: Path) -> None:
+    engine = Engine(_estimating(), _catalog(tmp_path, SAMPLE_WHEN_BIG), tmp_path)
+
+    assert engine.estimate_row_count(FQN) == 4321
+
+
+def test_an_external_table_read_by_no_rule_is_not_sized_from_its_recorded_count(
+    tmp_path: Path,
+) -> None:
+    explained = explain(_conn(tmp_path, BIG), FQN, _manifest(row_count=5000), external=True)
+
+    assert explained.row_count is None
+    assert explained.profile.rules[0].outcome == "size_unknown"
+    assert explained.note == (
+        "described from the catalog alone, so generate takes no row-count estimate for it"
+    )
+    assert explained.profile.values["freshness"]["max_age_days"] == 7
+
+
+def test_an_external_table_read_by_no_rule_ignores_a_live_estimate_too(tmp_path: Path) -> None:
+    explained = explain(
+        _conn(tmp_path, BIG),
+        FQN,
+        _manifest(row_count=5000),
+        estimate=5000,
+        online=True,
+        external=True,
+    )
+
+    assert explained.row_count is None
+    assert explained.profile.rules[0].outcome == "size_unknown"
+
+
+def test_a_rule_writing_the_mode_sizes_an_external_table(tmp_path: Path) -> None:
+    explained = explain(
+        _conn(tmp_path, SAMPLE_WHEN_BIG),
+        FQN,
+        _manifest(row_count=5000),
+        external=True,
+    )
+
+    assert (explained.row_count, explained.count_source) == (5000, "print")
+    assert explained.profile.rules[0].outcome == "applied"
+
+
+def test_a_rule_naming_the_mode_sizes_an_external_table(tmp_path: Path) -> None:
+    full = RuleConfig(
+        match=RuleMatch(tables=(FQN,)),
+        profile={"read": {"tables": {"mode": "full"}}},
+        label="defaults.rules[1]",
+    )
+    explained = explain(_conn(tmp_path, BIG, full), FQN, _manifest(row_count=5000), external=True)
+
+    assert (explained.row_count, explained.count_source) == (5000, "print")
+    assert explained.profile.rules[0].outcome == "applied"

@@ -83,6 +83,8 @@ Both `tables` and `queries` are OPTIONAL. An `assertions:` block with neither ke
 
 A shape violating this section — `assertions:` itself not a mapping, `tables:` not a mapping, `queries:` not a list, a table or column body not a mapping, a query entry not a mapping, or a query missing `name`/`sql`/a valid `expect` — is a block-shape fault. Evaluators MUST emit `assertion.malformed-block` (error) for it. Only a fault in `assertions:` itself, the one shape nothing else can be extracted from, MAY abort evaluation of the whole connection; every other block-shape fault MUST NOT prevent evaluation of the assertions unaffected by it — the malformed table, column or query is skipped, and every sibling assertion is still evaluated, per §5.4's run-everything-then-report principle.
 
+A key this section does not define is a fault too, wherever it sits: under `assertions:`, a table, or a query entry it is `assertion.malformed-block`; under a column, a name outside §2.4's vocabulary is `assertion.unknown-stat`; inside a range predicate, a key other than `min` and `max` is `assertion.malformed-predicate`. Each is reported with its full path and the nearest valid key, whether or not the print holds the table or column it sits under, and every recognised key beside it is still evaluated.
+
 ### 1.3 FQN matching
 
 Each key under `tables:` is a fully-qualified table name matching the FQN convention from the adapter's namespace path (per [SPEC §1.3](format/v1/SPEC.md#13-namespace-path)). Evaluators MUST match assertion FQNs against produced table FQNs exactly: lowercase, dotted (e.g., `arboretum.seedbank.accession`).
@@ -124,7 +126,7 @@ Every predicate is `<stat>: <expected>` where `<expected>` follows one of the fo
 | Scalar | `null_rate: 0.0` | Exact equality |
 | Range | `null_rate: {max: 0.01}` | Bounds — `min`, `max`, or both |
 | Enum | `classification: categorical` | Field MUST equal the value |
-| Set | `accepted_values: [a, b, c]` | The column's `values` list MUST be a subset of the given set. Applies only when that list is the column's whole domain: exhaustive (`values_coverage` of `1.0`) and read over the whole table, never from a file carrying `scope` |
+| Set | `accepted_values: [a, b, c]` | The column's `values` list MUST be a subset of the given set. Applies only when that list is the column's whole domain: exhaustive (`values_coverage` of `1.0`) and read over the whole table, never from a file carrying `scope`. Elements compare by type first: one of another type than the listed values (`true` against numbers, `1` against strings) is `assertion.malformed-predicate`; a temporal element matches by instant, as a range bound does; a `null` element is ignored |
 | Pattern | `looks_like: email` | The `inferred.looks_like` field MUST equal the value |
 
 Range form details:
@@ -134,6 +136,7 @@ Range form details:
 - `{min: X, max: Y}` — actual value MUST be in `[X, Y]`
 - A temporal value and its bounds compare as instants, never as text: `'2024-03-01 05:00:00'`, `'2024-03-01T04:00:00-01:00'` and an unquoted YAML `2024-03-01 05:00:00` name one instant. A reading without an offset is UTC, on either side; a date is its midnight UTC. A time of day compares only against a time of day, ordered by its UTC equivalent. A bound of the other kind, or with no ISO 8601 reading, is `assertion.malformed-predicate`
 - The same rule decides a scalar predicate on a temporal value: instant equality, not string equality
+- A range names at least one bound that is not null: `{max: null}`, an empty `max:`, and `{min: ~, max: ~}` are `assertion.malformed-predicate`; a null bound beside a real one is ignored
 
 Evaluators MUST emit `assertion.malformed-predicate` (error) when a predicate uses an unknown form or an incompatible value type (e.g., string scalar against a numeric stat). The type check runs before equality: `nullable: 1` or `null_count: false` is malformed, never a pass because a boolean equals its integer.
 
@@ -145,7 +148,7 @@ tables:
     row_count: <predicate>
 ```
 
-The only per-table predicate is `row_count`, applied to the top-level `row_count` field from `statistics.yaml`. A file carrying `catalog_only` (SPEC §2.2.15) issued no query and has no `row_count`, so the predicate is inapplicable there (`assertion.inapplicable-stat`, warning), in both modes.
+The only per-table predicate is `row_count`, applied to the top-level `row_count` field from `statistics.yaml`. A file carrying `catalog_only` (SPEC §2.2.15) issued no query and has no `row_count`, so the predicate is inapplicable there (`assertion.inapplicable-stat`, warning), in both modes. `row_count:` with no value is `assertion.malformed-predicate`.
 
 ### 2.3 Per-column predicates
 
@@ -192,7 +195,7 @@ Stats marked R or O in the SPEC §2.2.3 field matrix for the column's classifica
 | Mode | Source for statistic assertion evaluation |
 |---|---|
 | Offline (`dbprint check`) | The committed `prints/<connection>/<namespace>/<table>/statistics.yaml` |
-| Online (`dbprint check --online`) | Live re-extraction via the adapter; the just-computed `ColumnStats` payloads |
+| Online (`dbprint check --online`) | Live re-extraction via the adapter; the statistics that re-extraction would write |
 
 The predicate form is identical in both modes. Only the source of evidence differs.
 
@@ -209,11 +212,17 @@ The predicate form is identical in both modes. Only the source of evidence diffe
 | `accepted_values` on a column whose `values` list is truncated | `assertion.inapplicable-stat` warning — a capped list is the frequent slice of a domain, not the domain, so a subset check over it would both miss real violations and invent others |
 | `accepted_values` on a table whose print carries `scope` | `assertion.inapplicable-stat` warning; the detail names the scope — a list complete over the rows scanned is not the table's domain, for the same reason as a truncated one |
 | `accepted_values` over a `DECIMAL`/`NUMERIC` column | The list holds numbers on every classification (SPEC §2.2.4), so the set is written as numbers: `[-20, -19.5]`, not `['-20.0', '-19.5']` |
+| `accepted_values: [true, false]` on an integer column, or `[1, 2]` on a string column | `assertion.malformed-predicate`, for the same reason as `nullable: 1` |
+| `accepted_values` of YAML-native dates on a categorical date column | Compared by instant: `[2024-03-01]` matches a listed `'2024-03-01'` |
+| `null_count: {max: false}`, `row_count: {min: true}`, or any boolean range bound | `assertion.malformed-predicate`; a boolean has no order |
 | `accepted_values` and the table has values outside the asserted set | FAIL — `assertion.accepted-values-violated`; the offending values listed in the Issue detail |
 | Numeric range bound is a string, or a string range bound is numeric | `assertion.malformed-predicate` error; a temporal bound with no ISO 8601 reading (`'next tuesday'`), or of the other kind (a date against a time of day), is malformed too |
 | An offset-less value against an offset-bearing bound, or the reverse | The offset-less side is read as UTC (SPEC §2.2.4) |
 | A date against a datetime bound | The date is its midnight UTC: `'2024-03-02'` fails `{min: '2024-03-02T12:00:00'}` |
 | An unrepresentable temporal value (`infinity`, a BC or negative year, a year above 9999) | Ordered, not skipped: `-infinity`, BC and negative years sort before every representable instant, the rest after, so `infinity` fails `{max: '2030-01-01'}` |
+| A `range`/`percentiles` reading of `.nan`, which a conforming print never carries (SPEC §2.2.4) | FAIL — a NaN orders against no bound, so `{max: 100}` fails with `actual .nan is not a number a bound can order`; an infinity is compared as a number, so `.inf` fails `{max: 100}` and passes `{min: 0}` |
+| A NaN written as a range bound (`{max: .nan}`) | `assertion.malformed-predicate` error — a NaN bound orders nothing |
+| `accepted_values: [.nan]` on a column listing `.nan` | PASS — two NaNs are one value, as in diff |
 | A bound written with more than six fractional digits | Compared at microsecond resolution; SPEC renders no finer |
 | `nullable: 1`, `candidate_key: 1`, `null_count: false` | `assertion.malformed-predicate` error — a boolean and a number are different types |
 | All-null column asserted with `looks_like: <pattern>` | `assertion.inapplicable-stat` warning — `looks_like` requires sampled non-null values |
@@ -250,7 +259,7 @@ queries:
 | `name` | string | YES | Identifier-style (letters, digits, underscores); MUST be unique within the connection's `queries` list |
 | `severity` | enum | NO | `error` (default) or `warning` |
 | `sql` | string | YES | One or more SQL statements; the LAST statement's result is the assertion subject |
-| `expect` | enum | YES | `0` or `empty` (see §3.2, §3.3) |
+| `expect` | enum | YES | `0` or `empty`; a boolean is neither (see §3.2, §3.3) |
 
 ### 3.2 `expect: 0`
 
@@ -275,7 +284,7 @@ SQL assertions are written in the adapter's native SQL dialect. Producers MUST N
 | Adapter | Notes |
 |---|---|
 | PostgreSQL | Standard SQL; identifiers case-folded to lowercase unless quoted |
-| MySQL | Standard SQL; identifiers lowercase on Linux, case-insensitive on Windows/macOS depending on `lower_case_table_names` |
+| MySQL | Standard SQL; identifiers lowercase on Linux, case-insensitive on Windows/macOS depending on `lower_case_table_names`; a comment after the final `;` reaches the server as one more statement, which returns no result set, so end the SQL at its last `;` |
 | duckdb | Standard SQL; identifiers resolve case-insensitively, `physical_name` carries the catalog's original spelling |
 | ClickHouse | Its own SQL dialect, not standard; identifiers case-sensitive and never folded |
 | Redshift | Standard SQL (Postgres-derived); identifiers case-folded to lowercase unless quoted |
@@ -290,6 +299,7 @@ Queries MUST be read-only. Evaluators MUST run them in a read-only session where
 | Case | Resolution |
 |---|---|
 | Query raises a DB error at execution time | `assertion.sql-execution-error`, at the query's own severity (default `error`); Issue detail carries the DB error message |
+| The last statement returns no result set — a `SET`, DDL, or any statement the database answers without rows | `assertion.sql-execution-error`, at the query's own severity; the statements before it have run |
 | `expect: 0` query returns a value no integer can be read off — a string, a date, a boolean, or a non-finite number | `assertion.sql-type-mismatch`, at the query's own severity (default `error`) |
 | `expect: 0` query returns a non-zero `DECIMAL` | FAIL with `assertion.sql-non-zero`; the detail carries the count without the driver's scale (`5`, not `5.00`), and a fractional value as the driver spelled it |
 | `expect: 0` query returns NULL in row 0, column 0 | FAIL with `assertion.sql-non-zero`; Issue detail records `actual: null` |
@@ -303,7 +313,7 @@ Queries MUST be read-only. Evaluators MUST run them in a read-only session where
 
 ### 4.1 Default
 
-Every assertion defaults to severity `error`. Failed `error` assertions drive a non-zero exit code from `dbprint check --online` (see §6).
+Every assertion defaults to severity `error`. Failed `error` assertions drive a non-zero exit code from `dbprint check`, offline or `--online` (see §6).
 
 ### 4.2 Per-assertion override
 
@@ -354,7 +364,7 @@ class Issue:
 | `assertion.inapplicable-stat` | warning | The artifact carries no measurement the predicate can be read against — forbidden for the classification, never queried, or not measured this run (§2.4, §2.6) |
 | `assertion.redacted-stat` | warning | Predicate over cell values on a column whose values were redacted |
 | `assertion.malformed-predicate` | error | Predicate form invalid or incompatible value type |
-| `assertion.malformed-block` | error | The `assertions:` block, or one table/column/query entry within it, does not match §1.2's shape |
+| `assertion.malformed-block` | error | The `assertions:` block, or one table/column/query entry within it, does not match §1.2's shape, or names a key §1.2 does not define |
 | `assertion.row-count-mismatch` | error | `row_count` predicate failed |
 | `assertion.null-rate-mismatch` | error | `null_rate` predicate failed |
 | `assertion.null-count-mismatch` | error | `null_count` predicate failed |
@@ -411,7 +421,7 @@ SQL assertions are NOT executed in offline mode (no live DB connection) — but 
 2. Statistic assertion predicates against live re-extracted statistics.
 3. SQL assertions against the live database.
 
-A structural failure found offline — a conformance error or a stale print — means there is nothing worth comparing, and suppresses this phase; an *assertion* failure found offline does not, since the print itself is still well-formed and fresh. The two are independent questions, and §6.3's MAX rule is what lets both exit codes surface at once when both are true.
+A structural failure found offline — a conformance error or a stale print — means there is nothing worth comparing, and suppresses this phase; an *assertion* failure found offline does not, since the print itself is still well-formed and fresh. The two are independent questions, and §6.3's precedence decides which exit code a run reports when both are true; both findings are reported.
 
 ### 6.3 Exit code mapping
 
@@ -423,9 +433,9 @@ A structural failure found offline — a conformance error or a stale print — 
 | 3 | Drift detected — `drift.schema-changed`, `drift.statistic-changed`, or both | online only |
 | 4 | Connection error (DB unreachable, auth failed) | online only |
 | 5 | Partial extraction — the connection was reached but some tables could not be re-extracted; the ones that did are still compared and reported normally — or the committed manifest names a table the last `generate` run could not profile (its `failed_tables`) | offline + online |
-| 6 | At least one `error`-severity assertion failed — a statistic assertion predicate, or a block-shape/duplicate-name fault in the `queries:` config itself | offline + online |
+| 6 | At least one `error`-severity assertion failed — a statistic assertion predicate, or a fault in the `assertions:` block itself — a block-shape, unknown-key or duplicate-name fault | offline + online |
 
-When multiple failure conditions co-occur, top-level exit is the MAX of the per-condition codes. SQL assertion execution errors emit `assertion.sql-execution-error` Issues, not exit code 4 — the DB connection succeeded; the QUERY failed.
+When several conditions co-occur, the exit code is the first of 1, 4, 5, 6, 3, 2 that applies. SQL assertion execution errors emit `assertion.sql-execution-error` Issues, not exit code 4 — the DB connection succeeded; the QUERY failed.
 
 ---
 
@@ -435,6 +445,7 @@ Consumers MUST tolerate:
 
 - **Unknown predicate forms**: a YAML structure under `<stat>:` not matching any of the forms in §2.1. Evaluators tolerant of unknown forms SHOULD skip with `assertion.malformed-predicate`; strict evaluators MAY accept a form whose semantics this document does not define.
 - **Unknown SQL `expect` values**: values beyond `0` and `empty`. Evaluators MUST emit `assertion.malformed-block` and skip; additional values (`equals N`, `greater_than N`) are not defined.
+- **Unknown keys** at any level of the block: reported per §1.2; every recognised sibling is still evaluated.
 - **Unknown `severity` values**: treat as `warning` by default.
 - **Unknown Issue codes** emitted by downstream tools: pass through unchanged.
 

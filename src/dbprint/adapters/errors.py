@@ -62,6 +62,16 @@ class QueryFailed(RuntimeError):
         return "\n".join(lines)
 
 
+class NoResultSet(RuntimeError):
+    """A SQL assertion's last statement returned no result set, so there are no rows to judge."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "the last statement returned no result set; "
+            "a SQL assertion is judged on its last statement's rows",
+        )
+
+
 def dedent_sql(sql: str) -> str:
     """Remove the indentation every line shares and the blank edge lines; the layout stays."""
 

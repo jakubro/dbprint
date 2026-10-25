@@ -4,12 +4,17 @@ value: SPEC 2.2.4's domain rendering and SPEC 2.2.14's canonical sketch bytes.
 
 from __future__ import annotations
 
+import re
 from functools import partial
 from typing import assert_never
 
+from dbprint.spec.classification import is_floating_type
 from dbprint.spec.sketch import SketchKind
 from ..base import TemporalShape, lookup_operand, lookup_temporal_shape
 from ..sql_layout import call
+
+
+_DECIMAL_SCALE_RE = re.compile(r"\(\s*\d+\s*,\s*(\d+)\s*\)")
 
 
 # `timestamp` is session-zone-converted on read; `timestamp_ntz` carries no zone.
@@ -25,6 +30,38 @@ _OPERANDS: dict[str, str] = {"variant": "CAST({} AS STRING)", "object": "CAST({}
 
 
 render_operand = partial(lookup_operand, _OPERANDS)
+
+
+def finite_value(expr: str, sql_type: str) -> str:
+    """`expr` where finite, NULL for NaN and the infinities; unchanged on a type holding neither."""
+
+    if not is_floating_type(sql_type):
+        return expr
+
+    finite = f"NOT ISNAN({expr}) AND {expr} NOT IN (CAST('inf' AS DOUBLE), CAST('-inf' AS DOUBLE))"
+
+    return f"CASE WHEN {finite} THEN {expr} END"
+
+
+def sum_expression(expr: str, sql_type: str) -> str:
+    """`SUM` over `expr` at precision 38; Spark sums a narrower exact type into a narrower one."""
+
+    if is_floating_type(sql_type):
+        return f"SUM({expr})"
+
+    if scale := _DECIMAL_SCALE_RE.search(sql_type):
+        return f"SUM(CAST({expr} AS DECIMAL(38, {scale[1]})))"
+
+    return f"SUM(CAST({expr} AS DECIMAL(38, 0)))"
+
+
+def mean_expression(expr: str, sql_type: str) -> str:
+    """The mean of `expr`: `AVG` on a floating type, else the exact sum over the count."""
+
+    if is_floating_type(sql_type):
+        return f"AVG(CAST({expr} AS DOUBLE))"
+
+    return f"CAST({sum_expression(expr, sql_type)} AS DOUBLE) / NULLIF(COUNT({expr}), 0)"
 
 
 def render_text(expr: str, sql_type: str) -> str:

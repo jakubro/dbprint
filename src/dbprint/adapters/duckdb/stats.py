@@ -21,13 +21,15 @@ from dbprint.spec.rounding import (
     measured_value,
 )
 from dbprint.spec.spatial import Extent, Geometry
-from . import introspect
 from .connection import DIALECT, Cursor, exec_query
 from .rendering import (
+    finite_value,
+    mean_expression,
     render_binary,
     render_domain,
     render_text,
     stores_below_microsecond,
+    sum_expression,
     temporal_shape,
 )
 from .. import statements
@@ -63,9 +65,9 @@ from ..base import (
     measure_columns,
     measures_length,
     numeric_block_from_row,
+    numeric_row,
     phase_a_cost,
     profile_over,
-    row_count_or_none,
     run_phase_a,
     unrepresentable_fields,
     whole_temporal_block,
@@ -108,7 +110,6 @@ def compute_base(
         return TableCounts(row_count=0, rows_scanned=0), PhaseA({})
 
     source = table_source(identity, scope)
-    estimate = introspect.row_count_estimate(cursor, identity)
     rows_scanned, phase_a = run_phase_a(
         columns,
         phase_a_cost,
@@ -122,7 +123,7 @@ def compute_base(
         identity.quoted(),
         rows_scanned,
         scope,
-        lambda: row_count_or_none(estimate),
+        lambda: None,
     )
 
     return TableCounts(row_count, rows_scanned, row_count_method), phase_a
@@ -360,7 +361,7 @@ def probe_timeline(
         DIALECT,
         table_source(identity, scope),
         cn,
-        f"DATE_TRUNC('{unit}', {cn})",
+        _utc_truncation(unit, cn, col.classified_type),
         render_domain("bkt.bucket_start", col.classified_type),
     )
 
@@ -481,11 +482,12 @@ def _phase_a_statement(
         select_parts.append(f"COALESCE(COUNT_IF({cn} IS NULL), 0) AS null_{column_alias(col.name)}")
 
         if is_numeric_type(col.classified_type):
+            fv = finite_value(cn, col.classified_type)
             select_parts.extend(
                 (
                     f"COALESCE(COUNT_IF({cn} = 0), 0) AS zero_{column_alias(col.name)}",
-                    f"COALESCE(COUNT_IF({cn} < 0), 0) AS neg_{column_alias(col.name)}",
-                    f"COALESCE(COUNT_IF({cn} = TRUNC({cn})), 0) AS quant_{column_alias(col.name)}",
+                    f"COALESCE(COUNT_IF({fv} < 0), 0) AS neg_{column_alias(col.name)}",
+                    f"COALESCE(COUNT_IF({fv} = TRUNC({fv})), 0) AS quant_{column_alias(col.name)}",
                 ),
             )
         elif measures_length(col.classified_type, _is_unsupported):
@@ -630,30 +632,40 @@ def _fetch_numeric_block(
     values: bool = True,
 ) -> NumericBlock:
     cn = source_column(col, DIALECT)
+    fv = finite_value(cn, col.classified_type)
+    counted = [f"COUNT({fv}) AS fin_val", f"COUNT({cn}) AS nn_val"] if fv != cn else []
     pct_select = [
-        f"PERCENTILE_CONT({p / 100.0}) WITHIN GROUP (ORDER BY CAST({cn} AS DOUBLE)) AS p_{p:02d}"
+        f"PERCENTILE_CONT({p / 100.0}) WITHIN GROUP (ORDER BY CAST({fv} AS DOUBLE)) AS p_{p:02d}"
         for p in config.percentiles
     ]
-    row = exec_query(
-        cursor,
-        f"""
-        SELECT
-          MIN({cn}) AS mn,
-          MAX({cn}) AS mx,
-          AVG({cn}) AS avg_val,
-          SUM({cn}) AS sum_val,
-          {listed(pct_select, 10)}
-        FROM
-          {indented(source, 10)}
-        WHERE
-          {cn} IS NOT NULL
-        """,
-    ).fetchone()
+
+    def read(aggregates: bool) -> Any:
+        mean = mean_expression(fv, col.classified_type) if aggregates else "NULL"
+        total = sum_expression(fv, col.classified_type) if aggregates else "NULL"
+
+        return exec_query(
+            cursor,
+            f"""
+            SELECT
+              MIN({fv}) AS mn,
+              MAX({fv}) AS mx,
+              {mean} AS avg_val,
+              {total} AS sum_val,
+              {listed([*counted, *pct_select], 14)}
+            FROM
+              {indented(source, 14)}
+            WHERE
+              {cn} IS NOT NULL
+            """,
+        ).fetchone()
+
+    row, failure = numeric_row(read)
     exact = _exact_integer if _matches(col.classified_type, _DECIMAL_STRING_TYPES) else _as_is
+    first_percentile = 4 + len(counted)
 
     return numeric_block_from_row(
         row,
-        row[4:] if row else (),
+        row[first_percentile:] if row else (),
         config,
         None
         if not values
@@ -667,11 +679,14 @@ def _fetch_numeric_block(
             lambda v: measured_value(exact(v)),
         ),
         exact,
+        finite=row[4] if row and counted else None,
+        non_null=row[5] if row and counted else None,
+        failure=failure,
     )
 
 
-# duckdb hands these back as decimal strings, exact past 2**53.
-_DECIMAL_STRING_TYPES = ("bignum",)
+# duckdb hands a `BIGNUM` back as a decimal string, exact past 2**53; these columns sum into one.
+_DECIMAL_STRING_TYPES = ("bignum", "hugeint", "uhugeint", "int128", "uint128")
 
 
 def _fetch_temporal_block(
@@ -800,7 +815,8 @@ def _fetch_calendar_temporal_block(
     ]
 
     if day_aligned:
-        agg_select.append(f"COUNT_IF({value} = DATE_TRUNC('day', {value})) AS quant")
+        utc = _utc_reading(value, col.classified_type)
+        agg_select.append(f"COUNT_IF({utc} = DATE_TRUNC('day', {utc})) AS quant")
 
     percentile_renders = [
         (f"p{p:02d}", render_domain(f"agg.p_{p:02d}", col.classified_type)) for p in percentile_keys
@@ -956,3 +972,16 @@ def _ranked_percentiles(keys: Sequence[int]) -> list[str]:
         f"THEN {_RANKED_VALUE} END) AS p_{p:02d}"
         for p in keys
     ]
+
+
+def _utc_reading(expr: str, sql_type: str) -> str:
+    """A zone-aware value as its naive UTC wall clock, so truncation ignores the session zone."""
+
+    return f"({expr} AT TIME ZONE 'UTC')" if temporal_shape(sql_type) == "timestamp_tz" else expr
+
+
+def _utc_truncation(unit: str, cn: str, sql_type: str) -> str:
+    if temporal_shape(sql_type) != "timestamp_tz":
+        return f"DATE_TRUNC('{unit}', {cn})"
+
+    return f"DATE_TRUNC('{unit}', {_utc_reading(cn, sql_type)}) AT TIME ZONE 'UTC'"

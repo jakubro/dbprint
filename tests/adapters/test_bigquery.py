@@ -4,14 +4,23 @@ against the emulator through a REST cursor, which reports no partitioning and no
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
+from typing import Any, ClassVar
+
 import pytest
+import yaml
 
 from dbprint.adapters import BigqueryAdapter, StatisticsConfig
+from dbprint.adapters.base import RequiredFilter
 from dbprint.adapters.bigquery import DIALECT, introspect
 from dbprint.adapters.errors import QueryFailed
 from dbprint.adapters.identifiers import IdentifierRejected, Identity
+from dbprint.config import ConnectionConfig, ProfileConfig, RelationshipsProfile
+from dbprint.config.project import RuleConfig, RuleMatch, SketchesProfile, TablesConfig
+from dbprint.engine import Engine
 from dbprint.spec.sketch import low64_md5
-from tests.adapters.conftest import StubCursor
+from tests.adapters.conftest import PartitionFilterCursor, StubCursor
 
 
 _PROJECT = "dbprint-test"
@@ -305,7 +314,7 @@ class TestTableKinds:
             ("accession", "BASE TABLE", "CREATE TABLE seedbank.accession (a INT64);"),
             ("accession_copy", "CLONE", "CREATE TABLE seedbank.accession_copy CLONE x;"),
         ]
-        adapter = _bigquery_adapter(StubCursor(rows), "seedbank")
+        adapter = _bigquery_adapter(_Listing(rows), "seedbank")
 
         try:
             listed = {t.fqn: t.type for t in adapter.list_tables(include=["*"], exclude=[])}
@@ -322,7 +331,7 @@ class TestTableKinds:
             ("field_scan", "EXTERNAL", "CREATE EXTERNAL TABLE seedbank.field_scan OPTIONS();"),
             ("accession_then", "SNAPSHOT", "CREATE SNAPSHOT TABLE seedbank.accession_then;"),
         ]
-        adapter = _bigquery_adapter(StubCursor(rows), "seedbank")
+        adapter = _bigquery_adapter(_Listing(rows), "seedbank")
 
         try:
             listed = {
@@ -364,7 +373,7 @@ class TestTableKinds:
 
     def test_an_excluded_external_table_is_not_listed(self) -> None:
         rows: list[tuple[object, ...]] = [("field_scan", "EXTERNAL", None)]
-        adapter = _bigquery_adapter(StubCursor(rows), "seedbank")
+        adapter = _bigquery_adapter(_Listing(rows), "seedbank")
 
         try:
             listed = adapter.list_tables(include=["*"], exclude=["seedbank.field_scan"])
@@ -601,9 +610,209 @@ class TestTemporalValueListFailureDegradesTheWholeBlock:
         assert all(getattr(stat, name) is None for name in stat.unmeasured)
 
 
-class _RefusingPartitions(StubCursor):
+class _Listing(StubCursor):
+    """Canned `TABLES` rows; a dataset whose `TABLE_OPTIONS` names no option-bearing table."""
+
+    options = False
+
+    def execute(self, sql: str, params: object = None) -> StubCursor:
+        self.options = "TABLE_OPTIONS" in sql
+
+        return super().execute(sql, params)
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        return [] if self.options else super().fetchall()
+
+
+class _RefusingPartitions(_Listing):
     def execute(self, sql: str, params: object = None) -> StubCursor:
         if "PARTITIONS" in sql:
             raise RuntimeError("Not found: PARTITIONS has no storage statistics for this table")
 
         return super().execute(sql, params)
+
+
+class TestRequiredPartitionFilter:
+    """A table that refuses an unfiltered read is described from the catalog, or read filtered."""
+
+    PARTITIONING: ClassVar[dict[str, str]] = {"field_log": "logged_on", "field_round": "plot"}
+
+    def test_the_option_read_names_the_option_and_keeps_hidden_columns(self) -> None:
+        cursor = _Listing([("field_log", "BASE TABLE", None)])
+        adapter = _bigquery_adapter(cursor, "seedbank")
+
+        try:
+            adapter.list_tables(include=["*"], exclude=[])
+        finally:
+            adapter.close()
+
+        read = next(s for s in cursor.statements if "TABLE_OPTIONS" in s)
+
+        assert "require_partition_filter" in read
+        assert "COLUMNS" in read and "is_partitioning_column = 'YES'" in read
+        assert "is_hidden" not in read
+
+    @pytest.fixture
+    def seeded(self, bigquery_test_dataset: Any) -> tuple[Any, str]:
+        cursor, dataset = bigquery_test_dataset
+
+        for statement in (
+            (
+                f"CREATE TABLE `{dataset}.field_log` (id INT64, logged_on DATE, rank STRING, "
+                "cohort ARRAY<INT64>) PARTITION BY logged_on "
+                "OPTIONS (require_partition_filter = TRUE)"
+            ),
+            (
+                f"INSERT INTO `{dataset}.field_log` VALUES (1, DATE '2026-01-01', 'a', [1, 2]), "
+                "(2, DATE '2026-01-02', 'b', [3]), (3, DATE '2026-01-03', 'a', [])"
+            ),
+            (
+                f"CREATE TABLE `{dataset}.field_round` (id INT64, plot INT64) "
+                "PARTITION BY RANGE_BUCKET(plot, GENERATE_ARRAY(0, 100, 10)) "
+                "OPTIONS (require_partition_filter = TRUE)"
+            ),
+        ):
+            cursor.execute(statement)
+
+        return cursor, dataset
+
+    def _generate(
+        self,
+        tmp_path: Path,
+        seeded: tuple[Any, str],
+        caplog: pytest.LogCaptureFixture,
+        *rules: RuleConfig,
+        partitions: bool = True,
+    ) -> tuple[PartitionFilterCursor, dict[str, Any], list[str]]:
+        inner, dataset = seeded
+        cursor = PartitionFilterCursor(inner, dataset, self.PARTITIONING, partitions=partitions)
+        adapter = BigqueryAdapter(
+            {"project": _PROJECT, "dataset": dataset},
+            cursor_factory=lambda _params: cursor,
+        )
+        conn = ConnectionConfig(
+            name="main",
+            adapter="bigquery",
+            output=tmp_path / "prints",
+            tables=TablesConfig(include=(f"{dataset}.field_*",)),
+            rules=rules,
+            profile=ProfileConfig(
+                relationships=RelationshipsProfile(infer=False),
+                sketches=SketchesProfile(enabled=False),
+            ),
+        )
+        with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
+            result = Engine(adapter, conn, tmp_path).generate()
+
+        return (
+            cursor,
+            {t.fqn.split(".")[-1]: t for t in result.tables},
+            [r.getMessage() for r in caplog.records],
+        )
+
+    def _statistics(self, tmp_path: Path, table: str) -> dict[str, Any]:
+        path = next((tmp_path / "prints").rglob(f"{table}/statistics.yaml"))
+
+        return yaml.safe_load(path.read_text())
+
+    @staticmethod
+    def _filter(dataset: str, table: str, predicate: str) -> RuleConfig:
+        return RuleConfig(
+            match=RuleMatch(tables=(f"{dataset}.{table}",)),
+            profile={"read": {"tables": {"mode": "filter", "filter": predicate}}},
+        )
+
+    def test_the_listing_marks_the_option(self, seeded: tuple[Any, str]) -> None:
+        inner, dataset = seeded
+        cursor = PartitionFilterCursor(inner, dataset, self.PARTITIONING)
+        adapter = _bigquery_adapter(cursor, dataset)
+
+        try:
+            listed = {
+                t.fqn.split(".")[-1]: t.required_filter
+                for t in adapter.list_tables(include=["*"], exclude=[])
+            }
+        finally:
+            adapter.close()
+
+        assert listed["field_log"] == RequiredFilter("require_partition_filter", "logged_on")
+        assert listed["field_round"] == RequiredFilter("require_partition_filter", "plot")
+        assert listed["herbarium"] is None
+
+    def test_with_no_rule_both_are_described_from_the_catalog_and_warned_of(
+        self,
+        tmp_path: Path,
+        seeded: tuple[Any, str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        cursor, tables, warnings = self._generate(tmp_path, seeded, caplog)
+
+        assert {name: t.status for name, t in tables.items()} == {
+            "field_log": "ok",
+            "field_round": "ok",
+        }
+        assert self._statistics(tmp_path, "field_log")["catalog_only"] is True
+        assert self._statistics(tmp_path, "field_round")["catalog_only"] is True
+        assert cursor.refused == []
+        named = [w for w in warnings if "field_log" in w and "require_partition_filter" in w]
+
+        assert len(named) == 1
+        assert "mode: filter" in named[0] and "logged_on >=" in named[0]
+
+    def test_a_sample_rule_is_still_described_from_the_catalog(
+        self,
+        tmp_path: Path,
+        seeded: tuple[Any, str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _, dataset = seeded
+        sample = RuleConfig(profile={"read": {"tables": {"mode": "sample", "fraction": 0.5}}})
+        cursor, _, warnings = self._generate(tmp_path, seeded, caplog, sample)
+
+        assert self._statistics(tmp_path, "field_log")["catalog_only"] is True
+        assert cursor.refused == []
+        assert any(f"{dataset}.field_log" in w and "mode: filter" in w for w in warnings)
+
+    def test_a_filter_rule_reads_each_table_through_its_filter(
+        self,
+        tmp_path: Path,
+        seeded: tuple[Any, str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _, dataset = seeded
+        cursor, tables, _ = self._generate(
+            tmp_path,
+            seeded,
+            caplog,
+            self._filter(dataset, "field_log", "logged_on >= DATE '2026-01-02'"),
+            self._filter(dataset, "field_round", "plot >= 0"),
+        )
+        log = self._statistics(tmp_path, "field_log")
+        rounds = self._statistics(tmp_path, "field_round")
+
+        assert cursor.refused == []
+        assert (log["row_count"], log["row_count_method"], log["scope"]["rows_scanned"]) == (
+            3,
+            "approximate",
+            2,
+        )
+        assert (tables["field_round"].status, rounds["row_count"]) == ("ok", 0)
+
+    def test_a_refused_partitions_read_fails_the_table_and_never_counts_unfiltered(
+        self,
+        tmp_path: Path,
+        seeded: tuple[Any, str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _, dataset = seeded
+        cursor, tables, _ = self._generate(
+            tmp_path,
+            seeded,
+            caplog,
+            self._filter(dataset, "field_log", "logged_on >= DATE '2026-01-02'"),
+            partitions=False,
+        )
+
+        assert tables["field_log"].status == "failed"
+        assert "INFORMATION_SCHEMA.PARTITIONS" in (tables["field_log"].error or "")
+        assert cursor.refused == []

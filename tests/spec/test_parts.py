@@ -9,6 +9,7 @@ from dbprint.spec.parts import (
     canonical,
     depth,
     display,
+    enclosing_chain,
     is_canonical,
     last_member,
     member,
@@ -37,7 +38,7 @@ def test_a_member_takes_the_plain_form_only_for_a_plain_name(name: str, step: st
 
 @pytest.mark.parametrize(
     "path",
-    ["[*]", "[keys]", ".status", "[*].sku", '["user-id"]', ".a[*][keys]", '["a.b"].c'],
+    ["[*]", "[keys]", ".status", "[*].lot", '["user-id"]', ".a[*][keys]", '["a.b"].c'],
 )
 def test_a_canonical_path_respells_as_itself(path: str) -> None:
     assert canonical(path) == path
@@ -59,13 +60,22 @@ def test_a_path_the_grammar_does_not_admit_is_refused(path: str) -> None:
 
 
 def test_a_part_sits_inside_its_longest_proper_prefix() -> None:
-    assert parent("[*].sku") == "[*]"
+    assert parent("[*].lot") == "[*]"
     assert parent('.a["b c"][*]') == '.a["b c"]'
     assert parent(".status") is None
     assert depth('.a["b c"][*]') == 3
-    assert last_member("[*].sku[*]") == "sku"
+    assert last_member("[*].lot[*]") == "lot"
     assert last_member("[keys]") is None
-    assert display("items", "[*].sku") == "items[*].sku"
+    assert display("items", "[*].lot") == "items[*].lot"
+
+
+def test_the_chain_reads_a_part_and_every_part_it_sits_inside_nearest_first() -> None:
+    readings = {".a": "a", ".a[*]": "a-elements", ".a[*].b": "b", ".z": "z"}
+
+    assert enclosing_chain(".a[*].b.c", readings) == ("b", "a-elements", "a")
+    assert enclosing_chain(".a[*].b", readings) == ("b", "a-elements", "a")
+    assert enclosing_chain(".z", readings) == ("z",)
+    assert enclosing_chain(".q.r", readings) == ()
 
 
 def test_parts_are_kept_by_occurrences_then_path_text() -> None:

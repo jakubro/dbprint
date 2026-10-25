@@ -9,7 +9,7 @@ from typing import get_args
 
 import pytest
 
-from dbprint.spec.epoch import EpochUnit, bounds_epoch_unit, sample_epoch_unit
+from dbprint.spec.epoch import EpochUnit, _as_integral, bounds_epoch_unit, sample_epoch_unit
 
 
 # isdigit()-true, isdecimal()-false: a superscript, a subscript, and a circled digit.
@@ -130,6 +130,25 @@ class TestPerValueRule:
 
     def test_an_ordinary_digit_string_column_is_not_detected(self) -> None:
         assert sample_epoch_unit([str(i) for i in range(30)]) is None
+
+
+class TestNonFiniteValues:
+    """A NaN or an infinity is no instant: it scores nothing and costs the column nothing."""
+
+    @pytest.mark.parametrize(
+        "value",
+        [float("nan"), float("inf"), float("-inf"), Decimal("NaN"), Decimal("Infinity")],
+    )
+    def test_a_non_finite_value_is_not_integral(self, value: object) -> None:
+        assert _as_integral(value) is None
+
+    def test_one_infinity_in_a_sample_keeps_its_unit(self) -> None:
+        values: list[object] = [float("inf"), *(1704067200 + i for i in range(29))]
+
+        assert sample_epoch_unit(values) == "seconds"
+
+    def test_a_sample_of_non_finite_values_names_no_unit(self) -> None:
+        assert sample_epoch_unit([float("nan"), float("inf")]) is None
 
 
 class TestHostileCharacters:

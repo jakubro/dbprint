@@ -79,6 +79,37 @@ def test_a_degraded_temporal_block_is_named_with_its_cause(
     assert [m for m in messages if "column 'sown_at'" in m] == [warning]
 
 
+def test_a_total_no_exact_type_holds_is_named_with_its_cause(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    database = tmp_path / "garden.duckdb"
+    con = duckdb.connect(str(database))
+    con.execute(
+        "CREATE TABLE tally AS SELECT CAST('99999999999999999999999999999999999000' "
+        "AS DECIMAL(38,0)) + CAST(i AS DECIMAL(38,0)) AS stock FROM range(200) r(i)",
+    )
+    con.close()
+    conn = ConnectionConfig(
+        name="g",
+        adapter="duckdb",
+        output=tmp_path / "prints",
+        profile=ProfileConfig(relationships=RelationshipsProfile(infer=False)),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="dbprint.engine.orchestrator"):
+        Engine(DuckdbAdapter({"database": str(database)}), conn, tmp_path).generate()
+
+    statistics = yaml.safe_load(next((tmp_path / "prints").rglob("statistics.yaml")).read_text())
+    stock = statistics["columns"]["stock"]
+    messages = [r.getMessage() for r in caplog.records if "column 'stock'" in r.getMessage()]
+
+    assert stock["unmeasured"] == ["mean", "sum"]
+    assert "range" in stock
+    assert len(messages) == 1
+    assert "column 'stock' mean and sum failed:" in messages[0]
+
+
 def test_every_degrading_block_hands_its_cause_to_the_engine() -> None:
     bare = [
         f"{path.relative_to(_PACKAGE)}:{handler.lineno}"

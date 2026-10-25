@@ -109,10 +109,10 @@ def infer_value_derived_edges(
     children: Sequence[SketchCandidate],
     parents: Sequence[SketchCandidate],
     existing: frozenset[tuple[str, str, str, str]],
+    asserted: frozenset[tuple[str, str]] = frozenset(),
 ) -> dict[str, list[ForeignKeyMeta]]:
-    """Propose an edge from measured value containment (SPEC 2.3's `measured` detection) -
-    every qualifying child column of a table contributes, and the table's whole list is ordered
-    once at the end for diff stability across runs.
+    """Propose measured-containment edges (SPEC 2.3.11), each table's list ordered for diff stability;
+    a child in `asserted` (fqn, column) already has a declared or inferred parent and proposes none.
     """
 
     proposals: dict[str, list[tuple[str, str, str, ForeignKeyMeta]]] = {}
@@ -121,6 +121,9 @@ def infer_value_derived_edges(
         child_kind = sketch_kind(child.sql_type)
 
         if child_kind is None or not _may_refer(child, child_kind):
+            continue
+
+        if (child.fqn, child.column) in asserted:
             continue
 
         for parent in parents:

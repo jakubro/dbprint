@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, LiteralString, cast
 
 import pytest
 
@@ -96,7 +97,12 @@ class TestDuckdb:
         assert "[keys]" in wide["parts"]
         assert wide["parts_found"] == 1001
 
-    def test_keys_that_look_like_emails_withhold_every_key_part(self, tmp_path: Path) -> None:
+    def test_keys_that_look_like_emails_withhold_every_key_part(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.DEBUG, logger="dbprint.adapters")
         hits = duckdb_print(
             tmp_path,
             "CREATE TABLE gauge (gauge_no INTEGER, hits MAP(VARCHAR, INTEGER))",
@@ -111,11 +117,34 @@ class TestDuckdb:
         assert "@example.invalid" not in "".join(
             p.read_text() for p in tmp_path.rglob("*.yaml") if p.is_file()
         )
+        assert _traced(caplog)
+        assert "@example.invalid" not in _traced(caplog)
+
+    def test_a_withheld_outer_key_is_never_read_and_nothing_below_it_is_counted(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.DEBUG, logger="dbprint.adapters")
+        nested = duckdb_print(
+            tmp_path,
+            "CREATE TABLE gauge (gauge_no INTEGER, readings MAP(VARCHAR, MAP(VARCHAR, INTEGER)))",
+            "INSERT INTO gauge SELECT i, MAP {'g' || (i % 4) || '@example.invalid': "
+            "MAP {'depth': i, 'flow': i}} FROM range(40) r(i)",
+            redact=(RedactRule(looks_like=("email",), with_="hash"),),
+        )["gauge"]["readings"]
+
+        assert list(nested["parts"]) == ["[keys]"]
+        assert nested["parts_found"] == 5
+        assert _traced(caplog)
+        assert "@example.invalid" not in _traced(caplog)
 
     def test_a_rule_on_the_column_masks_the_keys_and_withholds_their_parts(
         self,
         tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
+        caplog.set_level(logging.DEBUG, logger="dbprint.adapters")
         labels = duckdb_print(
             tmp_path,
             *_LABELS,
@@ -124,6 +153,9 @@ class TestDuckdb:
 
         assert list(labels["parts"]) == ["[keys]"]
         assert labels["parts"]["[keys]"]["redacted"] == "mask"
+        assert _traced(caplog)
+        assert "'unit'" not in _traced(caplog)
+        assert "'site'" not in _traced(caplog)
 
     def test_a_key_listed_without_its_key_set_is_withheld(self, tmp_path: Path) -> None:
         solo = duckdb_print(
@@ -162,6 +194,32 @@ def test_a_postgres_hstore_off_the_search_path_is_a_map(
     assert attrs["empty_count"] == 1
     assert set(attrs["parts"]) == {"[keys]", ".unit", ".site"}
     assert (attrs["parts"][".site"]["occurrences"], attrs["parts"][".site"]["null_count"]) == (2, 1)
+
+
+def test_a_postgres_hstore_key_reads_its_own_value_with_standard_conforming_strings_off(
+    postgres_test_db: dict[str, str],
+    tmp_path: Path,
+) -> None:
+    with psql(postgres_test_db) as conn:
+        conn.execute("CREATE SCHEMA IF NOT EXISTS kit")
+        conn.execute("CREATE EXTENSION IF NOT EXISTS hstore SCHEMA kit")
+        conn.execute("CREATE TABLE public.gauge (gauge_no integer, attrs kit.hstore)")
+        conn.execute(
+            "INSERT INTO public.gauge VALUES "
+            "(1, kit.hstore('a\\''b', 'q')), (2, kit.hstore('a\\''b', 'r'))",
+        )
+        database = postgres_test_db["database"]
+        conn.execute(
+            cast(
+                LiteralString,
+                f'ALTER DATABASE "{database}" SET standard_conforming_strings = off',
+            ),
+        )
+
+    attrs = generate(PostgresAdapter(postgres_test_db), "postgres", tmp_path, "*.gauge")["attrs"]
+    member = next(part for path, part in attrs["parts"].items() if path != "[keys]")
+
+    assert [v["value"] for v in member["values"]] == ["q", "r"]
 
 
 def test_a_clickhouse_map_counts_a_repeated_key_once_and_its_entries_twice(
@@ -270,3 +328,9 @@ def _standard_string(text: str) -> str:
 
 def _escaped_string(text: str) -> str:
     return "'" + text.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n") + "'"
+
+
+def _traced(caplog: pytest.LogCaptureFixture) -> str:
+    return "\n".join(
+        r.getMessage() for r in caplog.records if r.getMessage().startswith("statement")
+    )

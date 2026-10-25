@@ -1,12 +1,13 @@
 """Sensitivity detection per SPEC v1, section 4.4.
 
-`detect(column_name, values, looks_like)` returns the category of must-not-leave-the-database
+`detect(column_name, values, assigned=...)` returns the category of must-not-leave-the-database
 data a column carries, or None. Recall-biased where `looks_like` is precision-biased: an
 over-flag costs one over-masked column, a miss leaks a name or a live credential into a git
 repository. Absence is "not detected", never "safe to publish"; dbprint is no compliance tool.
 
 Every token set below is matched by `_matches` as a trailing, separator-delimited token run of
-the normalized name; `_WEAK_CREDENTIAL_TOKENS` alone is matched whole-string. A few sets also
+the normalized name; `_COMPOUND_CREDENTIAL_TOKENS` needs a head before the run, and
+`_WEAK_CREDENTIAL_TOKENS` alone is matched whole-string. A few sets also
 carry a disqualifying-head list vetoing a match whose preceding token names something that is
 not personal data (`company_name`); those lists hold English qualifier nouns, never names of
 people - the given-names dictionary SPEC 4.4.3 bans. An unlisted head neither vetoes nor
@@ -21,8 +22,11 @@ Pure: no I/O, no state.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from typing import Literal
+
+from .looks_like import EMAIL_ADDRESS, LooksLike
+from .secret_formats import holds_secret
 
 
 Sensitivity = Literal[
@@ -45,6 +49,11 @@ Sensitivity = Literal[
 PERSONAL_NAME_VALUE_THRESHOLD = 0.5
 POSTAL_ADDRESS_VALUE_THRESHOLD = 0.5
 NATIONAL_ID_VALUE_THRESHOLD = 0.5
+CONTACT_SHAPE_THRESHOLD = 0.5
+FINANCIAL_ACCOUNT_SHAPE_THRESHOLD = 0.5
+ONLINE_IDENTIFIER_SHAPE_THRESHOLD = 0.5
+GEOLOCATION_SHAPE_THRESHOLD = 0.5
+CREDENTIAL_SHAPE_THRESHOLD = 0.5
 
 # Column names that identify a person's name on their own; no corroboration (SPEC 4.4.3).
 _STRONG_NAME_TOKENS = frozenset(
@@ -73,8 +82,11 @@ _STRONG_NAME_TOKENS = frozenset(
 # holding companies and `people.name` holding people are indistinguishable by name alone.
 _WEAK_NAME_TOKENS = frozenset({"name", "display_name", "owner", "author", "contact"})
 
-# Heads naming an organisation, place, label or system object - never a person - veto a name;
-# a bare `name` in a table one of them names (singular or plural) is vetoed too.
+# The tokens naming the thing itself; every other name token names a person attached to it.
+_THING_NAME_TOKENS = frozenset({"name", "display_name", "full_name"})
+
+# Heads naming an organisation, place, label or system object - never a person - veto a thing's
+# name; a bare `name` in a table one of them names (singular or plural) is vetoed too.
 _NAME_DISQUALIFIED_HEADS = frozenset(
     {
         "account",
@@ -191,9 +203,14 @@ _STRONG_FINANCIAL_ACCOUNT_TOKENS = frozenset(
 _STRONG_CREDENTIAL_TOKENS = frozenset(
     {
         "password",
+        "passwd",
+        "pwd",
         "password_hash",
+        "password_digest",
+        "password_salt",
         "api_key",
         "secret_key",
+        "secret_access_key",
         "access_token",
         "refresh_token",
         "session_token",
@@ -207,12 +224,14 @@ _STRONG_CREDENTIAL_TOKENS = frozenset(
 # threshold: `hex` pairs only with these, since an unconditional `hex` would catch checksums.
 _WEAK_CREDENTIAL_TOKENS = frozenset({"key", "token", "secret", "hash"})
 
+# `token` and `secret` ending a longer name (`remember_token`) name a secret; `key`, `hash` do not.
+_COMPOUND_CREDENTIAL_TOKENS = frozenset({"token", "secret"})
+
 # `looks_like` values that are themselves credentials, whatever the column name: RFC 7515's
 # header decode already rules out an ordinary dotted token (SPEC 4.1.1).
 _CREDENTIAL_SHAPES = frozenset({"jwt"})
 
-# `looks_like` values that corroborate a weak credential name. `looks_like` has already
-# cleared its own 95% threshold, so no second per-value share is derived (SPEC 4.4.4).
+# `looks_like` values that corroborate a weak credential name, at the shape share (SPEC 4.4.4).
 _WEAK_CREDENTIAL_SHAPES = frozenset({"jwt", "hex"})
 
 # Column names that identify a coordinate, coordinate pair or geohash on their own. `city`,
@@ -423,8 +442,8 @@ _CONTACT_SHAPES = frozenset({"email", "phone"})
 
 # `looks_like` values that are themselves financial accounts - each carries a mod-97 or a
 # Luhn check, so it corroborates whatever the column name. `account_number`/`account_no`/
-# `pan` are in no token set: each is as often an internal id, and the shape alone carries
-# them without a second per-value threshold (SPEC 4.4.4).
+# `pan` are in no token set: each is as often an internal id, and the shape share alone
+# carries them (SPEC 4.4.4).
 _FINANCIAL_SHAPES = frozenset({"card_number", "iban"})
 
 # Suffixes marking an organisation rather than a person; one is enough to veto the value.
@@ -463,26 +482,31 @@ _DIGIT_RE = re.compile(r"\d")
 # Canadian SIN will not corroborate, a stated single-locale gap (SPEC 4.4.4).
 _SSN_RE = re.compile(r"^(\d{3})-(\d{2})-(\d{4})$")
 _SSN_INVALID_AREAS = frozenset({"000", "666"})
+_ADDRESS_RE = re.compile(EMAIL_ADDRESS)
 
 
 def detect(
     column_name: str,
     values: Iterable[object],
-    looks_like: str | None = None,
     *,
+    assigned: Mapping[LooksLike, int] | None = None,
     classification: str | None = None,
     table: str | None = None,
 ) -> Sensitivity | None:
     """Return the must-not-leave-the-database category this column carries, or None (SPEC 4.4).
 
-    Only string `values` corroborate; `table` settles a bare `name`, and a `boolean` carries none.
+    `assigned` is the per-pattern tally SPEC 4.1 assigned over `values`, whose length is the
+    shape-share denominator; only string `values` corroborate a name. `table` settles a bare
+    `name`, and a `boolean` carries none.
     """
 
     if classification == "boolean":
         return None
 
     normalized = _normalize(column_name)
-    samples = [v for v in values if isinstance(v, str) and v.strip()]
+    drawn = list(values)
+    samples = [v for v in drawn if isinstance(v, str) and v.strip()]
+    tally = assigned or {}
 
     if _is_personal_name(normalized, samples, table):
         return "personal_name"
@@ -490,7 +514,7 @@ def detect(
     if _is_postal_address(normalized, samples):
         return "postal_address"
 
-    if _is_geolocation(normalized, looks_like):
+    if _is_geolocation(normalized, tally, len(drawn)):
         return "geolocation"
 
     if _is_date_of_birth(normalized):
@@ -499,10 +523,10 @@ def detect(
     if _is_national_id(normalized, samples):
         return "national_id"
 
-    if _is_financial_account(normalized, looks_like):
+    if _is_financial_account(normalized, tally, len(drawn)):
         return "financial_account"
 
-    if _is_credential(normalized, looks_like):
+    if _is_credential(normalized, tally, len(drawn), samples):
         return "credential"
 
     if _is_health(normalized):
@@ -514,13 +538,19 @@ def detect(
     if _is_employment(normalized):
         return "employment"
 
-    if _is_contact(normalized, looks_like):
+    if _is_contact(normalized, tally, drawn):
         return "contact"
 
-    if _is_online_identifier(normalized, looks_like):
+    if _is_online_identifier(normalized, tally, len(drawn)):
         return "online_identifier"
 
     return None
+
+
+def names_credential(column_name: str) -> bool:
+    """True when the column name alone makes a column a `credential` (SPEC 4.4.1)."""
+
+    return _names_credential(_normalize(column_name))
 
 
 def _normalize(column_name: str) -> str:
@@ -563,16 +593,35 @@ def _matches(
 
 
 def _is_personal_name(normalized: str, samples: list[str], table: str | None) -> bool:
-    if _matches(normalized, _STRONG_NAME_TOKENS, _NAME_DISQUALIFIED_HEADS):
+    if _thing_name_vetoed(normalized):
+        return False
+
+    if _matches(normalized, _STRONG_NAME_TOKENS):
         return True
 
-    if not _matches(normalized, _WEAK_NAME_TOKENS, _NAME_DISQUALIFIED_HEADS):
+    if not _matches(normalized, _WEAK_NAME_TOKENS):
         return False
 
     if normalized == "name" and table is not None and _names_a_non_person(table):
         return False
 
     return _share(samples, _looks_like_person) >= PERSONAL_NAME_VALUE_THRESHOLD
+
+
+def _thing_name_vetoed(normalized: str) -> bool:
+    """An organisation word vetoes the longest thing-name run; its trailing `name` is not retried."""
+
+    name_parts = normalized.split("_")
+
+    for token in sorted(_THING_NAME_TOKENS, key=lambda t: -t.count("_")):
+        token_parts = token.split("_")
+
+        if name_parts[-len(token_parts) :] == token_parts:
+            head = name_parts[: -len(token_parts)]
+
+            return bool(head) and head[-1] in _NAME_DISQUALIFIED_HEADS
+
+    return False
 
 
 def _is_postal_address(normalized: str, samples: list[str]) -> bool:
@@ -585,8 +634,11 @@ def _is_postal_address(normalized: str, samples: list[str]) -> bool:
     return _share(samples, _looks_like_street) >= POSTAL_ADDRESS_VALUE_THRESHOLD
 
 
-def _is_geolocation(normalized: str, looks_like: str | None) -> bool:
-    return _matches(normalized, _GEOLOCATION_TOKENS) or looks_like in _GEOLOCATION_SHAPES
+def _is_geolocation(normalized: str, tally: Mapping[LooksLike, int], drawn: int) -> bool:
+    if _matches(normalized, _GEOLOCATION_TOKENS):
+        return True
+
+    return _shape_share(tally, _GEOLOCATION_SHAPES, drawn) >= GEOLOCATION_SHAPE_THRESHOLD
 
 
 def _is_date_of_birth(normalized: str) -> bool:
@@ -606,17 +658,44 @@ def _is_national_id(normalized: str, samples: list[str]) -> bool:
     return _share(samples, _looks_like_ssn) >= NATIONAL_ID_VALUE_THRESHOLD
 
 
-def _is_financial_account(normalized: str, looks_like: str | None) -> bool:
-    return _matches(normalized, _STRONG_FINANCIAL_ACCOUNT_TOKENS) or looks_like in _FINANCIAL_SHAPES
+def _is_financial_account(normalized: str, tally: Mapping[LooksLike, int], drawn: int) -> bool:
+    if _matches(normalized, _STRONG_FINANCIAL_ACCOUNT_TOKENS):
+        return True
+
+    return _shape_share(tally, _FINANCIAL_SHAPES, drawn) >= FINANCIAL_ACCOUNT_SHAPE_THRESHOLD
 
 
-def _is_credential(normalized: str, looks_like: str | None) -> bool:
-    if _matches(normalized, _STRONG_CREDENTIAL_TOKENS) or looks_like in _CREDENTIAL_SHAPES:
+def _is_credential(
+    normalized: str,
+    tally: Mapping[LooksLike, int],
+    drawn: int,
+    samples: list[str],
+) -> bool:
+    if _names_credential(normalized):
+        return True
+
+    if _shape_share(tally, _CREDENTIAL_SHAPES, drawn) >= CREDENTIAL_SHAPE_THRESHOLD:
+        return True
+
+    if any(holds_secret(sample) for sample in samples):
         return True
 
     # Whole-string only, unlike every other tier: a tail match would flag `content_hash`
     # on a `hex` column as `credential`.
-    return normalized in _WEAK_CREDENTIAL_TOKENS and looks_like in _WEAK_CREDENTIAL_SHAPES
+    return (
+        normalized in _WEAK_CREDENTIAL_TOKENS
+        and _shape_share(tally, _WEAK_CREDENTIAL_SHAPES, drawn) >= CREDENTIAL_SHAPE_THRESHOLD
+    )
+
+
+def _names_credential(normalized: str) -> bool:
+    if _matches(normalized, _STRONG_CREDENTIAL_TOKENS):
+        return True
+
+    return normalized not in _COMPOUND_CREDENTIAL_TOKENS and _matches(
+        normalized,
+        _COMPOUND_CREDENTIAL_TOKENS,
+    )
 
 
 def _is_health(normalized: str) -> bool:
@@ -631,14 +710,37 @@ def _is_employment(normalized: str) -> bool:
     return _matches(normalized, _EMPLOYMENT_TOKENS, _EMPLOYMENT_DISQUALIFIED_HEADS)
 
 
-def _is_contact(normalized: str, looks_like: str | None) -> bool:
-    return _matches(normalized, _CONTACT_TOKENS) or looks_like in _CONTACT_SHAPES
+def _is_contact(normalized: str, tally: Mapping[LooksLike, int], drawn: list[object]) -> bool:
+    if _matches(normalized, _CONTACT_TOKENS):
+        return True
+
+    # A value assigned `email` always holds an address, so the search counts it and the tally
+    # is read for the other shapes only - a list or a `Name <address>` matches no pattern whole.
+    holding = sum(1 for v in drawn if isinstance(v, str) and _ADDRESS_RE.search(v))
+    shapes = _CONTACT_SHAPES - {"email"}
+
+    return _shape_share(tally, shapes, len(drawn), holding) >= CONTACT_SHAPE_THRESHOLD
 
 
-def _is_online_identifier(normalized: str, looks_like: str | None) -> bool:
+def _is_online_identifier(normalized: str, tally: Mapping[LooksLike, int], drawn: int) -> bool:
+    if _matches(normalized, _ONLINE_IDENTIFIER_TOKENS):
+        return True
+
     return (
-        _matches(normalized, _ONLINE_IDENTIFIER_TOKENS) or looks_like in _ONLINE_IDENTIFIER_SHAPES
+        _shape_share(tally, _ONLINE_IDENTIFIER_SHAPES, drawn) >= ONLINE_IDENTIFIER_SHAPE_THRESHOLD
     )
+
+
+def _shape_share(
+    tally: Mapping[LooksLike, int],
+    shapes: frozenset[str],
+    drawn: int,
+    extra: int = 0,
+) -> float:
+    if not drawn:
+        return 0.0
+
+    return (sum(n for shape, n in tally.items() if shape in shapes) + extra) / drawn
 
 
 def _names_a_non_person(table: str) -> bool:

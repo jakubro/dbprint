@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib.resources
 import json
-from typing import cast, get_args
+from typing import ClassVar, get_args
 
 import pytest
 
@@ -14,12 +14,17 @@ from dbprint.spec.sensitivity import (
     _CREDENTIAL_SHAPES,
     _FINANCIAL_SHAPES,
     _GEOLOCATION_SHAPES,
+    _NAME_DISQUALIFIED_HEADS,
     _ONLINE_IDENTIFIER_SHAPES,
+    _STRONG_NAME_TOKENS,
+    _THING_NAME_TOKENS,
     _WEAK_CREDENTIAL_SHAPES,
+    _WEAK_NAME_TOKENS,
     Sensitivity,
-    _matches,
     detect,
+    names_credential,
 )
+from tests._secrets import ALNUM, FORMATS, jwt, pick
 
 
 _PEOPLE = ["Ada Lovelace", "Grace Hopper", "Alan Turing", "Karen Sparck Jones"]
@@ -174,7 +179,7 @@ class TestGeolocation:
         assert detect(column, []) == "geolocation"
 
     def test_a_latlon_shaped_value_carries_it_whatever_the_name_is(self) -> None:
-        assert detect("payload", ["51.5074,-0.1278"], "latlon") == "geolocation"
+        assert detect("payload", ["51.5074,-0.1278"], assigned={"latlon": 1}) == "geolocation"
 
     def test_a_city_column_is_not_flagged(self) -> None:
         """A `redact` rule here would silently empty the enumeration a print publishes."""
@@ -289,10 +294,14 @@ class TestFinancialAccount:
     def test_an_iban_shaped_value_carries_it_whatever_the_name_is(self) -> None:
         """A mod-97 check is corroboration on its own, unlike any heuristic category."""
 
-        assert detect("ref", ["SK3112000000198742637541"], "iban") == "financial_account"
+        assert (
+            detect("ref", ["DE89370400440532013000"], assigned={"iban": 1}) == "financial_account"
+        )
 
     def test_a_pan_shaped_value_carries_it_whatever_the_name_is(self) -> None:
-        assert detect("ref", ["4111111111111111"], "card_number") == "financial_account"
+        assert (
+            detect("ref", ["4111111111111111"], assigned={"card_number": 1}) == "financial_account"
+        )
 
     def test_a_numeric_card_column_is_flagged_by_name_alone(self) -> None:
         """No sample is drawn for `numeric`, so the name is the only evidence available."""
@@ -302,28 +311,31 @@ class TestFinancialAccount:
     def test_an_internal_account_number_is_not_flagged(self) -> None:
         """Generic name, no corroborating shape - the weak tier's negative."""
 
-        assert detect("account_number", ["ACCT-100042"], None) is None
+        assert detect("account_number", ["ACCT-100042"]) is None
 
     def test_a_corroborated_account_number_is_flagged(self) -> None:
         """Generic name, an IBAN-shaped value - the weak tier's positive."""
 
-        assert detect("account_number", ["SK3112000000198742637541"], "iban") == "financial_account"
+        assert (
+            detect("account_number", ["DE89370400440532013000"], assigned={"iban": 1})
+            == "financial_account"
+        )
 
     def test_a_numeric_account_number_is_not_flagged(self) -> None:
         """No sample on `numeric`, so the weak tier - which needs the shape - cannot fire."""
 
-        assert detect("account_number", [], None) is None
+        assert detect("account_number", []) is None
 
     @pytest.mark.parametrize("column", ["bic", "swift_code", "sort_code", "routing_number"])
     def test_institution_identifiers_are_refused(self, column: str) -> None:
         """These name a bank, not an account - refused rather than unconsidered."""
 
-        assert detect(column, ["SEEDGB2L"], "bic") is None
+        assert detect(column, ["SEEDGB2L"], assigned={"bic": 1}) is None
 
     def test_a_tokenised_card_column_is_not_flagged(self) -> None:
         """No name token and no shape - `1111` reports no `looks_like` on its own."""
 
-        assert detect("card_last4", ["1111"], None) is None
+        assert detect("card_last4", ["1111"]) is None
 
 
 class TestCredential:
@@ -344,28 +356,118 @@ class TestCredential:
         assert detect(column, []) == "credential"
 
     def test_the_jwt_shape_carries_it_whatever_the_name_is(self) -> None:
-        assert detect("payload", ["a.b.c"], "jwt") == "credential"
+        assert detect("payload", ["a.b.c"], assigned={"jwt": 1}) == "credential"
 
     def test_a_weak_name_corroborated_by_jwt_is_flagged(self) -> None:
-        assert detect("token", [], "jwt") == "credential"
+        assert detect("token", ["a.b.c"], assigned={"jwt": 1}) == "credential"
 
     def test_a_weak_name_corroborated_by_hex_is_flagged(self) -> None:
-        assert detect("key", [], "hex") == "credential"
+        assert detect("key", ["9f86d081884c7d65"], assigned={"hex": 1}) == "credential"
 
     def test_a_settings_table_key_column_is_not_flagged(self) -> None:
         """Weak name, no corroborating shape - a settings table's own key is not a secret."""
 
-        assert detect("key", ["theme", "locale", "timezone"], None) is None
+        assert detect("key", ["theme", "locale", "timezone"]) is None
 
     def test_a_checksum_column_is_not_flagged_by_hex_alone(self) -> None:
         """`hex` corroborates a weak name; it does not create one on its own."""
 
-        assert detect("checksum", [], "hex") is None
+        assert detect("checksum", ["9f86d081884c7d65"], assigned={"hex": 1}) is None
 
     def test_a_compound_weak_token_is_not_reached_by_containment(self) -> None:
         """The weak tier stays whole-string: containment would flag every `*_hash` checksum."""
 
-        assert detect("content_hash", [], "hex") is None
+        assert detect("content_hash", ["9f86d081884c7d65"], assigned={"hex": 1}) is None
+
+
+class TestCredentialNames:
+    """Framework secret columns end in `token` or `secret`, or spell `password` another way."""
+
+    @pytest.mark.parametrize(
+        "column",
+        [
+            "password_digest",
+            "reset_password_token",
+            "confirmation_token",
+            "unlock_token",
+            "remember_token",
+            "api_token",
+            "id_token",
+            "bearer_token",
+            "webhook_secret",
+            "otp_secret",
+            "oauth_token_secret",
+            "passwd",
+            "pwd",
+            "password_salt",
+            "aws_secret_access_key",
+            "next_page_token",
+            "rememberToken",
+        ],
+    )
+    def test_the_name_alone_is_enough(self, column: str) -> None:
+        assert detect(column, [pick(ALNUM, 20)]) == "credential"
+        assert names_credential(column)
+
+    @pytest.mark.parametrize(
+        ("column", "values", "assigned"),
+        [
+            ("token_type", ["bearer"], {}),
+            ("secret_question", ["first pet"], {}),
+            ("token", ["alpha", "beta"], {}),
+            ("secret", ["north", "south"], {}),
+            ("content_hash", ["9f86d081884c7d65"], {"hex": 1}),
+            ("cache_key", ["9f86d081884c7d65"], {"hex": 1}),
+        ],
+    )
+    def test_an_ordinary_name_is_not_flagged(
+        self,
+        column: str,
+        values: list[str],
+        assigned: dict[LooksLike, int],
+    ) -> None:
+        assert detect(column, values, assigned=assigned) is None
+
+    def test_a_bare_weak_word_is_no_credential_name(self) -> None:
+        assert not names_credential("token")
+        assert not names_credential("secret")
+
+    def test_a_boolean_named_for_a_secret_carries_nothing(self) -> None:
+        assert detect("is_secret", [], classification="boolean") is None
+
+
+class TestCredentialValues:
+    """One sampled value in a recognised secret format flags the column, whatever its name."""
+
+    @pytest.mark.parametrize("name", sorted(FORMATS))
+    def test_a_neutral_name_holding_one_format(self, name: str) -> None:
+        values = [FORMATS[name](), "pending", "n/a"]
+
+        assert detect("payload", values) == "credential"
+
+    def test_a_jwt_among_ordinary_values(self) -> None:
+        values = [jwt(), "note one", "note two", "note three"]
+
+        assert detect("payload", values) == "credential"
+
+    def test_a_jwt_inside_an_authorization_header(self) -> None:
+        assert detect("payload", [f"Authorization: Bearer {jwt()}"]) == "credential"
+
+    def test_a_key_pasted_into_prose(self) -> None:
+        note = f"rotated after the audit: {FORMATS['ghp']()} (old one revoked)"
+
+        assert detect("field_notes", [note]) == "credential"
+
+    def test_a_dotted_token_without_alg_is_no_secret(self) -> None:
+        assert detect("payload", [jwt({"kid": "seedbank"})]) is None
+
+    def test_an_earlier_category_keeps_its_column(self) -> None:
+        """The chain is most-specific-first (SPEC 4.4.3): a name outranks a value."""
+
+        assert detect("full_name", ["Ada Lovelace", FORMATS["sk_live"]()]) == "personal_name"
+
+    def test_a_later_category_loses_its_column(self) -> None:
+        assert detect("email", [FORMATS["bcrypt"]()]) == "credential"
 
 
 class TestHealth:
@@ -386,7 +488,10 @@ class TestHealth:
     def test_a_prose_notes_column_still_carries_it(self) -> None:
         """No value list exists to withhold; the flag is not conditional on there being one."""
 
-        assert detect("diagnosis_notes", ["patient reports mild symptoms"], "prose") == "health"
+        assert (
+            detect("diagnosis_notes", ["patient reports mild symptoms"], assigned={"prose": 1})
+            == "health"
+        )
 
     @pytest.mark.parametrize("column", ["condition", "treatment", "procedure", "status"])
     def test_an_ordinary_operational_column_is_not_flagged(self, column: str) -> None:
@@ -460,12 +565,12 @@ class TestEmployment:
 
 class TestContact:
     def test_the_email_shape_carries_it(self) -> None:
-        assert detect("primary", ["a@b.com"], "email") == "contact"
+        assert detect("primary", ["a@b.com"], assigned={"email": 1}) == "contact"
 
     def test_the_phone_shape_carries_it(self) -> None:
         """An unhelpful column name is no obstacle - the shape alone is evidence."""
 
-        assert detect("contact_field", ["+1 (555) 123-4567"], "phone") == "contact"
+        assert detect("contact_field", ["+1 (555) 123-4567"], assigned={"phone": 1}) == "contact"
 
     def test_a_contact_column_name_carries_it(self) -> None:
         assert detect("phone_number", ["555 0100"]) == "contact"
@@ -501,15 +606,15 @@ class TestContact:
     def test_a_name_outranks_a_contact_shape(self) -> None:
         """One field, so the more specific category wins."""
 
-        assert detect("first_name", ["a@b.com"], "email") == "personal_name"
+        assert detect("first_name", ["a@b.com"], assigned={"email": 1}) == "personal_name"
 
     def test_national_id_outranks_a_contact_shape(self) -> None:
         """The chain checks most-specific first; `national_id` sits above `contact`."""
 
-        assert detect("ssn", ["a@b.com"], "email") == "national_id"
+        assert detect("ssn", ["a@b.com"], assigned={"email": 1}) == "national_id"
 
     def test_financial_account_outranks_a_contact_shape(self) -> None:
-        assert detect("card_number", ["a@b.com"], "email") == "financial_account"
+        assert detect("card_number", ["a@b.com"], assigned={"email": 1}) == "financial_account"
 
 
 class TestOnlineIdentifier:
@@ -521,10 +626,13 @@ class TestOnlineIdentifier:
         assert detect(column, []) == "online_identifier"
 
     def test_the_ip_shape_carries_it_whatever_the_name_is(self) -> None:
-        assert detect("remote", ["203.0.113.42"], "ip") == "online_identifier"
+        assert detect("remote", ["203.0.113.42"], assigned={"ip": 1}) == "online_identifier"
 
     def test_the_mac_address_shape_carries_it_whatever_the_name_is(self) -> None:
-        assert detect("hw_addr", ["02:00:00:00:00:01"], "mac_address") == "online_identifier"
+        assert (
+            detect("hw_addr", ["02:00:00:00:00:01"], assigned={"mac_address": 1})
+            == "online_identifier"
+        )
 
     def test_an_internal_key_is_not_flagged(self) -> None:
         """The decisive exclusion: flagging these puts a rule over every foreign key."""
@@ -535,7 +643,7 @@ class TestOnlineIdentifier:
     def test_a_uuid_column_is_not_flagged_by_shape(self) -> None:
         """`uuid` is the commonest primary key in any schema and must not become shape evidence."""
 
-        assert detect("id", ["a" * 20], "uuid") is None
+        assert detect("id", ["a" * 20], assigned={"uuid": 1}) is None
 
     def test_a_username_column_is_not_flagged(self) -> None:
         """Settled: a handle identifies an account, not a device or network endpoint."""
@@ -550,7 +658,78 @@ class TestOnlineIdentifier:
     def test_a_contact_shape_outranks_it(self) -> None:
         """An email is also an online identifier; the more specific category wins."""
 
-        assert detect("primary", ["a@b.com"], "email") == "contact"
+        assert detect("primary", ["a@b.com"], assigned={"email": 1}) == "contact"
+
+
+class TestShapeShares:
+    """SPEC 4.4.4: a category's shapes reach it at half the draw, counted together."""
+
+    ADDRESSES: ClassVar[list[str]] = [f"keeper{i}@seedbank.example" for i in range(10)]
+    PHONES: ClassVar[list[str]] = [f"+44 7700 900{i:03d}" for i in range(10)]
+
+    def test_nine_addresses_in_ten_are_contact(self) -> None:
+        values = [*self.ADDRESSES[:9], "n/a"]
+
+        assert detect("relay", values, assigned={"email": 9}) == "contact"
+
+    def test_addresses_and_phones_add(self) -> None:
+        values = [*self.ADDRESSES[:5], *self.PHONES[:5]]
+
+        assert detect("relay", values, assigned={"email": 5, "phone": 5}) == "contact"
+
+    @pytest.mark.parametrize(("addresses", "expected"), [(5, "contact"), (4, None)])
+    def test_half_the_draw_is_the_bar(self, addresses: int, expected: str | None) -> None:
+        values = [*self.ADDRESSES[:addresses], *["n/a"] * (10 - addresses)]
+
+        assert detect("relay", values, assigned={"email": addresses}) == expected
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "keeper{i}@seedbank.example, steward{i}@seedbank.example",
+            "Seed Keeper <keeper{i}@x.org>",
+        ],
+    )
+    def test_an_address_inside_a_value_counts(self, value: str) -> None:
+        """A list or a display-name form matches no pattern whole and leaks every address."""
+
+        assert detect("relay", [value.format(i=i) for i in range(10)], assigned={}) == "contact"
+
+    def test_prose_mentioning_an_address_now_and_then_is_not_flagged(self) -> None:
+        notes = [*[f"sent to keeper{i}@seedbank.example" for i in range(3)], *["dried"] * 7]
+
+        assert detect("field_notes", notes, assigned={}) is None
+
+    @pytest.mark.parametrize(
+        ("name", "assigned", "expected"),
+        [
+            ("remote", {"ip": 3, "mac_address": 2}, "online_identifier"),
+            ("ref", {"iban": 3, "card_number": 2}, "financial_account"),
+            ("spot", {"latlon": 5}, "geolocation"),
+            ("payload", {"jwt": 6}, "credential"),
+            ("token", {"hex": 6}, "credential"),
+            ("content_hash", {"hex": 10}, None),
+        ],
+    )
+    def test_a_category_s_shapes(
+        self,
+        name: str,
+        assigned: dict[LooksLike, int],
+        expected: str | None,
+    ) -> None:
+        """The draw is stand-ins: the tally is the shape evidence, and no value holds a secret."""
+
+        draw = [f"v{i}" for i in range(10)]
+
+        assert detect(name, draw, assigned=assigned) == expected
+
+    def test_an_empty_draw_carries_no_shape(self) -> None:
+        assert detect("remote", [], assigned={"ip": 3}) is None
+
+    def test_a_value_that_is_no_string_holds_no_address(self) -> None:
+        values = [address.encode() for address in self.ADDRESSES]
+
+        assert detect("relay", values, assigned={}) is None
 
 
 class TestDetectionChain:
@@ -559,27 +738,30 @@ class TestDetectionChain:
     """
 
     @pytest.mark.parametrize(
-        ("name", "shape", "expected"),
+        ("name", "values", "assigned", "expected"),
         [
-            ("first_name", "iban", "personal_name"),
-            ("first_name", "email", "personal_name"),
-            ("street_address", "email", "postal_address"),
-            ("latitude", "email", "geolocation"),
-            ("dob", "email", "date_of_birth"),
-            ("ssn", "email", "national_id"),
-            ("card_number", "jwt", "financial_account"),
-            ("api_key", "email", "credential"),
-            ("salary", "email", "employment"),
-            ("device_id", "email", "contact"),
+            ("first_name", ["DE89370400440532013000"], {"iban": 1}, "personal_name"),
+            ("first_name", ["a@b.com"], {"email": 1}, "personal_name"),
+            ("street_address", ["12 Kew Road", "a@b.com"], {"email": 1}, "postal_address"),
+            ("latitude", ["a@b.com"], {"email": 1}, "geolocation"),
+            ("dob", ["a@b.com"], {"email": 1}, "date_of_birth"),
+            ("ssn", ["a@b.com"], {"email": 1}, "national_id"),
+            ("card_number", ["a.b.c"], {"jwt": 1}, "financial_account"),
+            ("api_key", ["a@b.com"], {"email": 1}, "credential"),
+            ("salary", ["a@b.com"], {"email": 1}, "employment"),
+            ("device_id", ["a@b.com"], {"email": 1}, "contact"),
         ],
     )
     def test_an_earlier_category_outranks_a_later_shape(
         self,
         name: str,
-        shape: str,
+        values: list[str],
+        assigned: dict[LooksLike, int],
         expected: str,
     ) -> None:
-        assert detect(name, [], shape) == expected
+        """Each draw reaches the later shape's share; `street_address` needs its own half too."""
+
+        assert detect(name, values, assigned=assigned) == expected
 
 
 class TestTailAnchorReachesEveryTierButWeakCredentials:
@@ -658,15 +840,83 @@ class TestTokenRuns:
     def test_only_the_token_before_the_run_can_disqualify(self) -> None:
         assert detect("brand_x_name", ["Ada Lovelace", "Alan Turing"]) == "personal_name"
 
-    def test_a_disqualified_strong_run_falls_back_to_corroboration(self) -> None:
-        assert detect("company_full_name", ["Acme Ltd", "Initech Llc"]) is None
+    @pytest.mark.parametrize(
+        "column",
+        ["company_full_name", "site_display_name", "company_display_name"],
+    )
+    @pytest.mark.parametrize(
+        "values",
+        [
+            ["Lakeside Botanical Society", "Granite Ridge Arboretum"],
+            ["Ada Lovelace", "Alan Turing"],
+        ],
+        ids=["organisations", "people"],
+    )
+    def test_a_vetoed_thing_name_is_not_judged_again_by_the_name_it_ends_in(
+        self,
+        column: str,
+        values: list[str],
+    ) -> None:
+        assert detect(column, values) is None
 
-    def test_a_disqualified_run_does_not_stop_the_next_token(self) -> None:
+    def test_an_unvetoed_thing_name_keeps_its_tier(self) -> None:
         people = ["Ada Lovelace", "Alan Turing"]
-        ordered = cast(frozenset[str], ("display_name", "name"))
 
-        assert detect("company_display_name", people) == "personal_name"
-        assert _matches("company_display_name", ordered, frozenset({"company"})) is True
+        assert detect("full_name", []) == "personal_name"
+        assert detect("display_name", people) == "personal_name"
+        assert detect("display_name", ["Acme Inc."]) is None
+        assert detect("curator_display_name", people) == "personal_name"
+
+
+class TestAPersonAttachedToAThing:
+    @pytest.mark.parametrize(
+        "column",
+        ["project_owner", "report_author", "event_contact", "campaign_recipient"],
+    )
+    def test_a_person_word_under_an_organisation_word_is_flagged(self, column: str) -> None:
+        assert detect(column, _PEOPLE) == "personal_name"
+
+    @pytest.mark.parametrize(
+        "column",
+        ["account_contact_name", "vendor_first_name", "team_surname"],
+    )
+    def test_a_strong_person_token_under_an_organisation_word_needs_no_sample(
+        self,
+        column: str,
+    ) -> None:
+        assert detect(column, []) == "personal_name"
+
+    @pytest.mark.parametrize(
+        ("column", "values"),
+        [
+            ("supplier_name", ["Lakeside Botanical Society", "Acme Inc"]),
+            ("site_name", ["North Field", "Glasshouse 2"]),
+            ("status_name", ["Active", "Retired"]),
+            ("company_full_name", ["Acme Ltd", "Initech Llc"]),
+        ],
+    )
+    def test_the_thing_s_own_name_stays_vetoed(self, column: str, values: list[str]) -> None:
+        assert detect(column, values) is None
+
+    def test_a_bare_name_in_a_table_of_non_persons_stays_unflagged(self) -> None:
+        assert detect("name", ["Lakeside Botanical Society"], table="sites") is None
+
+    def test_organisation_values_under_a_person_word_are_flagged_for_recall(self) -> None:
+        assert detect("project_owner", ["Lakeside Botanical Society"]) == "personal_name"
+
+    def test_machine_values_under_a_person_word_do_not_corroborate(self) -> None:
+        assert detect("table_owner", ["etl_admin", "reporting_ro"]) is None
+
+    def test_no_organisation_word_vetoes_a_person_token(self) -> None:
+        missed = [
+            f"{head}_{token}"
+            for head in sorted(_NAME_DISQUALIFIED_HEADS)
+            for tokens, values in ((_STRONG_NAME_TOKENS, []), (_WEAK_NAME_TOKENS, _PEOPLE))
+            for token in sorted(tokens - _THING_NAME_TOKENS)
+            if detect(f"{head}_{token}", values) != "personal_name"
+        ]
+
+        assert missed == []
 
 
 _ORGANISATIONS = [

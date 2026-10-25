@@ -42,9 +42,11 @@ COVERS = frozenset(
         "incomplete_grain_search",
         "catalog_only_table",
         "declared_missing_artifact",
+        "outside_print_entry",
         "delimiter_in_a_value",
         "value_spelling",
         "scoped_complete_list",
+        "scoped_part_list",
         "scoped_candidate_key",
         "scoped_latest_value",
         "extreme_number_statistics",
@@ -70,6 +72,7 @@ ANCHORS: dict[str, tuple[str, str]] = {
     # a catalog_only object's absent fields read as unasked, never as a measured emptiness.
     "catalog_only_table": ("2.2.15", "catalog_only"),
     "declared_missing_artifact": ("7.3", "artifacts"),
+    "outside_print_entry": ("2.5", "path"),
     "delimiter_in_a_value": ("2.2.3", "values"),
     "value_spelling": ("2.2.4", "values"),
     "orphan_spelling": ("2.2.4", "spelling_of"),
@@ -81,6 +84,7 @@ ANCHORS: dict[str, tuple[str, str]] = {
     "unreadable_profiled_at": ("2.5", "profiled_at"),
     # The three scanned-set claims rest on SPEC 2.2.8's one rule; the guide names its block.
     "scoped_complete_list": ("2.2.8", "scope"),
+    "scoped_part_list": ("2.2.8", "occurrences"),
     "scoped_candidate_key": ("2.2.8", "scope"),
     "scoped_latest_value": ("2.2.8", "scope"),
 }

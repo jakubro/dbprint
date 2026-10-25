@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from importlib import resources
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -44,8 +45,9 @@ _MANIFEST_DEFS = json.loads(
 )["$defs"]
 
 
-def _carried(fqn: str, payload: dict[str, Any]) -> ManifestTableEntry:
-    carried = CarriedTable(table=CommittedTable(fqn=fqn, entry=payload), reason="out_of_scope")
+def _carried(fqn: str, payload: dict[str, Any], directory: Path = Path()) -> ManifestTableEntry:
+    table = CommittedTable(fqn=fqn, entry=payload, directory=directory)
+    carried = CarriedTable(table=table, reason="out_of_scope")
 
     return carried_entry(carried, resolved_max_age_days=None)
 
@@ -96,6 +98,7 @@ def _manifest(entries: list[ManifestTableEntry], **overrides: Any) -> dict[str, 
         "selectors": NO_SELECTORS,
         "redaction_rules_configured": 0,
         "default_collation": "en_US.UTF-8",
+        "dbprint_version": "0.9.0",
     }
     fields.update(overrides)
 
@@ -143,14 +146,22 @@ class TestAnnotationsPresence:
     def test_absent_when_not_authored(self) -> None:
         assert "statistics_annotations" not in _payload(_entry())["artifacts"]
 
-    def test_presence_survives_a_carry_forward(self) -> None:
-        carried = _carried(
-            "seedbank.accession",
-            _payload(_entry(has_statistics_annotations=True)),
-        )
+    def test_presence_follows_the_file_on_disk_across_a_carry(self, tmp_path: Path) -> None:
+        payload = _payload(_entry(has_statistics_annotations=True))
+        written, deleted = tmp_path / "written", tmp_path / "deleted"
+        written.mkdir()
+        deleted.mkdir()
+        (written / "statistics.annotations.yaml").write_text("format_version: 1\n")
 
-        assert carried.has_statistics_annotations is True
-        assert "statistics_annotations" in _payload(carried)["artifacts"]
+        kept = _carried("seedbank.accession", payload, written)
+        dropped = _carried("seedbank.accession", payload, deleted)
+        added = _carried("seedbank.accession", _payload(_entry()), written)
+
+        assert kept.has_statistics_annotations is True
+        assert "statistics_annotations" in _payload(kept)["artifacts"]
+        assert dropped.has_statistics_annotations is False
+        assert "statistics_annotations" not in _payload(dropped)["artifacts"]
+        assert added.has_statistics_annotations is True
 
 
 class TestRelationshipAnnotationsPresence:
@@ -162,14 +173,22 @@ class TestRelationshipAnnotationsPresence:
     def test_absent_when_not_authored(self) -> None:
         assert "relationships_annotations" not in _payload(_entry())["artifacts"]
 
-    def test_presence_survives_a_carry_forward(self) -> None:
-        carried = _carried(
-            "seedbank.accession",
-            _payload(_entry(has_relationships_annotations=True)),
-        )
+    def test_presence_follows_the_file_on_disk_across_a_carry(self, tmp_path: Path) -> None:
+        payload = _payload(_entry(has_relationships_annotations=True))
+        written, deleted = tmp_path / "written", tmp_path / "deleted"
+        written.mkdir()
+        deleted.mkdir()
+        (written / "relationships.annotations.yaml").write_text("format_version: 1\n")
 
-        assert carried.has_relationships_annotations is True
-        assert "relationships_annotations" in _payload(carried)["artifacts"]
+        kept = _carried("seedbank.accession", payload, written)
+        dropped = _carried("seedbank.accession", payload, deleted)
+        added = _carried("seedbank.accession", _payload(_entry()), written)
+
+        assert kept.has_relationships_annotations is True
+        assert "relationships_annotations" in _payload(kept)["artifacts"]
+        assert dropped.has_relationships_annotations is False
+        assert "relationships_annotations" not in _payload(dropped)["artifacts"]
+        assert added.has_relationships_annotations is True
 
 
 class TestManifestAnnotationsPresence:

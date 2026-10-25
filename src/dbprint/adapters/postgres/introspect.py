@@ -213,7 +213,12 @@ def default_collation(conn: psycopg.Connection) -> str:
 def relationships(conn: psycopg.Connection, identity: Identity) -> list[ForeignKeyMeta]:
     """Declared outgoing FKs; one entry per constraint (composite as arrays)."""
 
-    return pg_catalog.relationships(partial(exec_query, conn), identity, on_unknown=None)
+    return pg_catalog.relationships(
+        partial(exec_query, conn),
+        identity,
+        on_unknown=None,
+        skip_clones=True,
+    )
 
 
 def indexes(conn: psycopg.Connection, identity: Identity) -> list[IndexMeta]:
@@ -222,6 +227,8 @@ def indexes(conn: psycopg.Connection, identity: Identity) -> list[IndexMeta]:
     A bare unique index (`indisunique`, no backing `pg_constraint`, `indpred IS NULL`) is
     reported by `unique_keys` instead. A partial unique index (`indpred IS NOT NULL`) stays
     here: it enforces uniqueness over a subset of rows, which `unique_keys` does not report.
+    Only key columns are listed - never an `INCLUDE` column or an expression member - and an
+    index with no column member is not reported.
     """
 
     rows = exec_query(
@@ -229,7 +236,7 @@ def indexes(conn: psycopg.Connection, identity: Identity) -> list[IndexMeta]:
         """
         SELECT
           icl.relname AS index_name,
-          STRING_TO_ARRAY(idx.indkey::TEXT, ' ')::INT[] AS attnums,
+          (STRING_TO_ARRAY(idx.indkey::TEXT, ' ')::INT[])[1:idx.indnkeyatts] AS attnums,
           idx.indisunique AS is_unique,
           acm.amname AS index_type,
           idx.indrelid AS table_relid
@@ -265,7 +272,11 @@ def indexes(conn: psycopg.Connection, identity: Identity) -> list[IndexMeta]:
     out: list[IndexMeta] = []
 
     for index_name, attnums, is_unique, index_type, table_relid in rows:
-        cols = pg_catalog.attnums_to_names(partial(exec_query, conn), table_relid, list(attnums))
+        # An expression member is attnum 0.
+        if not (key := [attnum for attnum in attnums if attnum != 0]):
+            continue
+
+        cols = pg_catalog.attnums_to_names(partial(exec_query, conn), table_relid, key)
         out.append(
             IndexMeta(
                 name=index_name,
@@ -336,7 +347,8 @@ def unique_keys(conn: psycopg.Connection, identity: Identity) -> list[UniqueKeyM
     `contype` sorts 'p' before 'u', so the primary key both leads and is marked; `conkey`
     is the attnum sequence in declaration order. The second arm adds a bare unique index
     backing no constraint - "declared unique" means enforced, not named - excluding partial
-    indexes and any a constraint already covers. No relkind filter, so a matview's bare
+    indexes, any a constraint already covers, and any with an expression member; only its key
+    columns form the key, never an `INCLUDE` column. No relkind filter, so a matview's bare
     unique index is picked up too.
     """
 
@@ -360,7 +372,7 @@ def unique_keys(conn: psycopg.Connection, identity: Identity) -> list[UniqueKeyM
         UNION ALL
 
         SELECT
-          STRING_TO_ARRAY(idx.indkey::TEXT, ' ')::INT[] AS conkey,
+          (STRING_TO_ARRAY(idx.indkey::TEXT, ' ')::INT[])[1:idx.indnkeyatts] AS conkey,
           idx.indrelid AS relid,
           'u' AS contype,
           icl.relname AS name
@@ -373,6 +385,7 @@ def unique_keys(conn: psycopg.Connection, identity: Identity) -> list[UniqueKeyM
           idx.indisunique
           AND NOT idx.indisprimary
           AND idx.indpred IS NULL
+          AND idx.indexprs IS NULL
           AND nsp.nspname = %s
           AND cls.relname = %s
           AND NOT EXISTS (
@@ -512,24 +525,70 @@ def view_dependencies(conn: psycopg.Connection, database: str) -> dict[str, tupl
 
 
 def reltuples_estimate(conn: psycopg.Connection, identity: Identity) -> float:
-    """Planner-stat row-count estimate; -1 if no stats yet (use exact path then)."""
+    """Planner-stat row-count estimate of every row the table's statements read; -1 if unknown.
 
-    row = exec_query(
+    An inheritance parent's statements read its descendants too, so their estimates are summed;
+    a partitioned table's own estimate already covers its partitions.
+    """
+
+    rows = exec_query(
         conn,
         """
+        WITH RECURSIVE
+          tree AS (
+
+            SELECT
+              cls.oid,
+              TRUE AS root
+            FROM
+              pg_class cls
+              JOIN pg_namespace nsp ON nsp.oid = cls.relnamespace
+            WHERE
+              nsp.nspname = %s
+              AND cls.relname = %s
+
+            UNION
+
+            SELECT
+              inh.inhrelid,
+              FALSE
+            FROM
+              tree tre
+              JOIN pg_inherits inh ON inh.inhparent = tre.oid
+
+          )
         SELECT
-          cls.reltuples::DOUBLE PRECISION
+          tre.root,
+          cls.relkind::TEXT,
+          cls.reltuples::DOUBLE PRECISION,
+          CASE
+            WHEN cls.reltuples < 0 AND cls.relkind = 'r' THEN pg_catalog.PG_RELATION_SIZE(cls.oid)
+          END
         FROM
-          pg_class cls
-          JOIN pg_namespace nsp ON nsp.oid = cls.relnamespace
-        WHERE
-          nsp.nspname = %s
-          AND cls.relname = %s
+          tree tre
+          JOIN pg_class cls ON cls.oid = tre.oid
         """,
         identity.addressed,
-    ).fetchone()
+    ).fetchall()
 
-    return float(row[0]) if row else -1.0
+    root = next((row for row in rows if row[0]), None)
+
+    if root is None or root[2] < 0:
+        return -1.0
+
+    if len(rows) == 1 or root[1] == "p":
+        return float(root[2])
+
+    total = 0.0
+
+    # A never-analyzed descendant reads -1; only one holding no pages is known to be empty.
+    for _, _, tuples, size in rows:
+        if tuples >= 0:
+            total += tuples
+        elif size != 0:
+            return -1.0
+
+    return total
 
 
 # The built-in name classification reads for each user-definable family; a composite is declined.

@@ -36,12 +36,16 @@ from tests.fixtures.adversarial import (
     ORPHAN_SPELLING_COLUMN,
     ORPHAN_SPELLING_TABLE,
     ORPHAN_SPELLING_VALUE,
+    OUTSIDE_PRINT_TABLE,
     PERCENTILE_INSIDE_RANGE_COLUMN,
     REDACTED_COLUMN,
     SCOPED_COMPLETE_LIST_COLUMN,
     SCOPED_KEY_COLUMN,
     SCOPED_LATEST_COLUMN,
+    SCOPED_PART_COLUMN,
+    SCOPED_PART_PATH,
     SCOPED_TABLE,
+    SEVERAL_EDGES_COLUMN,
     SEVERAL_EDGES_TABLE,
     SPELLING_COLUMN,
     SPELLING_VALUES,
@@ -49,6 +53,7 @@ from tests.fixtures.adversarial import (
     UNEVALUATED_TABLE,
     UNREADABLE_PROFILED_AT,
     UNREADABLE_PROFILED_TABLE,
+    VOID_VERDICT_NOTE,
     AdversarialPrint,
 )
 
@@ -72,9 +77,11 @@ COVERS = frozenset(
         "incomplete_grain_search",
         "catalog_only_table",
         "declared_missing_artifact",
+        "outside_print_entry",
         "delimiter_in_a_value",
         "value_spelling",
         "scoped_complete_list",
+        "scoped_part_list",
         "scoped_candidate_key",
         "scoped_latest_value",
         "extreme_number_statistics",
@@ -280,6 +287,12 @@ def test_a_bar_is_spelled_so_it_reads_back_as_itself(adversarial_print: Adversar
     assert all("\n" not in bar["value"] for bar in values["bars"])
 
 
+def _page_html(adversarial_print: AdversarialPrint, table: str) -> str:
+    client = web.create_app([_conn(adversarial_print)]).test_client()
+
+    return client.get(f"/t/{_conn(adversarial_print).name}/{table}").data.decode()
+
+
 def _page_text(adversarial_print: AdversarialPrint, table: str) -> str:
     client = web.create_app([_conn(adversarial_print)]).test_client()
     page = client.get(f"/t/{_conn(adversarial_print).name}/{table}").data.decode()
@@ -344,10 +357,21 @@ def test_the_bounds_are_the_range_not_a_percentile(adversarial_print: Adversaria
 
 
 def test_the_notes_name_every_standing_edge(adversarial_print: AdversarialPrint) -> None:
-    text = _page_text(adversarial_print, SEVERAL_EDGES_TABLE)
+    page = _page_html(adversarial_print, SEVERAL_EDGES_TABLE)
+    start = page.index(f'<tr id="col-{SEVERAL_EDGES_COLUMN}"')
+    row = html.unescape(page[start : page.index("</tr>", start)])
 
-    assert "FK: public.cultivar.id (declared), public.wide_lookup.a (measured)" in text
-    assert "public.batch.id (inferred)" not in text.split("Relationships", 1)[0]
+    assert "FK: public.cultivar.id (declared), public.wide_lookup.a (measured)" in row
+    assert "public.batch.id (inferred)" not in row
+
+
+def test_a_verdict_on_a_declared_edge_marks_nothing(adversarial_print: AdversarialPrint) -> None:
+    page = _page_html(adversarial_print, SEVERAL_EDGES_TABLE)
+    muted = re.findall(r"linkStyle (\d+) [^\n]*#c00", page)
+
+    assert VOID_VERDICT_NOTE not in html.unescape(page)
+    assert page.count("REJECTED by human annotation") == 1
+    assert len(muted) == 1
 
 
 def test_a_human_authored_edge_reaches_both_tables_tagged_annotated(
@@ -374,3 +398,18 @@ def test_connection_notes_are_reachable_from_a_table_page(
     assert f'id="{anchor}"' in index
     assert html.unescape(index).count(CONNECTION_NOTE) == 1
     assert f'#{anchor}"' in page
+
+
+def test_scoped_part_list_carries_the_clause(adversarial_print: AdversarialPrint) -> None:
+    page = _page(adversarial_print, SCOPED_TABLE)
+    column = next(c for c in page["columns"] if c["name"] == SCOPED_PART_COLUMN)
+    part = next(p for p in column["parts"] if p["label"] == SCOPED_PART_COLUMN + SCOPED_PART_PATH)
+
+    assert "values (complete over the rows scanned)" in part["notes"]
+
+
+def test_an_entry_outside_the_print_reads_as_absent(adversarial_print: AdversarialPrint) -> None:
+    found = catalogue.load_connections([_conn(adversarial_print)])[0]
+
+    assert catalogue.load_table(found, OUTSIDE_PRINT_TABLE) is None
+    assert OUTSIDE_PRINT_TABLE not in found.tables

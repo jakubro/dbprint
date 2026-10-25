@@ -163,6 +163,54 @@ class TestEvaluate:
         assert not outcome.passed
 
 
+class TestNonFiniteReadings:
+    """A NaN orders against no bound, so it fails one; an infinity compares as a number."""
+
+    def test_a_nan_reading_fails_a_bound_it_cannot_be_ordered_against(self) -> None:
+        assert evaluate(RangePredicate(max=100), float("nan")) == Outcome(
+            passed=False,
+            detail="actual .nan is not a number a bound can order",
+        )
+
+    @pytest.mark.parametrize("bound", ["1", True])
+    def test_a_bound_of_another_type_is_malformed_against_a_nan_reading(
+        self,
+        bound: object,
+    ) -> None:
+        outcome = evaluate(RangePredicate(max=bound), float("nan"))
+
+        assert (outcome.passed, outcome.malformed) == (False, True)
+
+    @pytest.mark.parametrize("actual", [5.0, None])
+    def test_a_nan_bound_is_malformed(self, actual: float | None) -> None:
+        assert evaluate(RangePredicate(max=float("nan")), actual) == Outcome(
+            passed=False,
+            detail="a NaN bound orders nothing",
+            malformed=True,
+        )
+
+    @pytest.mark.parametrize(
+        ("predicate", "actual", "passed"),
+        [
+            (RangePredicate(max=100), float("inf"), False),
+            (RangePredicate(min=0), float("-inf"), False),
+            (RangePredicate(min=0), float("inf"), True),
+        ],
+    )
+    def test_an_infinity_compares_against_a_bound(
+        self,
+        predicate: RangePredicate,
+        actual: float,
+        passed: bool,
+    ) -> None:
+        assert evaluate(predicate, actual).passed is passed
+
+    def test_a_listed_nan_is_the_accepted_nan(self) -> None:
+        values = [{"value": float("nan"), "count": 2}, {"value": 1.5, "count": 3}]
+
+        assert evaluate(SetPredicate((float("nan"), 1.5)), values).passed
+
+
 class TestScalarEqualityAgainstAFlooredOrCeilingedRatio:
     """SPEC 2.2.6's floor/ceiling changes what `null_rate: 0`/`1` mean (ASSERTIONS.md 2.6)."""
 
@@ -330,7 +378,21 @@ _MALFORMED_SHAPES = [
         {"min": 0, "limit": 1},
         MalformedPredicate("range predicate accepts only min and/or max keys"),
     ),
+    (
+        "null_rate",
+        {"max": None},
+        MalformedPredicate("range predicate needs a min or a max that is not null"),
+    ),
+    (
+        "null_rate",
+        {"min": None, "max": None},
+        MalformedPredicate("range predicate needs a min or a max that is not null"),
+    ),
 ]
+
+
+def test_a_null_bound_beside_a_real_one_is_ignored() -> None:
+    assert parse("null_rate", {"min": 0, "max": None}) == RangePredicate(min=0)
 
 
 @pytest.mark.parametrize(("stat", "raw", "expected"), _MALFORMED_SHAPES)
@@ -388,7 +450,11 @@ _OUTCOMES = [
     (
         RangePredicate(min=1),
         "a",
-        Outcome(passed=False, detail="actual 'a' not comparable to range bounds", malformed=True),
+        Outcome(
+            passed=False,
+            detail="bound 1 is not comparable to actual 'a' - incompatible types",
+            malformed=True,
+        ),
     ),
     (RangePredicate(min="2024-01-01"), "2024-01-01", Outcome(passed=True)),
     (RangePredicate(max="2024-01-01"), "2024-01-01", Outcome(passed=True)),
@@ -611,3 +677,91 @@ def test_the_assertable_vocabulary(
         is_assertable_edge_stat(name),
         is_value_bearing_stat(name),
     ) == (column, edge, value_bearing)
+
+
+class TestALiteralIsComparedByTypeFirst:
+    """ASSERTIONS.md 2.1: the type check runs before equality, in the set and range forms too."""
+
+    @pytest.mark.parametrize(
+        ("predicate", "listed"),
+        [
+            (SetPredicate((True, False)), [{"value": 0}, {"value": 1}]),
+            (SetPredicate((1, 0)), [{"value": True}, {"value": False}]),
+            (SetPredicate((1, 2)), [{"value": "1"}, {"value": "2"}]),
+        ],
+        ids=["booleans-against-numbers", "numbers-against-booleans", "numbers-against-strings"],
+    )
+    def test_a_set_element_of_another_type_is_malformed(
+        self,
+        predicate: SetPredicate,
+        listed: list[dict[str, object]],
+    ) -> None:
+        outcome = evaluate(predicate, listed)
+
+        assert (outcome.passed, outcome.malformed) == (False, True)
+
+    @pytest.mark.parametrize(
+        ("predicate", "listed"),
+        [
+            (SetPredicate((date(2024, 3, 1),)), [{"value": "2024-03-01"}]),
+            (SetPredicate(("2024-03-01 05:00:00",)), [{"value": "2024-03-01T05:00:00Z"}]),
+            (SetPredicate((1, 2.0)), [{"value": 1}, {"value": 2}]),
+            (SetPredicate(("a", None)), [{"value": "a"}]),
+        ],
+        ids=["yaml-date", "other-instant-spelling", "int-against-float", "null-element"],
+    )
+    def test_a_set_of_the_listed_type_passes(
+        self,
+        predicate: SetPredicate,
+        listed: list[dict[str, object]],
+    ) -> None:
+        assert evaluate(predicate, listed).passed
+
+    def test_two_unrepresentable_dates_stay_distinct(self) -> None:
+        outcome = evaluate(SetPredicate(("10000-01-01",)), ["10000-01-01", "10000-06-01"])
+
+        assert outcome.detail == "unexpected values present: ['10000-06-01']"
+
+    def test_a_bare_digit_run_is_not_read_as_a_time(self) -> None:
+        outcome = evaluate(SetPredicate(("2024",)), ["2024", "20:24"])
+
+        assert outcome.detail == "unexpected values present: ['20:24']"
+
+    def test_an_element_of_another_type_is_named_with_both_families(self) -> None:
+        outcome = evaluate(SetPredicate((True,)), [{"value": 0}, {"value": 1}])
+
+        assert outcome.detail == (
+            "accepted_values element True is a boolean; the column's values are number "
+            "- incompatible types"
+        )
+
+    def test_a_date_scalar_against_a_non_temporal_string_is_malformed(self) -> None:
+        assert evaluate(ScalarPredicate(date(2024, 3, 1)), "abc").malformed
+
+    def test_a_real_violation_still_names_the_extra_value(self) -> None:
+        outcome = evaluate(SetPredicate(("1",)), [{"value": "1"}, {"value": "2"}])
+
+        assert (outcome.passed, outcome.malformed) == (False, False)
+        assert outcome.detail == "unexpected values present: ['2']"
+
+    @pytest.mark.parametrize(
+        ("predicate", "actual"),
+        [
+            (RangePredicate(max=False), 0),
+            (RangePredicate(min=True), 5),
+            (RangePredicate(min=False), False),
+            (RangePredicate(min="1"), 3),
+        ],
+        ids=["false-max", "true-min", "boolean-actual", "string-bound"],
+    )
+    def test_a_range_bound_of_another_type_or_a_boolean_is_malformed(
+        self,
+        predicate: RangePredicate,
+        actual: object,
+    ) -> None:
+        outcome = evaluate(predicate, actual)
+
+        assert (outcome.passed, outcome.malformed) == (False, True)
+
+    def test_a_decimal_bound_orders_against_an_integer(self) -> None:
+        assert evaluate(RangePredicate(min=Decimal(1)), 3).passed

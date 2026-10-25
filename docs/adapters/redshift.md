@@ -34,7 +34,7 @@ GRANT SELECT ON svv_table_info TO dbprint_ro;
 
 `SVV_TABLE_INFO` is visible only to superusers, and `GRANT SELECT ON svv_table_info TO <user>` is what permits an ordinary user to query it. `GRANT ROLE sys:monitor` is a second route to the same access. `SYSLOG ACCESS UNRESTRICTED` is **not** a substitute — it does not open superuser-visible system views.
 
-Without that grant, `estimate_row_count` catches the failure and returns `-1` for every table, silently: the run warns `no row-count estimate for '<table>'; rules carrying \`match.min_rows\` or a \`read.tables.max_rows\` ceiling do not apply to it`, but nothing else in the run tells a reader that the whole size-gating system just went dark. An empty table is missing from `SVV_TABLE_INFO` entirely, rather than reported as zero, so its absence there is not itself a sign of a missing grant.
+Without that grant, the row-count read fails for every table and is taken as no estimate at all, silently: the run warns `no row-count estimate for '<table>'; rules carrying \`match.min_rows\` or a \`read.tables.max_rows\` ceiling do not apply to it`, but nothing else in the run tells a reader that the whole size-gating system just went dark. An empty table is missing from `SVV_TABLE_INFO` entirely, rather than reported as zero, so its absence there is not itself a sign of a missing grant.
 
 ## Sampling
 
@@ -52,7 +52,7 @@ Only one thing makes dbprint write, and only under one condition: `profile.read.
 
 Where it does fire, the drawn rows are copied once into a session-lifetime temporary table — `CREATE TEMPORARY TABLE <name> AS SELECT * FROM (SELECT * FROM <table> WHERE RANDOM() < p) src`, evaluating `RANDOM()` exactly once — and every statistics statement for that table reads the copy.
 
-`read.tables.materialize: false` never falls back on Redshift: `SAMPLE_FALLBACK_COHERENT` is `false` here, so a `sample`-scoped table with the write disabled, or a refused write, is refused outright rather than degrading:
+`read.tables.materialize: false` never falls back on Redshift: an unseeded `RANDOM()` draw never reads the same rows twice, so a `sample`-scoped table with the write disabled, or a refused write, is refused outright rather than degrading:
 
 ```
 table 'arboretum.seedbank.germination_trial': connection 'primary' (redshift) reads it
@@ -75,7 +75,7 @@ Both path segments are lowercased for the FQN, and the rule check refuses two ob
 ## What it cannot deliver
 
 - **`indexes`** — always empty. No index concept exists on Redshift.
-- **`depends_on` on a late-binding view** — always absent. A late-binding view has no `pg_rewrite` entry, and the code drops the unresolved row rather than let it collapse into "resolved, reads nothing" — so such a view is missing from the dependency map entirely.
+- **`depends_on` on a late-binding view** — always absent. A late-binding view has no `pg_rewrite` entry, and dbprint drops the unresolved row rather than let it collapse into "resolved, reads nothing" — so such a view is missing from the dependency map entirely.
 - **Row-count estimate without the `svv_table_info` grant** — see "Read this one" above.
 - **Foreign key `on_delete` / `on_update`** — always `NO ACTION`. The FK grammar Redshift exposes carries no referential-action slot.
 
@@ -97,6 +97,10 @@ An `INTERVAL` column lists its values as Redshift's own `::varchar` text, the te
 `database` is optional. Omitted, the connection first opens `dev` — which exists on every cluster and namespace and can be neither dropped nor renamed — and reads every local database `svv_redshift_databases` lists, less the system ones. A datashare's consumer database (`database_type = 'shared'`) is not enumerated.
 
 A Redshift session reads one database's catalog alone — cross-database queries do not reach `pg_catalog` or `information_schema`, and `SHOW TABLE` has no database slot — so the connection opens one session per database holding a selected table, with the same credentials, and runs every statement for a table on its own database's session. It holds one connection per database read for the whole run. The grants below are needed in each database profiled, `TEMP` included wherever a table is sampled. A database whose session will not open is skipped with a warning. View dependencies are read only in databases holding a selected table; one whose dependency read fails is named in a warning and its views omit `depends_on` for that run. A configured `database` is matched to the spelling `svv_redshift_databases` stores, so `Dev` reads `dev`.
+
+## The row-count estimate
+
+A table's size, and a sampled table's `row_count`, come from `svv_table_info.estimated_visible_rows`, which excludes rows marked for deletion and not yet vacuumed; a sampled table publishes `row_count_method: approximate`.
 
 ## Statement timeout
 

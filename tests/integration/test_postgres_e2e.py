@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import LiteralString, cast
 
 import pytest
 import yaml
@@ -11,6 +12,7 @@ from click.testing import Result
 from dbprint.cli import run_log
 from tests._cli import credential_env, run_cli, write_project
 from tests._engine_run import conformance_errors
+from tests._secrets import FORMATS
 from tests.conftest import pg_connect
 
 
@@ -291,6 +293,49 @@ def test_a_narrowed_read_over_a_stale_estimate_conforms(
     assert errors == [], "Conformance violations:\n" + "\n".join(
         f"  {e.code} at {e.path}: {e.detail}" for e in errors
     )
+
+
+def test_a_secret_in_the_catalog_text_is_masked(
+    e2e_postgres_db: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SPEC 2.1.3: pg_dump's own spelling of a default, a check, a comment and a view body."""
+
+    db = e2e_postgres_db["database"]
+    planted = {"default": "Df3hYb7wNe", "comment": "Cm8rXz4kJd", "view": "Vw5tPq2nLs"}
+    check_key = FORMATS["sk_live"]()
+
+    with pg_connect(e2e_postgres_db) as conn:
+        for statement in (
+            (
+                "ALTER TABLE public.herbarium ALTER COLUMN name "
+                f"SET DEFAULT 'password={planted['default']}'"
+            ),
+            f"ALTER TABLE public.herbarium ADD CHECK (name <> '{check_key}')",
+            f"COMMENT ON COLUMN public.herbarium.biome IS 'api_key={planted['comment']}'",
+            (
+                "CREATE VIEW public.herbarium_v AS SELECT h.id, "
+                f"'host=db.example user=etl password={planted['view']} dbname=x'::text "
+                "AS conninfo FROM public.herbarium h"
+            ),
+        ):
+            conn.execute(cast(LiteralString, statement))
+
+    project_dir = tmp_path / "project"
+    write_project(project_dir, CONN_NAME, "postgres")
+    result = _run_generate(project_dir, _credential_env(e2e_postgres_db), monkeypatch)
+    assert result.exit_code in (0, 3), result.output
+
+    public = project_dir / "prints" / CONN_NAME / db / "public"
+    table = (public / "herbarium" / "ddl.sql").read_text()
+    view = (public / "herbarium_v" / "ddl.sql").read_text()
+
+    assert [s for s in (*planted.values(), check_key) if s in table + view] == []
+    assert "DEFAULT 'password=[HIDDEN]'" in table
+    assert "<> '[HIDDEN]'" in table
+    assert "IS 'api_key=[HIDDEN]'" in table
+    assert "password=[HIDDEN] dbname=x" in view
 
 
 _LAGGING_ESTIMATE_YAML = f"""\

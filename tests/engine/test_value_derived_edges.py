@@ -58,6 +58,7 @@ def _fixture(
     child_cardinality: int = ROW_COUNT - 5,
     parent_unique: bool = True,
     declared_edge: bool = False,
+    declared_target: str = "id",
     second_child: bool = False,
     child_rows: int = ROW_COUNT,
 ) -> dict[str, MockTable]:
@@ -95,7 +96,7 @@ def _fixture(
             ForeignKeyMeta(
                 column=("linked_ref",),
                 target_table="public.b",
-                target_column=("id",),
+                target_column=(declared_target,),
                 on_delete="NO ACTION",
                 on_update="NO ACTION",
                 constraint_name="a_linked_ref_fkey",
@@ -212,6 +213,30 @@ class TestDuplicateSuppression:
         a, _ = _generate(tmp_path, declared_edge=True)
 
         assert [e["detection"] for e in a["refers_to"]] == ["declared"]
+
+    def test_a_child_with_a_declared_parent_proposes_no_second_parent(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """`linked_ref` is declared into `b.code`; its values also fit inside `b.id`."""
+
+        a, _ = _generate(tmp_path, declared_edge=True, declared_target="code", second_child=True)
+
+        assert [(e["column"], e["detection"]) for e in a["refers_to"]] == [
+            (["linked_ref"], "declared"),
+            (["linked_ref2"], "measured"),
+        ]
+
+    def test_a_carried_child_with_a_declared_parent_proposes_no_second_parent(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        _generate(tmp_path, declared_edge=True, declared_target="code", second_child=True)
+        a, _ = _generate(tmp_path, declared_edge=True, declared_target="code", second_child=True)
+
+        assert [e["detection"] for e in a["refers_to"] if e["column"] == ["linked_ref"]] == [
+            "declared",
+        ]
 
 
 class TestReciprocity:

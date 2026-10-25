@@ -7,6 +7,7 @@ from __future__ import annotations
 from functools import partial
 from typing import assert_never
 
+from dbprint.spec.classification import base_type, is_floating_type
 from dbprint.spec.sketch import SketchKind
 from ..base import TemporalShape, lookup_operand, lookup_temporal_shape
 
@@ -23,6 +24,7 @@ _SHAPES: dict[str, TemporalShape] = {
     "timestamptz": "timestamp_tz",
 }
 
+_SUMMED_AS_DECIMAL = ("smallint", "integer", "bigint", "int", "int2", "int4", "int8")
 _CLOCK_PICTURE = "HH24:MI:SS.US"
 _INSTANT_PICTURE = 'YYYY-MM-DD"T"HH24:MI:SS.US'
 
@@ -32,6 +34,35 @@ _OPERANDS: dict[str, str] = {}
 
 
 render_operand = partial(lookup_operand, _OPERANDS)
+
+
+def finite_value(expr: str, sql_type: str) -> str:
+    """`expr` where finite, NULL for NaN and the infinities; unchanged on a type holding neither."""
+
+    if not is_floating_type(sql_type):
+        return expr
+
+    finite = f"{expr} NOT IN ('NaN'::FLOAT8, 'Infinity'::FLOAT8, '-Infinity'::FLOAT8)"
+
+    return f"CASE WHEN {finite} THEN {expr} END"
+
+
+def sum_expression(expr: str, sql_type: str) -> str:
+    """`SUM` over `expr` at precision 38; Redshift sums an integer type in `BIGINT` otherwise."""
+
+    if base_type(sql_type) in _SUMMED_AS_DECIMAL:
+        return f"SUM(CAST({expr} AS DECIMAL(38, 0)))"
+
+    return f"SUM({expr})"
+
+
+def mean_expression(expr: str, sql_type: str) -> str:
+    """The mean of `expr`: `AVG` on a floating type, else the exact sum over the count."""
+
+    if is_floating_type(sql_type):
+        return f"AVG({expr}::FLOAT8)"
+
+    return f"CAST({sum_expression(expr, sql_type)} AS FLOAT8) / NULLIF(COUNT({expr}), 0)"
 
 
 def render_text(expr: str, sql_type: str) -> str:

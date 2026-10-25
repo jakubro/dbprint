@@ -16,7 +16,7 @@ There is no host, no port, no user, and nothing to grant — the file's own file
 
 ### What a read-only connection can and cannot do
 
-`read_only: true` opens the file without a write lock, and it does **not** block the temporary table `materialize_scope` creates for a narrowed table: duckdb's read-only guard applies per attached database, and the session's own `temp` catalog is exempt from it. A `read_only` connection over a file therefore still samples correctly.
+`read_only: true` opens the file without a write lock, and it does **not** block the temporary table a sampled table's draw is copied into: duckdb's read-only guard applies per attached database, and the session's own `temp` catalog is exempt from it. A `read_only` connection over a file therefore still samples correctly.
 
 `:memory:` combined with `read_only: true` is a different case — the connection never opens at all, since there is nothing on disk to open read-only.
 
@@ -34,13 +34,17 @@ duckdb is coherent **row for row** on a sampled table, the same guarantee Postgr
 
 Every `cardinality` is an exact distinct count at every table size, so `cardinality_method` is always `exact` — unlike adapters that read the engine's own estimate on a large table.
 
+## Row counts
+
+Every `row_count`, and every size a `min_rows` rule or a `max_rows` ceiling is tested against, is an exact `COUNT(*)`, which duckdb answers from row-group counts and deletion markers without reading column data. A table rows were deleted from is sized by the rows it holds — the catalog's `estimated_size` keeps counting deleted rows until a whole row group empties — and a sampled table publishes `row_count_method: exact`.
+
 ## When dbprint writes
 
 Only one thing makes dbprint write, and only under one condition: `profile.read.tables.materialize` is on by default, and it fires **only for a table read in `sample` mode** — by a `fraction`, or by a `max_rows` ceiling that resolves below the table's size, at whatever level the ceiling is set. A project that narrows nothing, which is what `dbprint init` scaffolds, never writes. A `filter` is a predicate rather than a fraction and never materializes.
 
 Where it does fire, the drawn rows are copied once into a session-lifetime temporary table in duckdb's own `temp` catalog — unqualified, since duckdb allows a temporary table only there — and every statistics statement for that table reads the copy.
 
-`read.tables.materialize: false` never falls back on duckdb: `SAMPLE_FALLBACK_COHERENT` is `true` here, the same as PostgreSQL, so an unmaterialized `sample` scope already stays coherent across statements. The only way the write itself can fail is the read-only interaction above.
+`read.tables.materialize: false` gives up nothing on duckdb: the seeded sample reads the same rows on every statement, as on PostgreSQL, so an unmaterialized `sample` scope stays coherent across statements. The only way the write itself can fail is the read-only interaction above.
 
 ## Identifiers
 

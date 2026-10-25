@@ -11,11 +11,12 @@ import os
 import re
 from pathlib import Path
 
+import pytest
 import yaml
 from click.testing import CliRunner
 
 from dbprint.cli.main import main
-from dbprint.mcp import ServedConnections, dispatch
+from dbprint.mcp import McpError, ServedConnections, dispatch
 from dbprint.mcp.tools import TOOL_NAMES
 from tests import _mcp_pages
 from tests._grammar import split_outside_literals
@@ -40,6 +41,8 @@ from tests.fixtures.adversarial import (
     ORPHAN_SPELLING_COLUMN,
     ORPHAN_SPELLING_TABLE,
     ORPHAN_SPELLING_VALUE,
+    OUTSIDE_PRINT_SENTINEL,
+    OUTSIDE_PRINT_TABLE,
     PARTIAL_AS_WHOLE,
     PERCENTILE_INSIDE_RANGE_COLUMN,
     REDACTED_COLUMN,
@@ -47,6 +50,8 @@ from tests.fixtures.adversarial import (
     SCOPED_COMPLETE_LIST_COLUMN,
     SCOPED_KEY_COLUMN,
     SCOPED_LATEST_COLUMN,
+    SCOPED_PART_COLUMN,
+    SCOPED_PART_PATH,
     SCOPED_TABLE,
     SEVERAL_EDGES_COLUMN,
     SEVERAL_EDGES_TABLE,
@@ -55,6 +60,7 @@ from tests.fixtures.adversarial import (
     TRUNCATED_FK_COLUMN,
     UNEVALUATED_TABLE,
     UNREADABLE_PROFILED_TABLE,
+    VOID_VERDICT_NOTE,
     AdversarialPrint,
 )
 
@@ -78,9 +84,11 @@ COVERS = frozenset(
         "incomplete_grain_search",
         "catalog_only_table",
         "declared_missing_artifact",
+        "outside_print_entry",
         "delimiter_in_a_value",
         "value_spelling",
         "scoped_complete_list",
+        "scoped_part_list",
         "scoped_candidate_key",
         "scoped_latest_value",
         "extreme_number_statistics",
@@ -479,6 +487,7 @@ def test_every_standing_edge_is_named_surest_first(adversarial_print: Adversaria
 
     assert "FK: public.cultivar.id (declared), public.wide_lookup.a (measured); " in row
     assert REJECTED_EDGE_TARGET not in row
+    assert VOID_VERDICT_NOTE not in _md(adversarial_print, SEVERAL_EDGES_TABLE)
 
 
 def test_a_human_authored_edge_reaches_both_tables_tagged_annotated(
@@ -506,3 +515,48 @@ def test_connection_notes_reach_a_single_table_reader_once(
 
     assert text.count(CONNECTION_NOTE) == 1
     assert payload["connection_notes"] == CONNECTION_NOTE
+
+
+def test_scoped_part_list_resolves_as_the_scanned_domain(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    reply = _dict_result(
+        adversarial_print,
+        "resolve_value",
+        {
+            "table": SCOPED_TABLE,
+            "column": SCOPED_PART_COLUMN,
+            "part": SCOPED_PART_PATH,
+            "text": "abandoned",
+        },
+    )
+
+    assert reply["match"] == "none"
+    assert reply["exhaustive"] is False
+    assert (reply["scope"]["rows_scanned"], reply["row_count"]) == (250, 1000)
+    assert "the list is the whole domain over the rows scanned" in reply["sample_caveat"]
+
+
+def test_scoped_part_match_carries_the_scope(adversarial_print: AdversarialPrint) -> None:
+    matches = _dict_result(
+        adversarial_print,
+        "search_columns",
+        {"pattern": SCOPED_PART_COLUMN + SCOPED_PART_PATH},
+    )["matches"]
+    part = next(
+        m for m in matches if (m["table"], m.get("part")) == (SCOPED_TABLE, SCOPED_PART_PATH)
+    )
+
+    assert part["scope"]["rows_scanned"] == 250
+    assert part["rows_scanned"] == 250
+
+
+def test_an_entry_outside_the_print_reads_as_absent(adversarial_print: AdversarialPrint) -> None:
+    with pytest.raises(McpError) as caught:
+        dispatch(_state(adversarial_print), "get_table_context", {"table": OUTSIDE_PRINT_TABLE})
+
+    assert OUTSIDE_PRINT_SENTINEL not in caught.value.detail
+    listed = _dict_result(adversarial_print, "list_tables", {})
+
+    assert OUTSIDE_PRINT_SENTINEL not in str(listed)
+    assert OUTSIDE_PRINT_TABLE not in str(listed)

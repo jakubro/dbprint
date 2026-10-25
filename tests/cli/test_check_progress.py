@@ -219,12 +219,6 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
 
 
-def _duration_seconds(line: str) -> float:
-    """The trailing `tree.duration_text` field on a streaming progress line, as a float."""
-
-    return float(line.rsplit("\t", 1)[-1].removesuffix("s"))
-
-
 def _tick(
     fqn: str,
     index: int,
@@ -490,8 +484,6 @@ class TestAssertionsDurationAttribution:
         `arboretum.fixture.shape_probe` is the first table `check` walks; its read is made artificially slow.
         """
 
-        import time
-
         import dbprint.cli.commands.check as check_module
 
         _seed_committed_print(tmp_path, committed_print)
@@ -508,14 +500,23 @@ class TestAssertionsDurationAttribution:
         real_loader = check_module.artifact_yaml
         marker = "table: arboretum.fixture.shape_probe"
 
+        class _StoppedClock:
+            now = 0.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+        clock = _StoppedClock()
+
         class _SlowedForOneTable:
             def load(self, text: str) -> Any:
                 if marker in text:
-                    time.sleep(1.0)
+                    clock.now += 1.0
 
                 return real_loader.load(text)
 
         monkeypatch.setattr(check_module, "artifact_yaml", _SlowedForOneTable())
+        monkeypatch.setattr(check_module, "time", clock)
 
         result = CliRunner().invoke(main, ["check", "--format", "json", "--no-tui"])
         lines = {
@@ -524,18 +525,8 @@ class TestAssertionsDurationAttribution:
             if "\tasserted\t" in line
         }
 
-        slow = _duration_seconds(lines["arboretum.fixture.shape_probe"])
-        fast = _duration_seconds(lines["arboretum.seedbank.accession"])
-
-        # A relative comparison, not a fixed threshold: a heavily parallel run can add its own
-        # noise to every table's read, but the marked table's own ~1s sleep must still dominate.
-        assert slow >= 0.9, (
-            f"the slowed table's own line should show ~1.0s: {lines['arboretum.fixture.shape_probe']}"
-        )
-        assert fast < slow - 0.5, (
-            f"the fast table's line should not inherit the slow table's cost: "
-            f"slow={slow}s fast={fast}s"
-        )
+        assert lines["arboretum.fixture.shape_probe"].endswith("\t1.0s")
+        assert lines["arboretum.seedbank.accession"].endswith("\t0.0s")
 
 
 def _bar(renderer: LiveProgressRenderer) -> tuple[str, int, int]:

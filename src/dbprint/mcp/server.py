@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from typing import Any
 
@@ -218,24 +219,28 @@ async def run_stdio(server: Server) -> None:
 
 
 async def run_http(server: Server, host: str, port: int) -> None:
-    """HTTP/SSE server bound to loopback only; non-loopback hosts rejected at the CLI layer."""
+    """HTTP/SSE server bound to loopback, answering only a loopback `Host` and `Origin` for `port`.
+
+    Non-loopback bind addresses are rejected at the CLI layer.
+    """
 
     from mcp.server.sse import SseServerTransport
+    from mcp.server.transport_security import TransportSecuritySettings
     from starlette.applications import Starlette
-    from starlette.responses import Response
     from starlette.routing import Mount, Route
 
-    transport = SseServerTransport("/messages/")
-
-    async def handle_sse(request: Any) -> Response:
-        async with transport.connect_sse(request.scope, request.receive, request._send) as streams:
-            await server.run(streams[0], streams[1], initialization_options(server))
-
-        return Response()
-
+    hosts = [f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"]
+    transport = SseServerTransport(
+        "/messages/",
+        security_settings=TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=hosts,
+            allowed_origins=[f"http://{name}" for name in hosts],
+        ),
+    )
     app = Starlette(
         routes=[
-            Route("/sse", endpoint=handle_sse),
+            Route("/sse", endpoint=_SseEndpoint(transport, server)),
             Mount("/messages/", app=transport.handle_post_message),
         ],
     )
@@ -258,3 +263,26 @@ def serve_http(state: ServedConnections, host: str, port: int) -> None:
 
     server = build_server(state)
     anyio.run(run_http, server, host, port)
+
+
+class _SseEndpoint:
+    """The `/sse` route as a raw ASGI app, so a request the transport refused ends quietly.
+
+    `connect_sse` sends its own 421/403 and then raises `ValueError`; any response sent after it
+    would be a second one.
+    """
+
+    def __init__(self, transport: Any, server: Server) -> None:
+        self._transport = transport
+        self._server = server
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        async with contextlib.AsyncExitStack() as stack:
+            try:
+                streams = await stack.enter_async_context(
+                    self._transport.connect_sse(scope, receive, send),
+                )
+            except ValueError:
+                return
+
+            await self._server.run(streams[0], streams[1], initialization_options(self._server))

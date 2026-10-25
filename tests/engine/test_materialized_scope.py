@@ -11,6 +11,7 @@ import logging
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -25,6 +26,8 @@ from dbprint.adapters import (
 from dbprint.adapters.base import BaseStats, ColumnProgress, PhaseA, PhaseB, TableCounts
 from dbprint.config import ConnectionConfig, ProfileConfig, RelationshipsProfile, RuleConfig
 from dbprint.engine import Engine
+from dbprint.engine.staging import RunStage
+from dbprint.engine.writer import WriterError
 from tests._prints import quarter_scanned_table
 
 
@@ -234,6 +237,29 @@ class TestARefusedWriteDegrades:
 
         assert about_the_copy, f"no warning named the table whose copy was refused: {warnings}"
         assert "denied" in about_the_copy[0], "the warning drops the reason the write failed"
+
+
+class TestAFailedWriteStillReleasesTheCopy:
+    def test_the_copy_is_released_when_the_tables_files_cannot_be_written(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        table_dir = tmp_path / "w" / "public" / "t"
+        real = RunStage.write
+
+        def refusing(stage: Any, directory: Path, artifacts: dict[str, Any]) -> None:
+            if directory == table_dir:
+                raise WriterError(f"failed creating {directory}: [Errno 28] No space left")
+
+            real(stage, directory, artifacts)
+
+        with patch.object(RunStage, "write", refusing):
+            adapter = _run(
+                tmp_path,
+                RuleConfig(profile={"read": {"tables": {"mode": "sample", "fraction": 0.25}}}),
+            )
+
+        assert adapter.released == [COPY]
 
 
 def _run(

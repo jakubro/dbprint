@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shutil
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -180,3 +182,60 @@ class TestBuildSite:
         result = build.build_site([rich_conn], output)
 
         assert result.pages_written == 4
+
+
+class TestABuiltSiteDependsOnThePrintAlone:
+    def test_a_built_page_names_no_path_on_the_building_machine(
+        self,
+        rich_conn: ConnectionConfig,
+        tmp_path: Path,
+    ) -> None:
+        output = tmp_path / "site"
+
+        build.build_site([rich_conn], output)
+
+        pages = [page.read_text() for page in output.rglob("*.html")]
+
+        assert pages
+        assert not [p for p in pages if str(tmp_path) in p or str(tmp_path.resolve()) in p]
+
+    def test_a_built_page_states_the_profiled_date_not_an_age(
+        self,
+        rich_conn: ConnectionConfig,
+        tmp_path: Path,
+    ) -> None:
+        manifest_path = rich_conn.output / "primary" / "manifest.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text())
+        manifest["tables"]["seedbank.batch"]["profiled_at"] = "2026-03-09T14:27:36Z"
+        manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+        output = tmp_path / "site"
+
+        build.build_site([rich_conn], output)
+
+        page = (output / "t" / "primary" / "seedbank.batch" / "index.html").read_text()
+
+        assert ">Mar 09, 2026 14:27:36 UTC</span>" in page
+        assert " ago<" not in page
+
+    def test_one_print_builds_to_the_same_bytes_wherever_it_sits(
+        self,
+        rich_conn: ConnectionConfig,
+        tmp_path: Path,
+    ) -> None:
+        elsewhere = tmp_path / "elsewhere" / "prints"
+        shutil.copytree(rich_conn.output, elsewhere)
+        build.build_site([rich_conn], tmp_path / "one")
+        build.build_site([replace(rich_conn, output=elsewhere)], tmp_path / "two")
+
+        one = {
+            p.relative_to(tmp_path / "one"): p.read_bytes()
+            for p in (tmp_path / "one").rglob("*")
+            if p.is_file()
+        }
+        two = {
+            p.relative_to(tmp_path / "two"): p.read_bytes()
+            for p in (tmp_path / "two").rglob("*")
+            if p.is_file()
+        }
+
+        assert one == two

@@ -485,21 +485,20 @@ class ConnectionConfig:
         qualified: str,
         column_sensitivity: str | None,
         column_looks_like: str | None,
-        sensitivity: str | None,
-        looks_like: str | None,
+        detections: tuple[tuple[str | None, str | None], ...],
     ) -> str | None:
         """The primitive covering one part of the column `qualified` names (SPEC 2.2.9).
 
-        A rule covers the part when it covers its column, or when it lists the part's own
-        detection; a `columns` glob never names a part. Declaration order, last match wins.
+        A rule covers it through its column or any `detections` pair (own or enclosing); last wins.
         """
 
         primitive: str | None = None
 
         for rule in self.profile.redact:
-            if rule.covers(qualified, column_sensitivity, column_looks_like) or (
+            if rule.covers(qualified, column_sensitivity, column_looks_like) or any(
                 (sensitivity is not None and sensitivity in rule.sensitivity)
                 or (looks_like is not None and looks_like in rule.looks_like)
+                for sensitivity, looks_like in detections
             ):
                 primitive = rule.with_
 
@@ -549,7 +548,13 @@ class ConnectionConfig:
         own = f"connections.{self.name}.profile"
         tree = _profile_tree(self.profile)
         origins = {path: self.profile_origins.get(path, own) for path in _leaf_paths(tree)}
-        blocks = {kind: _read_tree(getattr(self.profile.read, kind)) for kind in BUILTIN_READ}
+        blocks = {
+            kind: _read_tree(
+                getattr(self.profile.read, kind),
+                materialize_written=("read", kind, "materialize") in self.profile_origins,
+            )
+            for kind in BUILTIN_READ
+        }
         read_origins = {
             kind: {key: self.profile_origins.get(("read", kind, key), own) for key in block}
             for kind, block in blocks.items()
@@ -568,6 +573,11 @@ class ConnectionConfig:
             for kind in BUILTIN_READ:
                 if written := (rule.profile.get("read") or {}).get(kind):
                     blocks[kind] = fold_read(blocks[kind], written, label, read_origins[kind])
+
+        for kind, block in blocks.items():
+            if block["mode"] == "sample" and "materialize" not in block:
+                block["materialize"] = MATERIALIZE_SAMPLE_DEFAULT
+                read_origins[kind]["materialize"] = BUILTIN_LABEL
 
         # A rule writing no `mode` is validated against the connection's, but an earlier matching
         # rule may have switched it; a parameter the final mode does not take stays inert.
@@ -833,14 +843,18 @@ def _typed_read(block: Mapping[str, Any]) -> ReadConfig:
     )
 
 
-def _read_tree(read: ReadConfig) -> dict[str, Any]:
+def _read_tree(read: ReadConfig, *, materialize_written: bool) -> dict[str, Any]:
     tree: dict[str, Any] = {"mode": read.mode}
 
     for key in ("fraction", "max_rows", "filter"):
         if (value := getattr(read, key)) is not None:
             tree[key] = value
 
-    if read.mode == "sample":
+    # Unwritten, the default is supplied once the fold knows the final mode; a config built in code
+    # records no origins, so a non-default value is taken as written.
+    if read.mode == "sample" and (
+        materialize_written or read.materialize != MATERIALIZE_SAMPLE_DEFAULT
+    ):
         tree["materialize"] = read.materialize
 
     return tree

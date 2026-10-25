@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 from jsonschema import Draft202012Validator
 
+from dbprint.spec import authored
 from .issue import Issue
 
 
@@ -37,9 +38,6 @@ _STATS = _load_schema("statistics.schema.json")
 _REL = _load_schema("relationships.schema.json")
 _MANIFEST = _load_schema("manifest.schema.json")
 _DIFF = _load_schema("diff.schema.json")
-_STATISTICS_ANNOTATIONS = _load_schema("statistics_annotations.schema.json")
-_RELATIONSHIPS_ANNOTATIONS = _load_schema("relationships_annotations.schema.json")
-_MANIFEST_ANNOTATIONS = _load_schema("manifest_annotations.schema.json")
 
 
 def relationships_schema() -> dict[str, Any]:
@@ -75,19 +73,35 @@ def check_diff(data: Any, path: str) -> list[Issue]:
 def check_statistics_annotations(data: Any, path: str) -> list[Issue]:
     """Validate a statistics.annotations.yaml body against the packaged JSON Schema."""
 
-    return _check(_STATISTICS_ANNOTATIONS, data, path, "§2.7.1")
+    return _check_authored("statistics_annotations", data, path, "§2.7.1")
 
 
 def check_relationships_annotations(data: Any, path: str) -> list[Issue]:
     """Validate a relationships.annotations.yaml body against the packaged JSON Schema."""
 
-    return _check(_RELATIONSHIPS_ANNOTATIONS, data, path, "§2.7.2")
+    return _check_authored("relationships_annotations", data, path, "§2.7.2")
 
 
 def check_manifest_annotations(data: Any, path: str) -> list[Issue]:
     """Validate a manifest.annotations.yaml body against the packaged JSON Schema."""
 
-    return _check(_MANIFEST_ANNOTATIONS, data, path, "§2.7.3")
+    return _check_authored("manifest_annotations", data, path, "§2.7.3")
+
+
+def _check_authored(kind: str, data: Any, path: str, spec_ref: str) -> list[Issue]:
+    # No JSON Schema can see a key YAML read as an int, bool or null, so it is checked here.
+    keys = [
+        Issue(
+            f"{path}::{authored.key_address(pointer)}",
+            "schema.type-mismatch",
+            "error",
+            authored.key_problem(pointer[-1]),
+            spec_ref,
+        )
+        for pointer in authored.non_string_keys(data)
+    ]
+
+    return keys + _check(authored.schema(kind), data, path, spec_ref)
 
 
 def _check(schema: dict[str, Any], data: Any, path: str, spec_ref: str) -> list[Issue]:
