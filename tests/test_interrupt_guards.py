@@ -14,6 +14,18 @@ _SRC = Path(dbprint.__file__).parent
 
 _MAY_CATCH_AN_INTERRUPT = {
     (
+        "adapters/duckdb/connection.py",
+        "execute",
+    ): "interrupts the statement in flight, then raises the driver's error from the interrupt",
+    (
+        "adapters/snowflake/connection.py",
+        "execute",
+    ): "cancels the session's statement in flight, then raises the driver's error from the interrupt",
+    (
+        "adapters/snowflake/connection.py",
+        "run",
+    ): "hands whatever ended the statement, a connector panic included, to the waiting thread",
+    (
         "cli/commands/docs.py",
         "serve_command",
     ): "`docs serve` stops on Ctrl-C and issues no statement",

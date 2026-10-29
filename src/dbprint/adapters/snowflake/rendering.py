@@ -25,7 +25,8 @@ _SHAPES: dict[str, TemporalShape] = {
     "timestamp_tz": "timestamp_tz",
 }
 
-_INSTANT_PICTURE = 'YYYY-MM-DD"T"HH24:MI:SS.FF6'
+_INSTANT_PICTURE = 'YYYY-MM-DD"T"HH24:MI:SS'
+_CLOCK_PICTURE = "HH24:MI:SS"
 
 
 # Types with no operator a statistic needs, measured through a lossless comparable form.
@@ -88,13 +89,13 @@ def render_domain(expr: str, sql_type: str, *, already_utc: bool = False) -> str
         case "date":
             return f"TO_VARCHAR({expr}, 'YYYY-MM-DD')"
         case "timestamp":
-            return _stripped(f"TO_VARCHAR({expr}, '{_INSTANT_PICTURE}')")
+            return _fraction(expr, expr, _INSTANT_PICTURE)
         case "timestamp_tz":
             utc = expr if already_utc else f"CONVERT_TIMEZONE('UTC', {expr})"
 
-            return f"{_stripped(f"TO_VARCHAR({utc}, '{_INSTANT_PICTURE}')")} || 'Z'"
+            return f"{_fraction(utc, expr, _INSTANT_PICTURE)} || 'Z'"
         case "time" | "time_tz":
-            return _stripped(f"TO_VARCHAR({expr}, 'HH24:MI:SS.FF6')")
+            return _fraction(expr, expr, _CLOCK_PICTURE)
         case "year":
             return f"TO_VARCHAR({expr})"
         case None:
@@ -121,6 +122,16 @@ def render_canonical(expr: str, sql_type: str, kind: SketchKind) -> str:
         return render_domain(expr, sql_type)
 
     return f"TO_VARCHAR({expr})"
+
+
+def _fraction(expr: str, instant: str, picture: str) -> str:
+    # Per value, not per column: the catalog hides precision, and the docs say neither how FF9 pads
+    # a coarser column nor whether FFn rounds. The fraction is read off the unconverted `instant`.
+    return (
+        f"CASE WHEN MOD(DATE_PART('nanosecond', {instant}), 1000) = 0 "
+        f"THEN {_stripped(f"TO_VARCHAR({expr}, '{picture}.FF6')")} "
+        f"ELSE TO_VARCHAR({expr}, '{picture}.FF9') END"
+    )
 
 
 def _stripped(rendered: str) -> str:

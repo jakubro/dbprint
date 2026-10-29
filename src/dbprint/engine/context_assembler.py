@@ -27,6 +27,7 @@ from dbprint.spec.artifacts import (
 from dbprint.spec.classification import compute_null_rate
 from dbprint.spec.edges import edge_detection, edge_key, rejected_edges
 from dbprint.spec.parts import display, member, parent, parse
+from dbprint.spec.rejection import rejected_fields, without_rejected
 from dbprint.spec.scope import (
     ScanScope,
     coverage_statement,
@@ -2152,6 +2153,37 @@ def _annotation_columns(mapping: dict[str, Any] | None) -> dict[str, dict[str, A
     return {name: entry for name, entry in columns.items() if isinstance(entry, dict)}
 
 
+def _without_rejected_fields(
+    statistics: dict[str, Any] | None,
+    annotations: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    columns = (statistics or {}).get("columns")
+
+    if not isinstance(columns, dict):
+        return statistics
+
+    shown = {
+        name: without_rejected(col, rejected_fields(annotations.get(name)))
+        if isinstance(col, dict)
+        else col
+        for name, col in columns.items()
+    }
+
+    if all(shown[name] is columns[name] for name in columns):
+        return statistics
+
+    return {**(statistics or {}), "columns": shown}
+
+
+def _without_rejections(annotations: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {
+        name: kept
+        for name, entry in annotations.items()
+        if (kept := {key: value for key, value in entry.items() if key != "rejected"})
+        or "rejected" not in entry
+    }
+
+
 def _annotated_grain(mapping: dict[str, Any] | None) -> dict[str, Any] | None:
     """The `grain` block of a parsed `statistics.annotations.yaml`, or None (SPEC 2.7.1)."""
 
@@ -2234,6 +2266,8 @@ def _load_table_artifacts(
 
         annotations = table_readings.live_annotations(_annotation_columns(stats_ann), statistics)
         annotated_grain = _annotated_grain(stats_ann)
+        statistics = _without_rejected_fields(statistics, annotations)
+        annotations = _without_rejections(annotations)
 
     relationship_annotations = None
 

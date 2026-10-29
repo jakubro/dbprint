@@ -38,6 +38,7 @@ from dbprint.spec.absence import Absence, block_value, column_value, disabled_of
 from dbprint.spec.artifacts import declared_artifacts
 from dbprint.spec.edges import edge_detection, edge_key, rejected_edges
 from dbprint.spec.parts import display
+from dbprint.spec.rejection import REJECTABLE, rejected_fields, without_rejected
 from dbprint.spec.scope import (
     SCANNED_CLAUSE,
     ScanScope,
@@ -825,6 +826,7 @@ def column_view(
 
     fk_targets = fk_target_map(relationships, relationship_annotations).get(name)
     annotation = annotations.get(name)
+    rejected = rejected_fields(annotation)
     note_md = annotation.get("note") if annotation else None
     claims = (annotation or {}).get("claims")
     values_notes = (annotation or {}).get("values")
@@ -852,12 +854,20 @@ def column_view(
         # SPEC 2.2.4: names the fields this run lost, so their cells are not read as forbidden.
         "unmeasured": tuple(column_value(col, "unmeasured") or ()),
         "notes": notes_synthesis.synthesize(
-            col,
+            without_rejected(col, rejected),
             fk_targets,
             hints_only=True,
             profile=profile,
             scope=scope,
         ).text,
+        "rejected_notes": [
+            text
+            for field in REJECTABLE
+            if field in rejected
+            and (
+                text := notes_synthesis.inferred_fact(col, field, profile=profile, scope=scope).text
+            )
+        ],
         # Not "values": Jinja resolves `.values` to the dict's bound method before item access.
         "value_list": values_view(col, scope),
         "range": range_view(col, scope),

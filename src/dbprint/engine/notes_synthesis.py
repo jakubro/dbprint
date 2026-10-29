@@ -14,6 +14,7 @@ from typing import Any
 
 from dbprint.spec.absence import Absence, column_value, read_column_field
 from dbprint.spec.classification import is_binary_type, is_integer_type
+from dbprint.spec.rejection import RejectableField
 from dbprint.spec.scope import ScanScope, list_is_complete, qualify, rows_scanned
 from dbprint.spec.value_text import spell_number, spell_percent
 from .context_terms import percentile_key
@@ -84,11 +85,12 @@ def synthesize(
 
     facts = [
         *facts,
-        *_candidate_key_suffix(column_stats, scope),
+        inferred_fact(column_stats, "candidate_key", scope=scope),
         *_physical_layout_key_suffix(column_stats),
-        *_looks_like_suffix(column_stats, params),
-        *_sensitivity_suffix(column_stats),
-        *_epoch_unit_suffix(column_stats),
+        inferred_fact(column_stats, "looks_like", profile=params),
+        inferred_fact(column_stats, "looks_like_candidate"),
+        inferred_fact(column_stats, "sensitivity"),
+        inferred_fact(column_stats, "epoch_unit"),
     ]
 
     if not hints_only:
@@ -99,6 +101,29 @@ def synthesize(
             *_coverage_method_suffix(column_stats),
             *_populated_suffix(column_stats),
         ]
+
+    return join_facts(facts)
+
+
+def inferred_fact(
+    column_stats: dict[str, Any],
+    field: RejectableField,
+    *,
+    profile: dict[str, Any] | None = None,
+    scope: ScanScope | None = None,
+) -> Rendered:
+    """One inferred field's fact as the Notes cell words it; empty where the column carries none."""
+
+    if field == "candidate_key":
+        facts = _candidate_key_suffix(column_stats, scope)
+    elif field == "looks_like":
+        facts = _looks_like_suffix(column_stats, profile)
+    elif field == "looks_like_candidate":
+        facts = _looks_like_candidate_suffix(column_stats)
+    elif field == "sensitivity":
+        facts = _sensitivity_suffix(column_stats)
+    else:
+        facts = _epoch_unit_suffix(column_stats)
 
     return join_facts(facts)
 
@@ -729,14 +754,12 @@ def _looks_like_suffix(
     stats: dict[str, Any],
     params: dict[str, Any] | None = None,
 ) -> list[Rendered]:
-    """A suffix: the detected shape (SPEC 4.1), present only where SPEC 4.1.5 samples for it -
-    absent a verdict, `_looks_like_candidate_suffix` covers the near-miss instead.
-    """
+    """A suffix: the detected shape (SPEC 4.1), present only where SPEC 4.1.5 samples for it."""
 
     pattern = column_value(stats, "inferred.looks_like")
 
     if not pattern:
-        return _looks_like_candidate_suffix(stats)
+        return []
 
     word = enum_word(pattern)
     keys = ("looks_like", f"looks_like:{pattern}")
@@ -766,12 +789,18 @@ def _looks_like_suffix(
 def _looks_like_candidate_suffix(stats: dict[str, Any]) -> list[Rendered]:
     """`looks_like`'s near-miss (SPEC 4.1.3): the best-scoring pattern below the verdict bar,
     worded "near" so it cannot read as the verdict, with the share named against the sample.
+    Silent beside a verdict, which SPEC 4.1.3 forbids it to accompany.
     """
 
     candidate = column_value(stats, "inferred.looks_like_candidate")
     share = column_value(stats, "inferred.looks_like_candidate_share")
 
-    if not candidate or not isinstance(share, (int, float)) or isinstance(share, bool):
+    if (
+        column_value(stats, "inferred.looks_like")
+        or not candidate
+        or not isinstance(share, (int, float))
+        or isinstance(share, bool)
+    ):
         return []
 
     text = f"near: {enum_word(candidate)} ({spell_percent(share)} of sampled values, no verdict)"

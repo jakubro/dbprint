@@ -4,7 +4,7 @@
 $ pip install 'dbprint[bigquery]'
 ```
 
-The extra carries `google-cloud-bigquery>=3.27`. Absent driver: `google-cloud-bigquery is not installed. Install dbprint with the [bigquery] extra: \`pip install dbprint[bigquery]\`.` A failed connection: `could not open a BigQuery session for project <project>, dataset <dataset>: <cause>` (without the dataset when none is configured).
+The extra carries `google-cloud-bigquery>=3.46.2`. Absent driver: `google-cloud-bigquery is not installed. Install dbprint with the [bigquery] extra: \`pip install dbprint[bigquery]\`.` A failed connection: `could not open a BigQuery session for project <project>, dataset <dataset>: <cause>` (without the dataset when none is configured).
 
 Fully-qualified names are `dataset.table`.
 

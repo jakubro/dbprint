@@ -4,7 +4,7 @@
 $ pip install 'dbprint[databricks]'
 ```
 
-The extra carries `databricks-sql-connector>=4.2`. Absent driver: `databricks-sql-connector is not installed. Install dbprint with the [databricks] extra: \`pip install dbprint[databricks]\`.` A failed connection: `could not open Databricks session for <server_hostname>: <cause>`.
+The extra carries `databricks-sql-connector>=4.8.0`. Absent driver: `databricks-sql-connector is not installed. Install dbprint with the [databricks] extra: \`pip install dbprint[databricks]\`.` A failed connection: `could not open Databricks session for <server_hostname>: <cause>`.
 
 Fully-qualified names are `catalog.schema.table`, whether or not `catalog` is set, so adding a second catalog renames nothing.
 

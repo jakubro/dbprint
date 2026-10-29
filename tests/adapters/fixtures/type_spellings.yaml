@@ -161,6 +161,7 @@ duckdb:
   TIMESTAMP_MS: temporal
   TIMESTAMP_NS: temporal
   TIMESTAMP WITH TIME ZONE: temporal
+  TIMESTAMPTZ_NS: temporal
   JSON: json
   VARIANT: json
   BLOB: binary
@@ -170,6 +171,7 @@ duckdb:
   STRUCT(a INTEGER): unsupported
   MAP(VARCHAR, INTEGER): unsupported
   UNION(n INTEGER, s VARCHAR): unsupported
+  TUPLE(INTEGER, VARCHAR): unsupported
 
 mysql:
   tinyint: numeric

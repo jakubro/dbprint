@@ -22,3 +22,8 @@ columns:
     note: >-
       Measured once at intake, not re-tested on a schedule; germination_trial carries
       any later re-tests.
+  collected_on:
+    note: >-
+      Date the material was collected. Several accessions can share a collecting day,
+      so the column identifies no accession even where every value is distinct.
+    rejected: [candidate_key]

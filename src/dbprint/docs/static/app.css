@@ -1,6 +1,6 @@
 /* Stylesheet for the dbprint docs site. Loaded once by base.html; every page shares it. */
 
-:root { color-scheme: light; }
+:root { color-scheme: light; --toggle-inset: .75rem; --toggle-size: 2.2rem; }
 body { font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; margin: 0; background: #fff; color: #000; }
 h1, h2 { font-size: 1.05rem; margin: 1.5rem 0 .5rem; }
 a { color: inherit; }
@@ -10,7 +10,11 @@ a { color: inherit; }
   width: 260px; flex-shrink: 0; height: 100vh; position: sticky; top: 0;
   overflow-y: auto; border-right: 1px solid #8883; padding: 1rem; font-size: .85rem; box-sizing: border-box;
 }
-.sidebar-title { font-weight: 600; }
+.sidebar-title {
+  display: block; font-weight: 600; white-space: nowrap; line-height: var(--toggle-size);
+  position: sticky; top: -1rem; z-index: 1; background: #fff; margin: -1rem -1rem 0;
+  padding: var(--toggle-inset) 1rem 0 calc(1rem + var(--toggle-inset) + var(--toggle-size));
+}
 .nav-conn { font-weight: 600; text-transform: uppercase; font-size: .7rem; letter-spacing: .03em; color: #777a; margin: 1rem 0 .6rem; }
 .nav-conn:first-child { margin-top: 0; }
 .nav-tree { margin-left: -.75rem; }
@@ -20,12 +24,14 @@ a { color: inherit; }
 .nav-current a { font-weight: 700; color: #4a90d9; }
 
 .sidebar-toggle {
-  position: fixed; top: .75rem; left: .75rem; z-index: 20;
-  width: 2.2rem; height: 2.2rem; display: flex; align-items: center; justify-content: center;
+  position: fixed; top: var(--toggle-inset); left: var(--toggle-inset); z-index: 20;
+  width: var(--toggle-size); height: var(--toggle-size); display: flex; align-items: center; justify-content: center;
   font-size: 1.1rem; line-height: 1; padding: 0; cursor: pointer;
   background: #fff; border: 1px solid #8883; border-radius: 4px;
 }
 .layout.sidebar-collapsed .sidebar { width: 0; padding: 0; border: none; overflow: hidden; }
+.layout.sidebar-collapsed { padding-left: calc(2 * var(--toggle-inset) + var(--toggle-size)); }
+.layout.sidebar-collapsed main { padding-left: 0; }
 
 main { flex: 1; min-width: 0; max-width: 1660px; margin: 0 auto; padding: 1.5rem; overflow-x: auto; box-sizing: border-box; }
 table { border-collapse: collapse; width: 100%; }

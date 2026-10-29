@@ -30,7 +30,7 @@ from ..base import (
     row_count_or_none,
 )
 from ..dialect import Dialect
-from ..driver import CursorFactory, ServerParams
+from ..driver import CursorFactory
 from ..errors import QueryFailed
 from ..identifiers import Identity, IdentityRegistry
 
@@ -47,7 +47,7 @@ class RedshiftAdapter(PerDatabaseSqlAdapter):
     """
 
     KNOWN_TYPES: ClassVar[tuple[str, ...]] = stats_module.KNOWN_TYPES
-    SERVER_PARAMS: ClassVar[type[ServerParams]] = ConnectionParams
+    SERVER_PARAMS = ConnectionParams
     # RANDOM() carries no seed at all, so an unmaterialized `sample` scope redraws with no
     # guarantee of agreement across statements.
     SAMPLE_FALLBACK_COHERENT: ClassVar[bool] = False

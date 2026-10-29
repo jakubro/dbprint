@@ -100,6 +100,9 @@ HUMAN_EDGE_COLUMN = "status"
 HUMAN_EDGE_TARGET = "public.curation_event"
 HUMAN_EDGE_TARGET_COLUMN = "condition"
 HUMAN_EDGE_NOTE = "the curation state a reading was taken under"
+REJECTED_FIELD_TABLE = "public.curation_event"
+REJECTED_FIELD_COLUMN = "id"
+REJECTED_FIELD_NOTE = "issued per import, so it identifies no event on its own"
 # `manifest.annotations.yaml`'s notes (SPEC 2.7.3), which a reader of any one table must meet.
 CONNECTION_NOTE = "condition codes are the curation states the herbarium assigns at intake"
 UNREADABLE_PROFILED_TABLE = "public.wide_lookup"
@@ -715,6 +718,25 @@ def _inject_several_edges(table_dir: Path) -> None:
     )
 
 
+def _write_rejected_field(print_root: Path) -> None:
+    """Reject a measured candidate key (SPEC 2.7.1) before the run that records the file."""
+
+    table_dir = print_root / Path(*REJECTED_FIELD_TABLE.split("."))
+    (table_dir / "statistics.annotations.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "format_version": 1,
+                "columns": {
+                    REJECTED_FIELD_COLUMN: {
+                        "note": REJECTED_FIELD_NOTE,
+                        "rejected": ["candidate_key"],
+                    },
+                },
+            },
+        ),
+    )
+
+
 def _drop_declared_statistics(print_root: Path) -> None:
     """Delete a declared `statistics.yaml` (SPEC 2.5) - a manifest promise disk no longer keeps.
 
@@ -765,6 +787,7 @@ def build(project_dir: Path) -> AdversarialPrint:
         with patch_registry({"postgres": _MockPostgresAdapter}):
             first = runner.invoke(main, ["generate", "--no-tui"])
             assert first.exit_code == 3, first.output
+            _write_rejected_field(project_dir / "prints" / CONN_NAME)
 
             second = runner.invoke(main, ["generate", "--no-tui"])
             assert second.exit_code == 0, second.output

@@ -12,6 +12,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from dbprint.spec.rejection import REJECTABLE
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SPEC_DIR = REPO_ROOT / "src" / "dbprint" / "spec" / "v1"
@@ -193,6 +195,11 @@ _COLUMNS_PROPERTY: dict[str, Any] = {
                         "column": {"type": "string", "minLength": 1},
                     },
                 },
+            },
+            "rejected": {
+                "type": "array",
+                "uniqueItems": True,
+                "items": {"enum": list(REJECTABLE)},
             },
         },
     },

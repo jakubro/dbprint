@@ -71,6 +71,19 @@
                 }
               }
             }
+          },
+          "rejected": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "candidate_key",
+                "looks_like",
+                "looks_like_candidate",
+                "sensitivity",
+                "epoch_unit"
+              ]
+            }
           }
         }
       }

@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from dbprint.config import load_project
+from dbprint.spec.predicate import evaluate, parse
 from tests._scripts import REPO_ROOT
 
 
@@ -59,6 +60,15 @@ _FULL_BLOCK = """\
           severity: warning
           sql: SELECT count(*) - count(DISTINCT email) FROM seedbank.collector
           expect: 0
+"""
+
+_UNQUOTED_BOUND_BLOCK = """\
+    assertions:
+      tables:
+        arboretum.seedbank.collector:
+          columns:
+            registered_at:
+              range.max: {max: 2026-03-04T06:00:00.000000100Z}
 """
 
 
@@ -110,6 +120,22 @@ class TestAssertionsBlockParsing:
         queries = cfg.connections["production"].assertions_raw["queries"]
         assert queries[0]["name"] == "no_duplicate_emails"
         assert queries[0]["expect"] == 0
+
+    def test_an_unquoted_nine_digit_bound_keeps_every_digit(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _write_config(tmp_path, _UNQUOTED_BOUND_BLOCK)
+        monkeypatch.chdir(tmp_path)
+        cfg = load_project()
+        table = cfg.connections["production"].assertions_raw["tables"][
+            "arboretum.seedbank.collector"
+        ]
+        bound = table["columns"]["registered_at"]["range.max"]
+
+        assert bound == {"max": "2026-03-04T06:00:00.000000100Z"}
+        assert evaluate(parse("range.max", bound), "2026-03-04T06:00:00.000000100Z").passed
 
     def test_full_block_captured(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         _write_config(tmp_path, _FULL_BLOCK)

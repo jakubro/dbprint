@@ -310,6 +310,11 @@ class TestTemporalRange:
             ("-infinity", {"min": "1900-01-01"}, False),
             ("0044-03-15 BC", {"max": "0001-01-01"}, True),
             ("9999-12-31T23:59:59.999999", {"max": "9999-12-31T23:59:59.999998"}, False),
+            ("2026-03-04T06:00:00.000000100", {"max": "2026-03-04T06:00:00"}, False),
+            ("2026-03-04T06:00:00.000000100Z", {"min": "2026-03-04T06:00:00.0000002Z"}, False),
+            ("2026-03-04T06:00:00.000000100", {"max": "2026-03-04T06:00:00.000000100"}, True),
+            ("06:00:00.000000100", {"max": "06:00:00"}, False),
+            ("2026-03-04T06:00:00.000000100+02", {"max": "2026-03-04T04:00:00Z"}, False),
         ],
     )
     def test_a_bound_is_read_by_value(self, actual: str, bounds: dict, passed: bool) -> None:
@@ -334,6 +339,12 @@ class TestTemporalRange:
 
         assert evaluate(predicate, "2024-03-01T01:00:00Z").passed
         assert not evaluate(predicate, "2024-03-01T01:00:01Z").passed
+
+    def test_accepted_instants_are_told_apart_a_nanosecond_apart(self) -> None:
+        listed = ["2026-03-04T06:00:00", "2026-03-04T06:00:00.000000100"]
+
+        assert not evaluate(SetPredicate(("2026-03-04T06:00:00",)), listed).passed
+        assert evaluate(SetPredicate(tuple(listed)), listed).passed
 
 
 class TestScalarTypeFamily:

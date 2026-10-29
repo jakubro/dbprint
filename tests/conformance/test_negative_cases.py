@@ -2824,6 +2824,78 @@ def test_annotations_grain_never_gates_conformance(print_dir: Path) -> None:
     assert conformance_errors(print_dir) == []
 
 
+def test_annotations_a_rejection_of_a_field_the_column_lacks_is_stale(print_dir: Path) -> None:
+    """`received_at` is far from unique, so it carries no `candidate_key` to reject."""
+
+    target = print_dir / _ANNOTATIONS
+    data = _load_yaml_file(target)
+    data["columns"]["received_at"] = {"rejected": ["candidate_key"]}
+    _write_yaml_file(target, data)
+
+    issues = validate_print(print_dir)
+    match = [i for i in issues if i.code == "annotations.unknown-inference"]
+
+    assert [(i.path, i.severity) for i in match] == [
+        (f"{_ANNOTATIONS}::columns.received_at.rejected", "warning"),
+    ]
+    assert conformance_errors(print_dir) == []
+
+
+def test_annotations_a_rejection_naming_no_inferred_field_makes_the_file_unreadable(
+    print_dir: Path,
+) -> None:
+    target = print_dir / _ANNOTATIONS
+    data = _load_yaml_file(target)
+    data["columns"]["taxon_id"]["rejected"] = ["cardinality"]
+    data["columns"]["not_a_real_column"] = {"note": "a stale key no pass reads"}
+    _write_yaml_file(target, data)
+
+    codes = _codes(validate_print(print_dir))
+
+    assert "schema.type-mismatch" in codes
+    assert [code for code in codes if code.startswith("annotations.")] == []
+
+
+def test_annotations_a_rejection_leaves_a_contradicting_claim_contradicted(
+    print_dir: Path,
+) -> None:
+    """`collected_on` is unique; claiming it is no candidate key stays wrong beside a rejection."""
+
+    target = print_dir / _ANNOTATIONS
+    data = _load_yaml_file(target)
+    data["columns"]["collected_on"] = {
+        "claims": {"candidate_key": False},
+        "rejected": ["candidate_key"],
+    }
+    _write_yaml_file(target, data)
+
+    codes = _codes(validate_print(print_dir))
+
+    assert "annotations.claim-contradicts-statistic" in codes
+    assert "annotations.unknown-inference" not in codes
+
+
+def test_annotations_a_rejected_sensitivity_still_warns_of_its_published_values(
+    print_dir: Path,
+) -> None:
+    manifest = _load_yaml_file(print_dir / "manifest.yaml")
+    entry = manifest["tables"]["arboretum.seedbank.collector"]
+    entry["artifacts"]["statistics_annotations"] = "statistics.annotations.yaml"
+    _write_yaml_file(print_dir / "manifest.yaml", manifest)
+    _write_yaml_file(
+        print_dir / entry["path"] / "statistics.annotations.yaml",
+        {"format_version": 1, "columns": {"full_name": {"rejected": ["sensitivity"]}}},
+    )
+
+    issues = validate_print(print_dir)
+
+    assert (
+        "privacy.unredacted-sensitive",
+        "arboretum/seedbank/collector/statistics.yaml::columns.full_name",
+    ) in {(i.code, i.path) for i in issues}
+    assert "annotations.unknown-inference" not in _codes(issues)
+
+
 # --- Relationship annotations (SPEC 2.7.2) ---------------------------
 
 _REL_ANNOTATIONS = "arboretum/seedbank/germination_trial/relationships.annotations.yaml"

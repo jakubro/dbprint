@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -31,8 +32,10 @@ from dbprint.spec.artifacts import (
     declared_artifacts,
     walkable_tables,
 )
+from dbprint.spec.drift import SUMMARY_COUNTERS
 from dbprint.spec.edges import edge_key, rejected_edges
 from dbprint.spec.fqn import join as join_fqn
+from dbprint.spec.rejection import REJECTABLE, rejected_fields, without_rejected
 from . import errors, paging
 from .reference import ReferenceDocument, read_document
 from .state import ServedConnections
@@ -42,6 +45,8 @@ from .state import ServedConnections
 _REFERENCE_DOCUMENTS: tuple[ReferenceDocument, ...] = ("spec", "assertions")
 _REFERENCE_MIME = "text/markdown"
 
+
+_COUNTER_OF = {kind: counter for counter, kinds in SUMMARY_COUNTERS.items() for kind in kinds}
 
 # Artifact kinds the server exposes; matches MCP.md 3.2 table.
 
@@ -93,9 +98,10 @@ _TABLE_KIND_DESCRIPTION = {
         "and value lists"
     ),
     "statistics": (
-        "The table's statistics file as written, including each column's sketch. "
-        "get_table_context returns these statistics with scope, redaction and unmeasured "
-        "fields applied; read this file raw only for the sketch"
+        "The table's statistics file, including each column's sketch, without the inferred "
+        "fields a person rejected in statistics_annotations. get_table_context returns these "
+        "statistics with scope, redaction and unmeasured fields applied; read this file only "
+        "for the sketch"
     ),
     "relationships": (
         "The table's joins file, without the joins a person rejected in "
@@ -104,8 +110,9 @@ _TABLE_KIND_DESCRIPTION = {
     ),
     "description": "The table's prose description, written by people. get_table_context has it",
     "statistics_annotations": (
-        "Column and value notes people wrote. get_table_context includes them, and "
-        "search_columns `text` searches them"
+        "Column and value notes people wrote, and the inferred fields a person rejected. "
+        "get_table_context includes the notes, and search_columns `text` searches them; no "
+        "other resource or tool carries a rejected field"
     ),
     "relationships_annotations": (
         "Notes people wrote on joins, including the joins a person rejected and the "
@@ -221,7 +228,11 @@ def parse_uri(uri: str) -> ResourceRef | ReferenceRef:
     raise errors.malformed_uri(uri)
 
 
-def list_page(state: ServedConnections, cursor: str | None) -> ListPage:
+def list_page(
+    state: ServedConnections,
+    cursor: str | None,
+    measure: paging.Measure = paging.compact,
+) -> ListPage:
     """The `resources/list` page `cursor` points at, under MCP.md 4.8's bound and cursor rules."""
 
     entries = enumerate_for(state)
@@ -237,7 +248,7 @@ def list_page(state: ServedConnections, cursor: str | None) -> ListPage:
 
         return reply
 
-    reply = paging.page(call, list(enumerate(entries)), render, cursor)
+    reply = paging.page(call, list(enumerate(entries)), render, cursor, measure)
     by_uri = {entry.uri: entry for entry in entries}
 
     return ListPage(
@@ -402,17 +413,22 @@ def _read_whole(state: ServedConnections, uri: str) -> ReadResult:
 
     whole = _read_text(file_path, _KIND_MIME[ref.kind], state.files.read)
 
-    if ref.kind != "relationships":
-        return whole
+    if ref.kind == "relationships":
+        return _without_rejected_edges(
+            whole,
+            manifest,
+            print_root,
+            ref.fqn,
+            file_path,
+            state.files.read,
+        )
+    elif ref.kind == "statistics":
+        annotations = artifacts.get("statistics_annotations")
+        annotations_path = file_path.parent / annotations if annotations else None
 
-    return _without_rejected_edges(
-        whole,
-        manifest,
-        print_root,
-        ref.fqn,
-        file_path,
-        state.files.read,
-    )
+        return _without_rejected_fields(whole, file_path, annotations_path, state.files.read)
+    else:
+        return whole
 
 
 def _page_query(uri: str) -> tuple[str, str, str | None]:
@@ -465,8 +481,8 @@ def _enumerate_connection(conn: ConnectionConfig, read: ArtifactReader) -> list[
             name=f"{conn.name} diff",
             description=(
                 f"What changed between the last two prints of connection {conn.name}, without "
-                f"events about a join a person rejected. get_diff returns it filtered by table or "
-                f"kind"
+                f"events about a join or an inferred field a person rejected. get_diff returns it "
+                f"filtered by table or kind"
             ),
             mime_type=_KIND_MIME["diff"],
         ),
@@ -605,44 +621,59 @@ def diff_without_rejected(
     print_root: Path,
     read: ArtifactReader,
 ) -> tuple[dict[str, Any], tuple[Path, ...]]:
-    """`diff.yaml` less its relationship events about a human-rejected edge (SPEC 2.7.2).
+    """`diff.yaml` less its events about a human-rejected edge or inferred field (SPEC 2.7).
 
-    `summary.relationships_changed` counts the events kept; the files read to decide are returned.
+    Each `summary` counter counts the events kept; the files read to decide are returned.
     """
 
     changes = [c for c in (data.get("changes") or []) if isinstance(c, dict)]
     tables = walkable_tables(manifest) if manifest else {}
     verdicts: dict[str, dict[tuple[Any, ...], Any]] = {}
+    withheld: dict[str, dict[str, frozenset[str]]] = {}
     consulted: list[Path] = []
     kept: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
 
     for change in changes:
+        kind = str(change.get("kind", ""))
         source = change.get("source_table")
+        table = change.get("table")
 
-        if not str(change.get("kind", "")).startswith("relationship_") or source not in tables:
-            kept.append(change)
-            continue
+        if kind.startswith("relationship_") and source in tables:
+            if source not in verdicts:
+                verdicts[source] = _source_verdicts(
+                    print_root,
+                    source,
+                    tables[source],
+                    consulted,
+                    read,
+                )
 
-        if source not in verdicts:
-            verdicts[source] = _source_verdicts(print_root, source, tables[source], consulted, read)
+            key = (
+                tuple(change.get("source_column") or ()),
+                change.get("target_table"),
+                tuple(change.get("target_column") or ()),
+            )
+            rejected = key in verdicts[source]
+        elif kind == "statistic_changed" and "part" not in change and table in tables:
+            if table not in withheld:
+                withheld[table] = _withheld_stats(print_root, table, tables[table], consulted, read)
 
-        key = (
-            tuple(change.get("source_column") or ()),
-            change.get("target_table"),
-            tuple(change.get("target_column") or ()),
-        )
+            rejected = change.get("stat") in withheld[table].get(change.get("column"), ())
+        else:
+            rejected = False
 
-        if key not in verdicts[source]:
-            kept.append(change)
+        (dropped if rejected else kept).append(change)
 
     shown = {**data, "changes": kept}
     summary = data.get("summary")
-    changed = summary.get("relationships_changed") if isinstance(summary, dict) else None
 
-    if len(kept) < len(changes) and isinstance(summary, dict) and isinstance(changed, int):
-        shown["summary"] = {
-            **summary,
-            "relationships_changed": changed - (len(changes) - len(kept)),
+    if dropped and isinstance(summary, dict):
+        counts = Counter(_COUNTER_OF.get(str(change.get("kind"))) for change in dropped)
+        shown["summary"] = summary | {
+            counter: summary[counter] - n
+            for counter, n in counts.items()
+            if counter is not None and isinstance(summary.get(counter), int)
         }
 
     return shown, tuple(consulted)
@@ -695,6 +726,78 @@ def _source_verdicts(
         edges = (parsed_mapping(relationships_path, read) or {}).get("refers_to")
 
     return _own_rejections(path, read, edges)
+
+
+def _withheld_stats(
+    print_root: Path,
+    table: str,
+    entry: dict[str, Any],
+    consulted: list[Path],
+    read: ArtifactReader,
+) -> dict[str, frozenset[str]]:
+    artifacts = declared_artifacts(entry)
+
+    if "statistics_annotations" not in artifacts:
+        return {}
+
+    path = table_directory(print_root, table, entry) / artifacts["statistics_annotations"]
+    consulted.append(path)
+
+    return {
+        name: frozenset(
+            f"inferred.{key}" for field in rejected_fields(col) for key in REJECTABLE[field]
+        )
+        for name, col in _annotated_columns(path, read).items()
+    }
+
+
+def _without_rejected_fields(
+    whole: ReadResult,
+    path: Path,
+    annotations_path: Path | None,
+    read: ArtifactReader,
+) -> ReadResult:
+    """Verbatim, with the file's own version, when nothing is withheld (MCP.md 3.4)."""
+
+    raw = read(path)
+    columns = raw.get("columns") if isinstance(raw, dict) else None
+    annotated = _annotated_columns(annotations_path, read)
+
+    if not isinstance(columns, dict) or annotations_path is None:
+        return whole
+
+    shown = {
+        name: without_rejected(col, rejected_fields(annotated.get(name)))
+        if isinstance(col, dict)
+        else col
+        for name, col in columns.items()
+    }
+
+    if all(shown[name] is columns[name] for name in columns):
+        return whole
+
+    return ReadResult(
+        content=dump_yaml({**raw, "columns": shown}),
+        mime_type=whole.mime_type,
+        version=paging.files_digest([path, annotations_path]),
+    )
+
+
+def _annotated_columns(path: Path | None, read: ArtifactReader) -> dict[str, dict[str, Any]]:
+    if path is None or not path.is_file():
+        return {}
+
+    try:
+        data = read(path)
+    except yaml.YAMLError:
+        return {}
+
+    columns = (authored.admitted("statistics_annotations", data) or {}).get("columns")
+
+    if not isinstance(columns, dict):
+        return {}
+
+    return {name: col for name, col in columns.items() if isinstance(col, dict)}
 
 
 def parsed_mapping(path: Path, read: ArtifactReader) -> dict[str, Any] | None:

@@ -565,16 +565,16 @@ How many values hold each type, keyed by the engine's own name for the type of o
 
 ```yaml
 inferred:
-  looks_like: <pattern>           # per §4.1; omit when no match
-  sampled: <int>                  # per §4.1.3; the draw looks_like was scored against
-  matched: <int>                  # per §4.1.3; how much of the draw agreed with looks_like
-  looks_like_candidate: <pattern> # per §4.1.3; best-scoring pattern below the verdict bar
-  looks_like_candidate_share: <float>  # per §4.1.3; that pattern's share of the same draw
+  looks_like: <pattern>           # per section 4.1; omit when no match
+  sampled: <int>                  # per section 4.1.3; the draw looks_like was scored against
+  matched: <int>                  # per section 4.1.3; how much of the draw agreed with looks_like
+  looks_like_candidate: <pattern> # per section 4.1.3; best-scoring pattern below the verdict bar
+  looks_like_candidate_share: <float>  # per section 4.1.3; that pattern's share of the same draw
   candidate_key: true             # only ever true; omit when not set
-  candidate_key_exception: measured_duplicates | estimated  # per §4.2; omit at ratio 1.0
-  sensitivity: <category>         # per §4.4; omit when nothing detected
-  epoch_unit: seconds | milliseconds  # per §4.5; omit when not detected
-  fk_candidate: { ... }           # reserved, not defined (see §4.3)
+  candidate_key_exception: measured_duplicates | estimated  # per section 4.2; omit at ratio 1.0
+  sensitivity: <category>         # per section 4.4; omit when nothing detected
+  epoch_unit: seconds | milliseconds  # per section 4.5; omit when not detected
+  fk_candidate: { ... }           # reserved, not defined (see section 4.3)
 ```
 
 `sampled` and `matched` are emitted together, and only beside `looks_like`: both MUST be omitted when `looks_like` is absent, even on a classification where a sample was drawn and cleared no pattern. Producers MUST NOT emit either field alongside `epoch_unit` or `sensitivity` alone — both axes may read the same draw, but the pair describes `looks_like`'s own verdict exclusively, per §4.1.3. `looks_like_candidate` and `looks_like_candidate_share` follow the identical pairing rule, in `looks_like`'s absence rather than its presence — see §4.1.3.
@@ -587,7 +587,7 @@ values:
   - { value: <scalar>, count: <int>, spelling_of: <scalar> }   # OPTIONAL; see below
 ```
 
-One ordered list describes every column that carries value data. Entries are ordered by `count` DESC, with ties broken by ascending code-point order of the text of `value` as written in this file (the YAML scalar after unquoting, e.g. `0.0000001`, `09:00:00`, `true`) — never a driver's or language's own string conversion of the value — deterministic across runs. Values MUST be strings, numbers, or booleans. On a classification other than `numeric`, `temporal` or `boolean`, a value of a non-character SQL type (a network address, a range, an interval, a set) is the engine's own text rendering of it — the same text `length` and `empty_count` are measured over. A value of a binary SQL type (§3.1) is the exception: every engine renders bytes differently, and some not as text at all, so it is written as lowercase hexadecimal with no prefix (`0aff`), two digits per byte, the spelling every engine's binary literal syntax accepts (`'\x0aff'::bytea`, `X'0aff'`, `FROM_HEX('0aff')`). NULL MUST NOT appear (NULL is tracked separately via `null_count`). On `numeric` and `temporal`, `value` is rendered exactly as `range`/`percentiles` render it (§2.2.4's domain-rendering rule below), and the list is drawn from the same top-N fetch `frequencies` (below) already issues — a producer MUST NOT issue a second statement to obtain it.
+One ordered list describes every column that carries value data. Entries are ordered by `count` DESC, with ties broken by ascending code-point order of the text of `value` as written in this file (the YAML scalar after unquoting, e.g. `0.0000001`, `09:00:00`, `true`) — never a driver's or language's own string conversion of the value — deterministic across runs. Values MUST be strings, numbers, or booleans. On a classification other than `numeric`, `temporal` or `boolean`, a value of a non-character SQL type (a network address, a range, an interval, a set) is the engine's own text rendering of it — the same text `length` and `empty_count` are measured over. Two kinds of type are exceptions. A value of a temporal SQL type (§2.2.14's temporal row) is written by the domain-rendering rule below on every classification, exactly as `range` would write it, and never as the engine's own text: a `categorical` `TIMESTAMPTZ` lists `2026-03-04T06:00:00Z` whatever the session's zone, and a `categorical` `TIMESTAMP_NS` lists `2026-03-04T06:00:00.000000100` where the engine prints `2026-03-04 06:00:00.0000001`. `time with time zone` is the one temporal type written with the offset it stores (`08:00:00+02:00`) rather than normalized to UTC: two of its values at the same UTC time under different offsets are distinct to the engine, so normalizing them would make one entry of two; an engine that stores the type in UTC writes `Z`. That spelling keeps every digit the type stores, so two values the column holds are never one entry. A value of a binary SQL type (§3.1) is the other: every engine renders bytes differently, and some not as text at all, so it is written as lowercase hexadecimal with no prefix (`0aff`), two digits per byte, the spelling every engine's binary literal syntax accepts (`'\x0aff'::bytea`, `X'0aff'`, `FROM_HEX('0aff')`). NULL MUST NOT appear (NULL is tracked separately via `null_count`). On `numeric` and `temporal`, `value` is rendered exactly as `range`/`percentiles` render it (§2.2.4's domain-rendering rule below), and the list is drawn from the same top-N fetch `frequencies` (below) already issues — a producer MUST NOT issue a second statement to obtain it.
 
 **How much of the column the list describes is decided by cardinality, not by classification.** The bound is `enumeration_threshold` (config; default 50), or `top_n_values` (config; default 20) where that is larger. When the column's distinct count is at most the bound the list is exhaustive and carries every distinct non-null value; above it, the list carries the `top_n_values` most frequent entries. The two settings therefore divide one question between them: `enumeration_threshold` is what makes a domain closed (§3.1), so it is how far a closed domain is published, and `top_n_values` is how much of an open one is sampled. A producer MUST NOT decide this from the classification: a low-cardinality column is enumerated in full whether it is `boolean`, `categorical`, `foreign_key_candidate` or `text`.
 
@@ -625,7 +625,7 @@ Producers MUST compute elapsed time, NOT the number of calendar-date boundaries 
 
 Flooring rather than rounding is what makes a sub-day span report `0` (§2.2.7) without a special case: any interval shorter than 24 hours has zero whole days in it.
 
-Elapsed time is exact, fractional seconds included. A producer MUST NOT truncate either instant to whole seconds, count second boundaries, or compute the count through floating point or rounded decimal division: `2024-01-01T00:00:00.5` to `2024-03-01T00:00:00.25` is `59` days, not `60`, and a `9999-12-31T23:59:59.999999` maximum is counted to the microsecond.
+Elapsed time is exact, fractional seconds included. A producer MUST NOT truncate either instant to whole seconds, count second boundaries, or compute the count through floating point or rounded decimal division: `2024-01-01T00:00:00.5` to `2024-03-01T00:00:00.25` is `59` days, not `60`, and a `9999-12-31T23:59:59.999999` maximum is counted to the microsecond. A bound written with nine fractional digits is counted to the nanosecond: `2026-03-04T00:00:00.000000600` to `2026-03-05T00:00:00.000000400` is `0` days, not `1`.
 
 **`range`**:
 
@@ -663,6 +663,8 @@ Percentile values in `.dbprint.yaml` configuration MUST be representable as inte
 | `YEAR` | `1960` | `WHERE made BETWEEN 1960 AND 2019` |
 
 The rule exists so a value read out of an artifact goes back into a query unchanged. The ISO form of a `YEAR` — `'1960-01-01'` — does not: MySQL evaluates a YEAR-to-date comparison to NULL, and the predicate returns no rows without reporting an error.
+
+**Fractional seconds.** A temporal value's fraction of a second is written with no digits, six, or nine, and is never rounded: none when the value falls on a whole second (`2026-03-04T06:00:00`), all six when it does not and every digit past the sixth is zero (`2026-03-04T06:00:00.500000`), and all nine when any digit past the sixth is nonzero (`2026-03-04T06:00:00.000000100`). The column's declared precision never changes a value's text: a `TIMESTAMP_NS`, `DateTime64(9)` or `TIMESTAMP_NTZ(9)` value of `06:00:00.5` is written `…06:00:00.500000`, as a microsecond `TIMESTAMP` writes it. A time of day follows the same rule (`06:00:00.000000100`), and a zone-aware value is normalized to UTC before its fraction is written. The rule binds every field that writes a temporal value — `range`, `percentiles`, `values`, `populated`, `timeline` — and §2.2.14's canonical bytes. Ascending code-point order of this text is ascending value order for a value with no zone designator; a trailing `Z` sorts after `.`, so it is not for a zone-aware value, and no rule in this specification depends on it.
 
 **`mean`, `sum`** (numeric only):
 
@@ -955,7 +957,7 @@ A statistic measured under this block is present, not partial; §7.1 states why 
 
 ```yaml
 scope:
-  rows_scanned: <int ≥ 0>       # ALWAYS when scope is present; rows the statistics were computed over
+  rows_scanned: <int >= 0>       # ALWAYS when scope is present; rows the statistics were computed over
   sample: <float (0, 1]>        # OPTIONAL; the fraction the producer asked the database to read - see below
   filter: <string>              # OPTIONAL; the row predicate applied, verbatim
 ```
@@ -1023,7 +1025,7 @@ null_patterns:
   coverage_method: measured | bounded # OPTIONAL; whether the pattern counts agreed with rows_scanned
   patterns:                           # ALWAYS; may be empty
     - columns: [<column name>, ...]   # ALWAYS; the columns null in these rows, empty for none
-      count: <int ≥ 0>                # ALWAYS; rows carrying exactly this combination
+      count: <int >= 0>                # ALWAYS; rows carrying exactly this combination
 ```
 
 **A pattern names columns, never positions.** Every entry in `columns` MUST name a column present in this file's `columns` map. A bitstring or an index list would carry its meaning in a column order stated somewhere else, and adding a column to the table would silently change what every artifact written before it meant.
@@ -1056,7 +1058,7 @@ A row count and per-column cardinality say nothing about how a table is physical
 physical_layout:
   mechanism: cluster | partition | sort # ALWAYS; named honestly per adapter
   keys:                               # ALWAYS; ordered, may not be empty
-    - expression: <string>            # ALWAYS; the declared expression, verbatim (§2.1.3's credential masks applied)
+    - expression: <string>            # ALWAYS; the declared expression, verbatim (section 2.1.3's credential masks applied)
       column: <string>                # OPTIONAL; the base column, when the expression resolves to one
 ```
 
@@ -1153,7 +1155,7 @@ sketch:
 | text | `varchar`, `text`, `char`, `character varying`, `character`, `string`, `uuid`, `fixedstring`, `tinytext`, `mediumtext`, `longtext` | Raw UTF-8 bytes, unmodified. A native `uuid` column is cast to text first, which every supported adapter renders in lowercase dashed form (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) by default — the same form §4.1.1's `uuid` pattern matches — so no separate UUID rule exists. Inherits §2.2.2's collation dependence: two engines that disagree on a text column's distinct set (a case- or accent-sensitivity difference) produce different sketches for it whatever this encoding does; the format does not resolve that, only states it |
 | boolean | `boolean`, `bool` | ASCII `true` or `false` |
 | binary | `bytea`, `blob`, `tinyblob`, `mediumblob`, `longblob`, `binary`, `varbinary`, `varbyte`, `binary varying`, `bytes`, `image` | The value's own bytes, unencoded — no hex or base64 spelling first. Every engine hashes a binary value directly, so no adapter needs a cast before hashing |
-| temporal | `date`, `date32`, `time`, `timestamp`, `timestamp with time zone`, `timestamp without time zone`, `time with time zone`, `time without time zone`, `timestamp_ntz`, `timestamp_ltz`, `timestamp_tz`, `timestamp_ns`, `timestamp_ms`, `timestamp_s`, `datetime`, `datetime64`, `year` | ISO 8601: `YYYY-MM-DD` for a date-only value; `YYYY-MM-DDTHH:MM:SS[.ffffff]` for a value with no timezone concept (nothing to normalize, so nothing to mark); `YYYY-MM-DDTHH:MM:SS[.ffffff]Z` for a timezone-aware value, normalized to UTC first; `HH:MM:SS[.ffffff]` for a time of day, never a fabricated date, and the same normalized to UTC with a trailing `Z` for `time with time zone`; `YYYY` for a `year`. The fraction is all six digits or none. This binds every adapter the same way regardless of that adapter's own `range.min`/`range.max` rendering - §2.2.4 permits one adapter to omit `Z` there even on a timezone-aware type (a display choice), but the sketch cannot: two adapters hashing the same instant to different bytes breaks cross-adapter agreement |
+| temporal | `date`, `date32`, `time`, `timestamp`, `timestamp with time zone`, `timestamp without time zone`, `time with time zone`, `time without time zone`, `timestamp_ntz`, `timestamp_ltz`, `timestamp_tz`, `timestamp_ns`, `timestamptz_ns`, `timestamp_ms`, `timestamp_s`, `datetime`, `datetime64`, `year` | ISO 8601: `YYYY-MM-DD` for a date-only value; `YYYY-MM-DDTHH:MM:SS[.fraction]` for a value with no timezone concept (nothing to normalize, so nothing to mark); `YYYY-MM-DDTHH:MM:SS[.fraction]Z` for a timezone-aware value, normalized to UTC first; `HH:MM:SS[.fraction]` for a time of day, never a fabricated date, and the same normalized to UTC with a trailing `Z` for `time with time zone`; `YYYY` for a `year`. The fraction is §2.2.4's: absent, all six digits, or all nine where a digit past the sixth is nonzero — a value with no digit below the microsecond hashes the same bytes whatever its column's declared precision, and two values a nanosecond apart hash apart. This binds every adapter the same way regardless of that adapter's own `range.min`/`range.max` rendering - §2.2.4 permits one adapter to omit `Z` there even on a timezone-aware type (a display choice), but the sketch cannot: two adapters hashing the same instant to different bytes breaks cross-adapter agreement |
 
 A floating-point type (`real`, `double precision`, `double`, `float`, `money`) has no canonical encoding and MUST NOT carry a sketch — equality-based set membership on a floating-point value is not stable across engines, and a join key of this type is not a case this field is built for. A type outside every row above — `json`/`jsonb`/`variant` and unsupported types among them — also has no canonical encoding and MUST NOT carry a sketch.
 
@@ -1168,6 +1170,7 @@ A floating-point type (`real`, `double precision`, `double`, `float`, `money`) h
 | boolean | `true` | `317521853213362953` |
 | binary | the two bytes `0x0a 0xff` | `8458408032758825719` |
 | temporal | `2026-03-09T14:27:36Z` | `9552359349123505343` |
+| temporal (below a microsecond) | `2026-03-04T06:00:00.000000100Z` | `2655136246489926217` |
 | temporal (time of day) | `00:00:37` | `10604805012337869669` |
 
 **Which columns carry one.** Unless the file's `disabled` list names `sketches` (§2.2.21), a producer MUST emit `sketch` on every column, in a table read unscoped, whose SQL type falls in the table above, is not redacted (see below), and that meets at least one of:
@@ -1348,7 +1351,7 @@ ClickHouse's merging engines combine the rows that share a sorting key only when
 merging:
   engine: ReplacingMergeTree      # the engine family, a Replicated or Shared prefix removed
   key:                            # the sorting key, in order; empty for ORDER BY tuple()
-    - expression: order_id        # verbatim (§2.1.3's credential masks applied)
+    - expression: order_id        # verbatim (section 2.1.3's credential masks applied)
       column: order_id            # the base column, when the expression is one
   one_row_per_key: true
   rows: stored                    # stored | merged
@@ -1641,7 +1644,7 @@ selectors:                                # the connection's own include/exclude
 redaction_rules_configured: <int>         # count of `redact` rules in force; 0 means none configured
 default_collation: <string>               # the connection's own name for its default comparison collation
 failed_tables: [<fqn>, ...]               # OPTIONAL; tables this run attempted and could not profile
-manifest_annotations: manifest.annotations.yaml   # present only if user-authored (§2.7.3)
+manifest_annotations: manifest.annotations.yaml   # present only if user-authored (section 2.7.3)
 tables:
   <fqn>:
     type: table | view | matview
@@ -1656,10 +1659,10 @@ tables:
     row_count: <int>                      # absent where the table's statistics.yaml carries catalog_only
     columns: <int>
     profiled_at: <ISO8601>
-    max_age_days: <int ≥ 0>               # OPTIONAL; the freshness threshold this table was judged against
+    max_age_days: <int >= 0>               # OPTIONAL; the freshness threshold this table was judged against
     profile:                              # OPTIONAL; only the blocks that differ from the connection's, each whole
       <block>: {...}                      # e.g. null_patterns: {enabled: false}
-    max_rows_scanned: <int ≥ 1>           # OPTIONAL; the row-count ceiling that governed this table
+    max_rows_scanned: <int >= 1>           # OPTIONAL; the row-count ceiling that governed this table
 ```
 
 `failed_tables` names every table the writing run's scope matched and the target listed whose profiling failed, plus any such mark carried forward for a table outside this run's scope that the connection's own `selectors` still cover. The list is sorted and omitted when empty. An FQN may also be a key of `tables`; that entry is then an earlier run's, dated by its own `profiled_at`. A producer MUST NOT record a failure cause here, because a driver's message quotes cell values past every redaction rule; the cause belongs to the run's own output. A producer SHOULD re-attempt a named table on its next run regardless of `max_age_days`. A consumer MUST NOT read an FQN named here and absent from `tables` as absent from the database: the table exists and is unprofiled.
@@ -1742,7 +1745,7 @@ Every counter naming an event kind is exact — the count of those events in the
 summary:
   tables_added: <int>
   tables_removed: <int>
-  tables_modified: <int>              # tables with ≥ 1 event of any kind but table_added/table_removed (type, column, spelling, collation, stat, row-count, rel, index, comment, ...)
+  tables_modified: <int>              # tables with >= 1 event of any kind but table_added/table_removed (type, column, spelling, collation, stat, row-count, rel, index, comment, ...)
   columns_added: <int>
   columns_removed: <int>
   columns_type_changed: <int>
@@ -1815,7 +1818,7 @@ The object's rows moved between this database and another system (§2.2.20) — 
 ```yaml
 - kind: column_physical_name_changed
   table: <FQN>
-  column: <name>                      # the lowercase map key (§2.2.1)
+  column: <name>                      # the lowercase map key (section 2.2.1)
   before: <catalog spelling>
   after: <catalog spelling>
 ```
@@ -1881,7 +1884,7 @@ The effective collation moved: `collation` where present, else that side's manif
 - kind: statistic_changed
   table: <FQN>
   column: <name>
-  part: <path>                        # OPTIONAL; the part of the column the stat belongs to (§2.2.18)
+  part: <path>                        # OPTIONAL; the part of the column the stat belongs to (section 2.2.18)
   stat: <dot_path>                    # e.g., "cardinality", "percentiles.p99", "distribution"
   before: <value>                     # type matches stat's data type
   after: <value>
@@ -1952,7 +1955,7 @@ Fires whenever `depends_on` (§2.2.17) differs between baseline and target, on a
 ```yaml
 - kind: relationship_added
   source_table: <FQN>
-  source_column: [<col>, ...]          # always array per §2.3
+  source_column: [<col>, ...]          # always array per section 2.3
   target_table: <FQN>
   target_column: [<col>, ...]          # same length as source_column
   on_delete: <enum>                    # declared edges only
@@ -2127,6 +2130,7 @@ columns:
     derived_from:                    # OPTIONAL - the columns this one's values come from
     - table: <fqn>
       column: <column_name>
+    rejected: [<field>, ...]         # OPTIONAL - inferred fields a human withdrew
 grain:                               # OPTIONAL - a human-stated key the producer measured none for
   keys:
   - columns: [<column_name>, ...]
@@ -2135,11 +2139,19 @@ grain:                               # OPTIONAL - a human-stated key the produce
 
 Keys MUST match a column's name as it appears in that table's `statistics.yaml` `columns` map (§2.2) — always lowercase (§2.2.1), not necessarily the form a user typed against the source database. A key naming a column not present there is stale: consumers SHOULD report it rather than fail on it, and it MUST NOT block generation or validation.
 
-**A column's entry carries `note`, `claims`, `values`, `derived_from`, or any combination** — an entry with none of them is legal but carries no annotation. `note` is free-form Markdown. `claims` is zero or more `<stat>: <predicate>` pairs in the statistic-assertion grammar [`ASSERTIONS.md`](../../ASSERTIONS.md) §2 specifies, scoped to this column: `<stat>` is any stat that grammar allows asserting on a column, `<predicate>` any form it defines. A claim states something a statistic can check — it MUST NOT be used to record what a statistic cannot express; that belongs in `note` or in `description.md` (§2.4). Consumers evaluate `claims` against the table's own `statistics.yaml`, offline, the same way the assertion DSL evaluates a statistic assertion in offline mode. A claim that contradicts the statistic it names, or that cannot be evaluated at all (an unassertable or unemitted stat, a malformed predicate, a redacted column), is reported per §6.3 — never silently accepted, and never failed as an error: this axis is advisory, per §2.4's precedence rule.
+**A column's entry carries `note`, `claims`, `values`, `derived_from`, `rejected`, or any combination** — an entry with none of them is legal but carries no annotation. `note` is free-form Markdown. `claims` is zero or more `<stat>: <predicate>` pairs in the statistic-assertion grammar [`ASSERTIONS.md`](../../ASSERTIONS.md) §2 specifies, scoped to this column: `<stat>` is any stat that grammar allows asserting on a column, `<predicate>` any form it defines. A claim states something a statistic can check — it MUST NOT be used to record what a statistic cannot express; that belongs in `note` or in `description.md` (§2.4). Consumers evaluate `claims` against the table's own `statistics.yaml`, offline, the same way the assertion DSL evaluates a statistic assertion in offline mode. A claim that contradicts the statistic it names, or that cannot be evaluated at all (an unassertable or unemitted stat, a malformed predicate, a redacted column), is reported per §6.3 — never silently accepted, and never failed as an error: this axis is advisory, per §2.4's precedence rule.
 
 **`values` carries what a domain member means, not what a statistic can measure.** Each entry pairs a `value` — a scalar addressed the same way `statistics.yaml`'s own `values` list addresses one (§2.2.4) — with a `note` explaining it: a sentinel (`-1` meaning "count not recorded at collection, not a real zero"), a reserved code, anything a human knows about that one member of the domain that the count beside it cannot say. A `value` naming a member the column's own **exhaustive** `values` list (`values_coverage` of `1.0`) does not have is stale, reported the same way a stale column key is (§6.3); under a truncated list the value may occur unlisted, so an unmatched note is treated as an addition, not stale. A redacted column (§2.2.9) has no literal a note could name, so `values` there is unassertable rather than checked.
 
 **`derived_from` names the columns this column's values are copied or computed from**, so a note written once on a source reaches every table built from it. Each entry carries `table`, the source's FQN, and `column`, its name in that table's `statistics.yaml`; both are REQUIRED. A consumer rendering the column for a reader who writes queries carries each source column's `note` and value notes beside the column's own, labelled with the source they come from. They never replace the column's own entry, and inheritance is one step: a source's own `derived_from` is not followed. The field states lineage, not a join — it adds no edge to `relationships.yaml` and asserts no foreign key. An entry naming a table absent from `manifest.yaml`'s `tables`, or a column that table's `statistics.yaml` does not have, is stale, reported at warning severity like a stale column key (§6.3). **It layers over the producer's own `derived_from` (§2.2.4)**: where an annotation entry carries the key, its list replaces the producer's for that column wholesale, never merged — and `derived_from: []` states that the column has no source worth carrying, suppressing the producer's list.
+
+**`rejected` withdraws a guess the producer published under the column's `inferred`** (§4). It lists field names, each one of `candidate_key`, `looks_like`, `looks_like_candidate`, `sensitivity` and `epoch_unit`, and a field takes the fields that only qualify it with it: `candidate_key_exception` goes with `candidate_key`, `sampled` and `matched` with `looks_like`, `looks_like_candidate_share` with `looks_like_candidate`. A name outside that list, or one listed twice, fails the schema, and `rejected: []` rejects nothing. A rejection carries no replacement value — what the column really is, where there is something to say, goes in its `note` — and a wrong inference is rejected, never claimed false: a claim is checked against the measurement, which still carries the field.
+
+**`statistics.yaml` is unchanged, and no producer reads the rejection**: redaction by `sensitivity` or `looks_like`, the `prose` value-list rule, the grain search's skip (§2.2.12) and measured-edge eligibility (§2.3.11) all run off what was measured.
+
+**A consumer handing the column to an agent that writes queries withholds a rejected field and its qualifying fields**, as it withholds a rejected edge (§2.7.2): `dbprint context` and `dbprint serve` leave it out of every rendering, every search filter and match, and every `statistic_changed` event on it they return. A browsing surface may show it, marked as rejected. `claims` and `.dbprint.yaml` statistic assertions still evaluate the measured field, and `privacy.unredacted-sensitive` (§6.3) still reports a rejected `sensitivity`, since the values still publish.
+
+**A rejection naming a field the column's own `statistics.yaml` does not carry is stale**, unless the column's `unmeasured` list or the file's `disabled` list accounts for the field's absence: reported at warning severity per §6.3, like a verdict on an edge `relationships.yaml` no longer carries (§2.7.2). A rejection still withholds a field that comes back on a later run.
 
 **`grain` states a candidate key by the columns that make it one** — the same identity `statistics.yaml`'s own `grain.keys[]` addresses (§2.2.12), so a human writes the exact columns they mean rather than inventing a second naming scheme. Each entry carries `columns` (REQUIRED, the addressing tuple) and `note` (OPTIONAL). This is additive, never a correction: the producer's own measured or declared keys are unchanged and still rendered, and a human states a key the search never found or a declared one the catalog does not carry a constraint for — the two lists are shown together, the annotated one marked as such. A `columns` entry naming a column the table's `statistics.yaml` does not have is stale, reported the same way a stale `columns` key is (§6.3) — any one unknown column invalidates the whole key, since the tuple addresses a set, not a single field.
 
@@ -2895,12 +2907,13 @@ Grouped by concern. `E` = error, `W` = warning.
 | `annotations.unknown-source` | W | A `derived_from` entry in `statistics.annotations.yaml` names a table absent from `manifest.yaml`'s `tables`, or a column that table's `statistics.yaml` does not have (§2.7.1; stale, not fatal) |
 | `annotations.unknown-value` | W | A `values` entry in `statistics.annotations.yaml` names a value the column's own **exhaustive** `values` list does not have (§2.7.1; stale, not fatal — a truncated list is not checked) |
 | `annotations.value-note-unassertable` | W | A `values` entry addresses a column carrying a `redacted` marker (§2.2.9) — there is no literal to check the note against |
+| `annotations.unknown-inference` | W | A `rejected` entry in `statistics.annotations.yaml` names an inferred field the column's own `statistics.yaml` does not carry, and neither the column's `unmeasured` nor the file's `disabled` accounts for (§2.7.1; stale, not fatal) |
 
 ### 6.4 Catalog totals
 
-- **165 codes** across 10 groups
+- **166 codes** across 10 groups
 - **132 error** codes (gate conformance)
-- **33 warning** codes (recoverable anomalies)
+- **34 warning** codes (recoverable anomalies)
 
 The catalog MAY grow in MINOR releases (additive only). Existing codes' semantics MUST NOT change.
 

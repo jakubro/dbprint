@@ -35,16 +35,20 @@ columns:
     values:
       - value: pending
         note: Set by the intake form only; the batch importer writes `queued`.
+  received_at:
+    note: Intake time; unique so far only because intake records one accession at a time.
+    rejected: [candidate_key]
 ```
 
-Four things are available on an entry, and they answer different questions:
+Five things are available on an entry, and they answer different questions:
 
 - **`note`** is free-form Markdown; the docs site shows raw HTML in it as text. The format imposes no structure on it.
-- **`claims`** are predicates in the [assertion grammar](../ASSERTIONS.md), evaluated against the column's own statistics. A claim that the artifact contradicts is reported by `dbprint check`, so a note that has gone stale announces itself.
+- **`claims`** are predicates in the [assertion grammar](../ASSERTIONS.md), evaluated against the column's own statistics. A claim that the artifact contradicts is reported by `dbprint check`, so a note that has gone stale announces itself. A wrong inference is rejected, never claimed false: a claim is checked against the measurement, which still carries the field.
 - **`values`** attach a note to one value in the column's own value list.
 - **`derived_from`** names the columns this one is copied or computed from, as `{table, column}` pairs. A query-purpose context for the column carries each source's note and value notes beside its own, labelled with the source, so a pitfall written once on a source table reaches every table built from it. It is lineage only — no join is implied — and a source the print does not hold is reported by `dbprint check` as `annotations.unknown-source`. A connection configured with a `dbt_manifest` fills this in for every model column it can trace; an entry written here replaces the traced list for its column, and `derived_from: []` suppresses it.
+- **`rejected`** withdraws a guess the producer published under the column's `inferred` — `candidate_key`, `looks_like`, `looks_like_candidate`, `sensitivity` or `epoch_unit` — when a human knows it is wrong, such as a timestamp unique only because rows so far arrived one at a time. It takes no replacement value: what the column is goes in its `note`. Agents reading the print no longer meet the field, while `statistics.yaml`, every claim and `dbprint check`'s privacy warnings still read the measurement.
 
-`relationships.annotations.yaml` additionally lets a human reject an inferred or measured edge with a verdict — the one place an annotation overrules the producer, and only because such an edge is a guess rather than a constraint the catalog declares.
+`relationships.annotations.yaml` additionally lets a human reject an inferred or measured edge with a verdict. That and `rejected` are the two places an annotation overrules the producer, and only because what they reject is a guess: an inferred field, or an edge the catalog does not declare.
 
 ## The rule that decides who wins
 
@@ -79,7 +83,7 @@ Not every annotation reaches every reader, and it is worth knowing which before 
 | Written in | Reaches |
 |---|---|
 | `description.md` | `dbprint context`, the MCP server, and the browsable print |
-| `statistics.annotations.yaml` | the same three, per column |
+| `statistics.annotations.yaml` | the same three, per column; a field listed under `rejected` is left out of `dbprint context` and every MCP tool and resource but the annotations file itself, the browsable print shows it marked as rejected, and `dbprint check` warns `annotations.unknown-inference` once the column no longer carries it |
 | `relationships.annotations.yaml` | a verdict rejecting an inferred or measured edge withholds the edge from `dbprint context` and the MCP server, and the browsable print draws it marked as rejected; an edge a human adds that resolves against no producer edge is listed on both tables it joins, everywhere, tagged `annotated`; a verdict addressing a declared edge is void on every surface, and `dbprint check` warns `annotations.verdict-on-declared-edge` |
 | `manifest.annotations.yaml` | `dbprint context` and `get_table_context` on any table, every format (once per document over several tables), the browsable print's index page, linked from every table page, and the MCP resource for the file itself |
 

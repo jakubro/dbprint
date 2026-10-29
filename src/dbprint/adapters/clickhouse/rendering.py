@@ -96,11 +96,13 @@ temporal_shape = partial(lookup_temporal_shape, _SHAPES)
 
 
 def stores_below_microsecond(sql_type: str) -> bool:
-    """Whether a `DateTime64(p)` keeps digits the microsecond rendering drops (SPEC 2.2.4)."""
+    """Whether a `DateTime64(p)` or `Time64(p)` keeps digits a microsecond drops (SPEC 2.2.4)."""
 
     match = _PRECISION_RE.search(sql_type)
 
-    return base_type(sql_type) == "datetime64" and match is not None and int(match[1]) > 6
+    return (
+        base_type(sql_type) in ("datetime64", "time64") and match is not None and int(match[1]) > 6
+    )
 
 
 def render_domain(expr: str, sql_type: str) -> str:
@@ -116,13 +118,31 @@ def render_domain(expr: str, sql_type: str) -> str:
                 call("formatDateTime", call("toDateTime64", expr, "6"), "'%Y-%m-%dT%H:%i:%S.%f'"),
             )
         case "timestamp_tz":
-            return _utc_instant(expr)
+            return _utc_instant(expr, sql_type)
         case "time" | "time_tz":
-            return _clock(expr)
+            return _clock(expr, sql_type)
         case None:
             raise ValueError(f"not a temporal type: {sql_type!r}")
         case _:
             assert_never(shape)
+
+
+def day_span(low: str, high: str, sql_type: str) -> str:
+    """Whole days from `low` to `high` (SPEC 2.2.4), to the nanosecond where the type stores one."""
+
+    # `dateDiff` counts unit boundaries, so days are microseconds (SPEC 2.2.4); a `Date` stays a
+    # date, since one widened to an instant passes through the session zone's daylight saving.
+    if temporal_shape(sql_type) == "date":
+        return f"dateDiff('day', {low}, {high})"
+
+    if stores_below_microsecond(sql_type):
+        # `dateDiff('nanosecond')` wraps across DateTime64(9)'s range, so the difference is Int128.
+        ticks, precision = _ticks(high, sql_type), _precision(sql_type)
+        nanos = f"(toInt128({ticks}) - {_ticks(low, sql_type)}) * {10 ** (9 - precision)}"
+
+        return f"intDiv({nanos}, 86400000000000)"
+
+    return f"intDiv(dateDiff('microsecond', {low}, {high}), 86400000000)"
 
 
 def frame_zone(sql_type: str) -> str:
@@ -153,25 +173,63 @@ def render_canonical(expr: str, sql_type: str, kind: SketchKind) -> str:
         case "date" | "year":
             return f"toString({expr})"
         case "timestamp" | "timestamp_tz":
-            return _utc_instant(expr)
+            return _utc_instant(expr, sql_type)
         case "time" | "time_tz":
-            return _clock(expr)
+            return _clock(expr, sql_type)
         case None:
             raise ValueError(f"not a temporal type: {sql_type!r}")
         case _:
             assert_never(shape)
 
 
-def _utc_instant(expr: str) -> str:
+def _utc_instant(expr: str, sql_type: str) -> str:
+    if stores_below_microsecond(sql_type):
+        return f"concat({_nanosecond(expr, sql_type, '%Y-%m-%dT%H:%i:%S.%f')}, 'Z')"
+
     utc = call("toTimeZone", call("toDateTime64", expr, "6"), "'UTC'")
 
     return f"concat({_stripped(f"formatDateTime({utc}, '%Y-%m-%dT%H:%i:%S.%f')")}, 'Z')"
 
 
-def _clock(expr: str) -> str:
+def _clock(expr: str, sql_type: str) -> str:
+    if stores_below_microsecond(sql_type):
+        return _nanosecond(expr, sql_type, "%H:%i:%S.%f")
+
     return _stripped(
         call("formatDateTime", call("toDateTime64", expr, "6", "'UTC'"), "'%H:%i:%S.%f'"),
     )
+
+
+def _nanosecond(expr: str, sql_type: str, picture: str) -> str:
+    # The microsecond is floored through the tick count: `toDateTime64(x, 6)` rounds a
+    # pre-1970 value toward the epoch, and `%f` prints a scale's digits under a session setting.
+    ticks, precision = _ticks(expr, sql_type), _precision(sql_type)
+    per_micro = 10 ** (precision - 6)
+    below = f"positiveModulo({ticks}, {per_micro})"
+    micro = call("fromUnixTimestamp64Micro", f"intDiv({ticks} - {below}, {per_micro})", "'UTC'")
+    nanos = f"{below} * {10 ** (9 - precision)}"
+    digits = f"if({below} = 0, '', leftPad(toString({nanos}), 3, '0'))"
+
+    return _stripped(f"concat(formatDateTime({micro}, '{picture}'), {digits})")
+
+
+def _ticks(expr: str, sql_type: str) -> str:
+    # `DateTime64(7)`/`(8)` reaches 2299; its own ticks hold that, nanoseconds overflow at 2262.
+    if base_type(sql_type) == "time64":
+        return call("toUnixTimestamp64Nano", call("toDateTime64", expr, "9", "'UTC'"))
+
+    precision = str(_precision(sql_type))
+
+    return call("reinterpretAsInt64", call("toDateTime64", expr, precision, "'UTC'"))
+
+
+def _precision(sql_type: str) -> int:
+    if base_type(sql_type) == "time64":
+        return 9
+
+    match = _PRECISION_RE.search(sql_type)
+
+    return int(match[1]) if match else 3
 
 
 def _stripped(rendered: str) -> str:

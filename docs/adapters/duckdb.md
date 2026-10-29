@@ -4,7 +4,7 @@
 $ pip install 'dbprint[duckdb]'
 ```
 
-The extra carries `duckdb>=1.0`. duckdb runs in-process: no server, no separate driver process, and no `pg_dump`-style external binary — DDL comes straight from the catalog. Absent driver: `duckdb is not installed. Install dbprint with the [duckdb] extra: \`pip install dbprint[duckdb]\`.` A failed open: `could not open duckdb database <database>: <cause>`.
+The extra carries `duckdb>=2.0.0`. duckdb runs in-process: no server, no separate driver process, and no `pg_dump`-style external binary — DDL comes straight from the catalog. Absent driver: `duckdb is not installed. Install dbprint with the [duckdb] extra: \`pip install dbprint[duckdb]\`.` A failed open: `could not open duckdb database <database>: <cause>`.
 
 Fully-qualified names are `database.schema.table` — three segments, matching duckdb's own attached-database-then-schema nesting.
 
@@ -65,7 +65,7 @@ Every duckdb identifier resolves case-insensitively, so a capital in the catalog
 | `STRUCT(...)`, `UNION(...)` | `composite` | A nested field keeps its full path (`.spot.x`) |
 | `MAP(K, V)` | `composite` | `labels['site'] IS NULL` holds for an absent key, a null value, an empty map and a null map alike; the parts tell them apart |
 | `JSON` | `json` | `types` keys are what `json_type` returns |
-| `GEOMETRY` | `spatial` | Needs the `spatial` extension installed: dbprint loads it but never installs it, and without it `geometry` and `extent` are reported unmeasured with a warning. `srid` is a CRS string such as `OGC:CRS84`; duckdb 1.5.5 reads a file database's `GEOMETRY('OGC:CRS84')` column back with no CRS |
+| `GEOMETRY` | `spatial` | Needs the `spatial` extension installed: dbprint loads it but never installs it, and without it `geometry` and `extent` are reported unmeasured with a warning. `srid` is a CRS string such as `OGC:CRS84` |
 
 ## Statement timeout
 

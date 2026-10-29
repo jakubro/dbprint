@@ -14,6 +14,7 @@ import yaml
 
 from dbprint.adapters import DatabricksAdapter, StatisticsConfig
 from dbprint.adapters.databricks.introspect import UnmappedTableType
+from dbprint.adapters.databricks.rendering import day_span, render_domain
 from dbprint.adapters.identifiers import table_meta
 from dbprint.config import TablesConfig
 from dbprint.engine import Engine
@@ -573,3 +574,43 @@ class TestAnsiIntervalsAreMeasuredAsText:
         assert duration["inferred"]["candidate_key"] is True
         assert duration["cardinality"] == 60
         assert "range" not in duration
+
+
+@pytest.mark.parametrize(
+    ("literal", "spelled"),
+    [
+        ("TIMESTAMP_NTZ '2026-03-04 06:00:00.5'", "2026-03-04T06:00:00.500000"),
+        ("TIMESTAMP_NTZ '2026-03-04 06:00:00'", "2026-03-04T06:00:00"),
+        ("TIMESTAMP_NTZ '1969-12-31 23:59:59.999999'", "1969-12-31T23:59:59.999999"),
+    ],
+)
+def test_a_nanosecond_precision_rendering_spells_a_whole_microsecond_as_six_digits(
+    databricks_test_schema,
+    literal: str,
+    spelled: str,
+) -> None:
+    databricks_test_schema.execute(
+        f"SELECT {render_domain(literal, 'timestamp_ntz(9)')}, {render_domain(literal, 'timestamp_ntz')}",
+    )
+
+    assert databricks_test_schema.fetchone() == (spelled, spelled)
+
+
+@pytest.mark.parametrize(
+    ("low", "high", "days"),
+    [
+        ("1700-01-01 00:00:00", "2200-01-01 00:00:00", 182_621),
+        ("2026-03-04 00:00:00.000001", "2026-03-05 00:00:00", 0),
+        ("1969-12-31 23:59:59.999999", "1970-01-01 23:59:59.999999", 1),
+    ],
+)
+def test_a_nanosecond_precision_span_counts_whole_days_past_three_centuries(
+    databricks_test_schema,
+    low: str,
+    high: str,
+    days: int,
+) -> None:
+    span = day_span(f"TIMESTAMP_NTZ '{low}'", f"TIMESTAMP_NTZ '{high}'", "timestamp_ntz(9)")
+    databricks_test_schema.execute(f"SELECT {span}")
+
+    assert databricks_test_schema.fetchone() == (days,)

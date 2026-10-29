@@ -139,6 +139,7 @@ _TEMPORAL_TYPES = (
     "datetime64",
     "year",
     "timestamp_ns",
+    "timestamptz_ns",
     "timestamp_ms",
     "timestamp_s",
     "time_ns",

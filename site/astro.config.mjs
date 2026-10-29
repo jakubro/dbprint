@@ -115,7 +115,8 @@ export default defineConfig({
   },
   integrations: [
     // Claims fenced mermaid blocks before Starlight's renderer sees them, so it must stay first.
-    mermaid({ autoTheme: true }),
+    // Mermaid 12's 120 px default wraps labels again past the line breaks their authors wrote.
+    mermaid({ autoTheme: true, mermaidConfig: { flowchart: { wrappingWidth: 200 } } }),
     starlight({
       title: "dbprint",
       plugins: [starlightThemeRapide()],

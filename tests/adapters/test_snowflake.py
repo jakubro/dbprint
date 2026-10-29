@@ -62,21 +62,36 @@ def _write_rsa_key(path: Path, *, passphrase: str | None = None) -> Path:
     return path
 
 
+class _FakeCursor:
+    def __init__(self, closed: list[str]) -> None:
+        self._closed = closed
+
+    def close(self) -> None:
+        self._closed.append("cursor")
+
+
 class _FakeConnection:
-    def cursor(self) -> object:
-        return object()
+    def __init__(self, closed: list[str]) -> None:
+        self._closed = closed
+
+    def cursor(self) -> _FakeCursor:
+        return _FakeCursor(self._closed)
+
+    def close(self) -> None:
+        self._closed.append("connection")
 
 
 class _FakeConnector:
     """Stand-in for snowflake.connector that records connect() kwargs."""
 
-    def __init__(self, captured: dict[str, object]) -> None:
+    def __init__(self, captured: dict[str, object], closed: list[str] | None = None) -> None:
         self._captured = captured
+        self._closed = [] if closed is None else closed
 
     def connect(self, **kwargs: object) -> _FakeConnection:
         self._captured.update(kwargs)
 
-        return _FakeConnection()
+        return _FakeConnection(self._closed)
 
 
 @pytest.fixture
@@ -204,6 +219,38 @@ class TestKeyPairAuth:
     def test_missing_key_file_raises_actionable_error(self, tmp_path: Path) -> None:
         with pytest.raises(SnowflakeConnectionError, match="could not load"):
             _load_private_key(str(tmp_path / "absent.pem"), None)
+
+
+class TestConnectorSession:
+    def test_connect_turns_keep_alive_auto_detection_off(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        captured: dict[str, object] = {}
+        monkeypatch.setattr(importlib, "import_module", lambda _name: _FakeConnector(captured))
+
+        _default_cursor_factory(ConnectionParams.from_credentials({**_BASE, "password": "pw"}))
+
+        assert captured["enable_server_session_keep_alive_auto_detection"] is False
+
+    def test_closing_the_session_closes_the_connector_connection(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        closed: list[str] = []
+        monkeypatch.setattr(
+            importlib,
+            "import_module",
+            lambda _name: _FakeConnector({}, closed),
+        )
+        session = connection_module.Connection(
+            ConnectionParams.from_credentials({**_BASE, "password": "pw"}),
+        )
+
+        session.open()
+        session.close()
+
+        assert closed == ["cursor", "connection"]
 
 
 class TestStatementTrace:
@@ -362,9 +409,14 @@ class _RecordingShim(SnowflakeDialectShim):
         super().__init__(con, table_types=table_types)
         self.statements: list[str] = []
 
-    def execute(self, sql: str, params: object = None) -> _RecordingShim:
+    def execute(
+        self,
+        sql: str,
+        params: object = None,
+        num_statements: int | None = None,
+    ) -> _RecordingShim:
         self.statements.append(" ".join(sql.split()))
-        super().execute(sql, params)
+        super().execute(sql, params, num_statements)
 
         return self
 

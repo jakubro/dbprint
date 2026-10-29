@@ -29,7 +29,7 @@ from ..base import (
     row_count_or_none,
 )
 from ..dialect import Dialect
-from ..driver import CursorFactory, ServerParams
+from ..driver import CursorFactory
 from ..identifiers import IdentityRegistry
 
 
@@ -48,7 +48,7 @@ class ClickhouseAdapter(SqlAdapter):
     """
 
     KNOWN_TYPES: ClassVar[tuple[str, ...]] = stats_module.KNOWN_TYPES
-    SERVER_PARAMS: ClassVar[type[ServerParams]] = ConnectionParams
+    SERVER_PARAMS = ConnectionParams
     # SAMPLE's determinism depends on a declared SAMPLE BY key; an unmaterialized scope on a
     # table without one is not a seeded per-row guarantee.
     SAMPLE_FALLBACK_COHERENT: ClassVar[bool] = False

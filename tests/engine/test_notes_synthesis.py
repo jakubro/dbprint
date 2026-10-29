@@ -666,6 +666,64 @@ class TestLooksLikeCandidateSuffix:
         assert "looks like" not in synthesize(s)
 
 
+class TestInferredFact:
+    """One inferred field worded alone, as the Notes cell words it beside the rest."""
+
+    _COLUMN = _stats(
+        "text",
+        values=[{"value": "a@b.org", "count": 1}],
+        inferred={
+            "looks_like": "email",
+            "sampled": 9,
+            "matched": 9,
+            "candidate_key": True,
+            "candidate_key_exception": "measured_duplicates",
+            "sensitivity": "contact",
+            "epoch_unit": "seconds",
+        },
+    )
+
+    @pytest.mark.parametrize(
+        ("field", "text"),
+        [
+            ("candidate_key", "candidate key (measured duplicates)"),
+            ("looks_like", "looks like: email (9 of 9 sampled)"),
+            ("looks_like_candidate", ""),
+            ("sensitivity", "detected: contact"),
+            ("epoch_unit", "epoch: seconds"),
+        ],
+    )
+    def test_each_field_alone(self, field: Any, text: str) -> None:
+        assert notes_synthesis.inferred_fact(self._COLUMN, field).text == text
+
+    def test_a_near_miss_alone(self) -> None:
+        column = _stats(
+            "text",
+            inferred={"looks_like_candidate": "email", "looks_like_candidate_share": 0.53},
+        )
+
+        assert notes_synthesis.inferred_fact(column, "looks_like_candidate").text == (
+            "near: email (53% of sampled values, no verdict)"
+        )
+
+    def test_a_field_the_column_lacks_is_empty(self) -> None:
+        column = _stats("numeric", range={"min": 1, "max": 9})
+
+        assert notes_synthesis.inferred_fact(column, "epoch_unit").text == ""
+        assert notes_synthesis.inferred_fact(column, "candidate_key").text == ""
+
+    def test_the_profile_and_the_scope_shape_it_as_they_shape_the_cell(self) -> None:
+        scope = scope_of({"scope": {"rows_scanned": 90, "sample": 0.1}})
+        profile = {"looks_like": {"sample_size": 1000}}
+
+        assert notes_synthesis.inferred_fact(self._COLUMN, "looks_like", profile=profile).text == (
+            "looks like: email (9 of 9 sampled, 1000 configured)"
+        )
+        assert notes_synthesis.inferred_fact(self._COLUMN, "candidate_key", scope=scope).text == (
+            "candidate key (measured duplicates) over the rows scanned"
+        )
+
+
 class TestCoverageMethodSuffix:
     """SPEC 2.2.4: `bounded` means the coverage figure is a clamp, not a raw measurement."""
 

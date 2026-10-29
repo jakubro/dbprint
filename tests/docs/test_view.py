@@ -690,6 +690,39 @@ class TestLiveAnnotations:
 
 
 class TestColumnView:
+    def test_a_rejected_field_leaves_the_notes_and_is_marked(self) -> None:
+        stats = {
+            "classification": "text",
+            "null_count": 0,
+            "null_rate": 0.0,
+            "inferred": {
+                "looks_like": "email",
+                "sampled": 40,
+                "matched": 40,
+                "candidate_key": True,
+                "sensitivity": "contact",
+            },
+        }
+        annotations = {"email": {"rejected": ["sensitivity", "candidate_key"]}}
+
+        rendered = view.column_view("email", stats, 40, None, annotations)
+
+        assert rendered["notes"] == "looks like: email (40 of 40 sampled)"
+        assert rendered["rejected_notes"] == ["candidate key", "detected: contact"]
+
+    def test_a_stale_rejection_marks_nothing(self) -> None:
+        stats = {"classification": "numeric", "null_count": 0, "null_rate": 0.0}
+
+        rendered = view.column_view(
+            "seed_count",
+            stats,
+            40,
+            None,
+            {"seed_count": {"rejected": ["epoch_unit"]}},
+        )
+
+        assert rendered["rejected_notes"] == []
+
     def test_notes_reuses_engine_notes_synthesis(self, rich_conn: ConnectionConfig) -> None:
         found = catalogue.load_connections([rich_conn])[0]
         artifacts = catalogue.load_table(found, "seedbank.batch")

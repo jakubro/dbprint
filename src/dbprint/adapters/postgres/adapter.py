@@ -30,7 +30,7 @@ from ..base import (
     row_count_or_none,
 )
 from ..dialect import Dialect
-from ..driver import ServerParams, last_rows
+from ..driver import last_rows
 from ..errors import QueryFailed
 from ..identifiers import IdentityRegistry, select_tables
 
@@ -46,7 +46,7 @@ class PostgresAdapter(PerDatabaseSqlAdapter):
     """
 
     KNOWN_TYPES: ClassVar[tuple[str, ...]] = stats_module.KNOWN_TYPES
-    SERVER_PARAMS: ClassVar[type[ServerParams]] = ConnectionParams
+    SERVER_PARAMS = ConnectionParams
     # BERNOULLI decides membership per row by hashing (block, offset, seed) - an
     # unmaterialized `sample` scope still reads the same rows on every statement.
     SAMPLE_FALLBACK_COHERENT: ClassVar[bool] = True

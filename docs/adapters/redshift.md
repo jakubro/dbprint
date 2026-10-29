@@ -4,7 +4,7 @@
 $ pip install 'dbprint[redshift]'
 ```
 
-The extra carries `redshift-connector>=2.1`. Absent driver: `redshift-connector is not installed. Install dbprint with the [redshift] extra: \`pip install dbprint[redshift]\`.` A failed connection: `could not connect to Redshift at <host>:<port>/<database> as <user>: <cause>`. The connection opens with `autocommit = True`; the adapter applies no session-level read-only setting.
+The extra carries `redshift-connector>=2.2.0`. Absent driver: `redshift-connector is not installed. Install dbprint with the [redshift] extra: \`pip install dbprint[redshift]\`.` A failed connection: `could not connect to Redshift at <host>:<port>/<database> as <user>: <cause>`. The connection opens with `autocommit = True`; the adapter applies no session-level read-only setting.
 
 Fully-qualified names are `database.schema.table`, whether or not `database` is set.
 

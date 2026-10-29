@@ -815,6 +815,103 @@ class TestTheDiffResourceWithholdsRejectedEdges:
         assert read(state, "dbprint://production/diff").version != before
 
 
+def _reject_the_collector_email(conn: ConnectionConfig, rejected: list[str]) -> Path:
+    root = conn.output / conn.name
+    manifest_path = root / "manifest.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text())
+    manifest["tables"][_COLLECTOR]["artifacts"]["statistics_annotations"] = (
+        "statistics.annotations.yaml"
+    )
+    manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+    path = root / "arboretum/seedbank/collector/statistics.annotations.yaml"
+    path.write_text(
+        yaml.safe_dump({"format_version": 1, "columns": {"email": {"rejected": rejected}}}),
+    )
+
+    return path
+
+
+class TestTheStatisticsResourceWithholdsRejectedFields:
+    """SPEC 2.7.1: the served statistics drop a rejected inferred field; the file keeps it."""
+
+    def test_the_field_and_the_keys_beside_it_are_dropped(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        _reject_the_collector_email(primary_conn, ["looks_like"])
+        served = yaml.safe_load(
+            read(_state(primary_conn), f"dbprint://production/{_COLLECTOR}/statistics").content,
+        )
+        on_disk = primary_conn.output / "production/arboretum/seedbank/collector/statistics.yaml"
+
+        assert served["columns"]["email"]["inferred"] == {
+            "candidate_key": True,
+            "sensitivity": "contact",
+        }
+        assert served["columns"]["phone"]["inferred"]["looks_like"] == "phone"
+        assert served["columns"]["email"]["redacted"] == "mask"
+        assert "looks_like: email" in on_disk.read_text()
+
+    def test_a_table_no_rejection_touches_is_served_byte_for_byte(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        uri = f"dbprint://production/{_COLLECTOR}/statistics"
+        unannotated = read(_state(primary_conn), uri)
+        _reject_the_collector_email(primary_conn, ["epoch_unit"])
+        served = read(_state(primary_conn), uri)
+
+        assert (served.content, served.version) == (unannotated.content, unannotated.version)
+
+    def test_editing_the_rejection_moves_the_version(self, primary_conn: ConnectionConfig) -> None:
+        rejections = _reject_the_collector_email(primary_conn, ["sensitivity"])
+        state = _state(primary_conn)
+        uri = f"dbprint://production/{_COLLECTOR}/statistics"
+        before = read(state, uri).version
+        rejections.write_text(rejections.read_text() + "# reviewed again\n")
+
+        assert read(state, uri).version != before
+
+    def test_the_descriptions_say_what_is_withheld_and_where_it_is_kept(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        _reject_the_collector_email(primary_conn, ["sensitivity"])
+        listed = {e.uri: e.description for e in enumerate_for(_state(primary_conn))}
+        prefix = f"dbprint://production/{_COLLECTOR}"
+
+        assert "without the inferred fields a person rejected" in listed[f"{prefix}/statistics"]
+        assert (
+            "no other resource or tool carries a rejected field"
+            in listed[f"{prefix}/statistics_annotations"]
+        )
+        assert "an inferred field a person rejected" in listed["dbprint://production/diff"]
+
+
+class TestTheDiffResourceWithholdsRejectedFields:
+    """SPEC 2.7.1: the served diff carries no event on a rejected inferred field."""
+
+    def test_the_event_is_dropped_and_statistics_drifted_counts_what_is_left(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        path = primary_conn.output / primary_conn.name / "diff.yaml"
+        diff = yaml.safe_load(path.read_text())
+        event = {"kind": "statistic_changed", "table": _COLLECTOR, "column": "email"}
+        diff["changes"] = [
+            {**event, "stat": "inferred.sensitivity", "before": "contact", "after": None},
+            {**event, "stat": "null_rate", "before": 0.0, "after": 0.01, "delta": 0.01},
+        ]
+        diff["summary"] = {**diff.get("summary", {}), "statistics_drifted": 2}
+        path.write_text(yaml.safe_dump(diff, sort_keys=False))
+        _reject_the_collector_email(primary_conn, ["sensitivity"])
+        served = yaml.safe_load(read(_state(primary_conn), "dbprint://production/diff").content)
+
+        assert [c["stat"] for c in served["changes"]] == ["null_rate"]
+        assert served["summary"]["statistics_drifted"] == 1
+        assert "inferred.sensitivity" in path.read_text()
+
+
 class TestPagedReads:
     """MCP.md 3.4: a resource larger than a page is read page by page through its URI."""
 

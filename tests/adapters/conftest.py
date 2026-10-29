@@ -8,10 +8,13 @@ session-scoped local cluster (initdb + pg_ctl), Snowflake on an in-memory duckdb
 from __future__ import annotations
 
 import json
+import os
 import re
 import secrets
+import signal
 import socket
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -254,6 +257,23 @@ def all_sql_adapters(request: pytest.FixtureRequest) -> dict[str, Adapter]:
     return {kind: _adapter_factory_for(request, kind)() for kind in SQL_PARAMS}
 
 
+@pytest.fixture
+def armed() -> Iterator[Callable[[], None]]:
+    """Arm a SIGINT to this process 0.5 s later, per call; one not yet fired is cancelled."""
+
+    timers: list[threading.Timer] = []
+
+    def arm() -> None:
+        timers.append(threading.Timer(0.5, os.kill, (os.getpid(), signal.SIGINT)))
+        timers[-1].start()
+
+    try:
+        yield arm
+    finally:
+        for timer in timers:
+            timer.cancel()
+
+
 def _adapter_factory_for(request: pytest.FixtureRequest, kind: str) -> Callable[[], Adapter]:
     """Build the connected-adapter factory for one backend name."""
 
@@ -454,7 +474,12 @@ class SnowflakeDialectShim:
         for macro in _SEMISTRUCTURED_MACROS:
             con.execute(macro)
 
-    def execute(self, sql: str, params: Any = None) -> SnowflakeDialectShim:
+    def execute(
+        self,
+        sql: str,
+        params: Any = None,
+        num_statements: int | None = None,
+    ) -> SnowflakeDialectShim:
         # duckdb's own INFORMATION_SCHEMA spans every attached catalog, so an unqualified read
         # would pass here and fail on Snowflake; every read must name its database.
         if _UNQUALIFIED_INFO_SCHEMA_RE.search(sql):
@@ -494,8 +519,10 @@ class SnowflakeDialectShim:
         ):
             self._rows = self._column_comments(params)
         elif params is None:
+            self._refuse_an_uncounted_batch(_to_duckdb(sql), num_statements)
             self._con.execute(_to_duckdb(sql))
         else:
+            self._refuse_an_uncounted_batch(_to_duckdb(sql), num_statements)
             self._con.execute(_to_duckdb(sql), params)
 
         if self._table_types and "information_schema.tables" in flat and "table_type" in flat:
@@ -507,6 +534,16 @@ class SnowflakeDialectShim:
             ]
 
         return self
+
+    def _refuse_an_uncounted_batch(self, sql: str, num_statements: int | None) -> None:
+        """Snowflake runs one statement per call unless the call names a count, 0 naming any."""
+
+        count = len(self._con.extract_statements(sql))
+
+        if count > 1 and num_statements != 0:
+            raise duckdb.InvalidInputException(
+                f"Actual statement count {count} did not match the desired statement count 1.",
+            )
 
     def _column_type(self, name: str, data_type: str) -> str:
         """The type `COLUMNS` reports: Snowflake has `ARRAY`, `VARIANT` and a bare `MAP`."""
@@ -842,9 +879,17 @@ _TO_VARCHAR_TS_RE = re.compile(
     r"TO_VARCHAR\((.+?), 'YYYY-MM-DD\"T\"HH24:MI:SS\.FF6'\)",
     re.IGNORECASE,
 )
-_NANOSECOND_PART_RE = re.compile(r"DATE_PART\('nanosecond', (\w+\.\w+)\)", re.IGNORECASE)
+_TO_VARCHAR_TS_NANO_RE = re.compile(
+    r"TO_VARCHAR\((.+?), 'YYYY-MM-DD\"T\"HH24:MI:SS\.FF9'\)",
+    re.IGNORECASE,
+)
+_NANOSECOND_PART_RE = re.compile(
+    r"DATE_PART\('nanosecond', (\w+\.(?:\"(?:[^\"]|\"\")+\"|\w+))\)",
+    re.IGNORECASE,
+)
 _TO_VARCHAR_DATE_RE = re.compile(r"TO_VARCHAR\((.+?), 'YYYY-MM-DD'\)", re.IGNORECASE)
 _TO_VARCHAR_CLOCK_RE = re.compile(r"TO_VARCHAR\((.+?), 'HH24:MI:SS\.FF6'\)", re.IGNORECASE)
+_TO_VARCHAR_CLOCK_NANO_RE = re.compile(r"TO_VARCHAR\((.+?), 'HH24:MI:SS\.FF9'\)", re.IGNORECASE)
 # The sketch's non-temporal canonical cast (SPEC 2.2.14) - one column, no picture argument.
 _TO_VARCHAR_BARE_RE = re.compile(r"TO_VARCHAR\((\w+\.\"(?:[^\"]|\"\")+\")\)", re.IGNORECASE)
 # The sketch's low-64-bit hash (SPEC 2.2.14) - a fixed 16-X hex format model over MD5.
@@ -907,7 +952,7 @@ def _flattened(match: re.Match[str]) -> str:
 def _rewrite_nanosecond_part(sql: str) -> str:
     """Snowflake's sub-second `DATE_PART('nanosecond', x)` -> duckdb's, which also counts seconds."""
 
-    return _NANOSECOND_PART_RE.sub(r"((date_part('microseconds', \1) % 1000000) * 1000)", sql)
+    return _NANOSECOND_PART_RE.sub(r"(nanosecond(\1) % 1000000000)", sql)
 
 
 def _rewrite_count_distinct_multi(sql: str) -> str:
@@ -936,9 +981,14 @@ def _rewrite_temporal_render(sql: str) -> str:
     sql = _CONVERT_TIMEZONE_RE.sub(r"(\1 AT TIME ZONE 'UTC')", sql)
     sql = sql.replace("::TIMESTAMP_NTZ", "::TIMESTAMP")
     sql = _TO_VARCHAR_TS_RE.sub(r"strftime(\1, '%Y-%m-%dT%H:%M:%S.%f')", sql)
+    sql = _TO_VARCHAR_TS_NANO_RE.sub(r"strftime(\1, '%Y-%m-%dT%H:%M:%S.%n')", sql)
     sql = _TO_VARCHAR_DATE_RE.sub(r"strftime(\1, '%Y-%m-%d')", sql)
     sql = _TO_VARCHAR_CLOCK_RE.sub(
         r"strftime(DATE '1970-01-01' + CAST(\1 AS TIME), '%H:%M:%S.%f')",
+        sql,
+    )
+    sql = _TO_VARCHAR_CLOCK_NANO_RE.sub(
+        r"strftime(make_timestamp_ns(epoch_ns(\1)), '%H:%M:%S.%n')",
         sql,
     )
 

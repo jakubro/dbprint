@@ -173,3 +173,34 @@ class TestCheck:
         assert "arboretum/seedbank/accession/statistics.annotations.yaml" in out
         assert "annotations.claim-contradicts-statistic" in out
         assert "arboretum/seedbank/vault/" not in out
+
+    def test_a_rejection_of_a_field_the_column_lacks_exits_1(
+        self,
+        project: Path,
+        committed_print: Path,
+    ) -> None:
+        annotations = committed_print / "production/arboretum/seedbank/accession"
+        (annotations / "statistics.annotations.yaml").write_text(
+            "format_version: 1\ncolumns:\n  received_at:\n    rejected: [candidate_key]\n",
+        )
+        code, out, _ = _run("annotate", ACCESSION, "--check")
+
+        assert code == 1
+        assert "columns.received_at.rejected" in out
+        assert "annotations.unknown-inference" in out
+
+    def test_a_rejection_with_its_note_and_no_claim_exits_0(
+        self,
+        project: Path,
+        committed_print: Path,
+    ) -> None:
+        annotations = committed_print / "production/arboretum/seedbank/accession"
+        (annotations / "statistics.annotations.yaml").write_text(
+            "format_version: 1\ncolumns:\n  collected_on:\n"
+            "    note: Several accessions can share a collecting day.\n"
+            "    rejected: [candidate_key]\n",
+        )
+        code, out, _ = _run("annotate", ACCESSION, "--check")
+
+        assert code == 0
+        assert out == f"{ACCESSION}: no annotation findings\n"

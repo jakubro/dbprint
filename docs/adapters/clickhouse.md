@@ -4,7 +4,7 @@
 $ pip install 'dbprint[clickhouse]'
 ```
 
-The extra carries `clickhouse-connect>=1.7`. Absent driver: `clickhouse-connect is not installed. Install dbprint with the [clickhouse] extra: \`pip install dbprint[clickhouse]\`.` A failed connection: `could not connect to ClickHouse at <host>:<port>/<database> as <user>: <cause>`. There is no session-level read-only setting the adapter applies — what a connection can do is entirely the connected user's own grants.
+The extra carries `clickhouse-connect>=1.11.0`. Absent driver: `clickhouse-connect is not installed. Install dbprint with the [clickhouse] extra: \`pip install dbprint[clickhouse]\`.` A failed connection: `could not connect to ClickHouse at <host>:<port>/<database> as <user>: <cause>`. There is no session-level read-only setting the adapter applies — what a connection can do is entirely the connected user's own grants.
 
 Fully-qualified names are `database.table` — two segments; ClickHouse has no schema tier.
 

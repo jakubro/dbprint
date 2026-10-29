@@ -27,6 +27,10 @@ The table page is the one worth knowing. It carries what `statistics.yaml` carri
 
 ![One categorical column in the Columns tab: its type, null rate and cardinality, a bar per value with its count, the share of rows those values cover, its length profile, and the annotation note under its name](images/browsing-columns.png)
 
+A guess a person withdrew under `rejected` in `statistics.annotations.yaml` — a candidate key, a value shape, a sensitivity — stays in the column's Notes, marked `REJECTED by human annotation`, where `dbprint context` and the MCP server leave it out.
+
+![A date column in the Columns tab: the annotation note under its name says it identifies no accession, and its Notes cell reads REJECTED by human annotation: candidate key](images/browsing-rejected.png)
+
 Three banners can appear above everything else, and they are deliberately distinct because absence and corruption read differently: `Missing: <kinds>` names a declared artifact that isn't on disk; `Unreadable: <kinds>` names one that is on disk but malformed — it failed to parse, or is an annotation file that does not match its schema; a catalog-only notice explains that no query was issued at all, so cardinality is not measured on this page.
 
 A measurement the file's `disabled` list names gets a block of its own, quoting the list and stating what is unknown because configuration switched it off for this table — an absent null-pattern table or timeline there is not a finding about the data.

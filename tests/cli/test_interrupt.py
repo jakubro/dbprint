@@ -68,7 +68,7 @@ def test_ctrl_c_mid_statement_exits_one_and_commits_nothing(
     assert "Aborted" in err
     assert _tree(work / "prints" / "wh") == before
     assert f"\t{LATER}\tstart" not in err
-    assert "Query interrupted" not in err
+    assert "INTERRUPT Error" not in err
     assert "sql-execution-error" not in err
 
 

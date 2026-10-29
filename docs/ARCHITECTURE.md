@@ -135,6 +135,7 @@ This map is maintained by hand. It is not generated from the tree and nothing ch
 │   │   ├── drift.py                        #   every recorded field's drift family, and the diff's summary counters
 │   │   ├── fqn.py                          #   the FQN syntax: its one join and split, and a table's directory
 │   │   ├── edges.py                        #   an edge's detection and address, and which verdicts bind
+│   │   ├── rejection.py                    #   the inferred fields a human rejected, and what a reader withholds
 │   │   ├── epoch.py                        #   epoch-encoded integer detection + unit
 │   │   ├── sketch.py                       #   KMV sketch construction + containment
 │   │   ├── percentiles.py                  #   percentile/bound coherence past float64's exact range
@@ -437,7 +438,7 @@ Two consequences worth stating plainly. `TABLESAMPLE` binds to a base table and 
 
 ### Cursor-factory injection (for testability)
 
-Adapters that talk to managed databases (Snowflake) carry an optional `cursor_factory` constructor parameter. The factory takes the resolved `ConnectionParams` and returns a DB-API-compatible cursor object exposing `execute(sql, params)` / `fetchall()` / `fetchone()` / `close()`.
+Adapters that talk to managed databases (Snowflake) carry an optional `cursor_factory` constructor parameter. The factory takes the resolved `ConnectionParams` and returns a DB-API-compatible cursor object exposing `execute(sql, params)` / `fetchall()` / `fetchone()` / `close()`. Snowflake's `execute` also takes a `num_statements` keyword, which `execute_query` passes as `0` so assertion SQL of several statements runs in one call; an injected cursor accepts it.
 
 Production callers omit the parameter — the default factory imports the vendor connector lazily (so `dbprint serve` and other extras-gated paths do not pay the import cost) and produces a real cursor. Tests inject a duckdb in-memory connection that satisfies the same interface, exercising the full extraction pipeline without requiring a live account.
 
@@ -766,7 +767,7 @@ flowchart LR
     C -->|yes| Z
     C -->|no| D{.env at project root<br/>defines DBPRINT_ARBORETUM_HOST?}
     D -->|yes| Z
-    D -->|no| E[Raise — connection<br/>error, exit 4]
+    D -->|no| E[Raise - connection<br/>error, exit 4]
 ```
 
 ### Required vs optional keys
@@ -851,7 +852,7 @@ class GenerateResult:
 @dataclass(frozen=True)
 class DiffResult:
     connection_name: str
-    diff: dict[str, Any]  # SPEC §2.6-shaped dict
+    diff: dict[str, Any]  # SPEC 2.6-shaped dict
     target_scanned_tables: int  # count of successful extractions
     elapsed_ms: int
     exit_code: int  # 0 ok, 1 no-baseline, 4 conn, 5 partial
@@ -962,7 +963,7 @@ A run's writes are staged and committed together (§4), so a crash before the co
 
 A write that fails is isolated like any other failure: a table's own first write — its `ddl.sql` and `statistics.yaml` — fails that table, and the run commits the rest; any other write, the stage's opening and the commit fail the connection with exit 1, and sibling connections still run.
 
-A Ctrl-C is the run's state, not one statement's failure: a driver error raised by an interrupted statement (duckdb reports Ctrl-C as `Query interrupted`) is re-raised as the interrupt, never degraded, and a stage refuses to commit once the run was interrupted.
+A Ctrl-C is the run's state, not one statement's failure: a driver error raised by an interrupted statement (duckdb reports Ctrl-C as an `InterruptException`) is re-raised as the interrupt, never degraded, and a stage refuses to commit once the run was interrupted. The Snowflake connector blocks without ever seeing the signal, so the adapter runs each statement on a helper thread and, on a Ctrl-C, cancels the session's statement in flight and re-raises its error as the interrupt.
 
 ### Conformance issues vs runtime errors
 
@@ -1113,7 +1114,7 @@ When `default is None`, any tool call without `connection?` raises `-32602 Inval
 
 ### Skill companion
 
-`docs/examples/skill/dbprint.md` ships a markdown instruction skill: it tells an agent which question a committed print answers, which tool answers it, and what the resulting number does and does not cover. The tools it names are the MCP surface; `dbprint context` is the shell route where no server is connected. Drop-in compatible with Claude Code (`.claude/skills/`), Cursor (`.cursor/rules/`), Cline (custom instructions). See `docs/examples/skill/README.md` for per-client install steps.
+`docs/examples/skill/dbprint.md` ships a markdown instruction skill: it tells an agent which question a committed print answers, which tool answers it, and what the resulting number does and does not cover. The tools it names are the MCP surface; `dbprint context` is the shell route where no server is connected. Installed as `.claude/skills/dbprint/SKILL.md`, it loads in Claude Code, Cursor and Cline alike. See `docs/examples/skill/README.md` for per-client install steps.
 
 Hand-written, unlike `reading.md` beside it — prose aimed at an agent rather than a rendering of SPEC. `tests/test_skill_claims_agreement.py` holds it to the code instead: every tool it names is served, every `detection` value is accounted for, every field it leans on is still in the schemas.
 
@@ -1145,13 +1146,14 @@ A print's own vocabulary is presentation-sensitive — the site does not just fo
 - **Scope.** The scanned-set share is `scope.rows_scanned / row_count` (SPEC 2.2.8's authoritative rescaling ratio) — never `scope.sample`, which records only what the producer asked to read.
 - **Redaction.** A column carrying any `redacted` marker never has its `range`/`percentiles` plotted or listed (SPEC 2.2.9: a masked or hashed bound must not be ordered, compared, or plotted). Value-list bar counts are unaffected — they are true under every primitive.
 - **Detection.** Every rendered relationship edge, in both `refers_to` and `referenced_by`, states its `detection`; an inferred edge never carries a filler `on_delete`/`on_update` it cannot have (SPEC 2.3.8).
+- **Rejection.** An edge or an inferred field a human rejected never reaches an agent: `context_assembler._load_table_artifacts` strips both as it loads a table, so `dbprint context`, `get_table_context` and the Context tab never see them, and the MCP resources, `search_columns` and `get_diff` strip them on their own reads. The site's Columns and Relationships tabs keep them, marked `REJECTED by human annotation`.
 - **Absence.** An empty `columns` map reads as "the read matched no rows", never "this table has no columns" (SPEC 2.2.7); an empty `grain.keys` reads against `grain.search`'s tri-state (absent / bounded / exhausted), never as a flat "no grain".
 - **`notes_synthesis.synthesize()` reuse.** The FK target, `candidate_key`, `physical_layout_key`, `looks_like`, `sensitivity` and `epoch_unit` render through the same function `dbprint context` calls, so a wording change to one surface changes both. The site passes `hints_only`, which drops the classification-dispatched text: cardinality, null rate, range, percentiles and the value list all have a column of their own in the table.
 - **Context tab.** Table and schema pages carry the fragment `dbprint context` prints for the same selection — the one table, or every table of the schema sorted — once per purpose, assembled by `view.context_view` through `engine.assemble_context` with default `AssemblyOptions`, so its source text is byte-identical to the CLI's. Both purposes are in the page and the picker switches client-side, so a static build needs no server. The fragment quotes database values, so its renderer (`web._render_context`) shows raw HTML and Markdown links as text; `nl2br` keeps the header's identity lines apart. Each page assembles twice, uncached, which a static build pays per table and schema page.
 - **`sketch`** renders as a presence badge only — never the base64 payload, which runs to several kilobytes per column.
 - **Markup.** A print is text written by whoever can commit to it, so none of it reaches the page live. User Markdown (`description.md`, notes, connection notes) renders through `web._render_markdown`, which shows raw HTML as text and keeps only `http`, `https`, `mailto` and relative targets live, judged after decoding character references the way a browser does; a refused link keeps its text and loses its target. Every other print value is autoescaped by Jinja. `app.js` writes data into the page only as text, and every diagram label is written in Mermaid's `#<code>;` entity form, so a quote or a pipe in a column name cannot end a label and start a statement.
 - **Mentions.** A table or column named in a description or a column note links to its page or row, a plural naming the same table too. The link is made on the rendered page's text, never inside a link, an image, a code block, an address or a code span other than one naming the table exactly.
-- **Shared readings.** Every surface reads one engine function per table-level fact and words its result: `baseline.read_manifest` (what a manifest holds and why it cannot be read), `freshness.classify` (live, stale or dormant), `value_list` (a value's spellings and its notes), `table_readings` (grain, statistics parameters, cardinality saturation, which annotations stand) and `spec.edges.rejected_edges` (which verdicts bind). `tests/consumer/register.py` pins each state a surface has disagreed on.
+- **Shared readings.** Every surface reads one engine function per table-level fact and words its result: `baseline.read_manifest` (what a manifest holds and why it cannot be read), `freshness.classify` (live, stale or dormant), `value_list` (a value's spellings and its notes), `table_readings` (grain, statistics parameters, cardinality saturation, which annotations stand), `spec.edges.rejected_edges` (which verdicts bind) and `spec.rejection.without_rejected` (a column less the inferred fields a human rejected). `tests/consumer/register.py` pins each state a surface has disagreed on.
 
 ### Static build
 

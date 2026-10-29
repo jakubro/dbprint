@@ -14,7 +14,7 @@ from typing import Any, Literal
 
 from .absence import Absence, FieldReading, read_column_field, verdict_withheld
 from .scope import ScanScope, list_is_complete, scope_line
-from .temporal_age import parse_instant
+from .temporal_age import parse_instant, sub_microsecond
 from .temporal_range import is_representable, leading_year
 from .value_text import spell_number
 
@@ -305,13 +305,13 @@ def _temporal(value: Any) -> _Temporal | None:
     if isinstance(value, (date, datetime)):
         instant = parse_instant(value)
 
-        return None if instant is None else _Temporal("instant", (0, _micros(instant)))
+        return None if instant is None else _Temporal("instant", (0, _nanos(instant)))
 
     if not isinstance(value, str):
         return None
 
     if (instant := parse_instant(value)) is not None:
-        return _Temporal("instant", (0, _micros(instant)))
+        return _Temporal("instant", (0, _nanos(instant) + sub_microsecond(value)))
 
     try:
         clock = time.fromisoformat(value)
@@ -322,7 +322,7 @@ def _temporal(value: Any) -> _Temporal | None:
         on_day = datetime.combine(_CLOCK_DAY, clock)
         on_day = on_day if on_day.tzinfo is not None else on_day.replace(tzinfo=UTC)
 
-        return _Temporal("clock", (0, _micros(on_day)))
+        return _Temporal("clock", (0, _nanos(on_day) + sub_microsecond(value)))
 
     if not is_representable(value) and (year := leading_year(value)) is not None:
         return _Temporal("instant", (-1 if year.year < 1 else 1, year.year))
@@ -330,8 +330,8 @@ def _temporal(value: Any) -> _Temporal | None:
     return None
 
 
-def _micros(instant: datetime) -> int:
-    return (instant - _EPOCH) // timedelta(microseconds=1)
+def _nanos(instant: datetime) -> int:
+    return (instant - _EPOCH) // timedelta(microseconds=1) * 1000
 
 
 def _eval_enum(p: EnumPredicate, actual: Any) -> Outcome:

@@ -1,13 +1,13 @@
 ---
 name: dbprint-annotate
-description: Write the notes that explain a database's dbprint snapshot - what its codes, units, sentinel values and exclusions mean - from the code that writes each table and read-only queries against the database. Use when asked to annotate or document a database's tables, or when dbprint annotate --check reports findings.
+description: Write the notes in a database's dbprint print - the snapshot of a live database committed beside a .dbprint.yaml - that say what its codes, units, sentinel values and exclusions mean, sourced from the code that writes each table and checked with read-only queries, so an agent reading the print writes correct SQL. Use when asked to annotate, document or explain a printed database's tables or columns, or to fix what dbprint annotate --check or dbprint check reports about its annotations.
 ---
 
 # Annotating a dbprint print
 
 A print measures what the data holds. It cannot say what a code means, which unit a number is in, what a far-future date stands for, or which rows a report leaves out — and an agent reading the print stops looking for those answers elsewhere. The annotation layer is where they go. A wrong annotation is worse than none, because the reader follows it, so every statement written here is sourced, scoped and, wherever a statistic can check it, checked.
 
-Work one table at a time, in the order below. You need the print (`prints/<connection>/`), the code that writes and reads the tables, and read-only access to the database. Never write to the database, and never edit a producer-written file (`statistics.yaml`, `relationships.yaml`, `ddl.sql`, `manifest.yaml`, `reading.md`).
+Work one table at a time, in the order below. You need a local checkout of the print (`prints/<connection>/` beside `.dbprint.yaml`, unless that file's `output` names another directory) — one read through a remote `--project` is read-only — the code that writes and reads the tables, and read-only access to the database. Never write to the database, and never edit a producer-written file (`statistics.yaml`, `relationships.yaml`, `ddl.sql`, `manifest.yaml`, `diff.yaml`, `reading.md`).
 
 ## 1. Read what the print already says
 
@@ -38,7 +38,7 @@ A fact the code states and the data contradicts is written as the data shows it,
 
 A rule that applies to some calculations only says which. "Exclude shelf QX" written without its scope will be applied to every count a reader writes.
 
-**`statistics.annotations.yaml`**, beside it. A column `note` for what a column means; a `values` entry for each code; `claims` for every statement a statistic can check:
+**`statistics.annotations.yaml`**, beside it. A column `note` for what a column means; a `values` entry for each code; `claims` for every statement a statistic can check; `rejected` for an inference under the column's `inferred` that the code shows is wrong — a `candidate_key`, `looks_like`, `looks_like_candidate`, `sensitivity` or `epoch_unit` — with a `note` saying what the column is instead:
 
 ```yaml
 # statistics.annotations.yaml
@@ -60,13 +60,16 @@ columns:
       null_rate: 0
   received_at:
     note: Written in UTC by the intake service (`intake/receive.py`); a report's day boundaries are UTC days.
+  collected_on:
+    note: Date the material was collected; several accessions can share a collecting day, so it identifies no accession (`models/accession.py`).
+    rejected: [candidate_key]
 grain:
   keys:
     - columns: [accession_id]
       note: Assigned at intake and never reused (`models/accession.py`).
 ```
 
-A column copied or computed from another table's column — a `curator_profile.email` copied from `collector.email` — carries `derived_from` naming that column (`derived_from: [{table: arboretum.seedbank.collector, column: email}]`), and the pitfall is written once, on the source: a query-purpose context for the derived column carries the source's notes beside its own. A print generated with a dbt manifest already records this lineage for every model column it could trace; write `derived_from` only where it is missing or wrong.
+A column copied or computed from another table's column — a `curator_profile.email` copied from `collector.email` — carries `derived_from` naming that column (`derived_from: [{table: arboretum.seedbank.collector, column: email}]`), and the pitfall is written once, on the source: a query-purpose context for the derived column carries the source's notes beside its own. The notes travel one step only, and only from a table in the print — a column derived from a derived column gets its direct source's notes, not that source's own. A print generated with a dbt manifest already records this lineage for every model column it could trace; write `derived_from` only where it is missing or wrong — a list written here replaces the traced one, and `derived_from: []` removes a wrong one.
 
 **`relationships.annotations.yaml`**, beside it. Reject a measured or inferred edge that joins two columns sharing nothing but values, and add a join the producer could not find, each with a note naming its source:
 
@@ -83,23 +86,23 @@ refers_to:
 
 An added join takes the same shape without `verdict`, its `note` naming the code that writes the column.
 
-**`manifest.annotations.yaml`**, at the print root, for a fact true of many tables — a code shared across them, a unit every timestamp uses. Write it once there rather than in every table's files.
+**`manifest.annotations.yaml`**, at the print root, for a fact true of many tables — a code shared across them, a unit every timestamp uses. It holds `format_version: 1` and one Markdown string under `notes`; write the fact once there rather than in every table's files.
 
 ## 5. Rules for every statement
 
 - **Sourced.** Each statement names the file or the query it rests on.
 - **Scoped.** A rule says which calculations it applies to and which it does not.
-- **Checkable where possible.** Anything a statistic can check — a null rate, a range bound, a closed set of values, uniqueness — is also a `claims` entry, so `dbprint check` reports it the day it stops being true. Prose in `description.md` is checked by nothing.
+- **Checkable where possible.** Anything a statistic can check — a null rate, a range bound, a closed set of values, uniqueness — is also a `claims` entry, so `dbprint check` reports it the day it stops being true. Prose in `description.md` is checked by nothing. A wrong inference is rejected, never claimed false: `claims: {candidate_key: false}` on a unique column is a contradiction `dbprint check` reports on every run.
 - **Open questions stay open.** Write "Open question: whether `viability_pct` before the trial form was rebuilt was recorded as a percent; its history does not say" — never a hedged rule such as "probably a percent, treat with care", which reads as an instruction and gets followed either way.
 - **Measured beats written.** Do not restate a count, a null rate or a value list the statistics already carry; the statistics are current as of the last run and prose is not. Annotate what a statistic cannot express.
 
 ## 6. Check before finishing
 
-A newly created per-table annotation file is invisible until the next run records it in the manifest, so regenerate first, then check the table:
+A new `description.md` or per-table annotation file is invisible until the next run records it in the manifest, so regenerate first — a table still within its freshness window is recorded again, not re-read — then check the table:
 
 ```console
 $ dbprint generate
 $ dbprint annotate <table> --check
 ```
 
-It lists every finding on the table's annotation files — a contradicted claim, a stale column or value key, a verdict on an edge that no longer exists, an unassertable claim, a file the manifest does not record yet — and exits 1 while any remains. A contradicted claim means the claim or the note beside it is wrong: re-read the code and re-run the query, then fix the annotation, never the statistic. Repeat until it exits 0. Then read the table once more through `dbprint context <table> --purpose query`, as an agent writing SQL will, and confirm every rule a correct query needs is on that page.
+It lists every finding on the table's annotation files — a contradicted claim, a stale column or value key, a verdict on an edge that no longer exists, a rejection naming a field the column does not carry, an unassertable claim, a file the manifest does not record yet — and exits 1 while any remains. A contradicted claim means the claim or the note beside it is wrong: re-read the code and re-run the query, then fix the annotation, never the statistic. Repeat until it exits 0. `--check` reads one table's files; `manifest.annotations.yaml` is read as soon as it is written and checked by `dbprint check`, which exits 1 while it is malformed. Then read the table once more through `dbprint context <table> --purpose query`, as an agent writing SQL will, and confirm every rule a correct query needs is on that page.

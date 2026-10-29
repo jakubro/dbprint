@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import os
 import signal
-import threading
 import time
 from collections.abc import Callable, Iterator
 
@@ -27,21 +25,6 @@ def connection() -> Iterator[Connection]:
         yield opened
     finally:
         opened.close()
-
-
-@pytest.fixture
-def armed() -> Iterator[Callable[[], None]]:
-    timers: list[threading.Timer] = []
-
-    def arm() -> None:
-        timers.append(threading.Timer(0.5, os.kill, (os.getpid(), signal.SIGINT)))
-        timers[-1].start()
-
-    try:
-        yield arm
-    finally:
-        for timer in timers:
-            timer.cancel()
 
 
 def test_inside_handling_a_converted_interrupt_raises_interrupted_promptly(
@@ -70,6 +53,25 @@ def test_with_no_handler_the_chained_interrupt_alone_raises_interrupted(
             exec_query(connection.cursor, SLOW)
     finally:
         signal.signal(signal.SIGINT, previous)
+
+
+def test_with_no_statement_timeout_a_ctrl_c_still_interrupts_promptly(
+    armed: Callable[[], None],
+) -> None:
+    untimed = Connection(ConnectionParams(":memory:"))
+    untimed.open()
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    started = time.monotonic()
+    armed()
+
+    try:
+        with pytest.raises(interrupt.Interrupted):
+            exec_query(untimed.cursor, SLOW)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        untimed.close()
+
+    assert time.monotonic() - started < 5
 
 
 def test_a_statement_timeout_is_a_timed_out_failure_never_an_interrupt() -> None:

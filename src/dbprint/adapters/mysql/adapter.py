@@ -27,7 +27,6 @@ from ..base import (
     row_count_or_none,
 )
 from ..dialect import Dialect
-from ..driver import ServerParams
 from ..identifiers import IdentityRegistry
 
 
@@ -38,7 +37,7 @@ class MysqlAdapter(SqlAdapter):
     """
 
     KNOWN_TYPES: ClassVar[tuple[str, ...]] = stats_module.KNOWN_TYPES
-    SERVER_PARAMS: ClassVar[type[ServerParams]] = ConnectionParams
+    SERVER_PARAMS = ConnectionParams
     # RAND(seed) is undocumented across multiple references in one statement, so a
     # `sample` scope with no copy must be refused rather than measured over drifting rows.
     SAMPLE_FALLBACK_COHERENT: ClassVar[bool] = False

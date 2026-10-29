@@ -8,9 +8,13 @@ internal-error shape, hiding a handler that forgot to map its own errors.
 from __future__ import annotations
 
 import http.client
+import itertools
 import json
 import logging
 import socket
+import subprocess
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -23,14 +27,24 @@ from mcp.client import Client
 from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.shared.exceptions import MCPError as SdkMcpError
-from mcp.types import CallToolResult, TextContent
+from mcp.types import (
+    CLIENT_CAPABILITIES_META_KEY,
+    CLIENT_INFO_META_KEY,
+    LATEST_PROTOCOL_VERSION,
+    PROTOCOL_VERSION_META_KEY,
+    CallToolResult,
+    TextContent,
+)
 
 from dbprint.config import ConnectionConfig
-from dbprint.mcp import ServedConnections, build_server
+from dbprint.mcp import ServedConnections, build_server, paging
 from dbprint.mcp import tools as tools_module
 from dbprint.mcp.server import run_http
 from tests._scripts import REPO_ROOT
 from .conftest import StdioServer
+
+
+_ENVELOPE = {"_meta", "cacheScope", "resultType", "ttlMs"}
 
 
 def _state_for(conn: ConnectionConfig) -> ServedConnections:
@@ -134,6 +148,76 @@ def _stdio_read_resource_error(server: StdioServer, uri: str) -> SdkMcpError:
             raise AssertionError(f"{uri} did not raise an MCPError")
 
     return anyio.run(_run)
+
+
+@contextmanager
+def _raw_stdio(
+    server: StdioServer,
+    version: str,
+) -> Generator[Callable[[str, dict[str, Any]], str]]:
+    """`dbprint serve` over stdio, read raw: an SDK client's result model adds fields never sent.
+
+    `initialize` reaches 2025-11-25 at most; a later version is named in every request's `_meta`.
+    """
+
+    process = subprocess.Popen(
+        [server.command, *_stdio_params(server).args],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        encoding="utf-8",
+    )
+    ids = itertools.count(1)
+
+    def send(message: dict[str, Any]) -> None:
+        assert process.stdin is not None
+        process.stdin.write(json.dumps(message) + "\n")
+        process.stdin.flush()
+
+    client = {"name": "pytest", "version": "0"}
+    envelope = {
+        PROTOCOL_VERSION_META_KEY: version,
+        CLIENT_INFO_META_KEY: client,
+        CLIENT_CAPABILITIES_META_KEY: {},
+    }
+    handshake = version != LATEST_PROTOCOL_VERSION
+
+    def call(method: str, params: dict[str, Any]) -> str:
+        assert process.stdout is not None
+        sent = params if handshake else {**params, "_meta": envelope}
+        send({"jsonrpc": "2.0", "id": next(ids), "method": method, "params": sent})
+        line = process.stdout.readline().rstrip("\n")
+        start = line.index('"result":') + len('"result":')
+
+        return line[start:-1]
+
+    try:
+        if handshake:
+            call(
+                "initialize",
+                {"protocolVersion": version, "capabilities": {}, "clientInfo": client},
+            )
+            send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+        yield call
+    finally:
+        process.terminate()
+        process.communicate(timeout=10)
+
+
+def _resource_pages(server: StdioServer, version: str) -> list[str]:
+    with _raw_stdio(server, version) as call:
+        pages = [call("resources/list", {})]
+
+        while (cursor := json.loads(pages[-1]).get("nextCursor")) is not None:
+            pages.append(call("resources/list", {"cursor": cursor}))
+
+    return pages
+
+
+def _uris(page: str) -> list[str]:
+    return [resource["uri"] for resource in json.loads(page)["resources"]]
 
 
 def _stdio_list_resource_uris(server: StdioServer) -> list[str]:
@@ -414,6 +498,59 @@ class TestPagingReachesTheWire:
         assert len(pages) > 1
         assert len(uris) == len(set(uris))
         assert sum("seedbank.t" in uri for uri in uris) == 200 * 3
+
+    @pytest.mark.parametrize(
+        ("version", "envelope"),
+        [("2025-11-25", set()), (LATEST_PROTOCOL_VERSION, _ENVELOPE)],
+    )
+    @pytest.mark.parametrize(
+        ("method", "key", "fields"),
+        [
+            ("tools/list", "tools", {"name", "description", "inputSchema", "annotations"}),
+            ("resources/list", "resources", {"uri", "name", "description", "mimeType"}),
+        ],
+    )
+    def test_a_protocol_list_crosses_stdio_unindented_with_only_the_fields_rendered(
+        self,
+        stdio_server: StdioServer,
+        version: str,
+        envelope: set[str],
+        method: str,
+        key: str,
+        fields: set[str],
+    ) -> None:
+        with _raw_stdio(stdio_server, version) as call:
+            sent = call(method, {})
+
+        reply = json.loads(sent)
+
+        assert set(reply) == {key} | envelope
+        assert {field for item in reply[key] for field in item} == fields
+        assert len(paging.compact(reply)) == len(sent)
+
+    def test_every_resource_page_but_the_last_fills_the_bound_in_its_longest_wire_form(
+        self,
+        stdio_server: StdioServer,
+    ) -> None:
+        path = stdio_server.project_dir / "prints" / stdio_server.conn_name / "manifest.yaml"
+        manifest = yaml.safe_load(path.read_text())
+        entry = next(iter(manifest["tables"].values()))
+        manifest["tables"] = {f"seedbank.t{i:04d}": dict(entry) for i in range(200)}
+        path.write_text(yaml.safe_dump(manifest))
+        handshake, enveloped = (
+            _resource_pages(stdio_server, version)
+            for version in ("2025-11-25", LATEST_PROTOCOL_VERSION)
+        )
+        heads = [json.loads(page)["resources"][0] for page in enveloped[1:]]
+        grown = [
+            len(page) + len(",") + len(json.dumps(head, separators=(",", ":"), ensure_ascii=False))
+            for page, head in zip(enveloped, heads, strict=False)
+        ]
+
+        assert len(enveloped) > 1
+        assert [_uris(page) for page in handshake] == [_uris(page) for page in enveloped]
+        assert max(len(page) for page in handshake + enveloped) <= 20_000
+        assert min(grown) > 20_000
 
     def test_the_tool_list_is_one_page(self, primary_conn: ConnectionConfig) -> None:
         async def _run() -> tuple[int, str | None]:

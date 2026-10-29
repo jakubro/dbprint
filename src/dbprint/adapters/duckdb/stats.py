@@ -25,6 +25,7 @@ from .connection import DIALECT, Cursor, exec_query
 from .rendering import (
     finite_value,
     mean_expression,
+    published_instant,
     render_binary,
     render_domain,
     render_text,
@@ -80,6 +81,7 @@ from ..statements import column_alias
 _UNSUPPORTED_TYPES = (
     "record",
     "struct",
+    "tuple",
     "array",
     "list",
     "map",
@@ -731,13 +733,14 @@ def _fetch_clock_temporal_block(
 
     cn = source_column(col, DIALECT)
     percentile_keys = config.percentiles
-    pct_select = _ranked_percentiles(percentile_keys)
+    published = partial(_clock_bound, sql_type=col.classified_type)
+    pct_select = _ranked_percentiles(percentile_keys, published)
     row = exec_query(
         cursor,
         f"""
         SELECT
-          MIN({_RANKED_VALUE}) AS mn,
-          MAX({_RANKED_VALUE}) AS mx,
+          {published(f"MIN({_RANKED_VALUE})")} AS mn,
+          {published(f"MAX({_RANKED_VALUE})")} AS mx,
           {listed(pct_select, 10)}
         FROM
           (
@@ -825,18 +828,7 @@ def _fetch_calendar_temporal_block(
     outer_select = [
         f"{render_domain('agg.mn', col.classified_type)} AS mn_text",
         f"{render_domain('agg.mx', col.classified_type)} AS mx_text",
-        # Second boundaries corrected by the sub-second fractions, then integer division: exact
-        # elapsed days with no INT64 overflow at the calendar's ends (SPEC 2.2.4).
-        """
-        (
-          DATEDIFF('second', agg.mn, agg.mx)
-          - CASE
-            WHEN DATE_PART('microseconds', agg.mx) % 1000000
-              < DATE_PART('microseconds', agg.mn) % 1000000 THEN 1
-            ELSE 0
-          END
-        ) // 86400 AS span_days
-        """,
+        _span_days("agg.mn", "agg.mx", col.classified_type),
         *(f"{expr} AS {key}_text" for key, expr in percentile_renders),
         *(["agg.quant"] if day_aligned else []),
     ]
@@ -938,7 +930,9 @@ def _value_select_and_group(cn: str, sql_type: str) -> tuple[str, str]:
         return render_binary(cn), cn
 
     if temporal_shape(sql_type) == "timestamp_tz":
-        return render_domain(cn, sql_type), cn
+        rendered = render_domain(cn, sql_type)
+
+        return rendered, rendered if stores_below_microsecond(sql_type) else cn
 
     if is_string_like(sql_type, _is_unsupported):
         return render_text(cn, sql_type), cn
@@ -946,12 +940,29 @@ def _value_select_and_group(cn: str, sql_type: str) -> tuple[str, str]:
     if not stores_below_microsecond(sql_type):
         return cn, cn
 
-    if temporal_shape(sql_type) == "time":
-        return f"CAST({cn} AS TIME)", f"CAST({cn} AS TIME)"
-
     rendered = render_domain(cn, sql_type)
 
     return rendered, rendered
+
+
+def _span_days(low: str, high: str, sql_type: str) -> str:
+    if stores_below_microsecond(sql_type):
+        return (
+            f"(CAST(EPOCH_NS({high}) AS HUGEINT) - EPOCH_NS({low})) // 86400000000000 AS span_days"
+        )
+
+    # Second boundaries corrected by the sub-second fractions, then integer division: exact
+    # elapsed days with no INT64 overflow at the calendar's ends (SPEC 2.2.4).
+    return f"""
+        (
+          DATEDIFF('second', {low}, {high})
+          - CASE
+            WHEN DATE_PART('microseconds', {high}) % 1000000
+              < DATE_PART('microseconds', {low}) % 1000000 THEN 1
+            ELSE 0
+          END
+        ) // 86400 AS span_days
+        """
 
 
 def _exact_integer(v: Any) -> Any:
@@ -966,12 +977,23 @@ def _matches(sql_type: str, types: tuple[str, ...]) -> bool:
     return base_type(sql_type) in types
 
 
-def _ranked_percentiles(keys: Sequence[int]) -> list[str]:
+def _ranked_percentiles(
+    keys: Sequence[int],
+    published: Callable[[str], str] = _as_is,
+) -> list[str]:
     return [
-        f"MIN(CASE WHEN rnk.dbprint_rn >= CEIL({p / 100.0} * rnk.dbprint_n) "
-        f"THEN {_RANKED_VALUE} END) AS p_{p:02d}"
+        published(
+            f"MIN(CASE WHEN rnk.dbprint_rn >= CEIL({p / 100.0} * rnk.dbprint_n) "
+            f"THEN {_RANKED_VALUE} END)",
+        )
+        + f" AS p_{p:02d}"
         for p in keys
     ]
+
+
+def _clock_bound(expr: str, sql_type: str) -> str:
+    # A driver's time of day holds microseconds at most, so a finer one is rendered in SQL.
+    return render_domain(expr, sql_type) if stores_below_microsecond(sql_type) else expr
 
 
 def _utc_reading(expr: str, sql_type: str) -> str:
@@ -982,6 +1004,11 @@ def _utc_reading(expr: str, sql_type: str) -> str:
 
 def _utc_truncation(unit: str, cn: str, sql_type: str) -> str:
     if temporal_shape(sql_type) != "timestamp_tz":
-        return f"DATE_TRUNC('{unit}', {cn})"
+        return f"DATE_TRUNC('{unit}', {published_instant(cn, sql_type)})"
 
-    return f"DATE_TRUNC('{unit}', {_utc_reading(cn, sql_type)}) AT TIME ZONE 'UTC'"
+    if stores_below_microsecond(sql_type):
+        reading = published_instant(cn, sql_type)
+    else:
+        reading = _utc_reading(cn, sql_type)
+
+    return f"DATE_TRUNC('{unit}', {reading}) AT TIME ZONE 'UTC'"

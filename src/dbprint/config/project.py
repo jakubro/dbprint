@@ -701,9 +701,17 @@ def _find_project_config(start: Path) -> Path | None:
 
 def _load_yaml(path: Path) -> Any:
     try:
-        return yaml.safe_load(path.read_text(encoding="utf-8"))
+        return yaml.load(path.read_text(encoding="utf-8"), Loader=_ConfigLoader)
     except yaml.YAMLError as exc:
         raise ConfigError(f"{path}: invalid YAML - {exc}") from exc
+
+
+class _ConfigLoader(yaml.SafeLoader):
+    pass
+
+
+# PyYAML's date-time keeps six fractional digits, where an assertion bound compares nine.
+_ConfigLoader.add_constructor("tag:yaml.org,2002:timestamp", _ConfigLoader.construct_yaml_str)
 
 
 _BUILTIN_PROFILE: dict[str, Any] = {

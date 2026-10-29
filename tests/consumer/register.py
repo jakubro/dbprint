@@ -147,6 +147,13 @@ REGISTER: tuple[ClaimState, ...] = (
         "outside the connection root; that table reads as absent.",
     ),
     ClaimState(
+        "rejected_inferred_field",
+        "Never presents an inferred field a human rejected in statistics.annotations.yaml as a "
+        "fact about the column - in a rendering, a search filter or match, or a statistic event; "
+        "a browsing surface may show it marked rejected, and a surface serving the files verbatim "
+        "serves the rejection in statistics_annotations.",
+    ),
+    ClaimState(
         "value_spelling",
         "Spells a stored 'NULL', an empty, a whitespace-only and a long spaced value so each "
         "reads back as exactly itself on one line - never as a genuine null, nothing, or a fold.",

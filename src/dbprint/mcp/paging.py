@@ -110,12 +110,19 @@ def files_digest(paths: Iterable[Path]) -> str:
 
 
 def serialized(reply: Any) -> str:
-    """A reply as the client receives it: the server's own `json.dumps` of a dict, a string as is."""
+    """A tool reply's text as the client receives it: a dict's indented JSON, a string as is."""
 
     return reply if isinstance(reply, str) else json.dumps(reply, default=str, indent=2)
 
 
+def compact(reply: Any) -> str:
+    """A protocol list reply as the SDK sends it: unindented JSON, non-ASCII left unescaped."""
+
+    return json.dumps(reply, default=str, separators=(",", ":"), ensure_ascii=False)
+
+
 Render = Callable[[Sequence[Any], bool, str | None], Any]
+Measure = Callable[[Any], str]
 
 
 def page(
@@ -123,10 +130,12 @@ def page(
     units: Sequence[Any],
     render: Render,
     cursor: str | None,
+    measure: Measure = serialized,
 ) -> Any:
     """The reply for the page `cursor` points at; no cursor is the first page.
 
-    `render(units, first, next_cursor)` must grow with the run and carry any header on page one.
+    `render(units, first, next_cursor)` must grow with the run and carry any header on page one;
+    `measure` spells a reply as it crosses the wire, a tool reply's text by default.
     """
 
     first = cursor is None
@@ -135,7 +144,7 @@ def page(
     if start > len(units) or (not first and start == len(units)):
         raise errors.foreign_cursor(call.tool)
 
-    count = _longest_run(units, start, first, render, call.cursor(0))
+    count = _longest_run(units, start, first, render, call.cursor(0), measure)
 
     if count == len(units) - start:
         return render(units[start:], first, None)
@@ -300,8 +309,8 @@ def _widest_prefix(text: str, bound: int, width: Callable[[str], int]) -> int:
     return len(text)
 
 
-def _fits(reply: Any) -> bool:
-    return len(serialized(reply)) <= PAGE_CHARACTERS
+def _fits(reply: Any, measure: Measure = serialized) -> bool:
+    return len(measure(reply)) <= PAGE_CHARACTERS
 
 
 def _longest_run(
@@ -310,13 +319,14 @@ def _longest_run(
     first: bool,
     render: Render,
     placeholder: str,
+    measure: Measure,
 ) -> int:
     def fits(count: int) -> bool:
         run = units[start : start + count]
         keys = [unit.key for unit in run if isinstance(unit, Part)]
 
         # A mapping holds one value per key, so two parts of one item never share a page.
-        return len(keys) == len(set(keys)) and _fits(render(run, first, placeholder))
+        return len(keys) == len(set(keys)) and _fits(render(run, first, placeholder), measure)
 
     remaining = len(units) - start
     low, high = 0, 1

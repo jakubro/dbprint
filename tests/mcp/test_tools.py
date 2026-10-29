@@ -1256,6 +1256,22 @@ class TestSearchColumnsText:
         assert [m["column"] for m in result["matches"]] == ["institution_email"]
 
 
+def _reject_on_the_collector(conn: ConnectionConfig, columns: dict[str, Any]) -> None:
+    root = conn.output / conn.name
+    manifest_path = root / "manifest.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text())
+    entry = manifest["tables"]["arboretum.seedbank.collector"]
+    entry["artifacts"]["statistics_annotations"] = "statistics.annotations.yaml"
+    manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+    (root / entry["path"] / "statistics.annotations.yaml").write_text(
+        yaml.safe_dump({"format_version": 1, "columns": columns}),
+    )
+
+
+def _collector_columns(result: dict[str, Any]) -> set[str]:
+    return {m["column"] for m in result["matches"] if m["table"] == "arboretum.seedbank.collector"}
+
+
 class TestSearchColumns:
     def test_match_email(self, primary_conn: ConnectionConfig) -> None:
         """`email` is an exact (wildcard-free) pattern - arboretum.seedbank.collector is the one match."""
@@ -1289,6 +1305,43 @@ class TestSearchColumns:
         assert match["sensitivity"] == "contact"
         assert match["redacted"] == "mask"
         assert match["candidate_key"] is True
+
+    def test_a_rejected_candidate_key_matches_false_and_never_true(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        _reject_on_the_collector(primary_conn, {"email": {"rejected": ["candidate_key"]}})
+        state = _state_for(primary_conn)
+        unique = _dict_result(state, "search_columns", {"candidate_key": True})
+        not_unique = _dict_result(state, "search_columns", {"candidate_key": False})
+        by_name = _dict_result(state, "search_columns", {"pattern": "email"})
+        match = next(m for m in by_name["matches"] if m["column"] == "email")
+
+        assert "email" not in _collector_columns(unique)
+        assert "phone" in _collector_columns(unique)
+        assert "email" in _collector_columns(not_unique)
+        assert "candidate_key" not in match
+        assert match["sensitivity"] == "contact"
+
+    def test_a_rejected_pattern_and_detection_match_no_filter(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        _reject_on_the_collector(
+            primary_conn,
+            {"email": {"note": "a field station inbox", "rejected": ["looks_like", "sensitivity"]}},
+        )
+        state = _state_for(primary_conn)
+        pattern = _dict_result(state, "search_columns", {"looks_like": "email"})
+        detected = _dict_result(state, "search_columns", {"sensitivity": "contact"})
+        by_name = _dict_result(state, "search_columns", {"pattern": "email"})
+        match = next(m for m in by_name["matches"] if m["column"] == "email")
+
+        assert _collector_columns(pattern) == {"institution_email"}
+        assert "email" not in _collector_columns(detected)
+        assert "phone" in _collector_columns(detected)
+        assert {"looks_like", "sampled", "matched", "sensitivity"} & set(match) == set()
+        assert (match["redacted"], match["annotation"]) == ("mask", "a field station inbox")
 
     def test_a_missing_path_key_still_resolves_the_table(
         self,
@@ -1705,6 +1758,49 @@ class TestGetDiff:
 
         assert [c["source_column"] for c in result["changes"]] == [["collector_id"]]
         assert result["summary"]["relationships_changed"] == 1
+
+    def test_a_statistic_event_on_a_rejected_field_is_withheld(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        _reject_on_the_collector(primary_conn, {"email": {"rejected": ["looks_like"]}})
+        root = primary_conn.output / primary_conn.name
+        event = {
+            "kind": "statistic_changed",
+            "table": "arboretum.seedbank.collector",
+            "column": "email",
+        }
+        diff = yaml.safe_load((root / "diff.yaml").read_text())
+        diff["changes"] = [
+            {**event, "stat": "inferred.looks_like", "before": "email", "after": "url"},
+            {**event, "stat": "cardinality", "before": 400, "after": 380, "delta": -20},
+            {
+                **event,
+                "part": ".host",
+                "stat": "inferred.looks_like",
+                "before": "url",
+                "after": "ip",
+            },
+            {
+                **event,
+                "column": "phone",
+                "stat": "inferred.looks_like",
+                "before": "phone",
+                "after": "ip",
+            },
+        ]
+        diff["summary"] = {**diff.get("summary", {}), "statistics_drifted": 4}
+        (root / "diff.yaml").write_text(yaml.safe_dump(diff, sort_keys=False))
+
+        result = _dict_result(_state_for(primary_conn), "get_diff", {})
+
+        assert [(c["column"], c.get("part"), c["stat"]) for c in result["changes"]] == [
+            ("email", None, "cardinality"),
+            ("email", ".host", "inferred.looks_like"),
+            ("phone", None, "inferred.looks_like"),
+        ]
+        assert result["summary"]["statistics_drifted"] == 3
+        assert result["total"] == 3
 
 
 class TestToolDefinitions:

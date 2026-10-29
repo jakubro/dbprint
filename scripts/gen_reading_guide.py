@@ -331,6 +331,14 @@ _TRAPS = (
         "human's word with nothing measured behind it."
     ),
     (
+        "**A field under `inferred` is a guess, and a human may have withdrawn it.** "
+        "`candidate_key`, `looks_like`, `looks_like_candidate`, `sensitivity` and `epoch_unit` "
+        "are the producer's inferences (SPEC 4). One a column's `statistics.annotations.yaml` "
+        "entry lists under `rejected` still stands in `statistics.yaml`, but a human found it "
+        "wrong (SPEC 2.7.1): read it as no fact about the column, and the entry's `note` for "
+        "what the column is instead."
+    ),
+    (
         "**`cardinality` is collation-relative.** Two prints of one logical schema, taken "
         "through different engines or different column-level collations, can legitimately "
         "disagree on a text column's distinct count for this reason alone — it is not drift."

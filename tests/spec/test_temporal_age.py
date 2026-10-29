@@ -6,7 +6,9 @@ from datetime import UTC, datetime, timedelta, timezone
 
 from dbprint.spec.temporal_age import (
     day_count,
+    elapsed_days,
     freshness_classification,
+    instant_nanoseconds,
     max_age_days,
     parse_instant,
 )
@@ -43,6 +45,30 @@ class TestDayCount:
 
     def test_a_far_past_maximum_one_microsecond_past_the_clock_ages_exactly(self) -> None:
         assert max_age_days("1400-03-01T12:18:38.000001", "2026-09-24T12:18:38Z") == 228848
+
+
+class TestNanosecondInstants:
+    """SPEC 2.2.4 publishes a value finer than a microsecond with nine digits; none is dropped."""
+
+    def test_digits_past_the_sixth_are_kept(self) -> None:
+        assert instant_nanoseconds("2026-03-04T06:00:00.000000100Z") == 1_772_604_000_000_000_100
+        assert (
+            instant_nanoseconds("2026-03-04T06:00:00.000000100+02:00") == 1_772_596_800_000_000_100
+        )
+
+    def test_an_instant_before_the_epoch_keeps_its_last_nanosecond(self) -> None:
+        assert instant_nanoseconds("1969-12-31T23:59:59.999999999") == -1
+
+    def test_a_microsecond_spelling_reads_as_before(self) -> None:
+        assert instant_nanoseconds("2026-03-04T06:00:00.500000") == 1_772_604_000_500_000_000
+        assert instant_nanoseconds("next tuesday") is None
+
+    def test_a_span_short_of_a_day_by_200_nanoseconds_is_no_day(self) -> None:
+        assert elapsed_days("2026-03-04T00:00:00.000000600", "2026-03-05T00:00:00.000000400") == 0
+        assert elapsed_days("2026-03-04T00:00:00.000000600", "2026-03-05T00:00:00.000000600") == 1
+
+    def test_a_maximum_one_nanosecond_into_a_day_ages_a_day_less(self) -> None:
+        assert max_age_days("2026-03-04T06:00:00.000000100Z", "2026-03-05T06:00:00Z") == 0
 
 
 class TestParseInstant:

@@ -29,7 +29,7 @@ from ..base import (
     TableScope,
 )
 from ..dialect import Dialect
-from ..driver import CursorFactory
+from ..driver import CursorFactory, last_rows
 from ..errors import QueryFailed
 from ..identifiers import IdentityRegistry
 
@@ -116,6 +116,11 @@ class SnowflakeAdapter(SqlAdapter):
 
     def unread_dependency_namespaces(self) -> tuple[SkippedNamespace, ...]:
         return self._unread_dependencies
+
+    def execute_query(self, sql: str) -> list[tuple[Any, ...]]:
+        """Run user-authored SQL in one call; return the last statement's rows (ASSERTIONS.md 3)."""
+
+        return last_rows(connection_module.exec_statements(self._cursor, sql))
 
     def release_scope(self, fqn: str, scope: TableScope) -> None:
         stats_module.release(self._cursor, self._identity(fqn), scope)

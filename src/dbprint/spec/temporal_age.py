@@ -1,11 +1,12 @@
 """Day-count arithmetic per SPEC 2.2.4, shared by every producer and the conformance validator.
 
-`day_count` is SPEC 2.2.4's one definition of whole elapsed days between two instants, and
-every other helper derives from it, so the two sides can never round differently.
+`day_count` and `elapsed_days` (published instants, to the nanosecond) are SPEC 2.2.4's whole
+elapsed days; every other helper derives from them, so the two sides can never round differently.
 """
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 
@@ -14,6 +15,10 @@ FreshnessClassification = Literal["live", "stale", "dormant"]
 
 LIVE_CEILING_DAYS = 7
 STALE_CEILING_DAYS = 90
+
+_DAY_NANOSECONDS = 86_400_000_000_000
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+_FINE_FRACTION_RE = re.compile(r"\.\d{6}(\d{1,3})\d*(?=Z|[+-]\d{2}(?::?\d{2})?$|$)")
 
 
 def day_count(earlier: datetime, later: datetime) -> int:
@@ -51,19 +56,48 @@ def parse_instant(value: object) -> datetime | None:
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
+def sub_microsecond(value: object) -> int:
+    """The nanoseconds past the microsecond a string's seventh to ninth fraction digits spell."""
+
+    if not isinstance(value, str) or (match := _FINE_FRACTION_RE.search(value)) is None:
+        return 0
+
+    return int(match[1].ljust(3, "0"))
+
+
+def instant_nanoseconds(value: object) -> int | None:
+    """`value` as nanoseconds since the epoch, digits past the sixth kept; None as `parse_instant`.
+
+    `datetime.fromisoformat` drops those digits, which a nanosecond type publishes (SPEC 2.2.4).
+    """
+
+    if (instant := parse_instant(value)) is None:
+        return None
+
+    return (instant - _EPOCH) // timedelta(microseconds=1) * 1000 + sub_microsecond(value)
+
+
+def elapsed_days(earlier: object, later: object) -> int | None:
+    """`day_count` between two published instants, to the nanosecond; None if one is unparseable."""
+
+    start = instant_nanoseconds(earlier)
+    end = instant_nanoseconds(later)
+
+    if start is None or end is None:
+        return None
+
+    return (end - start) // _DAY_NANOSECONDS
+
+
 def max_age_days(range_max: object, profiled_at: str) -> int:
     """SPEC 2.2.4: `max(0, day_count(max(column), profiled_at))`.
 
     Reads 0 when either operand is not a parseable instant - date-less, absent, or out of range.
     """
 
-    earlier = parse_instant(range_max)
-    later = parse_instant(profiled_at)
+    days = elapsed_days(range_max, profiled_at)
 
-    if earlier is None or later is None:
-        return 0
-
-    return max(0, day_count(earlier, later))
+    return 0 if days is None else max(0, days)
 
 
 def freshness_classification(days: int) -> FreshnessClassification:

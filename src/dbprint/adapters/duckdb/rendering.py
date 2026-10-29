@@ -24,14 +24,17 @@ _SHAPES: dict[str, TemporalShape] = {
     "timestamp with time zone": "timestamp_tz",
     "timestamp_ltz": "timestamp_tz",
     "timestamp_tz": "timestamp_tz",
+    "timestamptz_ns": "timestamp_tz",
 }
 # `STRFTIME` binds these to its TIMESTAMP_NS overload, which overflows past 2262-04-11.
 _SUMMED_AS_BIGNUM = ("hugeint", "uhugeint", "int128", "uint128")
 _COARSE_TIMESTAMP_TYPES = ("timestamp_s", "timestamp_ms")
-_SUB_MICROSECOND_TYPES = ("timestamp_ns", "time_ns")
+_SUB_MICROSECOND_TYPES = ("timestamp_ns", "timestamptz_ns", "time_ns")
 
 _CLOCK_PICTURE = "%H:%M:%S.%f"
 _INSTANT_PICTURE = "%Y-%m-%dT%H:%M:%S.%f"
+_NANO_CLOCK_PICTURE = "%H:%M:%S.%n"
+_NANO_INSTANT_PICTURE = "%Y-%m-%dT%H:%M:%S.%n"
 
 
 # Types with no operator a statistic needs, measured through a lossless comparable form.
@@ -89,25 +92,56 @@ def stores_below_microsecond(sql_type: str) -> bool:
     return base_type(sql_type) in _SUB_MICROSECOND_TYPES
 
 
+def published_instant(expr: str, sql_type: str) -> str:
+    """`expr` floored to the microsecond; the date functions would round it through `TIMESTAMP`."""
+
+    shape = temporal_shape(sql_type)
+
+    if shape not in ("timestamp", "timestamp_tz") or not stores_below_microsecond(sql_type):
+        return expr
+
+    aware = expr if shape == "timestamp_tz" else f"TIMEZONE('UTC', {expr})"
+    epoch = "CAST('1970-01-01 00:00:00+00' AS TIMESTAMPTZ_NS)"
+    micros = f"DATEDIFF('microsecond', {epoch}, {aware})"
+
+    # `DATEDIFF` is NULL for an infinity, which reaches `TIMESTAMP` only through its text.
+    return (
+        f"CASE WHEN {micros} IS NULL THEN CAST(CAST({aware} AS VARCHAR) AS TIMESTAMP) "
+        f"ELSE MAKE_TIMESTAMP({micros}) END"
+    )
+
+
 def render_domain(expr: str, sql_type: str) -> str:
     """SQL text rendering `expr` per SPEC 2.2.4 - `STRFTIME` reads a plain `TIMESTAMP`, a
     `TIMESTAMPTZ` argument otherwise pulling in an optional ICU dependency.
     """
 
     shape = temporal_shape(sql_type)
+    fine = stores_below_microsecond(sql_type)
 
     match shape:
         case "date":
             return f"STRFTIME({expr}, '%Y-%m-%d')"
+        case "timestamp" if fine:
+            return _nanosecond(f"STRFTIME({expr}, '{_NANO_INSTANT_PICTURE}')")
         case "timestamp":
             coarse = base_type(sql_type) in _COARSE_TIMESTAMP_TYPES
             source = f"CAST(({expr}) AS TIMESTAMP)" if coarse else expr
 
             return _stripped(f"STRFTIME({source}, '{_INSTANT_PICTURE}')")
+        case "timestamp_tz" if fine:
+            utc = f"({expr}) AT TIME ZONE 'UTC'"
+
+            return _zoned(_nanosecond(f"STRFTIME({utc}, '{_NANO_INSTANT_PICTURE}')"))
         case "timestamp_tz":
             source = f"CAST(({expr}) AT TIME ZONE 'UTC' AS TIMESTAMP)"
 
-            return f"{_stripped(f"STRFTIME({source}, '{_INSTANT_PICTURE}')")} || 'Z'"
+            return _zoned(_stripped(f"STRFTIME({source}, '{_INSTANT_PICTURE}')"))
+        case "time" if fine:
+            # STRFTIME has no TIME_NS overload: a time of day goes through its nanosecond count.
+            source = f"MAKE_TIMESTAMP_NS(EPOCH_NS({expr}))"
+
+            return _nanosecond(f"STRFTIME({source}, '{_NANO_CLOCK_PICTURE}')")
         case "time":
             return _clock(f"CAST(({expr}) AS TIME)")
         case "time_tz":
@@ -142,5 +176,15 @@ def _clock(time_expr: str) -> str:
     return _stripped(f"STRFTIME(DATE '1970-01-01' + {time_expr}, '{_CLOCK_PICTURE}')")
 
 
+def _nanosecond(rendered: str) -> str:
+    # Nine digits shed their last three when those are zero, leaving the six a microsecond keeps.
+    return _stripped(f"REGEXP_REPLACE({rendered}, '000$', '')")
+
+
 def _stripped(rendered: str) -> str:
     return f"REGEXP_REPLACE({rendered}, '\\.000000$', '')"
+
+
+def _zoned(rendered: str) -> str:
+    # `STRFTIME` spells an infinity as the word, which takes no zone designator (SPEC 2.2.4).
+    return f"REGEXP_REPLACE({rendered}, '(\\d)$', '\\1Z')"

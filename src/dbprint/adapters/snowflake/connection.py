@@ -8,11 +8,12 @@ connector lazily, so an injected duckdb cursor never pays the import cost.
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .. import driver
+from .. import driver, interrupt
 from ..dialect import Dialect
 from ..driver import Cursor, FactoryConnection
 
@@ -29,6 +30,10 @@ _LOG = logging.getLogger(__name__)
 
 # The vendor's own ceiling; a larger limit is refused rather than silently clamped.
 STATEMENT_TIMEOUT_CEILING_SECONDS = 604_800
+
+_POLL_SECONDS = 0.1
+_CANCEL_ATTEMPTS = 2
+_CANCEL_WAIT_SECONDS = 5.0
 
 
 class SnowflakeConnectionError(RuntimeError):
@@ -114,6 +119,20 @@ def exec_query(cursor: Cursor, sql: str, params: Any = None) -> Cursor:
     return driver.execute(_LOG, _is_timeout, cursor, sql, params)
 
 
+def exec_statements(cursor: Any, sql: str) -> Any:
+    """Run user-authored SQL of any number of statements in one call and return the cursor.
+
+    Snowflake refuses a second statement in a call that does not name a count, and 0 names any.
+    """
+
+    def run() -> Any:
+        cursor.execute(sql, num_statements=0)
+
+        return cursor
+
+    return driver.traced(_LOG, _is_timeout, run, sql, None)
+
+
 def _default_cursor_factory(params: ConnectionParams) -> Any:
     """Build a real snowflake-connector cursor; raises if the extra is missing."""
 
@@ -132,6 +151,8 @@ def _default_cursor_factory(params: ConnectionParams) -> Any:
         # The adapter writes `?` placeholders; the connector's default pyformat binds
         # client-side via `command % params` and fails on them.
         "paramstyle": "qmark",
+        # Unset, connector 5 warns on each connect(); False logs out on close (no async queries).
+        "enable_server_session_keep_alive_auto_detection": False,
     }
 
     if params.database is not None:
@@ -153,9 +174,7 @@ def _default_cursor_factory(params: ConnectionParams) -> Any:
     else:
         connect_kwargs["password"] = params.password
 
-    connection = connector.connect(**connect_kwargs)
-
-    return connection.cursor()
+    return _CancellableCursor(connector.connect(**connect_kwargs))
 
 
 def _load_private_key(path: str, passphrase: str | None) -> bytes:
@@ -188,6 +207,80 @@ def _load_private_key(path: str, passphrase: str | None) -> bytes:
         raise SnowflakeConnectionError(
             f"could not load Snowflake private key from {path!r}: {exc}",
         ) from exc
+
+
+class _CancellableCursor:
+    """Runs each statement on a helper thread, cancelling it on a Ctrl-C connector 5 never sees."""
+
+    def __init__(self, connection: Any) -> None:
+        self._connection = connection
+        self._cursor = connection.cursor()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._cursor, name)
+
+    def execute(self, sql: str, params: Any = None, num_statements: int | None = None) -> Any:
+        interrupt.raise_if_requested()
+
+        finished = threading.Event()
+        outcome: list[Any] = []
+        counted = {} if num_statements is None else {"num_statements": num_statements}
+
+        def run() -> None:
+            try:
+                outcome.append(
+                    self._cursor.execute(sql, **counted)
+                    if params is None
+                    else self._cursor.execute(sql, params, **counted),
+                )
+            except BaseException as exc:  # noqa: BLE001 - handed to the waiting thread, which raises it
+                outcome.append(exc)
+            finally:
+                finished.set()
+
+        try:
+            threading.Thread(target=run, daemon=True).start()
+
+            while not finished.wait(_POLL_SECONDS):
+                interrupt.raise_if_requested()
+        except BaseException as interrupted:
+            self._cancel(finished)
+
+            if outcome and isinstance(outcome[0], BaseException):
+                raise outcome[0] from interrupted
+
+            raise
+
+        if isinstance(outcome[0], BaseException):
+            raise outcome[0]
+
+        return outcome[0]
+
+    def _cancel(self, finished: threading.Event) -> None:
+        # A session runs one statement at a time, so this cancels exactly the interrupted one; the
+        # second attempt covers a cancel that reached the server before the statement did.
+        for _ in range(_CANCEL_ATTEMPTS):
+            try:
+                canceller = self._connection.cursor()
+
+                try:
+                    canceller.execute(
+                        "SELECT SYSTEM$CANCEL_ALL_QUERIES(?)",
+                        (self._connection.session_id,),
+                    )
+                finally:
+                    canceller.close()
+            except Exception as exc:  # noqa: BLE001 - the run ends interrupted either way
+                _LOG.debug("cancelling the interrupted statement failed: %s", exc)
+
+            if finished.wait(_CANCEL_WAIT_SECONDS):
+                return
+
+    def close(self) -> None:
+        try:
+            self._cursor.close()
+        finally:
+            self._connection.close()
 
 
 def _is_timeout(exc: BaseException) -> bool:

@@ -453,8 +453,89 @@ class TestDerivedFrom:
         assert ca.check_derived_from(tmp_path, manifest) == []
 
 
+_INFERRED = {
+    **_COLOR,
+    "cardinality_ratio": 1.0,
+    "inferred": {
+        "looks_like": "email",
+        "sampled": 10,
+        "matched": 10,
+        "candidate_key": True,
+        "sensitivity": "contact",
+        "epoch_unit": "seconds",
+    },
+}
+_NEAR_MISS = {
+    **_COLOR,
+    "inferred": {"looks_like_candidate": "email", "looks_like_candidate_share": 0.6},
+}
+
+
+class TestRejections:
+    """SPEC 2.7.1: a rejection naming a field the column does not carry is stale, at warning."""
+
+    def _rejections(
+        self,
+        tmp_path: Path,
+        rejected: list[str],
+        column: dict[str, Any] = _COLOR,
+        **statistics: Any,
+    ) -> list[Issue]:
+        stats = {**_STATS, "columns": {"color": column}, **statistics}
+        manifest = _print(tmp_path, {"columns": {"color": {"rejected": rejected}}}, stats)
+
+        return ca.check_rejections(tmp_path, manifest)
+
+    def test_a_field_the_column_carries_is_quiet(self, tmp_path: Path) -> None:
+        rejected = ["candidate_key", "looks_like", "sensitivity", "epoch_unit"]
+
+        assert self._rejections(tmp_path, rejected, _INFERRED) == []
+        assert self._rejections(tmp_path, ["looks_like_candidate"], _NEAR_MISS) == []
+
+    @pytest.mark.parametrize(
+        "field",
+        ["candidate_key", "looks_like", "looks_like_candidate", "sensitivity", "epoch_unit"],
+    )
+    def test_a_field_the_column_lacks_is_stale(self, tmp_path: Path, field: str) -> None:
+        assert self._rejections(tmp_path, [field]) == [
+            Issue(
+                f"{_ANN}::columns.color.rejected",
+                "annotations.unknown-inference",
+                "warning",
+                f"rejected names [{field!r}], which statistics.yaml does not carry for this column.",
+                "§2.7.1",
+            ),
+        ]
+
+    def test_every_stale_name_on_a_column_is_one_finding(self, tmp_path: Path) -> None:
+        issues = self._rejections(tmp_path, ["epoch_unit", "candidate_key"])
+
+        assert len(issues) == 1
+        assert "['epoch_unit', 'candidate_key']" in issues[0].detail
+
+    def test_a_field_unmeasured_on_the_column_is_quiet(self, tmp_path: Path) -> None:
+        column = {**_COLOR, "unmeasured": ["inferred.looks_like"]}
+
+        assert self._rejections(tmp_path, ["looks_like"], column) == []
+
+    def test_a_field_switched_off_for_the_table_is_quiet(self, tmp_path: Path) -> None:
+        assert self._rejections(tmp_path, ["looks_like"], disabled=["looks_like"]) == []
+
+    def test_a_column_the_statistics_lack_is_only_a_stale_key(self, tmp_path: Path) -> None:
+        manifest = _print(tmp_path, {"columns": {"shade": {"rejected": ["epoch_unit"]}}})
+
+        assert ca.check_rejections(tmp_path, manifest) == []
+        assert [i.code for i in ca.check_stale_keys(tmp_path, manifest)] == [
+            "annotations.unknown-column",
+        ]
+
+
 _FINDING = {
-    "color": {"claims": {"null_count": 3}, "values": [{"value": "green", "note": "x"}]},
+    "color": {
+        "claims": {"null_count": 3},
+        "values": [{"value": "green", "note": "x"}],
+        "rejected": ["epoch_unit"],
+    },
     "shade": {"note": "a column the statistics lack"},
 }
 
@@ -472,7 +553,7 @@ class TestAFileFailingAdmissionIsReadByNoPass:
             {"columns": {**_FINDING, "code": {"note": 5}}},
         ],
     )
-    @pytest.mark.parametrize("check", [*_CHECKS, ca.check_derived_from])
+    @pytest.mark.parametrize("check", [*_CHECKS, ca.check_derived_from, ca.check_rejections])
     def test_no_annotations_finding_is_reported(
         self,
         tmp_path: Path,

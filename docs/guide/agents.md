@@ -7,20 +7,20 @@ Pick by what the client supports:
 | Surface | Use when |
 |---|---|
 | **The packaged skill** | The client takes markdown rules, skills or custom instructions. Nothing to run |
-| **The MCP server** | The client speaks MCP and you want native tool and resource primitives, multi-connection routing, and a token-budgeted context tool |
+| **The MCP server** | The client speaks MCP and you want native tool and resource primitives, multi-connection routing, and paged replies |
 
 Both read the same files on disk. Neither opens a database connection.
 
 ## The markdown skill
 
-The repository carries a skill that tells an agent where a print's files live, which to open for a given question, and to follow the print's own `reading.md` for how to interpret what it finds. It is one file, and installing it is copying that file into wherever the client keeps its rules:
+The repository carries a skill that has an agent read the print before it queries the database: which tool answers which question, what the number it gets back does and does not cover, and `dbprint context` as the shell route where no server is connected. The client lists the skill's description to the agent, which loads the rest when a task needs a fact about the database. It is one file, and installing it is copying that file into a skill directory:
 
 | Client | Where |
 |---|---|
-| Claude Code | `.claude/skills/dbprint/SKILL.md` in the project, or `~/.claude/skills/dbprint/SKILL.md` for every project |
-| Cursor | the project's `.cursor/rules/` directory, or the global rules under Settings |
-| Cline | Custom Instructions in settings |
-| Anything else | wherever that client reads persistent instructions from |
+| Claude Code, Cursor, Cline | `.claude/skills/dbprint/SKILL.md` in the project — all three read project skills there |
+| Claude Code and Cursor, for every project | `~/.claude/skills/dbprint/SKILL.md` |
+| Cline, for every project | `~/.cline/skills/dbprint/SKILL.md` |
+| Anything else | the file's body, below its frontmatter, wherever that client reads persistent instructions from |
 
 The skill itself and its install notes are published here: [installing it](../examples/skill/README.md) and [the skill itself](../examples/skill/dbprint.md).
 
@@ -80,7 +80,7 @@ The server states which tool answers which question, then how to read an answer,
 
 | Tool | Answers |
 |---|---|
-| `get_table_context` | everything known about one table, as an assembled fragment, inside a token budget |
+| `get_table_context` | everything known about one table, as an assembled fragment, paged |
 | `list_tables` | what is in this print, and under `failed_tables` what the last run could not profile — a table listed there exists and is unprofiled; with `detail: true`, each table's row count and whether its statistics are stale |
 | `search_columns` | which columns match a name, a shape, or what their notes say |
 | `resolve_value` | how a phrase from a question is spelled in one column's values |
@@ -88,7 +88,7 @@ The server states which tool answers which question, then how to read an answer,
 | `get_diff` | what changed at the last generate |
 | `get_reference` | the format specification, served from the package |
 
-`get_table_context` is the one to reach for first: it assembles DDL, description, annotations and per-column notes into a single fragment and trims to a budget by dropping whole sections in priority order, never truncating mid-section, rather than making the agent stitch four files together. `search_columns` is the first call for a broader question — a name glob, a `text` search over column notes, `classification`/`sql_type`/`sensitivity`/`looks_like`/`redacted` filters and a `candidate_key` match, all ANDed, with `rows_scanned` and `row_count` both returned on a scoped match so a caller can tell a sampled number from a table-wide one without a second call.
+`get_table_context` is the one to reach for first: it assembles DDL, description, annotations and per-column notes into a single fragment rather than making the agent stitch four files together, and pages a long one: a section too long for one page continues on the next, never dropped. `search_columns` is the first call for a broader question — a name glob, a `text` search over column notes, `classification`/`sql_type`/`sensitivity`/`looks_like`/`redacted` filters and a `candidate_key` match, all ANDed, with `rows_scanned` and `row_count` both returned on a scoped match so a caller can tell a sampled number from a table-wide one without a second call.
 
 A tool call never surfaces a bare protocol error: a fault comes back as a normal result with `is_error: true` and a readable message, so a client does not need special-case handling to show the agent what went wrong.
 
@@ -120,7 +120,7 @@ $ dbprint context 'arboretum.seedbank.*' --budget 4000
 | `profile` (default) | Header, Terms, Connection notes, DDL, Description, Annotations, Cardinality table, Relationships | You want to know what is in the table and how much of it was measured |
 | `query` | Header, Terms, DDL, Connection notes, Joins, Data dictionary, Column values | You are about to write SQL against the table |
 
-`query` drops every statistic but each nullable column's null share — the cue that a predicate needs an `IS NULL` arm — and renders instead what a query writer needs a literal from: the columns whose value list a predicate can be written from, each with its counts, and a coverage cell saying whether that list is the column's whole domain or, as a percentage, the share of it the five most frequent values cover. A numeric or date column with no such list shows its frequent values instead — a sentinel like `-1` or `9999-12-31` on a share of the rows — labelled as frequent values rather than a domain. A value with a note in `statistics.annotations.yaml` carries it inline, so what a code means sits beside the code itself, and a column whose `derived_from` names a source carries that source's notes too. Every value and number is spelled so it reads back as itself — `NULL` is a genuine null, `'NULL'` the stored string; the [MCP server specification](../MCP.md#41-get_table_context) states the full rule. The join paths are the `## Joins` list: the DDL's foreign keys and the edges the print inferred or measured, each with its detection, so a table whose catalog declares no key still says what it joins to; an edge a human added in `relationships.annotations.yaml` is listed as `annotated`. Under either purpose, a header line `Meanings: not documented here` marks a table with no description and no column or value note, whose codes, units and defaults the agent must read from the code.
+`query` drops every statistic but each nullable column's null share — the cue that a predicate needs an `IS NULL` arm — and renders instead what a query writer needs a literal from: the columns whose value list a predicate can be written from, each with its counts, and a coverage cell saying whether that list is the column's whole domain or, as a percentage, the share of it the five most frequent values cover. A numeric or date column with no such list shows its frequent values instead — a sentinel like `-1` or `9999-12-31` on a share of the rows — labelled as frequent values rather than a domain. A value with a note in `statistics.annotations.yaml` carries it inline, so what a code means sits beside the code itself, and a column whose `derived_from` names a source carries that source's notes too. Every value and number is spelled so it reads back as itself — `NULL` is a genuine null, `'NULL'` the stored string; the [MCP server specification](../MCP.md#41-get_table_context) states the full rule. The join paths are the `## Joins` list: the DDL's foreign keys and the edges the print inferred or measured, each with its detection, so a table whose catalog declares no key still says what it joins to; an edge a human added in `relationships.annotations.yaml` is listed as `annotated`, and one a human rejected there is not listed. An inferred field a human rejected in `statistics.annotations.yaml` is left out of the fragment in every format. Under either purpose, a header line `Meanings: not documented here` marks a table with no description and no column or value note, whose codes, units and defaults the agent must read from the code.
 
 When the fragment is over budget, dropping a whole section usually beats letting `--budget` truncate, because you choose what goes:
 

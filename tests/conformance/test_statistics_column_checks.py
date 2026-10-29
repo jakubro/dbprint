@@ -1281,6 +1281,8 @@ class TestUnrepresentable:
 
 _JAN_1 = "2026-01-01T00:00:00Z"
 _JAN_11 = "2026-01-11T00:00:00Z"
+_PAST_MIDNIGHT = "2026-03-04T00:00:00.000000600"
+_SHORT_OF_A_DAY = "2026-03-05T00:00:00.000000400"
 
 
 class TestSpanDays:
@@ -1300,6 +1302,7 @@ class TestSpanDays:
         ("col", "rng"),
         [
             ({}, {"min": _JAN_1, "max": _JAN_11, "span_days": 10}),
+            ({}, {"min": _PAST_MIDNIGHT, "max": _SHORT_OF_A_DAY, "span_days": 0}),
             ({"redacted": "mask"}, {"min": _JAN_1, "max": _JAN_11, "span_days": 9}),
             ({"redacted": "hash"}, {"min": _JAN_1, "max": _JAN_11, "span_days": 9}),
             ({"unrepresentable": ["min"]}, {"min": _JAN_1, "max": _JAN_11, "span_days": 9}),
@@ -1312,6 +1315,17 @@ class TestSpanDays:
     )
     def test_a_span_that_agrees_or_cannot_be_read_back(self, col: dict[str, Any], rng: Any) -> None:
         assert st._check_span_days({**col, "range": rng}, _C) == []
+
+    def test_nine_digit_bounds_are_counted_to_the_nanosecond(self) -> None:
+        rng = {"min": _PAST_MIDNIGHT, "max": _SHORT_OF_A_DAY, "span_days": 1}
+
+        assert st._check_span_days({"range": rng}, _C) == [
+            _issue(
+                "stats.span-days-mismatch",
+                "span_days=1 but day_count(range.min, range.max)=0.",
+                "§2.2.4",
+            ),
+        ]
 
 
 class TestMaxAgeDays:
@@ -1339,6 +1353,12 @@ class TestMaxAgeDays:
     def test_an_age_that_agrees(self) -> None:
         assert self._check(10) == []
         assert self._check(9, unrepresentable=["min"]) != []
+
+    def test_a_nine_digit_maximum_is_aged_to_the_nanosecond(self) -> None:
+        later = "2026-03-05T06:00:00Z"
+
+        assert self._check(0, "2026-03-04T06:00:00.000000100Z", profiled_at=later) == []
+        assert self._check(1, "2026-03-04T06:00:00.000000100Z", profiled_at=later) != []
 
     @pytest.mark.parametrize(
         ("observed", "col", "profiled_at"),

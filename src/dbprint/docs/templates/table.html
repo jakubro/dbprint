@@ -537,6 +537,7 @@
             </td>
             <td>
               {{ col.notes }}
+              {% for note in col.rejected_notes %}<div class="rel-rejected">REJECTED by human annotation: {{ note }}</div>{% endfor %}
               {% if col.sketch_available %}<span class="badge badge-sketch" title="A KMV sketch is computed for this column">sketch</span>{% endif %}
             </td>
           </tr>
@@ -607,7 +608,7 @@
                   <div class="rel-observed">
                     fanout avg {{ r.observed.fanout_avg|number }}{% if r.observed.fanout_max is not none %} (max {{ r.observed.fanout_max|number }}){% endif %},
                     covers {{ r.observed.target_coverage|percent }} of target
-                    {% if r.observed.containment is not none %}, {{ r.observed.containment|percent }} of referencing values contained{% endif %}
+                    {%- if r.observed.containment is not none %}, {{ r.observed.containment|percent }} of referencing values contained{% endif %}
                     {% if r.observed.containment is not none and r.observed.answerable_count is not none %}({{ r.observed.answerable_count|number }} answerable){% endif %}
                   </div>
                   {% if r.observed.coherent == false %}<div class="rel-incoherent">INCOHERENT: referencing cardinality exceeds the target's</div>{% endif %}
@@ -636,7 +637,7 @@
                   <div class="rel-observed">
                     fanout avg {{ r.observed.fanout_avg|number }}{% if r.observed.fanout_max is not none %} (max {{ r.observed.fanout_max|number }}){% endif %},
                     covers {{ r.observed.target_coverage|percent }} of target
-                    {% if r.observed.containment is not none %}, {{ r.observed.containment|percent }} of referencing values contained{% endif %}
+                    {%- if r.observed.containment is not none %}, {{ r.observed.containment|percent }} of referencing values contained{% endif %}
                     {% if r.observed.containment is not none and r.observed.answerable_count is not none %}({{ r.observed.answerable_count|number }} answerable){% endif %}
                   </div>
                   {% if r.observed.coherent == false %}<div class="rel-incoherent">INCOHERENT: referencing cardinality exceeds the target's</div>{% endif %}

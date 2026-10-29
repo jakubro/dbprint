@@ -32,6 +32,8 @@ The second and third are the ones that age well. A glob covers the columns you k
 
 `looks_like` is a 95% verdict, so a `looks_like` rule misses a column that is mostly but not wholly one shape; a `sensitivity` rule reaches it once half its sampled values carry the category's shape ([SPEC 4.4.4](../format/v1/SPEC.md#444-thresholds)).
 
+Both follow the detection `statistics.yaml` publishes. An annotation rejecting a column's `sensitivity` or `looks_like` withdraws it from what agents read, not from redaction: a rule naming that category or shape still covers the column, and `privacy.unredacted-sensitive` still reports it while its values publish ([annotating a print](annotations.md)).
+
 ## Three primitives
 
 | `with` | Effect on the literal |

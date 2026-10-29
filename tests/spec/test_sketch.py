@@ -42,6 +42,11 @@ class TestVectors:
             pytest.param("hello", 13362634815750784402, id="text"),
             pytest.param("true", 317521853213362953, id="boolean"),
             pytest.param("2026-03-09T14:27:36Z", 9552359349123505343, id="temporal"),
+            pytest.param(
+                "2026-03-04T06:00:00.000000100Z",
+                2655136246489926217,
+                id="temporal_below_a_microsecond",
+            ),
             pytest.param("00:00:37", 10604805012337869669, id="time_of_day"),
             pytest.param(b"\x0a\xff", 8458408032758825719, id="binary"),
         ],

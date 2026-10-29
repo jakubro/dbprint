@@ -12,6 +12,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -625,7 +626,8 @@ class TestWatchForRefresh:
     ) -> None:
         """The sleep is stubbed to block forever, so only the thread's own start is under test."""
 
-        monkeypatch.setattr(remote_module.time, "sleep", lambda _seconds: threading.Event().wait())
+        clock = SimpleNamespace(sleep=lambda _seconds: threading.Event().wait())
+        monkeypatch.setattr(remote_module, "time", clock)
 
         before = set(threading.enumerate())
         watch_for_refresh(RemoteAddress(remote="unused"))

@@ -24,12 +24,14 @@ from dbprint.spec.spatial import Extent, Geometry
 from .connection import DIALECT, exec_query
 from .introspect import estimate_row_count
 from .rendering import (
+    day_span,
     finite_value,
     mean_expression,
     render_binary,
     render_domain,
     render_operand,
     render_text,
+    stores_below_microsecond,
     sum_expression,
     temporal_shape,
     utc_instant,
@@ -577,10 +579,11 @@ def _fetch_value_list(
 ) -> ValueList:
     cn = render_operand(source_column(col, DIALECT), col.classified_type)
     select_expr = cn
+    fine = stores_below_microsecond(col.classified_type)
 
     if is_binary_type(col.classified_type):
         select_expr = render_binary(cn)
-    elif temporal_shape(col.classified_type) == "timestamp_tz":
+    elif temporal_shape(col.classified_type) == "timestamp_tz" or fine:
         select_expr = render_domain(cn, col.classified_type)
     elif is_string_like(col.classified_type, _is_unsupported):
         select_expr = render_text(cn, col.classified_type)
@@ -593,6 +596,7 @@ def _fetch_value_list(
         non_null,
         config,
         column=cn,
+        group=select_expr if fine else None,
     )
 
 
@@ -699,14 +703,10 @@ def _fetch_temporal_block(
     rendered_min = render_domain(f"MIN({cn})", col.classified_type)
     rendered_max = render_domain(f"MAX({cn})", col.classified_type)
 
-    # Integer microseconds, never a float epoch (SPEC 2.2.4). TIMESTAMPDIFF reads session-zone wall
-    # clocks, so only a naive type takes it; a zone-aware one differences its epoch.
     span_days = (
-        f"DATEDIFF(MAX({cn}), MIN({cn}))"
-        if not day_aligned
-        else f"(UNIX_MICROS(MAX({cn})) - UNIX_MICROS(MIN({cn}))) DIV 86400000000"
-        if temporal_shape(col.classified_type) == "timestamp_tz"
-        else f"TIMESTAMPDIFF(MICROSECOND, MIN({cn}), MAX({cn})) DIV 86400000000"
+        day_span(f"MIN({cn})", f"MAX({cn})", col.classified_type)
+        if day_aligned
+        else f"DATEDIFF(MAX({cn}), MIN({cn}))"
     )
 
     agg_select = [

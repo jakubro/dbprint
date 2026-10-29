@@ -51,6 +51,7 @@ from dbprint.spec.classification import Classification
 from dbprint.spec.looks_like import LooksLike
 from dbprint.spec.parts import display
 from dbprint.spec.redaction import Primitive as RedactionPrimitive
+from dbprint.spec.rejection import rejected_fields, without_rejected
 from dbprint.spec.scope import ScanScope, list_is_complete, reply_scope, rows_scanned, scope_of
 from dbprint.spec.sensitivity import Sensitivity
 from . import errors, paging, reference
@@ -147,8 +148,9 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
             "it as a key; a section too long for one page continues on the next, never "
             "dropped. Under `profile`, md Notes summarise each column - a long value list "
             "shows its 5 most frequent values - while json and yaml carry the statistics "
-            "whole; for json/yaml a `_corrupted` field names any of the table's print files "
-            "that is malformed."
+            "whole but for each column's sketch and any inferred field a person rejected; for "
+            "json/yaml a `_corrupted` field names any of the table's print files that is "
+            "malformed."
         ),
         input_schema={
             "type": "object",
@@ -290,11 +292,12 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
             "get_table_context; list tables rather than columns with list_tables. A match on a table read in part "
             "carries its `scope` block with rows_scanned/row_count, so a caller can tell a "
             "scanned-set number or key from a table-wide one; a match carrying a looks_like verdict carries the "
-            "sampled/matched draw behind it, since a verdict from two values reads "
-            "identically to one from ten thousand otherwise. A match carries "
+            "sampled/matched draw behind it, since a verdict from two values reads identically "
+            "to one from ten thousand otherwise. A match carries "
             "sensitivity/redacted/candidate_key (and candidate_key_exception where the "
             "ratio falls short of 1.0) whenever the column does, so filtering on any of "
-            "them returns the matched category, not just a bare column name. Paged: every "
+            "them returns the matched category, not just a bare column name. An inferred field "
+            "a person rejected reads as absent. Paged: every "
             "reply carries the `total` matched, and `next_cursor` while more remain. A "
             "result carries `unreadable_tables` only when a table's own statistics or "
             "annotations are malformed, on its first page: a statistics failure drops "
@@ -333,14 +336,15 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                         f"({', '.join(sorted(get_args(Sensitivity)))}) - a glob of '*' "
                         f"sweeps every column carrying any detection. A detection, never "
                         f"a verdict; its absence on a column is not an assertion that "
-                        f"the column is safe"
+                        f"the column is safe. A detection a person rejected never matches"
                     ),
                 },
                 "looks_like": {
                     "type": "string",
                     "description": (
                         f"fnmatch glob against inferred.looks_like "
-                        f"({', '.join(sorted(get_args(LooksLike)))})"
+                        f"({', '.join(sorted(get_args(LooksLike)))}); a pattern a person "
+                        f"rejected never matches"
                     ),
                 },
                 "redacted": {
@@ -352,7 +356,9 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                 },
                 "candidate_key": {
                     "type": "boolean",
-                    "description": "Exact match against inferred.candidate_key",
+                    "description": (
+                        "Exact match against inferred.candidate_key; a rejected key reads false"
+                    ),
                 },
                 "text": {
                     "type": "string",
@@ -482,7 +488,8 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
             "`changes` list names each one - tables and columns added, removed or "
             "retyped, relationships changed, statistics that drifted. A statistic with "
             "no drift event did not change between the two runs; a table "
-            "counted in `unevaluated_tables` was not compared. The `changes` list is paged in "
+            "counted in `unevaluated_tables` was not compared. An event about a join or an "
+            "inferred field a person rejected is withheld. The `changes` list is paged in "
             "recorded order with `total` and `next_cursor`; every other key of the document rides "
             "the first page whole. "
             "A table's current state, rather than what changed, is get_table_context's answer."
@@ -560,7 +567,10 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
 )
 
 
-def list_page(cursor: str | None) -> tuple[list[ToolDef], str | None]:
+def list_page(
+    cursor: str | None,
+    measure: paging.Measure = paging.compact,
+) -> tuple[list[ToolDef], str | None]:
     """The `tools/list` page `cursor` points at, and the cursor to the next when one exists."""
 
     def render(units: Sequence[Any], first: bool, next_cursor: str | None) -> dict[str, Any]:
@@ -583,7 +593,7 @@ def list_page(cursor: str | None) -> tuple[list[ToolDef], str | None]:
         return reply
 
     call = paging.Call("tools/list", {}, ())
-    reply = paging.page(call, list(enumerate(TOOL_DEFINITIONS)), render, cursor)
+    reply = paging.page(call, list(enumerate(TOOL_DEFINITIONS)), render, cursor, measure)
     by_name = {definition.name: definition for definition in TOOL_DEFINITIONS}
 
     return [by_name[tool["name"]] for tool in reply["tools"]], reply.get("nextCursor")
@@ -1039,8 +1049,8 @@ def _tool_search_columns(state: ServedConnections, arguments: dict[str, Any]) ->
         )
 
         for col_name in sorted(column_names):
-            col = stats_columns.get(col_name) or {}
             annotation = annotation_columns.get(col_name) or {}
+            col = without_rejected(stats_columns.get(col_name) or {}, rejected_fields(annotation))
             matches += [
                 _search_match(fqn, entry, col_name, col, annotation, scope) | extra
                 for extra in _column_hit(col_name, col, annotation, pattern, text, filters)

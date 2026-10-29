@@ -77,6 +77,7 @@ _TEMPORAL_TYPES = (
     "timestamp_ltz",
     "timestamp_tz",
     "timestamp_ns",
+    "timestamptz_ns",
     "timestamp_ms",
     "timestamp_s",
     "datetime",

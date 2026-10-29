@@ -39,6 +39,8 @@ from tests.fixtures.adversarial import (
     OUTSIDE_PRINT_TABLE,
     PERCENTILE_INSIDE_RANGE_COLUMN,
     REDACTED_COLUMN,
+    REJECTED_FIELD_NOTE,
+    REJECTED_FIELD_TABLE,
     SCOPED_COMPLETE_LIST_COLUMN,
     SCOPED_KEY_COLUMN,
     SCOPED_LATEST_COLUMN,
@@ -60,6 +62,7 @@ from tests.fixtures.adversarial import (
 
 COVERS = frozenset(
     {
+        "rejected_inferred_field",
         "scoped_table",
         "redacted_column",
         "future_dated_temporal",
@@ -413,3 +416,12 @@ def test_an_entry_outside_the_print_reads_as_absent(adversarial_print: Adversari
 
     assert catalogue.load_table(found, OUTSIDE_PRINT_TABLE) is None
     assert OUTSIDE_PRINT_TABLE not in found.tables
+
+
+def test_a_rejected_inferred_field_is_shown_marked_rejected(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    text = _page_text(adversarial_print, REJECTED_FIELD_TABLE)
+
+    assert "REJECTED by human annotation: candidate key" in text
+    assert REJECTED_FIELD_NOTE in text

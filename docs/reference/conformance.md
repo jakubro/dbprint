@@ -4,7 +4,7 @@ Every code conformance validation can raise — the full set `validate_print()` 
 
 A print conforms when no `error` is raised against it. A `warning` records an anomaly that does not gate conformance; [SPEC 6.1](../format/v1/SPEC.md#61-severity-model) defines both, and [SPEC 6.2](../format/v1/SPEC.md#62-issue-document-shape) defines the issue each one is reported in.
 
-165 codes: 132 error, 33 warning.
+166 codes: 132 error, 34 warning.
 
 | Code | Severity | Specified in | Trigger |
 |---|---|---|---|
@@ -13,6 +13,7 @@ A print conforms when no `error` is raised against it. A `warning` records an an
 | `annotations.grain-unknown-column` | warning | [Annotations (§2.7)](../format/v1/SPEC.md#annotations-27) | A `grain.keys[]` entry in `statistics.annotations.yaml` names a column not present in the table's `statistics.yaml` `columns` map (§2.7.1; stale key, not fatal) |
 | `annotations.unknown-column` | warning | [Annotations (§2.7)](../format/v1/SPEC.md#annotations-27) | A key in `statistics.annotations.yaml`'s `columns` map names a column not present in the table's `statistics.yaml` (stale key; not fatal) |
 | `annotations.unknown-edge` | warning | [Annotations (§2.7)](../format/v1/SPEC.md#annotations-27) | A `verdict` in `relationships.annotations.yaml` addresses an edge absent from the table's own `relationships.yaml` `refers_to` (§2.7.2; stale, not fatal) |
+| `annotations.unknown-inference` | warning | [Annotations (§2.7)](../format/v1/SPEC.md#annotations-27) | A `rejected` entry in `statistics.annotations.yaml` names an inferred field the column's own `statistics.yaml` does not carry, and neither the column's `unmeasured` nor the file's `disabled` accounts for (§2.7.1; stale, not fatal) |
 | `annotations.unknown-source` | warning | [Annotations (§2.7)](../format/v1/SPEC.md#annotations-27) | A `derived_from` entry in `statistics.annotations.yaml` names a table absent from `manifest.yaml`'s `tables`, or a column that table's `statistics.yaml` does not have (§2.7.1; stale, not fatal) |
 | `annotations.unknown-value` | warning | [Annotations (§2.7)](../format/v1/SPEC.md#annotations-27) | A `values` entry in `statistics.annotations.yaml` names a value the column's own **exhaustive** `values` list does not have (§2.7.1; stale, not fatal — a truncated list is not checked) |
 | `annotations.value-note-unassertable` | warning | [Annotations (§2.7)](../format/v1/SPEC.md#annotations-27) | A `values` entry addresses a column carrying a `redacted` marker (§2.2.9) — there is no literal to check the note against |

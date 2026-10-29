@@ -47,6 +47,8 @@ from tests.fixtures.adversarial import (
     PERCENTILE_INSIDE_RANGE_COLUMN,
     REDACTED_COLUMN,
     REJECTED_EDGE_TARGET,
+    REJECTED_FIELD_COLUMN,
+    REJECTED_FIELD_TABLE,
     SCOPED_COMPLETE_LIST_COLUMN,
     SCOPED_KEY_COLUMN,
     SCOPED_LATEST_COLUMN,
@@ -67,6 +69,7 @@ from tests.fixtures.adversarial import (
 
 COVERS = frozenset(
     {
+        "rejected_inferred_field",
         "scoped_table",
         "redacted_column",
         "future_dated_temporal",
@@ -560,3 +563,21 @@ def test_an_entry_outside_the_print_reads_as_absent(adversarial_print: Adversari
 
     assert OUTSIDE_PRINT_SENTINEL not in str(listed)
     assert OUTSIDE_PRINT_TABLE not in str(listed)
+
+
+def test_a_rejected_inferred_field_is_left_out(adversarial_print: AdversarialPrint) -> None:
+    arguments = {"candidate_key": True, "pattern": REJECTED_FIELD_COLUMN}
+    unique = _dict_result(adversarial_print, "search_columns", arguments)["matches"]
+    column = _statistics(adversarial_print, REJECTED_FIELD_TABLE)["columns"][REJECTED_FIELD_COLUMN]
+
+    assert REJECTED_FIELD_TABLE not in [m["table"] for m in unique]
+    assert "candidate_key" not in (column.get("inferred") or {})
+    assert (
+        "candidate key"
+        not in _md(adversarial_print, REJECTED_FIELD_TABLE)
+        .split(
+            f"| {REJECTED_FIELD_COLUMN} |",
+            1,
+        )[1]
+        .splitlines()[0]
+    )

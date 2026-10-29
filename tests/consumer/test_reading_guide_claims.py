@@ -25,6 +25,7 @@ gen = load_script("gen_reading_guide")
 
 COVERS = frozenset(
     {
+        "rejected_inferred_field",
         "scoped_table",
         "redacted_column",
         "future_dated_temporal",
@@ -79,6 +80,7 @@ ANCHORS: dict[str, tuple[str, str]] = {
     "column_with_several_edges": ("2.3", "refers_to"),
     "human_authored_edge": ("2.7.2", "annotated"),
     "connection_notes": ("2.7.3", "notes"),
+    "rejected_inferred_field": ("2.7.1", "rejected"),
     "percentile_inside_range": ("2.2.4", "percentiles"),
     "grain_search_without_outcome": ("2.2.12", "exhausted"),
     "unreadable_profiled_at": ("2.5", "profiled_at"),

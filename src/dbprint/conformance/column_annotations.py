@@ -8,7 +8,7 @@ from typing import Any
 
 import yaml
 
-from dbprint.spec.absence import column_value, disabled_of, read_column_field
+from dbprint.spec.absence import Absence, column_value, disabled_of, read_column_field
 from dbprint.spec.artifacts import declared_artifacts, walkable_tables
 from dbprint.spec.predicate import (
     MalformedPredicate,
@@ -26,6 +26,9 @@ from .issue import Issue
 from .layout import annotated_tables
 from .progress import TableSink
 from .yaml_utils import load_yaml
+
+
+_ACCOUNTED_FOR = frozenset({Absence.PRESENT, Absence.UNMEASURED, Absence.DISABLED})
 
 
 def check_entry(data: Any, path: str, tbl_fqn: str) -> list[Issue]:
@@ -349,6 +352,44 @@ def _value_unassertable(rel: str, col_name: str, i: int, reason: str) -> Issue:
         reason,
         "§2.7.1",
     )
+
+
+def check_rejections(
+    print_root: Path,
+    manifest_data: dict,
+    *,
+    on_table: TableSink | None = None,
+) -> list[Issue]:
+    """Warn on a rejection naming an inferred field its column's statistics do not carry.
+
+    A field the run could not read or was switched off from is accounted for; a `candidate_key`
+    below the threshold reads omitted, so rejecting it is stale too.
+    """
+
+    issues: list[Issue] = []
+    fields = _annotated_columns(print_root, manifest_data, "rejected", list, on_table)
+
+    for rel, col_name, rejected, col_stats, _, disabled in fields:
+        stale = [
+            name
+            for name in rejected
+            if read_column_field(col_stats, f"inferred.{name}", disabled=disabled).state
+            not in _ACCOUNTED_FOR
+        ]
+
+        if stale:
+            issues.append(
+                Issue(
+                    f"{rel}::columns.{col_name}.rejected",
+                    "annotations.unknown-inference",
+                    "warning",
+                    f"rejected names {stale!r}, which statistics.yaml does not carry for this "
+                    "column.",
+                    "§2.7.1",
+                ),
+            )
+
+    return issues
 
 
 def _source_columns(print_root: Path, entry: Any) -> set[str] | None:

@@ -38,7 +38,7 @@ just mutate PKG  # mutation-test spec, assertions or conformance against its own
                  # by hand, never in check; prints each surviving mutant as a diff
 just test [ARGS] # pytest, no coverage; ARGS narrows (just test tests/engine -k diff)
                  # prints one SKIPPED line per distinct skip reason, with its count
-                 # stops at a 30-minute wall clock or 80 GiB total resident memory, naming the cap
+                 # stops at a 45-minute wall clock or 80 GiB total resident memory, naming the cap
 just test-cov    # pytest with coverage (term-missing); what `check` runs
 just test-fast   # every test needing no database server, container or JVM; parallel, no coverage
                  # the inner loop while editing - never the commit gate, which is `check`

@@ -15,6 +15,7 @@ from ..sql_layout import call
 
 
 _DECIMAL_SCALE_RE = re.compile(r"\(\s*\d+\s*,\s*(\d+)\s*\)")
+_PRECISION_RE = re.compile(r"\(\s*(\d+)\s*\)")
 
 
 # `timestamp` is session-zone-converted on read; `timestamp_ntz` carries no zone.
@@ -77,6 +78,35 @@ def render_text(expr: str, sql_type: str) -> str:
 temporal_shape = partial(lookup_temporal_shape, _SHAPES)
 
 
+def stores_below_microsecond(sql_type: str) -> bool:
+    """Whether a `TIMESTAMP(p)`/`TIMESTAMP_NTZ(p)` stores below the microsecond (SPEC 2.2.4)."""
+
+    match = _PRECISION_RE.search(sql_type)
+
+    return temporal_shape(sql_type) is not None and match is not None and int(match[1]) > 6
+
+
+def day_span(low: str, high: str, sql_type: str) -> str:
+    """Whole days from `low` to `high` (SPEC 2.2.4), to the nanosecond where the type stores one."""
+
+    # Integer microseconds, never a float epoch (SPEC 2.2.4). TIMESTAMPDIFF reads session-zone wall
+    # clocks, so only a naive type takes it; a zone-aware one differences its epoch.
+    micros = (
+        f"(UNIX_MICROS({high}) - UNIX_MICROS({low}))"
+        if temporal_shape(sql_type) == "timestamp_tz"
+        else f"TIMESTAMPDIFF(MICROSECOND, {low}, {high})"
+    )
+
+    if not stores_below_microsecond(sql_type):
+        return f"{micros} DIV 86400000000"
+
+    # A span past about 292 years overflows BIGINT once counted in nanoseconds.
+    below = f"{_sub_microsecond(high)} - {_sub_microsecond(low)}"
+    nanos = f"CAST({micros} AS DECIMAL(38, 0)) * 1000 + {below}"
+
+    return f"({nanos}) DIV 86400000000000"
+
+
 def utc_instant(expr: str, sql_type: str) -> str:
     """`expr` as its naive UTC instant when `sql_type` is zone-aware, else unchanged.
 
@@ -86,7 +116,14 @@ def utc_instant(expr: str, sql_type: str) -> str:
     if temporal_shape(sql_type) != "timestamp_tz":
         return expr
 
-    return f"CAST({call('CONVERT_TIMEZONE', 'CURRENT_TIMEZONE()', "'UTC'", expr)} AS TIMESTAMP_NTZ)"
+    match = _PRECISION_RE.search(sql_type)
+    target = (
+        f"TIMESTAMP_NTZ({match[1]})"
+        if stores_below_microsecond(sql_type) and match
+        else "TIMESTAMP_NTZ"
+    )
+
+    return f"CAST({call('CONVERT_TIMEZONE', 'CURRENT_TIMEZONE()', "'UTC'", expr)} AS {target})"
 
 
 def render_domain(expr: str, sql_type: str, *, already_utc: bool = False) -> str:
@@ -101,11 +138,11 @@ def render_domain(expr: str, sql_type: str, *, already_utc: bool = False) -> str
         case "date":
             return call("DATE_FORMAT", expr, "'yyyy-MM-dd'")
         case "timestamp":
-            return _instant(expr)
+            return _instant(expr, stores_below_microsecond(sql_type))
         case "timestamp_tz":
             source = expr if already_utc else utc_instant(expr, sql_type)
 
-            return f"CONCAT({_instant(source)}, 'Z')"
+            return f"CONCAT({_instant(source, stores_below_microsecond(sql_type))}, 'Z')"
         case "time" | "time_tz" | "year":
             return f"CAST({expr} AS STRING)"
         case None:
@@ -132,7 +169,15 @@ def render_canonical(expr: str, sql_type: str, kind: SketchKind) -> str:
     return f"CAST({expr} AS STRING)"
 
 
-def _instant(expr: str) -> str:
-    body = f"DATE_FORMAT({expr}, \"yyyy-MM-dd'T'HH:mm:ss.SSSSSS\")"
+def _instant(expr: str, fine: bool) -> str:
+    if fine:
+        nine = f"DATE_FORMAT({expr}, \"yyyy-MM-dd'T'HH:mm:ss.SSSSSSSSS\")"
+        body = f"REGEXP_REPLACE({nine}, '000$', '')"
+    else:
+        body = f"DATE_FORMAT({expr}, \"yyyy-MM-dd'T'HH:mm:ss.SSSSSS\")"
 
     return f"REGEXP_REPLACE({body}, '\\\\.000000$', '')"
+
+
+def _sub_microsecond(expr: str) -> str:
+    return f"CAST(SUBSTRING(DATE_FORMAT({expr}, 'SSSSSSSSS'), 7, 3) AS BIGINT)"

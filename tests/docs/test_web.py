@@ -321,7 +321,7 @@ class TestRoutes:
         response = client.get("/static/vendor/mermaid.min.js")
 
         assert response.status_code == 200
-        assert b'version:"12.1.0"' in response.data
+        assert b'version:"12.2.0"' in response.data
 
     def test_no_cdn_reference_anywhere_in_a_rendered_page(
         self,
@@ -597,6 +597,48 @@ class TestAPageClaimsOnlyWhatItsDataSupports:
         body = client.get("/t/production/arboretum.seedbank.accession_summary").data.decode()
 
         assert 'class="bar-fill" style="width:' not in body
+
+
+_REL_OBSERVED_RE = re.compile(r'<div class="rel-observed">(.*?)</div>', re.DOTALL)
+
+
+def _measured_joins(page: str) -> list[str]:
+    return [" ".join(html.unescape(block).split()) for block in _REL_OBSERVED_RE.findall(page)]
+
+
+class TestTheMeasuredJoinDetail:
+    def test_containment_follows_the_coverage_in_both_directions(
+        self,
+        reference_conn: ConnectionConfig,
+    ) -> None:
+        client = web.create_app([reference_conn]).test_client()
+
+        joins = _measured_joins(
+            client.get("/t/production/arboretum.seedbank.accession").data.decode(),
+        )
+
+        assert joins[0].endswith(
+            "covers 100% of target, 100% of referencing values contained (400 answerable)",
+        )
+        assert joins[2].endswith(
+            "covers 12.8% of target, 100% of referencing values contained (117 answerable)",
+        )
+        assert [join for join in joins if " ," in join] == []
+
+    def test_an_edge_without_containment_ends_at_the_coverage(
+        self,
+        rich_conn: ConnectionConfig,
+    ) -> None:
+        path = rich_conn.print_root / "seedbank" / "batch" / "relationships.yaml"
+        relationships = yaml.safe_load(path.read_text())
+        del relationships["refers_to"][0]["observed"]["containment"]
+        path.write_text(yaml.safe_dump(relationships))
+
+        page = web.create_app([rich_conn]).test_client().get("/t/primary/seedbank.batch")
+
+        assert _measured_joins(page.data.decode()) == [
+            "fanout avg 7.5 (max 9), covers 100% of target",
+        ]
 
 
 class TestAnnotationsWithoutReadableStatistics:

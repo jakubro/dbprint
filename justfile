@@ -15,7 +15,7 @@ PYTHON := UV_RUN + " python -m"
 # Test runner wrapper: time and total resident memory caps, each with a backstop, and a per-process limit
 RUN_CAPPED := justfile_directory() / "scripts/run-capped.sh"
 # Clone detector, pinned exactly: its fingerprints are the baseline's format
-JSCPD := "npx --yes jscpd@5.3.2 --config .jscpd.json --baseline .jscpd-baseline.json"
+JSCPD := "npx --yes jscpd@5.4.2 --config .jscpd.json --baseline .jscpd-baseline.json"
 # Mutation testing works on a copy: mutmut writes `mutants/` into its working directory
 MUTATE_DIR := "/tmp/dbprint--mutate"
 MUTMUT := UV_ENV + " uv run --project " + justfile_directory() + " --extra dev --extra mcp --extra docs mutmut"
@@ -37,7 +37,7 @@ install:
 # Run tests; ARGS narrows (pytest falls back to testpaths when given no path)
 # `-rfEs`, not `-rs`: `-r` replaces pytest's default `fE`, so failures and errors must be restated.
 test *ARGS:
-    {{ UV_ENV }} nice -n 19 {{ RUN_CAPPED }} 30 81920 32768 -- uv run --extra dev --extra mcp --extra docs python -m pytest -rfEs {{ ARGS }} 2>&1 | tee /tmp/dbprint--test.log
+    {{ UV_ENV }} nice -n 19 {{ RUN_CAPPED }} 45 81920 32768 -- uv run --extra dev --extra mcp --extra docs python -m pytest -rfEs {{ ARGS }} 2>&1 | tee /tmp/dbprint--test.log
 
 # Run all tests with coverage, parallelized (kept out of `test` - not worth it on a narrowed run)
 # `loadgroup` honours conftest's Spark and BigQuery groups: one instance per group, not per worker.

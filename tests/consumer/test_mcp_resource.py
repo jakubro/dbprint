@@ -38,6 +38,8 @@ from tests.fixtures.adversarial import (
     OUTSIDE_PRINT_TABLE,
     PERCENTILE_INSIDE_RANGE_COLUMN,
     REDACTED_COLUMN,
+    REJECTED_FIELD_COLUMN,
+    REJECTED_FIELD_TABLE,
     SCOPED_COMPLETE_LIST_COLUMN,
     SCOPED_KEY_COLUMN,
     SCOPED_LATEST_COLUMN,
@@ -58,6 +60,7 @@ from tests.fixtures.adversarial import (
 
 COVERS = frozenset(
     {
+        "rejected_inferred_field",
         "scoped_table",
         "redacted_column",
         "future_dated_temporal",
@@ -376,3 +379,15 @@ def test_an_entry_outside_the_print_reads_as_absent(
         )
 
     assert OUTSIDE_PRINT_SENTINEL not in caught.value.detail
+
+
+def test_a_rejected_inferred_field_is_left_out(adversarial_print: AdversarialPrint) -> None:
+    statistics = _statistics(adversarial_print, REJECTED_FIELD_TABLE)
+    conn = adversarial_print.conn.name
+    uri = f"dbprint://{conn}/{REJECTED_FIELD_TABLE}/statistics_annotations"
+    annotations = yaml.safe_load(mcp_resources.read(_state(adversarial_print), uri).content)
+
+    assert "candidate_key" not in (
+        statistics["columns"][REJECTED_FIELD_COLUMN].get("inferred") or {}
+    )
+    assert annotations["columns"][REJECTED_FIELD_COLUMN]["rejected"] == ["candidate_key"]

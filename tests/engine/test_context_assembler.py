@@ -3620,6 +3620,230 @@ def test_a_manifest_whose_profile_is_not_a_mapping_still_renders(tmp_path: Path)
     assert "# Table: herbarium.public.collector" in text
 
 
+_FIELD_LOG = "herbarium.public.field_log"
+
+
+def _inferred_column(classification: str, inferred: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    return {
+        "sql_type": "varchar",
+        "nullable": False,
+        "null_count": 0,
+        "null_rate": 0.0,
+        "cardinality": 50,
+        "cardinality_ratio": 1.0,
+        "cardinality_method": "exact",
+        "classification": classification,
+        "inferred": inferred,
+        **extra,
+    }
+
+
+_EMAIL = {"looks_like": "email", "sampled": 50, "matched": 50, "sensitivity": "contact"}
+_NEAR = {"looks_like_candidate": "email", "looks_like_candidate_share": 0.6}
+
+_REJECTIONS = [
+    ("candidate_key", "updated_at", "accession_number", "candidate key", {"candidate_key"}),
+    (
+        "looks_like",
+        "email",
+        "phone",
+        "looks like: email",
+        {"looks_like", "sampled", "matched"},
+    ),
+    ("looks_like_candidate", "field_notes", "condition", "near: email", set(_NEAR)),
+    ("sensitivity", "institution", "street_address", "detected: contact", {"sensitivity"}),
+    ("epoch_unit", "seed_count", "cohort", "epoch: seconds", {"epoch_unit"}),
+]
+_COLUMNS = {
+    "updated_at": _inferred_column("temporal", {"candidate_key": True}),
+    "accession_number": _inferred_column("numeric", {"candidate_key": True}),
+    "email": _inferred_column("text", _EMAIL),
+    "phone": _inferred_column("text", _EMAIL),
+    "field_notes": _inferred_column("text", _NEAR),
+    "condition": _inferred_column("text", _NEAR),
+    "institution": _inferred_column("text", _EMAIL, redacted="mask"),
+    "street_address": _inferred_column("text", _EMAIL, redacted="mask"),
+    "seed_count": _inferred_column("numeric", {"epoch_unit": "seconds"}),
+    "cohort": _inferred_column("numeric", {"epoch_unit": "seconds"}),
+}
+
+
+def _seed_rejections(
+    tmp_path: Path,
+    entries: dict[str, dict[str, Any]],
+    columns: dict[str, dict[str, Any]] = _COLUMNS,
+) -> tuple[Path, dict[str, Any]]:
+    print_root = tmp_path / "prints" / "primary"
+    table_dir = print_root / "herbarium" / "public" / "field_log"
+    table_dir.mkdir(parents=True)
+    (table_dir / "ddl.sql").write_text("CREATE TABLE field_log (accession_number integer);\n")
+    statistics = {
+        "format_version": 1,
+        "table": _FIELD_LOG,
+        "type": "table",
+        "profiled_at": "2026-06-09T00:00:00Z",
+        "row_count": 50,
+        "row_count_method": "exact",
+        "columns": columns,
+    }
+    (table_dir / "statistics.yaml").write_text(yaml.safe_dump(statistics))
+    (table_dir / "statistics.annotations.yaml").write_text(
+        yaml.safe_dump({"format_version": 1, "columns": entries}),
+    )
+    manifest: dict[str, Any] = {
+        **copy.deepcopy(MANIFEST),
+        "tables": {
+            _FIELD_LOG: {
+                "type": "table",
+                "path": "herbarium/public/field_log",
+                "artifacts": {
+                    "ddl": "ddl.sql",
+                    "statistics": "statistics.yaml",
+                    "statistics_annotations": "statistics.annotations.yaml",
+                },
+                "row_count": 50,
+                "columns": len(columns),
+                "profiled_at": "2026-06-09T00:00:00Z",
+            },
+        },
+    }
+
+    return print_root, manifest
+
+
+def _profile(print_root: Path, manifest: dict[str, Any], **kwargs: Any) -> str:
+    return assemble_context(
+        manifest,
+        print_root,
+        [_FIELD_LOG],
+        AssemblyOptions(**kwargs),
+        "primary",
+    ).text
+
+
+class TestARejectedInferredFieldIsWithheld:
+    """A rejected inferred field reaches no agent surface; its column's other facts do (SPEC 2.7.1)."""
+
+    @pytest.mark.parametrize(("field", "column", "control", "fact", "keys"), _REJECTIONS)
+    def test_the_cardinality_row_drops_it_beside_an_unrejected_twin(
+        self,
+        tmp_path: Path,
+        field: str,
+        column: str,
+        control: str,
+        fact: str,
+        keys: set[str],
+    ) -> None:
+        del keys
+        print_root, manifest = _seed_rejections(
+            tmp_path,
+            {column: {"note": "withdrawn by a reviewer", "rejected": [field]}},
+        )
+        text = _profile(print_root, manifest)
+
+        assert fact not in _row_for(text, column)
+        assert fact in _row_for(text, control)
+        assert "- **" + column + "**: withdrawn by a reviewer" in text
+
+    @pytest.mark.parametrize(("field", "column", "control", "fact", "keys"), _REJECTIONS)
+    def test_the_json_statistics_drop_it_and_the_keys_beside_it(
+        self,
+        tmp_path: Path,
+        field: str,
+        column: str,
+        control: str,
+        fact: str,
+        keys: set[str],
+    ) -> None:
+        del fact
+        print_root, manifest = _seed_rejections(tmp_path, {column: {"rejected": [field]}})
+        payload = assemble_structured_context(manifest, print_root, _FIELD_LOG, AssemblyOptions())
+        columns = payload["statistics"]["columns"]
+
+        assert keys & set(columns[column].get("inferred") or {}) == set()
+        assert keys <= set(columns[control]["inferred"])
+
+    @pytest.mark.parametrize(("field", "column", "control", "fact", "keys"), _REJECTIONS)
+    def test_the_legend_drops_a_term_only_a_rejected_field_used(
+        self,
+        tmp_path: Path,
+        field: str,
+        column: str,
+        control: str,
+        fact: str,
+        keys: set[str],
+    ) -> None:
+        del keys
+        del control
+        columns = {column: _COLUMNS[column]}
+        print_root, manifest = _seed_rejections(tmp_path, {column: {"rejected": [field]}}, columns)
+        legend = _profile(print_root, manifest).partition("## Terms")[2]
+        label = fact.partition(":")[0]
+
+        assert f"- {label}:" not in legend
+
+    def test_an_entry_holding_only_a_rejection_renders_no_annotations(self, tmp_path: Path) -> None:
+        print_root, manifest = _seed_rejections(
+            tmp_path,
+            {"updated_at": {"rejected": ["candidate_key"]}},
+        )
+        payload = assemble_structured_context(manifest, print_root, _FIELD_LOG, AssemblyOptions())
+
+        assert "## Annotations" not in _profile(print_root, manifest)
+        assert "annotations" not in payload
+
+    def test_the_annotations_payload_carries_no_rejection(self, tmp_path: Path) -> None:
+        print_root, manifest = _seed_rejections(
+            tmp_path,
+            {"updated_at": {"note": "write time", "rejected": ["candidate_key"]}},
+        )
+        payload = assemble_structured_context(manifest, print_root, _FIELD_LOG, AssemblyOptions())
+
+        assert payload["annotations"] == {"updated_at": {"note": "write time"}}
+
+    def test_a_stale_rejection_withholds_nothing(self, tmp_path: Path) -> None:
+        print_root, manifest = _seed_rejections(
+            tmp_path,
+            {"updated_at": {"rejected": ["epoch_unit"]}},
+        )
+
+        assert "candidate key" in _row_for(_profile(print_root, manifest), "updated_at")
+
+    def test_a_redacted_column_keeps_its_marker(self, tmp_path: Path) -> None:
+        rejected = {"institution": {"rejected": ["sensitivity"]}}
+        print_root, manifest = _seed_rejections(tmp_path / "rejected", rejected)
+        plain_root, plain_manifest = _seed_rejections(tmp_path / "plain", {})
+        payload = assemble_structured_context(manifest, print_root, _FIELD_LOG, AssemblyOptions())
+
+        assert _row_for(_profile(print_root, manifest), "institution") == _row_for(
+            _profile(plain_root, plain_manifest),
+            "institution",
+        ).replace("; detected: contact", "")
+        assert payload["statistics"]["columns"]["institution"]["redacted"] == "mask"
+
+    def test_a_caching_reader_gets_its_documents_back_unmutated(self, tmp_path: Path) -> None:
+        print_root, manifest = _seed_rejections(tmp_path, {"email": {"rejected": ["looks_like"]}})
+        cache: dict[Path, Any] = {}
+
+        def read(path: Path) -> Any:
+            if path not in cache:
+                cache[path] = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+            return cache[path]
+
+        assemble_context(
+            manifest,
+            print_root,
+            [_FIELD_LOG],
+            AssemblyOptions(),
+            "primary",
+            read=read,
+        )
+        statistics = cache[print_root / "herbarium/public/field_log/statistics.yaml"]
+
+        assert statistics["columns"]["email"]["inferred"]["looks_like"] == "email"
+
+
 def _seed_human_edge(tmp_path: Path, **entry: Any) -> tuple[Path, dict[str, Any]]:
     """`accession` adds an edge into `collector` that no `relationships.yaml` emits."""
 

@@ -163,6 +163,7 @@ def validate_print(
     edge_claims_issues = relationship_annotations.check_claims(print_root, manifest_data)
     issues.extend(edge_claims_issues)
     issues.extend(column_annotations.check_derived_from(print_root, manifest_data))
+    issues.extend(column_annotations.check_rejections(print_root, manifest_data))
 
     if on_table is not None:
         findings = _findings_by_table(issues, tables)

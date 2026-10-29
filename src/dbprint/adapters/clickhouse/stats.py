@@ -27,6 +27,7 @@ from dbprint.spec.spatial import Extent, Geometry
 from .connection import DIALECT, Cursor, exec_query
 from .introspect import estimate_row_count
 from .rendering import (
+    day_span,
     finite_value,
     frame_zone,
     mean_expression,
@@ -906,13 +907,7 @@ def _fetch_temporal_block(
     select_parts = [
         render_domain(f"min({cn})", col.classified_type),
         render_domain(f"max({cn})", col.classified_type),
-        # `dateDiff` counts unit boundaries, so days are microseconds (SPEC 2.2.4); a `Date` stays a
-        # date, since one widened to an instant passes through the session zone's daylight saving.
-        "0"
-        if clock
-        else f"dateDiff('day', min({cn}), max({cn}))"
-        if temporal_shape(col.classified_type) == "date"
-        else f"intDiv(dateDiff('microsecond', min({cn}), max({cn})), 86400000000)",
+        "0" if clock else day_span(f"min({cn})", f"max({cn})", col.classified_type),
         *percentile_exprs,
     ]
 

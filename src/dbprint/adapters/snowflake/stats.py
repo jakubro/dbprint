@@ -658,13 +658,13 @@ def _fetch_value_list(
     """
 
     cn = identity.source_column(col.name)
-    # Snowflake's catalog omits a timestamp's precision, which defaults to nanoseconds, so every
-    # timestamp groups on its microsecond rendering (SPEC 2.2.4).
+    # Snowflake's catalog omits a timestamp's or time's precision, which defaults to nanoseconds,
+    # so each groups on its rendering (SPEC 2.2.4).
     select_expr = cn
 
     if is_binary_type(col.classified_type):
         select_expr = render_binary(cn)
-    elif temporal_shape(col.classified_type) in ("timestamp", "timestamp_tz"):
+    elif temporal_shape(col.classified_type) in ("timestamp", "timestamp_tz", "time"):
         select_expr = render_domain(cn, col.classified_type)
     elif is_string_like(col.classified_type, _is_unsupported):
         select_expr = render_text(cn, col.classified_type)
@@ -832,28 +832,40 @@ def _fetch_clock_temporal_block(
 
     cn = identity.source_column(col.name)
     percentile_keys = config.percentiles
-    pct_select = _ranked_percentiles(percentile_keys)
+    rendered = partial(render_domain, sql_type=col.classified_type)
+    agg_select = [
+        f"MIN({_RANKED_VALUE}) AS mn",
+        f"MAX({_RANKED_VALUE}) AS mx",
+        *_ranked_percentiles(percentile_keys),
+    ]
+    outer_select = [
+        f"{rendered(key)} AS {key.removeprefix('agg.')}_text"
+        for key in ("agg.mn", "agg.mx", *(f"agg.p_{p:02d}" for p in percentile_keys))
+    ]
     row = exec_query(
         cursor,
         f"""
         SELECT
-          MIN({_RANKED_VALUE}) AS mn,
-          MAX({_RANKED_VALUE}) AS mx,
-          {listed(pct_select, 10)}
+          {listed(outer_select, 10)}
         FROM
           (
             SELECT
-              {cn} AS dbprint_value,
-              ROW_NUMBER() OVER (
-                ORDER BY
-                  {cn}
-              ) AS dbprint_rn,
-              COUNT(1) OVER () AS dbprint_n
+              {listed(agg_select, 14)}
             FROM
-              {indented(source, 14)}
-            WHERE
-              {cn} IS NOT NULL
-          ) rnk
+              (
+                SELECT
+                  {cn} AS dbprint_value,
+                  ROW_NUMBER() OVER (
+                    ORDER BY
+                      {cn}
+                  ) AS dbprint_rn,
+                  COUNT(1) OVER () AS dbprint_n
+                FROM
+                  {indented(source, 18)}
+                WHERE
+                  {cn} IS NOT NULL
+              ) rnk
+          ) agg
         """,
     ).fetchone()
 
@@ -874,8 +886,8 @@ def _fetch_clock_temporal_block(
     distribution, frequencies, values = _approximate_distribution_via_top_n(
         cursor,
         source,
-        cn,
-        cn,
+        rendered(cn),
+        rendered(cn),
         non_null,
         config,
         measured_value,
@@ -895,7 +907,7 @@ def _ranked_percentiles(keys: Sequence[int]) -> list[str]:
 
 
 def _span_days_sql(timestamp: bool) -> str:
-    """Whole elapsed days between `mn` and `mx`, exact at microsecond resolution (SPEC 2.2.4).
+    """Whole elapsed days between `mn` and `mx`, exact to the nanosecond (SPEC 2.2.4).
 
     `DATEDIFF` counts unit boundaries and `/` rounds to scale 6; both are corrected for here.
     """
@@ -903,15 +915,11 @@ def _span_days_sql(timestamp: bool) -> str:
     if not timestamp:
         return "DATEDIFF('day', agg.mn, agg.mx)"
 
-    micros = {
-        side: f"(DATE_PART('nanosecond', {side}) - MOD(DATE_PART('nanosecond', {side}), 1000))"
-        for side in ("agg.mn", "agg.mx")
-    }
-    seconds = f"""
+    seconds = """
         (
           DATEDIFF('second', agg.mn, agg.mx)
           - CASE
-            WHEN {micros["agg.mx"]} < {micros["agg.mn"]} THEN 1
+            WHEN DATE_PART('nanosecond', agg.mx) < DATE_PART('nanosecond', agg.mn) THEN 1
             ELSE 0
           END
         )

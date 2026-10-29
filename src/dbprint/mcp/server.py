@@ -13,6 +13,7 @@ from mcp.server.models import InitializationOptions
 from mcp.server.stdio import stdio_server
 from mcp.shared.exceptions import MCPError as SdkMcpError
 from mcp.types import (
+    SERVER_INFO_META_KEY,
     CallToolRequestParams,
     CallToolResult,
     ListResourceTemplatesResult,
@@ -30,7 +31,7 @@ from mcp.types import (
 from mcp.types import Resource as McpResource
 
 from dbprint import __version__ as DBPRINT_VERSION
-from . import errors, resources, tools
+from . import errors, paging, resources, tools
 from .state import ServedConnections
 
 
@@ -83,7 +84,11 @@ def build_server(state: ServedConnections) -> Server:
         params: PaginatedRequestParams | None,
     ) -> ListResourcesResult:
         try:
-            listed = resources.list_page(state, params.cursor if params else None)
+            listed = resources.list_page(
+                state,
+                params.cursor if params else None,
+                _as_sent(server, ListResourcesResult(resources=[])),
+            )
         except errors.McpError as exc:
             # Mapped verbatim to ErrorData, as read_resource does below - unmapped, the SDK
             # sanitizes errors.McpError into an opaque internal error instead of its code.
@@ -139,7 +144,10 @@ def build_server(state: ServedConnections) -> Server:
         params: PaginatedRequestParams | None,
     ) -> ListToolsResult:
         try:
-            definitions, next_cursor = tools.list_page(params.cursor if params else None)
+            definitions, next_cursor = tools.list_page(
+                params.cursor if params else None,
+                _as_sent(server, ListToolsResult(tools=[])),
+            )
         except errors.McpError as exc:
             raise SdkMcpError(exc.code, exc.detail) from exc
 
@@ -181,7 +189,7 @@ def build_server(state: ServedConnections) -> Server:
 
         return CallToolResult(content=[TextContent(type="text", text=text)], is_error=False)
 
-    return Server(
+    server = Server(
         SERVER_NAME,
         version=DBPRINT_VERSION,
         instructions=SERVER_DESCRIPTION,
@@ -191,6 +199,8 @@ def build_server(state: ServedConnections) -> Server:
         on_list_tools=list_tools,
         on_call_tool=call_tool,
     )
+
+    return server
 
 
 def initialization_options(server: Server) -> InitializationOptions:
@@ -286,3 +296,11 @@ class _SseEndpoint:
                 return
 
             await self._server.run(streams[0], streams[1], initialization_options(self._server))
+
+
+def _as_sent(server: Server, empty: ListToolsResult | ListResourcesResult) -> paging.Measure:
+    # A 2026-era connection adds the result's own fields and a serverInfo stamp to the reply.
+    envelope = empty.model_dump(by_alias=True, mode="json", exclude_none=True)
+    envelope["_meta"] = {SERVER_INFO_META_KEY: server.server_info_stamp}
+
+    return lambda reply: paging.compact({**envelope, **reply})

@@ -43,7 +43,7 @@ from dbprint.spec.statistics_matrix import (
     part_required_fields,
     redactable_classifications,
 )
-from dbprint.spec.temporal_age import day_count, parse_instant
+from dbprint.spec.temporal_age import elapsed_days, parse_instant
 from dbprint.spec.temporal_range import LeadingYear, leading_year
 from dbprint.spec.value_text import scalar_text, value_order_key
 from .issue import Issue
@@ -2668,13 +2668,10 @@ def _check_span_days(col: dict, col_path: str) -> list[Issue]:
     if isinstance(unrepresentable, list) and {"min", "max"} & set(unrepresentable):
         return []
 
-    earlier = parse_instant(rng.get("min"))
-    later = parse_instant(rng.get("max"))
+    expected = elapsed_days(rng.get("min"), rng.get("max"))
 
-    if earlier is None or later is None:
+    if expected is None:
         return []
-
-    expected = day_count(earlier, later)
 
     if span_days != expected:
         return [
@@ -3041,13 +3038,12 @@ def _check_max_age_days_mismatch(col: dict, col_path: str, profiled_at: Any) -> 
     if isinstance(unrepresentable, list) and "max" in unrepresentable:
         return []
 
-    earlier = parse_instant(rng.get("max"))
-    later = parse_instant(profiled_at)
+    days = elapsed_days(rng.get("max"), profiled_at)
 
-    if earlier is None or later is None:
+    if days is None:
         return []
 
-    expected = max(0, day_count(earlier, later))
+    expected = max(0, days)
 
     if observed != expected:
         return [

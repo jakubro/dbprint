@@ -223,7 +223,7 @@ The predicate form is identical in both modes. Only the source of evidence diffe
 | A `range`/`percentiles` reading of `.nan`, which a conforming print never carries (SPEC §2.2.4) | FAIL — a NaN orders against no bound, so `{max: 100}` fails with `actual .nan is not a number a bound can order`; an infinity is compared as a number, so `.inf` fails `{max: 100}` and passes `{min: 0}` |
 | A NaN written as a range bound (`{max: .nan}`) | `assertion.malformed-predicate` error — a NaN bound orders nothing |
 | `accepted_values: [.nan]` on a column listing `.nan` | PASS — two NaNs are one value, as in diff |
-| A bound written with more than six fractional digits | Compared at microsecond resolution; SPEC renders no finer |
+| A bound written with more than six fractional digits | Compared to the nanosecond, the finest SPEC §2.2.4 renders: `{max: '2026-03-04T06:00:00'}` fails against `2026-03-04T06:00:00.000000100`; digits past the ninth are dropped, whether or not the bound is quoted |
 | `nullable: 1`, `candidate_key: 1`, `null_count: false` | `assertion.malformed-predicate` error — a boolean and a number are different types |
 | All-null column asserted with `looks_like: <pattern>` | `assertion.inapplicable-stat` warning — `looks_like` requires sampled non-null values |
 | `candidate_key: true` on a column whose `cardinality_ratio` fell below the key threshold | FAIL — `assertion.candidate-key-mismatch`; the absent verdict reads as `false` |
