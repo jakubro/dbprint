@@ -96,6 +96,9 @@ docs = [
   "markupsafe>=3.0.4",
   "waitress>=3.0.2",
 ]
+all = [
+  "dbprint[postgres,mysql,snowflake,duckdb,clickhouse,redshift,databricks,bigquery,mcp,dbt,docs]",
+]
 
 [project.scripts]
 dbprint = "dbprint.cli:main"

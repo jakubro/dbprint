@@ -55,7 +55,7 @@ Requires **Python 3.13+**. Install with the driver extra for the database's engi
 uv tool install 'dbprint[postgres]'     # or [mysql], [snowflake], [duckdb], [clickhouse], [redshift], [databricks], [bigquery]; SQLite needs none
 ```
 
-Add the `[mcp]`, `[docs]` or `[dbt]` extras in the same install — `uv tool install 'dbprint[postgres,mcp]'` — since a later install replaces the earlier one rather than adding to it.
+Add `[mcp]`, `[docs]` or `[dbt]` in the same install — `uv tool install 'dbprint[postgres,mcp]'`, or `'dbprint[all]'` for every extra — since a later install replaces the earlier one.
 
 The Postgres adapter shells out to **`pg_dump`** for DDL, so the PostgreSQL client binaries must be on `PATH`.
 

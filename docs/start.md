@@ -12,7 +12,7 @@ $ pip install 'dbprint[mysql]'
 
 This page uses MySQL because it needs nothing beyond the extra — no external binary, no service account file, no warehouse. Every engine dbprint ships an adapter for has its own page with the install line, the exact grants and what it cannot promise about a sampled table: [duckdb](adapters/duckdb.md), [PostgreSQL](adapters/postgres.md), [MySQL](adapters/mysql.md), [ClickHouse](adapters/clickhouse.md), [Redshift](adapters/redshift.md), [Snowflake](adapters/snowflake.md), [Databricks](adapters/databricks.md), [BigQuery](adapters/bigquery.md), [SQLite](adapters/sqlite.md). For another engine, only the extra and the two connection blocks below change.
 
-Three extras are independent of the engine: `dbprint[docs]` for the browsable site, `dbprint[mcp]` for the MCP server, and `dbprint[dbt]` for reading column lineage from a dbt project's manifest. Combine them as `pip install 'dbprint[mysql,docs]'`.
+Three extras are independent of the engine: `dbprint[docs]` for the browsable site, `dbprint[mcp]` for the MCP server, and `dbprint[dbt]` for reading column lineage from a dbt project's manifest. Combine them as `pip install 'dbprint[mysql,docs]'`; `pip install 'dbprint[all]'` installs every engine's driver and all three.
 
 dbprint also needs a database account that can read the tables to profile. Each engine's adapter page states the exact grants; a role that can already run `SELECT` against those tables is enough for this page.
 
