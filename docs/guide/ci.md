@@ -1,6 +1,6 @@
 # Gating CI
 
-`dbprint check` is the command a pipeline runs. It answers three questions in one pass — is the print well-formed, is it fresh, and does the data still satisfy the assertions you wrote — and reports the outcome in an exit code.
+`dbprint check` is the command a pipeline runs. It answers three questions in one pass — is the print well-formed, is it fresh, and does the data still satisfy the assertions written for it — and reports the outcome in an exit code.
 
 ## Offline by default
 
@@ -8,17 +8,17 @@
 $ dbprint check
 ```
 
-No connection, no credentials, no database. It reads the committed print and verifies its structure against the format, its freshness against each table's recorded threshold, and any assertions that can be evaluated from the artifact alone. That makes it a job you can run on every pull request, including one from a fork.
+No connection, no credentials, no database. It reads the committed print and verifies its structure against the format, its freshness against each table's recorded threshold, and any assertions that can be evaluated from the artifact alone. It can run on every pull request, including one from a fork.
 
 ```console
 $ dbprint check --online
 ```
 
-Adds a connection and re-extracts, so it can also report drift between the committed print and the live database. This needs credentials and costs a profiling run, so it is usually a separate, slower job — see [tracking drift](drift.md) for when each is worth running.
+Adds a connection and re-extracts, so it can also report drift between the committed print and the live database. This needs credentials and costs a profiling run, so it fits a separate, slower job — see [tracking drift](drift.md) for when each is worth running.
 
 ## Exit codes
 
-Seven outcomes from `check`, ordered so a pipeline can decide how much each one deserves.
+`check` exits with one of these codes:
 
 | Code | Meaning |
 |---|---|
@@ -34,15 +34,13 @@ Drift covers what a committed print can be compared on. Column defaults, indexes
 
 When several outcomes apply — within one connection or across connections — the exit code is the first of `1`, `4`, `5`, `6`, `3`, `2` that does: a result that cannot be trusted or a table that was not read outranks the state of a trustworthy print. So while the manifest names a table the last `generate` could not profile, offline `check` returns `5` over a stale print or drift until a `generate` profiles it, and a malformed print reads as `1` whatever else holds. A pipeline that needs every cause reads `--format json`, which lists every issue.
 
-One more code exists in the family and `check` never returns it: `7`, total failure, which `dbprint generate` uses when every table it touched failed. A pipeline treating any non-zero as fatal does not care; one that switches on the number should not expect `7` from a gate job.
+One more code exists in the family and `check` never returns it: `7`, total failure, which `dbprint generate` uses when every table it touched failed. A pipeline treating any non-zero as fatal is unaffected; one that switches on the number never receives `7` from `check`.
 
-## Which severities you actually see
-
-This is worth knowing before you rely on the output.
+## How each severity is reported
 
 **Errors are listed in full.** Each one prints its path, its code and the specification section it was raised against.
 
-**Warnings are reported as a count.** The clean line reads `OK: conformance clean (3 warning(s))` and the codes are not named. So a `privacy.unredacted-sensitive` on a column you forgot to redact, or a `manifest.orphaned-artifact` on an annotation file created after the last generate, is present in the output as a number and nothing more.
+**Warnings are reported as a count.** The clean line reads `OK: conformance clean (3 warning(s))` and the codes are not named. So a `privacy.unredacted-sensitive` on a column no `redact` rule covers, or a `manifest.orphaned-artifact` on an annotation file created after the last generate, is present in the output as a number and nothing more.
 
 To see which warnings a print carries, take the machine envelope:
 
@@ -75,7 +73,7 @@ jobs:
 
 No extra is needed: the offline path opens no connection, so it loads no driver.
 
-For the online job, install the extra for your engine and supply credentials through the environment. Every credential key reads from `DBPRINT_<CONNECTION>_<KEY>`, upper-cased, which keeps them out of the repository:
+For the online job, install the engine's extra and supply credentials through the environment. Every credential key reads from `DBPRINT_<CONNECTION>_<KEY>`, upper-cased, which keeps them out of the repository:
 
 ```yaml
   drift:
@@ -93,9 +91,9 @@ For the online job, install the extra for your engine and supply credentials thr
           DBPRINT_PRIMARY_PASSWORD: ${{ secrets.DB_PASSWORD }}
 ```
 
-The online job needs a database reachable from the runner and the read privileges your engine's adapter page lists — [duckdb](../adapters/duckdb.md), [PostgreSQL](../adapters/postgres.md), [MySQL](../adapters/mysql.md), [ClickHouse](../adapters/clickhouse.md), [Redshift](../adapters/redshift.md), [Snowflake](../adapters/snowflake.md), [Databricks](../adapters/databricks.md), [BigQuery](../adapters/bigquery.md). PostgreSQL additionally needs `pg_dump` on `PATH`, at least the server's major version.
+The online job needs a database reachable from the runner and the read privileges the engine's adapter page lists — [duckdb](../adapters/duckdb.md), [PostgreSQL](../adapters/postgres.md), [MySQL](../adapters/mysql.md), [ClickHouse](../adapters/clickhouse.md), [Redshift](../adapters/redshift.md), [Snowflake](../adapters/snowflake.md), [Databricks](../adapters/databricks.md), [BigQuery](../adapters/bigquery.md), [SQLite](../adapters/sqlite.md). PostgreSQL additionally needs `pg_dump` on `PATH`, at least the server's major version.
 
-It also needs the temporary-table privilege from that page if anything in scope resolves to a fraction. `--online` re-extracts, so any table read in `sample` mode — by `fraction`, or by a `max_rows` ceiling at any level that resolves below its size — makes the job write a temporary table. Without the privilege PostgreSQL, duckdb and Databricks read the seeded sample directly, with a warning; MySQL, Snowflake, ClickHouse, Redshift and BigQuery fail those tables instead, and the job exits `5`.
+It also needs the temporary-table privilege from that page if anything in scope resolves to a fraction. `--online` re-extracts, so any table read in `sample` mode — by `fraction`, or by a `max_rows` ceiling at any level that resolves below its size — makes the job write a temporary table; SQLite writes it outside the file and needs no privilege. Without the privilege PostgreSQL, duckdb and Databricks read the seeded sample directly, with a warning; MySQL, Snowflake, ClickHouse, Redshift and BigQuery fail those tables instead, and the job exits `5`.
 
 ## Exit codes from `generate`
 
@@ -143,7 +141,7 @@ primary	arboretum.public.taxon	sketched	0.0s
 primary	summary	4 ok / 0 failed / 0 skipped	0.9s
 ```
 
-`-q` silences stderr progress on every command — `generate`, `diff` and `check` all put it there, so a pipeline reaching for `-q` to quieten a log never affects a command's own stdout payload.
+`-q` silences stderr progress on every command — `generate`, `diff` and `check` all put it there, so `-q` quietens a log without affecting a command's own stdout payload.
 
 ## The machine envelope
 
@@ -180,11 +178,11 @@ connections:
               null_rate: 0
 ```
 
-Offline, an assertion is evaluated against the committed print — so it tells you what was true when the print was taken. Under `--online` it is evaluated against a fresh extraction. A predicate over a redacted column's values is refused rather than evaluated against placeholders. The grammar, the severities and the full predicate vocabulary are in [Assertions](../ASSERTIONS.md).
+Offline, an assertion is evaluated against the committed print — so it reports what was true when the print was taken. Under `--online` it is evaluated against a fresh extraction. A predicate over a redacted column's values is refused rather than evaluated against placeholders. The grammar, the severities and the full predicate vocabulary are in [Assertions](../ASSERTIONS.md).
 
 ## Failing on staleness alone
 
-A pipeline that wants to fail only when a print has aged past a deadline of its own can override every recorded threshold for one run:
+To fail only when a print has aged past a deadline of the pipeline's own, override every recorded threshold for one run:
 
 ```console
 $ dbprint check --max-age 7d

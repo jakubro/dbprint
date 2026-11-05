@@ -16,6 +16,7 @@ from dbprint.adapters import (
     PostgresAdapter,
     RedshiftAdapter,
     SnowflakeAdapter,
+    SqliteAdapter,
 )
 from dbprint.adapters.mysql import connection as mysql_connection
 from dbprint.adapters.postgres import connection as postgres_connection
@@ -59,6 +60,7 @@ _ADAPTERS: dict[str, tuple[Any, dict[str, Any], tuple[str, ...]]] = {
         ("_identities",),
     ),
     "duckdb": (DuckdbAdapter, {"database": ":memory:"}, ("_identities",)),
+    "sqlite": (SqliteAdapter, {"database": ":memory:"}, ("_identities",)),
 }
 
 

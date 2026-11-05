@@ -12,6 +12,8 @@ import yaml
 from dbprint.engine import AssemblyOptions, assemble_context
 from dbprint.engine.context_assembler import (
     TableArtifacts,
+    _ValueNote,
+    _dictionary_lines,
     _disabled_summary,
     _grain_summary,
     _identity_lines,
@@ -197,6 +199,13 @@ def _line_battery() -> list[Rendered]:
     ]
     incoming = [
         {"column": ["id"], "referencer_table": "public.sheet", "referencer_column": ["a_id"]},
+        {
+            "column": ["id"],
+            "referencer_table": "public.herbarium_sheet",
+            "referencer_column": ["herbarium_id"],
+            "detection": "inferred",
+            "observed": {"containment": 0.0, "answerable_count": 12},
+        },
     ]
     lines = _markdown_relationships(_artifacts({"refers_to": edges, "referenced_by": incoming}))
     lines += [
@@ -218,6 +227,7 @@ def _line_battery() -> list[Rendered]:
         ),
         _values_cell({"redacted": "mask"}, [{"count": 3}], None),
         _disabled_summary({"disabled": ["timeline"]}),
+        *_dictionary_lines("rank", {}, [_ValueNote("emeritus", "a retired rank", absent=True)], []),
     ]
     document = {
         "classification": "json",
@@ -328,27 +338,62 @@ def test_every_observed_label_is_a_term_the_line_recorded() -> None:
 
 
 def test_the_legend_is_the_heading_then_one_line_per_term_in_table_order() -> None:
-    text = legend({"distribution:long_tail", "percentile:50", "detection:declared"})
+    text = legend({"distribution:long_tail", "sampled", "detection:declared"})
 
     assert text.splitlines()[:2] == [LEGEND_HEADING, ""]
-    assert text.splitlines()[2:] == [
-        (
-            "- declared: the catalog declares it - a foreign key on an edge, a primary or unique "
-            "key on Grain - so it is a constraint (json/yaml `detection: declared`)"
-        ),
-        (
-            "- long tail: the listed values cover under 30% of non-null scanned rows; many rarer "
-            "values exist (json/yaml `distribution: long_tail`)"
-        ),
-        "- P50: the 50th percentile of the non-null scanned values (json/yaml `percentiles.p50`)",
+    assert [line.split(":", 1)[0] for line in text.splitlines()[2:]] == [
+        "- sampled",
+        "- declared",
+        "- long tail",
     ]
 
 
 def test_an_enum_term_filtered_by_a_tool_names_the_filter() -> None:
-    assert legend({"looks_like:country_code"}).endswith(
-        "(json/yaml `inferred.looks_like: country_code`; "
-        "search_columns `looks_like: country_code`)",
+    assert legend({"looks_like"}).endswith(
+        "(json/yaml `inferred.looks_like`; search_columns `looks_like`)",
     )
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "true",
+        "mean",
+        "distinct",
+        "percentile:50",
+        "looks_like:country_code",
+        "sensitivity:contact",
+        "classification:json",
+        "redaction:hash",
+        "freshness:live",
+    ],
+)
+def test_a_label_that_reads_as_what_it_is_draws_no_line(key: str) -> None:
+    assert legend({key}) == ""
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "sampled",
+        "over_the_rows_scanned",
+        "withheld",
+        "detection:inferred",
+        "no_match",
+        "looks_like",
+        "values_complete",
+        "length",
+        "fk",
+    ],
+)
+def test_a_label_hiding_a_rule_is_defined(key: str) -> None:
+    assert legend({key}).startswith(LEGEND_HEADING)
+
+
+def test_the_sampled_term_never_rescales_a_distinct_count() -> None:
+    text = " ".join(legend({"sampled"}).split())
+
+    assert "a distinct count, ratio, bound, percentile, sum or mean never is" in text
 
 
 def test_no_keys_draw_no_legend() -> None:

@@ -1,6 +1,6 @@
 # Choosing what to profile
 
-A print of a warehouse costs a query per column per table. This page is about spending that budget deliberately: which tables get profiled at all, how much of each one is read, and how the artifact records what it actually looked at.
+A print of a warehouse costs a query per column per table. This page covers how that cost is set: which tables get profiled at all, how much of each one is read, and how the artifact records what it actually looked at.
 
 Two axes, and they never mix. `include` and `exclude` decide **which** tables are profiled. `rules` decide **how** each profiled table is read. A rule cannot bring a table into scope; it can only narrow what happens to one already there.
 
@@ -18,7 +18,7 @@ connections:
       exclude: ["arboretum.seedbank.audit_*"]
 ```
 
-Omitting `tables.include` profiles everything the connection can see. On a warehouse that is the difference between a print you commit and one you abandon.
+Omitting `tables.include` profiles everything the connection can see.
 
 The command line can narrow this further for one run — `--include` intersects with the config and `--exclude` unions with it — but neither can widen beyond what the config already admits. `--dry-run` resolves the whole plan and writes nothing, which is how to see what a scope change would do before it runs. For one table, `dbprint config explain <table>` prints the profile it resolves to, each value commented with the default, connection or rule that set it.
 
@@ -43,14 +43,14 @@ connections:
 
 Each table is read in exactly one mode, so it can never be narrowed two ways at once:
 
-- **`sample` with `fraction`** reads a fraction of the table, drawn once and seeded from the table's own name. Within a run every statistic for the table reads that one draw. Across runs only PostgreSQL and duckdb guarantee the same rows come back; see your engine's adapter page.
-- **`sample` with `max_rows`** is a ceiling in rows rather than a fraction; the engine resolves it against the table's size — the catalog's row estimate, or a count on duckdb and ClickHouse. It is as natural in a connection's or `defaults`' own `profile.read` as in a rule, because a project-wide budget is the point of it.
+- **`sample` with `fraction`** reads a fraction of the table, drawn once and seeded from the table's own name. Within a run every statistic for the table reads that one draw. Across runs only PostgreSQL, duckdb and SQLite guarantee the same rows come back; see the engine's adapter page.
+- **`sample` with `max_rows`** is a ceiling in rows rather than a fraction; the engine resolves it against the table's size — the catalog's row estimate, or a count on duckdb, ClickHouse and SQLite. It is as natural in a connection's or `defaults`' own `profile.read` as in a rule, because it states a project-wide budget.
 - **`filter`** is one SQL predicate, interpolated verbatim into every statistics query for that table. dbprint does not parse or validate it. Treat `.dbprint.yaml` as carrying the same trust as the credentials file.
 - **`catalog`** reads no rows at all: the table is described from the catalog, as plain views are by default, and its `statistics.yaml` carries `catalog_only`.
 
 A rule that switches mode drops the parameters the new mode does not take, so a filtered table never inherits a project-wide ceiling. Plain views have their own block, `read.views`, which defaults to `catalog` and takes `full` or `filter`.
 
-## The gate that covers tables nobody has named
+## `min_rows`: a rule for tables it does not name
 
 `min_rows` sits on the `match` rather than in the `profile`, so it gates everything the rule sets:
 
@@ -59,21 +59,19 @@ A rule that switches mode drops the parameters the new mode does not take, so a 
         profile: {read: {tables: {mode: sample, fraction: 0.01}}}
 ```
 
-That samples every table over half a billion rows without naming any of them — including the one somebody adds next quarter. It is the difference between a scoping config that ages well and one that needs an edit every time the schema grows.
+That samples every table over half a billion rows without naming any of them, a table added later included, so the scoping config needs no edit when the schema grows.
 
-Two consequences worth knowing before relying on it. The size comes from the catalog's own estimate on most engines, which lags writes on PostgreSQL and is approximate by design on InnoDB, so a table sitting near the threshold can fall either side of it between runs; duckdb and ClickHouse count the rows instead. And where the engine has no size at all the rule does **not** apply: an unknown size takes the un-narrowed path, and the run says so on stderr rather than deciding silently.
+Two consequences follow. The size comes from the catalog's own estimate on most engines, which lags writes on PostgreSQL and is approximate by design on InnoDB, so a table sitting near the threshold can fall either side of it between runs; duckdb, ClickHouse and SQLite count the rows instead. And where the engine has no size at all the rule does **not** apply: an unknown size takes the un-narrowed path, and the run says so on stderr rather than deciding silently.
 
 Because `check` and `list` never connect, a size condition cannot be re-evaluated offline. They do not need to: the run that wrote the print resolved the threshold *with* the row count in hand and recorded the result on each table's manifest entry, so a `min_rows` rule that applied online still governs the offline verdict. Only an entry that records no threshold at all falls back to the rules that match by name alone, and both commands warn when that happens.
 
 ## What a narrowed read does to the artifact
 
-This is the part worth internalising, because it changes what every number in the file means.
-
 A narrowed table's `statistics.yaml` carries a `scope` block naming `rows_scanned`, and **every ratio in that file is computed against `rows_scanned`, not against `row_count`**. A `null_rate` of `0.04` on a one-percent sample describes the four percent of the sampled rows that were null. It is not a claim about the table.
 
 The same applies to `values_coverage`: a value of `1.0` under a scope means the list is exhaustive over the rows that were scanned, and says nothing about the ones that were not.
 
-`row_count` itself is the count the scan produced whenever the table was read whole, and `row_count_method` reads `exact`. Only a narrowed table takes the catalog's estimate instead, which is what `approximate` marks — and a narrowed table on duckdb or ClickHouse, or one the catalog holds no estimate for, is counted with a `COUNT` and reads `exact` too. So `approximate` always means the read was narrowed, while `exact` says nothing either way; `scope` remains the field to read for that.
+`row_count` itself is the count the scan produced whenever the table was read whole, and `row_count_method` reads `exact`. Only a narrowed table takes the catalog's estimate instead, which is what `approximate` marks — and a narrowed table on duckdb, ClickHouse or SQLite, or one the catalog holds no estimate for, is counted with a `COUNT` and reads `exact` too. So `approximate` always means the read was narrowed, while `exact` says nothing either way; `scope` remains the field to read for that.
 
 [SPEC 2.2.8](../format/v1/SPEC.md#228-scope--statistics-over-part-of-a-table) defines the block and the arithmetic; [SPEC 7.1](../format/v1/SPEC.md#71-partial-reads-and-failed-reads) covers reading the result. A table crossing a size threshold therefore changes the shape of its own artifact with no schema change at all, and `dbprint diff` shows exactly that.
 
@@ -94,13 +92,13 @@ None of this is what `unmeasured` describes. `scope` is a decision the config ma
 
 ## Coherence across a sampled table
 
-One table's profile issues many statements. If the fraction were re-evaluated per statement, each would read different rows and the file would contradict itself on a table nobody wrote to. dbprint avoids that in two layers: the fraction is seeded from the table's name, and — where the connection permits the write — the drawn rows are copied once into a session-lifetime temporary table that every subsequent statement reads.
+One table's profile issues many statements. If the fraction were re-evaluated per statement, each would read different rows and the file would contradict itself on a table no write touched. dbprint avoids that in two layers: the fraction is seeded from the table's name, and — where the connection permits the write — the drawn rows are copied once into a session-lifetime temporary table that every subsequent statement reads.
 
-That copy is the only circumstance in which dbprint writes to your database, and what it needs differs per engine. The adapter page for your engine states the privilege, where the object lives, and what changes when the write is refused.
+That copy is the only write dbprint makes to the database, and what it needs differs per engine. Each engine's adapter page states the privilege, where the object lives, and what changes when the write is refused.
 
 ## Cheaper without narrowing
 
-Sampling is not the only lever. Two `statistics` keys cut cost on wide tables without reducing what was scanned:
+Two `statistics` keys cut cost on wide tables without reducing what was scanned:
 
 | Key | Default | Effect |
 |---|---|---|

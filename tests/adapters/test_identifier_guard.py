@@ -103,6 +103,8 @@ _KEYWORD_FOLDS = {
     ("snowflake/introspect.py", "list_databases"): "the system database's name",
     ("snowflake/introspect.py", "relationships"): "a referential-action keyword",
     ("snowflake/introspect.py", "_is_true"): "a boolean keyword",
+    ("sqlite/introspect.py", "affinity"): "a declared type's affinity keywords",
+    ("sqlite/introspect.py", "declared_columns"): "the INTEGER PRIMARY KEY type keyword",
 }
 
 
@@ -177,6 +179,7 @@ _SEED_PINS = [
         226508143,
         "dbprint_sample_1f3326310d803d6f",
     ),
+    ("sqlite", ("main", "Accession"), 1262507218, "dbprint_sample_d02db5cf4b4054d2"),
 ]
 
 
@@ -234,6 +237,7 @@ _CANNOT_HOLD_A_CASE_PAIR = {
     "duckdb": "identifiers are case-insensitive; the pair is a duplicate column",
     "mysql": "column names are case-insensitive under every collation",
     "snowflake": "the stand-in is duckdb, which cannot hold the pair",
+    "sqlite": "identifiers are case-insensitive; the pair is a duplicate column",
 }
 _HOLDS_A_CASE_PAIR = ("clickhouse", "postgres", "redshift")
 
@@ -289,6 +293,7 @@ _ARITY = {
     "postgres": 3,
     "redshift": 3,
     "snowflake": 3,
+    "sqlite": 2,
 }
 
 

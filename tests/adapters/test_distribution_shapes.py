@@ -4,6 +4,7 @@ never exhaustive there, so the `frequencies`-based check is their only route to 
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, ClassVar, LiteralString, cast
@@ -22,6 +23,7 @@ from dbprint.adapters import (
     PostgresAdapter,
     RedshiftAdapter,
     SnowflakeAdapter,
+    SqliteAdapter,
     StatisticsConfig,
 )
 from dbprint.spec.temporal_age import parse_instant
@@ -41,6 +43,7 @@ VENDORS = [
     "redshift",
     "databricks",
     "bigquery",
+    "sqlite",
 ]
 
 
@@ -259,12 +262,35 @@ def _adapter(
             {"project": _BIGQUERY_PROJECT, "dataset": dataset},
             cursor_factory=lambda _params: bq_cursor,
         )
+    elif vendor == "sqlite":
+        connection = _sqlite_connection(
+            "CREATE TABLE shaped (n INTEGER, t TIMESTAMP)",
+            f"INSERT INTO shaped (n, t) VALUES {_value_rows(counts)}",
+        )
+        seed(connection.execute, "huge", "")
+        adapter = _sqlite_adapter(connection)
     else:
         raise ValueError(f"unknown vendor: {vendor!r}")
 
     adapter.connect()
 
     return adapter
+
+
+def _sqlite_connection(*statements: str) -> sqlite3.Connection:
+    connection = sqlite3.connect(":memory:", check_same_thread=False, autocommit=True)
+
+    for statement in statements:
+        connection.execute(statement)
+
+    return connection
+
+
+def _sqlite_adapter(connection: sqlite3.Connection) -> SqliteAdapter:
+    return SqliteAdapter(
+        {"database": ":memory:"},
+        cursor_factory=lambda _params: connection.cursor(),
+    )
 
 
 def _profile(adapter: Adapter) -> dict:
@@ -490,9 +516,11 @@ class TestPercentileAgreement:
             finally:
                 adapter.close()
 
-            # ClickHouse has no zoneless timestamp: its DateTime publishes the same instant marked `Z`.
+            # ClickHouse has no zoneless timestamp: its DateTime publishes the same instant marked `Z`;
+            # SQLite publishes the text it stores, here with a space where ISO puts `T` (SPEC 2.2.4).
             percentile_sets[vendor] = {
-                k: v.removesuffix("Z") if isinstance(v, str) else v for k, v in percentiles.items()
+                k: v.removesuffix("Z").replace(" ", "T") if isinstance(v, str) else v
+                for k, v in percentiles.items()
             }
 
         first = percentile_sets[VENDORS[0]]
@@ -617,6 +645,7 @@ _HUGE_TYPES = {
     "redshift": "bigint",
     "databricks": "BIGINT",
     "bigquery": "INT64",
+    "sqlite": "INTEGER",
 }
 
 
@@ -696,6 +725,7 @@ _TEMPORAL_TYPES = {
     "redshift": ("timestamp", "TIMESTAMP '{}'"),
     "databricks": ("TIMESTAMP_NTZ", "TIMESTAMP_NTZ '{}'"),
     "bigquery": ("DATETIME", "DATETIME '{}'"),
+    "sqlite": ("DATETIME", "'{}'"),
 }
 
 
@@ -964,6 +994,17 @@ def _quantized_adapter(vendor: str, request: pytest.FixtureRequest) -> Adapter:
             {"project": _BIGQUERY_PROJECT, "dataset": dataset},
             cursor_factory=lambda _params: bq_cursor,
         )
+    elif vendor == "sqlite":
+        rows = ", ".join(
+            f"({n}, '{t}')"
+            for n, t in zip(_QUANTIZED_NUMERIC_VALUES, _QUANTIZED_TEMPORAL_VALUES, strict=True)
+        )
+        adapter = _sqlite_adapter(
+            _sqlite_connection(
+                "CREATE TABLE quantized (n NUMERIC, t TIMESTAMP)",
+                f"INSERT INTO quantized (n, t) VALUES {rows}",
+            ),
+        )
     else:
         raise ValueError(f"unknown vendor: {vendor!r}")
 
@@ -1204,6 +1245,14 @@ def _length_adapter(vendor: str, request: pytest.FixtureRequest) -> Adapter:
             {"project": _BIGQUERY_PROJECT, "dataset": dataset},
             cursor_factory=lambda _params: bq_cursor,
         )
+    elif vendor == "sqlite":
+        values = ", ".join(f"('{v}')" for v in _LENGTH_VALUES)
+        adapter = _sqlite_adapter(
+            _sqlite_connection(
+                "CREATE TABLE lengths (s TEXT)",
+                f"INSERT INTO lengths (s) VALUES {values}",
+            ),
+        )
     else:
         raise ValueError(f"unknown vendor: {vendor!r}")
 
@@ -1417,6 +1466,14 @@ def _folded_adapter(vendor: str, request: pytest.FixtureRequest) -> Adapter:
         adapter = BigqueryAdapter(
             {"project": _BIGQUERY_PROJECT, "dataset": dataset},
             cursor_factory=lambda _params: bq_cursor,
+        )
+    elif vendor == "sqlite":
+        values = ", ".join(f"('{v}')" for v in _FOLDED_VALUES)
+        adapter = _sqlite_adapter(
+            _sqlite_connection(
+                "CREATE TABLE folded (s TEXT)",
+                f"INSERT INTO folded (s) VALUES {values}",
+            ),
         )
     else:
         raise ValueError(f"unknown vendor: {vendor!r}")

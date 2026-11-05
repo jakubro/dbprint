@@ -19,6 +19,7 @@ _CURATOR_TABLE_BY_VENDOR = {
     "redshift": "seedbank.curator",
     "databricks": "seedbank.curator",
     "bigquery": "seedbank.curator",
+    "sqlite": "main.curator",
 }
 _HERBARIUM_TABLE_BY_VENDOR = {
     "postgres": "seedbank.herbarium",
@@ -29,6 +30,7 @@ _HERBARIUM_TABLE_BY_VENDOR = {
     "redshift": "seedbank.herbarium",
     "databricks": "seedbank.herbarium",
     "bigquery": "seedbank.herbarium",
+    "sqlite": "main.herbarium",
 }
 
 

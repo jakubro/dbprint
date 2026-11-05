@@ -485,6 +485,20 @@ _CATALOGUE: dict[str, dict[str, str]] = {
         "temporal": "sown_at_server",
         "binary": "absent: the engine has no binary type",
     },
+    "sqlite": {
+        "date": "sown_on",
+        "time": "absent: a time of day is stored as text, which classifies text (SPEC 3.3)",
+        "time_tz": _NO_TIME_TZ,
+        "timestamp": "sown_at",
+        "timestamp_tz": "absent: the engine has no zone-aware type",
+        "year": _NO_YEAR,
+        "integer": "plots",
+        "decimal": "absent: the engine stores no decimal scale, only INTEGER or REAL",
+        "text": "label",
+        "boolean": "is_open",
+        "temporal": "sown_at",
+        "binary": "payload",
+    },
     "bigquery": {
         "date": "sown_on",
         "time": "opens_at",
@@ -516,6 +530,21 @@ _CATALOGUE: dict[str, dict[str, str]] = {
 }
 
 
+def _seed_sqlite(request: pytest.FixtureRequest) -> tuple[str, ...]:
+    con = request.getfixturevalue("sqlite_native_connection")
+    con.execute(
+        "CREATE TABLE slot (is_open BOOLEAN, sown_on DATE, sown_at TIMESTAMP, label VARCHAR, "
+        "plots INTEGER, payload BLOB)",
+    )
+    con.execute(
+        "INSERT INTO slot VALUES "
+        "(1, '2024-01-01', '2024-01-01 00:00:00.5', 'plot-1', 3, X'0AFF'), "
+        "(0, '2024-02-29', '2024-06-01 12:00:00', 'plot-2', 7, X'00')",
+    )
+
+    return ("is_open", "sown_on", "sown_at", "label", "plots", "payload")
+
+
 _SEEDERS: dict[str, Callable[[pytest.FixtureRequest], tuple[str, ...]]] = {
     "bigquery": _seed_bigquery,
     "clickhouse": _seed_clickhouse,
@@ -525,6 +554,7 @@ _SEEDERS: dict[str, Callable[[pytest.FixtureRequest], tuple[str, ...]]] = {
     "postgres": _seed_postgres,
     "redshift": _seed_redshift,
     "snowflake": _seed_snowflake,
+    "sqlite": _seed_sqlite,
 }
 
 

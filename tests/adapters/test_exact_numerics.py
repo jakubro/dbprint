@@ -159,6 +159,9 @@ def test_exact_decimals_survive_every_substrate(
     if vendor == "bigquery":
         return  # the emulator decodes NUMERIC and BIGNUMERIC as float (measured)
 
+    if vendor == "sqlite":
+        return  # SQLite stores a decimal past 15 significant digits as a binary64 REAL
+
     masses = {1 + _MASS_STEP * i for i in range(_ROWS)}
     stock = stats["stock"]
 
@@ -238,6 +241,13 @@ _TYPES: dict[str, dict[str, str]] = {
         "grade": "DECIMAL(4,1)",
         "n": "INT",
     },
+    "sqlite": {
+        "id": "DECIMAL(20,0)",
+        "mass": "DECIMAL(38,18)",
+        "stock": "DECIMAL(38,6)",
+        "grade": "DECIMAL(4,1)",
+        "n": "INTEGER",
+    },
     "bigquery": {
         "id": "BIGNUMERIC",
         "mass": "BIGNUMERIC",
@@ -273,6 +283,12 @@ def _seed_duckdb(request: pytest.FixtureRequest, types: dict[str, str]) -> None:
     con = request.getfixturevalue("duckdb_native_connection")
     con.execute(_create(types, "seedbank.lot"))
     con.execute(_insert(types, "seedbank.lot"))
+
+
+def _seed_sqlite(request: pytest.FixtureRequest, types: dict[str, str]) -> None:
+    con = request.getfixturevalue("sqlite_native_connection")
+    con.execute(_create(types, "lot"))
+    con.execute(_insert(types, "lot"))
 
 
 def _seed_snowflake(request: pytest.FixtureRequest, types: dict[str, str]) -> None:
@@ -332,6 +348,7 @@ _SEEDERS: dict[str, Any] = {
     "postgres": _seed_postgres,
     "redshift": _seed_redshift,
     "snowflake": _seed_snowflake,
+    "sqlite": _seed_sqlite,
 }
 
 

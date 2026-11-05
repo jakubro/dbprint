@@ -1178,7 +1178,7 @@ class TestObservedRendering:
             self._artifacts(self._refers_to({"scope_compatible": False})),
         )
 
-        assert "\n  not measured (one side was read in part)" in line
+        assert line.splitlines()[1].endswith("; not measured")
         assert "covers" not in line
 
     def test_no_observed_block_renders_nothing_extra(self) -> None:
@@ -2672,10 +2672,12 @@ class TestQueryPurpose:
 
         assert "100% - the list is the whole domain" in _row_for(text, "rank")
 
-    def test_a_truncated_list_states_that_it_is_a_sample(self, tmp_path: Path) -> None:
+    def test_a_sampled_list_of_single_row_values_has_no_row(self, tmp_path: Path) -> None:
+        """`collector_id`'s listed values each hold one row: they name rows, not codes."""
+
         text = _query(_seed_print(tmp_path), "herbarium.public.collector", MANIFEST)
 
-        assert "2% - a sample of the most frequent values" in _row_for(text, "collector_id")
+        assert "| collector_id |" not in text
 
     def test_a_column_without_values_has_no_row(self, tmp_path: Path) -> None:
         """`seed_count` is numeric with no value list; an empty cell would read as no values."""
@@ -2818,7 +2820,190 @@ class TestSpellingGroupRendering:
         )
         entries = payload["values"]["rank"]["entries"]
 
-        assert entries[-1] == {"value": "Certified", "count": 5, "spelling_of": "certified"}
+        assert {"value": "Certified", "count": 5, "spelling_of": "certified"} in entries
+
+
+def _incoming(table: str, column: str = "herbarium_id", **extra: Any) -> dict[str, Any]:
+    return {
+        "column": ["id"],
+        "referencer_table": table,
+        "referencer_column": [column],
+        "detection": "inferred",
+        **extra,
+    }
+
+
+_SHEETS = [f"public.herbarium_sheet_{n}" for n in range(1, 8)]
+
+
+class TestNameOnlyIncomingJoinsFold:
+    """Joins guessed from a column name alone fold to one line once they would crowd the page."""
+
+    def _artifacts(self, incoming: list[dict[str, Any]]) -> TableArtifacts:
+        return TestRelationshipsMarkdown._artifacts({"refers_to": [], "referenced_by": incoming})
+
+    def test_seven_sharing_a_column_fold_into_one_query_line(self) -> None:
+        from dbprint.engine.context_assembler import _markdown_joins
+
+        lines = _markdown_joins(self._artifacts([_incoming(t) for t in _SHEETS]))
+
+        assert [line.text for line in lines] == [
+            "## Joins",
+            (
+                "- id <- herbarium_id in 7 tables (inferred); search_columns pattern "
+                "'herbarium_id' lists every column of that name"
+            ),
+        ]
+
+    def test_five_stay_listed_one_by_one(self) -> None:
+        from dbprint.engine.context_assembler import _markdown_joins
+
+        lines = _markdown_joins(self._artifacts([_incoming(t) for t in _SHEETS[:5]]))
+
+        assert len(lines) == 6
+        assert lines[1].text == "- id <- public.herbarium_sheet_1.herbarium_id (inferred)"
+
+    def test_a_noted_a_declared_and_a_lone_edge_stay_listed(self) -> None:
+        from dbprint.engine.context_assembler import _markdown_joins
+
+        incoming = [
+            *(_incoming(t) for t in _SHEETS),
+            _incoming("public.garden", note="The garden that holds the sheet."),
+            _incoming("public.curator", detection="declared"),
+            _incoming("public.vault", column="recorded_by"),
+        ]
+        texts = [line.text for line in _markdown_joins(self._artifacts(incoming))]
+
+        assert "- id <- public.curator.herbarium_id (declared)" in texts
+        assert any(
+            t.startswith("- id <- public.garden.herbarium_id (inferred); note:") for t in texts
+        )
+        assert "- id <- public.vault.recorded_by (inferred)" in texts
+        assert sum("in 7 tables" in t for t in texts) == 1
+
+    def test_the_profile_relationships_fold_the_same_edges(self) -> None:
+        lines = _relationship_lines(self._artifacts([_incoming(t) for t in _SHEETS]))
+
+        assert [line.text for line in lines] == [
+            "## Relationships",
+            (
+                "- <- herbarium_id in 7 tables (inferred); search_columns pattern "
+                "'herbarium_id' lists every column of that name"
+            ),
+        ]
+
+    def test_a_measured_edge_stays_listed_on_the_profile(self) -> None:
+        measured = {"fanout_avg": 2.0, "target_coverage": 0.5}
+        incoming = [
+            *(_incoming(t) for t in _SHEETS),
+            _incoming("public.garden", observed=measured),
+        ]
+        texts = [line.text for line in _relationship_lines(self._artifacts(incoming))]
+
+        assert "- <- public.garden.herbarium_id (inferred)" in texts
+
+    def test_a_fold_spells_the_column_as_the_database_does(self) -> None:
+        from dbprint.engine.context_assembler import _markdown_joins
+
+        artifacts = self._artifacts([_incoming(t) for t in _SHEETS])
+        artifacts.spellings = {t: {"herbarium_id": "HerbariumID"} for t in _SHEETS}
+
+        assert _markdown_joins(artifacts)[1].text.startswith(
+            "- id <- HerbariumID in 7 tables (inferred); search_columns pattern 'herbarium_id'",
+        )
+
+    def test_a_fold_of_edges_read_in_part_keeps_not_measured(self) -> None:
+        apart = {"scope_compatible": False}
+        lines = _relationship_lines(
+            self._artifacts([_incoming(t, observed=apart) for t in _SHEETS]),
+        )
+
+        assert lines[1].text.startswith("- <- herbarium_id in 7 tables (inferred); not measured;")
+
+
+class TestTheQueryPageLeadsWithWhatAPredicateNeeds:
+    """Values and their meanings come before the Joins list, on every surface alike."""
+
+    def test_values_then_dictionary_then_joins(self) -> None:
+        a = _coded_artifacts(annotations={"rank": {"note": "F field, R reared"}})
+        a.relationships = {"refers_to": [], "referenced_by": [_incoming("public.garden")]}
+        text = _query_text(a)
+
+        assert (
+            text.index("## Column values")
+            < text.index("## Data dictionary")
+            < text.index("## Joins")
+        )
+
+    def test_the_rendered_page_keeps_that_order_with_the_legend_second(self) -> None:
+        a = _coded_artifacts(annotations={"rank": {"note": "F field, R reared"}})
+        a.relationships = {"refers_to": [], "referenced_by": [_incoming("public.garden")]}
+        text = _render_table_markdown(
+            a,
+            AssemblyOptions(purpose="query"),
+            None,
+            {},
+            None,
+            with_legend=True,
+        ).text
+        headings = [line for line in text.splitlines() if line.startswith("## ")]
+
+        assert headings == [
+            "## Terms",
+            "## DDL",
+            "## Column values",
+            "## Data dictionary",
+            "## Joins",
+        ]
+
+    def test_the_structured_reply_keeps_the_same_order(self) -> None:
+        from dbprint.engine.context_assembler import _query_candidates
+
+        a = _coded_artifacts(annotations={"rank": {"note": "F field, R reared"}})
+        a.relationships = {"refers_to": [], "referenced_by": [_incoming("public.garden")]}
+        names = [name for name, _ in _query_candidates(a, AssemblyOptions(purpose="query"))]
+
+        assert names.index("values") < names.index("dictionary") < names.index("joins")
+
+
+class TestASpellingGroupRanksByItsTotal:
+    """A group's spellings count together, so it sorts by their joint rows (SPEC 2.2.4)."""
+
+    _RANK: ClassVar[dict[str, Any]] = {
+        "classification": "categorical",
+        "cardinality": 4,
+        "values": [
+            {"value": "field", "count": 30},
+            {"value": "reared", "count": 20},
+            {"value": "Gifted", "count": 15},
+            {"value": "gifted", "count": 10, "spelling_of": "Gifted"},
+        ],
+        "values_coverage": 1.0,
+    }
+
+    def _artifacts(self) -> TableArtifacts:
+        return _bare_artifacts({"row_count": 75, "columns": {"rank": self._RANK}})
+
+    def test_the_query_value_table_lists_the_group_second(self) -> None:
+        row = _row_for(_query_text(self._artifacts()), "rank")
+
+        assert "'field' (30), 'Gifted' (25) {'Gifted' (15), 'gifted' (10)}, 'reared' (20)" in row
+
+    def test_the_profile_notes_list_the_group_second(self) -> None:
+        from dbprint.engine.context_assembler import _profile_sections
+
+        sections = _profile_sections(self._artifacts(), AssemblyOptions(), {}, None)
+        table = next(s.text for s in sections if s.name == "cardinality")
+
+        assert "'field' (40%), 'Gifted' (33.3%, 2 spellings), 'reared' (26.7%)" in table
+
+    def test_the_structured_entries_list_the_group_second(self) -> None:
+        from dbprint.engine.context_assembler import _structured_parts
+
+        _, candidates = _structured_parts(self._artifacts(), AssemblyOptions(purpose="query"))
+        entries = dict(candidates)["values"]["rank"]["entries"]
+
+        assert [e["value"] for e in entries] == ["field", "Gifted", "gifted", "reared"]
 
 
 class TestTheStructuredQueryPayloadStatesItsPopulation:
@@ -2990,6 +3175,473 @@ EDGES_OF_EVERY_DETECTION: dict[str, object] = {
 }
 
 
+def _with_value_notes(print_root: Path, columns: dict[str, list[tuple[Any, str]]]) -> Path:
+    manifest_path = print_root / "manifest.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text())
+    manifest["tables"]["herbarium.public.collector"]["artifacts"]["statistics_annotations"] = (
+        "statistics.annotations.yaml"
+    )
+    manifest_path.write_text(yaml.safe_dump(manifest))
+    (print_root / "herbarium" / "public" / "collector" / "statistics.annotations.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "format_version": 1,
+                "columns": {
+                    name: {"values": [{"value": value, "note": note} for value, note in notes]}
+                    for name, notes in columns.items()
+                },
+            },
+            sort_keys=False,
+        ),
+    )
+
+    return print_root
+
+
+_EVERY_KIND_OF_VALUE_NOTE = {
+    "institution": [
+        ("Uppsala", "a partner past the five shown"),
+        ("Kew", "the herbarium at Kew"),
+        ("KEW", "an older spelling"),
+        ("Oslo", "a partner the sample never drew"),
+    ],
+    "rank": [("senior", "ten years in"), ("emeritus", "a retired rank")],
+    "seed_count": [(7, "a batch counted by hand")],
+}
+
+
+def _every_kind_of_value_note(tmp_path: Path) -> Path:
+    return _with_value_notes(_seed_print_with_a_sampled_column(tmp_path), _EVERY_KIND_OF_VALUE_NOTE)
+
+
+def _dictionary_line(text: str, column: str) -> str:
+    dictionary = text.split("## Data dictionary", 1)[1].split("\n## ", 1)[0]
+
+    return next(line for line in dictionary.splitlines() if line.startswith(f"- {column}: "))
+
+
+def _with_no_rank_read(tmp_path: Path) -> Path:
+    print_root = _seed_print(tmp_path)
+    stats_path = print_root / "herbarium" / "public" / "collector" / "statistics.yaml"
+    stats = yaml.safe_load(stats_path.read_text())
+    stats["columns"]["rank"].update(values=[], values_coverage=1.0, cardinality=0)
+    stats_path.write_text(yaml.safe_dump(stats))
+
+    return print_root
+
+
+def _manifest_of(print_root: Path) -> dict[str, Any]:
+    return yaml.safe_load((print_root / "manifest.yaml").read_text())
+
+
+def _query_noted(print_root: Path) -> str:
+    return _query(print_root, "herbarium.public.collector", _manifest_of(print_root))
+
+
+class TestEveryValueNoteReachesTheQueryPurpose:
+    def test_a_shown_value_keeps_its_note_inline(self, tmp_path: Path) -> None:
+        text = _query_noted(_every_kind_of_value_note(tmp_path))
+
+        assert "'senior' (10) = 'ten years in'" in _row_for(text, "rank")
+        assert "{'Kew' (30), 'KEW' (10) = 'an older spelling'} = 'the herbarium at Kew'" in (
+            _row_for(text, "institution")
+        )
+
+    def test_an_unshown_value_note_rides_the_dictionary_line_in_file_order(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        text = _query_noted(_every_kind_of_value_note(tmp_path))
+
+        assert _dictionary_line(text, "institution") == (
+            "- institution: 'Uppsala' = a partner past the five shown; "
+            "'Oslo' = a partner the sample never drew"
+        )
+        assert _dictionary_line(text, "seed_count") == "- seed_count: 7 = a batch counted by hand"
+        assert "Uppsala" not in _row_for(text, "institution")
+
+    def test_a_value_a_complete_list_lacks_is_marked(self, tmp_path: Path) -> None:
+        text = _query_noted(_every_kind_of_value_note(tmp_path))
+
+        assert _dictionary_line(text, "rank") == (
+            "- rank: 'emeritus' (not in the rows read) = a retired rank"
+        )
+        assert "- not in the rows read: " in text.split("## DDL", 1)[0]
+
+    def test_a_value_an_empty_complete_list_lacks_is_marked(self, tmp_path: Path) -> None:
+        print_root = _with_value_notes(
+            _with_no_rank_read(tmp_path),
+            {"rank": [("emeritus", "gone")]},
+        )
+
+        assert _dictionary_line(_query_noted(print_root), "rank") == (
+            "- rank: 'emeritus' (not in the rows read) = gone"
+        )
+
+    def test_json_marks_a_value_an_empty_complete_list_lacks(self, tmp_path: Path) -> None:
+        print_root = _with_value_notes(
+            _with_no_rank_read(tmp_path),
+            {"rank": [("emeritus", "gone")]},
+        )
+        payload = assemble_structured_context(
+            _manifest_of(print_root),
+            print_root,
+            "herbarium.public.collector",
+            AssemblyOptions(format="json", purpose="query"),
+        )
+
+        assert payload["value_notes"]["rank"] == [
+            {"value": "emeritus", "note": "gone", "not_in_rows_read": True},
+        ]
+
+    def test_a_complete_frequency_list_matches_a_note_by_value(self, tmp_path: Path) -> None:
+        print_root = _seed_print(tmp_path)
+        stats_path = print_root / "herbarium" / "public" / "collector" / "statistics.yaml"
+        stats = yaml.safe_load(stats_path.read_text())
+        stats["columns"]["seed_count"].update(
+            cardinality=1,
+            values=[{"value": 1.0, "count": 95}],
+            frequencies={"listed": 1},
+        )
+        stats_path.write_text(yaml.safe_dump(stats))
+        print_root = _with_value_notes(print_root, {"seed_count": [(1, "one"), (2, "two")]})
+
+        assert _dictionary_line(_query_noted(print_root), "seed_count") == (
+            "- seed_count: 1 = one; 2 (not in the rows read) = two"
+        )
+
+    def test_a_note_matching_a_listed_value_exactly_keeps_its_spelling(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        print_root = _seed_print_with_a_sampled_column(tmp_path)
+        stats_path = print_root / "herbarium" / "public" / "collector" / "statistics.yaml"
+        stats = yaml.safe_load(stats_path.read_text())
+        stats["columns"]["institution"]["values"] += [
+            {"value": 1, "count": 1},
+            {"value": "1", "count": 1},
+        ]
+        stats_path.write_text(yaml.safe_dump(stats))
+        print_root = _with_value_notes(print_root, {"institution": [(1, "a numeric code")]})
+
+        assert _dictionary_line(_query_noted(print_root), "institution") == (
+            "- institution: 1 = a numeric code"
+        )
+
+    def test_an_unshown_note_spells_its_value_as_the_list_does(self, tmp_path: Path) -> None:
+        print_root = _seed_print_with_a_sampled_column(tmp_path)
+        stats_path = print_root / "herbarium" / "public" / "collector" / "statistics.yaml"
+        stats = yaml.safe_load(stats_path.read_text())
+        stats["columns"]["institution"]["values"].append({"value": "1", "count": 1})
+        stats_path.write_text(yaml.safe_dump(stats))
+        print_root = _with_value_notes(print_root, {"institution": [(1, "a placeholder code")]})
+
+        assert _dictionary_line(_query_noted(print_root), "institution") == (
+            "- institution: '1' = a placeholder code"
+        )
+
+    def test_a_column_with_no_values_row_still_gets_its_line(self, tmp_path: Path) -> None:
+        print_root = _with_value_notes(
+            _seed_print(tmp_path),
+            {"seed_count": [(17, "a manual override")]},
+        )
+        text = _query_noted(print_root)
+
+        assert _dictionary_line(text, "seed_count") == "- seed_count: 17 = a manual override"
+        assert "| seed_count |" not in text
+
+    def test_the_column_note_comes_first_on_its_line(self, tmp_path: Path) -> None:
+        print_root = _every_kind_of_value_note(tmp_path)
+        path = print_root / "herbarium" / "public" / "collector" / "statistics.annotations.yaml"
+        annotations = yaml.safe_load(path.read_text())
+        annotations["columns"]["seed_count"]["note"] = "seeds per packet"
+        path.write_text(yaml.safe_dump(annotations, sort_keys=False))
+        text = _query_noted(print_root)
+
+        assert _dictionary_line(text, "seed_count") == (
+            "- seed_count: seeds per packet; 7 = a batch counted by hand"
+        )
+
+    def test_json_carries_each_unshown_note_once_under_value_notes(self, tmp_path: Path) -> None:
+        print_root = _every_kind_of_value_note(tmp_path)
+        payload = assemble_structured_context(
+            _manifest_of(print_root),
+            print_root,
+            "herbarium.public.collector",
+            AssemblyOptions(format="json", purpose="query"),
+        )
+
+        assert payload["value_notes"] == {
+            "institution": [
+                {"value": "Uppsala", "note": "a partner past the five shown"},
+                {"value": "Oslo", "note": "a partner the sample never drew"},
+            ],
+            "rank": [{"value": "emeritus", "note": "a retired rank", "not_in_rows_read": True}],
+            "seed_count": [{"value": 7, "note": "a batch counted by hand"}],
+        }
+        entries = payload["values"]["institution"]["entries"]
+        assert {"value": "KEW", "count": 10, "note": "an older spelling", "spelling_of": "Kew"} in (
+            entries
+        )
+
+    @pytest.mark.parametrize("fmt", ["md", "json"])
+    def test_annotations_off_renders_no_value_note(self, tmp_path: Path, fmt: str) -> None:
+        print_root = _every_kind_of_value_note(tmp_path)
+        text = assemble_context(
+            _manifest_of(print_root),
+            print_root,
+            ["herbarium.public.collector"],
+            AssemblyOptions(format=fmt, purpose="query", include_annotations=False),
+            "primary",
+        ).text
+
+        notes = [note for column in _EVERY_KIND_OF_VALUE_NOTE.values() for _, note in column]
+        assert [note for note in notes if note in text] == []
+        assert "'senior' (10)" in text or '"senior"' in text
+
+    @pytest.mark.parametrize("fmt", ["md", "json"])
+    def test_a_redacted_columns_value_notes_stay_out(self, tmp_path: Path, fmt: str) -> None:
+        print_root = _with_value_notes(
+            _seed_redacted_print(tmp_path),
+            {"status": [("archived", "kept for audit")]},
+        )
+        text = assemble_context(
+            _manifest_of(print_root),
+            print_root,
+            ["herbarium.public.collector"],
+            AssemblyOptions(format=fmt, purpose="query"),
+            "primary",
+        ).text
+
+        assert "kept for audit" not in text
+        assert "archived" not in text
+
+    def test_the_profile_purpose_is_unchanged(self, tmp_path: Path) -> None:
+        print_root = _every_kind_of_value_note(tmp_path)
+        text = assemble_context(
+            _manifest_of(print_root),
+            print_root,
+            ["herbarium.public.collector"],
+            AssemblyOptions(),
+            "primary",
+        ).text
+
+        assert "## Data dictionary" not in text
+        assert "not in the rows read" not in text
+        assert "a partner past the five shown" in text
+
+
+def _seed_spelled_print(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
+    """`accession` and `collector`, whose catalog spells several columns in mixed case."""
+
+    root = tmp_path / "prints" / "primary"
+    manifest: dict[str, Any] = {"format_version": 1, "connection": "primary", "tables": {}}
+    accession_columns = {
+        "accession_id": {"classification": "numeric", "nullable": False, "null_count": 0},
+        "collectorid": {
+            "classification": "foreign_key_candidate",
+            "physical_name": "CollectorId",
+            "nullable": False,
+            "null_count": 0,
+        },
+        "rank": {
+            "classification": "categorical",
+            "physical_name": "Rank",
+            "nullable": True,
+            "null_count": 1,
+            "null_rate": 0.25,
+            "cardinality": 2,
+            "values": [{"value": "wild", "count": 2}, {"value": "cultivated", "count": 1}],
+            "values_coverage": 1.0,
+        },
+        "seedcount": {
+            "classification": "numeric",
+            "physical_name": "SeedCount",
+            "nullable": True,
+            "null_count": 2,
+            "null_rate": 0.5,
+        },
+        "email": {
+            "classification": "text",
+            "nullable": False,
+            "null_count": 0,
+            "derived_from": [{"table": "arboretum.seedbank.collector", "column": "emailaddress"}],
+        },
+    }
+    collector_columns = {
+        "collectorid": {
+            "classification": "numeric",
+            "physical_name": "CollectorId",
+            "nullable": False,
+            "null_count": 0,
+        },
+        "emailaddress": {
+            "classification": "text",
+            "physical_name": "EmailAddress",
+            "nullable": False,
+            "null_count": 0,
+        },
+    }
+    edge = {"column": ["collectorid"], "detection": "declared"}
+    files: dict[str, dict[str, Any]] = {
+        "accession": {
+            "statistics.yaml": {"row_count": 4, "columns": accession_columns},
+            "relationships.yaml": {
+                "refers_to": [
+                    {
+                        **edge,
+                        "target_table": "arboretum.seedbank.collector",
+                        "target_column": ["collectorid"],
+                    },
+                ],
+                "referenced_by": [],
+            },
+            "statistics.annotations.yaml": {
+                "format_version": 1,
+                "columns": {"rank": {"note": "the collection's provenance"}},
+            },
+        },
+        "collector": {
+            "statistics.yaml": {"row_count": 2, "columns": collector_columns},
+            "relationships.yaml": {
+                "refers_to": [],
+                "referenced_by": [
+                    {
+                        **edge,
+                        "referencer_table": "arboretum.seedbank.accession",
+                        "referencer_column": ["collectorid"],
+                    },
+                ],
+            },
+            "statistics.annotations.yaml": {
+                "format_version": 1,
+                "columns": {"emailaddress": {"note": "lower-cased at entry"}},
+            },
+        },
+    }
+
+    for table, artifacts in files.items():
+        table_dir = root / "arboretum" / "seedbank" / table
+        table_dir.mkdir(parents=True)
+        (table_dir / "ddl.sql").write_text(f"CREATE TABLE {table} (x int);\n")
+
+        for name, body in artifacts.items():
+            (table_dir / name).write_text(yaml.safe_dump(body))
+
+        manifest["tables"][f"arboretum.seedbank.{table}"] = {
+            "type": "table",
+            "path": f"arboretum/seedbank/{table}",
+            "artifacts": {
+                "ddl": "ddl.sql",
+                "statistics": "statistics.yaml",
+                "relationships": "relationships.yaml",
+                "statistics_annotations": "statistics.annotations.yaml",
+            },
+            "row_count": 4,
+            "columns": len(artifacts["statistics.yaml"]["columns"]),
+        }
+
+    (root / "manifest.yaml").write_text(yaml.safe_dump(manifest))
+
+    return root, manifest
+
+
+class TestTheQueryPurposeSpellsAColumnAsTheDatabaseDoes:
+    def test_the_value_table_nulls_and_dictionary_spell_the_column(self, tmp_path: Path) -> None:
+        root, manifest = _seed_spelled_print(tmp_path)
+        text = _query(root, "arboretum.seedbank.accession", manifest)
+
+        assert _row_for(text, "Rank").startswith("| Rank | 'wild' (2), 'cultivated' (1) |")
+        assert "Nulls: SeedCount (50%)" in text
+        assert "- Rank: the collection's provenance" in text
+        assert re.search(r"(?<![-\w])(rank|seedcount|collectorid)\b", text.split("```")[2]) is None
+
+    def test_a_join_spells_both_ends(self, tmp_path: Path) -> None:
+        root, manifest = _seed_spelled_print(tmp_path)
+
+        accession = _query(root, "arboretum.seedbank.accession", manifest)
+        collector = _query(root, "arboretum.seedbank.collector", manifest)
+
+        assert "- CollectorId -> arboretum.seedbank.collector.CollectorId (declared)" in accession
+        assert "- CollectorId <- arboretum.seedbank.accession.CollectorId (declared)" in collector
+
+    def test_an_inherited_source_is_labelled_with_its_spelling(self, tmp_path: Path) -> None:
+        root, manifest = _seed_spelled_print(tmp_path)
+        text = _query(root, "arboretum.seedbank.accession", manifest)
+
+        assert (
+            "- email (from arboretum.seedbank.collector.EmailAddress): lower-cased at entry"
+        ) in text
+
+    def test_json_keeps_its_keys_and_maps_each_named_spelling(self, tmp_path: Path) -> None:
+        root, manifest = _seed_spelled_print(tmp_path)
+        payload = assemble_structured_context(
+            manifest,
+            root,
+            "arboretum.seedbank.accession",
+            AssemblyOptions(format="json", purpose="query"),
+        )
+
+        assert payload["physical_names"] == {
+            "arboretum.seedbank.accession": {
+                "collectorid": "CollectorId",
+                "rank": "Rank",
+                "seedcount": "SeedCount",
+            },
+            "arboretum.seedbank.collector": {
+                "collectorid": "CollectorId",
+                "emailaddress": "EmailAddress",
+            },
+        }
+        assert list(payload)[list(payload).index("ddl") + 1] == "physical_names"
+        assert "rank" in payload["values"]
+
+    @pytest.mark.parametrize(
+        ("dropped", "collector"),
+        [
+            ("include_relationships", {"emailaddress": "EmailAddress"}),
+            ("include_annotations", {"collectorid": "CollectorId"}),
+        ],
+    )
+    def test_the_map_names_no_column_the_payload_leaves_out(
+        self,
+        tmp_path: Path,
+        dropped: str,
+        collector: dict[str, str],
+    ) -> None:
+        root, manifest = _seed_spelled_print(tmp_path)
+        payload = assemble_structured_context(
+            manifest,
+            root,
+            "arboretum.seedbank.accession",
+            AssemblyOptions(format="json", purpose="query", **{dropped: False}),
+        )
+
+        assert payload["physical_names"]["arboretum.seedbank.collector"] == collector
+
+    def test_a_table_spelled_as_its_keys_carries_no_map(self, tmp_path: Path) -> None:
+        payload = assemble_structured_context(
+            MANIFEST,
+            _seed_print(tmp_path),
+            "herbarium.public.collector",
+            AssemblyOptions(format="json", purpose="query"),
+        )
+
+        assert "physical_names" not in payload
+
+    def test_the_profile_purpose_is_unchanged(self, tmp_path: Path) -> None:
+        root, manifest = _seed_spelled_print(tmp_path)
+        text = assemble_context(
+            manifest,
+            root,
+            ["arboretum.seedbank.accession"],
+            AssemblyOptions(),
+            "primary",
+        ).text
+
+        assert _row_for(text, "rank")
+
+
 class TestTheQueryJoinsList:
     """Every unrejected edge, the surest first, and nothing measured about the edge itself."""
 
@@ -3071,6 +3723,89 @@ class TestTheQueryJoinsList:
                 "detection": "inferred",
             },
         ]
+
+
+_EMPTY_JOIN = {
+    "column": ["garden_id"],
+    "target_table": "public.garden",
+    "target_column": ["garden_code"],
+    "detection": "inferred",
+    "observed": {
+        "fanout_avg": 1.0,
+        "target_coverage": 0.0,
+        "containment": 0.0,
+        "answerable_count": 70,
+    },
+}
+
+
+class TestAJoinMeasuredEmptyReadsAsNoMatch:
+    """An edge whose measurement found none of its values in the target is not a usable join."""
+
+    def test_the_query_joins_line_says_no_match(self) -> None:
+        from dbprint.engine.context_assembler import _markdown_joins
+
+        lines = _markdown_joins(TestRelationshipsMarkdown._artifacts({"refers_to": [_EMPTY_JOIN]}))
+
+        assert lines[1].text == "- garden_id -> public.garden.garden_code (inferred, no match)"
+        assert "no_match" in lines[1].terms
+
+    def test_the_profile_relationships_line_says_no_match(self) -> None:
+        artifacts = TestRelationshipsMarkdown._artifacts({"refers_to": [_EMPTY_JOIN]})
+
+        assert _relationship_lines(artifacts)[1].text == (
+            "- -> public.garden.garden_code (inferred, no match); via: garden_id"
+        )
+
+    def test_the_structured_joins_carry_no_match(self) -> None:
+        from dbprint.engine.context_assembler import _structured_joins
+
+        joins = _structured_joins(
+            TestRelationshipsMarkdown._artifacts({"refers_to": [_EMPTY_JOIN]}),
+        )
+
+        assert joins["refers_to"][0]["no_match"] is True
+
+    def test_the_cardinality_tables_fk_label_says_no_match(self) -> None:
+        targets = fk_target_map({"refers_to": [_EMPTY_JOIN]})
+
+        assert targets == {"garden_id": ["public.garden.garden_code (inferred, no match)"]}
+
+    def test_an_incoming_edge_says_no_match(self) -> None:
+        from dbprint.engine.context_assembler import _markdown_joins
+
+        incoming = {
+            "column": ["id"],
+            "referencer_table": "public.garden",
+            "referencer_column": ["herbarium_id"],
+            "detection": "inferred",
+            "observed": {"containment": 0.0, "answerable_count": 40},
+        }
+        artifacts = TestRelationshipsMarkdown._artifacts({"referenced_by": [incoming]})
+
+        assert _markdown_joins(artifacts)[1].text == (
+            "- id <- public.garden.herbarium_id (inferred, no match)"
+        )
+        assert _relationship_lines(artifacts)[1].text == (
+            "- <- public.garden.herbarium_id (inferred, no match)"
+        )
+
+    @pytest.mark.parametrize(
+        "observed",
+        [
+            {"containment": 0.02, "answerable_count": 50},
+            {"containment": 0.0, "answerable_count": 0},
+            {"containment": 0.0, "answerable_count": 4},
+            {"scope_compatible": False},
+        ],
+    )
+    def test_an_edge_with_a_match_or_no_comparison_does_not(self, observed: dict[str, Any]) -> None:
+        from dbprint.engine.context_assembler import _markdown_joins
+
+        edge = {**_EMPTY_JOIN, "observed": observed}
+        lines = _markdown_joins(TestRelationshipsMarkdown._artifacts({"refers_to": [edge]}))
+
+        assert "no match" not in lines[1].text
 
 
 def _nullable(null_count: int, null_rate: float, **extra: Any) -> dict[str, Any]:
@@ -4041,6 +4776,95 @@ class TestAPrintWithoutMeaningsSaysSo:
         assert "meanings: not documented here" in _row_for(_query_text(a), "rank")
         assert "meanings_documented" not in header
 
+    def test_a_description_naming_the_column_in_code_documents_it(self) -> None:
+        from dbprint.engine.context_assembler import _structured_parts
+
+        a = _coded_artifacts(description="`rank` is F for field-collected, R for reared.\n")
+        _, candidates = _structured_parts(a, AssemblyOptions(purpose="query"))
+
+        assert "meanings: not documented here" not in _query_text(a)
+        assert "meanings_documented" not in dict(candidates)["values"]["rank"]
+
+    def test_a_bare_word_in_prose_does_not_document_the_column(self) -> None:
+        a = _coded_artifacts(description="Sorted by rank within each plot.\n")
+
+        assert "meanings: not documented here" in _row_for(_query_text(a), "rank")
+
+    def test_another_columns_note_naming_it_in_code_documents_it(self) -> None:
+        a = _coded_artifacts(annotations={"frozen": {"note": "Only set where `rank` is R."}})
+
+        assert "meanings: not documented here" not in _row_for(_query_text(a), "rank")
+
+    def test_connection_notes_naming_a_column_document_the_table(self) -> None:
+        from dbprint.engine.context_assembler import _profile_sections, _structured_parts
+
+        a = _coded_artifacts()
+        a.shared_notes = "Every table's `frozen` flag marks a sealed accession."
+        header, _ = _structured_parts(a, AssemblyOptions())
+        profile = _profile_sections(a, AssemblyOptions(), {}, None)
+
+        assert "Meanings:" not in _query_text(a)
+        assert "Meanings:" not in profile[0].text
+        assert "meanings_documented" not in header
+
+    def test_connection_notes_naming_nothing_here_leave_the_table_undocumented(self) -> None:
+        a = _coded_artifacts()
+        a.shared_notes = "Every schema is replicated unchanged from the field database."
+
+        assert "Meanings: not documented here" in _query_text(a)
+
+    def test_a_value_note_naming_the_column_in_code_documents_it(self) -> None:
+        notes = {"frozen": {"values": [{"value": True, "note": "Set only once `rank` is R."}]}}
+
+        assert "meanings: not documented here" not in _row_for(
+            _query_text(_coded_artifacts(annotations=notes)),
+            "rank",
+        )
+
+    def test_the_databases_own_spelling_in_code_documents_it(self) -> None:
+        a = _coded_artifacts(description="`RANK_CODE` is F for field-collected.\n")
+        a.spellings = {a.fqn: {"rank": "RANK_CODE"}}
+
+        assert "meanings: not documented here" not in _query_text(a)
+
+    def test_a_longer_name_containing_it_does_not_document_it(self) -> None:
+        a = _coded_artifacts(description="`rank_code` is the herbarium's own grading.\n")
+
+        assert "meanings: not documented here" in _row_for(_query_text(a), "rank")
+
+    def test_connection_notes_on_disk_are_read(self, tmp_path: Path) -> None:
+        print_root = _seed_print(tmp_path)
+        notes = print_root / "manifest.annotations.yaml"
+        notes.write_text(yaml.safe_dump({"format_version": 1, "notes": "Printed weekly."}))
+        unnamed = _query(print_root, "herbarium.public.collector", MANIFEST)
+        notes.write_text(
+            yaml.safe_dump({"format_version": 1, "notes": "`rank` is the herbarium's grading."}),
+        )
+        named = _query(print_root, "herbarium.public.collector", MANIFEST)
+
+        assert "meanings: not documented here" in _row_for(unnamed, "rank")
+        assert "meanings: not documented here" not in _row_for(named, "rank")
+
+    def test_another_tables_column_of_that_name_does_not_document_it(self) -> None:
+        a = _coded_artifacts(description="Joins `taxon.rank`, which is a botanical rank.\n")
+
+        assert "meanings: not documented here" in _row_for(_query_text(a), "rank")
+
+    def test_the_annotate_brief_still_asks_for_a_note_the_description_names(self) -> None:
+        from dbprint.engine.context_assembler import _codes_undocumented
+
+        a = _coded_artifacts(description="`rank` is F for field-collected, R for reared.\n")
+        rank = (a.statistics or {})["columns"]["rank"]
+
+        assert _codes_undocumented(a, "rank", rank, 1.0, prose=False) is True
+        assert _codes_undocumented(a, "rank", rank, 1.0) is False
+
+    def test_connection_notes_naming_the_column_in_code_document_it(self) -> None:
+        a = _coded_artifacts()
+        a.shared_notes = "`rank` is F for field-collected on every table."
+
+        assert "meanings: not documented here" not in _row_for(_query_text(a), "rank")
+
 
 def _frequency_artifacts(column: dict[str, Any]) -> TableArtifacts:
     return _bare_artifacts({"row_count": 1000, "columns": {"matures_at": column}})
@@ -4256,6 +5080,37 @@ class TestASourceNoteReachesTheDerivedColumn:
                 },
             ],
         }
+
+    @pytest.mark.parametrize("redacted", ["collector", "curator_profile"])
+    def test_a_redacted_side_withholds_the_source_value_notes(
+        self,
+        tmp_path: Path,
+        redacted: str,
+    ) -> None:
+        root, manifest = _seed_lineage_print(tmp_path, [_SOURCE])
+        path = root / "arboretum" / "seedbank" / redacted / "statistics.yaml"
+        statistics = yaml.safe_load(path.read_text())
+        statistics["columns"]["email"]["redacted"] = "mask"
+        path.write_text(yaml.safe_dump(statistics))
+        text = _query(root, "arboretum.seedbank.curator_profile", manifest)
+        payload = assemble_structured_context(
+            manifest,
+            root,
+            "arboretum.seedbank.curator_profile",
+            AssemblyOptions(format="json", purpose="query"),
+        )
+
+        assert (
+            "- email (from arboretum.seedbank.collector.email): Case-insensitive: two rows "
+            "differing only in case are one person."
+        ) in text.splitlines()
+        assert "x@example.org" not in text
+        assert payload["inherited_notes"]["email"] == [
+            {
+                "source": "arboretum.seedbank.collector.email",
+                "note": "Case-insensitive: two rows differing only in case are one person.",
+            },
+        ]
 
     def test_a_source_the_print_lacks_carries_nothing(self, tmp_path: Path) -> None:
         root, manifest = _seed_lineage_print(

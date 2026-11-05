@@ -1,6 +1,6 @@
 """The labels a Markdown context reply prints, and the `## Terms` legend that defines them.
 
-A renderer records the key of every label it prints; `legend` defines exactly those keys.
+A renderer records the key of every label it prints; `legend` defines those not self-evident.
 """
 
 from __future__ import annotations
@@ -99,15 +99,22 @@ TERMS: Mapping[str, Term] = {
     ),
     "meanings_table": Term(
         "Meanings",
-        "not documented here = no table narrative and no column or value note says what this "
-        "table's values mean; read codes, units and defaults from the code that writes it",
+        "not documented here = no table narrative, column or value note, or connection note naming "
+        "the table or a column of it says what this table's values mean; read codes, units and "
+        "defaults from the code that writes it",
         "meanings_documented: false",
     ),
     "meanings": Term(
         "meanings",
-        "not documented here = the column's values are a complete list of codes no note "
-        "explains; read what each means from the code that writes the table",
+        "not documented here = the column's values are a complete list of codes that no note on "
+        "it explains and no narrative or other note names in code; read what each means from the "
+        "code that writes the table",
         "values.<column>.meanings_documented: false",
+    ),
+    "not_in_rows_read": Term(
+        "not in the rows read",
+        "a note names a value the column's complete value list does not hold",
+        "value_notes.<column>[].not_in_rows_read: true",
     ),
     "grain": Term("Grain", "the columns whose values identify a row", "grain"),
     "annotated": Term(
@@ -389,6 +396,12 @@ TERMS: Mapping[str, Term] = {
         "one side was read in part, so nothing about the join was measured",
         "observed.scope_compatible: false",
     ),
+    "no_match": Term(
+        "no match",
+        "measured: none of the referencing values compared was found among the target's, so a "
+        "join on this edge is likely empty - unless the two columns' types or collations differ",
+        "joins[].no_match: true; profile observed.containment: 0",
+    ),
     "incoherent": Term(
         "incoherent",
         "the referencing column has more distinct values than the target, so some cannot match",
@@ -467,6 +480,46 @@ TERMS: Mapping[str, Term] = {
 }
 
 
+_SELF_EVIDENT: frozenset[str] = frozenset(
+    {
+        "scanned",
+        "grain",
+        "buckets",
+        "bucket_starts",
+        "distinct",
+        "values",
+        "true",
+        "false",
+        "mean",
+        "srid",
+        "extent_x",
+        "extent_y",
+        "dimension",
+        "mixed_dimension",
+        "zero_vectors",
+        "via",
+        "on_delete",
+        "fanout_max",
+        "cluster_partition_key",
+        "epoch",
+        "distribution",
+    },
+)
+
+_SELF_EVIDENT_FAMILIES = frozenset(
+    {
+        "freshness",
+        "looks_like",
+        "sensitivity",
+        "epoch_unit",
+        "candidate_key_exception",
+        "redaction",
+        "classification",
+        "percentile",
+    },
+)
+
+
 def term(key: str) -> Term:
     """The term behind `key`; a percentile key (`percentile:50`) is generated for any number."""
 
@@ -491,21 +544,19 @@ def label(key: str) -> str:
 
 
 def legend(keys: Iterable[str]) -> str:
-    """`## Terms` and one line per key in TERMS order, percentiles last; "" for no keys."""
+    """`## Terms` and one line per key in TERMS order; "" for no keys.
 
-    wanted = set(keys)
+    A label whose reading hides no rule - a denominator, a threshold, a caveat - is not defined.
+    """
+
+    wanted = {key for key in keys if not _self_evident(key)}
 
     if not wanted:
         return ""
 
-    order = list(TERMS)
-    ordered = sorted(
-        wanted,
-        key=lambda k: (order.index(k), 0) if k in TERMS else (len(order), int(k.partition(":")[2])),
-    )
     lines = [LEGEND_HEADING, ""]
 
-    for key in ordered:
+    for key in sorted(wanted, key=list(TERMS).index):
         t = term(key)
         where = [f"json/yaml `{t.spelling}`"] if t.spelling else []
         where += [t.tool_filter] if t.tool_filter else []
@@ -513,6 +564,12 @@ def legend(keys: Iterable[str]) -> str:
         lines.append(f"- {t.label}: {t.definition}{suffix}")
 
     return "\n".join(lines)
+
+
+def _self_evident(key: str) -> bool:
+    family, member, _ = key.partition(":")
+
+    return key in _SELF_EVIDENT or (bool(member) and family in _SELF_EVIDENT_FAMILIES)
 
 
 def percentile_key(field: str) -> str | None:

@@ -40,9 +40,9 @@ The warehouse grant is not optional even though most of the introspection could 
 
 `ALL TABLES IN SCHEMA` covers what exists when the grant runs. Use `GRANT SELECT ON FUTURE TABLES IN SCHEMA ... ` to cover tables created afterwards.
 
-### What an under-privileged role does — read this one
+### What an under-privileged role does
 
-Snowflake fails differently from most of the other engines, and the difference is the thing most likely to waste an afternoon.
+Snowflake fails differently from most of the other engines.
 
 Both surfaces the adapter enumerates from are filtered to what the role can see. `INFORMATION_SCHEMA` returns only objects the current role has been granted access to, and `SHOW` returns only objects the role holds at least one privilege on. A role missing `SELECT` therefore does not get an error — it gets **an empty result**. On a first run dbprint writes a print with no tables in it; against an existing print, a listing that shares none of its tables exits `4` and names the grants.
 
@@ -58,7 +58,7 @@ The view-dependency read issues two statements: `information_schema.tables` to s
 GRANT DATABASE ROLE SNOWFLAKE.OBJECT_VIEWER TO ROLE dbprint_ro;
 ```
 
-Issued by `ACCOUNTADMIN`. This is narrower than `IMPORTED PRIVILEGES ON DATABASE SNOWFLAKE` and is the route Snowflake itself recommends. Without it, a role without access to that share does not fail the run: the catalog read raises, the run degrades with one warning, and every view and matview in the connection omits `depends_on` for that run. Do not expect a view created moments ago to resolve — the three-hour lag is Snowflake's own published figure, not a dbprint limitation.
+Issued by `ACCOUNTADMIN`. This is narrower than `IMPORTED PRIVILEGES ON DATABASE SNOWFLAKE` and is the route Snowflake itself recommends. Without it, a role without access to that share does not fail the run: the catalog read raises, the run degrades with one warning, and every view and matview in the connection omits `depends_on` for that run. A view created moments ago may not resolve yet: the three-hour lag is Snowflake's own published figure, not a dbprint limitation.
 
 ## Sampling
 
@@ -73,7 +73,7 @@ Snowflake's seed applies only to `SYSTEM`/`BLOCK` sampling, so that is what a fr
 - **A seed is not supported on fixed-size sampling.** The extra distinct-value draw that `inferred.looks_like` takes is `SAMPLE ROW (n ROWS)`, which is fixed-size, so it cannot be seeded at all.
 - **A seed is not supported on a view or a subquery.** A fraction binds to a base table.
 
-The consequence for a sampled Snowflake print: coherence between a shape claim and the rest of the profile is **population-level only**, never row for row. A test or a consumer asserting that `inferred.sampled` describes the same rows as `null_count` is asserting something this engine cannot deliver. PostgreSQL and duckdb are the two engines that cohere row for row; Databricks reproduces the sampled fraction but not that row-level agreement.
+The consequence for a sampled Snowflake print: coherence between a shape claim and the rest of the profile is **population-level only**, never row for row. A test or a consumer asserting that `inferred.sampled` describes the same rows as `null_count` is asserting something this engine cannot deliver. PostgreSQL, duckdb and SQLite cohere row for row; Databricks reproduces the sampled fraction but not that row-level agreement.
 
 ## When dbprint writes
 

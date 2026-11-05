@@ -62,6 +62,7 @@ ADAPTERS: tuple[str, ...] = (
     "redshift",
     "databricks",
     "bigquery",
+    "sqlite",
 )
 
 AdapterName = Literal[
@@ -73,6 +74,7 @@ AdapterName = Literal[
     "redshift",
     "databricks",
     "bigquery",
+    "sqlite",
 ]
 
 

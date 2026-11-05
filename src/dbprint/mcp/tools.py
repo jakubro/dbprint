@@ -34,6 +34,7 @@ from dbprint.engine.baseline import (
 from dbprint.engine.context_assembler import (
     authored_relationship_annotations,
     incoming_rejections,
+    spelling_files,
 )
 from dbprint.engine.freshness import classify
 from dbprint.engine.table_readings import live_annotations
@@ -74,9 +75,42 @@ _MANIFEST_FILTERED_KEYS = frozenset({"tables", "failed_tables"})
 
 _SEARCHED_KINDS = ("statistics", "statistics_annotations")
 
-_PER_COLUMN_SECTIONS = frozenset({"annotations", "values", "dictionary"})
+_PER_COLUMN_SECTIONS = frozenset({"annotations", "values", "dictionary", "value_notes"})
 
 _RESOLUTION_LISTS = ("spellings", "candidates", "domain")
+
+# One sentence per field a reply carries, read where the field appears rather than in a description.
+_FIELD_NOTES = {
+    "unreadable_tables": (
+        "tables whose statistics or annotations would not parse: a statistics failure leaves the "
+        "table's columns out of matches, an annotations failure only their notes"
+    ),
+    "switched_off_tables": (
+        "tables whose looks_like detection was switched off: a column of theirs missing from "
+        "matches is not a finding that it holds no such value"
+    ),
+    "scope": (
+        "a match carrying scope was read in part: its numbers and keys describe the rows "
+        "scanned, not the table"
+    ),
+    "sampled": "a looks_like verdict rests on its draw: matched of sampled values fit the shape",
+    "candidate_key_exception": "the key holds with the exception named, not over every value",
+    "sensitivity": (
+        "a detection, never a verdict: a column this search does not return was not detected, "
+        "which is not a finding that it is safe to publish"
+    ),
+    "freshness": "live or stale against max_age_days; dormant where profiled_at is unreadable",
+    "threshold_error": "the table's age threshold could not be resolved, so it carries no verdict",
+    "unevaluated_tables": (
+        "summary.unevaluated_tables counts tables that were not compared: a missing event about "
+        "one of them is not a finding"
+    ),
+    "changes": (
+        "a statistic with no drift event did not change between the two prints, unless its "
+        "table was not compared"
+    ),
+    "_corrupted": "names each print file of the table that would not parse; its content is absent",
+}
 
 _DIFF_KINDS: list[str] = json.loads(
     importlib.resources.files("dbprint.spec.v1").joinpath("diff.schema.json").read_text("utf-8"),
@@ -133,24 +167,13 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
         annotations=_READ_ONLY,
         name="get_table_context",
         description=(
-            "Read one table. Call it before writing SQL against a table, with "
-            "`purpose: query`: DDL, the Joins list (declared foreign keys, joins dbprint "
-            "inferred from column names or measured from values, and joins a person added, "
-            "tagged annotated - minus any a person rejected; a join mentioned only in the "
-            "table's prose description is not in it), a data dictionary, the value lists a "
-            "predicate is written from, with their counts and coverage, and each nullable "
-            "column's null share, plus notes that apply to the whole database. Call it with "
-            "the default `purpose: profile` to describe the data - statistics such as null "
-            "rates, cardinality and ranges, joins, the table's prose description and notes. "
-            "Use search_columns or list_tables first when the table is not yet known, "
-            "and resolve_value to check how one phrase is spelled in one column. Paged: md "
-            "and yaml end every page but the last with a `next_cursor` line, json carries "
-            "it as a key; a section too long for one page continues on the next, never "
-            "dropped. Under `profile`, md Notes summarise each column - a long value list "
-            "shows its 5 most frequent values - while json and yaml carry the statistics "
-            "whole but for each column's sketch and any inferred field a person rejected; for "
-            "json/yaml a `_corrupted` field names any of the table's print files that is "
-            "malformed."
+            "Read one table. Before writing SQL against it, call with `purpose: query`: DDL, the "
+            "value lists a predicate is written from with their counts and coverage, each nullable "
+            "column's null share, the data dictionary, the Joins list, and notes on the whole "
+            "database. The default `purpose: profile` describes the data instead: statistics, "
+            "relationships, the description and notes. Find the table first with search_columns or "
+            "list_tables; check one phrase's stored spelling with resolve_value. Paged: md and yaml "
+            "end every page but the last with a `next_cursor` line, json carries it as a key."
         ),
         input_schema={
             "type": "object",
@@ -192,9 +215,10 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                         "md renders the chosen purpose as Markdown - under `profile`, a "
                         "per-column Notes summary rather than the raw statistics fields "
                         "json and yaml carry. All three omit each column's sketch (a hashed "
-                        "summary of its distinct values); the table's raw statistics file, "
-                        "sketch included, is the dbprint://<connection>/<table>/statistics "
-                        "resource. get_reference "
+                        "summary of its distinct values); the "
+                        "dbprint://<connection>/<table>/statistics resource is the table's "
+                        "statistics file with each column's sketch, less the inferred fields "
+                        "a person rejected. get_reference "
                         "document: guide explains each json/yaml field."
                     ),
                 },
@@ -236,16 +260,11 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
         annotations=_READ_ONLY,
         name="list_tables",
         description=(
-            "List a connection's tables, optionally narrowed by an fnmatch pattern over "
-            "the dotted names. Use it to see which tables exist, their row counts, and "
-            "whether each table's statistics are stale: `detail: true` adds each "
-            "table's type, row_count, columns and profiled_at, and a freshness verdict "
-            "- `live`, `stale`, or `dormant` "
-            "when profiled_at is unreadable - with its age_days and the max_age_days it "
-            "is judged against. A table whose threshold cannot be resolved carries "
-            "`threshold_error` instead of a verdict. To find columns rather than tables, "
-            "use search_columns; for the print's raw table index, get_manifest. "
-            "Paged: every reply carries the `total` matched, and `next_cursor` while more remain."
+            "List a connection's tables, optionally narrowed by an fnmatch pattern over the dotted "
+            "names: which tables exist and whether they are stale. `detail: true` adds each table's type, row_count, columns, profiled_at and a "
+            "freshness verdict. To find columns rather than tables, use search_columns; for the "
+            "print's raw table index, get_manifest. Paged: every reply carries the `total` matched, "
+            "and `next_cursor` while more remain."
         ),
         input_schema={
             "type": "object",
@@ -283,28 +302,11 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
         annotations=_READ_ONLY,
         name="search_columns",
         description=(
-            "Find columns across every table - the first call when the table holding a "
-            "fact is not yet known. Filters, all optional and ANDed: a name glob, a `text` "
-            "search over column names and their notes, and classification/sql_type/"
-            "sensitivity/looks_like/redacted globs and a candidate_key match - for "
-            "example every column holding an email address (`looks_like: email`) or "
-            "contact details (`sensitivity: contact`). Read a table found this way with "
-            "get_table_context; list tables rather than columns with list_tables. A match on a table read in part "
-            "carries its `scope` block with rows_scanned/row_count, so a caller can tell a "
-            "scanned-set number or key from a table-wide one; a match carrying a looks_like verdict carries the "
-            "sampled/matched draw behind it, since a verdict from two values reads identically "
-            "to one from ten thousand otherwise. A match carries "
-            "sensitivity/redacted/candidate_key (and candidate_key_exception where the "
-            "ratio falls short of 1.0) whenever the column does, so filtering on any of "
-            "them returns the matched category, not just a bare column name. An inferred field "
-            "a person rejected reads as absent. Paged: every "
-            "reply carries the `total` matched, and `next_cursor` while more remain. A "
-            "result carries `unreadable_tables` only when a table's own statistics or "
-            "annotations are malformed, on its first page: a statistics failure drops "
-            "that table's columns from `matches` entirely; an annotations-only failure "
-            "still returns them, without the annotation. A `looks_like` search also carries "
-            "`switched_off_tables` on its first page, naming each table whose looks_like "
-            "detection was switched off, where a non-match is not a finding."
+            "Find columns across every table by name glob, by words in their notes (`text`), or by "
+            "what they hold - `looks_like: email`, `sensitivity: contact`, classification, sql_type, "
+            "`redacted`, `candidate_key`. Filters AND together. The first call when you don't yet know "
+            "which table holds a fact; read a table it finds with get_table_context. Paged: `total`, "
+            "and `next_cursor` while more remain."
         ),
         input_schema={
             "type": "object",
@@ -334,9 +336,8 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                     "description": (
                         f"fnmatch glob against inferred.sensitivity "
                         f"({', '.join(sorted(get_args(Sensitivity)))}) - a glob of '*' "
-                        f"sweeps every column carrying any detection. A detection, never "
-                        f"a verdict; its absence on a column is not an assertion that "
-                        f"the column is safe. A detection a person rejected never matches"
+                        f"sweeps every column carrying any detection. A detection a person "
+                        f"rejected never matches"
                     ),
                 },
                 "looks_like": {
@@ -385,22 +386,12 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
         annotations=_READ_ONLY,
         name="resolve_value",
         description=(
-            "Resolve a phrase, a code or a spelling against one column's published "
-            "values, before writing a literal into a filter whose stored spelling "
-            "get_table_context does not already list in full. Answers, in order of "
-            "preference: `stored` - the text is a listed value, or folds to one, and "
-            "the reply carries the spelling a predicate must use; `definition` - the "
-            "text names what a value's note says it means; `nearest` - the listed "
-            "values closest to the text, ranked; `none`; or `unavailable` where the "
-            "column publishes no value list, lost it on the latest print, or redacts it. Every "
-            "reply carries the column's `coverage` and how many values the print "
-            "`listed`, plus a caveat sentence wherever that list is a sample - a "
-            "spelling absent from a sample is not evidence it is absent from the "
-            "column. An exhaustive list of at most fifty values rides along whole as "
-            "`domain`, so a small vocabulary needs one call; on a table read in part, "
-            "`exhaustive` is false, the reply carries the table's `scope` and "
-            "`row_count`, and `domain` is the scanned rows' whole domain. Paged: every "
-            "page repeats the scalar keys; the answer list comes before `domain`."
+            "Check how a phrase, code or spelling is stored in one column before writing it into a "
+            "filter, when get_table_context does not list the column's values in full. `match` says "
+            "what was found: `stored`, with every spelling a predicate must use; `definition`, where a "
+            "value's note means the phrase; `nearest` values; `none`; or `unavailable`, with its "
+            "reason. A complete list of at most fifty values rides along whole as `domain`. Paged: every "
+            "page repeats the scalar keys."
         ),
         input_schema={
             "type": "object",
@@ -414,7 +405,10 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                 "column": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Column name as the print spells it",
+                    "description": (
+                        "Column name: its key in the print, or its `physical_name`, the database's "
+                        "own spelling"
+                    ),
                 },
                 "part": {
                     "type": "string",
@@ -446,14 +440,9 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
         annotations=_READ_ONLY,
         name="get_manifest",
         description=(
-            "Return the print's index for a connection - its tables and the files each "
-            "has, not a semantic catalogue of what they mean. "
-            "Use it for an index field no other tool projects; for table names, row "
-            "counts and staleness, list_tables with `detail: true` is shorter and "
-            "already judges each table's freshness. "
-            "The `tables` map is paged in FQN order with `total` and `next_cursor`; every "
-            "other key of the document rides the first page whole, `failed_tables` "
-            "filtered by `pattern` like `tables`."
+            "Return the print's raw index for a connection: its tables and the files each has. For "
+            "table names, row counts and staleness, list_tables with `detail: true` is shorter. The "
+            "`tables` map is paged with `total` and `next_cursor`; every other key rides the first page."
         ),
         input_schema={
             "type": "object",
@@ -483,16 +472,12 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
         annotations=_READ_ONLY,
         name="get_diff",
         description=(
-            "Answer what changed between the database's last two prints: "
-            "the recorded diff, whose `summary` counts every kind of change and whose "
-            "`changes` list names each one - tables and columns added, removed or "
-            "retyped, relationships changed, statistics that drifted. A statistic with "
-            "no drift event did not change between the two runs; a table "
-            "counted in `unevaluated_tables` was not compared. An event about a join or an "
-            "inferred field a person rejected is withheld. The `changes` list is paged in "
-            "recorded order with `total` and `next_cursor`; every other key of the document rides "
-            "the first page whole. "
-            "A table's current state, rather than what changed, is get_table_context's answer."
+            "Answer what changed between the database's last two prints: `summary` counts each kind "
+            "of change and `changes` names each one - tables and columns added, removed or retyped, "
+            "relationships changed, statistics that drifted - filtered by table or kind, less "
+            "events about what a person rejected. A table's "
+            "current state is get_table_context's answer. `changes` is paged with `total` and "
+            "`next_cursor`; every other key rides the first page."
         ),
         input_schema={
             "type": "object",
@@ -527,14 +512,11 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
         annotations=_READ_ONLY,
         name="get_reference",
         description=(
-            "Look up the dbprint format specification or the assertion DSL "
-            "specification by section number, or the reading guide by heading: what a "
-            "print's field means, or what a finding's spec_ref (e.g. '§2.2.4') refers to. "
-            "A section returns its own text and lists its direct subsections, each read "
-            "by its own number or heading; omit section for the heading tree. The guide "
-            "is the one this dbprint version ships, not the copy stored with a print. Paged "
-            "like get_table_context's md. Depends on no connection or print; what one "
-            "print's tables hold is get_table_context's and list_tables' answer."
+            "Look up the format specification or the assertion DSL by section number, or the reading "
+            "guide by heading: what a print's field means, or what a finding's spec_ref (e.g. "
+            "'§2.2.4') refers to. Omit section for the heading tree; a section lists its direct "
+            "subsections. Needs no connection; what a table holds is get_table_context's answer. Paged "
+            "like get_table_context's md."
         ),
         input_schema={
             "type": "object",
@@ -728,7 +710,13 @@ def _tool_get_table_context(
     files = (
         print_root / MANIFEST_FILENAME,
         *(table_dir / name for name in artifacts.values()),
-        *dict.fromkeys((*referencers, *authors)),
+        *dict.fromkeys(
+            (
+                *referencers,
+                *authors,
+                *spelling_files(manifest, print_root, table, state.files.read),
+            ),
+        ),
         print_root / MANIFEST_ANNOTATIONS_FILENAME,
     )
     call = paging.Call("get_table_context", arguments, files)
@@ -754,6 +742,7 @@ def _tool_get_table_context(
         options,
         read=state.files.read,
     )
+    header |= _notes(["_corrupted"] if header.get("_corrupted") else [])
 
     def render(units: Sequence[Any], first: bool, next_cursor: str | None) -> dict[str, Any] | str:
         del first
@@ -850,6 +839,12 @@ def _tool_list_tables(state: ServedConnections, arguments: dict[str, Any]) -> di
 
     call = paging.Call("list_tables", arguments, (conn.print_root / MANIFEST_FILENAME,))
     head = {"failed_tables": failed} if failed else {}
+
+    if detail:
+        values = [value for _, value in items]
+        head |= _notes(
+            ["freshness", *(["threshold_error"] if _any_carry(values, "threshold_error") else [])],
+        )
 
     return _page(call, items, render, arguments, head=head)
 
@@ -1075,6 +1070,18 @@ def _tool_search_columns(state: ServedConnections, arguments: dict[str, Any]) ->
     if switched_off:
         head["switched_off_tables"] = sorted(switched_off)
 
+    noted = [
+        *(["unreadable_tables"] if unreadable else []),
+        *(["switched_off_tables"] if switched_off else []),
+        *(
+            key
+            for key in ("scope", "sampled", "candidate_key_exception")
+            if _any_carry(matches, key)
+        ),
+        *(["sensitivity"] if filters.sensitivity else []),
+    ]
+    head |= _notes(noted)
+
     return _page(call, list(enumerate(matches)), render, arguments, head=head)
 
 
@@ -1209,6 +1216,16 @@ def _tool_resolve_value(state: ServedConnections, arguments: dict[str, Any]) -> 
         annotation_path = table_dir / artifacts["statistics_annotations"]
 
         raise errors.malformed_artifact(str(annotation_path), malformed)
+
+    if column not in stats_columns:
+        column = next(
+            (
+                key
+                for key, col in stats_columns.items()
+                if isinstance(col, dict) and column_value(col, "physical_name") == column
+            ),
+            column,
+        )
 
     if column not in stats_columns:
         raise errors.unknown_column(column, table, sorted(stats_columns))
@@ -1346,6 +1363,8 @@ def _tool_get_diff(state: ServedConnections, arguments: dict[str, Any]) -> dict[
     shown, decided_by = diff_without_rejected(data, manifest, conn.print_root, state.files.read)
     matched = [c for c in shown["changes"] if _change_matches(c, arguments)]
     header = {key: value for key, value in shown.items() if key != "changes"}
+    unevaluated = (shown.get("summary") or {}).get("unevaluated_tables")
+    header |= _notes(["changes", *(["unevaluated_tables"] if unevaluated else [])])
 
     def render(units: Sequence[Any], first: bool, next_cursor: str | None) -> dict[str, Any]:
         del first
@@ -1452,6 +1471,14 @@ def _paged(reply: dict[str, Any], *, total: int, next_cursor: str | None) -> dic
         reply["next_cursor"] = next_cursor
 
     return reply
+
+
+def _notes(fields: list[str]) -> dict[str, Any]:
+    return {"notes": {field: _FIELD_NOTES[field] for field in fields}} if fields else {}
+
+
+def _any_carry(entries: Sequence[Any], key: str) -> bool:
+    return any(isinstance(entry, dict) and key in entry for entry in entries)
 
 
 def _load_manifest(state: ServedConnections, conn: ConnectionConfig) -> dict[str, Any] | None:

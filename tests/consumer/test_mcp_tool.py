@@ -57,11 +57,18 @@ from tests.fixtures.adversarial import (
     SCOPED_TABLE,
     SEVERAL_EDGES_COLUMN,
     SEVERAL_EDGES_TABLE,
+    SPELLED_COLUMN,
+    SPELLED_NAME,
+    SPELLED_TABLE,
     SPELLING_COLUMN,
     SPELLING_VALUES,
     TRUNCATED_FK_COLUMN,
     UNEVALUATED_TABLE,
     UNREADABLE_PROFILED_TABLE,
+    UNSHOWN_NOTE,
+    UNSHOWN_NOTE_COLUMN,
+    UNSHOWN_NOTE_TABLE,
+    UNSHOWN_NOTE_VALUE,
     VOID_VERDICT_NOTE,
     AdversarialPrint,
 )
@@ -90,6 +97,8 @@ COVERS = frozenset(
         "outside_print_entry",
         "delimiter_in_a_value",
         "value_spelling",
+        "unshown_value_note",
+        "physical_name_spelling",
         "scoped_complete_list",
         "scoped_part_list",
         "scoped_candidate_key",
@@ -581,3 +590,41 @@ def test_a_rejected_inferred_field_is_left_out(adversarial_print: AdversarialPri
         )[1]
         .splitlines()[0]
     )
+
+
+def test_a_note_on_an_unshown_value_reaches_get_table_context_query(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    state = _state(adversarial_print)
+    arguments = {"table": UNSHOWN_NOTE_TABLE, "purpose": "query"}
+    md = _mcp_pages.joined(_mcp_pages.pages(state, "get_table_context", arguments))
+    payload = _mcp_pages.merged(
+        _mcp_pages.pages(state, "get_table_context", arguments | {"format": "json"}),
+    )
+
+    assert f"- {UNSHOWN_NOTE_COLUMN}: " in md
+    assert f"'{UNSHOWN_NOTE_VALUE}' = {UNSHOWN_NOTE}" in md
+    assert {"value": UNSHOWN_NOTE_VALUE, "note": UNSHOWN_NOTE} in payload["value_notes"][
+        UNSHOWN_NOTE_COLUMN
+    ]
+
+
+def test_a_column_is_named_and_resolved_by_its_database_spelling(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    state = _state(adversarial_print)
+    arguments = {"table": SPELLED_TABLE, "purpose": "query"}
+    md = _mcp_pages.joined(_mcp_pages.pages(state, "get_table_context", arguments))
+    payload = _mcp_pages.merged(
+        _mcp_pages.pages(state, "get_table_context", arguments | {"format": "json"}),
+    )
+    resolved = _dict_result(
+        adversarial_print,
+        "resolve_value",
+        {"table": SPELLED_TABLE, "column": SPELLED_NAME, "text": "x"},
+    )
+
+    assert f"| {SPELLED_NAME} | " in md
+    assert f"| {SPELLED_COLUMN} | " not in md
+    assert payload["physical_names"] == {SPELLED_TABLE: {SPELLED_COLUMN: SPELLED_NAME}}
+    assert (resolved["column"], resolved["match"]) == (SPELLED_COLUMN, "stored")

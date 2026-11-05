@@ -36,7 +36,7 @@ _NOT_AN_FQN = {
     ("conformance/diff.py", "check_redacted_values"): "a statistic path",
     ("engine/carried.py", "redaction_mismatches"): "a column-grain display name",
     ("engine/context_assembler.py", "_endpoint"): "a key path inside one column",
-    ("engine/context_assembler.py", "_inherited_notes"): "a column-grain display name",
+    ("engine/context_assembler.py", "_column_label"): "a column-grain display name",
     ("engine/context_assembler.py", "open_questions"): "a column-grain display name",
     ("engine/context_assembler.py", "_referencer"): "a column-grain display name",
     ("engine/context_assembler.py", "_target"): "a column-grain display name",

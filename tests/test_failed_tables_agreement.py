@@ -32,11 +32,15 @@ _NEEDS_NO_FAILURES = {
     ("engine/context_assembler.py", "incoming_rejections"): "reads present referencers' files",
     ("engine/context_assembler.py", "_incoming_cardinalities"): "reads present referencers' files",
     ("engine/context_assembler.py", "_inherited_notes"): "reads present sources' annotation files",
+    ("engine/context_assembler.py", "_column_spellings"): (
+        "reads present joined and source tables' statistics files"
+    ),
     ("engine/context_assembler.py", "open_questions"): "reads one present table's files",
     ("mcp/resources.py", "_without_rejected_edges"): "reads one present table's annotations",
     ("mcp/resources.py", "diff_without_rejected"): "reads present source tables' annotations",
     ("engine/thresholds.py", "resolve"): "resolves thresholds for present entries",
     ("mcp/resources.py", "_enumerate_connection"): "lists files; an unprofiled table has none",
+    ("mcp/instructions.py", "_summary"): "counts tables; an unprofiled one keeps its last print",
     ("mcp/tools.py", "_freshness"): "judges the freshness of present entries",
     ("mcp/tools.py", "_tool_search_columns"): "searches columns; an unprofiled table has none",
 }

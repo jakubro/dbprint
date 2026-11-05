@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -103,9 +103,18 @@ HUMAN_EDGE_NOTE = "the curation state a reading was taken under"
 REJECTED_FIELD_TABLE = "public.curation_event"
 REJECTED_FIELD_COLUMN = "id"
 REJECTED_FIELD_NOTE = "issued per import, so it identifies no event on its own"
+# A value note on a value the sampled `id` list does not carry (SPEC 2.7.1).
+UNSHOWN_NOTE_TABLE = "public.batch"
+UNSHOWN_NOTE_COLUMN = "id"
+UNSHOWN_NOTE_VALUE = "00000000-0000-7000-8000-000000000042"
+UNSHOWN_NOTE = "the placeholder an import writes before its event exists"
 # `manifest.annotations.yaml`'s notes (SPEC 2.7.3), which a reader of any one table must meet.
 CONNECTION_NOTE = "condition codes are the curation states the herbarium assigns at intake"
 UNREADABLE_PROFILED_TABLE = "public.wide_lookup"
+# A column the catalog spells otherwise than its lowercase key (SPEC 2.2.4).
+SPELLED_TABLE = "public.wide_lookup"
+SPELLED_COLUMN = "b"
+SPELLED_NAME = "B"
 UNREADABLE_PROFILED_AT = "not-a-date"
 EXTREME_ROW_COUNT = 10_000
 # Every float statistic of `wide`/`tiny` sits where `str(float)` switches to exponent form.
@@ -223,7 +232,7 @@ def _fixture_tables() -> dict[str, MockTable]:
                 cardinality=60,
                 cardinality_ratio=0.24,
                 cardinality_method="exact",
-                values=tuple(ValueCount(value=f"rank-{i:02d}", count=1) for i in range(30)),
+                values=tuple(ValueCount(value=f"rank-{i:02d}", count=4) for i in range(30)),
                 values_coverage=TRUNCATED_FK_COVERAGE,
                 distribution="uniform",
                 empty_count=0,
@@ -398,9 +407,10 @@ def _fixture_tables() -> dict[str, MockTable]:
         rows_scanned=0,
     )
 
+    a, b, c = columns(("a", "text"), ("b", "text"), ("c", "text"))
     wide_lookup = mock_table(
         "public.wide_lookup",
-        columns(("a", "text"), ("b", "text"), ("c", "text")),
+        (a, replace(b, physical_name=SPELLED_NAME), c),
         {
             name: ColumnStats(
                 sql_type="text",
@@ -418,7 +428,7 @@ def _fixture_tables() -> dict[str, MockTable]:
             )
             for name in ("a", "b", "c")
         },
-        ddl="CREATE TABLE public.wide_lookup (a text, b text, c text);\n",
+        ddl='CREATE TABLE public.wide_lookup (a text, "B" text, c text);\n',
         row_count=100,
     )
 
@@ -737,6 +747,22 @@ def _write_rejected_field(print_root: Path) -> None:
     )
 
 
+def _write_unshown_value_note(print_root: Path) -> None:
+    table_dir = print_root / Path(*UNSHOWN_NOTE_TABLE.split("."))
+    (table_dir / "statistics.annotations.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "format_version": 1,
+                "columns": {
+                    UNSHOWN_NOTE_COLUMN: {
+                        "values": [{"value": UNSHOWN_NOTE_VALUE, "note": UNSHOWN_NOTE}],
+                    },
+                },
+            },
+        ),
+    )
+
+
 def _drop_declared_statistics(print_root: Path) -> None:
     """Delete a declared `statistics.yaml` (SPEC 2.5) - a manifest promise disk no longer keeps.
 
@@ -788,6 +814,7 @@ def build(project_dir: Path) -> AdversarialPrint:
             first = runner.invoke(main, ["generate", "--no-tui"])
             assert first.exit_code == 3, first.output
             _write_rejected_field(project_dir / "prints" / CONN_NAME)
+            _write_unshown_value_note(project_dir / "prints" / CONN_NAME)
 
             second = runner.invoke(main, ["generate", "--no-tui"])
             assert second.exit_code == 0, second.output

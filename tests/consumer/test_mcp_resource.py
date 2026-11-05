@@ -47,12 +47,19 @@ from tests.fixtures.adversarial import (
     SCOPED_PART_PATH,
     SCOPED_TABLE,
     SEVERAL_EDGES_TABLE,
+    SPELLED_COLUMN,
+    SPELLED_NAME,
+    SPELLED_TABLE,
     SPELLING_COLUMN,
     SPELLING_VALUES,
     TRUNCATED_FK_COLUMN,
     UNEVALUATED_TABLE,
     UNREADABLE_PROFILED_AT,
     UNREADABLE_PROFILED_TABLE,
+    UNSHOWN_NOTE,
+    UNSHOWN_NOTE_COLUMN,
+    UNSHOWN_NOTE_TABLE,
+    UNSHOWN_NOTE_VALUE,
     VOID_VERDICT_NOTE,
     AdversarialPrint,
 )
@@ -81,6 +88,8 @@ COVERS = frozenset(
         "outside_print_entry",
         "delimiter_in_a_value",
         "value_spelling",
+        "unshown_value_note",
+        "physical_name_spelling",
         "scoped_complete_list",
         "scoped_part_list",
         "scoped_candidate_key",
@@ -391,3 +400,21 @@ def test_a_rejected_inferred_field_is_left_out(adversarial_print: AdversarialPri
         statistics["columns"][REJECTED_FIELD_COLUMN].get("inferred") or {}
     )
     assert annotations["columns"][REJECTED_FIELD_COLUMN]["rejected"] == ["candidate_key"]
+
+
+def test_a_note_on_an_unshown_value_is_served_in_statistics_annotations(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    conn = adversarial_print.conn.name
+    uri = f"dbprint://{conn}/{UNSHOWN_NOTE_TABLE}/statistics_annotations"
+    annotations = yaml.safe_load(mcp_resources.read(_state(adversarial_print), uri).content)
+
+    assert {"value": UNSHOWN_NOTE_VALUE, "note": UNSHOWN_NOTE} in annotations["columns"][
+        UNSHOWN_NOTE_COLUMN
+    ]["values"]
+
+
+def test_a_columns_spelling_is_served_in_statistics(adversarial_print: AdversarialPrint) -> None:
+    column = _statistics(adversarial_print, SPELLED_TABLE)["columns"][SPELLED_COLUMN]
+
+    assert column["physical_name"] == SPELLED_NAME

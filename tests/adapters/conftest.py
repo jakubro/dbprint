@@ -13,6 +13,7 @@ import re
 import secrets
 import signal
 import socket
+import sqlite3
 import subprocess
 import threading
 import time
@@ -49,6 +50,7 @@ from dbprint.adapters import (
     Range,
     RedshiftAdapter,
     SnowflakeAdapter,
+    SqliteAdapter,
     UniqueKeyMeta,
     ValueCount,
 )
@@ -72,6 +74,7 @@ PARAMS = [
     "redshift",
     "databricks",
     "bigquery",
+    "sqlite",
 ]
 SQL_PARAMS = [
     "postgres",
@@ -82,6 +85,7 @@ SQL_PARAMS = [
     "redshift",
     "databricks",
     "bigquery",
+    "sqlite",
 ]
 
 _BIGQUERY_EMULATOR_IMAGE = "ghcr.io/goccy/bigquery-emulator:0.8.1"
@@ -338,6 +342,20 @@ def _adapter_factory_for(request: pytest.FixtureRequest, kind: str) -> Callable[
             return a
 
         return build_duckdb
+
+    if kind == "sqlite":
+        sqlite_connection = request.getfixturevalue("sqlite_native_connection")
+
+        def build_sqlite() -> Adapter:
+            a = SqliteAdapter(
+                {"database": ":memory:"},
+                cursor_factory=lambda _p: sqlite_connection.cursor(),
+            )
+            a.connect()
+
+            return a
+
+        return build_sqlite
 
     if kind == "clickhouse":
         native_cursor = request.getfixturevalue("clickhouse_native_connection")
@@ -1194,6 +1212,101 @@ def _seed_contract_schema_duckdb(con: duckdb.DuckDBPyConnection) -> None:
     con.execute(
         "INSERT INTO seedbank.tie_spellings VALUES\n"
         + _tie_spellings_values(lambda hours: f"INTERVAL '{hours} hours'"),
+    )
+
+
+@pytest.fixture
+def sqlite_native_connection() -> Iterator[sqlite3.Connection]:
+    """Fresh in-memory SQLite database seeded with the contract-suite schema, read by the adapter.
+
+    Shared across threads, as a run's sessions are; the tables sit in `main`, SQLite's one schema.
+    """
+
+    con = sqlite3.connect(":memory:", check_same_thread=False, autocommit=True)
+    _seed_contract_schema_sqlite(con)
+
+    try:
+        yield con
+    finally:
+        con.close()
+
+
+def _seed_contract_schema_sqlite(con: sqlite3.Connection) -> None:
+    """Populate the SQLite database with the contract-suite tables - mirrors the duckdb fixture,
+    a UUID as its text and a timestamp as the text SQLite stores it as.
+    """
+
+    con.execute(
+        """
+        CREATE TABLE herbarium (
+            id UUID PRIMARY KEY,
+            name VARCHAR(64) NOT NULL,
+            rank VARCHAR(16) NOT NULL,
+            code VARCHAR(16) NOT NULL
+        )
+        """,
+    )
+    con.execute("CREATE UNIQUE INDEX herbarium_code_ux ON herbarium (code)")
+    con.execute(
+        """
+        CREATE TABLE curator (
+            id UUID PRIMARY KEY,
+            email VARCHAR(255) UNIQUE NOT NULL,
+            herbarium_id UUID REFERENCES herbarium(id),
+            is_active BOOLEAN NOT NULL DEFAULT 1,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            seed_count INTEGER,
+            withdrawn_at TIMESTAMP
+        )
+        """,
+    )
+    con.execute("CREATE INDEX curator_email_idx ON curator (email)")
+    con.execute(
+        """
+        INSERT INTO herbarium (id, name, rank, code) VALUES
+          ('00000000-0000-7000-8000-000000000001', 'Ashgrove',   'us', 'ASHGROVE'),
+          ('00000000-0000-7000-8000-000000000002', 'Thornfield', 'eu', 'THORNFIELD'),
+          ('00000000-0000-7000-8000-000000000003', 'Millbrook',  'us', 'MILLBROOK')
+        """,
+    )
+    con.execute(
+        """
+        INSERT INTO curator (id, email, herbarium_id, is_active, seed_count) VALUES
+          ('00000000-0000-7000-8000-000000000011', 'a@x.com', '00000000-0000-7000-8000-000000000001', 1, 30),
+          ('00000000-0000-7000-8000-000000000012', 'b@x.com', '00000000-0000-7000-8000-000000000001', 1, 31),
+          ('00000000-0000-7000-8000-000000000013', 'c@x.com', '00000000-0000-7000-8000-000000000002', 0, NULL)
+        """,
+    )
+    con.execute(
+        """
+        CREATE TABLE viability_check (
+            id UUID PRIMARY KEY,
+            herbarium_id UUID REFERENCES herbarium(id),
+            label VARCHAR(32) NOT NULL,
+            score INTEGER NOT NULL,
+            observed_at TIMESTAMP NOT NULL,
+            rank VARCHAR(8) NOT NULL,
+            within_day_at TIMESTAMP NOT NULL,
+            across_midnight_at TIMESTAMP NOT NULL,
+            late_evening_at TIMESTAMP NOT NULL,
+            scheduled_at TIMESTAMP NOT NULL,
+            expires_at TIMESTAMP NOT NULL,
+            subsecond_at TIMESTAMP NOT NULL
+        )
+        """,
+    )
+    con.execute(
+        "INSERT INTO viability_check "
+        "(id, herbarium_id, label, score, observed_at, rank, within_day_at, across_midnight_at, late_evening_at, scheduled_at, expires_at, subsecond_at) VALUES\n"
+        + _wide_values_clause(),
+    )
+    con.execute(
+        "CREATE TABLE tie_spellings "
+        "(id INTEGER PRIMARY KEY, weight DOUBLE, step INTEGER, letter VARCHAR, span TEXT)",
+    )
+    con.execute(
+        "INSERT INTO tie_spellings VALUES\n"
+        + _tie_spellings_values(lambda hours: f"'{hours} hours'"),
     )
 
 

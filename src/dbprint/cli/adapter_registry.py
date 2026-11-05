@@ -16,6 +16,7 @@ from dbprint.adapters import (
     PostgresAdapter,
     RedshiftAdapter,
     SnowflakeAdapter,
+    SqliteAdapter,
 )
 
 
@@ -28,6 +29,7 @@ ADAPTERS: dict[str, type[Adapter]] = {
     "postgres": PostgresAdapter,
     "redshift": RedshiftAdapter,
     "snowflake": SnowflakeAdapter,
+    "sqlite": SqliteAdapter,
 }
 
 

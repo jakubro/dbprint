@@ -1302,6 +1302,9 @@ class Engine:
                 comments_known=comments_known,
             )
 
+        with _operation("read_columns"):
+            columns = self._adapter.read_columns(tbl.fqn, columns)
+
         fk_source_columns = frozenset(c for fk in relationships for c in fk.column)
 
         if tbl.type == "view" and self._conn.min_rows_conditions_name(tbl.fqn):

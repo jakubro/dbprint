@@ -130,6 +130,7 @@ _GUARDED_HELPER: dict[str, str] = {
     "databricks": "_fetch_temporal_block",
     "redshift": "_approximate_distribution_via_top_n",
     "bigquery": "_approximate_distribution_via_top_n",
+    "sqlite": "_fetch_temporal_block",
 }
 
 # Hand-authored rather than taken from `temporal_block_unmeasured`: an adapter that recomputed

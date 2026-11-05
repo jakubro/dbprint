@@ -24,6 +24,7 @@ _INT64 = {
     "clickhouse": "Int64",
     "databricks": "BIGINT",
     "bigquery": "INT64",
+    "sqlite": "INTEGER",
 }
 
 
@@ -35,6 +36,14 @@ def test_a_64_bit_total_is_exact_and_its_mean_inside_the_range(
     seed_count = _measure(vendor, request, _INT64[vendor], _INT64_BASE)
 
     assert seed_count.range is not None
+
+    if vendor == "sqlite":
+        # SQLite's SUM refuses a total past int64, and it offers no wider exact type.
+        assert seed_count.unmeasured == ("mean", "sum")
+        assert (seed_count.mean, seed_count.sum) == (None, None)
+
+        return
+
     assert seed_count.mean is not None
 
     if vendor == "bigquery":
@@ -197,6 +206,13 @@ def _seed_duckdb(request: pytest.FixtureRequest, sql_type: str, values: list[str
         con.execute(statement)
 
 
+def _seed_sqlite(request: pytest.FixtureRequest, sql_type: str, values: list[str]) -> None:
+    con = request.getfixturevalue("sqlite_native_connection")
+
+    for statement in _statements("tally", sql_type, values):
+        con.execute(statement)
+
+
 def _seed_snowflake(request: pytest.FixtureRequest, sql_type: str, values: list[str]) -> None:
     shim = request.getfixturevalue("snowflake_duckdb_connection")
 
@@ -254,4 +270,5 @@ _SEEDERS: dict[str, Any] = {
     "postgres": _seed_postgres,
     "redshift": _seed_redshift,
     "snowflake": _seed_snowflake,
+    "sqlite": _seed_sqlite,
 }

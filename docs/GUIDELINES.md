@@ -282,6 +282,17 @@ The acid test: if you replaced the implementation with a no-op or a wrong implem
 
 ---
 
+## 4. Documentation voice
+
+The site pages and the README state what dbprint does, in a neutral register.
+
+- ✅ **Always** state what dbprint does, what a command prints, or what a file holds.
+- ✅ **Always** give a heading the name of what its section contains.
+- 🚫 **Never** describe an audience: what people, users, newcomers or teams do, want, reach for or get wrong.
+- 🚫 **Never** write a line whose job is to persuade — a slogan or a closing flourish.
+
+---
+
 ## Cross-references
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) — module map, layering, adapter protocol, engine flow, write contract, error model, exit codes, test substrates.

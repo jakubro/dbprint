@@ -388,18 +388,18 @@ def test_duckdb_publishes_a_timestamptz_ns_column_as_its_microsecond_sibling(
 ) -> None:
     database = tmp_path / "garden.duckdb"
     con = duckdb.connect(str(database))
-    con.execute("CREATE TABLE reading (id INTEGER, taken TIMESTAMPTZ_NS, plain TIMESTAMPTZ)")
+    con.execute("CREATE TABLE gauge (id INTEGER, taken TIMESTAMPTZ_NS, plain TIMESTAMPTZ)")
     con.execute(
-        "INSERT INTO reading SELECT i, CAST(TIMESTAMPTZ '2026-03-01 08:00:00+00' + to_hours(i) "
+        "INSERT INTO gauge SELECT i, CAST(TIMESTAMPTZ '2026-03-01 08:00:00+00' + to_hours(i) "
         "AS TIMESTAMPTZ_NS), TIMESTAMPTZ '2026-03-01 08:00:00+00' + to_hours(i) FROM range(1, 400) r(i)",
     )
     con.execute(
-        "INSERT INTO reading VALUES (400, CAST('2026-03-20 06:30:00.123456789+00' AS TIMESTAMPTZ_NS), "
+        "INSERT INTO gauge VALUES (400, CAST('2026-03-20 06:30:00.123456789+00' AS TIMESTAMPTZ_NS), "
         "TIMESTAMPTZ '2026-03-20 06:30:00.123456+00')",
     )
     con.close()
 
-    payload = _generated(DuckdbAdapter({"database": str(database)}), "duckdb", tmp_path, "reading")
+    payload = _generated(DuckdbAdapter({"database": str(database)}), "duckdb", tmp_path, "gauge")
     taken, plain = payload["columns"]["taken"], payload["columns"]["plain"]
 
     assert taken["classification"] == "temporal"
@@ -452,9 +452,9 @@ def test_duckdb_publishes_an_infinite_nanosecond_instant_as_its_microsecond_sibl
 def test_duckdb_keeps_timestamptz_ns_values_a_nanosecond_apart(tmp_path: Path) -> None:
     database = tmp_path / "garden.duckdb"
     con = duckdb.connect(str(database))
-    con.execute("CREATE TABLE pulse (t TIMESTAMPTZ_NS)")
+    con.execute("CREATE TABLE tally (t TIMESTAMPTZ_NS)")
     con.execute(
-        "INSERT INTO pulse SELECT CASE WHEN i % 2 = 0 "
+        "INSERT INTO tally SELECT CASE WHEN i % 2 = 0 "
         "THEN CAST('2026-03-04 06:00:00+00' AS TIMESTAMPTZ_NS) "
         "ELSE CAST('2026-03-04 06:00:00.0000001+00' AS TIMESTAMPTZ_NS) END FROM range(40) r(i)",
     )
@@ -484,18 +484,18 @@ def test_duckdb_publishes_each_value_a_nanosecond_apart_and_its_own_print_passes
     database = tmp_path / "garden.duckdb"
     con = duckdb.connect(str(database))
     con.execute(
-        "CREATE TABLE pulse (t TIMESTAMP_NS, tz TIMESTAMPTZ_NS, clock TIME_NS, whole TIMESTAMP_NS, "
+        "CREATE TABLE tally (t TIMESTAMP_NS, tz TIMESTAMPTZ_NS, clock TIME_NS, whole TIMESTAMP_NS, "
         "tz_whole TIMESTAMPTZ_NS, clock_whole TIME_NS)",
     )
     con.execute(
-        f"INSERT INTO pulse SELECT {_NANOSECOND_PAIRS_SQL}, "
+        f"INSERT INTO tally SELECT {_NANOSECOND_PAIRS_SQL}, "
         "CAST('2026-03-04 06:00:00.5' AS TIMESTAMP_NS), "
         "CAST('2026-03-04 06:00:00.5+00' AS TIMESTAMPTZ_NS), "
         "CAST('06:00:00.5' AS TIME_NS) FROM range(40) r(i)",
     )
     con.close()
 
-    payload = _generated(DuckdbAdapter({"database": str(database)}), "duckdb", tmp_path, "pulse")
+    payload = _generated(DuckdbAdapter({"database": str(database)}), "duckdb", tmp_path, "tally")
 
     assert _published(payload) == {
         **_NANOSECOND_PAIRS,
@@ -508,18 +508,18 @@ def test_duckdb_publishes_each_value_a_nanosecond_apart_and_its_own_print_passes
 def test_duckdb_publishes_a_time_ns_bound_with_every_digit(tmp_path: Path) -> None:
     database = tmp_path / "garden.duckdb"
     con = duckdb.connect(str(database))
-    con.execute("CREATE TABLE shift (clock TIME_NS)")
+    con.execute("CREATE TABLE orchard (clock TIME_NS)")
     con.execute(
-        "INSERT INTO shift SELECT CAST(TIME '00:01:00' + to_minutes(i) AS TIME_NS) "
+        "INSERT INTO orchard SELECT CAST(TIME '00:01:00' + to_minutes(i) AS TIME_NS) "
         "FROM range(597) r(i)",
     )
     con.execute(
-        "INSERT INTO shift VALUES (CAST('00:00:00.000000600' AS TIME_NS)), "
+        "INSERT INTO orchard VALUES (CAST('00:00:00.000000600' AS TIME_NS)), "
         "(CAST('23:59:59.999999999' AS TIME_NS)), (CAST('12:00:00.123456789' AS TIME_NS))",
     )
     con.close()
 
-    clock = _generated(DuckdbAdapter({"database": str(database)}), "duckdb", tmp_path, "shift")[
+    clock = _generated(DuckdbAdapter({"database": str(database)}), "duckdb", tmp_path, "orchard")[
         "columns"
     ]["clock"]
 
@@ -536,12 +536,12 @@ def test_clickhouse_publishes_each_value_a_nanosecond_apart_in_any_zone(
 ) -> None:
     cursor = clickhouse_native_connection
     cursor.execute(
-        "CREATE TABLE seedbank.pulse (id Int32, t DateTime64(9, 'UTC'), "
+        "CREATE TABLE seedbank.tally (id Int32, t DateTime64(9, 'UTC'), "
         "tzk DateTime64(9, 'Asia/Kathmandu'), clock Time64(9), whole DateTime64(9, 'UTC')) "
         "ENGINE = MergeTree ORDER BY id",
     )
     cursor.execute(
-        "INSERT INTO seedbank.pulse SELECT number, "
+        "INSERT INTO seedbank.tally SELECT number, "
         "fromUnixTimestamp64Nano(toInt64(1772604000000000000 + number % 2 * 100), 'UTC'), "
         "fromUnixTimestamp64Nano(toInt64(1772604000000000000 + number % 2 * 100), 'Asia/Kathmandu'), "
         "toTime64(fromUnixTimestamp64Nano(toInt64(21600000000000 + number % 2 * 100), 'UTC'), 9), "
@@ -552,7 +552,7 @@ def test_clickhouse_publishes_each_value_a_nanosecond_apart_in_any_zone(
         cursor_factory=lambda _params: cursor,
     )
 
-    published = _published(_generated(adapter, "clickhouse", tmp_path, "pulse"))
+    published = _published(_generated(adapter, "clickhouse", tmp_path, "tally"))
     del published["id"]
 
     assert published == {
@@ -565,9 +565,9 @@ def test_clickhouse_publishes_each_value_a_nanosecond_apart_in_any_zone(
 
 def test_snowflake_publishes_each_value_a_nanosecond_apart(tmp_path: Path) -> None:
     adapter = snowflake(
-        "CREATE TABLE seedbank.pulse (t TIMESTAMP_NS, tz TIMESTAMPTZ_NS, clock TIME_NS, "
+        "CREATE TABLE seedbank.tally (t TIMESTAMP_NS, tz TIMESTAMPTZ_NS, clock TIME_NS, "
         "whole TIMESTAMP_NS)",
-        f"INSERT INTO seedbank.pulse SELECT {_NANOSECOND_PAIRS_SQL}, "
+        f"INSERT INTO seedbank.tally SELECT {_NANOSECOND_PAIRS_SQL}, "
         "CAST('2026-03-04 06:00:00.5' AS TIMESTAMP_NS) FROM range(40) r(i)",
         column_types={
             "t": "TIMESTAMP_NTZ",
@@ -577,7 +577,7 @@ def test_snowflake_publishes_each_value_a_nanosecond_apart(tmp_path: Path) -> No
         },
     )
 
-    payload = _generated(adapter, "snowflake", tmp_path, "pulse")
+    payload = _generated(adapter, "snowflake", tmp_path, "tally")
 
     assert _published(payload) == {
         **_NANOSECOND_PAIRS,
@@ -591,11 +591,11 @@ def test_clickhouse_publishes_a_seven_digit_instant_past_the_nanosecond_range(
 ) -> None:
     cursor = clickhouse_native_connection
     cursor.execute(
-        "CREATE TABLE seedbank.vault_door (id Int32, sealed DateTime64(7, 'UTC')) "
+        "CREATE TABLE seedbank.nursery (id Int32, sealed DateTime64(7, 'UTC')) "
         "ENGINE = MergeTree ORDER BY id",
     )
     cursor.execute(
-        "INSERT INTO seedbank.vault_door SELECT number, "
+        "INSERT INTO seedbank.nursery SELECT number, "
         "if(number = 199, toDateTime64('2270-07-19 00:00:00.0000003', 7, 'UTC'), "
         "toDateTime64('2270-01-01 00:00:00', 7, 'UTC') + toIntervalDay(number)) FROM numbers(200)",
     )
@@ -604,7 +604,7 @@ def test_clickhouse_publishes_a_seven_digit_instant_past_the_nanosecond_range(
         cursor_factory=lambda _params: cursor,
     )
 
-    sealed = _generated(adapter, "clickhouse", tmp_path, "vault_door")["columns"]["sealed"]
+    sealed = _generated(adapter, "clickhouse", tmp_path, "nursery")["columns"]["sealed"]
 
     assert sealed["range"] == {
         "min": "2270-01-01T00:00:00Z",
@@ -620,18 +620,18 @@ def test_a_nanosecond_instant_hashes_alike_on_duckdb_and_clickhouse(
 ) -> None:
     database = tmp_path / "garden.duckdb"
     con = duckdb.connect(str(database))
-    con.execute("CREATE TABLE beat (id INTEGER, t TIMESTAMPTZ_NS)")
+    con.execute("CREATE TABLE seed_lot (id INTEGER, t TIMESTAMPTZ_NS)")
     con.execute(
-        "INSERT INTO beat SELECT i, make_timestamp_ns(1772604000000000000 + i * 100) "
+        "INSERT INTO seed_lot SELECT i, make_timestamp_ns(1772604000000000000 + i * 100) "
         "AT TIME ZONE 'UTC' FROM range(50) r(i)",
     )
     con.close()
     cursor = clickhouse_native_connection
     cursor.execute(
-        "CREATE TABLE seedbank.beat (id Int32, t DateTime64(9, 'UTC')) ENGINE = MergeTree ORDER BY id",
+        "CREATE TABLE seedbank.seed_lot (id Int32, t DateTime64(9, 'UTC')) ENGINE = MergeTree ORDER BY id",
     )
     cursor.execute(
-        "INSERT INTO seedbank.beat SELECT number, "
+        "INSERT INTO seedbank.seed_lot SELECT number, "
         "fromUnixTimestamp64Nano(toInt64(1772604000000000000 + number * 100), 'UTC') FROM numbers(50)",
     )
     clickhouse = ClickhouseAdapter(
@@ -643,9 +643,9 @@ def test_a_nanosecond_instant_hashes_alike_on_duckdb_and_clickhouse(
         DuckdbAdapter({"database": str(database)}),
         "duckdb",
         tmp_path / "d",
-        "beat",
+        "seed_lot",
     )
-    on_clickhouse = _generated(clickhouse, "clickhouse", tmp_path / "c", "beat")
+    on_clickhouse = _generated(clickhouse, "clickhouse", tmp_path / "c", "seed_lot")
 
     listed = {entry["value"] for entry in on_duckdb["columns"]["t"]["values"]}
 
@@ -666,9 +666,16 @@ def test_a_duckdb_tuple_column_leaves_the_grain_to_the_measured_search(
     with caplog.at_level(logging.WARNING, logger="dbprint"):
         payload = _generated(DuckdbAdapter({"database": str(database)}), "duckdb", tmp_path, "plot")
 
-    assert payload["columns"]["spot"]["classification"] == "unsupported"
+    spot = payload["columns"]["spot"]
+
+    assert spot["classification"] == "composite"
+    assert {path: part["occurrences"] for path, part in spot["parts"].items()} == {
+        '["1"]': 500,
+        '["2"]': 500,
+    }
+    assert "candidate_key" not in spot.get("inferred", {})
     assert payload["grain"]["keys"] == [{"columns": ["bed", "pos"], "detection": "measured"}]
-    assert not [r for r in caplog.records if "suppressed" in r.getMessage()]
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
 
 
 _CLICKHOUSE_DECLARATIONS = {

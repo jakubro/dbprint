@@ -1,6 +1,6 @@
 # Withholding cell values
 
-A print carries real cell values: the value list of a categorical column, the bounds of a range, the percentiles of a numeric. That is what makes it useful to a reader, and it is also why an email column or a street address needs handling before the file is committed.
+A print carries real cell values: the value list of a categorical column, the bounds of a range, the percentiles of a numeric. An email column or a street address therefore needs handling before the file is committed.
 
 Redaction withholds the **literals** and keeps the **measurements**. A redacted column still publishes its null count, its cardinality, its ratios, its value counts, its coverage and its distribution — all identical to an unredacted run. Only the values themselves are replaced or removed.
 
@@ -24,11 +24,11 @@ connections:
 
 | Criterion | Matches on | Use it for |
 |---|---|---|
-| `columns` | globs over `<table>.<column>` | the column detection misses, and the one your own naming convention marks |
-| `sensitivity` | the column's own detected `inferred.sensitivity` | a category, so a column added next quarter is covered by a rule written today |
+| `columns` | globs over `<table>.<column>` | the column detection misses, and the one the project's own naming convention marks |
+| `sensitivity` | the column's own detected `inferred.sensitivity` | a category, so a rule written now also covers a column added later |
 | `looks_like` | the column's own detected `inferred.looks_like` | a shape, whatever the column is called |
 
-The second and third are the ones that age well. A glob covers the columns you know about; a category covers the ones the schema has not grown yet. `sensitivity` and `looks_like` are closed vocabularies checked when the config loads, so a typo is refused by name rather than quietly covering nothing — see [SPEC 4.4.1](../format/v1/SPEC.md#441-categories) for the categories and [SPEC 4.1](../format/v1/SPEC.md#41-looks_like-patterns) for the shapes. `columns` is an open glob and is not checked, because a pattern matching no table today may match one tomorrow.
+A glob covers the columns whose names it matches; a category or a shape also covers a column whose name no glob anticipated. `sensitivity` and `looks_like` are closed vocabularies checked when the config loads, so a typo is refused by name rather than quietly covering nothing — see [SPEC 4.4.1](../format/v1/SPEC.md#441-categories) for the categories and [SPEC 4.1](../format/v1/SPEC.md#41-looks_like-patterns) for the shapes. `columns` is an open glob and is not checked, because a pattern matching no table today may match one tomorrow.
 
 `looks_like` is a 95% verdict, so a `looks_like` rule misses a column that is mostly but not wholly one shape; a `sensitivity` rule reaches it once half its sampled values carry the category's shape ([SPEC 4.4.4](../format/v1/SPEC.md#444-thresholds)).
 
@@ -46,7 +46,7 @@ The column declares which one it received, with a `redacted` marker naming the p
 
 ## Where the salt lives, and why not in the config
 
-`hash` is refused without a salt. An unsalted digest of an email address is reversible by dictionary attack in minutes, so the digest is only worth anything with a secret behind it — and `.dbprint.yaml` is committed.
+`hash` is refused without a salt. An unsalted digest of an email address is reversible by dictionary attack in minutes, so the digest protects nothing without a secret behind it — and `.dbprint.yaml` is committed.
 
 The salt therefore lives with the credentials, never in the project config:
 
@@ -101,6 +101,8 @@ The producer applies the rule while writing the column, and the conformance vali
 A covered column carries no `sketch`, because a set of digests of the withheld values is that column enumerated in another form — and a `detection: measured` join edge is built from a sketch, so edges resting on a covered column disappear with it.
 
 A redacted column has no literal to compare against, so predicates over `accepted_values`, `range` or `percentiles` are refused rather than evaluated against placeholders. Temporal columns coarsen their derived day counts as well. If a data-quality assertion depends on a column's actual values, redacting that column removes the assertion's ground truth — see [Assertions](../ASSERTIONS.md).
+
+A note written on one of a covered column's values names a literal the rule withholds, so `dbprint context --purpose query` renders it nowhere: not on the column, and not on a column whose `derived_from` names it. The column's own `note` still renders, on both.
 
 ## The DDL is masked, not redacted
 

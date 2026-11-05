@@ -17,7 +17,7 @@ from tests._prints import connection_config
 
 
 _FILE_SUFFIXES = ("_file", "_path", "_dir", "_dirname")
-_FILE_VALUED = {"duckdb": {"database"}}
+_FILE_VALUED = {"duckdb": {"database"}, "sqlite": {"database"}}
 _NOT_A_FILESYSTEM_PATH = {"http_path"}
 
 

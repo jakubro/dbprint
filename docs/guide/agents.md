@@ -1,13 +1,13 @@
 # Giving a print to an agent
 
-A committed print is already readable by an agent that can open files in the workspace — that is the point of putting it in the repository as plain text. What this page adds is the two ways to make the agent *reliably* reach for it, and to read it correctly when it does.
+A committed print is plain text in the repository, readable by any agent that can open files in the workspace. This page covers the two ways to point an agent at it — a skill and an MCP server — and how an agent reads it correctly.
 
 Pick by what the client supports:
 
 | Surface | Use when |
 |---|---|
 | **The packaged skill** | The client takes markdown rules, skills or custom instructions. Nothing to run |
-| **The MCP server** | The client speaks MCP and you want native tool and resource primitives, multi-connection routing, and paged replies |
+| **The MCP server** | The client speaks MCP. Adds native tool and resource primitives, multi-connection routing, and paged replies |
 
 Both read the same files on disk. Neither opens a database connection.
 
@@ -47,15 +47,18 @@ Most clients take a JSON block naming the command:
 }
 ```
 
-`--project` is the part worth getting right. Without it the project resolves from the working directory, and the working directory of an editor-launched server is whatever the client happened to start it in. Naming the project explicitly makes the server independent of that. It accepts a directory whose direct child is `.dbprint.yaml`, that file itself, or a git address — so a print committed to another repository can be served without cloning it by hand. A git address's remote and ref may not begin with `-`, and its subpath must stay inside the cloned repository: relative, with no `..`, and not through a symlink that leads out.
+Without `--project` the project resolves from the working directory, and the working directory of an editor-launched server is whatever the client started it in. Naming the project explicitly makes the server independent of that. It accepts a directory whose direct child is `.dbprint.yaml`, that file itself, or a git address — so a print committed to another repository can be served without cloning it by hand. A git address's remote and ref may not begin with `-`, and its subpath must stay inside the cloned repository: relative, with no `..`, and not through a symlink that leads out.
 
 For a local socket instead of stdio, `--transport http --port 8765`. The bind address is loopback and cannot be widened, and the server answers only a request addressed to a loopback name, so a web page that rebinds its own name to `127.0.0.1` reaches nothing.
 
 ### What every agent reads on connect
 
-The server states which tool answers which question, then how to read an answer, as its own MCP `instructions` on every handshake:
+The server states what it serves, when to call it and which tool answers which question, as its own MCP `instructions` on every handshake — here, serving the reference example:
 
-> Answers questions about a database from its print, a snapshot dbprint took of it and committed to the repository: DDL, row counts, column statistics and value lists, joins, and notes people wrote. No database is queried. Answer from these tools, not the print's files, which lack the sampling, redaction and missing-measurement handling the tools apply.
+> Answers questions about the databases below from their prints - snapshots dbprint took and committed to the repository: DDL, row counts, column statistics, the exact stored spelling of values, joins, and notes people wrote on what columns and codes mean. No database is queried. Call these tools before writing, reviewing or debugging SQL against any of these tables, and answer from them, not the print's files, which lack the sampling, redaction and missing-measurement handling the tools apply.
+>
+> Served:
+> - production - postgres, printed 2026-03-09, 10 tables: arboretum.seedbank (9), arboretum.fixture (1)
 >
 > Which tool answers what:
 > - Writing SQL: get_table_context with purpose: query for every table the query touches - DDL, the Joins list, the data dictionary, value lists.
@@ -66,15 +69,9 @@ The server states which tool answers which question, then how to read an answer,
 > - What a field or a finding's spec_ref means: get_reference; how to read json/yaml fields: get_reference document: guide.
 > - The print's raw table index: get_manifest.
 >
-> Reading an answer:
-> - Scope. A table with a scope block was read in part, by a sample or a row filter; its statistics describe the rows scanned, not the table. Under a sample a row count - nulls, a value's count, a true/false split - MAY be multiplied by row_count / rows_scanned for a rough table-wide figure; under a filter nothing rescales, and a distinct count, ratio, bound, percentile, sum or mean never does.
-> - Inference. Fields under inferred, and joins whose detection is inferred or measured, are dbprint's guesses, not database constraints. No sensitivity on a column means nothing was detected, not that the column is safe to publish.
-> - Absence. A missing field is not zero. A field named in an unmeasured or disabled list was not measured: its value is unknown, not none.
-> - Meanings. A print states what the data holds, not what its codes, units or defaults mean: read the code or docs for any meaning it does not annotate.
+> Markdown replies open with a Terms list defining what they print - sampling, inferred joins, withheld values; read it before reusing a count.
 
-**Get the rescaling direction right.** Under a sample, a row count — nulls, a value's count, a true/false split — on a column carrying a population marker scales to table grain by `count * (row_count / rows_scanned)`; under a filter nothing rescales. A distinct count, a ratio, a bound, a percentile or an aggregate is not scalable at all, under any formula.
-
-`looks_like` publishes the `sampled`/`matched` draw it rests on and `candidate_key` is recomputable from `cardinality_ratio`; `sensitivity` publishes no evidence at all — an agent that has learned to trust `looks_like`'s published evidence should not extend the same trust to a `sensitivity` flag with nothing behind it.
+How to read an answer rides the reply itself: each Markdown reply opens with a `## Terms` list defining the labels it prints whose reading hides a rule, and a search, listing, diff or json/yaml table reply explains a field only some replies carry in its own `notes`.
 
 ### Tools
 
@@ -88,7 +85,7 @@ The server states which tool answers which question, then how to read an answer,
 | `get_diff` | what changed at the last generate |
 | `get_reference` | the format specification, served from the package |
 
-`get_table_context` is the one to reach for first: it assembles DDL, description, annotations and per-column notes into a single fragment rather than making the agent stitch four files together, and pages a long one: a section too long for one page continues on the next, never dropped. `search_columns` is the first call for a broader question — a name glob, a `text` search over column notes, `classification`/`sql_type`/`sensitivity`/`looks_like`/`redacted` filters and a `candidate_key` match, all ANDed, with `rows_scanned` and `row_count` both returned on a scoped match so a caller can tell a sampled number from a table-wide one without a second call.
+`get_table_context` is the first call for one table: it assembles DDL, description, annotations and per-column notes into a single fragment rather than making the agent stitch four files together, and pages a long one: a section too long for one page continues on the next, never dropped. `search_columns` is the first call for a broader question — a name glob, a `text` search over column notes, `classification`/`sql_type`/`sensitivity`/`looks_like`/`redacted` filters and a `candidate_key` match, all ANDed, with `rows_scanned` and `row_count` both returned on a scoped match so a caller can tell a sampled number from a table-wide one without a second call.
 
 A tool call never surfaces a bare protocol error: a fault comes back as a normal result with `is_error: true` and a readable message, so a client does not need special-case handling to show the agent what went wrong.
 
@@ -96,13 +93,13 @@ The full URI scheme, every tool signature, and the multi-connection rules are in
 
 ### Resources — two shapes
 
-Most artifacts are per-connection, at `dbprint://<connection>/...`, so a client that prefers resources over tools gets the raw YAML. Two resources are the exception: the format specification and the assertion grammar live at `dbprint:///reference/spec` and `dbprint:///reference/assertions` — an empty-authority URI carrying no connection at all, listed once for the whole server rather than once per connection, since neither document is connection-specific.
+Most artifacts are per-connection, at `dbprint://<connection>/...`, so a client that reads resources rather than tools gets the raw YAML. Two resources are the exception: the format specification and the assertion grammar live at `dbprint:///reference/spec` and `dbprint:///reference/assertions` — an empty-authority URI carrying no connection at all, listed once for the whole server rather than once per connection, since neither document is connection-specific.
 
 ### Connections, when there is more than one
 
 The server resolves what it serves at startup: a single connection is served without being named, and so is every connection marked `auto: true`. With two or more served and no default, a tool call that omits `connection` returns an error rather than guessing. Passing a name — `dbprint serve warehouse` — makes that one the default.
 
-## Without either
+## `dbprint context` on the command line
 
 `dbprint context` writes the same assembled fragment to stdout, which is enough for a client that takes pasted text or a pipeline that builds a prompt:
 
@@ -111,18 +108,18 @@ $ dbprint context arboretum.seedbank.accession
 $ dbprint context 'arboretum.seedbank.*' --budget 4000
 ```
 
-### What the fragment is for
+### `--purpose`: describing or querying
 
 `--purpose` selects the fragment, and the choice is between describing the data and querying it:
 
-| `--purpose` | Sections | Read it when |
+| `--purpose` | Sections | Use |
 |---|---|---|
-| `profile` (default) | Header, Terms, Connection notes, DDL, Description, Annotations, Cardinality table, Relationships | You want to know what is in the table and how much of it was measured |
-| `query` | Header, Terms, DDL, Connection notes, Joins, Data dictionary, Column values | You are about to write SQL against the table |
+| `profile` (default) | Header, Terms, Connection notes, DDL, Description, Annotations, Cardinality table, Relationships | Describing what is in the table and how much of it was measured |
+| `query` | Header, Terms, DDL, Connection notes, Column values, Data dictionary, Joins | Writing SQL against the table |
 
-`query` drops every statistic but each nullable column's null share — the cue that a predicate needs an `IS NULL` arm — and renders instead what a query writer needs a literal from: the columns whose value list a predicate can be written from, each with its counts, and a coverage cell saying whether that list is the column's whole domain or, as a percentage, the share of it the five most frequent values cover. A numeric or date column with no such list shows its frequent values instead — a sentinel like `-1` or `9999-12-31` on a share of the rows — labelled as frequent values rather than a domain. A value with a note in `statistics.annotations.yaml` carries it inline, so what a code means sits beside the code itself, and a column whose `derived_from` names a source carries that source's notes too. Every value and number is spelled so it reads back as itself — `NULL` is a genuine null, `'NULL'` the stored string; the [MCP server specification](../MCP.md#41-get_table_context) states the full rule. The join paths are the `## Joins` list: the DDL's foreign keys and the edges the print inferred or measured, each with its detection, so a table whose catalog declares no key still says what it joins to; an edge a human added in `relationships.annotations.yaml` is listed as `annotated`, and one a human rejected there is not listed. An inferred field a human rejected in `statistics.annotations.yaml` is left out of the fragment in every format. Under either purpose, a header line `Meanings: not documented here` marks a table with no description and no column or value note, whose codes, units and defaults the agent must read from the code.
+`query` drops every statistic but each nullable column's null share — the cue that a predicate needs an `IS NULL` arm — and renders instead what a query writer needs a literal from: the columns whose value list a predicate can be written from, each with its counts, and a coverage cell saying whether that list is the column's whole domain or, as a percentage, the share of it the five most frequent values cover. A numeric or date column with no such list shows its frequent values instead — a sentinel like `-1` or `9999-12-31` on a share of the rows — labelled as frequent values rather than a domain. A value with a note in `statistics.annotations.yaml` carries it inline, so what a code means sits beside the code itself; a note on a value the list does not show sits on the column's Data dictionary line, and a column whose `derived_from` names a source carries that source's notes too. Every column is named as the database spells it, which can differ from the lowercase key `statistics.yaml` files it under, and every value and number is spelled so it reads back as itself — `NULL` is a genuine null, `'NULL'` the stored string; the [MCP server specification](../MCP.md#41-get_table_context) states the full rule. The join paths are the `## Joins` list: the DDL's foreign keys and the edges the print inferred or measured, each with its detection, so a table whose catalog declares no key still says what it joins to; an edge a human added in `relationships.annotations.yaml` is listed as `annotated`, and one a human rejected there is not listed. An edge whose measurement found none of the referencing values in the target reads `no match`: a join on it is likely empty. Past five incoming edges guessed from a column name alone, those sharing a referencing column name fold into one line counting the tables and naming the `search_columns` call that lists them. An inferred field a human rejected in `statistics.annotations.yaml` is left out of the fragment in every format. Under either purpose, a header line `Meanings: not documented here` marks a table with no description, no column or value note, and no connection note naming it or a column of it, whose codes, units and defaults the agent must read from the code. Under `query`, a complete code list that no note explains and no note or description names in backticks ends its coverage cell with `meanings: not documented here`.
 
-When the fragment is over budget, dropping a whole section usually beats letting `--budget` truncate, because you choose what goes:
+A fragment over budget can drop whole sections by flag, which decides what goes rather than leaving it to `--budget`'s truncation:
 
 | Flag | Drops |
 |---|---|
@@ -136,10 +133,11 @@ When the fragment is over budget, dropping a whole section usually beats letting
 
 Connection-level notes from `manifest.annotations.yaml` reach every render: a single table carries them in its own `## Connection notes` section (`connection_notes` in json and yaml), and a render over several tables carries them once, in the document header — see [annotating a print](annotations.md).
 
-## What to expect the agent to get wrong
+## Misreadings to state in a rules file
 
-Three things are worth stating in your own rules file, because they are the misreadings that produce confident wrong answers:
+These misreadings produce confident wrong answers, and belong in the project's own rules file:
 
 - **A sampled table's ratios are denominated in `rows_scanned`, not in `row_count`.** A `null_rate` under a `scope` block describes the sample. [Choosing what to profile](scoping.md) covers the block; the print's own `reading.md` says the same thing to whoever opens it.
 - **An absent field is not a zero.** The format distinguishes "measured and absent" from "never measured", and [SPEC 7](../format/v1/SPEC.md#7-reading-an-absence) is written from the reader's side specifically for this.
-- **Only a row count rescales to table grain, and only by multiplying.** See "Get the rescaling direction right" above — the two ratios are reciprocals, so an agent that reaches for the wrong one gets a plausible number rather than an obvious error.
+- **Only a row count rescales to table grain, and only by multiplying.** Under a sample, a row count — nulls, a value's count, a true/false split — on a column carrying a population marker scales by `count * (row_count / rows_scanned)`; under a filter nothing rescales, and a distinct count, a ratio, a bound, a percentile or an aggregate rescales under no formula. The two ratios are reciprocals, so the wrong one gives a plausible number rather than an obvious error.
+- **A `sensitivity` flag carries no evidence.** `looks_like` publishes the `sampled`/`matched` draw it rests on and `candidate_key` is recomputable from `cardinality_ratio`; `sensitivity` publishes nothing behind it, and its absence is not a statement that a column is safe.

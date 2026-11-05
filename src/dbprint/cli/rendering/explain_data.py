@@ -13,8 +13,8 @@ from dbprint.engine.explain import TableExplanation
 from dbprint.engine.yaml_dumper import spell_inline
 
 
-# A leaf longer than this (a whole `redact` list) takes its comment two spaces after it rather
-# than pushing every other comment that far right.
+# A leaf longer than this takes its comment two spaces after it rather than pushing every other
+# comment that far right.
 _ALIGNED_WIDTH = 60
 
 
@@ -151,10 +151,28 @@ def _leaf_lines(
         if isinstance(value, Mapping) and value:
             out.append((f"{indent}{key}:", ""))
             out += _leaf_lines(value, origins, here)
+        elif isinstance(value, list) and value and all(isinstance(v, Mapping) for v in value):
+            out.append((f"{indent}{key}:", origins.get(here, "")))
+            out += [(line, "") for item in value for line in _block_item(item, f"{indent}  ")]
         else:
             out.append((f"{indent}{key}: {spell_inline(value)}", origins.get(here, "")))
 
     return out
+
+
+def _block_item(item: Mapping[str, Any], indent: str) -> list[str]:
+    lines = []
+
+    for n, (key, value) in enumerate(item.items()):
+        lead = f"{indent}- " if n == 0 else f"{indent}  "
+
+        if isinstance(value, list) and value:
+            lines.append(f"{lead}{key}:")
+            lines += [f"{indent}    - {spell_inline(v)}" for v in value]
+        else:
+            lines.append(f"{lead}{key}: {spell_inline(value)}")
+
+    return lines
 
 
 def _redact_rule(rule: RedactRule) -> dict[str, Any]:

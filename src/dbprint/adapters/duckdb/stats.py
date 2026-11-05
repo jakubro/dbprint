@@ -15,6 +15,7 @@ from dbprint.spec.classification import (
     is_array_type,
     is_binary_type,
     is_numeric_type,
+    top_level_arguments,
 )
 from dbprint.spec.distribution import summarize as summarize_frequencies
 from dbprint.spec.rounding import (
@@ -226,19 +227,32 @@ ARRAYS = ArrayReads(
 
 def _member_source(node: PartSource, member: Member) -> str:
     name = string_literal(member.name)
+    # duckdb reads a TUPLE element only by index, and a STRUCT field only by name, a digit name too.
+    key = str(member.position) if base_type(node.sql_type) == "tuple" else name
     function = "UNION_EXTRACT" if member.union else "STRUCT_EXTRACT"
     presence = (
         f"UNION_TAG({node.operand}) = {name}" if member.union else f"{node.operand} IS NOT NULL"
     )
-    statement = select_from([f"{function}({node.operand}, {name}) AS v"], node.source)
+    statement = select_from([f"{function}({node.operand}, {key}) AS v"], node.source)
 
     return derived(f"{statement}\nWHERE\n  {presence}", SOURCE_ALIAS)
 
 
-RECORDS = RecordReads(
-    members=lambda _cursor, node: declared_members(node.sql_type),
-    source=_member_source,
-)
+def _members(_cursor: Cursor, node: PartSource) -> list[Member]:
+    if base_type(node.sql_type) != "tuple":
+        return declared_members(node.sql_type)
+
+    # A TUPLE names no element: `TIMESTAMP WITH TIME ZONE` is one type, not a field and its type.
+    text = node.sql_type.strip()
+    inner = text[text.index("(") + 1 : -1]
+
+    return [
+        Member(name=str(position), sql_type=argument.strip(), position=position)
+        for position, argument in enumerate(top_level_arguments(inner), start=1)
+    ]
+
+
+RECORDS = RecordReads(members=_members, source=_member_source)
 
 
 _DOCUMENT_READS = {

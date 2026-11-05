@@ -21,6 +21,7 @@ Vendor = Literal[
     "redshift",
     "databricks",
     "bigquery",
+    "sqlite",
 ]
 
 PLACEHOLDERS: dict[Paramstyle, str] = {"pyformat": "%s", "qmark": "?"}
@@ -194,6 +195,13 @@ VENDOR_SUPPORT: dict[str, frozenset[Vendor]] = {
     "reinterpretasuint64(": frozenset({"clickhouse"}),
     "lowerutf8(": frozenset({"clickhouse"}),
     "trimboth(": frozenset({"clickhouse"}),
+    # SQLite's catalog pragmas and schema table, and the functions its adapter registers.
+    "pragma_": frozenset({"sqlite"}),
+    "sqlite_schema": frozenset({"sqlite"}),
+    "dbprint_draw(": frozenset({"sqlite"}),
+    "dbprint_md5(": frozenset({"sqlite"}),
+    "dbprint_low64(": frozenset({"sqlite"}),
+    "dbprint_iso(": frozenset({"sqlite"}),
     # Quoting and casts.
     "`": frozenset({"mysql", "clickhouse", "databricks", "bigquery"}),
     "::": frozenset({"postgres", "snowflake", "duckdb", "redshift"}),

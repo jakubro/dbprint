@@ -48,7 +48,7 @@ Assertions are declared in `.dbprint.yaml` under each connection:
 ```yaml
 connections:
   <connection_name>:
-    adapter: postgres | mysql | duckdb | clickhouse | redshift | snowflake | databricks | bigquery
+    adapter: postgres | mysql | duckdb | clickhouse | redshift | snowflake | databricks | bigquery | sqlite
     # ... existing connection fields ...
 
     assertions:
@@ -91,7 +91,7 @@ Each key under `tables:` is a fully-qualified table name matching the FQN conven
 
 ### 1.4 Unknown FQNs and columns
 
-If an assertion references an FQN whose committed statistics the evaluator cannot read, it MUST emit `assertion.unknown-table` as a warning and skip every predicate under that FQN. Four distinct causes reach this code, and a reader diagnosing one should check all four: the FQN is absent from the manifest; it is present but declares no `statistics` artifact; the declared file is missing from disk; or the file does not parse as YAML. Only the first is literally "unknown table", so the detail string is a starting point rather than a diagnosis.
+If an assertion references an FQN whose committed statistics the evaluator cannot read, it MUST emit `assertion.unknown-table` as a warning and skip every predicate under that FQN. Four distinct causes reach this code: the FQN is absent from the manifest; it is present but declares no `statistics` artifact; the declared file is missing from disk; or the file does not parse as YAML. Only the first is literally "unknown table", so the detail string is a starting point rather than a diagnosis.
 
 If a predicate references a column not present in the table's `statistics.yaml`, evaluators MUST emit `assertion.unknown-column` as a warning and skip that column's predicates.
 
@@ -291,8 +291,9 @@ SQL assertions are written in the adapter's native SQL dialect. Producers MUST N
 | Snowflake | Standard SQL; identifiers UPPERCASE unless quoted; warehouse selection inherited from connection config |
 | Databricks | Spark SQL; identifiers case-folded to lowercase unless quoted |
 | BigQuery | GoogleSQL, not standard; identifiers case-sensitive, addressed through dbprint's lowercase-to-physical column map |
+| SQLite | SQLite's own SQL; identifiers resolve case-insensitively, `physical_name` carries the declared spelling; a table is `main.<table>` |
 
-Queries MUST be read-only. Evaluators MUST run them in a read-only session where the adapter supports one; the reference implementation does so only on PostgreSQL (`SET TRANSACTION READ ONLY`). Every other adapter runs the query on the same session the profile used, where read-only is the operator's responsibility — a read-only role or grant; duckdb's own `read_only` connection key (see its adapter page) covers the whole session when the operator sets it, but it is opt-in rather than assertion-specific. Write operations (INSERT, UPDATE, DELETE, DDL) are out of scope for assertions, and on every adapter but PostgreSQL nothing mechanically prevents one unless the operator's own grant does.
+Queries MUST be read-only. Evaluators MUST run them in a read-only session where the adapter supports one; the reference implementation does so on PostgreSQL (`SET TRANSACTION READ ONLY`), and SQLite's connection is read-only throughout (`mode=ro`). Every other adapter runs the query on the same session the profile used, where read-only is the operator's responsibility — a read-only role or grant; duckdb's own `read_only` connection key (see its adapter page) covers the whole session when the operator sets it, but it is opt-in rather than assertion-specific. Write operations (INSERT, UPDATE, DELETE, DDL) are out of scope for assertions, and on every adapter but PostgreSQL and SQLite nothing mechanically prevents one unless the operator's own grant does.
 
 ### 3.5 Edge cases
 

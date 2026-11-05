@@ -30,11 +30,11 @@ GRANT SELECT ON svv_table_info TO dbprint_ro;
 | `USAGE` | each external schema | listing its external tables through `svv_external_tables` and `svv_external_columns`, and `SHOW EXTERNAL TABLE` |
 | `SELECT` | each external table a rule reads by writing its `read.tables.mode` | statistics read through Spectrum or the federated source |
 
-### Read this one: `svv_table_info` is superuser-only by default
+### `svv_table_info` is superuser-only by default
 
 `SVV_TABLE_INFO` is visible only to superusers, and `GRANT SELECT ON svv_table_info TO <user>` is what permits an ordinary user to query it. `GRANT ROLE sys:monitor` is a second route to the same access. `SYSLOG ACCESS UNRESTRICTED` is **not** a substitute — it does not open superuser-visible system views.
 
-Without that grant, the row-count read fails for every table and is taken as no estimate at all, silently: the run warns `no row-count estimate for '<table>'; rules carrying \`match.min_rows\` or a \`read.tables.max_rows\` ceiling do not apply to it`, but nothing else in the run tells a reader that the whole size-gating system just went dark. An empty table is missing from `SVV_TABLE_INFO` entirely, rather than reported as zero, so its absence there is not itself a sign of a missing grant.
+Without that grant, the row-count read fails for every table and is taken as no estimate at all, silently: the run warns `no row-count estimate for '<table>'; rules carrying \`match.min_rows\` or a \`read.tables.max_rows\` ceiling do not apply to it`, but nothing else in the run says that no size-gated rule applied. An empty table is missing from `SVV_TABLE_INFO` entirely, rather than reported as zero, so its absence there is not itself a sign of a missing grant.
 
 ## Sampling
 
@@ -44,7 +44,7 @@ Without that grant, the row-count read fails for every table and is taken as no 
 | Seeded | no — `RANDOM()` carries no seed at all on Redshift |
 | `looks_like` sub-draw | oversamples with `RANDOM()`; the distinct set is hash-ordered either way |
 
-Because the fraction cannot be seeded, coherence across a sampled table depends entirely on the materialized copy below — there is no population-level fallback guarantee the way duckdb or PostgreSQL have.
+Because the fraction cannot be seeded, coherence across a sampled table depends entirely on the materialized copy below — there is no population-level fallback guarantee the way PostgreSQL, duckdb or SQLite have.
 
 ## When dbprint writes
 
@@ -76,7 +76,7 @@ Both path segments are lowercased for the FQN, and the rule check refuses two ob
 
 - **`indexes`** — always empty. No index concept exists on Redshift.
 - **`depends_on` on a late-binding view** — always absent. A late-binding view has no `pg_rewrite` entry, and dbprint drops the unresolved row rather than let it collapse into "resolved, reads nothing" — so such a view is missing from the dependency map entirely.
-- **Row-count estimate without the `svv_table_info` grant** — see "Read this one" above.
+- **Row-count estimate without the `svv_table_info` grant** — see "`svv_table_info` is superuser-only by default" above.
 - **Foreign key `on_delete` / `on_update`** — always `NO ACTION`. The FK grammar Redshift exposes carries no referential-action slot.
 
 `is_nullable` on a column has a documented blank third state; only an explicit `NO` / `FALSE` / `F` makes the NOT NULL claim.

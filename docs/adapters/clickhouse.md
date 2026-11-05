@@ -40,7 +40,7 @@ Missing `SELECT` on `system.data_skipping_indices` fails index enumeration for t
 | Seeded | no — determinism depends on the table declaring a `SAMPLE BY` key at creation, which is out of dbprint's control |
 | `looks_like` sub-draw | fixed-size `SAMPLE n`, degrading to a direct scan when the table declares no sampling key |
 
-The listing reads each table's `sampling_key` from `system.tables` as it enumerates, so whether a table can be sampled is known before any statement reads it. The row-for-row guarantee PostgreSQL and duckdb give does not apply here: coherence with the rest of a sampled ClickHouse profile is population-level only.
+The listing reads each table's `sampling_key` from `system.tables` as it enumerates, so whether a table can be sampled is known before any statement reads it. The row-for-row guarantee PostgreSQL, duckdb and SQLite give does not apply here: coherence with the rest of a sampled ClickHouse profile is population-level only.
 
 ## When dbprint writes
 
@@ -78,7 +78,7 @@ Some engines hold no rows a read can describe, so dbprint leaves them out of the
 
 - **Queue and stream engines** — `Kafka`, `RabbitMQ`, `NATS`, `FileLog`, `S3Queue`, `AzureQueue` and the Redis Streams engine. A read removes what it reads from the queue, so profiling one would consume messages a pipeline is waiting for; where direct reads are off, it fails every run.
 - **`Null`** — stores nothing; a read is always empty.
-- **`LiveView` and `WindowView`** — deliver results through `WATCH` or a target table, and a window view's own `.inner.` storage tables hold partial aggregation states. A window view writing `TO` a table of yours leaves that table listed.
+- **`LiveView` and `WindowView`** — deliver results through `WATCH` or a target table, and a window view's own `.inner.` storage tables hold partial aggregation states. A window view writing `TO` a separate table leaves that table listed.
 - **`GenerateRandom`** — returns random rows without end, so its first count would run until the statement limit.
 
 ## Remote engines
@@ -93,7 +93,7 @@ A rule writing any other `read.tables.mode` for it is refused before any table i
 
 ## Secrets in DDL
 
-`ddl.sql` shows every secret argument of an engine or table function as `[HIDDEN]`. Where your user profile turns `format_display_secrets_in_show_and_select` on, dbprint turns it off for its own reads; a server that refuses the override fails the table rather than publish the secret. A password or key written anywhere else in the DDL — a URL's `user:password@`, a default, a comment, a view body — is masked by the credential masks every adapter's DDL passes through ([SPEC 2.1.3](../format/v1/SPEC.md#213-what-must-be-stripped-per-adapter)).
+`ddl.sql` shows every secret argument of an engine or table function as `[HIDDEN]`. Where the user's settings profile turns `format_display_secrets_in_show_and_select` on, dbprint turns it off for its own reads; a server that refuses the override fails the table rather than publish the secret. A password or key written anywhere else in the DDL — a URL's `user:password@`, a default, a comment, a view body — is masked by the credential masks every adapter's DDL passes through ([SPEC 2.1.3](../format/v1/SPEC.md#213-what-must-be-stripped-per-adapter)).
 
 ## What it cannot deliver
 
@@ -118,7 +118,7 @@ A rule writing any other `read.tables.mode` for it is refused before any table i
 
 ## Merging engines
 
-On `ReplacingMergeTree`, `SummingMergeTree`, `AggregatingMergeTree`, `CoalescingMergeTree`, `CollapsingMergeTree` and `VersionedCollapsingMergeTree`, with or without a `Replicated` or `Shared` prefix, the print counts the stored rows, which repeat a key until a background merge combines them. `row_count`, `cardinality` and `grain` describe those rows; query with `FINAL` for the merged ones, as the table's `merging` block and `dbprint context` both say. Where your user profile sets `final`, every read is already merged and the block says `rows: merged`.
+On `ReplacingMergeTree`, `SummingMergeTree`, `AggregatingMergeTree`, `CoalescingMergeTree`, `CollapsingMergeTree` and `VersionedCollapsingMergeTree`, with or without a `Replicated` or `Shared` prefix, the print counts the stored rows, which repeat a key until a background merge combines them. `row_count`, `cardinality` and `grain` describe those rows; query with `FINAL` for the merged ones, as the table's `merging` block and `dbprint context` both say. Where the user's settings profile sets `final`, every read is already merged and the block says `rows: merged`.
 
 ## Row counts
 

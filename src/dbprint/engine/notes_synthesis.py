@@ -58,10 +58,12 @@ def synthesize(
     profile: dict[str, Any] | None = None,
     scope: ScanScope | None = None,
     row_count: int | None = None,
+    key: bool = False,
 ) -> Rendered:
     """Return the Notes cell for one column and the term keys its labels use.
 
     `hints_only` keeps the FK edges and suffixes; `row_count` is the fallback share population.
+    `key` marks a declared key column, which, like one with an FK edge, shows no median or mean.
     """
 
     classification = column_value(column_stats, "classification") or "unsupported"
@@ -81,6 +83,7 @@ def synthesize(
             scope,
             total,
             rows,
+            key=key or bool(fk_targets),
         )
 
     facts = [
@@ -202,6 +205,8 @@ def _base_template(
     scope: ScanScope | None,
     total: int | None,
     rows: int | None,
+    *,
+    key: bool = False,
 ) -> list[Rendered]:
     """Dispatch on classification; the branches that render literals also read the marker.
 
@@ -223,7 +228,7 @@ def _base_template(
         if entries and list_is_complete(stats):
             values = [_complete_values(stats, entries, scope, total, redaction)]
         elif entries:
-            values = [_truncated_values(stats, entries, total, redaction)]
+            values = _truncated_values(stats, entries, total, redaction)
         else:
             values = []
 
@@ -238,7 +243,7 @@ def _base_template(
         return _temporal_notes(stats, redaction, scope, total, rows)
 
     if classification == "numeric":
-        return _numeric_notes(stats, redaction, total, rows)
+        return _numeric_notes(stats, redaction, total, rows, key=key)
 
     if classification == "text":
         return _text_notes(stats, redaction, params, scope, total, rows)
@@ -326,7 +331,7 @@ def _categorical_notes(
 
     values = _truncated_values(stats, entries, total, redaction)
 
-    return [*redacted, values, *distribution, *_length_suffix(stats)]
+    return [*redacted, *values, *distribution, *_length_suffix(stats)]
 
 
 def _temporal_notes(
@@ -385,9 +390,13 @@ def _numeric_notes(
     redaction: str | None = None,
     total: int | None = None,
     rows: int | None = None,
+    *,
+    key: bool = False,
 ) -> list[Rendered]:
     """Range, median, mean and shape - under redaction only the count profile remains, so
     `distribution` stays and the bounds, mean and degenerate counts are absent (SPEC 2.2.9).
+
+    A key's median and mean measure how its ids were issued, not the data, and are left out.
     """
 
     rng = column_value(stats, "range") or {}
@@ -412,7 +421,7 @@ def _numeric_notes(
     if redaction is not None:
         facts = [_redacted_label(redaction)]
 
-        if mean is not None:
+        if mean is not None and not key:
             facts.append(_fact(f"mean: {_statistic(mean)}", "mean"))
 
         return [*facts, *_sampled_values(stats, total, redaction), *census, *distribution]
@@ -422,10 +431,10 @@ def _numeric_notes(
     if mn is not None and mx is not None:
         facts.append(_fact(f"range: {_statistic(mn)} -> {_statistic(mx)}", "range"))
 
-    if p50 is not None:
+    if p50 is not None and not key:
         facts.append(_fact(f"P50: {_statistic(p50)}", "percentile:50"))
 
-    if mean is not None:
+    if mean is not None and not key:
         facts.append(_fact(f"mean: {_statistic(mean)}", "mean"))
 
     facts += [*_sampled_values(stats, total, redaction), *census, *distribution]
@@ -460,7 +469,7 @@ def _text_notes(
     values = _truncated_values(stats, entries, total, redaction)
     redacted = [_redacted_label(redaction)] if redaction is not None else []
 
-    return [*redacted, values, *distribution, *census, *length]
+    return [*redacted, *values, *distribution, *census, *length]
 
 
 def _distinct(stats: dict[str, Any]) -> list[Rendered]:
@@ -481,7 +490,7 @@ def _sampled_values(
     if not entries or list_is_complete(stats):
         return []
 
-    return [_truncated_values(stats, entries, total, redaction)]
+    return _truncated_values(stats, entries, total, redaction)
 
 
 def _truncated_values(
@@ -489,13 +498,18 @@ def _truncated_values(
     entries: list[tuple[Any, int]],
     total: int | None,
     redaction: str | None,
-) -> Rendered:
+) -> list[Rendered]:
     """The most frequent categories with their shares and the share they cover together.
 
-    No figure counts or mentions an entry the list does not show.
+    No figure counts or mentions an entry the list does not show; none when each shown value
+    holds one row, which names rows rather than categories.
     """
 
     shown = _grouped_entries(stats, entries)[:NOTES_TOP_VALUES_LIMIT]
+
+    if all(count <= 1 for _, count, _ in shown):
+        return []
+
     share_of = total or sum(count for _, count in entries) or 1
     items = [
         f"{'withheld' if redaction is not None else spell_literal(value)} "
@@ -505,10 +519,12 @@ def _truncated_values(
     covered = spell_percent(sum(count for _, count, _ in shown) / share_of)
     keys = ("values_top", "withheld") if redaction is not None else ("values_top",)
 
-    return _fact(
-        f"values (top {len(shown)}, covering {covered}): {LIST_SEPARATOR.join(items)}",
-        *keys,
-    )
+    return [
+        _fact(
+            f"values (top {len(shown)}, covering {covered}): {LIST_SEPARATOR.join(items)}",
+            *keys,
+        ),
+    ]
 
 
 def _distribution_suffix(
@@ -519,15 +535,20 @@ def _distribution_suffix(
     """The shape verdict (SPEC 2.2.5), schema-required on every classification that has it.
 
     Survives redaction; a dominant value is named with its share, as `withheld` when redacted.
+    A column holding no value has no shape, whatever the artifact records.
     """
 
     distribution = column_value(stats, "distribution")
 
-    if not distribution:
+    if not distribution or column_value(stats, "cardinality") == 0:
+        return []
+
+    grouped = _grouped_entries(stats, _value_entries(stats))
+
+    if distribution == "long_tail" and grouped and all(count <= 1 for _, count, _ in grouped):
         return []
 
     text = f"distribution: {enum_word(distribution)}"
-    grouped = _grouped_entries(stats, _value_entries(stats))
 
     if distribution == "dominant_value" and grouped:
         value, count, _ = grouped[0]
@@ -906,7 +927,7 @@ def _grouped_entries(
     stats: dict[str, Any],
     entries: list[tuple[Any, int]],
 ) -> list[tuple[Any, int, int]]:
-    """`(value, total, spellings)` per category, members folded into their canonical (SPEC 2.2.4).
+    """`(value, total, spellings)` per category, spellings folded (SPEC 2.2.4), by total if folded.
 
     An ungrouped value, or one whose canonical is not listed, counts one spelling.
     """
@@ -924,7 +945,10 @@ def _grouped_entries(
         total = count + sum(int(m.get("count") or 0) for m in spellings)
         out.append((value, total, len(spellings) + 1))
 
-    return out
+    if all(spellings == 1 for _, _, spellings in out):
+        return out
+
+    return sorted(out, key=lambda grouped: -grouped[1])
 
 
 def _spelling_suffix(spellings: int) -> str:

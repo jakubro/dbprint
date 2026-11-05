@@ -63,6 +63,11 @@ class _HookRecorder(MockAdapter):
 
         return super().introspect_unique_keys(fqn)
 
+    def read_columns(self, fqn: str, columns: Any) -> Any:
+        self.hooks.append(("read_columns", fqn))
+
+        return super().read_columns(fqn, columns)
+
     def compute_base_statistics(self, fqn: str, *args: Any, **kwargs: Any) -> Any:
         self.statistics.append(fqn)
 
@@ -106,6 +111,7 @@ def test_a_view_is_described_without_a_query_by_default(tmp_path: Path) -> None:
 
     assert _statistics(tmp_path)["catalog_only"] is True
     assert VIEW not in adapter.statistics
+    assert ("read_columns", VIEW) not in adapter.hooks
 
 
 def test_a_view_read_in_full_is_profiled_like_a_table_less_its_layout_and_keys(
@@ -128,6 +134,7 @@ def test_a_view_read_in_full_is_profiled_like_a_table_less_its_layout_and_keys(
     assert "physical_layout" not in statistics
     assert VIEW in adapter.statistics
     assert ("physical_layout", VIEW) not in adapter.hooks
+    assert ("read_columns", VIEW) in adapter.hooks
     assert _manifest_entry(tmp_path)["row_count"] == 100
     assert "max_rows_scanned" not in _manifest_entry(tmp_path)
     assert _errors(tmp_path) == []
@@ -309,6 +316,7 @@ def test_a_catalog_only_table_is_described_without_a_query_and_carried_next_run(
     assert "row_count" not in statistics
     assert set(statistics["columns"]["id"]) <= {"sql_type", "nullable", "classification"}
     assert TABLE not in adapter.statistics
+    assert ("read_columns", TABLE) not in adapter.hooks
     assert "row_count" not in entry
     assert "max_rows_scanned" not in entry
     assert next(t for t in again.tables if t.fqn == TABLE).status == "skipped"

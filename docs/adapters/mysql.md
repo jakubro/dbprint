@@ -37,9 +37,9 @@ primary: could not connect to MySQL at 127.0.0.1:3306/my_db as 'dbprint_ro':
 1044 (42000): Access denied for user 'dbprint_ro'@'%' to database 'my_db'
 ```
 
-and the run exits `4` having profiled nothing. There is no partial print to inspect, which makes a missing grant here easier to diagnose than on most other engines.
+and the run exits `4` having profiled nothing. There is no partial print to inspect.
 
-`SHOW VIEW` is the one grant that is easy to miss, because it is needed for exactly one thing. A view's DDL comes from `SHOW CREATE TABLE`, which MySQL gates behind `SHOW VIEW` for views specifically. Without it the tables profile normally and every view fails:
+`SHOW VIEW` is needed for exactly one thing. A view's DDL comes from `SHOW CREATE TABLE`, which MySQL gates behind `SHOW VIEW` for views specifically. Without it the tables profile normally and every view fails:
 
 ```
 1 table failed: ProgrammingError: 1142 (42000): SHOW VIEW command denied to user
@@ -77,7 +77,7 @@ database 'my_db'), and this adapter's per-statement fallback cannot be seeded in
 across statements. Narrow with mode: filter instead of a sample.
 ```
 
-MySQL reports the underlying cause as a plain access-denied error rather than one naming temporary tables specifically, so the parenthesized cause is worth reading in full before concluding the account lost its `SELECT` rather than `CREATE TEMPORARY TABLES`.
+MySQL reports the underlying cause as a plain access-denied error rather than one naming temporary tables specifically, so a missing `CREATE TEMPORARY TABLES` can read like a lost `SELECT`; the parenthesized cause carries the detail.
 
 There is no fallback path to choose here: setting `read.tables.materialize: false` on a `sample`-mode table refuses it before any statement runs, for the same reason — MySQL's undocumented `RAND(seed)` guarantee means an unmaterialized draw is never trusted.
 
@@ -95,7 +95,7 @@ A `SET` column lists its values as MySQL's own text, members in declared order (
 
 ## Table kinds
 
-A MariaDB system-versioned table is profiled over its current rows; history rows are never read, and its implicit `row_start`/`row_end` columns are not published. Where your session sets `system_versioning_asof`, the print describes the table as of that time. A `SEQUENCE` is not listed.
+A MariaDB system-versioned table is profiled over its current rows; history rows are never read, and its implicit `row_start`/`row_end` columns are not published. Where the session sets `system_versioning_asof`, the print describes the table as of that time. A `SEQUENCE` is not listed.
 
 A MariaDB view never carries `depends_on`: MariaDB's catalog holds only the view's definition text.
 

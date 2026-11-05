@@ -1,20 +1,20 @@
 # Your first print
 
-This walks a database you can already connect to through to a print committed alongside your code. It ends at files in your repository, not at a command that printed something.
+This page takes a database with a working connection to a print committed beside the code. It ends at files in the repository.
 
-## Before you start
+## Prerequisites
 
-dbprint needs Python 3.13 or newer, and one extra per database engine. The extra carries the driver; the base package carries no database dependency at all.
+dbprint needs Python 3.13 or newer, and one extra per database engine. The extra carries the driver; the base package carries no database dependency at all. SQLite is the exception: its driver is Python's own, so it needs no extra.
 
 ```console
 $ pip install 'dbprint[mysql]'
 ```
 
-This page uses MySQL because it needs nothing beyond the extra — no external binary, no service account file, no warehouse. Every engine dbprint ships an adapter for has its own page with the install line, the exact grants and what it cannot promise about a sampled table: [duckdb](adapters/duckdb.md), [PostgreSQL](adapters/postgres.md), [MySQL](adapters/mysql.md), [ClickHouse](adapters/clickhouse.md), [Redshift](adapters/redshift.md), [Snowflake](adapters/snowflake.md), [Databricks](adapters/databricks.md), [BigQuery](adapters/bigquery.md). Swap the extra and the two connection blocks below for your own engine and the rest of this page is unchanged.
+This page uses MySQL because it needs nothing beyond the extra — no external binary, no service account file, no warehouse. Every engine dbprint ships an adapter for has its own page with the install line, the exact grants and what it cannot promise about a sampled table: [duckdb](adapters/duckdb.md), [PostgreSQL](adapters/postgres.md), [MySQL](adapters/mysql.md), [ClickHouse](adapters/clickhouse.md), [Redshift](adapters/redshift.md), [Snowflake](adapters/snowflake.md), [Databricks](adapters/databricks.md), [BigQuery](adapters/bigquery.md), [SQLite](adapters/sqlite.md). For another engine, only the extra and the two connection blocks below change.
 
 Three extras are independent of the engine: `dbprint[docs]` for the browsable site, `dbprint[mcp]` for the MCP server, and `dbprint[dbt]` for reading column lineage from a dbt project's manifest. Combine them as `pip install 'dbprint[mysql,docs]'`.
 
-You also need an account on the database that can read the tables you want profiled. Your engine's adapter page states the exact grants; a role that can already run `SELECT` against those tables is enough to follow this page.
+dbprint also needs a database account that can read the tables to profile. Each engine's adapter page states the exact grants; a role that can already run `SELECT` against those tables is enough for this page.
 
 ## 1. Scaffold the project
 
@@ -29,11 +29,11 @@ wrote	connections_file	<home>/.dbprint/connections.yaml
 
 One tab-separated line per file: what happened, which file it is, and where it landed — the third column is an absolute path in the real output. A second run reports `kept` for anything already there.
 
-Two files, with deliberately different lifetimes. `.dbprint.yaml` describes the project and is committed. `~/.dbprint/connections.yaml` holds credentials, lives in your home directory rather than the repository, and is shared by every project on the machine — `init` writes it only when it is absent, so a second project never overwrites the first one's entries.
+Two files, with deliberately different lifetimes. `.dbprint.yaml` describes the project and is committed. `~/.dbprint/connections.yaml` holds credentials, lives in the home directory rather than the repository, and is shared by every project on the machine — `init` writes it only when it is absent, so a second project never overwrites the first one's entries.
 
 ## 2. Name the connection
 
-`.dbprint.yaml` arrives with one connection called `primary`. Point `adapter` and `tables.include` at your engine — this page uses MySQL:
+`.dbprint.yaml` arrives with one connection called `primary`. Set `adapter` and `tables.include` for the engine — this page uses MySQL:
 
 ```yaml
 connections:
@@ -45,7 +45,7 @@ connections:
         - "seedbank.*"
 ```
 
-`tables.include` is the one line worth reading twice. It decides which tables are profiled, as `fnmatch` globs over the lowercased fully-qualified name; the shape of that name is the engine's own — `database.table` on MySQL and ClickHouse, `database.schema.table` on PostgreSQL, Redshift, Snowflake and duckdb, `catalog.schema.table` on Databricks, `dataset.table` on BigQuery. Your adapter page states the shape for your engine. Omitting it entirely profiles everything the connection can see, which on a warehouse is rarely what you want.
+`tables.include` decides which tables are profiled, as `fnmatch` globs over the lowercased fully-qualified name; the shape of that name is the engine's own — `database.table` on MySQL and ClickHouse, `database.schema.table` on PostgreSQL, Redshift, Snowflake and duckdb, `catalog.schema.table` on Databricks, `dataset.table` on BigQuery, `main.table` on SQLite. Each adapter page states the shape for its engine. Omitting it profiles everything the connection can see.
 
 `auto: true` means a bare `dbprint generate` runs this connection without naming it.
 
@@ -96,11 +96,11 @@ A progress bar tracks each pass while it runs and settles when it finishes; a bo
 
 `- rows` appears once, on `taxon_names`, a view: by default no query is issued against a view, so its `statistics.yaml` is written from the catalog alone and says so. The sketching lines carry no rows column at all — that pass reads columns rather than rows, so each of its lines is a name and a duration, nothing else.
 
-Sketching is a second pass because it answers a different question: it summarises join keys so a consumer can estimate how far two columns overlap without querying either. It is skipped for views, and for any table you later narrow to a sample.
+Sketching is a second pass because it answers a different question: it summarises join keys so a consumer can estimate how far two columns overlap without querying either. It is skipped for views, and for any table narrowed to a sample.
 
 Piping the command somewhere gives a plain tab-separated record per event instead, which is the form a CI log should capture — `--no-tui` forces it at a terminal, and `-q` silences progress altogether. [Gating CI](guide/ci.md) shows that form.
 
-One table's failure does not stop the others: every table is attempted and the failures are reported together at the end, listed under the summary and then in full on stderr. The exit code tells you which kind of outcome you got — `0` all well, `3` the schema moved since the last run — on a first run every table is new, so `3` is expected, `4` the database could not be reached, `5` some tables failed and the rest were still written, `7` every table failed, and `1` the configuration or the committed print could not be used. A `4` is usually the credentials, or a prerequisite checked when the connection opens (a missing `pg_dump` on PostgreSQL); a `5` is usually a missing grant on one table; a `7` is usually a role that reaches the database but can read none of it, or an adapter-specific prerequisite your engine's page names (an absent `SAMPLE BY` key on ClickHouse). [Troubleshooting](guide/troubleshooting.md) indexes those by symptom.
+One table's failure does not stop the others: every table is attempted and the failures are reported together at the end, listed under the summary and then in full on stderr. The exit code names the outcome — `0` all well, `3` the schema moved since the last run — on a first run every table is new, so `3` is expected, `4` the database could not be reached, `5` some tables failed and the rest were still written, `7` every table failed, and `1` the configuration or the committed print could not be used. A `4` is usually the credentials, or a prerequisite checked when the connection opens (a missing `pg_dump` on PostgreSQL); a `5` is usually a missing grant on one table; a `7` is usually a role that reaches the database but can read none of it, or an adapter-specific prerequisite the engine's page names (an absent `SAMPLE BY` key on ClickHouse). [Troubleshooting](guide/troubleshooting.md) indexes those by symptom.
 
 The run is read-only unless a table is narrowed to a fraction of its rows, and nothing here narrows anything — see [choosing what to profile](guide/scoping.md) for when that changes and what it needs.
 
@@ -122,7 +122,7 @@ prints/
         └── taxon_names/       a view: statistics.yaml from the catalog alone, no rows scanned
 ```
 
-Open `prints/primary/reading.md` first. It is written into every print alongside the data, and it names each kind of column dbprint recognises, what each measurement means, and the traps worth knowing before you rely on a number.
+Open `prints/primary/reading.md` first. It is written into every print alongside the data, and it names each kind of column dbprint recognises, what each measurement means, and the caveats that apply before a number is relied on.
 
 Then `statistics.yaml`, which is where the data is. Each column carries what it is, how much of it is null, how many distinct values it holds, and — depending on what kind of column it is — its value list, its range, or its percentiles. For the normative definition of every field, and of what a *missing* field means, see [SPEC 2.2](format/v1/SPEC.md#22-statisticsyaml) and [SPEC 7](format/v1/SPEC.md#7-reading-an-absence).
 
@@ -144,7 +144,7 @@ $ git add .dbprint.yaml prints/
 $ git commit -m "add dbprint prints"
 ```
 
-That is the artifact. From here:
+The print is committed. Further steps:
 
 - Add prose the numbers cannot carry — see [annotating a print](guide/annotations.md).
 - Withhold cell values from columns that should not leave the database — see [withholding cell values](guide/redaction.md).

@@ -154,6 +154,17 @@ REGISTER: tuple[ClaimState, ...] = (
         "serves the rejection in statistics_annotations.",
     ),
     ClaimState(
+        "unshown_value_note",
+        "Carries a note written on a value the surface's value list does not show, tied to that "
+        "value; a surface serving the files verbatim serves it in statistics_annotations.",
+    ),
+    ClaimState(
+        "physical_name_spelling",
+        "Names a column whose physical_name differs from its key by that spelling wherever it "
+        "hands a query writer a column name; a structured surface carries the spelling, and a "
+        "surface serving the files verbatim serves physical_name in statistics.",
+    ),
+    ClaimState(
         "value_spelling",
         "Spells a stored 'NULL', an empty, a whitespace-only and a long spaced value so each "
         "reads back as exactly itself on one line - never as a genuine null, nothing, or a fold.",

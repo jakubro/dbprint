@@ -154,8 +154,12 @@ class TestRoutes:
         client = web.create_app([scoped_conn]).test_client()
 
         body = client.get("/t/primary/seedbank.curation_event").data.decode()
+        columns_tab = body.split('<div data-tab-panel="columns">', 1)[1].split(
+            "data-tab-panel=",
+            1,
+        )[0]
 
-        assert "actionType" not in body  # the only place this fixture's physical_name appeared
+        assert "actionType" not in columns_tab
 
     def test_null_companion_note_and_relocated_table_in_columns_tab(
         self,

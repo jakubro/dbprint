@@ -22,11 +22,11 @@ roles/bigquery.jobUser      -- required separately; no data role carries bigquer
 roles/bigquery.dataEditor   -- only if sampling: the copy is a real table in the profiled dataset
 ```
 
-`roles/bigquery.dataViewer` carries `bigquery.tables.getData`; `roles/bigquery.metadataViewer` does not, so a metadata-only principal reads structure and computes no statistics at all. A reader who never samples needs strictly less than one who does — the `dataEditor` grant is needed only for the `CREATE OR REPLACE TABLE` / `DROP TABLE` pair described below.
+`roles/bigquery.dataViewer` carries `bigquery.tables.getData`; `roles/bigquery.metadataViewer` does not, so a metadata-only principal reads structure and computes no statistics at all. A role that never samples needs strictly less than one that does — the `dataEditor` grant is needed only for the `CREATE OR REPLACE TABLE` / `DROP TABLE` pair described below.
 
 ### Cost
 
-`INFORMATION_SCHEMA` queries carry a 10 MB minimum each, are never cached, and the adapter issues several per table — so a `generate` run bills a floor well above what the data itself costs. This is the one adapter page that has to say that plainly: every catalog read here is a billed query, not a free metadata lookup.
+`INFORMATION_SCHEMA` queries carry a 10 MB minimum each, are never cached, and the adapter issues several per table — so a `generate` run bills a floor well above what the data itself costs: every catalog read here is a billed query, not a free metadata lookup.
 
 ## Sampling
 
@@ -97,7 +97,7 @@ A rule carrying `min_rows`, and any `max_rows` ceiling, needs to know how big a 
 
 Unlike the three reads below, this one does not degrade: a refused or unavailable read fails that table and names `estimate_row_count` as the operation, rather than answering "no estimate". The two are not the same fact — an absent estimate is something the catalog said about the table, while a missing grant would otherwise leave every size-conditioned rule declining in silence, on every table, with nothing in the output saying so.
 
-Three catalog reads degrade rather than fail when the connection cannot see a column: `TABLES.ddl`, `COLUMNS.collation_name`, and `COLUMNS.clustering_ordinal_position`. Losing the third means clustering is not detected, and a clustered table may publish `partition` instead — worth knowing if physical layout looks wrong on a table you know is clustered. `COLUMN_FIELD_PATHS` degrades the same way, leaving every column comment absent.
+Three catalog reads degrade rather than fail when the connection cannot see a column: `TABLES.ddl`, `COLUMNS.collation_name`, and `COLUMNS.clustering_ordinal_position`. Losing the third means clustering is not detected, and a clustered table may publish `partition` instead. `COLUMN_FIELD_PATHS` degrades the same way, leaving every column comment absent.
 
 ## Statement timeout
 

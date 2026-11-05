@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from pathlib import Path
 from types import ModuleType
 from typing import Any, LiteralString, cast
@@ -18,6 +19,7 @@ from dbprint.adapters import (
     ClickhouseAdapter,
     DatabricksAdapter,
     PostgresAdapter,
+    SqliteAdapter,
 )
 from dbprint.adapters.base import PartSource
 from dbprint.adapters.dialect import Vendor
@@ -397,6 +399,32 @@ def test_a_snowflake_variant_and_object_are_descended() -> None:
     assert (attrs[".colour"].occurrences, attrs[".size"].occurrences) == (2, 1)
 
 
+def test_a_sqlite_document_is_descended_and_its_true_and_false_read_as_one_boolean(
+    tmp_path: Path,
+) -> None:
+    connection = sqlite3.connect(":memory:", check_same_thread=False, autocommit=True)
+    connection.execute("CREATE TABLE curation_event (event_no INTEGER, payload JSON)")
+    connection.execute(
+        """INSERT INTO curation_event VALUES
+        (1, '{"status": "new", "sealed": true, "items": [{"lot": "a"}]}'),
+        (2, '{"status": null, "sealed": false}'),
+        (3, '{"status": "old", "sealed": true}'),
+        (4, '[1, 2]')""",
+    )
+    adapter = SqliteAdapter({"database": ":memory:"}, cursor_factory=lambda _p: connection.cursor())
+    payload = generate(adapter, "sqlite", tmp_path, "*.curation_event")["payload"]
+    parts = payload["parts"]
+
+    assert payload["types"] == {"object": 3, "array": 1}
+    assert parts[".sealed"]["classification"] == "boolean"
+    assert parts[".sealed"]["values"] == [
+        {"value": True, "count": 2},
+        {"value": False, "count": 1},
+    ]
+    assert (parts[".status"]["occurrences"], parts[".status"]["null_count"]) == (3, 1)
+    assert parts[".items[*].lot"]["occurrences"] == 1
+
+
 @pytest.mark.parametrize(
     ("vendor", "sql_type"),
     [
@@ -408,6 +436,7 @@ def test_a_snowflake_variant_and_object_are_descended() -> None:
         ("redshift", "super"),
         ("databricks", "variant"),
         ("clickhouse", "JSON"),
+        ("sqlite", "JSON"),
     ],
 )
 def test_the_document_reads_speak_their_own_dialect(vendor: Vendor, sql_type: str) -> None:

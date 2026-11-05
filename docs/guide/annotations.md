@@ -1,8 +1,8 @@
 # Annotating a print
 
-Half of what a newcomer needs is measurable, and dbprint measures it. The other half is not in the database at all: which of two revenue columns every report actually uses, that a status value has been dead since a migration, that a join everyone writes one way is one-to-many more often than they expect.
+dbprint measures what a database holds. What its values mean is not in the database at all: which of two revenue columns every report uses, that a status value has been unused since a migration, which rows a report leaves out.
 
-Annotations are where that half lives. They sit beside the generated artifacts, in files the producer never writes to.
+Annotations record that meaning. They sit beside the generated artifacts, in files the producer never writes to.
 
 ## The files dbprint will not overwrite
 
@@ -40,12 +40,12 @@ columns:
     rejected: [candidate_key]
 ```
 
-Five things are available on an entry, and they answer different questions:
+An entry takes these fields, each answering a different question:
 
 - **`note`** is free-form Markdown; the docs site shows raw HTML in it as text. The format imposes no structure on it.
 - **`claims`** are predicates in the [assertion grammar](../ASSERTIONS.md), evaluated against the column's own statistics. A claim that the artifact contradicts is reported by `dbprint check`, so a note that has gone stale announces itself. A wrong inference is rejected, never claimed false: a claim is checked against the measurement, which still carries the field.
-- **`values`** attach a note to one value in the column's own value list.
-- **`derived_from`** names the columns this one is copied or computed from, as `{table, column}` pairs. A query-purpose context for the column carries each source's note and value notes beside its own, labelled with the source, so a pitfall written once on a source table reaches every table built from it. It is lineage only — no join is implied — and a source the print does not hold is reported by `dbprint check` as `annotations.unknown-source`. A connection configured with a `dbt_manifest` fills this in for every model column it can trace; an entry written here replaces the traced list for its column, and `derived_from: []` suppresses it.
+- **`values`** attach a note to one value of the column. The value need not be one the published list shows — a list cut to its most frequent values may leave it out — and the note still reaches `dbprint context --purpose query`; a value missing from a list that holds the whole table's domain is reported by `dbprint annotate --check` as `annotations.unknown-value`.
+- **`derived_from`** names the columns this one is copied or computed from, as `{table, column}` pairs. A query-purpose context for the column carries each source's note and value notes beside its own, labelled with the source, so a pitfall written once on a source table reaches every table built from it; where the source or the column is redacted, the source's value notes stay behind and its note alone travels. It is lineage only — no join is implied — and a source the print does not hold is reported by `dbprint check` as `annotations.unknown-source`. A connection configured with a `dbt_manifest` fills this in for every model column it can trace; an entry written here replaces the traced list for its column, and `derived_from: []` suppresses it.
 - **`rejected`** withdraws a guess the producer published under the column's `inferred` — `candidate_key`, `looks_like`, `looks_like_candidate`, `sensitivity` or `epoch_unit` — when a human knows it is wrong, such as a timestamp unique only because rows so far arrived one at a time. It takes no replacement value: what the column is goes in its `note`. Agents reading the print no longer meet the field, while `statistics.yaml`, every claim and `dbprint check`'s privacy warnings still read the measurement.
 
 `relationships.annotations.yaml` additionally lets a human reject an inferred or measured edge with a verdict. That and `rejected` are the two places an annotation overrules the producer, and only because what they reject is a guess: an inferred field, or an edge the catalog does not declare.
@@ -54,21 +54,21 @@ Five things are available on an entry, and they answer different questions:
 
 An annotation may correct an inference, and may add knowledge a measurement cannot express. It does not overrule a measurement.
 
-That is a real boundary, not a stylistic one. The artifact's arithmetic and catalog reads were taken at a known moment against the live database; prose was written at another moment by someone working from memory. Where the two disagree about something a statistic can answer, the statistic is the one with provenance. Where they disagree about something no statistic can answer, there is nothing to disagree with — that is exactly the space annotations exist to fill.
+The artifact's arithmetic and catalog reads were taken at a known moment against the live database; prose was written at another moment by someone working from memory. Where the two disagree about something a statistic can answer, the statistic is the one with provenance. Where they disagree about something no statistic can answer, there is nothing to disagree with, and the annotation stands.
 
-The file naming carries the same point: these are `.annotations.`, never `.override.`. [SPEC 2.7](../format/v1/SPEC.md#27-human-authored-annotation-files) states the rule normatively and [SPEC 2.4](../format/v1/SPEC.md#24-descriptionmd) states the precedence it restates.
+The file names follow the same rule: these are `.annotations.`, never `.override.`. [SPEC 2.7](../format/v1/SPEC.md#27-human-authored-annotation-files) states the rule normatively and [SPEC 2.4](../format/v1/SPEC.md#24-descriptionmd) states the precedence it restates.
 
 ## A new per-table annotation file is invisible until the next generate
 
-This is the one that catches people, and it applies to the three per-table files.
+This applies to the three per-table files.
 
 Every consumer surface — `dbprint context`, the MCP server, the browsable print `dbprint docs` builds — resolves a **table's** artifacts through `manifest.yaml`. The manifest records which annotation files existed at the moment the print was generated. A `description.md`, `statistics.annotations.yaml` or `relationships.annotations.yaml` created afterwards is not in it, so nothing reads it.
 
-`dbprint check` reports it as a `manifest.orphaned-artifact` warning. But warnings are reported by count rather than by code, so the message is easy to miss — see [gating CI](ci.md).
+`dbprint check` reports it as a `manifest.orphaned-artifact` warning. Warnings are reported by count rather than by code, so the summary line does not name it — see [gating CI](ci.md).
 
 Run `dbprint generate` after creating or deleting one of those three. Each run rebuilds the manifest's artifacts map from the table directories, so a plain run declares a new file and forgets a deleted one without re-profiling a table that is still fresh. Editing a file the manifest already records takes effect immediately; only creating or deleting one needs the run.
 
-`manifest.annotations.yaml` is the exception, and behaves the way you would expect: it is a connection-level file read by name from the print root rather than resolved through the manifest, so creating it takes effect at once, and the conformance validator schema-checks it whenever it is present.
+`manifest.annotations.yaml` is the exception: it is a connection-level file read by name from the print root rather than resolved through the manifest, so creating it takes effect at once, and the conformance validator schema-checks it whenever it is present.
 
 ## Writing them with an agent
 
@@ -78,7 +78,7 @@ Most of what belongs in an annotation is already written down somewhere — in t
 
 ## Where annotations surface
 
-Not every annotation reaches every reader, and it is worth knowing which before choosing where to write something.
+Each annotation file reaches these readers:
 
 | Written in | Reaches |
 |---|---|

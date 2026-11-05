@@ -70,6 +70,54 @@ class TestDuckdb:
         assert parts[".card"]["occurrences"] + parts[".iban"]["occurrences"] == 81
         assert parts[".card"]["null_count"] == 9
 
+    def test_a_tuple_names_each_element_by_its_position(self, tmp_path: Path) -> None:
+        plot = duckdb_print(
+            tmp_path,
+            "CREATE TABLE grower (grower_no INTEGER, plot TUPLE(INTEGER, STRUCT(town VARCHAR)))",
+            "INSERT INTO grower SELECT i, CASE WHEN i % 10 = 0 THEN NULL ELSE "
+            "(i % 7, {'town': ['north', 'south'][i % 2 + 1]}) END FROM range(100) r(i)",
+        )["grower"]["plot"]
+        parts = plot["parts"]
+
+        assert plot["classification"] == "composite"
+        assert set(parts) == {'["1"]', '["2"]', '["2"].town'}
+        assert parts['["1"]']["occurrences"] == 90
+        assert parts['["1"]']["cardinality"] == 7
+        assert parts['["2"].town']["occurrences"] == 90
+        assert {v["value"] for v in parts['["2"].town']["values"]} == {"north", "south"}
+
+    def test_a_tuple_of_types_spelled_in_several_words_is_named_by_position(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        grower = duckdb_print(
+            tmp_path,
+            "CREATE TABLE grower (grower_no INTEGER, plot TUPLE(TIMESTAMPTZ, TIMESTAMPTZ), "
+            "spot TUPLE(TIMETZ))",
+            "INSERT INTO grower SELECT i, row(TIMESTAMPTZ '2026-03-04 06:00:00+00' + i * "
+            "INTERVAL 1 DAY, TIMESTAMPTZ '2026-03-04 06:00:00+00' + i * INTERVAL 1 HOUR), "
+            "row(TIMETZ '06:00:00+00' + i * INTERVAL 1 MINUTE) FROM range(200) r(i)",
+        )["grower"]
+
+        assert {path: part["classification"] for path, part in grower["plot"]["parts"].items()} == {
+            '["1"]': "temporal",
+            '["2"]': "temporal",
+        }
+        assert {path: part["classification"] for path, part in grower["spot"]["parts"].items()} == {
+            '["1"]': "temporal",
+        }
+
+    def test_a_struct_field_named_by_a_digit_is_read_by_its_name(self, tmp_path: Path) -> None:
+        plot = duckdb_print(
+            tmp_path,
+            'CREATE TABLE grower (grower_no INTEGER, plot STRUCT("1" INTEGER, "2" VARCHAR))',
+            "INSERT INTO grower SELECT i, {'2': 'r' || (i % 3), '1': i % 5} FROM range(60) r(i)",
+        )["grower"]["plot"]
+        parts = plot["parts"]
+
+        assert parts['["1"]']["cardinality"] == 5
+        assert {v["value"] for v in parts['["2"]']["values"]} == {"r0", "r1", "r2"}
+
     def test_the_depth_cap_keeps_the_nested_record_as_a_count_profile(
         self,
         tmp_path: Path,
@@ -228,6 +276,7 @@ def test_a_databricks_struct_is_descended(databricks_test_schema: Any) -> None:
         ("postgres", "site_t", Member("town", "text")),
         ("duckdb", "STRUCT(town VARCHAR)", Member("town", "VARCHAR")),
         ("duckdb", "UNION(town VARCHAR)", Member("town", "VARCHAR", union=True)),
+        ("duckdb", "TUPLE(VARCHAR)", Member("1", "VARCHAR", position=1)),
         ("bigquery", "STRUCT<town STRING>", Member("town", "STRING")),
         ("databricks", "struct<town:string>", Member("town", "string")),
         ("clickhouse", "Tuple(town String)", Member("town", "String", position=1)),

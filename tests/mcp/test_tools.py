@@ -455,6 +455,28 @@ class TestEveryListReplyIsPaged:
 
         assert "changed" in caught.value.detail
 
+    def test_a_context_cursor_over_a_rewritten_joined_tables_statistics_is_refused(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        state = _state_for(primary_conn)
+        arguments = {"table": "arboretum.seedbank.accession", "format": "json"}
+        cursor = _dict_result(state, "get_table_context", arguments)["next_cursor"]
+        stats = (
+            primary_conn.output
+            / primary_conn.name
+            / "arboretum"
+            / "seedbank"
+            / "collector"
+            / "statistics.yaml"
+        )
+        stats.write_text(stats.read_text() + "\n")
+
+        with pytest.raises(McpError) as caught:
+            dispatch(state, "get_table_context", {**arguments, "cursor": cursor})
+
+        assert "changed" in caught.value.detail
+
 
 class TestEveryCallIsCheckedAgainstTheToolsOwnSchema:
     """MCP.md 8.2: the SDK runs no `inputSchema` check, so `dispatch` is where one has to be."""
@@ -987,6 +1009,7 @@ class TestCorruptedArtifactPassesThroughUnchanged:
         assert isinstance(result["_corrupted"], dict)
         assert set(result["_corrupted"]) == {"statistics"}
         assert isinstance(result["_corrupted"]["statistics"], str)
+        assert "would not parse" in result["notes"]["_corrupted"]
 
     def test_yaml_format_carries_the_same_mapping_as_json(
         self,
@@ -1609,6 +1632,17 @@ class TestSearchColumns:
         # collector_id carries no sensitivity, so the wildcard must not match its absence.
         assert "collector_id" not in cols
 
+    def test_a_sensitivity_search_says_a_miss_is_not_a_clearance(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        state = _state_for(primary_conn)
+        searched = _dict_result(state, "search_columns", {"sensitivity": "contact"})
+        unfiltered = _dict_result(state, "search_columns", {"pattern": "email"})
+
+        assert "not a finding that it is safe to publish" in searched["notes"]["sensitivity"]
+        assert "sensitivity" not in unfiltered.get("notes", {})
+
     def test_redacted_filter(self, primary_conn: ConnectionConfig) -> None:
         """email, phone, institution_email and shape_probe's logger_ipv4 carry `redacted: mask`."""
 
@@ -1639,6 +1673,39 @@ class TestSearchColumns:
 
         assert match["row_count"] == 5
         assert match["rows_scanned"] == 2
+        assert "describe the rows scanned, not the table" in result["notes"]["scope"]
+
+
+class TestRepliesExplainTheFieldsTheyCarry:
+    """A field that appears only in some replies is explained in the reply that carries it."""
+
+    def test_a_looks_like_match_explains_its_draw(self, primary_conn: ConnectionConfig) -> None:
+        result = _dict_result(_state_for(primary_conn), "search_columns", {"looks_like": "email"})
+
+        assert "matched of sampled values" in result["notes"]["sampled"]
+
+    def test_a_plain_search_carries_no_notes(self, primary_conn: ConnectionConfig) -> None:
+        result = _dict_result(_state_for(primary_conn), "search_columns", {"pattern": "rank"})
+
+        assert "notes" not in result
+
+    def test_a_detailed_listing_explains_freshness(self, primary_conn: ConnectionConfig) -> None:
+        state = _state_for(primary_conn)
+        detailed = _dict_result(state, "list_tables", {"detail": True})
+        bare = _dict_result(state, "list_tables", {})
+
+        assert "dormant where profiled_at is unreadable" in detailed["notes"]["freshness"]
+        assert "notes" not in bare
+
+    def test_a_diff_says_what_a_missing_drift_event_means(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        result = _dict_result(_state_for(primary_conn), "get_diff", {})
+
+        assert "did not change between the two prints" in result["notes"]["changes"]
+        assert result["summary"]["unevaluated_tables"] > 0
+        assert "were not compared" in result["notes"]["unevaluated_tables"]
 
 
 class TestGetManifest:

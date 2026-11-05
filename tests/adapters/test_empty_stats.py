@@ -52,6 +52,7 @@ def test_a_column_phase_a_declined_carries_no_cardinality(vendor: str) -> None:
         ("postgres", "exact"),
         ("redshift", "exact"),
         ("snowflake", "exact"),
+        ("sqlite", "exact"),
     ],
 )
 def test_a_supported_column_carries_a_zero_cardinality(vendor: str, method: str) -> None:

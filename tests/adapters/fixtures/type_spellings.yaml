@@ -341,3 +341,24 @@ snowflake:
   VECTOR: vector
   FILE: unsupported
   UNKNOWN: unsupported
+
+sqlite:
+  INTEGER: numeric
+  INT: numeric
+  BIGINT: numeric
+  INT8: numeric
+  REAL: numeric
+  DOUBLE: numeric
+  FLOAT: numeric
+  NUMERIC: numeric
+  DECIMAL(10,5): numeric
+  TEXT: text
+  VARCHAR(255): text
+  CHARACTER(20): text
+  UUID: text
+  BLOB: binary
+  BOOLEAN: boolean
+  DATE: temporal
+  DATETIME: temporal
+  TIMESTAMP: temporal
+  JSON: json

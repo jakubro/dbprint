@@ -20,9 +20,9 @@ GRANT USE CATALOG, USE SCHEMA, SELECT ON CATALOG my_catalog TO `dbprint_ro`;
 
 No `CREATE TABLE`, no `MODIFY`, no ownership. Two prerequisites no `GRANT` covers: the Databricks SQL access entitlement on the principal, and `CAN USE` on the warehouse the connection targets. Temporary-table creation needs no privilege at all, but is unsupported on Dedicated (single-user) access-mode clusters.
 
-### The behavior worth knowing before trusting a table count
+### A privilege-filtered table listing
 
-Unity Catalog's `information_schema` is privilege-**filtered**, not privilege-**gated**: an under-privileged principal does not get an error, it gets **fewer rows**. A print that is silently short of tables looks identical to a database that genuinely has fewer tables. Check the table count this run reports against what you expect before trusting an empty or small print.
+Unity Catalog's `information_schema` is privilege-**filtered**, not privilege-**gated**: an under-privileged principal does not get an error, it gets **fewer rows**. A print that is silently short of tables looks identical to a database that genuinely has fewer tables. Check the table count this run reports against the expected one before trusting an empty or small print.
 
 ## Unity Catalog vs. the fallback
 
@@ -46,7 +46,7 @@ On Unity Catalog, `table_type` maps eight documented values; a ninth stops the r
 | Seeded | yes, and measured reproducible — a table the copy cannot be taken on still reads a stable fraction directly, with a warning |
 | `looks_like` sub-draw | `ORDER BY rand(seed) LIMIT`, seeded — `TABLESAMPLE (n ROWS)` is documented as a `LIMIT`, not a random draw, so it is not used for this |
 
-Databricks reproduces the sampled fraction reliably — the measured coherence above the runtime floor that lets it degrade rather than refuse when the copy is unavailable — but that guarantee does not extend to row-level agreement between the fraction and the separate `looks_like` draw; see [PostgreSQL](postgres.md#sampling) for where the two engines that do promise full row-for-row coherence stand relative to it.
+Databricks reproduces the sampled fraction reliably — the measured coherence above the runtime floor that lets it degrade rather than refuse when the copy is unavailable — but that guarantee does not extend to row-level agreement between the fraction and the separate `looks_like` draw; see [PostgreSQL](postgres.md#sampling) for where the engines that do promise full row-for-row coherence stand relative to it.
 
 ## When dbprint writes
 
@@ -66,7 +66,7 @@ Both path segments are lowercased for the FQN; columns keep their catalog spelli
 
 ## Foreign tables
 
-A `FOREIGN` table, federated by query or by catalog, is listed with `external: true` (SPEC 2.2.20) and described from the catalog alone. A rule writing any other `read.tables.mode` for it is refused before any table is read, with exit 1, because the read would reach another live database. An `EXTERNAL` table, a streaming table and a shallow clone are ordinary tables: an external table's files sit in your own cloud storage and cost what a managed table's do. On the fallback path nothing is marked external.
+A `FOREIGN` table, federated by query or by catalog, is listed with `external: true` (SPEC 2.2.20) and described from the catalog alone. A rule writing any other `read.tables.mode` for it is refused before any table is read, with exit 1, because the read would reach another live database. An `EXTERNAL` table, a streaming table and a shallow clone are ordinary tables: an external table's files sit in the account's own cloud storage and cost what a managed table's do. On the fallback path nothing is marked external.
 
 ## Row count and cost
 

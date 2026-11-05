@@ -41,6 +41,7 @@ from .mysql import MysqlAdapter
 from .postgres import PostgresAdapter
 from .redshift import RedshiftAdapter
 from .snowflake import SnowflakeAdapter
+from .sqlite import SqliteAdapter
 
 
 __all__ = [
@@ -75,6 +76,7 @@ __all__ = [
     "Range",
     "RedshiftAdapter",
     "SnowflakeAdapter",
+    "SqliteAdapter",
     "StatisticsConfig",
     "TableCounts",
     "TableMeta",

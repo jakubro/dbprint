@@ -23,6 +23,8 @@ from dbprint.adapters.redshift import DIALECT as REDSHIFT_DIALECT
 from dbprint.adapters.redshift import stats as redshift_stats
 from dbprint.adapters.snowflake import DIALECT as SNOWFLAKE_DIALECT
 from dbprint.adapters.snowflake import stats as snowflake_stats
+from dbprint.adapters.sqlite import DIALECT as SQLITE_DIALECT
+from dbprint.adapters.sqlite import stats as sqlite_stats
 
 
 DIALECTS: dict[str, Dialect] = {
@@ -34,6 +36,7 @@ DIALECTS: dict[str, Dialect] = {
     "redshift": REDSHIFT_DIALECT,
     "databricks": DATABRICKS_DIALECT,
     "bigquery": BIGQUERY_DIALECT,
+    "sqlite": SQLITE_DIALECT,
 }
 
 
@@ -46,6 +49,7 @@ STATS_MODULES: dict[str, ModuleType] = {
     "redshift": redshift_stats,
     "databricks": databricks_stats,
     "bigquery": bigquery_stats,
+    "sqlite": sqlite_stats,
 }
 
 

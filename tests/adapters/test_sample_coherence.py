@@ -41,20 +41,21 @@ DRAW_CLAUSES: dict[str, str] = {
     "redshift": "random() <",
     "databricks": "tablesample (",
     "bigquery": "tablesample system (",
+    "sqlite": "dbprint_draw(",
 }
 
 # The vendors whose unmaterialized fallback stays coherent, written out rather than read from the
 # adapters: a wrongly-flipped flag would turn the tests below into silent skips, not failures.
-COHERENT_FALLBACK_VENDORS = frozenset({"databricks", "duckdb", "postgres"})
+COHERENT_FALLBACK_VENDORS = frozenset({"databricks", "duckdb", "postgres", "sqlite"})
 
 # `CREATE TEMPORARY TABLE ... AS SELECT` is a Databricks-only feature OSS Spark rejects
 # (measured), so only tests calling `materialize_scope` directly are affected here.
 _NO_LOCAL_TEMP_TABLE = {"databricks"}
 
-# The DDL keyword each vendor's copy step opens with - only BigQuery diverges, its copy being
-# a genuine non-session table (`adapters.bigquery.stats.materialize`), self-expiring and
-# replaceable rather than session-scoped.
-_COPY_PREFIX: dict[str, str] = {"bigquery": "create or replace table"}
+# The keyword each vendor's drawing copy statement opens with - BigQuery's is a self-expiring,
+# replaceable non-session table (`adapters.bigquery.stats.materialize`), and SQLite fills a
+# table it created first, since `AS SELECT` would drop each column's collation.
+_COPY_PREFIX: dict[str, str] = {"bigquery": "create or replace table", "sqlite": "insert into"}
 
 
 def _profile(
@@ -226,6 +227,7 @@ DRAW_EXPRESSIONS: dict[str, str] = {
     "snowflake": r"sample system \([^)]*\)(?: seed \([^)]*\))?",
     "duckdb": r"tablesample bernoulli\([^)]*\)(?: repeatable \([^)]*\))?",
     "databricks": r"tablesample \([^)]*\)(?: repeatable \([^)]*\))?",
+    "sqlite": r"dbprint_draw\([0-9]+, .*?\) < [0-9.]+",
 }
 
 

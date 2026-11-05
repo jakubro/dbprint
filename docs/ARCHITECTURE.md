@@ -54,7 +54,8 @@ This map is maintained by hand. It is not generated from the tree and nothing ch
 │   │   ├── clickhouse/                     #   concrete adapter package - refuses an unmaterialized sample
 │   │   ├── redshift/                       #   concrete adapter package - refuses an unmaterialized sample
 │   │   ├── databricks/                     #   concrete adapter package - degrades to an unmaterialized sample
-│   │   └── bigquery/                       #   concrete adapter package - refuses an unmaterialized sample
+│   │   ├── bigquery/                       #   concrete adapter package - refuses an unmaterialized sample
+│   │   └── sqlite/                         #   concrete adapter package - in-process, file opened read-only
 │   │       (each package: rendering.py      #   the vendor's one per-type SQL rendering)
 │   ├── engine/                             # Orchestration layer
 │   │   ├── orchestrator.py                 #   Engine.generate() top-level flow
@@ -110,6 +111,7 @@ This map is maintained by hand. It is not generated from the tree and nothing ch
 │   │   ├── reference.py                    #   packaged spec and guide lookup, backing get_reference
 │   │   ├── paging.py                       #   cursor paging under a character bound (MCP.md 4.8)
 │   │   ├── tools.py                        #   tool handlers (pure)
+│   │   ├── instructions.py                 #   the connect-time instructions, naming what is served
 │   │   ├── server.py                       #   the only module importing the MCP SDK
 │   │   └── errors.py                       #   McpError + JSON-RPC code mapping
 │   ├── spec/                               # Normative helpers + packaged schemas
@@ -246,6 +248,7 @@ class Adapter(ABC):
 
     def extract_ddl(self, fqn: str) -> str: ...
     def introspect_columns(self, fqn: str) -> list[ColumnMeta]: ...
+    def read_columns(self, fqn: str, columns: list[ColumnMeta]) -> list[ColumnMeta]: ...
     def introspect_relationships(self, fqn: str) -> list[ForeignKeyMeta]: ...
     def introspect_indexes(self, fqn: str) -> list[IndexMeta]: ...
     def introspect_unique_keys(self, fqn: str) -> list[UniqueKeyMeta]: ...
@@ -386,13 +389,13 @@ Adapters do not return artifact-shaped dicts. They return typed intermediate rec
 
 ### Cardinality measurement
 
-`cardinality_method` (part of `BaseStats`, [§2.2.2 of the spec](format/v1/SPEC.md#222-universal-per-column-fields)) records how a column's distinct-value count was obtained, and the eight adapters split two ways on it.
+`cardinality_method` (part of `BaseStats`, [§2.2.2 of the spec](format/v1/SPEC.md#222-universal-per-column-fields)) records how a column's distinct-value count was obtained, and the adapters split two ways on it.
 
 Four reach a cheap population-level estimate instead of scanning the distinct set: Postgres reads the planner's stored `n_distinct` from `pg_stats` — the inherited row for a table with inheritance children; Snowflake and BigQuery compute an HLL sketch via `APPROX_COUNT_DISTINCT`, ClickHouse via `uniqCombined64`. All four report `approximate` for that estimate, and all four re-probe a near-unique column exactly — one `COUNT(DISTINCT)` statement per table, after every batch, once the estimate crosses a threshold close to the row count — because an estimation error near that boundary is exactly where it would flip a `candidate_key` verdict.
 
-MySQL, Redshift, Databricks and duckdb publish `exact` unconditionally: the first three expose no stored per-column distinct-value estimate to read, and duckdb's `approx_count_distinct` errs by tens of percent on large tables while its in-process exact count stays cheap, so `compute_column_statistics` issues a `COUNT(DISTINCT)` for every column on every table there — not a choice between two paths, because only one exists. Measured on MySQL against a multi-million-row table, that statement costs single-digit seconds per column and scales with cardinality and value width; on a wide table the cost is paid once per column, every run, regardless of table size.
+MySQL, Redshift, Databricks, duckdb and SQLite publish `exact` unconditionally: the first three expose no stored per-column distinct-value estimate to read, SQLite has no approximate distinct count at all, and duckdb's `approx_count_distinct` errs by tens of percent on large tables while its in-process exact count stays cheap, so `compute_column_statistics` issues a `COUNT(DISTINCT)` for every column on every table there — not a choice between two paths, because only one exists. Measured on MySQL against a multi-million-row table, that statement costs single-digit seconds per column and scales with cardinality and value width; on a wide table the cost is paid once per column, every run, regardless of table size.
 
-The asymmetry is load-bearing for anyone reading a print from one of those four: `approximate` never appears there, and `exact` does not carry the same weight it carries on the other four — it means "the only measurement this adapter has," not "counted because the population was small enough to count."
+The asymmetry is load-bearing for anyone reading a print from one of those five: `approximate` never appears there, and `exact` does not carry the same weight it carries on the other four — it means "the only measurement this adapter has," not "counted because the population was small enough to count."
 
 ### Row-level narrowing and sampling
 
@@ -404,7 +407,7 @@ Three things bound it. The copy costs a write, so it is refusable: the table's r
 
 The sampler adds its own bounded draw on top of that source rather than reading all of it: `SELECT DISTINCT` blocks, so a row limit trims the result and not the scan, and scanning the whole scoped set once per eligible column is the cost a scope exists to avoid. The scoped source decides *which* rows are eligible; the sampler's own draw decides *how many* of them it reads, sized from the scoped estimate. A draw returning fewer than `MIN_SAMPLE_DRAW` values is re-taken over the scoped set directly, which is what keeps a selective predicate from yielding a near-empty draw with nothing recording it.
 
-A path decision must not itself cost a scan: every adapter but duckdb and ClickHouse sizes it from a catalog estimate, never `COUNT(*)`. Those two count, because their counts read row-group or part metadata and deletion markers rather than rows, and their catalog figures keep counting deleted rows. A fraction scales that estimate arithmetically; a predicate does not, because none of these catalogs estimates selectivity, so a filtered read stays on the sampling path and relies on the re-read above.
+A path decision must not itself cost a scan: every adapter but duckdb, ClickHouse and SQLite sizes it from a catalog estimate, never `COUNT(*)`. SQLite counts because it keeps no estimate unless `ANALYZE` ran; the other two count, because their counts read row-group or part metadata and deletion markers rather than rows, and their catalog figures keep counting deleted rows. A fraction scales that estimate arithmetically; a predicate does not, because none of these catalogs estimates selectivity, so a filtered read stays on the sampling path and relies on the re-read above.
 
 How the two draws compose is dialect-specific, and the differences are load-bearing:
 
@@ -422,7 +425,7 @@ How the two draws compose is dialect-specific, and the differences are load-bear
 
 **Why a seed at all.** The copy is refusable, so the sampling construct is still what a run reads where the write was declined — and there it is seeded. The seed is derived from the table's normalized FQN, so it is stable without being stored and distinct per table without being coordinated; nothing about it reaches the artifact, which SPEC 2.2.8 requires. It is also what the copy itself is built from, so two runs against an unchanged table copy the same rows wherever the engine honours it.
 
-What the seed does **not** do, on every adapter, is guarantee that two evaluations of one seeded expression read the same rows — and an adapter states which side of that line it is on through `SAMPLE_FALLBACK_COHERENT`. Postgres and duckdb are True: `BERNOULLI` decides membership per row by hashing (block, offset, seed), so an unmaterialized fallback still reads the same rows on every statement. Databricks is True above its measured runtime floor — `TABLESAMPLE ... REPEATABLE` is coherent on this engine. Snowflake, MySQL, ClickHouse, Redshift and BigQuery are False: none of their per-statement constructs is documented to reproduce a row set on repeat evaluation, so the engine refuses a `sample` scope with no materialized copy on those five rather than publish a file whose fields disagree with each other.
+What the seed does **not** do, on every adapter, is guarantee that two evaluations of one seeded expression read the same rows — and an adapter states which side of that line it is on through `SAMPLE_FALLBACK_COHERENT`. Postgres and duckdb are True: `BERNOULLI` decides membership per row by hashing (block, offset, seed), so an unmaterialized fallback still reads the same rows on every statement. SQLite is True too: its draw is a registered function of the table's seed and the row's values alone. Databricks is True above its measured runtime floor — `TABLESAMPLE ... REPEATABLE` is coherent on this engine. Snowflake, MySQL, ClickHouse, Redshift and BigQuery are False: none of their per-statement constructs is documented to reproduce a row set on repeat evaluation, so the engine refuses a `sample` scope with no materialized copy on those five rather than publish a file whose fields disagree with each other.
 
 Two consequences worth stating plainly. `TABLESAMPLE` binds to a base table and cannot nest, which is why Postgres has two composition shapes where the others have one — and because BERNOULLI decides membership per row from the seed rather than from a sequence, a narrower rate under the same seed yields a *subset* of the wider draw. Snowflake, by contrast, supports no seed on fixed-size sampling, so `looks_like` there agrees with the rest of the profile at the population level rather than row for row; a test asserting identical rows would be asserting something the adapter cannot do.
 
@@ -448,7 +451,7 @@ The pattern is opt-in: simple-to-host adapters (postgres) skip the factory hook 
 
 Every adapter also takes a keyword-only `statement_timeout` (seconds, or `None`), carried into its `ConnectionParams` and applied once per session in `connect()` through the vendor's own setting — never a method called after construction, since the limit is fixed for the adapter's life. `exec_query` marks a driver's timeout on the `QueryFailed` it raises (`timed_out`), and the engine renders that one failure as `timed out after <limit>`; everything else about it is the ordinary failure path. Because the default cursor factories are where the setting lives, the injected test substrates never see it.
 
-The string-literal grammar is pinned the same way, on the two engines that let a session change it: Postgres starts every session with `standard_conforming_strings = on` and refuses one that does not read it back, and MySQL removes `NO_BACKSLASH_ESCAPES` from the session's `sql_mode`. A map or document key read back from the data reaches SQL as a literal (`base.key_literal`), safe only under the grammar its form assumes; the other six engines fix theirs.
+The string-literal grammar is pinned the same way, on the two engines that let a session change it: Postgres starts every session with `standard_conforming_strings = on` and refuses one that does not read it back, and MySQL removes `NO_BACKSLASH_ESCAPES` from the session's `sql_mode`. A map or document key read back from the data reaches SQL as a literal (`base.key_literal`), safe only under the grammar its form assumes; every other engine fixes its own.
 
 ### Sessions
 
@@ -776,7 +779,7 @@ Each adapter declares two credential sets. `REQUIRED_KEYS` must all resolve or t
 
 The Snowflake adapter requires `account, user, warehouse, role` and treats `database`, `password`, `private_key_file`, `private_key_file_pwd`, and `schema` as optional. Its auth is **either-or**: exactly one of `password` or `private_key_file` (an RSA PEM PKCS8 key, decrypted with `private_key_file_pwd` when encrypted) must be provided — neither or both is a configuration error.
 
-A third set, `PATH_KEYS`, names the keys whose value is a local file (duckdb `database`, BigQuery `credentials_file`, Snowflake `private_key_file`). Credential resolution anchors a relative one at the project root, never the working directory, expands `~`, and refuses a file that does not exist before the adapter is built — so no driver is ever handed a path it could create.
+A third set, `PATH_KEYS`, names the keys whose value is a local file (duckdb and SQLite `database`, BigQuery `credentials_file`, Snowflake `private_key_file`). Credential resolution anchors a relative one at the project root, never the working directory, expands `~`, and refuses a file that does not exist before the adapter is built — so no driver is ever handed a path it could create.
 
 ### Split rationale
 
@@ -899,6 +902,7 @@ This pattern matches the spec's `validate_print` contract in [§6.5 of the spec]
 |---|---|---|
 | `extract_ddl` | table | Aborts the table — the artifact describes nothing without it. |
 | `introspect_columns` | table | Aborts the table, same reason. |
+| `read_columns` | table | Aborts the table: the columns' classification rests on it. Called only for an object the run reads; the default returns the catalog's columns unchanged, and SQLite reads each column's storage classes here (SPEC 3.3). |
 | `compute_base_statistics` | column | Degrades per batch: a failed batch is retried one column at a time, and a column still failing is published from its type and a null-count read, named `unmeasured` (§2.2.4). Aborts the table only when that null-count read fails too. A failed exact recount leaves the approximate counts standing. |
 | `compute_column_statistics` | column | Degrades per column: every adapter's Phase B runs through `run_phase_b`, so a statement failing for one column leaves that column its Phase A fields and classification and names every field it still owed `unmeasured`; a timed-out statement degrades its column the same way, and the warning says it timed out. One warning per table lists the degraded columns and the first error. A numeric statement that fails is re-issued once without its mean and sum, which are then named `unmeasured`, unless it timed out. |
 | `estimate_row_count` | table | Aborts the table. Only called when a rule's size condition needs it. |
@@ -982,6 +986,7 @@ Each adapter contract row uses the substrate appropriate to its host environment
 | `snowflake` | In-memory duckdb connection injected via `cursor_factory`; per-test fresh `:memory:` instance | Adapter SQL targets duckdb directly; Snowflake-only behavior is outside the automated suite |
 | `mysql` | Ephemeral MariaDB started via `mariadb-install-db` + `mariadbd`; per-test fresh database | One server per run, shared by every xdist worker, amortises startup; the adapter speaks the wire protocol both MariaDB and Oracle MySQL serve. Native-JSON-type parity is verified by the environment-gated live suite |
 | `duckdb` | In-memory duckdb connection, per test | The adapter under test and its substrate are the same engine — no substitution point exists, unlike the Snowflake row below |
+| `sqlite` | In-memory `sqlite3` connection injected via `cursor_factory`, per test | The adapter's own engine, but the interpreter's own SQLite build: a library on another host can lack a compile option this one has (`ENABLE_PERCENTILE`, `ENABLE_MATH_FUNCTIONS`, a smaller `MAX_FUNCTION_ARG`), so the adapter uses none of them. The read-only open, WAL side files and a missing file are proved on real files under the test's scratch directory |
 | `clickhouse` | In-process chdb instance injected via `cursor_factory`, per test | Real ClickHouse (chdb embeds the engine as a library), so this proves engine semantics, not just dialect shape — the strongest substrate here after duckdb's own row. Cannot prove anything distributed |
 | `redshift` | Real Postgres, wrapped in a shim (`RedshiftDialectShim`) that answers the Redshift-only catalog statements from Postgres's own catalog and rewrites three SQL constructs Postgres spells differently; per-test fresh database | The weakest substrate here: no Redshift-derived engine exists to embed or install. Proves the statistics-computation SQL genuinely (`WITHIN GROUP`, `RANDOM()`, `CREATE TEMPORARY TABLE ... AS SELECT` all run unmodified against a real server) and constraint introspection genuinely too (`pg_constraint`, a standard PostgreSQL catalog table, reached unmodified) — only the genuinely Redshift-only surfaces (`SVV_*`/`STV_*`, `SHOW TABLE`/`SHOW VIEW`, `db_collation()`) are fabricated. See below |
 | `databricks` | Real local PySpark + Delta session, no shim, for the `information_schema`-absent fallback path (one session per xdist group, fresh Delta schema per test); `RecordedResponseCursor` answers Unity Catalog's own primary path from rows hand-transcribed to Databricks' own documented schemas, for the same reason a shim was never an option — no local substrate implements it at all | Two substrates, not one: the fallback path is a genuine engine (`SHOW CREATE TABLE`, `DESCRIBE ... AS JSON`, `ANALYZE TABLE` and every constraint clause are refused outright on OSS Delta, measured); Unity Catalog's own path is fabricated response data, proving the adapter's parsing/pairing logic against a documented row shape, never a real engine's behavior. See below |
@@ -1018,7 +1023,7 @@ chdb embeds the same ClickHouse engine the production driver (`clickhouse-connec
 
 What it proves: dialect shape and engine semantics both — a table's `SAMPLE` behavior, its aggregate functions, and its catalog reads are all the real thing. What it cannot prove: anything distributed. `SAMPLE` against a `Distributed` table or a `ReplicatedMergeTree`, cluster-wide `system` table behavior, and access-control-gated reads are all outside an in-process build's reach.
 
-One measured finding shapes the adapter more than the substrate choice does: a table's own `SAMPLE BY` key does not guarantee that `SAMPLE` narrows anything — a monotonic key was measured reading the whole table at every requested fraction. Materialization is not an optimization here the way it is on PostgreSQL, duckdb and Databricks; it is the only way a sampled `statistics.yaml` can be trusted, which is why `read.tables.materialize: false` fails a sampled table outright on this adapter rather than degrading to an unseeded read (see [CONFIG.md](CONFIG.md)'s `profile.read` section).
+One measured finding shapes the adapter more than the substrate choice does: a table's own `SAMPLE BY` key does not guarantee that `SAMPLE` narrows anything — a monotonic key was measured reading the whole table at every requested fraction. Materialization is not an optimization here the way it is on PostgreSQL, duckdb, Databricks and SQLite; it is the only way a sampled `statistics.yaml` can be trusted, which is why `read.tables.materialize: false` fails a sampled table outright on this adapter rather than degrading to an unseeded read (see [CONFIG.md](CONFIG.md)'s `profile.read` section).
 
 ### Why Postgres, shimmed, for Redshift
 
@@ -1081,6 +1086,7 @@ src/dbprint/mcp/
 ├── resources.py      # URI parse + per-artifact handlers (pure)
 ├── reference.py      # packaged spec and guide lookup, backing get_reference
 ├── tools.py          # tool implementations (pure)
+├── instructions.py   # the instructions sent on connect, built from the served manifests
 └── server.py         # SDK adapter: wires handlers into mcp.server.Server
 ```
 

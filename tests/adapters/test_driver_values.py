@@ -226,6 +226,16 @@ def _seed_duckdb(request: pytest.FixtureRequest) -> tuple[str, dict[str, str]]:
     }
 
 
+def _seed_sqlite(request: pytest.FixtureRequest) -> tuple[str, dict[str, str]]:
+    con = request.getfixturevalue("sqlite_native_connection")
+    con.execute("CREATE TABLE spelled (id INTEGER, label TEXT)")
+    con.execute(
+        "INSERT INTO spelled VALUES " + _values_clause(_rows(_LABELS), lambda _, v: _literal(v)),
+    )
+
+    return "spelled", {"label": "{col} = {lit}"}
+
+
 def _seed_snowflake(request: pytest.FixtureRequest) -> tuple[str, dict[str, str]]:
     shim = request.getfixturevalue("snowflake_duckdb_connection")
     shim.execute("CREATE TABLE seedbank.spelled (id INTEGER, label VARCHAR)")
@@ -374,4 +384,5 @@ _SEEDERS: dict[str, Callable[[pytest.FixtureRequest], tuple[str, dict[str, str]]
     "postgres": _seed_postgres,
     "redshift": _seed_redshift,
     "snowflake": _seed_snowflake,
+    "sqlite": _seed_sqlite,
 }

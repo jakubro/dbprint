@@ -53,12 +53,19 @@ from tests.fixtures.adversarial import (
     SCOPED_TABLE,
     SEVERAL_EDGES_COLUMN,
     SEVERAL_EDGES_TABLE,
+    SPELLED_COLUMN,
+    SPELLED_NAME,
+    SPELLED_TABLE,
     SPELLING_COLUMN,
     SPELLING_VALUES,
     TRUNCATED_FK_COLUMN,
     UNEVALUATED_TABLE,
     UNREADABLE_PROFILED_AT,
     UNREADABLE_PROFILED_TABLE,
+    UNSHOWN_NOTE,
+    UNSHOWN_NOTE_COLUMN,
+    UNSHOWN_NOTE_TABLE,
+    UNSHOWN_NOTE_VALUE,
     VOID_VERDICT_NOTE,
     AdversarialPrint,
 )
@@ -87,6 +94,8 @@ COVERS = frozenset(
         "outside_print_entry",
         "delimiter_in_a_value",
         "value_spelling",
+        "unshown_value_note",
+        "physical_name_spelling",
         "scoped_complete_list",
         "scoped_part_list",
         "scoped_candidate_key",
@@ -369,3 +378,49 @@ def test_a_rejected_inferred_field_is_left_out(adversarial_print: AdversarialPri
 
     assert "candidate_key" not in (column.get("inferred") or {})
     assert payload["annotations"][REJECTED_FIELD_COLUMN] == {"note": REJECTED_FIELD_NOTE}
+
+
+def test_a_note_on_an_unshown_value_is_carried_under_value_notes(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    runner = CliRunner()
+    old_cwd = Path.cwd()
+    os.chdir(adversarial_print.conn.output.parent)
+
+    try:
+        args = ["context", UNSHOWN_NOTE_TABLE, "--purpose", "query", "--format", "json"]
+        result = runner.invoke(main, args)
+    finally:
+        os.chdir(old_cwd)
+
+    assert result.exit_code == 0, result.output
+
+    payload = json.loads(result.output)
+    block = payload.get("values", {}).get(UNSHOWN_NOTE_COLUMN, {})
+    shown = [entry["value"] for entry in block.get("entries", [])]
+
+    assert {"value": UNSHOWN_NOTE_VALUE, "note": UNSHOWN_NOTE} in payload["value_notes"][
+        UNSHOWN_NOTE_COLUMN
+    ]
+    assert UNSHOWN_NOTE_VALUE not in shown
+
+
+def test_a_columns_spelling_is_carried_under_physical_names(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    runner = CliRunner()
+    old_cwd = Path.cwd()
+    os.chdir(adversarial_print.conn.output.parent)
+
+    try:
+        args = ["context", SPELLED_TABLE, "--purpose", "query", "--format", "json"]
+        result = runner.invoke(main, args)
+    finally:
+        os.chdir(old_cwd)
+
+    assert result.exit_code == 0, result.output
+
+    payload = json.loads(result.output)
+
+    assert payload["physical_names"] == {SPELLED_TABLE: {SPELLED_COLUMN: SPELLED_NAME}}
+    assert SPELLED_COLUMN in payload["values"]

@@ -103,6 +103,7 @@ class TestFiniteValueText:
             ),
             ("bigquery", "FLOAT64", "CASE WHEN NOT IS_NAN(x) AND NOT IS_INF(x) THEN x END"),
             ("clickhouse", "Float64", "CASE WHEN isFinite(x) THEN x END"),
+            ("sqlite", "REAL", "CASE WHEN ABS(x) <= 1.7976931348623157e308 THEN x END"),
             (
                 "databricks",
                 "DOUBLE",
@@ -134,6 +135,7 @@ class TestFiniteValueText:
             ("databricks", "BIGINT"),
             ("mysql", "double"),
             ("mysql", "int"),
+            ("sqlite", "INTEGER"),
         ],
     )
     def test_a_type_holding_no_non_finite_value_keeps_its_sql_unchanged(

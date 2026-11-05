@@ -5,12 +5,12 @@ This directory holds two markdown skills in the Agent Skills layout, each a file
 - **`dbprint.md`**, the reading skill, teaches an agent to open a committed print before it queries a database: which tool answers which question, and what the number it gets back does and does not cover. It names the MCP tools, and falls back to `dbprint context` in a shell where no server is connected.
 - **`dbprint-annotate.md`**, the annotation skill, is for writing a print rather than reading it, described in its own section below.
 
-## When to use this vs. the MCP server
+## The skill and the MCP server compared
 
 | Surface | Use when |
 |---|---|
 | **Skill (this directory)** | The client loads skills or markdown rules. Its description reaches the agent before any dbprint tool does — while it is about to query a database, write SQL or trust a claim about the data — and sends it to the print first. Installed without the server, its shell route still works. |
-| **MCP server (`dbprint serve`)** | The client supports MCP and you want the tools themselves: native tool / resource primitives, multi-connection routing, and paged replies. The server's own instructions carry the reading rules to every client that connects. |
+| **MCP server (`dbprint serve`)** | The client supports MCP. Serves the tools themselves: native tool / resource primitives, multi-connection routing, and paged replies. The server's own instructions name the databases it serves and which tool answers what; each reply carries the reading rules for what it holds. |
 
 They are complements rather than alternatives — the skill tells an agent which tool to call, the server provides the tools. Installed together, the skill's tool names resolve; installed alone, its shell route still works.
 

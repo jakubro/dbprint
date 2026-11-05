@@ -39,7 +39,7 @@ class TestCandidateKeySuffix:
             values=[{"value": "a1b2", "count": 1}],
             inferred={"candidate_key": True},
         )
-        assert synthesize(s) == "values (top 1, covering 100%): 'a1b2' (100%); candidate key"
+        assert synthesize(s) == "candidate key"
 
     def test_names_the_exception(self) -> None:
         s = _stats(
@@ -47,14 +47,91 @@ class TestCandidateKeySuffix:
             values=[{"value": "a1b2", "count": 1}],
             inferred={"candidate_key": True, "candidate_key_exception": "measured_duplicates"},
         )
-        assert synthesize(s) == (
-            "values (top 1, covering 100%): 'a1b2' (100%); candidate key (measured duplicates)"
-        )
+        assert synthesize(s) == "candidate key (measured duplicates)"
 
     def test_rides_a_classification_other_than_text_too(self) -> None:
         s = _stats("numeric", range={"min": 1, "max": 9}, inferred={"candidate_key": True})
 
         assert synthesize(s) == "range: 1 -> 9; candidate key"
+
+
+class TestNotesLeaveOutWhatCarriesNothing:
+    """A fact a reader cannot act on costs its line and teaches the reader to skip lines."""
+
+    def test_a_list_of_values_each_holding_one_row_is_left_out(self) -> None:
+        s = _stats(
+            "text",
+            values=[{"value": "s-001", "count": 1}, {"value": "s-002", "count": 1}],
+        )
+
+        assert "values (top" not in synthesize(s)
+
+    def test_a_list_with_a_repeated_value_stays(self) -> None:
+        s = _stats(
+            "text",
+            values=[{"value": "s-001", "count": 3}, {"value": "s-002", "count": 1}],
+        )
+
+        assert "values (top 2, covering" in synthesize(s)
+
+    def test_a_declared_key_carries_no_median_or_mean(self) -> None:
+        s = _stats("numeric", range={"min": 1, "max": 900}, percentiles={"p50": 450}, mean=450.5)
+
+        assert synthesize(s, key=True) == "range: 1 -> 900"
+
+    def test_a_unique_measure_keeps_its_median_and_mean(self) -> None:
+        s = _stats(
+            "numeric",
+            range={"min": 1, "max": 900},
+            percentiles={"p50": 450},
+            mean=450.5,
+            inferred={"candidate_key": True},
+        )
+
+        assert synthesize(s) == "range: 1 -> 900; P50: 450; mean: 450.5; candidate key"
+
+    def test_a_foreign_key_carries_no_median_or_mean(self) -> None:
+        s = _stats("numeric", range={"min": 1, "max": 900}, percentiles={"p50": 450}, mean=450.5)
+
+        assert synthesize(s, "public.herbarium.id (inferred)") == (
+            "FK: public.herbarium.id (inferred); range: 1 -> 900"
+        )
+
+    def test_a_measure_keeps_its_median_and_mean(self) -> None:
+        s = _stats("numeric", range={"min": 1, "max": 900}, percentiles={"p50": 450}, mean=450.5)
+
+        assert synthesize(s) == "range: 1 -> 900; P50: 450; mean: 450.5"
+
+    def test_a_column_holding_no_value_has_no_distribution(self) -> None:
+        s = _stats("categorical", values=[], values_coverage=1.0, cardinality=0)
+        s["distribution"] = "uniform"
+
+        assert "distribution" not in synthesize(s)
+
+    def test_a_long_tail_of_single_row_values_goes_with_its_list(self) -> None:
+        s = _stats(
+            "text",
+            values=[{"value": "s-001", "count": 1}, {"value": "s-002", "count": 1}],
+            distribution="long_tail",
+        )
+
+        assert "long tail" not in synthesize(s)
+
+    def test_two_single_row_spellings_of_one_value_are_a_repeated_value(self) -> None:
+        s = _stats(
+            "text",
+            values=[
+                {"value": "Field", "count": 1},
+                {"value": "field", "count": 1, "spelling_of": "Field"},
+            ],
+        )
+
+        assert "'Field' (" in synthesize(s)
+
+    def test_a_redacted_key_carries_no_mean(self) -> None:
+        s = _stats("numeric", mean=450.5, redacted="hash")
+
+        assert "mean" not in synthesize(s, key=True)
 
 
 class TestBoolean:
@@ -568,7 +645,7 @@ class TestLooksLikeSuffix:
     def test_appended_when_detected(self) -> None:
         s = _stats(
             "text",
-            values=[{"value": "a@b.com", "count": 1}],
+            values=[{"value": "a@b.com", "count": 2}],
             inferred={"looks_like": "email"},
         )
         assert synthesize(s).endswith("; looks like: email")
@@ -591,7 +668,7 @@ class TestLooksLikeSuffix:
     def test_looks_like_sample_size_rides_the_verdict(self) -> None:
         s = _stats(
             "text",
-            values=[{"value": "a@b.com", "count": 1}],
+            values=[{"value": "a@b.com", "count": 2}],
             inferred={"looks_like": "email"},
         )
         out = synthesize(s, profile={"looks_like": {"sample_size": 500}})
@@ -601,7 +678,7 @@ class TestLooksLikeSuffix:
     def test_no_sample_size_note_without_configured_params(self) -> None:
         s = _stats(
             "text",
-            values=[{"value": "a@b.com", "count": 1}],
+            values=[{"value": "a@b.com", "count": 2}],
             inferred={"looks_like": "email"},
         )
         assert synthesize(s).endswith("; looks like: email")
@@ -611,7 +688,7 @@ class TestLooksLikeSuffix:
 
         s = _stats(
             "text",
-            values=[{"value": "a@b.com", "count": 1}],
+            values=[{"value": "a@b.com", "count": 2}],
             inferred={"looks_like": "email", "sampled": 1000, "matched": 998},
         )
         assert synthesize(s).endswith("; looks like: email (998 of 1000 sampled)")
@@ -634,7 +711,7 @@ class TestLooksLikeSuffix:
     def test_evidence_and_the_configured_cap_ride_together(self) -> None:
         s = _stats(
             "text",
-            values=[{"value": "a@b.com", "count": 1}],
+            values=[{"value": "a@b.com", "count": 2}],
             inferred={"looks_like": "email", "sampled": 500, "matched": 480},
         )
         out = synthesize(s, profile={"looks_like": {"sample_size": 500}})
@@ -650,7 +727,7 @@ class TestLooksLikeCandidateSuffix:
     def test_the_share_names_its_population_as_sampled_values(self) -> None:
         s = _stats(
             "text",
-            values=[{"value": "x", "count": 1}],
+            values=[{"value": "x", "count": 2}],
             inferred={"looks_like_candidate": "email", "looks_like_candidate_share": 0.53},
         )
         assert synthesize(s).endswith("; near: email (53% of sampled values, no verdict)")

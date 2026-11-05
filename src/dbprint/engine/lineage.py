@@ -35,6 +35,7 @@ DBT_ADAPTERS: Mapping[str, frozenset[str]] = {
     "mysql": frozenset({"mysql"}),
     "clickhouse": frozenset({"clickhouse"}),
     "databricks": frozenset({"databricks", "spark"}),
+    "sqlite": frozenset({"sqlite"}),
 }
 
 _VERSION_RE = re.compile(r"/manifest/v(\d+)\.json$")

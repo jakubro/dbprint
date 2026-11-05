@@ -6,6 +6,8 @@ $ pip install 'dbprint[duckdb]'
 
 The extra carries `duckdb>=2.0.0`. duckdb runs in-process: no server, no separate driver process, and no `pg_dump`-style external binary — DDL comes straight from the catalog. Absent driver: `duckdb is not installed. Install dbprint with the [duckdb] extra: \`pip install dbprint[duckdb]\`.` A failed open: `could not open duckdb database <database>: <cause>`.
 
+A table's `ddl.sql` holds its `CREATE TABLE` as `duckdb_tables()` stores it, then each `CREATE INDEX` that `duckdb_indexes()` stores for it, unique ones included, in index-name order compared by code point, one blank line apart; a view's holds its `CREATE VIEW`. A `PRIMARY KEY` or `UNIQUE` constraint has no statement of its own: it stays in the `CREATE TABLE`.
+
 Fully-qualified names are `database.schema.table` — three segments, matching duckdb's own attached-database-then-schema nesting.
 
 ## Credentials
@@ -62,7 +64,7 @@ Every duckdb identifier resolves case-insensitively, so a capital in the catalog
 | Type | Profiled as | What to know |
 |---|---|---|
 | `T[]`, `T[n]` | `composite` | An array of floats with one length per value, such as an embedding in `FLOAT[n]`, also carries `norm` and `zero_count`; duckdb has no `vector` type |
-| `STRUCT(...)`, `UNION(...)` | `composite` | A nested field keeps its full path (`.spot.x`) |
+| `STRUCT(...)`, `TUPLE(...)`, `UNION(...)` | `composite` | A nested field keeps its full path (`.spot.x`); a `TUPLE` element, which has no name, is named by its 1-based position (`["1"]`) |
 | `MAP(K, V)` | `composite` | `labels['site'] IS NULL` holds for an absent key, a null value, an empty map and a null map alike; the parts tell them apart |
 | `JSON` | `json` | `types` keys are what `json_type` returns |
 | `GEOMETRY` | `spatial` | Needs the `spatial` extension installed: dbprint loads it but never installs it, and without it `geometry` and `extent` are reported unmeasured with a warning. `srid` is a CRS string such as `OGC:CRS84` |
@@ -79,4 +81,4 @@ duckdb has no server to cancel on, so `run.statement_timeout` is a client-side c
 
 - Every configuration key: [Configuration](../CONFIG.md)
 - What a `scope` block does to the numbers: [choosing what to profile](../guide/scoping.md) and [SPEC 2.2.8](../format/v1/SPEC.md#228-scope--statistics-over-part-of-a-table)
-- What DDL normalization strips and preserves: [SPEC 2.1.3](../format/v1/SPEC.md#213-what-must-be-stripped-per-adapter)
+- What DDL normalization strips and preserves: [SPEC 2.1.3](../format/v1/SPEC.md#213-what-must-be-stripped-per-adapter); the order of a table's statements: [SPEC 2.1.5](../format/v1/SPEC.md#215-multi-statement-ddl)

@@ -53,6 +53,7 @@ const SIDEBAR = [
     label: "Adapters",
     items: [
       { label: "duckdb", slug: "adapters/duckdb" },
+      { label: "SQLite", slug: "adapters/sqlite" },
       { label: "PostgreSQL", slug: "adapters/postgres" },
       { label: "MySQL", slug: "adapters/mysql" },
       { label: "ClickHouse", slug: "adapters/clickhouse" },

@@ -32,48 +32,11 @@ from mcp.types import Resource as McpResource
 
 from dbprint import __version__ as DBPRINT_VERSION
 from . import errors, paging, resources, tools
+from .instructions import instructions
 from .state import ServedConnections
 
 
 SERVER_NAME = "dbprint"
-
-# Sent unprompted on every connect (MCP.md 2); Claude Code keeps the first 2,048 characters, so
-# routing leads and the text stays under that. test_server.py binds its rules to SPEC 2.2.8/2.3/4.4.2/7.1.
-SERVER_DESCRIPTION = (
-    "Answers questions about a database from its print, a snapshot dbprint took of "
-    "it and committed to the repository: DDL, row counts, column statistics and value "
-    "lists, joins, and notes people wrote. No database is queried. Answer from these "
-    "tools, not the print's files, which lack the sampling, redaction and "
-    "missing-measurement handling the tools apply.\n\n"
-    "Which tool answers what:\n"
-    "- Writing SQL: get_table_context with purpose: query for every table the "
-    "query touches - DDL, the Joins list, the data dictionary, value lists.\n"
-    "- A filter value whose stored spelling is not listed in full there: "
-    "resolve_value; use every spelling it returns.\n"
-    "- Which table or column holds a fact, by name, type, shape (email, phone) "
-    "or what its notes say: search_columns (`text` searches the notes).\n"
-    "- Which tables exist, their row counts, whether their statistics are "
-    "stale: list_tables with detail: true.\n"
-    "- What changed since the previous print: get_diff.\n"
-    "- What a field or a finding's spec_ref means: get_reference; how to read "
-    "json/yaml fields: get_reference document: guide.\n"
-    "- The print's raw table index: get_manifest.\n\n"
-    "Reading an answer:\n"
-    "- Scope. A table with a scope block was read in part, by a sample or a "
-    "row filter; its statistics describe the rows scanned, not the table. "
-    "Under a sample a row count - nulls, a value's count, a true/false split - "
-    "MAY be multiplied by row_count / rows_scanned for a rough table-wide figure; "
-    "under a filter nothing rescales, and a distinct count, ratio, bound, "
-    "percentile, sum or mean never does.\n"
-    "- Inference. Fields under inferred, and joins whose detection is "
-    "inferred or measured, are dbprint's guesses, not database constraints. "
-    "No sensitivity on a column means nothing was detected, not that the "
-    "column is safe to publish.\n"
-    "- Absence. A missing field is not zero. A field named in an unmeasured or "
-    "disabled list was not measured: its value is unknown, not none.\n"
-    "- Meanings. A print states what the data holds, not what its codes, "
-    "units or defaults mean: read the code or docs for any meaning it does not annotate."
-)
 
 
 def build_server(state: ServedConnections) -> Server:
@@ -192,7 +155,7 @@ def build_server(state: ServedConnections) -> Server:
     server = Server(
         SERVER_NAME,
         version=DBPRINT_VERSION,
-        instructions=SERVER_DESCRIPTION,
+        instructions=instructions(state),
         on_list_resources=list_resources,
         on_list_resource_templates=list_resource_templates,
         on_read_resource=read_resource,
@@ -217,7 +180,7 @@ def initialization_options(server: Server) -> InitializationOptions:
             ),
             experimental_capabilities={},
         ),
-        instructions=SERVER_DESCRIPTION,
+        instructions=server.instructions,
     )
 
 

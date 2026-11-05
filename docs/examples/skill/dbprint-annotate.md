@@ -7,15 +7,15 @@ description: Write the notes in a database's dbprint print - the snapshot of a l
 
 A print measures what the data holds. It cannot say what a code means, which unit a number is in, what a far-future date stands for, or which rows a report leaves out — and an agent reading the print stops looking for those answers elsewhere. The annotation layer is where they go. A wrong annotation is worse than none, because the reader follows it, so every statement written here is sourced, scoped and, wherever a statistic can check it, checked.
 
-Work one table at a time, in the order below. You need a local checkout of the print (`prints/<connection>/` beside `.dbprint.yaml`, unless that file's `output` names another directory) — one read through a remote `--project` is read-only — the code that writes and reads the tables, and read-only access to the database. Never write to the database, and never edit a producer-written file (`statistics.yaml`, `relationships.yaml`, `ddl.sql`, `manifest.yaml`, `diff.yaml`, `reading.md`).
+Work one table at a time, in the order below. The work needs a local checkout of the print (`prints/<connection>/` beside `.dbprint.yaml`, unless that file's `output` names another directory) — one read through a remote `--project` is read-only — the code that writes and reads the tables, and read-only access to the database. Never write to the database, and never edit a producer-written file (`statistics.yaml`, `relationships.yaml`, `ddl.sql`, `manifest.yaml`, `diff.yaml`, `reading.md`).
 
 ## 1. Read what the print already says
 
-`dbprint context <table>` (or `get_table_context`) shows the DDL, every column's statistics, the relationships and any annotations already written. A header line `Meanings: not documented here` marks a table nobody has annotated yet. Note every coded column (a short complete value list), every column whose unit is not in its name, every value far from the rest (`2099-12-31`, `-1`, `0` on a large share of rows), and every measured or inferred join.
+`dbprint context <table>` (or `get_table_context`) shows the DDL, every column's statistics, the relationships and any annotations already written. A header line `Meanings: not documented here` marks a table no description, column note or connection note explains yet; under `--purpose query`, the same words closing a column's coverage cell mark a complete code list nothing explains. Prose in a description, a connection note or another column's note documents a column only where it names the column in backticks (`` `shelf_code` ``). Note every coded column (a short complete value list), every column whose unit is not in its name, every value far from the rest (`2099-12-31`, `-1`, `0` on a large share of rows), and every measured or inferred join.
 
 ## 2. Read the code before the data
 
-Find what writes the table — migrations, models, the job or service that inserts and updates it — and what reads it: the reports, exports and queries that consume it. The code states what each code means, which unit a number is in, which default a null stands for, which time zone a timestamp was written in, and which rows a consumer excludes. Record the file path beside every fact you take from it.
+Find what writes the table — migrations, models, the job or service that inserts and updates it — and what reads it: the reports, exports and queries that consume it. The code states what each code means, which unit a number is in, which default a null stands for, which time zone a timestamp was written in, and which rows a consumer excludes. Record the file path beside every fact taken from it.
 
 ## 3. Confirm with read-only queries
 
@@ -69,7 +69,7 @@ grain:
       note: Assigned at intake and never reused (`models/accession.py`).
 ```
 
-A column copied or computed from another table's column — a `curator_profile.email` copied from `collector.email` — carries `derived_from` naming that column (`derived_from: [{table: arboretum.seedbank.collector, column: email}]`), and the pitfall is written once, on the source: a query-purpose context for the derived column carries the source's notes beside its own. The notes travel one step only, and only from a table in the print — a column derived from a derived column gets its direct source's notes, not that source's own. A print generated with a dbt manifest already records this lineage for every model column it could trace; write `derived_from` only where it is missing or wrong — a list written here replaces the traced one, and `derived_from: []` removes a wrong one.
+A column copied or computed from another table's column — a `curator_profile.email` copied from `collector.email` — carries `derived_from` naming that column (`derived_from: [{table: arboretum.seedbank.collector, column: email}]`), and the pitfall is written once, on the source: a query-purpose context for the derived column carries the source's notes beside its own, except the source's value notes where either column is redacted. The notes travel one step only, and only from a table in the print — a column derived from a derived column gets its direct source's notes, not that source's own. A print generated with a dbt manifest already records this lineage for every model column it could trace; write `derived_from` only where it is missing or wrong — a list written here replaces the traced one, and `derived_from: []` removes a wrong one.
 
 **`relationships.annotations.yaml`**, beside it. Reject a measured or inferred edge that joins two columns sharing nothing but values, and add a join the producer could not find, each with a note naming its source:
 
@@ -94,7 +94,7 @@ An added join takes the same shape without `verdict`, its `note` naming the code
 - **Scoped.** A rule says which calculations it applies to and which it does not.
 - **Checkable where possible.** Anything a statistic can check — a null rate, a range bound, a closed set of values, uniqueness — is also a `claims` entry, so `dbprint check` reports it the day it stops being true. Prose in `description.md` is checked by nothing. A wrong inference is rejected, never claimed false: `claims: {candidate_key: false}` on a unique column is a contradiction `dbprint check` reports on every run.
 - **Open questions stay open.** Write "Open question: whether `viability_pct` before the trial form was rebuilt was recorded as a percent; its history does not say" — never a hedged rule such as "probably a percent, treat with care", which reads as an instruction and gets followed either way.
-- **Measured beats written.** Do not restate a count, a null rate or a value list the statistics already carry; the statistics are current as of the last run and prose is not. Annotate what a statistic cannot express.
+- **No restated statistics.** Do not restate a count, a null rate or a value list the statistics already carry; the statistics are current as of the last run and prose is not. Annotate what a statistic cannot express.
 
 ## 6. Check before finishing
 

@@ -94,6 +94,7 @@ SAMPLE_CLAUSES: dict[str, str] = {
     "redshift": "order by random()",
     "databricks": "order by rand(",
     "bigquery": "order by rand(",
+    "sqlite": "order by dbprint_draw(",
 }
 
 NARROW_TABLES = ["*.curator", "*.herbarium"]
@@ -296,6 +297,7 @@ class TestEveryAdapterIsCovered:
             "postgres": '"',
             "redshift": '"',
             "snowflake": '"',
+            "sqlite": '"',
         }
 
     def test_every_registered_adapter_is_swept(self) -> None:

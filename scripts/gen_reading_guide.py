@@ -617,7 +617,7 @@ _QUERY_WRITING_PARAGRAPHS = (
         "`inferred` or `measured` (SPEC 2.3): an inferred edge is a guess from a column name, a "
         "measured one a value containment seen at the read, neither a constraint, so prefer a "
         "declared edge where one exists; each column's `values` with its counts and `values_coverage`; "
-        "the column notes in `statistics.annotations.yaml`; and the `notes` in "
+        "the column and value notes in `statistics.annotations.yaml`; and the `notes` in "
         "`manifest.annotations.yaml` at the print root (SPEC 2.7.3), where a fact many tables "
         "share — what a code means, which unit a timestamp is in — is written once. Leave the rest of "
         "`statistics.yaml` — counts, ratios, percentiles, distributions — unread: they describe "
@@ -629,7 +629,11 @@ _QUERY_WRITING_PARAGRAPHS = (
         "a `numeric`/`temporal` column whose `frequencies.listed` is short of `cardinality`, a "
         "phrase absent from the list is not evidence it is absent from the column. An entry "
         "carrying `spelling_of` is another spelling of the value it names (SPEC 2.2.4) — one "
-        "category stored several ways, so a predicate needs every spelling in the group."
+        "category stored several ways, so a predicate needs every spelling in the group. A "
+        "`columns` key is lowercase; where the database spells the column otherwise, the column "
+        "carries that spelling as `physical_name` (SPEC 2.2.4), the name to quote in SQL. Below "
+        "`1.0` a value note may name a value the list does not carry (SPEC 2.7.1): the value "
+        "may occur unlisted, and the note says what it means."
     ),
     (
         "Every number in a print is written positionally, never in exponent form (SPEC 2.2.6), so "

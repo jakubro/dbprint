@@ -1,6 +1,6 @@
 # Browsing a print
 
-A print is plain text, and reading it in an editor works. But a print of any size is a lot of YAML, and the questions people actually arrive with — what is in this table, what joins to it, which columns are mostly null — are faster to answer by clicking than by scrolling.
+A print is plain text and reads in any editor. It also renders as linked pages, which show what is in a table, what joins to it and which columns are mostly null without scrolling through YAML.
 
 `dbprint docs` renders a committed print as a small site: one page per table, one per schema, and an index. It needs no database, because everything it shows is already on disk.
 
@@ -21,7 +21,7 @@ That binds `127.0.0.1:8765` and serves the connections the project resolves — 
 
 ![The index of a print: a filter box, the connection's notes, and one row per table with its type, row count, column count and when it was profiled](images/browsing-index.png)
 
-The table page is the one worth knowing. It carries what `statistics.yaml` carries — classification, null rate, cardinality, value lists, ranges, percentiles — beside the prose from that table's `description.md` and `statistics.annotations.yaml`, so a measurement and the note correcting it appear together rather than in two files. Value bars spell each value as `dbprint context` does — `''` for an empty string, `'NULL'` for the stored word, `NULL` only for a genuine null — and a `drop`-redacted column's bars read `(value withheld)`. Descriptions and notes render as Markdown; raw HTML in them shows as text, and only web, mail and relative links are live.
+The table page carries what `statistics.yaml` carries — classification, null rate, cardinality, value lists, ranges, percentiles — beside the prose from that table's `description.md` and `statistics.annotations.yaml`, so a measurement and the note correcting it appear together rather than in two files. Value bars spell each value as `dbprint context` does — `''` for an empty string, `'NULL'` for the stored word, `NULL` only for a genuine null — and a `drop`-redacted column's bars read `(value withheld)`. Descriptions and notes render as Markdown; raw HTML in them shows as text, and only web, mail and relative links are live.
 
 ![The top of a table page: cards for the table's rows, columns, related tables, grain, sensitive and redacted columns, cardinality and completeness, above the Overview, Columns, Relationships, DDL and Context tabs](images/browsing-table.png)
 
@@ -44,7 +44,7 @@ Two sections in the overview panel read the newer per-table fields directly:
 
 ### The column table's degenerate census
 
-Beside the null-rate bar, a column carrying `zero_count`, `negative_count`, `non_finite_count` or `empty_count` shows a dot-separated line — `<n> zero`, `<n> negative`, `<n> non-finite`, `<n> empty` — under the null figure. Each sub-count is gated on being truthy, so an explicit `0` renders nothing there, reading the same as a field the classification forbids or the run never measured. If you need to tell those apart, read `statistics.yaml` directly for that column.
+Beside the null-rate bar, a column carrying `zero_count`, `negative_count`, `non_finite_count` or `empty_count` shows a dot-separated line — `<n> zero`, `<n> negative`, `<n> non-finite`, `<n> empty` — under the null figure. Each sub-count is gated on being truthy, so an explicit `0` renders nothing there, reading the same as a field the classification forbids or the run never measured. `statistics.yaml` itself tells those apart for that column.
 
 Further down the same cell: `mean`/`sum` render as `mean X · sum Y` whenever either is present, each spelled as `statistics.yaml` spells it (positional, never an exponent). Every count on the page is its exact integer, never compacted to `10K`. A redacted column carries neither, nor `length` or the degenerate counts above — a marked column publishes its count profile only — so its cell shows `bounds withheld` and the counts it keeps. A `length` block renders as `length <min>-<max> · avg <avg> · p95 <p95>`.
 
@@ -80,7 +80,7 @@ A table read over part of its rows — a `sample` or a `filter` — describes th
 
 ## When a route fails to build
 
-`dbprint docs build` writes every page it can and collects the routes it could not into a `failed: <route>` line on stderr, then exits `1`. Each page is written the moment it renders, before the next route is attempted, and the static assets and marker file go down last, after every route has been tried — so a partial build still leaves every page that did render usable — a failure narrows what's on disk, it does not corrupt what's there.
+`dbprint docs build` writes every page it can and collects the routes it could not into a `failed: <route>` line on stderr, then exits `1`. Each page is written the moment it renders, before the next route is attempted, and the static assets and marker file go down last, after every route has been tried — so a partial build leaves every page that did render usable and corrupts nothing already on disk.
 
 ## Publishing it
 
@@ -93,16 +93,16 @@ Wrote 6 pages to dbprint-docs
 
 The output is self-contained — no CDN, no network at render time — so it works from a file share, an artifact store, or any static host. A built page depends on the print alone: it names no directory on the machine that built it, and a table's profiled time is the date itself rather than an age that would go stale once published.
 
-`build` writes a `.dbprint-docs` marker into the directory it creates, and refuses to recreate a directory that does not carry one unless you pass `--force`. That is the guard against pointing `--output` at a directory holding something else. Add the output directory to `.gitignore`: it is derived from the print, and the print is what you commit.
+`build` writes a `.dbprint-docs` marker into the directory it creates, and refuses to recreate a directory that does not carry one unless `--force` is passed. That is the guard against pointing `--output` at a directory holding something else. Add the output directory to `.gitignore`: it is derived from the print, and the print is what is committed.
 
-## When to reach for this rather than the alternatives
+## `dbprint docs`, `dbprint context` and the MCP server compared
 
-Three surfaces read the same print, and they answer to different readers.
+These surfaces read the same print for different readers:
 
-| Use | When |
+| Surface | For |
 |---|---|
-| `dbprint docs` | a human is exploring, or onboarding, and does not know what they are looking for yet |
-| `dbprint context` | a human or a pipeline needs a text fragment to paste into a prompt |
-| the MCP server | an agent should fetch what it needs on its own — see [giving a print to an agent](agents.md) |
+| `dbprint docs` | browsing the print with no specific question yet |
+| `dbprint context` | a text fragment for a prompt, pasted by hand or built by a pipeline |
+| the MCP server | an agent fetching tables on its own — see [giving a print to an agent](agents.md) |
 
-The site is the only one of the three built for browsing. The other two produce text for something else to consume.
+The site is the only one built for browsing; the other two produce text for something else to consume.

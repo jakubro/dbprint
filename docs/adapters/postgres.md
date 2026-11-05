@@ -62,7 +62,7 @@ A plain view is the exception at every rung, including the bottom one: a role ho
 | Seeded | yes, from the table's own name |
 | `looks_like` sub-draw | `TABLESAMPLE` at a computed rate, seeded |
 
-PostgreSQL is one of two engines on which a sampled print is coherent **row for row**: every statement for a sampled table reads the same rows, including the extra distinct-value draw that `inferred.looks_like` takes on top of them. duckdb gives the identical guarantee. Databricks reproduces the sampled fraction reliably but not that row-level agreement with `looks_like`; every other engine can only promise coherence at the population level.
+A sampled PostgreSQL print is coherent **row for row**: every statement for a sampled table reads the same rows, including the extra distinct-value draw that `inferred.looks_like` takes on top of them. duckdb and SQLite give the identical guarantee. Databricks reproduces the sampled fraction reliably but not that row-level agreement with `looks_like`; every other engine can only promise coherence at the population level.
 
 ## When dbprint writes
 
@@ -79,7 +79,7 @@ every statement reads the seeded sample directly, so a write between two of them
 and not the other
 ```
 
-On a table nobody writes to during the run, the fallback still reads the same rows in every statement: `BERNOULLI` decides each row from the seed, so the file agrees with itself. What it gives up is protection from writes — a row inserted or deleted between two statements reaches one and not the other, where the copy would have frozen the draw, so a column's listed value counts and the non-null figure they are a share of can come from different rows. Setting `read.tables.materialize: false` chooses that trade deliberately, which is the right call where the tool must stay strictly read-only — and the wrong one on a table taking writes, where it was chosen to avoid a grant.
+On a table no write reaches during the run, the fallback still reads the same rows in every statement: `BERNOULLI` decides each row from the seed, so the file agrees with itself. What it gives up is protection from writes — a row inserted or deleted between two statements reaches one and not the other, where the copy would have frozen the draw, so a column's listed value counts and the non-null figure they are a share of can come from different rows. Setting `read.tables.materialize: false` chooses that trade explicitly: the run stays strictly read-only, and a table taking writes loses that protection.
 
 ## Partitioned tables
 

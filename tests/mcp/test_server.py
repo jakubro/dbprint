@@ -39,8 +39,8 @@ from mcp.types import (
 from dbprint.config import ConnectionConfig
 from dbprint.mcp import ServedConnections, build_server, paging
 from dbprint.mcp import tools as tools_module
+from dbprint.mcp.instructions import instructions
 from dbprint.mcp.server import run_http
-from tests._scripts import REPO_ROOT
 from .conftest import StdioServer
 
 
@@ -576,83 +576,100 @@ class TestPagingReachesTheWire:
 
 
 class TestHandshakeAdvertisesInstructions:
-    def _instructions(self, conn: ConnectionConfig) -> str | None:
-        async def _run() -> str | None:
-            server = build_server(_state_for(conn))
-
-            async with Client(server) as client:
-                return client.instructions
-
-        return anyio.run(_run)
-
-    def test_instructions_carry_the_server_description(
+    def test_instructions_reach_the_client_at_initialize(
         self,
         primary_conn: ConnectionConfig,
     ) -> None:
-        from dbprint.mcp.server import SERVER_DESCRIPTION
+        async def _run() -> str | None:
+            async with Client(build_server(_state_for(primary_conn))) as client:
+                return client.instructions
 
-        assert self._instructions(primary_conn) == SERVER_DESCRIPTION
+        assert anyio.run(_run) == instructions(_state_for(primary_conn))
 
 
-class TestTheInstructionsRouteBeforeTheyInterpret:
-    """What an agent needs before its first call is which tool answers its task."""
+class TestTheInstructionsNameWhatIsServed:
+    """An agent decides whether its task touches these tables from the instructions alone."""
 
-    def test_they_fit_under_the_client_truncation_cap(self) -> None:
-        from dbprint.mcp.server import SERVER_DESCRIPTION
+    def test_each_connection_names_its_engine_date_tables_and_schemas(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        text = instructions(_state_for(primary_conn))
+        served = text.split("Served:\n", 1)[1].split("\n\n", 1)[0]
 
-        # Claude Code truncates a server's instructions at 2,048 characters by default.
-        assert len(SERVER_DESCRIPTION) <= 2048
-
-    def test_every_tool_is_named_before_the_reading_rules(self) -> None:
-        from dbprint.mcp.server import SERVER_DESCRIPTION
-
-        routing, reading = SERVER_DESCRIPTION.split("Reading an answer:", 1)
-
-        for name in tools_module.TOOL_NAMES:
-            assert name in routing, name
-
-        assert "Scope." in reading
-
-    def test_the_reading_rules_say_the_print_carries_no_meanings_it_was_not_given(self) -> None:
-        from dbprint.mcp.server import SERVER_DESCRIPTION
-
-        reading = " ".join(SERVER_DESCRIPTION.split("Reading an answer:", 1)[1].split())
-
-        assert "not what its codes, units or defaults mean: read the code or docs" in reading
-
-    def test_the_routing_names_the_guide(self) -> None:
-        from dbprint.mcp.server import SERVER_DESCRIPTION
-
-        routing = SERVER_DESCRIPTION.split("Reading an answer:", 1)[0]
-
-        assert "how to read json/yaml fields: get_reference document: guide" in " ".join(
-            routing.split(),
+        assert served == (
+            "- production - postgres, printed 2026-03-09, 10 tables: arboretum.seedbank (9), "
+            "arboretum.fixture (1)"
         )
 
+    def test_many_connections_still_fit_the_truncation_cap(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        names = [f"garden_{n:02d}" for n in range(60)]
+        state = ServedConnections(served=dict.fromkeys(names, primary_conn), default=None)
+        text = instructions(state)
 
-class TestTheInstructionsCarryTheQueryWriterRules:
-    """The two decisions an agent makes badly untold: which context to read, and when to ask."""
+        assert len(text) <= 2048
+        assert "- garden_00 - postgres" in text
+        assert "more; a tool called with an unknown connection lists every one" in text
+        assert text.endswith("read it before reusing a count.")
 
-    def test_retired_instructions_stay_out(self) -> None:
-        from dbprint.mcp.server import SERVER_DESCRIPTION
+    def test_a_name_too_long_for_the_cap_is_counted_not_dropped(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        names = ["g" * 640, "h" * 640]
+        text = instructions(
+            ServedConnections(served=dict.fromkeys(names, primary_conn), default=None),
+        )
 
-        assert "offers no other" not in SERVER_DESCRIPTION
-        # `rows_scanned / row_count` is below 1: an agent multiplying by it shrinks the count.
-        assert "rescaled by rows_scanned / row_count" not in SERVER_DESCRIPTION
-        assert "Under a sample a count MAY be multiplied" not in SERVER_DESCRIPTION
+        assert len(text) <= 2048
+        assert "- 2 more; a tool called with an unknown connection lists every one" in text
 
-    def test_a_distinct_count_never_rescales(self) -> None:
-        from dbprint.mcp.server import SERVER_DESCRIPTION
+    def test_an_unreadable_print_says_so(self, tmp_path: Path) -> None:
+        conn = ConnectionConfig(name="vault", adapter="postgres", output=tmp_path)
+        text = instructions(_state_for(conn))
 
-        scope = " ".join(SERVER_DESCRIPTION.split("- Scope.", 1)[1].split("\n-", 1)[0].split())
-        never = scope.split("under a filter nothing rescales, and", 1)[1]
+        assert "- vault - no readable print" in text
 
-        assert "a distinct count," in never
-        assert never.rstrip().endswith("never does.")
+
+class TestTheInstructionsRouteAndLeaveReadingToTheReplies:
+    """What an agent needs before its first call is which tool answers its task; how to read a
+    number rides the reply that carries it.
+    """
+
+    def test_they_fit_under_the_client_truncation_cap(self, primary_conn: ConnectionConfig) -> None:
+        # Claude Code truncates a server's instructions at 2,048 characters by default.
+        assert len(instructions(_state_for(primary_conn))) <= 2048
+
+    def test_every_tool_is_named(self, primary_conn: ConnectionConfig) -> None:
+        text = instructions(_state_for(primary_conn))
+
+        for name in tools_module.TOOL_NAMES:
+            assert name in text, name
+
+    def test_the_routing_names_the_guide(self, primary_conn: ConnectionConfig) -> None:
+        text = " ".join(instructions(_state_for(primary_conn)).split())
+
+        assert "how to read json/yaml fields: get_reference document: guide" in text
+
+    def test_no_reading_rule_is_restated(self, primary_conn: ConnectionConfig) -> None:
+        text = instructions(_state_for(primary_conn))
+
+        for rule in ("Reading an answer", "rows_scanned", "not database constraints", "not none"):
+            assert rule not in text, rule
+
+    def test_they_close_on_the_terms_list(self, primary_conn: ConnectionConfig) -> None:
+        text = instructions(_state_for(primary_conn))
+
+        assert text.rsplit("\n\n", 1)[-1].startswith("Markdown replies open with a Terms list")
+
+
+class TestTheGuideCarriesTheQueryWriterRules:
+    """The guide's reader holds files, not tools; the tools are its closing sentence."""
 
     def test_the_guide_states_the_same_facts_in_the_prints_own_files(self) -> None:
-        """The guide's reader holds files, not tools; the tools are its closing sentence."""
-
         from dbprint.engine.reading_guide import READING_GUIDE_TEXT
 
         section = READING_GUIDE_TEXT.split("## Writing a query against a printed table", 1)[-1]
@@ -665,45 +682,6 @@ class TestTheInstructionsCarryTheQueryWriterRules:
         assert section.count("resolve_value") == 1
         assert "Joins list" not in section
         assert "offers no other" not in section
-
-
-# `SERVER_DESCRIPTION` is delivered unprompted on every connect, so each entry anchors one of its
-# claims to the SPEC sentence behind it: a moved or reworded sentence fails here instead.
-_SPEC_PATH = REPO_ROOT / "docs/format/v1/SPEC.md"
-
-_SERVER_DESCRIPTION_ANCHORS = (
-    (
-        (
-            "is NOT rescalable to table grain by the reader without assuming the "
-            "sample is representative"
-        ),
-        "SPEC 2.2.8's sum-not-rescalable sentence moved",
-    ),
-    (
-        "A reader MUST NOT rescale a field that is not a row count",
-        "SPEC 2.2.8's only-row-counts-rescale sentence moved",
-    ),
-    (
-        'absence means "not detected", never "safe to publish"',
-        "SPEC 4.4.2's sensitivity-absence sentence moved",
-    ),
-    (
-        "MUST NOT treat the join as cardinality-guaranteed the way a declared FK is",
-        "SPEC 2.3's inferred-edge sentence moved",
-    ),
-    (
-        "names the fields and blocks a run tried and failed to measure",
-        "SPEC 7.1's unmeasured sentence moved",
-    ),
-)
-
-
-class TestServerDescriptionSpecBinding:
-    """Binds `SERVER_DESCRIPTION`'s own claims to the SPEC sentences that back them."""
-
-    @pytest.mark.parametrize(("needle", "message"), _SERVER_DESCRIPTION_ANCHORS)
-    def test_the_cited_spec_sentence_still_holds(self, needle: str, message: str) -> None:
-        assert needle in _SPEC_PATH.read_text(), message
 
 
 class TestToolDescriptionsReachTheWire:

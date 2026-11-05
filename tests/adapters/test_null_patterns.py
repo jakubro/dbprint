@@ -31,6 +31,7 @@ DRAW_CLAUSES: dict[str, str] = {
     "redshift": "random() <",
     "databricks": "tablesample (",
     "bigquery": "tablesample system (",
+    "sqlite": "dbprint_draw(",
 }
 
 

@@ -57,11 +57,18 @@ from tests.fixtures.adversarial import (
     SCOPED_TABLE,
     SEVERAL_EDGES_COLUMN,
     SEVERAL_EDGES_TABLE,
+    SPELLED_COLUMN,
+    SPELLED_NAME,
+    SPELLED_TABLE,
     SPELLING_COLUMN,
     SPELLING_VALUES,
     TRUNCATED_FK_COLUMN,
     UNEVALUATED_TABLE,
     UNREADABLE_PROFILED_TABLE,
+    UNSHOWN_NOTE,
+    UNSHOWN_NOTE_COLUMN,
+    UNSHOWN_NOTE_TABLE,
+    UNSHOWN_NOTE_VALUE,
     VOID_VERDICT_NOTE,
     AdversarialPrint,
 )
@@ -90,6 +97,8 @@ COVERS = frozenset(
         "outside_print_entry",
         "delimiter_in_a_value",
         "value_spelling",
+        "unshown_value_note",
+        "physical_name_spelling",
         "scoped_complete_list",
         "scoped_part_list",
         "scoped_candidate_key",
@@ -266,7 +275,7 @@ class TestTheQueryPurposeHonoursTheSameRegister:
     ) -> None:
         row = _value_row(_render_query(adversarial_print, SCOPED_TABLE), TRUNCATED_FK_COLUMN)
 
-        assert "'rank-00' (1)" in row
+        assert "'rank-00' (4)" in row
         assert "rank-05" not in row
         assert "6.7% - a sample of the most frequent values" in row
 
@@ -485,3 +494,23 @@ def test_a_rejected_inferred_field_is_left_out(adversarial_print: AdversarialPri
     assert "candidate key" not in _cardinality_row(text, REJECTED_FIELD_COLUMN)
     assert REJECTED_FIELD_NOTE in text
     assert "rejected" not in text
+
+
+def test_a_note_on_an_unshown_value_rides_its_columns_dictionary_line(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    text = _render_query(adversarial_print, UNSHOWN_NOTE_TABLE)
+    dictionary = text.split("## Data dictionary", 1)[1].split("\n## ", 1)[0]
+    line = next(
+        row for row in dictionary.splitlines() if row.startswith(f"- {UNSHOWN_NOTE_COLUMN}:")
+    )
+
+    assert f"'{UNSHOWN_NOTE_VALUE}' = {UNSHOWN_NOTE}" in line
+    assert UNSHOWN_NOTE_VALUE not in text.split("## Data dictionary", 1)[0]
+
+
+def test_a_column_is_named_as_the_database_spells_it(adversarial_print: AdversarialPrint) -> None:
+    text = _render_query(adversarial_print, SPELLED_TABLE)
+
+    assert _value_row(text, SPELLED_NAME).startswith(f"| {SPELLED_NAME} | 'x' (100)")
+    assert f"| {SPELLED_COLUMN} |" not in text

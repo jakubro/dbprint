@@ -143,6 +143,7 @@ AdapterType = Literal[
     "redshift",
     "databricks",
     "bigquery",
+    "sqlite",
 ]
 TableType = Literal["table", "view", "matview"]
 FkAction = Literal["NO ACTION", "CASCADE", "SET NULL", "SET DEFAULT", "RESTRICT"]
@@ -1086,7 +1087,8 @@ class DocumentReads:
     object and array names `type_of` returns. `entries` reads a node's object instances as rows
     `(k, v)` and `elements` its array instances as rows `v`, both aliased `ent`, `v` a document;
     `read` turns a document whose type name is given into its scalar value; `size` counts an
-    object's keys or an array's elements; `numeric` lists the number names, narrowest first.
+    object's keys or an array's elements; `numeric` lists the number names, narrowest first;
+    `aliases` maps a name onto the one a part is typed as, where `type_of` splits one type in two.
     """
 
     type_of: Callable[[str], str]
@@ -1102,6 +1104,7 @@ class DocumentReads:
     read: Callable[[str, str], str]
     size: Callable[[str], str]
     literal: Callable[[Any, str], str]
+    aliases: Mapping[str, str] = field(default_factory=dict)
 
     def holds(self, node: PartSource) -> bool:
         """Whether `node`'s values are documents this engine descends into.
@@ -1120,7 +1123,7 @@ class DocumentReads:
         the general document type.
         """
 
-        names = set(found)
+        names = {self.aliases.get(name, name) for name in found}
 
         if len(names) == 1:
             return names.pop()
@@ -1995,6 +1998,13 @@ class Adapter(ABC):
     @abstractmethod
     def introspect_columns(self, fqn: str) -> list[ColumnMeta]:
         """Return per-column structural metadata in ordinal order."""
+
+    def read_columns(self, fqn: str, columns: list[ColumnMeta]) -> list[ColumnMeta]:
+        """Return `columns` as `fqn`'s rows refine them; called only for an object a run reads."""
+
+        del fqn
+
+        return columns
 
     @abstractmethod
     def default_collation(self) -> str:

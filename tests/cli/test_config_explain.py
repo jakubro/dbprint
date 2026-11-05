@@ -270,3 +270,28 @@ def test_statistics_without_a_readable_external_flag_size_as_before(
 
     assert result.exit_code == 0, result.output
     assert "# row count: 5000, as the print last recorded it" in result.output
+
+
+def test_redact_rules_print_one_entry_per_line_and_round_trip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rules = """\
+    profile:
+      redact:
+      - {columns: [public.curator.email, public.curator.phone], with: hash}
+      - {sensitivity: [contact], with: mask}
+"""
+    write_project(tmp_path, "primary", "postgres", rules)
+    result = run_cli(tmp_path, monkeypatch, ["config", "explain", "primary"])
+    lines = result.output.splitlines()
+
+    assert result.exit_code == 0, result.output
+    assert yaml.safe_load(result.output)["profile"]["redact"] == [
+        {"columns": ["public.curator.email", "public.curator.phone"], "with": "hash"},
+        {"sensitivity": ["contact"], "with": "mask"},
+    ]
+    assert any(line.strip() == "- public.curator.phone" for line in lines)
+    assert any(
+        line.strip().startswith("redact:") and "# connections.primary" in line for line in lines
+    )

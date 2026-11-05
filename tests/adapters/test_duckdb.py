@@ -89,6 +89,14 @@ class TestKeysAndIndexesReadTheCatalogsMembers:
             a.close()
             connection.close()
 
+    def test_an_expression_index_is_written_as_the_catalog_stores_it(
+        self,
+        keyed: DuckdbAdapter,
+    ) -> None:
+        ddl = keyed.extract_ddl("memory.seedbank.field_log")
+
+        assert "\n\nCREATE INDEX log_expr_ix ON seedbank.field_log(((id + 1)));\n" in ddl
+
     def test_a_quoted_foreign_key_folds_both_sides(self, keyed: DuckdbAdapter) -> None:
         [edge] = keyed.introspect_relationships("memory.seedbank.field_log")
 
@@ -192,6 +200,71 @@ class TestDdlFromCatalog:
     def test_an_unknown_table_raises(self, adapter: DuckdbAdapter) -> None:
         with pytest.raises(UnknownTable, match="call list_tables"):
             adapter.extract_ddl("memory.seedbank.does_not_exist")
+
+    def test_a_table_ddl_carries_its_indexes_after_its_create_table(
+        self,
+        adapter: DuckdbAdapter,
+    ) -> None:
+        assert adapter.extract_ddl("memory.seedbank.herbarium") == (
+            'CREATE TABLE seedbank.herbarium(id UUID PRIMARY KEY, "name" VARCHAR NOT NULL, '
+            "code VARCHAR);\n"
+            "\n"
+            "CREATE UNIQUE INDEX herbarium_code_ux ON seedbank.herbarium(code);\n"
+            "\n"
+            'CREATE INDEX herbarium_name_idx ON seedbank.herbarium("name");\n'
+        )
+
+    def test_a_table_with_only_constraint_indexes_has_one_statement(
+        self,
+        adapter: DuckdbAdapter,
+    ) -> None:
+        ddl = adapter.extract_ddl("memory.seedbank.curator")
+
+        assert ddl.count("CREATE") == 1
+        assert ddl.startswith("CREATE TABLE seedbank.curator(")
+
+    def test_a_unique_constraint_adds_no_statement(self) -> None:
+        connection = duckdb.connect(":memory:")
+        connection.execute(
+            "CREATE TABLE plot (a INTEGER UNIQUE, b INTEGER, c INTEGER, UNIQUE (b, c))",
+        )
+        a = DuckdbAdapter({"database": ":memory:"}, cursor_factory=lambda _params: connection)
+        a.connect()
+        a.list_tables(include=["*"], exclude=[])
+
+        try:
+            ddl = a.extract_ddl("memory.main.plot")
+        finally:
+            a.close()
+            connection.close()
+
+        assert ddl.count("CREATE") == 1
+
+    def test_a_view_ddl_carries_no_index(self, adapter: DuckdbAdapter) -> None:
+        assert "CREATE INDEX" not in adapter.extract_ddl("memory.seedbank.active_curators_v")
+
+    def test_indexes_follow_in_code_point_order_of_their_names(self) -> None:
+        connection = duckdb.connect(":memory:")
+
+        for statement in (
+            "CREATE TABLE plot (a INTEGER, b INTEGER)",
+            "CREATE INDEX Ix_b ON plot (b)",
+            "CREATE INDEX aa_ix ON plot (a)",
+            "SET default_collation = 'nocase'",
+        ):
+            connection.execute(statement)
+
+        a = DuckdbAdapter({"database": ":memory:"}, cursor_factory=lambda _params: connection)
+        a.connect()
+        a.list_tables(include=["*"], exclude=[])
+
+        try:
+            ddl = a.extract_ddl("memory.main.plot")
+        finally:
+            a.close()
+            connection.close()
+
+        assert ddl.index("CREATE INDEX Ix_b") < ddl.index("CREATE INDEX aa_ix")
 
 
 class TestBareUniqueIndexPlacement:
