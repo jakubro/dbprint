@@ -20,8 +20,8 @@ from dbprint.mcp.tools import TOOL_DEFINITIONS
 from tests._scripts import REPO_ROOT
 
 
-SKILL_PATH = REPO_ROOT / "docs/examples/skill/dbprint.md"
-ANNOTATE_SKILL_PATH = REPO_ROOT / "docs/examples/skill/dbprint-annotate.md"
+SKILL_PATH = REPO_ROOT / "plugin/skills/dbprint/SKILL.md"
+ANNOTATE_SKILL_PATH = REPO_ROOT / "plugin/skills/dbprint-annotate/SKILL.md"
 CLI_DOCS_PATH = REPO_ROOT / "docs/CLI.md"
 RELATIONSHIPS_SCHEMA_PATH = REPO_ROOT / "src/dbprint/spec/v1/relationships.schema.json"
 _SCHEMA_PATHS = (

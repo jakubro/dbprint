@@ -87,6 +87,7 @@ def shipped_markdown() -> list[str]:
 
     paths = [REPO_ROOT / "README.md", REPO_ROOT / "src/dbprint/engine/reading_guide.md"]
     paths.extend(p for p in (REPO_ROOT / "docs").rglob("*.md") if "node_modules" not in p.parts)
+    paths.extend((REPO_ROOT / "plugin").rglob("*.md"))
 
     return sorted(p.relative_to(REPO_ROOT).as_posix() for p in paths)
 

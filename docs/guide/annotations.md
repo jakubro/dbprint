@@ -72,7 +72,7 @@ Run `dbprint generate` after creating or deleting one of those three. Each run r
 
 ## Writing them with an agent
 
-Most of what belongs in an annotation is already written down somewhere — in the code that writes the table and the reports that read it — and an agent with that code and read-only database access can find it. `dbprint annotate <table>` prints a brief for one table: the steps of the [annotation skill](../examples/skill/dbprint-annotate.md), the table's `--purpose query` context, and the open questions the print measured but cannot answer, each naming the file that answers it. Pipe it into an agent CLI or paste it into a chat; dbprint launches no program and calls no model.
+Most of what belongs in an annotation is already written down somewhere — in the code that writes the table and the reports that read it — and an agent with that code and read-only database access can find it. `dbprint annotate <table>` prints a brief for one table: the steps of the [annotation skill](../../plugin/skills/dbprint-annotate/SKILL.md), the table's `--purpose query` context, and the open questions the print measured but cannot answer, each naming the file that answers it. Pipe it into an agent CLI or paste it into a chat; dbprint launches no program and calls no model.
 
 `dbprint annotate <table> --check` then lists every finding on the table's annotation files — a contradicted claim, an unknown source, a key the format rejects — and exits 1 while any remain. A file it refuses for not matching its schema is read by no consumer until it is fixed. The skill has the agent run it until it passes.
 

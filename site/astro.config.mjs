@@ -42,7 +42,6 @@ const SIDEBAR = [
         label: "The packaged agent skills",
         collapsed: true,
         items: [
-          { label: "Installing them", slug: "examples/skill/readme" },
           { label: "The reading skill", slug: "examples/skill/dbprint" },
           { label: "The annotation skill", slug: "examples/skill/dbprint-annotate" },
         ],

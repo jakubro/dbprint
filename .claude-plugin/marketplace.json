@@ -1,0 +1,13 @@
+{
+  "name": "dbprint",
+  "owner": {
+    "name": "Jakub Roman"
+  },
+  "description": "dbprint for Claude Code. A database's schema, value lists and joins, from a snapshot in your repo - no database connection.",
+  "plugins": [
+    {
+      "name": "dbprint",
+      "source": "./plugin"
+    }
+  ]
+}

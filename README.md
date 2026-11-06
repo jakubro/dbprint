@@ -106,7 +106,7 @@ Commit the result beside the code. Then inspect it with no database in reach:
 dbprint list
 ```
 
-Then have an agent annotate a table — the brief carries the [annotation skill](https://github.com/jakubro/dbprint/blob/main/docs/examples/skill/dbprint-annotate.md)'s steps, so any agent CLI can follow it:
+Then have an agent annotate a table — the brief carries the [annotation skill](https://github.com/jakubro/dbprint/blob/main/plugin/skills/dbprint-annotate/SKILL.md)'s steps, so any agent CLI can follow it:
 
 ```sh
 dbprint annotate my_db.public.orders | claude -p
@@ -264,7 +264,20 @@ Full reference: [`docs/CLI.md`](https://github.com/jakubro/dbprint/blob/main/doc
 
 ### Connecting an agent
 
-An MCP client launches the server itself, so the client picks the working directory. Name the project explicitly:
+In Claude Code, install the plugin, which carries the MCP server and both skills and serves the print of the directory Claude Code is opened in:
+
+```sh
+claude plugin marketplace add jakubro/dbprint
+claude plugin install dbprint@dbprint
+```
+
+To serve a print kept elsewhere, set the plugin's `project` option to the directory holding `.dbprint.yaml`, that file itself, or a [git address](#reading-a-remote-project) — in `/plugin configure dbprint@dbprint`, or from a shell:
+
+```sh
+echo '{"project": "/srv/analytics"}' | claude plugin configure dbprint@dbprint --values-stdin
+```
+
+Any other MCP client launches the server itself, so the client picks the working directory. Name the project explicitly:
 
 ```json
 {
@@ -278,6 +291,8 @@ An MCP client launches the server itself, so the client picks the working direct
 ```
 
 The server reads the committed print and never connects to a database, so the client needs no credentials.
+
+[Giving a print to an agent](https://jakubro.github.io/dbprint/guide/agents/) covers the skills on their own, the server's tools and how an agent reads a reply.
 
 ### Reading a remote project
 
@@ -302,7 +317,7 @@ dbprint clones it and asks for no credentials of its own — the existing SSH ag
 - **CI exit codes.** `0` ok, `1` malformed print or unusable config, `2` stale, `3` drift, `4` connection failure, `5` partial run, `6` assertion failure, `7` total failure. `diff`, `check` and `context` all speak `--format json|yaml`.
 - **Scoped profiling.** Per-table rules can sample (seeded from the table name, where the engine supports seeding), apply a row filter, or change what's measured — gated on table size, so one rule covers every fact table not yet named. A table read this way carries a `scope` block and a per-column `rows_scanned`, and every count in the file is denominated in the rows actually read, never silently in the whole table.
 - **MCP server.** `dbprint serve` exposes the tools `get_table_context`, `list_tables`, `search_columns`, `resolve_value`, `get_manifest`, `get_diff`, `get_reference` — plus every artifact as a resource. It reads the committed print only and never opens a database connection. See [`docs/MCP.md`](https://github.com/jakubro/dbprint/blob/main/docs/MCP.md).
-- **Markdown skills.** For clients that take markdown rules or custom instructions, a drop-in skill file tells an agent what a committed print answers, which tool answers it, and what each number covers — no process to run. A second skill has an agent write the annotation files from the code that writes each table and read-only queries, checked with `dbprint annotate --check`. Both sit at [`docs/examples/skill/`](https://github.com/jakubro/dbprint/tree/main/docs/examples/skill) and read without installing anything.
+- **Markdown skills.** For clients that take markdown rules or custom instructions, a drop-in skill file tells an agent what a committed print answers, which tool answers it, and what each number covers — no process to run. A second skill has an agent write the annotation files from the code that writes each table and read-only queries, checked with `dbprint annotate --check`. Both sit at [`plugin/skills/`](https://github.com/jakubro/dbprint/tree/main/plugin/skills) and read without installing anything; the Claude Code plugin installs them with the server.
 - **dbt lineage.** Point a connection's `dbt_manifest` at a compiled dbt `manifest.json` and `generate` records each model column's source columns as `derived_from`, so a note written once on a source column reaches every model built from it (the `[dbt]` extra). See [`docs/CONFIG.md`](https://github.com/jakubro/dbprint/blob/main/docs/CONFIG.md).
 - **Token-budgeted context.** `dbprint context arboretum.seedbank.accession --budget 4000` fits the Markdown view into a token budget, dropping the lowest-priority sections first.
 

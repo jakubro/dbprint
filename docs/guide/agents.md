@@ -9,24 +9,46 @@ Pick by what the client supports:
 | **The packaged skill** | The client takes markdown rules, skills or custom instructions. Nothing to run |
 | **The MCP server** | The client speaks MCP. Adds native tool and resource primitives, multi-connection routing, and paged replies |
 
-Both read the same files on disk. Neither opens a database connection.
+Both read the same files on disk. Neither opens a database connection. They are complements rather than alternatives: the skill's description reaches the agent before any dbprint tool does and sends it to the print, the server provides the tools the skill names, and the skill installed alone still reads the print through `dbprint context` in a shell.
+
+## Claude Code: the plugin
+
+The repository is a Claude Code plugin marketplace, and its plugin installs both skills and the MCP server together:
+
+```console
+$ claude plugin marketplace add jakubro/dbprint
+$ claude plugin install dbprint@dbprint
+```
+
+The next session loads the skills as `/dbprint:dbprint` and `/dbprint:dbprint-annotate` and connects the `dbprint` server. The server runs through `uvx`, so `uv` must be installed, and it runs the dbprint release the plugin was published with; `claude plugin update dbprint@dbprint` moves to the next one.
+
+The server reads the print of the directory Claude Code is opened in, the one holding `.dbprint.yaml`. To serve a print kept elsewhere, set the plugin's `project` option to the directory holding `.dbprint.yaml`, that file itself, or a git address, as `dbprint serve --project` takes them — in `/plugin configure dbprint@dbprint`, or from a shell:
+
+```console
+$ echo '{"project": "/srv/analytics"}' | claude plugin configure dbprint@dbprint --values-stdin
+```
+
+Leaving it unset is the usual case, and the reason `claude plugin install` reports an option not yet set. The next two sections set up the skill and the server in any other client.
 
 ## The markdown skill
 
-The repository carries a skill that has an agent read the print before it queries the database: which tool answers which question, what the number it gets back does and does not cover, and `dbprint context` as the shell route where no server is connected. The client lists the skill's description to the agent, which loads the rest when a task needs a fact about the database. It is one file, and installing it is copying that file into a skill directory:
+The repository carries a skill that has an agent read the print before it queries the database: which tool answers which question, what the number it gets back does and does not cover, and `dbprint context` as the shell route where no server is connected. The client lists the skill's description to the agent, which loads the rest when a task needs a fact about the database. It is one `SKILL.md`, and installing it is copying its directory, `plugin/skills/dbprint/`, into a skill directory:
 
 | Client | Where |
 |---|---|
-| Claude Code, Cursor, Cline | `.claude/skills/dbprint/SKILL.md` in the project — all three read project skills there |
-| Claude Code and Cursor, for every project | `~/.claude/skills/dbprint/SKILL.md` |
-| Cline, for every project | `~/.cline/skills/dbprint/SKILL.md` |
-| Anything else | the file's body, below its frontmatter, wherever that client reads persistent instructions from |
+| Claude Code | the plugin above |
+| Cursor, Cline | `.claude/skills/dbprint/` in the project — both read project skills there |
+| Cursor, for every project | `~/.claude/skills/dbprint/` |
+| Cline, for every project | `~/.cline/skills/dbprint/` |
+| Anything else | the skill's body, below its frontmatter, wherever that client reads persistent instructions from |
 
-The skill itself and its install notes are published here: [installing it](../examples/skill/README.md) and [the skill itself](../examples/skill/dbprint.md).
+The skill itself is published here: [the reading skill](../../plugin/skills/dbprint/SKILL.md).
 
-A second skill, [the annotation skill](../examples/skill/dbprint-annotate.md), is for writing a print rather than reading it: it has an agent write the [annotation files](annotations.md) from the code that writes each table and read-only queries against the database. It installs the same way, and `dbprint annotate <table> | <agent CLI>` hands one table's brief to an agent without installing anything.
+A second skill, [the annotation skill](../../plugin/skills/dbprint-annotate/SKILL.md), is for writing a print rather than reading it: it has an agent write the [annotation files](annotations.md) from the code that writes each table and read-only queries against the database. It installs the same way and needs read-only database access, which the reading skill does not; `dbprint annotate <table> | <agent CLI>` hands one table's brief to an agent without installing anything.
 
 ## The MCP server
+
+Outside Claude Code, the client launches the server from its own configuration:
 
 ```console
 $ pip install 'dbprint[mcp]'

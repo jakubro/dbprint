@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 _PACKAGE_FILE = ("dbprint.engine", "annotate_skill.md")
-_SOURCE_TREE_FALLBACK = "docs/examples/skill/dbprint-annotate.md"
+_SOURCE_TREE_FALLBACK = "plugin/skills/dbprint-annotate/SKILL.md"
 
 # src/dbprint/engine/annotate_skill.py -> repo root (parents[0]=engine, [1]=dbprint, [2]=src, [3]=root).
 _REPO_ROOT = Path(__file__).resolve().parents[3]

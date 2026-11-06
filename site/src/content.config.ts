@@ -1,8 +1,11 @@
 import { readFileSync } from "node:fs";
+import path from "node:path";
 
 import { docsSchema } from "@astrojs/starlight/schema";
 import { glob, type Loader } from "astro/loaders";
 import { defineCollection } from "astro:content";
+
+import { publishedRoute } from "./plugins/rewrite-markdown-links.mjs";
 
 const LEADING_HEADING_RE = /^#\s+(.+)$/m;
 
@@ -10,9 +13,9 @@ const LEADING_HEADING_RE = /^#\s+(.+)$/m;
 // Starlight's required `title` from each file's H1 - a remark plugin runs after it, too late.
 function titledDocsLoader(): Loader {
   const inner = glob({
-    pattern: "**/*.md",
-    base: "../docs",
-    generateId: ({ entry }) => entry.replace(/\.md$/, "").toLowerCase(),
+    pattern: ["docs/**/*.md", "plugin/skills/*/SKILL.md"],
+    base: "..",
+    generateId: ({ entry }) => publishedRoute(path.posix.relative("docs", entry)),
   });
 
   return {

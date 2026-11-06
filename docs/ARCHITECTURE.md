@@ -1120,9 +1120,11 @@ When `default is None`, any tool call without `connection?` raises `-32602 Inval
 
 ### Skill companion
 
-`docs/examples/skill/dbprint.md` ships a markdown instruction skill: it tells an agent which question a committed print answers, which tool answers it, and what the resulting number does and does not cover. The tools it names are the MCP surface; `dbprint context` is the shell route where no server is connected. Installed as `.claude/skills/dbprint/SKILL.md`, it loads in Claude Code, Cursor and Cline alike. See `docs/examples/skill/README.md` for per-client install steps.
+`plugin/skills/dbprint/SKILL.md` ships a markdown instruction skill: it tells an agent which question a committed print answers, which tool answers it, and what the resulting number does and does not cover. The tools it names are the MCP surface; `dbprint context` is the shell route where no server is connected. Copied to `.claude/skills/dbprint/`, it loads in Claude Code, Cursor and Cline alike. `docs/guide/agents.md` has the per-client install steps.
 
 Hand-written, unlike `reading.md` beside it — prose aimed at an agent rather than a rendering of SPEC. `tests/test_skill_claims_agreement.py` holds it to the code instead: every tool it names is served, every `detection` value is accounted for, every field it leans on is still in the schemas.
+
+`plugin/` is a Claude Code plugin, and `.claude-plugin/marketplace.json` at the repository root makes the repository its marketplace. The plugin carries both skills and the `dbprint` MCP server, launched as `uvx --with dbprint[mcp]==<release> dbprint serve --project ${user_config.project}`; its manifest pins the release `server.json` pins, and its `version` names the same release. The `project` setting is optional: unset, it substitutes as an empty string, `--project ''` resolves exactly the working directory, and Claude Code starts a plugin's server in the directory it was opened in. `tests/test_claude_plugin.py` holds the pins to each other, and `tests/cli/test_serve.py` holds `--project ''` to that reading.
 
 ---
 

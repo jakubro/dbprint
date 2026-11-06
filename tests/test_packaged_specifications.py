@@ -128,7 +128,7 @@ def _links(text: str) -> list[str]:
 
 
 # The annotation skill is self-contained by design and carries no link to rewrite.
-_LINKLESS = frozenset({"docs/examples/skill/dbprint-annotate.md"})
+_LINKLESS = frozenset({"plugin/skills/dbprint-annotate/SKILL.md"})
 
 
 @pytest.mark.parametrize(
@@ -258,6 +258,29 @@ def test_rewrite_links_leaves_a_same_page_fragment_untouched() -> None:
     assert rewrite_links(text, "ASSERTIONS.md") == text
 
 
+def test_rewrite_links_routes_a_plugin_skill_to_its_page() -> None:
+    rewritten = rewrite_links("[x](../../plugin/skills/dbprint/SKILL.md)", "guide/agents.md")
+
+    assert rewritten == "[x](https://jakubro.github.io/dbprint/examples/skill/dbprint/)"
+
+
+def test_rewrite_links_resolves_a_document_kept_outside_docs() -> None:
+    skill = "../plugin/skills/dbprint-annotate/SKILL.md"
+
+    assert rewrite_links("[x](../../../docs/MCP.md)", skill) == (
+        "[x](https://jakubro.github.io/dbprint/mcp/)"
+    )
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["../../src/dbprint/cli/main.py", "../../plugin/skills/dbprint/", "../../README.md"],
+)
+def test_rewrite_links_refuses_any_other_target_outside_docs(target: str) -> None:
+    with pytest.raises(ValueError, match="escapes the docs root"):
+        rewrite_links(f"[x]({target})", "guide/agents.md")
+
+
 @pytest.mark.parametrize(
     ("text", "doc_relpath"),
     [
@@ -267,6 +290,7 @@ def test_rewrite_links_leaves_a_same_page_fragment_untouched() -> None:
         ("[x](https://semver.org)", "format/v1/SPEC.md"),
         ("[x](#foo)", "format/v1/SPEC.md"),
         ("[x](format/v1/SPEC.md#22-statisticsyaml)", "ASSERTIONS.md"),
+        ("[x](../../plugin/skills/dbprint/SKILL.md)", "guide/agents.md"),
     ],
 )
 def test_python_rewrite_agrees_with_the_real_site_plugin(text: str, doc_relpath: str) -> None:

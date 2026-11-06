@@ -1,0 +1,37 @@
+{
+  "name": "dbprint",
+  "version": "0.19.0",
+  "description": "A database's schema, value lists and joins, from a snapshot in your repo - no database connection. The MCP server that serves the snapshot, run with uvx, and the skills that read and annotate it.",
+  "author": {
+    "name": "Jakub Roman"
+  },
+  "homepage": "https://jakubro.github.io/dbprint/",
+  "repository": "https://github.com/jakubro/dbprint",
+  "license": "Apache-2.0",
+  "keywords": [
+    "database",
+    "schema",
+    "sql",
+    "mcp"
+  ],
+  "userConfig": {
+    "project": {
+      "type": "string",
+      "title": "Project",
+      "description": "Directory holding .dbprint.yaml, that file itself, or a git address of a repository carrying one. Left empty, the directory Claude Code was opened in"
+    }
+  },
+  "mcpServers": {
+    "dbprint": {
+      "command": "uvx",
+      "args": [
+        "--with",
+        "dbprint[mcp]==0.19.0",
+        "dbprint",
+        "serve",
+        "--project",
+        "${user_config.project}"
+      ]
+    }
+  }
+}

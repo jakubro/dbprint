@@ -14,11 +14,11 @@ from typing import Any
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 
 
-# Repo-relative source (under docs/) -> wheel-relative target - this rewrite's sole mapping.
+# Repo-relative source -> wheel-relative target - this rewrite's sole mapping.
 PACKAGED: dict[str, str] = {
     "docs/format/v1/SPEC.md": "dbprint/spec/v1/SPEC.md",
     "docs/ASSERTIONS.md": "dbprint/assertions/ASSERTIONS.md",
-    "docs/examples/skill/dbprint-annotate.md": "dbprint/engine/annotate_skill.md",
+    "plugin/skills/dbprint-annotate/SKILL.md": "dbprint/engine/annotate_skill.md",
 }
 
 # Mirror `site/astro.config.mjs`'s own constants - a `.mjs` file cannot be imported here, so
@@ -30,6 +30,8 @@ REF = "main"
 
 _LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
 _FENCE_RE = re.compile(r"^```")
+# The one published page outside docs/, mirroring `publishedRoute` in the site's link plugin.
+_PLUGIN_SKILL_RE = re.compile(r"^\.\./plugin/skills/([^/]+)/SKILL\.md$")
 
 
 def rewrite_links(text: str, doc_relpath: str) -> str:
@@ -72,21 +74,30 @@ def _rewrite_one(match: re.Match[str], doc_dir: str) -> str:
         return match.group(0)
 
     suffix = f"#{fragment}" if fragment else ""
-    resolved = posixpath.normpath(posixpath.join(doc_dir, target_path))
+    resolved = posixpath.relpath(posixpath.join("docs", doc_dir, target_path), "docs")
+    route = _route(resolved) if target_path.endswith(".md") else None
 
-    if resolved.startswith(".."):
+    if resolved.startswith("..") and route is None:
         message = f"link target escapes the docs root: {target}"
 
         raise ValueError(message)
 
-    if target_path.endswith(".md"):
-        route = resolved[: -len(".md")].lower()
-
+    if route is not None:
         return f"[{label}]({SITE_ORIGIN}{SITE_BASE}/{route}/{suffix})"
 
     kind = "tree" if target_path.endswith("/") else "blob"
 
     return f"[{label}]({REPOSITORY}/{kind}/{REF}/docs/{resolved}{suffix})"
+
+
+def _route(docs_relpath: str) -> str | None:
+    if skill := _PLUGIN_SKILL_RE.match(docs_relpath):
+        return f"examples/skill/{skill.group(1)}"
+
+    if docs_relpath.startswith(".."):
+        return None
+
+    return docs_relpath[: -len(".md")].lower()
 
 
 class LinkRewriteBuildHook(BuildHookInterface):
@@ -100,7 +111,7 @@ class LinkRewriteBuildHook(BuildHookInterface):
         self._scratch = scratch
 
         for source, target in PACKAGED.items():
-            doc_relpath = source.removeprefix("docs/")
+            doc_relpath = posixpath.relpath(source, "docs")
             text = (Path(self.root) / source).read_text(encoding="utf-8")
             rewritten = rewrite_links(text, doc_relpath)
             out_path = scratch / Path(target).name

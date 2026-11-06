@@ -138,6 +138,33 @@ class TestProject:
         assert result.exit_code == 0
         fake_serve.assert_called_once()
 
+    def test_an_empty_project_is_the_working_directory(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        project, _ = self._project_and_elsewhere(tmp_path)
+        monkeypatch.chdir(project)
+
+        with patch("dbprint.mcp.serve_stdio") as fake_serve:
+            result = CliRunner().invoke(main, ["serve", "warehouse", "--project", ""])
+
+        assert result.exit_code == 0
+        fake_serve.assert_called_once()
+
+    def test_an_empty_project_does_not_walk_up(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        project, _ = self._project_and_elsewhere(tmp_path)
+        monkeypatch.chdir(project / "prints")
+
+        result = CliRunner().invoke(main, ["serve", "warehouse", "--project", ""])
+
+        assert result.exit_code == EXIT_GENERIC
+        assert "prints/.dbprint.yaml" in result.output
+
     def test_the_same_invocation_without_the_flag_fails(
         self,
         tmp_path: Path,
