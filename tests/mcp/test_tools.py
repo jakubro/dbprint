@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 from dataclasses import replace
@@ -366,7 +367,14 @@ class TestEveryListReplyIsPaged:
                 body,
             )
 
-            assert [label for label in labels if label not in figures] == [], number
+            quoted = re.search(r"(?m)^>|(?:: |= | - )['\"]", figures) is not None
+            unprinted = [
+                label
+                for label in labels
+                if label not in figures and not (label == "quoted text" and quoted)
+            ]
+
+            assert unprinted == [], number
 
         assert "## Terms" in text_pages[0]
 
@@ -1010,6 +1018,36 @@ class TestCorruptedArtifactPassesThroughUnchanged:
         assert set(result["_corrupted"]) == {"statistics"}
         assert isinstance(result["_corrupted"]["statistics"], str)
         assert "would not parse" in result["notes"]["_corrupted"]
+
+    @pytest.mark.parametrize("purpose", ["profile", "query"])
+    def test_the_first_page_says_when_the_table_was_profiled(
+        self,
+        primary_conn: ConnectionConfig,
+        purpose: str,
+    ) -> None:
+        state = _state_for(primary_conn)
+        arguments = {"table": "arboretum.seedbank.collector", "purpose": purpose}
+        md = dispatch(state, "get_table_context", arguments)
+        payload = _dict_result(state, "get_table_context", {**arguments, "format": "json"})
+
+        assert isinstance(md, str)
+        assert "\nProfiled: 2026-03-09T14:27:36Z\n" in md.split("## Terms", 1)[0]
+        assert payload["profiled_at"] == "2026-03-09T14:27:36Z"
+
+    def test_the_corrupted_note_joins_the_notes_the_reply_already_carries(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        path = primary_conn.output / primary_conn.name / "arboretum/seedbank/collector"
+        (path / "relationships.yaml").write_text("refers_to: [unterminated")
+        result = _dict_result(
+            _state_for(primary_conn),
+            "get_table_context",
+            {"table": "arboretum.seedbank.collector", "format": "json"},
+        )
+
+        assert set(result["_corrupted"]) == {"relationships"}
+        assert {"sensitivity", "_corrupted"} <= set(result["notes"])
 
     def test_yaml_format_carries_the_same_mapping_as_json(
         self,
@@ -1674,6 +1712,8 @@ class TestSearchColumns:
         assert match["row_count"] == 5
         assert match["rows_scanned"] == 2
         assert "describe the rows scanned, not the table" in result["notes"]["scope"]
+        assert "MAY be multiplied by row_count / rows_scanned" in result["notes"]["scope"]
+        assert "under scope.filter nothing rescales" in result["notes"]["scope"]
 
 
 class TestRepliesExplainTheFieldsTheyCarry:
@@ -1968,6 +2008,35 @@ class TestGetReference:
             dispatch(self._EMPTY_STATE, "get_reference", {"document": "spec", "section": "9.9"})
 
         assert "9.9" in str(excinfo.value)
+
+    def test_unknown_section_lists_the_numbers_in_document_order(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A string sort would put '2.10' before '2.2'."""
+
+        from dbprint.mcp import reference as reference_module
+
+        text = "## 2. Two\n\n### 2.2 Two two\n\n### 2.10 Two ten\n"
+        monkeypatch.setattr(reference_module, "_read", lambda document: text)
+
+        with pytest.raises(McpError) as excinfo:
+            dispatch(self._EMPTY_STATE, "get_reference", {"document": "spec", "section": "9.9"})
+
+        assert excinfo.value.detail.endswith("Available: ['2', '2.2', '2.10']")
+
+    def test_an_unknown_guide_heading_lists_the_headings_alphabetically(self) -> None:
+        with pytest.raises(McpError) as excinfo:
+            dispatch(
+                self._EMPTY_STATE,
+                "get_reference",
+                {"document": "guide", "section": "No such heading"},
+            )
+
+        listed = ast.literal_eval(excinfo.value.detail.split("Available: ", 1)[1])
+
+        assert len(listed) > 1
+        assert listed == sorted(listed)
 
     def test_a_verbatim_spec_ref_citation_resolves_through_dispatch(
         self,

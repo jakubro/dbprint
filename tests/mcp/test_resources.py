@@ -321,6 +321,17 @@ class TestEnumerate:
         assert uris[0] == "dbprint:///reference/spec"
         assert uris[1] == "dbprint:///reference/assertions"
 
+    def test_each_reference_document_is_described_by_its_own_name(self) -> None:
+        state = ServedConnections(served={}, default=None)
+        described = {e.uri: e.description for e in enumerate_for(state)}
+
+        assert described["dbprint:///reference/spec"].startswith(
+            "The format specification, whole.",
+        )
+        assert described["dbprint:///reference/assertions"].startswith(
+            "The assertion DSL specification, whole.",
+        )
+
     def test_reference_documents_are_listed_even_with_no_served_connection(self) -> None:
         state = ServedConnections(served={}, default=None)
         uris = {e.uri for e in enumerate_for(state)}

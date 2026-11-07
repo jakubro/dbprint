@@ -1,10 +1,25 @@
-"""How every surface reads a column's value list: each spelling under its canonical value
-(SPEC 2.2.4), and the notes a human attached to a value (SPEC 2.7.1).
+"""How every surface reads a column's value list: each entry's count, each spelling under its
+canonical value (SPEC 2.2.4), and the notes a human attached to a value (SPEC 2.7.1).
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+
+def count_of(entry: Any) -> int:
+    """An entry's `count` read as JSON Schema's `integer`: `25.0` is 25, anything else 0."""
+
+    count = entry.get("count") if isinstance(entry, dict) else None
+
+    if isinstance(count, bool):
+        return 0
+    elif isinstance(count, int):
+        return count
+    elif isinstance(count, float) and count.is_integer():
+        return int(count)
+    else:
+        return 0
 
 
 def value_key(value: Any) -> str:
@@ -42,13 +57,7 @@ def grouped_values(entries: list[Any]) -> list[tuple[dict[str, Any], list[dict[s
     if not any(members for _, members in groups):
         return groups
 
-    return sorted(groups, key=lambda group: -sum(_count(e) for e in (group[0], *group[1])))
-
-
-def _count(entry: dict[str, Any]) -> int:
-    count = entry.get("count")
-
-    return count if isinstance(count, int) and not isinstance(count, bool) else 0
+    return sorted(groups, key=lambda group: -sum(count_of(e) for e in (group[0], *group[1])))
 
 
 def value_notes(annotation: Any) -> dict[str, str]:

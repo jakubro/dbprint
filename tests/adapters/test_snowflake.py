@@ -7,7 +7,7 @@ import logging
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import patch
 
 import duckdb
@@ -1722,3 +1722,89 @@ class TestTableKinds:
         manifest = yaml.safe_load((tmp_path / "primary" / "manifest.yaml").read_text())
 
         assert list(manifest["tables"]) == ["memory.seedbank.field_log"]
+
+
+class _SnowflakeColumnCatalog:
+    description: Any = (("value",),)
+
+    def __init__(
+        self,
+        columns: list[tuple[Any, ...]],
+        described: list[tuple[str, str]] | None,
+    ) -> None:
+        self._columns = columns
+        self._described = described
+        self._rows: list[tuple[Any, ...]] = []
+
+    def execute(self, sql: str, params: Any = None) -> _SnowflakeColumnCatalog:
+        del params
+
+        if not sql.strip().upper().startswith("DESCRIBE TABLE"):
+            self._rows = self._columns
+        elif self._described is None:
+            raise RuntimeError("Unsupported feature 'DESCRIBE TABLE' on an event table.")
+        else:
+            self._rows = [(name, kind, "COLUMN", "Y", None) for name, kind in self._described]
+
+        return self
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return self._rows
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        return self._rows[0] if self._rows else None
+
+    def close(self) -> None:
+        pass
+
+
+class TestTheDeclaredColumnType:
+    _COLUMNS: ClassVar[list[tuple[Any, ...]]] = [
+        ("ACCESSION_ID", 1, "NUMBER", "NO", None, None),
+        ("ACCESSION_CODE", 2, "TEXT", "NO", None, "en-ci"),
+        ("VIABILITY_PCT", 3, "NUMBER", "NO", None, None),
+        ("COLLECTED_ON", 4, "DATE", "NO", None, None),
+        ("RECEIVED_AT", 5, "TIMESTAMP_TZ", "NO", None, None),
+    ]
+    _DESCRIBED: ClassVar[list[tuple[str, str]]] = [
+        ("ACCESSION_ID", "NUMBER(38,0)"),
+        ("ACCESSION_CODE", "VARCHAR(24) COLLATE 'en-ci'"),
+        ("VIABILITY_PCT", "NUMBER(5,2)"),
+        ("RECEIVED_AT", "TIMESTAMP_TZ(0)"),
+    ]
+
+    def _published(self, described: list[tuple[str, str]] | None = _DESCRIBED) -> dict[str, str]:
+        cursor = _SnowflakeColumnCatalog(self._COLUMNS, described)
+        identity = Identity.of(("ARBORETUM", "SEEDBANK", "ACCESSION"), DIALECT)
+
+        return {c.name: c.sql_type for c in snowflake_introspect.columns(cursor, identity)}
+
+    def test_each_column_publishes_its_declared_precision_scale_and_length(self) -> None:
+        published = self._published()
+
+        assert published["accession_id"] == "NUMBER(38,0)"
+        assert published["viability_pct"] == "NUMBER(5,2)"
+        assert published["received_at"] == "TIMESTAMP_TZ(0)"
+
+    def test_a_collation_is_left_to_its_own_field(self) -> None:
+        assert self._published()["accession_code"] == "VARCHAR(24)"
+
+    def test_a_column_describe_does_not_return_keeps_its_catalog_type(self) -> None:
+        assert self._published()["collected_on"] == "DATE"
+
+    def test_a_table_describe_refuses_keeps_every_catalog_type(self) -> None:
+        assert self._published(None) == {
+            "accession_id": "NUMBER",
+            "accession_code": "TEXT",
+            "viability_pct": "NUMBER",
+            "collected_on": "DATE",
+            "received_at": "TIMESTAMP_TZ",
+        }
+
+    def test_an_integer_column_reads_as_integer_and_a_scaled_one_does_not(self) -> None:
+        from dbprint.spec.classification import is_integer_type
+
+        published = self._published()
+
+        assert is_integer_type(published["accession_id"])
+        assert not is_integer_type(published["viability_pct"])

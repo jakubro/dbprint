@@ -15,13 +15,19 @@ from click.testing import CliRunner
 from dbprint.cli.main import main
 from tests.fixtures.adversarial import (
     APPROXIMATE_ROW_COUNT_TABLE,
-    CONNECTION_NOTE,
+    COHORTS,
+    CONNECTION_NOTES,
     DECLARED_MISSING_KIND,
     DECLARED_MISSING_TABLE,
     DELIMITER_COLUMN,
     DELIMITER_TABLE,
     DELIMITER_VALUE,
+    DOCUMENTED_COLUMN,
+    DOCUMENTED_TABLE,
     EMPTY_COLUMNS_TABLE,
+    EMPTY_JOIN_COMPARED,
+    EMPTY_JOIN_TABLE,
+    EMPTY_JOIN_TARGET,
     EXTREME_NULL_RATE,
     EXTREME_TABLE,
     EXTREME_TINY_MEAN,
@@ -38,6 +44,7 @@ from tests.fixtures.adversarial import (
     ORPHAN_SPELLING_COLUMN,
     ORPHAN_SPELLING_TABLE,
     ORPHAN_SPELLING_VALUE,
+    OUTRANKED_VALUE,
     OUTSIDE_PRINT_SENTINEL,
     OUTSIDE_PRINT_TABLE,
     PERCENTILE_INSIDE_RANGE_COLUMN,
@@ -45,6 +52,10 @@ from tests.fixtures.adversarial import (
     REJECTED_FIELD_COLUMN,
     REJECTED_FIELD_NOTE,
     REJECTED_FIELD_TABLE,
+    ROWLESS_NOTE,
+    ROWLESS_NOTE_COLUMN,
+    ROWLESS_NOTE_TABLE,
+    ROWLESS_NOTE_VALUE,
     SCOPED_COMPLETE_LIST_COLUMN,
     SCOPED_KEY_COLUMN,
     SCOPED_LATEST_COLUMN,
@@ -57,8 +68,12 @@ from tests.fixtures.adversarial import (
     SPELLED_NAME,
     SPELLED_TABLE,
     SPELLING_COLUMN,
+    SPELLING_GROUP,
+    SPELLING_GROUP_COLUMN,
+    SPELLING_GROUP_TABLE,
     SPELLING_VALUES,
     TRUNCATED_FK_COLUMN,
+    UNDOCUMENTED_COLUMN,
     UNEVALUATED_TABLE,
     UNREADABLE_PROFILED_AT,
     UNREADABLE_PROFILED_TABLE,
@@ -81,6 +96,10 @@ COVERS = frozenset(
         "unevaluated_diff_table",
         "empty_columns_map",
         "column_with_several_edges",
+        "authored_heading",
+        "code_span_documented_column",
+        "measured_empty_join",
+        "outranking_spelling_group",
         "connection_notes",
         "human_authored_edge",
         "orphan_spelling",
@@ -345,7 +364,7 @@ def test_a_human_authored_edge_reaches_both_tables_tagged_annotated(
 
 
 def test_connection_notes_reach_a_single_table_reader(adversarial_print: AdversarialPrint) -> None:
-    assert _payload(adversarial_print, SEVERAL_EDGES_TABLE)["connection_notes"] == CONNECTION_NOTE
+    assert _payload(adversarial_print, SEVERAL_EDGES_TABLE)["connection_notes"] == CONNECTION_NOTES
 
 
 def test_scoped_part_list_rides_beside_the_top_level_scope(
@@ -396,13 +415,24 @@ def test_a_note_on_an_unshown_value_is_carried_under_value_notes(
     assert result.exit_code == 0, result.output
 
     payload = json.loads(result.output)
-    block = payload.get("values", {}).get(UNSHOWN_NOTE_COLUMN, {})
-    shown = [entry["value"] for entry in block.get("entries", [])]
+    shown = [entry["value"] for entry in payload["values"][UNSHOWN_NOTE_COLUMN]["entries"]]
 
     assert {"value": UNSHOWN_NOTE_VALUE, "note": UNSHOWN_NOTE} in payload["value_notes"][
         UNSHOWN_NOTE_COLUMN
     ]
+    assert shown == [value for value, _ in COHORTS[:5]]
     assert UNSHOWN_NOTE_VALUE not in shown
+
+
+def test_a_note_on_a_column_with_no_values_block_is_carried_under_value_notes(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    payload = _query_payload(adversarial_print, ROWLESS_NOTE_TABLE)
+
+    assert ROWLESS_NOTE_COLUMN not in payload["values"]
+    assert {"value": ROWLESS_NOTE_VALUE, "note": ROWLESS_NOTE} in payload["value_notes"][
+        ROWLESS_NOTE_COLUMN
+    ]
 
 
 def test_a_columns_spelling_is_carried_under_physical_names(
@@ -424,3 +454,50 @@ def test_a_columns_spelling_is_carried_under_physical_names(
 
     assert payload["physical_names"] == {SPELLED_TABLE: {SPELLED_COLUMN: SPELLED_NAME}}
     assert SPELLED_COLUMN in payload["values"]
+
+
+def _query_payload(adversarial_print: AdversarialPrint, table: str) -> dict:
+    runner = CliRunner()
+    old_cwd = Path.cwd()
+    os.chdir(adversarial_print.conn.output.parent)
+
+    try:
+        result = runner.invoke(main, ["context", table, "--purpose", "query", "--format", "json"])
+    finally:
+        os.chdir(old_cwd)
+
+    assert result.exit_code == 0, result.output
+
+    return json.loads(result.output)
+
+
+def test_a_coded_column_a_code_span_documents_reads_as_documented(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    values = _query_payload(adversarial_print, DOCUMENTED_TABLE)["values"]
+
+    assert "meanings_documented" not in values[DOCUMENTED_COLUMN]
+    assert values[UNDOCUMENTED_COLUMN]["meanings_documented"] is False
+
+
+def test_a_join_measured_empty_carries_no_match_on_both_tables(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    outgoing = _query_payload(adversarial_print, EMPTY_JOIN_TABLE)["joins"]["refers_to"]
+    incoming = _query_payload(adversarial_print, EMPTY_JOIN_TARGET)["joins"]["referenced_by"]
+    profile = _payload(adversarial_print, EMPTY_JOIN_TABLE)["relationships"]["refers_to"]
+    edge = next(e for e in profile if e["target_table"] == EMPTY_JOIN_TARGET)
+
+    assert next(e for e in outgoing if e["target_table"] == EMPTY_JOIN_TARGET)["no_match"] is True
+    assert (
+        next(e for e in incoming if e["referencer_table"] == EMPTY_JOIN_TABLE)["no_match"] is True
+    )
+    assert edge["observed"]["containment"] == 0
+    assert edge["observed"]["answerable_count"] == EMPTY_JOIN_COMPARED
+
+
+def test_a_spelling_group_lists_its_spellings_first(adversarial_print: AdversarialPrint) -> None:
+    values = _query_payload(adversarial_print, SPELLING_GROUP_TABLE)["values"]
+    entries = values[SPELLING_GROUP_COLUMN]["entries"]
+
+    assert [e["value"] for e in entries] == [*SPELLING_GROUP, OUTRANKED_VALUE]

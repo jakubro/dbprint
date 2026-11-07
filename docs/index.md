@@ -27,7 +27,7 @@ An excerpt of `dbprint context --purpose query` on a table from the [reference p
 
 ## Data dictionary
 
-One row per germination attempt run against a batch drawn from an accession.
+> One row per germination attempt run against a batch drawn from an accession.
 
 ## Joins
 - accession_id -> arboretum.seedbank.accession.accession_id (declared)

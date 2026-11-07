@@ -37,14 +37,14 @@ A measurement the file's `disabled` list names gets a block of its own, quoting 
 
 ### Timeline and Depends on
 
-Two sections in the overview panel read the newer per-table fields directly:
+Two sections in the overview panel read per-table fields directly:
 
 - **Timeline** — heading `Timeline - <column> by <unit>`, the anchor column linked to its own row. The hedge states the bucketed share as a percentage that keeps one more decimal wherever rounding would land a partial share on `0%` or `100%`, so a coverage under 1.0 never reads `100%`. It also reads `A missing bucket is a gap - no rows fell in that <unit>`, so an absent row between two present ones is a real gap, not a rendering skip. The block only appears when the file carries `timeline` at all — a scoped table or an empty one never shows it, since neither computed one.
 - **Depends on** — hedged `Catalog-derived, direct dependencies only - a different relation than a foreign key`. Three states, and the page tells them apart: a non-empty list renders links to each object; an empty list renders `Reads nothing else printed`; the field omitted entirely (the producer could not ask) renders no section at all. The same names double as diagram edges, drawn with an open-circle head and a muted dashed style so a dependency edge can never be mistaken for a foreign key even without color.
 
 ### The column table's degenerate census
 
-Beside the null-rate bar, a column carrying `zero_count`, `negative_count`, `non_finite_count` or `empty_count` shows a dot-separated line — `<n> zero`, `<n> negative`, `<n> non-finite`, `<n> empty` — under the null figure. Each sub-count is gated on being truthy, so an explicit `0` renders nothing there, reading the same as a field the classification forbids or the run never measured. `statistics.yaml` itself tells those apart for that column.
+Beside the null-rate bar, a column carrying `zero_count`, `negative_count`, `non_finite_count` or `empty_count` shows a dot-separated line — `<n> zero`, `<n> negative`, `<n> non-finite`, `<n> empty` — under the null figure. A count of `0` renders nothing there, reading the same as a field the classification forbids or the run never measured. `statistics.yaml` itself tells those apart for that column.
 
 Further down the same cell: `mean`/`sum` render as `mean X · sum Y` whenever either is present, each spelled as `statistics.yaml` spells it (positional, never an exponent). Every count on the page is its exact integer, never compacted to `10K`. A redacted column carries neither, nor `length` or the degenerate counts above — a marked column publishes its count profile only — so its cell shows `bounds withheld` and the counts it keeps. A `length` block renders as `length <min>-<max> · avg <avg> · p95 <p95>`.
 
@@ -53,6 +53,8 @@ Further down the same cell: `mean`/`sum` render as `mean X · sum Y` whenever ei
 Every edge gets a Detection badge with one of four verdicts: `declared` (a real foreign key), `measured` (proposed from two columns' own sketches, never a schema fact), `inferred` (a naming guess), or `annotated` (an edge a human added in `relationships.annotations.yaml`, listed on both tables it joins, with nothing measured behind it) — an edge carrying no `detection` at all reads as `inferred`, never defaulted upward. `declared` and `measured` are two different claims and the page never blurs them: a declared edge is a constraint the database enforces; a measured one is evidence the data happens to join cleanly today.
 
 Detail beside the badge carries whatever the edge can state — `on_delete`, a constraint name, the annotation path for a human-added edge — and, where the observed join was measured, its fanout, target coverage and containment, or `scopes not comparable` when the two sides' scopes can't be compared at all. A verdict a human annotation rejected renders `REJECTED by human annotation` on both the referencing and the referenced side; one addressing a declared edge is void and renders nothing.
+
+An edge whose measurement compared ten or more referencing values and found none of them in the target carries a `no match` badge beside its detection badge, on both tables: a join on it is likely empty, unless the two columns' types or collations differ. `dbprint context` reads the same edge as `(<detection>, no match)`.
 
 ![The Relationships tab: one row per edge, its direction, the columns on both sides, a detection badge, and the detail the edge carries](images/browsing-relationships.png)
 

@@ -40,7 +40,7 @@ class ServedConnections:
             return self.served[conn]
 
         if self.default is None:
-            raise errors.no_default_connection(list(self.served))
+            raise errors.no_default_connection(list(self.served), served=True)
 
         return self.served[self.default]
 
@@ -66,7 +66,7 @@ def build(
         if conn_arg is not None:
             raise errors.unknown_connection(conn_arg, list(configured_set)) from exc
 
-        raise errors.no_default_connection(list(configured_set)) from exc
+        raise errors.no_default_connection(list(configured_set), served=False) from exc
 
     return ServedConnections(
         served={c.name: c for c in resolved.connections},

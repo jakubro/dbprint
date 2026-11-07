@@ -18,7 +18,7 @@ from dbprint.spec.rejection import RejectableField
 from dbprint.spec.scope import ScanScope, list_is_complete, qualify, rows_scanned
 from dbprint.spec.value_text import spell_number, spell_percent
 from .context_terms import percentile_key
-from .value_list import grouped_values, value_key
+from .value_list import count_of, grouped_values, value_key
 from .yaml_dumper import spell_literal
 
 
@@ -26,9 +26,10 @@ FACT_SEPARATOR = "; "
 LIST_SEPARATOR = ", "
 NOTES_TOP_VALUES_LIMIT = 5  # entries a truncated list shows in the Notes; a spelling group is one
 UNIT_NORM_TOLERANCE = 0.001  # both norm bounds this close to 1 read as unit-normalized
+NO_MATCH_SUFFIX = ", no match"
 
 _PERCENTILE_FIELD_RE = re.compile(r"^p(\d+)$")
-_DETECTION_RE = re.compile(r"\((declared|inferred|measured)\)$")
+_DETECTION_RE = re.compile(rf"\((declared|inferred|measured)({re.escape(NO_MATCH_SUFFIX)})?\)$")
 
 
 @dataclass(frozen=True)
@@ -184,6 +185,12 @@ def non_null_rows(
     return population - (nulls if isinstance(nulls, int) else 0)
 
 
+def holds_no_value(stats: dict[str, Any]) -> bool:
+    """Whether the column holds no non-null value, so no `distribution` shape describes it."""
+
+    return column_value(stats, "cardinality") == 0
+
+
 def _fact(text: str, *keys: str) -> Rendered:
     return Rendered(text, frozenset(keys))
 
@@ -284,9 +291,10 @@ def _fk_note(classification: str, fk_targets: list[str] | None) -> list[Rendered
             else []
         )
 
-    detections = {f"detection:{m[1]}" for t in fk_targets if (m := _DETECTION_RE.search(t))}
+    matched = [m for t in fk_targets if (m := _DETECTION_RE.search(t))]
+    keys = {f"detection:{m[1]}" for m in matched} | {"no_match" for m in matched if m[2]}
 
-    return [_fact("FK: " + LIST_SEPARATOR.join(fk_targets), "fk", *detections)]
+    return [_fact("FK: " + LIST_SEPARATOR.join(fk_targets), "fk", *keys)]
 
 
 def _boolean_notes(stats: dict[str, Any], redaction: str | None) -> list[Rendered]:
@@ -540,7 +548,7 @@ def _distribution_suffix(
 
     distribution = column_value(stats, "distribution")
 
-    if not distribution or column_value(stats, "cardinality") == 0:
+    if not distribution or holds_no_value(stats):
         return []
 
     grouped = _grouped_entries(stats, _value_entries(stats))
@@ -942,7 +950,7 @@ def _grouped_entries(
             continue
 
         spellings = members.get(value_key(value)) or []
-        total = count + sum(int(m.get("count") or 0) for m in spellings)
+        total = count + sum(count_of(m) for m in spellings)
         out.append((value, total, len(spellings) + 1))
 
     if all(spellings == 1 for _, _, spellings in out):
@@ -966,7 +974,7 @@ def _value_entries(stats: dict[str, Any]) -> list[tuple[Any, int]]:
 
     for entry in entries:
         if isinstance(entry, dict):
-            out.append((entry.get("value"), int(entry.get("count") or 0)))
+            out.append((entry.get("value"), count_of(entry)))
         else:
             out.append((getattr(entry, "value", None), int(getattr(entry, "count", 0) or 0)))
 

@@ -413,7 +413,7 @@
       <tbody>
         {% for col in columns %}
           <tr id="col-{{ col.name }}" data-column="{{ col.name }}" data-type="{{ col.sql_type }}"
-              data-class="{{ col.classification }}" data-distribution="{{ col.distribution }}"
+              data-class="{{ col.classification }}" data-distribution="{{ col.distribution or '' }}"
               data-nullrate="{{ col.null_rate }}" data-cardinality="{{ col.cardinality.value if col.cardinality else '' }}">
             <td class="col-fixed">
               <span class="col-name">{{ col.name }}</span>
@@ -595,7 +595,7 @@
             <td>{{ col_links(r.column) }}</td>
             <td><a href="{{ url_for('table', conn=conn, table=r.target_table) }}">{{ r.target_table }}</a></td>
             <td>{{ col_links(r.target_column, url_for('table', conn=conn, table=r.target_table)) }}</td>
-            <td><span class="badge {{ {'declared': 'badge-declared', 'measured': 'badge-measured'}.get(r.detection, 'badge-inferred') }}">{{ r.detection }}</span></td>
+            <td><span class="badge {{ {'declared': 'badge-declared', 'measured': 'badge-measured'}.get(r.detection, 'badge-inferred') }}">{{ r.detection }}</span>{% if r.no_match %} <span class="badge badge-muted" title="{{ relationships.no_match_definition }}">no match</span>{% endif %}</td>
             <td>
               {% if r.on_delete %}<div class="muted">on_delete={{ r.on_delete }}</div>{% endif %}
               {% if r.constraint_name %}<div class="muted">{{ r.constraint_name }}</div>{% endif %}
@@ -624,7 +624,7 @@
             <td>{{ col_links(r.column) }}</td>
             <td><a href="{{ url_for('table', conn=conn, table=r.referencer_table) }}">{{ r.referencer_table }}</a></td>
             <td>{{ col_links(r.referencer_column, url_for('table', conn=conn, table=r.referencer_table)) }}</td>
-            <td><span class="badge {{ {'declared': 'badge-declared', 'measured': 'badge-measured'}.get(r.detection, 'badge-inferred') }}">{{ r.detection }}</span></td>
+            <td><span class="badge {{ {'declared': 'badge-declared', 'measured': 'badge-measured'}.get(r.detection, 'badge-inferred') }}">{{ r.detection }}</span>{% if r.no_match %} <span class="badge badge-muted" title="{{ relationships.no_match_definition }}">no match</span>{% endif %}</td>
             <td>
               {% if r.on_delete %}<div class="muted">on_delete={{ r.on_delete }}</div>{% endif %}
               {% if r.constraint_name %}<div class="muted">{{ r.constraint_name }}</div>{% endif %}

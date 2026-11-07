@@ -9,19 +9,28 @@ from __future__ import annotations
 import html
 import re
 
+import pytest
 import yaml
 
 from dbprint.config import ConnectionConfig
 from dbprint.docs import catalogue, view, web
 from tests.fixtures.adversarial import (
     APPROXIMATE_ROW_COUNT_TABLE,
+    COHORTS,
     CONNECTION_NOTE,
+    CONNECTION_NOTE_HEADING,
     DECLARED_MISSING_KIND,
     DECLARED_MISSING_TABLE,
     DELIMITER_COLUMN,
     DELIMITER_TABLE,
     DELIMITER_VALUE,
+    DOCUMENTED_COLUMN,
+    DOCUMENTED_TABLE,
     EMPTY_COLUMNS_TABLE,
+    EMPTY_JOIN_COLUMN,
+    EMPTY_JOIN_TABLE,
+    EMPTY_JOIN_TARGET,
+    EMPTY_JOIN_TARGET_COLUMN,
     EXPONENT_FORM,
     EXTREME_TABLE,
     FUTURE_DATED_COLUMN,
@@ -36,6 +45,7 @@ from tests.fixtures.adversarial import (
     ORPHAN_SPELLING_COLUMN,
     ORPHAN_SPELLING_TABLE,
     ORPHAN_SPELLING_VALUE,
+    OUTRANKED_VALUE,
     OUTSIDE_PRINT_TABLE,
     PERCENTILE_INSIDE_RANGE_COLUMN,
     REDACTED_COLUMN,
@@ -53,8 +63,12 @@ from tests.fixtures.adversarial import (
     SPELLED_NAME,
     SPELLED_TABLE,
     SPELLING_COLUMN,
+    SPELLING_GROUP,
+    SPELLING_GROUP_COLUMN,
+    SPELLING_GROUP_TABLE,
     SPELLING_VALUES,
     TRUNCATED_FK_COLUMN,
+    UNDOCUMENTED_COLUMN,
     UNEVALUATED_TABLE,
     UNREADABLE_PROFILED_AT,
     UNREADABLE_PROFILED_TABLE,
@@ -77,6 +91,10 @@ COVERS = frozenset(
         "unevaluated_diff_table",
         "empty_columns_map",
         "column_with_several_edges",
+        "authored_heading",
+        "code_span_documented_column",
+        "measured_empty_join",
+        "outranking_spelling_group",
         "connection_notes",
         "human_authored_edge",
         "orphan_spelling",
@@ -306,9 +324,12 @@ def _page_html(adversarial_print: AdversarialPrint, table: str) -> str:
 
 
 def _page_text(adversarial_print: AdversarialPrint, table: str) -> str:
-    client = web.create_app([_conn(adversarial_print)]).test_client()
-    page = client.get(f"/t/{_conn(adversarial_print).name}/{table}").data.decode()
-    page = re.sub(r"<(script|style)\b.*?</\1>|style=\"[^\"]*\"", " ", page, flags=re.DOTALL)
+    page = re.sub(
+        r"<(script|style)\b.*?</\1>|style=\"[^\"]*\"",
+        " ",
+        _page_html(adversarial_print, table),
+        flags=re.DOTALL,
+    )
 
     return html.unescape(re.sub(r"<[^>]+>", " ", page))
 
@@ -442,7 +463,18 @@ def test_a_note_on_an_unshown_value_reaches_the_query_context(
     query = _page(adversarial_print, UNSHOWN_NOTE_TABLE)["context"]["query"]
     line = next(row for row in query.splitlines() if row.startswith(f"- {UNSHOWN_NOTE_COLUMN}: "))
 
-    assert f"'{UNSHOWN_NOTE_VALUE}' = {UNSHOWN_NOTE}" in line
+    assert f"'{UNSHOWN_NOTE_VALUE}' = '{UNSHOWN_NOTE}'" in line
+    assert f"'{COHORTS[0][0]}' ({COHORTS[0][1]})" in _context_row(query, UNSHOWN_NOTE_COLUMN)
+    assert UNSHOWN_NOTE_VALUE not in _context_row(query, UNSHOWN_NOTE_COLUMN)
+
+
+def test_a_heading_in_the_connection_notes_nests_below_the_context_section(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    query = _page(adversarial_print, SEVERAL_EDGES_TABLE)["context"]["query"].splitlines()
+
+    assert f"> ### {CONNECTION_NOTE_HEADING}" in query
+    assert f"## {CONNECTION_NOTE_HEADING}" not in query
 
 
 def test_the_query_context_names_a_column_as_the_database_spells_it(
@@ -452,3 +484,62 @@ def test_the_query_context_names_a_column_as_the_database_spells_it(
 
     assert f"| {SPELLED_NAME} | " in query
     assert f"| {SPELLED_COLUMN} | " not in query
+
+
+def _context_row(text: str, column: str) -> str:
+    return next(line for line in text.splitlines() if line.startswith(f"| {column} |"))
+
+
+def test_a_coded_column_a_code_span_documents_carries_no_cue_on_the_context_tab(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    query = _page(adversarial_print, DOCUMENTED_TABLE)["context"]["query"]
+
+    assert "meanings: not documented here" not in _context_row(query, DOCUMENTED_COLUMN)
+    assert "meanings: not documented here" in _context_row(query, UNDOCUMENTED_COLUMN)
+
+
+@pytest.mark.parametrize(
+    ("table", "other"),
+    [(EMPTY_JOIN_TABLE, EMPTY_JOIN_TARGET), (EMPTY_JOIN_TARGET, EMPTY_JOIN_TABLE)],
+)
+def test_a_join_measured_empty_reads_no_match_on_every_tab_of_both_tables(
+    adversarial_print: AdversarialPrint,
+    table: str,
+    other: str,
+) -> None:
+    page = _page(adversarial_print, table)
+    rows = [*page["relationships"]["refers_to"], *page["relationships"]["referenced_by"]]
+    row = next(r for r in rows if other in (r.get("target_table"), r.get("referencer_table")))
+
+    assert "(inferred, no match)" in page["context"]["profile"]
+    assert row["no_match"] is True
+    assert "no match" in _relationships_row(adversarial_print, table, other)
+
+
+def _relationships_row(adversarial_print: AdversarialPrint, table: str, other: str) -> str:
+    page = _page_html(adversarial_print, table)
+    panel = page.split('data-tab-panel="relationships"', 1)[1].split("</table>", 1)[0]
+    row = next(r for r in panel.split("<tr>") if f">{other}</a>" in r)
+
+    return html.unescape(re.sub(r"<[^>]+>", " ", row))
+
+
+def test_the_columns_tab_fk_label_reads_no_match(adversarial_print: AdversarialPrint) -> None:
+    columns = {c["name"]: c for c in _page(adversarial_print, EMPTY_JOIN_TABLE)["columns"]}
+    target = f"{EMPTY_JOIN_TARGET}.{EMPTY_JOIN_TARGET_COLUMN}"
+
+    assert f"FK: {target} (inferred, no match)" in columns[EMPTY_JOIN_COLUMN]["notes"]
+
+
+def test_the_values_bars_rank_the_spelling_group_first(adversarial_print: AdversarialPrint) -> None:
+    statistics = _statistics(adversarial_print, SPELLING_GROUP_TABLE)
+    assert statistics is not None
+
+    values = view.values_view(statistics["columns"][SPELLING_GROUP_COLUMN])
+
+    assert values is not None
+    assert [(b["value"], b["count"]) for b in values["bars"]] == [
+        (SPELLING_GROUP[0], 55),
+        (OUTRANKED_VALUE, 45),
+    ]

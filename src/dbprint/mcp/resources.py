@@ -42,7 +42,10 @@ from .state import ServedConnections
 
 
 # The two server-global reference resources (MCP.md 3.2) - never per-connection.
-_REFERENCE_DOCUMENTS: tuple[ReferenceDocument, ...] = ("spec", "assertions")
+_REFERENCE_DOCUMENTS: dict[ReferenceDocument, str] = {
+    "spec": "format specification",
+    "assertions": "assertion DSL specification",
+}
 _REFERENCE_MIME = "text/markdown"
 
 
@@ -267,12 +270,10 @@ def enumerate_for(state: ServedConnections) -> list[ResourceEntry]:
         ResourceEntry(
             uri=f"dbprint:///reference/{document}",
             name=f"{document} reference",
-            description=(
-                f"The {document} specification, whole. get_reference returns one section by number"
-            ),
+            description=f"The {title}, whole. get_reference returns one section by number",
             mime_type=_REFERENCE_MIME,
         )
-        for document in _REFERENCE_DOCUMENTS
+        for document, title in _REFERENCE_DOCUMENTS.items()
     ]
 
     for conn_name in sorted(state.served):

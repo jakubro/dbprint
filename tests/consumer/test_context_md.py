@@ -10,6 +10,7 @@ import os
 import re
 from pathlib import Path
 
+import pytest
 import yaml
 from click.testing import CliRunner
 
@@ -17,13 +18,21 @@ from dbprint.cli.main import main
 from tests._grammar import split_outside_literals
 from tests.fixtures.adversarial import (
     APPROXIMATE_ROW_COUNT_TABLE,
+    COHORTS,
     CONNECTION_NOTE,
+    CONNECTION_NOTE_HEADING,
     DECLARED_MISSING_KIND,
     DECLARED_MISSING_TABLE,
     DELIMITER_COLUMN,
     DELIMITER_TABLE,
     DELIMITER_VALUE,
+    DOCUMENTED_COLUMN,
+    DOCUMENTED_TABLE,
     EMPTY_COLUMNS_TABLE,
+    EMPTY_JOIN_COLUMN,
+    EMPTY_JOIN_TABLE,
+    EMPTY_JOIN_TARGET,
+    EMPTY_JOIN_TARGET_COLUMN,
     EXPONENT_FORM,
     EXTREME_TABLE,
     FUTURE_DATED_COLUMN,
@@ -39,6 +48,7 @@ from tests.fixtures.adversarial import (
     ORPHAN_SPELLING_COLUMN,
     ORPHAN_SPELLING_TABLE,
     ORPHAN_SPELLING_VALUE,
+    OUTRANKED_VALUE,
     OUTSIDE_PRINT_SENTINEL,
     OUTSIDE_PRINT_TABLE,
     PARTIAL_AS_WHOLE,
@@ -49,6 +59,10 @@ from tests.fixtures.adversarial import (
     REJECTED_FIELD_COLUMN,
     REJECTED_FIELD_NOTE,
     REJECTED_FIELD_TABLE,
+    ROWLESS_NOTE,
+    ROWLESS_NOTE_COLUMN,
+    ROWLESS_NOTE_TABLE,
+    ROWLESS_NOTE_VALUE,
     SCOPED_COMPLETE_LIST_COLUMN,
     SCOPED_KEY_COLUMN,
     SCOPED_LATEST_COLUMN,
@@ -61,8 +75,12 @@ from tests.fixtures.adversarial import (
     SPELLED_NAME,
     SPELLED_TABLE,
     SPELLING_COLUMN,
+    SPELLING_GROUP,
+    SPELLING_GROUP_COLUMN,
+    SPELLING_GROUP_TABLE,
     SPELLING_VALUES,
     TRUNCATED_FK_COLUMN,
+    UNDOCUMENTED_COLUMN,
     UNEVALUATED_TABLE,
     UNREADABLE_PROFILED_TABLE,
     UNSHOWN_NOTE,
@@ -84,6 +102,10 @@ COVERS = frozenset(
         "unevaluated_diff_table",
         "empty_columns_map",
         "column_with_several_edges",
+        "authored_heading",
+        "code_span_documented_column",
+        "measured_empty_join",
+        "outranking_spelling_group",
         "connection_notes",
         "human_authored_edge",
         "orphan_spelling",
@@ -451,8 +473,20 @@ def test_a_human_authored_edge_reaches_both_tables_tagged_annotated(
         f"-> {HUMAN_EDGE_TARGET}.{HUMAN_EDGE_TARGET_COLUMN} (annotated); via: {HUMAN_EDGE_COLUMN}"
         in source
     )
-    assert f"note: {HUMAN_EDGE_NOTE}" in source
+    assert f"note: '{HUMAN_EDGE_NOTE}'" in source
     assert f"<- {SEVERAL_EDGES_TABLE}.{HUMAN_EDGE_COLUMN} (annotated)" in target
+
+
+@pytest.mark.parametrize("purpose", ["profile", "query"])
+def test_a_heading_in_the_connection_notes_nests_below_the_section(
+    adversarial_print: AdversarialPrint,
+    purpose: str,
+) -> None:
+    render = _render if purpose == "profile" else _render_query
+    lines = render(adversarial_print, SEVERAL_EDGES_TABLE).splitlines()
+
+    assert f"> ### {CONNECTION_NOTE_HEADING}" in lines
+    assert f"## {CONNECTION_NOTE_HEADING}" not in lines
 
 
 def test_connection_notes_reach_a_single_table_reader_once(
@@ -505,8 +539,22 @@ def test_a_note_on_an_unshown_value_rides_its_columns_dictionary_line(
         row for row in dictionary.splitlines() if row.startswith(f"- {UNSHOWN_NOTE_COLUMN}:")
     )
 
-    assert f"'{UNSHOWN_NOTE_VALUE}' = {UNSHOWN_NOTE}" in line
-    assert UNSHOWN_NOTE_VALUE not in text.split("## Data dictionary", 1)[0]
+    assert f"'{UNSHOWN_NOTE_VALUE}' = '{UNSHOWN_NOTE}'" in line
+    assert f"'{COHORTS[0][0]}' ({COHORTS[0][1]})" in _value_row(text, UNSHOWN_NOTE_COLUMN)
+    assert UNSHOWN_NOTE_VALUE not in _value_row(text, UNSHOWN_NOTE_COLUMN)
+
+
+def test_a_note_on_a_column_with_no_values_row_rides_its_dictionary_line(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    text = _render_query(adversarial_print, ROWLESS_NOTE_TABLE)
+    dictionary = text.split("## Data dictionary", 1)[1].split("\n## ", 1)[0]
+    line = next(
+        row for row in dictionary.splitlines() if row.startswith(f"- {ROWLESS_NOTE_COLUMN}:")
+    )
+
+    assert f"'{ROWLESS_NOTE_VALUE}' = '{ROWLESS_NOTE}'" in line
+    assert f"| {ROWLESS_NOTE_COLUMN} |" not in text
 
 
 def test_a_column_is_named_as_the_database_spells_it(adversarial_print: AdversarialPrint) -> None:
@@ -514,3 +562,41 @@ def test_a_column_is_named_as_the_database_spells_it(adversarial_print: Adversar
 
     assert _value_row(text, SPELLED_NAME).startswith(f"| {SPELLED_NAME} | 'x' (100)")
     assert f"| {SPELLED_COLUMN} |" not in text
+
+
+def _row(text: str, column: str) -> str:
+    return next(line for line in text.splitlines() if line.startswith(f"| {column} |"))
+
+
+def test_a_coded_column_a_code_span_documents_carries_no_meanings_cue(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    text = _render_query(adversarial_print, DOCUMENTED_TABLE)
+
+    assert "meanings: not documented here" not in _row(text, DOCUMENTED_COLUMN)
+    assert "meanings: not documented here" in _row(text, UNDOCUMENTED_COLUMN)
+
+
+def test_a_join_measured_empty_reads_no_match_on_both_tables(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    target = f"{EMPTY_JOIN_TARGET}.{EMPTY_JOIN_TARGET_COLUMN}"
+    profile = _render(adversarial_print, EMPTY_JOIN_TABLE)
+    query = _render_query(adversarial_print, EMPTY_JOIN_TABLE)
+    incoming = _render(adversarial_print, EMPTY_JOIN_TARGET)
+
+    assert f"- -> {target} (inferred, no match); via: {EMPTY_JOIN_COLUMN}" in profile
+    assert f"FK: {target} (inferred, no match)" in _row(profile, EMPTY_JOIN_COLUMN)
+    assert f"- {EMPTY_JOIN_COLUMN} -> {target} (inferred, no match)" in query
+    assert f"- <- {EMPTY_JOIN_TABLE}.{EMPTY_JOIN_COLUMN} (inferred, no match)" in incoming
+
+
+def test_a_spelling_group_outranks_the_single_value_it_trails_in_the_file(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    group, member = SPELLING_GROUP
+    profile = _row(_render(adversarial_print, SPELLING_GROUP_TABLE), SPELLING_GROUP_COLUMN)
+    query = _row(_render_query(adversarial_print, SPELLING_GROUP_TABLE), SPELLING_GROUP_COLUMN)
+
+    assert f"'{group}' (55%, 2 spellings), '{OUTRANKED_VALUE}' (45%)" in profile
+    assert f"'{group}' (55) {{'{group}' (35), '{member}' (20)}}, '{OUTRANKED_VALUE}' (45)" in query

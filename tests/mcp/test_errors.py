@@ -19,14 +19,19 @@ class TestErrorConstructors:
         assert "a" in err.detail and "b" in err.detail
 
     def test_no_default_connection_names_the_argument_to_pass(self) -> None:
-        err = errors.no_default_connection(["a", "b"])
+        err = errors.no_default_connection(["a", "b"], served=False)
         assert err.code == -32602
         assert "pass connection explicitly" in err.detail
 
-    def test_malformed_pattern(self) -> None:
-        err = errors.malformed_pattern("x[")
-        assert err.code == -32602
-        assert "x[" in err.detail
+    def test_no_default_connection_labels_a_served_set_as_served(self) -> None:
+        err = errors.no_default_connection(["staging", "production"], served=True)
+
+        assert err.detail.endswith("Served: ['production', 'staging']")
+
+    def test_no_default_connection_labels_a_configured_set_as_configured(self) -> None:
+        err = errors.no_default_connection(["b", "a"], served=False)
+
+        assert err.detail.endswith("Configured: ['a', 'b']")
 
     def test_missing_optional_artifact(self) -> None:
         err = errors.missing_optional_artifact("description.md", "public.curator")

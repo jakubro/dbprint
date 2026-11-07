@@ -32,6 +32,7 @@ from dbprint.engine.baseline import (
     table_directory,
 )
 from dbprint.engine.context_assembler import (
+    SAMPLE_RESCALING,
     authored_relationship_annotations,
     incoming_rejections,
     spelling_files,
@@ -91,7 +92,8 @@ _FIELD_NOTES = {
     ),
     "scope": (
         "a match carrying scope was read in part: its numbers and keys describe the rows "
-        "scanned, not the table"
+        f"scanned, not the table; under scope.sample {SAMPLE_RESCALING}; under scope.filter "
+        "nothing rescales"
     ),
     "sampled": "a looks_like verdict rests on its draw: matched of sampled values fit the shape",
     "candidate_key_exception": "the key holds with the exception named, not over every value",
@@ -742,7 +744,8 @@ def _tool_get_table_context(
         options,
         read=state.files.read,
     )
-    header |= _notes(["_corrupted"] if header.get("_corrupted") else [])
+    if header.get("_corrupted"):
+        header["notes"] = {**header.get("notes", {}), "_corrupted": _FIELD_NOTES["_corrupted"]}
 
     def render(units: Sequence[Any], first: bool, next_cursor: str | None) -> dict[str, Any] | str:
         del first
@@ -1427,7 +1430,7 @@ def _guide_reference(heading: str | None) -> str:
     found = reference.guide_section(heading)
 
     if found is None:
-        raise errors.unknown_section("guide", heading, reference.guide_headings())
+        raise errors.unknown_section("guide", heading, sorted(reference.guide_headings()))
 
     return found
 

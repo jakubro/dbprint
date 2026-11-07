@@ -21,7 +21,13 @@ from dbprint.engine.baseline import (
     read_artifact,
     unmeasured_block_message,
 )
-from dbprint.engine.context_assembler import external_line, fk_target_map, load_connection_notes
+from dbprint.engine.context_assembler import (
+    external_line,
+    fk_target_map,
+    load_connection_notes,
+    no_match,
+)
+from dbprint.engine.context_terms import TERMS
 from dbprint.engine.relationship_graph import incoming_key, with_human_edges
 from dbprint.engine.table_readings import (
     connection_profile,
@@ -32,7 +38,7 @@ from dbprint.engine.table_readings import (
     saturation,
     scanned_row_share,
 )
-from dbprint.engine.value_list import grouped_values, value_key, value_notes
+from dbprint.engine.value_list import count_of, grouped_values, value_key, value_notes
 from dbprint.engine.yaml_dumper import spell_value
 from dbprint.spec.absence import Absence, block_value, column_value, disabled_of, read_table_block
 from dbprint.spec.artifacts import declared_artifacts
@@ -744,7 +750,7 @@ def values_view(col: dict[str, Any], scope: ScanScope | None = None) -> dict[str
 
     # One bar per category, its spellings folded in (SPEC 2.2.4), as `dbprint context` reads it.
     groups = [
-        (entry, spellings, entry.get("count", 0) + sum(m.get("count", 0) for m in spellings))
+        (entry, spellings, count_of(entry) + sum(count_of(m) for m in spellings))
         for entry, spellings in grouped_values(values or [])
     ]
     top = max((total for _, _, total in groups), default=0)
@@ -850,7 +856,9 @@ def column_view(
         "quantized_count": column_value(col, "quantized_count"),
         "populated": column_value(col, "populated"),
         "length": column_value(col, "length"),
-        "distribution": column_value(col, "distribution"),
+        "distribution": None
+        if notes_synthesis.holds_no_value(col)
+        else column_value(col, "distribution"),
         # SPEC 2.2.4: names the fields this run lost, so their cells are not read as forbidden.
         "unmeasured": tuple(column_value(col, "unmeasured") or ()),
         "notes": notes_synthesis.synthesize(
@@ -938,6 +946,7 @@ def relationship_rows(
                 "path": entry.get("path"),
                 "target_path": entry.get("target_path"),
                 "observed": _observed_view(entry),
+                "no_match": no_match(entry),
                 "note": entry.get("note"),
                 "rejected": rejection is not None,
                 "rejected_note": rejection.get("note") if rejection else None,
@@ -959,6 +968,7 @@ def relationship_rows(
                 "path": entry.get("path"),
                 "referencer_path": entry.get("referencer_path"),
                 "observed": _observed_view(entry),
+                "no_match": no_match(entry),
                 "note": entry.get("note"),
                 "rejected": rejection is not None,
                 "rejected_note": rejection.get("note") if rejection else None,
@@ -969,6 +979,7 @@ def relationship_rows(
         "refers_to": out_rows,
         "referenced_by": in_rows,
         "eligible_target": (relationships or {}).get("eligible_target"),
+        "no_match_definition": TERMS["no_match"].definition,
     }
 
 

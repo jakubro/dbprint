@@ -396,6 +396,17 @@ def test_the_sampled_term_never_rescales_a_distinct_count() -> None:
     assert "a distinct count, ratio, bound, percentile, sum or mean never is" in text
 
 
+def test_a_notes_cell_naming_a_join_measured_empty_defines_both_its_words() -> None:
+    notes = synthesize(
+        {"classification": "numeric", "null_rate": 0.0},
+        ["public.garden.garden_code (inferred, no match)"],
+    )
+    text = legend(notes.terms)
+
+    assert "\n- inferred: " in text
+    assert "\n- no match: " in text
+
+
 def test_no_keys_draw_no_legend() -> None:
     assert legend(set()) == ""
 
@@ -410,9 +421,15 @@ def _unprinted(labels: list[str], text: str) -> list[str]:
     """Labels the text never prints; a label's `N`/`X` placeholders match any figure."""
 
     def pattern(label: str) -> str:
-        return re.escape(label).replace("N", r"\d+").replace("X", r"[^)]+")
+        return _PRINTED_AS_A_MARK.get(
+            label,
+            re.escape(label).replace("N", r"\d+").replace("X", r"[^)]+"),
+        )
 
     return [label for label in labels if label not in text and not re.search(pattern(label), text)]
+
+
+_PRINTED_AS_A_MARK = {"quoted text": r"(?m)^>|(?:: |= | - )['\"]"}
 
 
 def _legend_labels(text: str) -> tuple[list[str], str]:

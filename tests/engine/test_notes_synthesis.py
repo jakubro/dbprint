@@ -1317,6 +1317,30 @@ class TestTheFactGrammar:
         assert synthesize(s).endswith("; unrepresentable: max, P99, P1")
 
 
+class TestAValueCountReadsAsAnInteger:
+    @pytest.mark.parametrize(
+        ("count", "expected"),
+        [
+            (2.0, "values (complete): 'a' (60%), 'b' (40%)"),
+            ("2", "values (complete): 'a' (100%), 'b' (0%)"),
+            ("many", "values (complete): 'a' (100%), 'b' (0%)"),
+            (False, "values (complete): 'a' (100%), 'b' (0%)"),
+        ],
+    )
+    def test_a_whole_float_counts_and_anything_else_reads_zero(
+        self,
+        count: object,
+        expected: str,
+    ) -> None:
+        s = _stats(
+            "categorical",
+            values=[{"value": "a", "count": 3}, {"value": "b", "count": count}],
+            values_coverage=1.0,
+        )
+
+        assert synthesize(s).startswith(expected)
+
+
 class TestEveryEdgeOfAColumn:
     """The FK fact lists each edge a human left standing, on whatever classification carries it."""
 
@@ -1334,6 +1358,20 @@ class TestEveryEdgeOfAColumn:
         assert notes_synthesis.synthesize(_stats("foreign_key_candidate"), targets).text == (
             "FK: (site_id, plot_no) -> public.plot.(site_id, plot_no) (declared)"
         )
+
+    def test_a_join_measured_empty_records_its_detection_and_no_match(self) -> None:
+        targets = ["public.garden.garden_code (inferred, no match)"]
+
+        notes = notes_synthesis.synthesize(_stats("numeric"), targets)
+
+        assert {"fk", "detection:inferred", "no_match"} <= notes.terms
+
+    @pytest.mark.parametrize("detection", ["declared", "inferred", "measured"])
+    def test_a_usable_join_records_its_detection_alone(self, detection: str) -> None:
+        notes = notes_synthesis.synthesize(_stats("numeric"), [f"public.garden.id ({detection})"])
+
+        assert f"detection:{detection}" in notes.terms
+        assert "no_match" not in notes.terms
 
     def test_a_column_of_another_classification_with_no_edge_states_none(self) -> None:
         assert (

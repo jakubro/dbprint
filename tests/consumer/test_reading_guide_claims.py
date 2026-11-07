@@ -33,6 +33,10 @@ COVERS = frozenset(
         "unevaluated_diff_table",
         "empty_columns_map",
         "column_with_several_edges",
+        "authored_heading",
+        "code_span_documented_column",
+        "measured_empty_join",
+        "outranking_spelling_group",
         "connection_notes",
         "human_authored_edge",
         "orphan_spelling",
@@ -84,6 +88,10 @@ ANCHORS: dict[str, tuple[str, str]] = {
     "column_with_several_edges": ("2.3", "refers_to"),
     "human_authored_edge": ("2.7.2", "annotated"),
     "connection_notes": ("2.7.3", "notes"),
+    "code_span_documented_column": ("2.4", "description.md"),
+    "measured_empty_join": ("2.3.10", "containment"),
+    "outranking_spelling_group": ("2.2.4", "spelling_of"),
+    "authored_heading": ("2.7.3", "notes"),
     "rejected_inferred_field": ("2.7.1", "rejected"),
     "percentile_inside_range": ("2.2.4", "percentiles"),
     "grain_search_without_outcome": ("2.2.12", "exhausted"),
@@ -152,6 +160,26 @@ def test_every_register_entry_has_an_anchor() -> None:
     from tests.consumer import register
 
     assert {state.key for state in register.REGISTER} == set(ANCHORS)
+
+
+def test_a_code_named_in_backticks_reads_as_documented() -> None:
+    assert (
+        "A coded column the table's `description.md`, the connection notes or another column's "
+        "note names in backticks is documented there"
+    ) in _guide()
+
+
+def test_a_containment_of_zero_over_many_values_reads_as_a_likely_empty_join() -> None:
+    assert (
+        "A `containment` of `0` over an `answerable_count` of ten or more means no referencing "
+        "value compared was found in the target: a join on the edge likely returns nothing"
+    ) in _guide()
+
+
+def test_a_spelling_group_ranks_by_its_joint_count() -> None:
+    assert "a group holds its spellings' joint count, so the file's order is not its rank" in (
+        _guide()
+    )
 
 
 def test_the_whole_column_sentence_carries_the_scope_clause() -> None:

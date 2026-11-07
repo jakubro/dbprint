@@ -22,12 +22,22 @@ from tests import _mcp_pages
 from tests._grammar import split_outside_literals
 from tests.fixtures.adversarial import (
     APPROXIMATE_ROW_COUNT_TABLE,
+    COHORTS,
     CONNECTION_NOTE,
+    CONNECTION_NOTES,
+    CONNECTION_NOTE_HEADING,
     DECLARED_MISSING_KIND,
     DECLARED_MISSING_TABLE,
     DELIMITER_TABLE,
     DELIMITER_VALUE,
+    DOCUMENTED_COLUMN,
+    DOCUMENTED_TABLE,
     EMPTY_COLUMNS_TABLE,
+    EMPTY_JOIN_COLUMN,
+    EMPTY_JOIN_COMPARED,
+    EMPTY_JOIN_TABLE,
+    EMPTY_JOIN_TARGET,
+    EMPTY_JOIN_TARGET_COLUMN,
     EXPONENT_FORM,
     EXTREME_NULL_RATE,
     EXTREME_TABLE,
@@ -41,6 +51,7 @@ from tests.fixtures.adversarial import (
     ORPHAN_SPELLING_COLUMN,
     ORPHAN_SPELLING_TABLE,
     ORPHAN_SPELLING_VALUE,
+    OUTRANKED_VALUE,
     OUTSIDE_PRINT_SENTINEL,
     OUTSIDE_PRINT_TABLE,
     PARTIAL_AS_WHOLE,
@@ -61,8 +72,12 @@ from tests.fixtures.adversarial import (
     SPELLED_NAME,
     SPELLED_TABLE,
     SPELLING_COLUMN,
+    SPELLING_GROUP,
+    SPELLING_GROUP_COLUMN,
+    SPELLING_GROUP_TABLE,
     SPELLING_VALUES,
     TRUNCATED_FK_COLUMN,
+    UNDOCUMENTED_COLUMN,
     UNEVALUATED_TABLE,
     UNREADABLE_PROFILED_TABLE,
     UNSHOWN_NOTE,
@@ -84,6 +99,10 @@ COVERS = frozenset(
         "unevaluated_diff_table",
         "empty_columns_map",
         "column_with_several_edges",
+        "authored_heading",
+        "code_span_documented_column",
+        "measured_empty_join",
+        "outranking_spelling_group",
         "connection_notes",
         "human_authored_edge",
         "orphan_spelling",
@@ -526,7 +545,9 @@ def test_connection_notes_reach_a_single_table_reader_once(
     payload = _dict_result(adversarial_print, "get_table_context", arguments)
 
     assert text.count(CONNECTION_NOTE) == 1
-    assert payload["connection_notes"] == CONNECTION_NOTE
+    assert payload["connection_notes"] == CONNECTION_NOTES
+    assert f"> ### {CONNECTION_NOTE_HEADING}" in text.splitlines()
+    assert f"## {CONNECTION_NOTE_HEADING}" not in text.splitlines()
 
 
 def test_scoped_part_list_resolves_as_the_scanned_domain(
@@ -602,11 +623,15 @@ def test_a_note_on_an_unshown_value_reaches_get_table_context_query(
         _mcp_pages.pages(state, "get_table_context", arguments | {"format": "json"}),
     )
 
+    shown = [entry["value"] for entry in payload["values"][UNSHOWN_NOTE_COLUMN]["entries"]]
+
     assert f"- {UNSHOWN_NOTE_COLUMN}: " in md
-    assert f"'{UNSHOWN_NOTE_VALUE}' = {UNSHOWN_NOTE}" in md
+    assert f"'{UNSHOWN_NOTE_VALUE}' = '{UNSHOWN_NOTE}'" in md
+    assert UNSHOWN_NOTE_VALUE not in _md_row(md, UNSHOWN_NOTE_COLUMN)
     assert {"value": UNSHOWN_NOTE_VALUE, "note": UNSHOWN_NOTE} in payload["value_notes"][
         UNSHOWN_NOTE_COLUMN
     ]
+    assert shown == [value for value, _ in COHORTS[:5]]
 
 
 def test_a_column_is_named_and_resolved_by_its_database_spelling(
@@ -628,3 +653,74 @@ def test_a_column_is_named_and_resolved_by_its_database_spelling(
     assert f"| {SPELLED_COLUMN} | " not in md
     assert payload["physical_names"] == {SPELLED_TABLE: {SPELLED_COLUMN: SPELLED_NAME}}
     assert (resolved["column"], resolved["match"]) == (SPELLED_COLUMN, "stored")
+
+
+def _pages(adversarial_print: AdversarialPrint, table: str, **arguments: str) -> tuple[str, dict]:
+    state = _state(adversarial_print)
+    query = {"table": table, **arguments}
+    md = _mcp_pages.joined(_mcp_pages.pages(state, "get_table_context", query))
+    payload = _mcp_pages.merged(
+        _mcp_pages.pages(state, "get_table_context", query | {"format": "json"}),
+    )
+
+    return md, payload
+
+
+def _md_row(text: str, column: str) -> str:
+    return next(line for line in text.splitlines() if line.startswith(f"| {column} |"))
+
+
+def test_a_coded_column_a_code_span_documents_reads_as_documented(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    md, payload = _pages(adversarial_print, DOCUMENTED_TABLE, purpose="query")
+
+    assert "meanings: not documented here" not in _md_row(md, DOCUMENTED_COLUMN)
+    assert "meanings: not documented here" in _md_row(md, UNDOCUMENTED_COLUMN)
+    assert "meanings_documented" not in payload["values"][DOCUMENTED_COLUMN]
+    assert payload["values"][UNDOCUMENTED_COLUMN]["meanings_documented"] is False
+
+
+def test_a_join_measured_empty_reads_no_match_on_both_tables(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    target = f"{EMPTY_JOIN_TARGET}.{EMPTY_JOIN_TARGET_COLUMN}"
+    md, payload = _pages(adversarial_print, EMPTY_JOIN_TABLE, purpose="query")
+    incoming, incoming_payload = _pages(adversarial_print, EMPTY_JOIN_TARGET, purpose="query")
+    profile, profile_payload = _pages(adversarial_print, EMPTY_JOIN_TABLE)
+    edge = next(e for e in payload["joins"]["refers_to"] if e["target_table"] == EMPTY_JOIN_TARGET)
+    measured = next(
+        e
+        for e in profile_payload["relationships"]["refers_to"]
+        if e["target_table"] == EMPTY_JOIN_TARGET
+    )
+    back = next(
+        e
+        for e in incoming_payload["joins"]["referenced_by"]
+        if e["referencer_table"] == EMPTY_JOIN_TABLE
+    )
+
+    assert f"- {EMPTY_JOIN_COLUMN} -> {target} (inferred, no match)" in md
+    assert f"<- {EMPTY_JOIN_TABLE}.{EMPTY_JOIN_COLUMN} (inferred, no match)" in incoming
+    assert f"FK: {target} (inferred, no match)" in _md_row(profile, EMPTY_JOIN_COLUMN)
+    assert f"- -> {target} (inferred, no match); via: {EMPTY_JOIN_COLUMN}" in profile
+    assert edge["no_match"] is True
+    assert back["no_match"] is True
+    assert measured["observed"]["containment"] == 0
+    assert measured["observed"]["answerable_count"] == EMPTY_JOIN_COMPARED
+
+
+def test_a_spelling_group_outranks_the_single_value_it_trails_in_the_file(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    group, member = SPELLING_GROUP
+    md, payload = _pages(adversarial_print, SPELLING_GROUP_TABLE, purpose="query")
+    profile, _ = _pages(adversarial_print, SPELLING_GROUP_TABLE)
+    entries = payload["values"][SPELLING_GROUP_COLUMN]["entries"]
+
+    assert f"'{group}' (55) {{'{group}' (35), '{member}' (20)}}, '{OUTRANKED_VALUE}' (45)" in md
+    assert f"'{group}' (55%, 2 spellings), '{OUTRANKED_VALUE}' (45%)" in _md_row(
+        profile,
+        SPELLING_GROUP_COLUMN,
+    )
+    assert [e["value"] for e in entries] == [*SPELLING_GROUP, OUTRANKED_VALUE]

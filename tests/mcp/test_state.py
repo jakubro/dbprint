@@ -47,8 +47,10 @@ class TestBuildState:
     def test_no_auto_multiple_raises(self) -> None:
         project = _project(_conn("a"), _conn("b"))
 
-        with pytest.raises(McpError):
+        with pytest.raises(McpError) as excinfo:
             build_state(project, conn_arg=None)
+
+        assert excinfo.value.detail.endswith("Configured: ['a', 'b']")
 
 
 class TestResolve:
@@ -71,6 +73,18 @@ class TestResolve:
 
         with pytest.raises(McpError):
             state.resolve(None)
+
+    def test_no_default_names_the_served_set_not_the_configured_one(self) -> None:
+        state = ServedConnections(
+            served={"production": _conn("production"), "staging": _conn("staging")},
+            default=None,
+            configured=frozenset({"production", "staging", "archive"}),
+        )
+
+        with pytest.raises(McpError) as excinfo:
+            state.resolve(None)
+
+        assert excinfo.value.detail.endswith("Served: ['production', 'staging']")
 
     def test_unknown_conn_raises(self) -> None:
         state = ServedConnections(served={"primary": _conn("primary")}, default="primary")

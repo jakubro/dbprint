@@ -14,13 +14,18 @@ from dbprint.mcp import errors as mcp_errors
 from dbprint.mcp import resources as mcp_resources
 from tests.fixtures.adversarial import (
     APPROXIMATE_ROW_COUNT_TABLE,
-    CONNECTION_NOTE,
+    CONNECTION_NOTES,
     DECLARED_MISSING_KIND,
     DECLARED_MISSING_TABLE,
     DELIMITER_COLUMN,
     DELIMITER_TABLE,
     DELIMITER_VALUE,
+    DOCUMENTED_COLUMN,
+    DOCUMENTED_TABLE,
     EMPTY_COLUMNS_TABLE,
+    EMPTY_JOIN_COMPARED,
+    EMPTY_JOIN_TABLE,
+    EMPTY_JOIN_TARGET,
     EXTREME_TABLE,
     FUTURE_DATED_COLUMN,
     GRAIN_NO_OUTCOME_TABLE,
@@ -34,6 +39,7 @@ from tests.fixtures.adversarial import (
     ORPHAN_SPELLING_COLUMN,
     ORPHAN_SPELLING_TABLE,
     ORPHAN_SPELLING_VALUE,
+    OUTRANKED_VALUE,
     OUTSIDE_PRINT_SENTINEL,
     OUTSIDE_PRINT_TABLE,
     PERCENTILE_INSIDE_RANGE_COLUMN,
@@ -51,6 +57,9 @@ from tests.fixtures.adversarial import (
     SPELLED_NAME,
     SPELLED_TABLE,
     SPELLING_COLUMN,
+    SPELLING_GROUP,
+    SPELLING_GROUP_COLUMN,
+    SPELLING_GROUP_TABLE,
     SPELLING_VALUES,
     TRUNCATED_FK_COLUMN,
     UNEVALUATED_TABLE,
@@ -75,6 +84,10 @@ COVERS = frozenset(
         "unevaluated_diff_table",
         "empty_columns_map",
         "column_with_several_edges",
+        "authored_heading",
+        "code_span_documented_column",
+        "measured_empty_join",
+        "outranking_spelling_group",
         "connection_notes",
         "human_authored_edge",
         "orphan_spelling",
@@ -361,7 +374,7 @@ def test_connection_notes_are_served_as_their_own_file(adversarial_print: Advers
     uri = f"dbprint://{conn}/manifest_annotations"
     served = yaml.safe_load(mcp_resources.read(_state(adversarial_print), uri).content)
 
-    assert served["notes"] == CONNECTION_NOTE
+    assert served["notes"] == CONNECTION_NOTES
 
 
 def test_scoped_part_list_is_served_beside_its_scope(
@@ -418,3 +431,44 @@ def test_a_columns_spelling_is_served_in_statistics(adversarial_print: Adversari
     column = _statistics(adversarial_print, SPELLED_TABLE)["columns"][SPELLED_COLUMN]
 
     assert column["physical_name"] == SPELLED_NAME
+
+
+def _served(adversarial_print: AdversarialPrint, table: str, kind: str) -> str:
+    conn = adversarial_print.conn.name
+    uri = f"dbprint://{conn}/{table.replace('.', '/')}/{kind}"
+
+    return mcp_resources.read(_state(adversarial_print), uri).content
+
+
+def test_the_description_naming_a_coded_column_is_served_verbatim(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    assert f"`{DOCUMENTED_COLUMN}`" in _served(adversarial_print, DOCUMENTED_TABLE, "description")
+
+
+def test_a_join_measured_empty_is_served_with_its_measurement_on_both_tables(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    outgoing = yaml.safe_load(_served(adversarial_print, EMPTY_JOIN_TABLE, "relationships"))
+    incoming = yaml.safe_load(_served(adversarial_print, EMPTY_JOIN_TARGET, "relationships"))
+    edges = [
+        next(e for e in outgoing["refers_to"] if e["target_table"] == EMPTY_JOIN_TARGET),
+        next(e for e in incoming["referenced_by"] if e["referencer_table"] == EMPTY_JOIN_TABLE),
+    ]
+
+    for edge in edges:
+        assert edge["observed"]["containment"] == 0
+        assert edge["observed"]["answerable_count"] == EMPTY_JOIN_COMPARED
+
+
+def test_each_spelling_is_served_with_its_count_and_spelling_of(
+    adversarial_print: AdversarialPrint,
+) -> None:
+    column = _statistics(adversarial_print, SPELLING_GROUP_TABLE)["columns"][SPELLING_GROUP_COLUMN]
+    group, member = SPELLING_GROUP
+
+    assert column["values"] == [
+        {"value": OUTRANKED_VALUE, "count": 45},
+        {"value": group, "count": 35},
+        {"value": member, "count": 20, "spelling_of": group},
+    ]

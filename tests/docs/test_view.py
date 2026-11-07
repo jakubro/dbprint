@@ -563,6 +563,33 @@ class TestValuesView:
         assert result["coverage"] == 0.05  # noqa: RUF069 - the expected value is an exact literal
         assert result["coverage_text"] == "5% covered"
 
+    @pytest.mark.parametrize(
+        ("count", "expected"),
+        [
+            (10.0, [("Gifted", 25), ("field", 20)]),
+            ("10", [("field", 20), ("Gifted", 15)]),
+            (9.5, [("field", 20), ("Gifted", 15)]),
+        ],
+    )
+    def test_a_count_reads_as_an_integer_or_zero(
+        self,
+        count: object,
+        expected: list[tuple[str, int]],
+    ) -> None:
+        col = {
+            "values": [
+                {"value": "field", "count": 20},
+                {"value": "Gifted", "count": 15},
+                {"value": "gifted", "count": count, "spelling_of": "Gifted"},
+            ],
+        }
+
+        result = view.values_view(col)
+
+        assert result is not None
+        assert [(bar["value"], bar["count"]) for bar in result["bars"]] == expected
+        assert all(type(bar["count"]) is int for bar in result["bars"])
+
     def test_no_values_no_coverage_is_none(self) -> None:
         assert view.values_view({}) is None
 
@@ -690,6 +717,22 @@ class TestLiveAnnotations:
 
 
 class TestColumnView:
+    @pytest.mark.parametrize(("cardinality", "expected"), [(0, None), (1, "uniform")])
+    def test_a_column_holding_no_value_has_no_distribution(
+        self,
+        cardinality: int,
+        expected: str | None,
+    ) -> None:
+        stats = {
+            "classification": "numeric",
+            "null_count": 40,
+            "null_rate": 1.0 if cardinality == 0 else 0.5,
+            "cardinality": cardinality,
+            "distribution": "uniform",
+        }
+
+        assert view.column_view("seed_count", stats, 40, None, {})["distribution"] == expected
+
     def test_a_rejected_field_leaves_the_notes_and_is_marked(self) -> None:
         stats = {
             "classification": "text",
@@ -902,6 +945,44 @@ class TestColumnView:
 
 
 class TestRelationshipRows:
+    @pytest.mark.parametrize(("compared", "expected"), [(10, True), (9, False)])
+    def test_a_join_measured_empty_reads_no_match_from_ten_compared_values(
+        self,
+        compared: int,
+        expected: bool,
+    ) -> None:
+        observed = {
+            "fanout_avg": 2.0,
+            "target_coverage": 0.0,
+            "containment": 0.0,
+            "answerable_count": compared,
+        }
+        relationships = {
+            "refers_to": [
+                {
+                    "column": ["a"],
+                    "target_table": "t",
+                    "target_column": ["b"],
+                    "detection": "inferred",
+                    "observed": observed,
+                },
+            ],
+            "referenced_by": [
+                {
+                    "column": ["b"],
+                    "referencer_table": "u",
+                    "referencer_column": ["a"],
+                    "detection": "inferred",
+                    "observed": observed,
+                },
+            ],
+        }
+
+        rows = view.relationship_rows(_empty_conn(), "s.t", relationships, None)
+
+        assert rows["refers_to"][0]["no_match"] is expected
+        assert rows["referenced_by"][0]["no_match"] is expected
+
     def test_every_edge_states_detection_both_directions(self, rich_conn: ConnectionConfig) -> None:
         found = catalogue.load_connections([rich_conn])[0]
         artifacts = catalogue.load_table(found, "seedbank.batch")

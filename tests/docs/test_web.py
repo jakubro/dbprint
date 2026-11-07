@@ -602,6 +602,72 @@ class TestAPageClaimsOnlyWhatItsDataSupports:
 
         assert 'class="bar-fill" style="width:' not in body
 
+    def test_a_column_holding_no_value_carries_no_distribution_badge(
+        self,
+        reference_conn: ConnectionConfig,
+    ) -> None:
+        client = web.create_app([reference_conn]).test_client()
+
+        body = client.get("/t/production/arboretum.seedbank.accession").data.decode()
+        start = body.index('<tr id="col-storage_temperature_c"')
+        row = body[start : body.index("</tr>", start)]
+
+        assert 'data-distribution=""' in row
+        assert "badge-accent" not in row
+
+    @pytest.mark.parametrize(
+        ("page", "referenced"),
+        [
+            ("germination_trial", "arboretum.seedbank.collector"),
+            ("collector", "arboretum.seedbank.germination_trial"),
+        ],
+    )
+    def test_a_join_measured_empty_reads_no_match_on_both_tables(
+        self,
+        reference_conn: ConnectionConfig,
+        page: str,
+        referenced: str,
+    ) -> None:
+        _measure_collector_join(reference_conn, answerable_count=400)
+        client = web.create_app([reference_conn]).test_client()
+
+        body = client.get(f"/t/production/arboretum.seedbank.{page}").data.decode()
+
+        assert _relationship_cells(body, referenced)[4] == "inferred no match"
+
+    def test_nine_compared_values_are_too_few_to_read_no_match(
+        self,
+        reference_conn: ConnectionConfig,
+    ) -> None:
+        _measure_collector_join(reference_conn, answerable_count=9)
+        client = web.create_app([reference_conn]).test_client()
+
+        body = client.get("/t/production/arboretum.seedbank.germination_trial").data.decode()
+
+        assert _relationship_cells(body, "arboretum.seedbank.collector")[4] == "inferred"
+
+
+def _measure_collector_join(conn: ConnectionConfig, *, answerable_count: int) -> None:
+    seedbank = conn.print_root / "arboretum" / "seedbank"
+
+    for table, side, key, other in (
+        ("germination_trial", "refers_to", "target_table", "arboretum.seedbank.collector"),
+        ("collector", "referenced_by", "referencer_table", "arboretum.seedbank.germination_trial"),
+    ):
+        path = seedbank / table / "relationships.yaml"
+        relationships = yaml.safe_load(path.read_text())
+        edge = next(e for e in relationships[side] if e.get(key) == other)
+        edge["observed"].update(containment=0.0, answerable_count=answerable_count)
+        path.write_text(yaml.safe_dump(relationships, sort_keys=False))
+
+
+def _relationship_cells(page: str, table: str) -> list[str]:
+    panel = page.split('data-tab-panel="relationships"', 1)[1].split("</table>", 1)[0]
+    row = next(r for r in re.findall(r"<tr>(.*?)</tr>", panel, re.DOTALL) if f">{table}<" in r)
+    cells = re.findall(r"<td>(.*?)</td>", row, re.DOTALL)
+
+    return [" ".join(html.unescape(re.sub(r"<[^>]+>", " ", cell)).split()) for cell in cells]
+
 
 _REL_OBSERVED_RE = re.compile(r'<div class="rel-observed">(.*?)</div>', re.DOTALL)
 

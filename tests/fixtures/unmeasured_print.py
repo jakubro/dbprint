@@ -6,6 +6,7 @@ No healthy run exercises a degrade; regenerate with `python -m tests.fixtures.un
 from __future__ import annotations
 
 import shutil
+import tempfile
 from pathlib import Path
 
 from dbprint.adapters import (
@@ -71,13 +72,17 @@ def build(target: Path) -> Path:
 
 
 def restage() -> None:
-    """Rebuild the committed copy from scratch, with its run instants frozen."""
+    """Rebuild the committed copy from scratch, with its run instants frozen.
 
-    if COMMITTED.exists():
-        shutil.rmtree(COMMITTED)
+    A run leaves its lock beside its output, so it runs in a scratch tree and only the connection
+    root is copied back.
+    """
 
-    COMMITTED.mkdir(parents=True)
-    load_script("example_support").normalize_timestamps(build(COMMITTED), FROZEN_INSTANT)
+    with tempfile.TemporaryDirectory() as scratch:
+        built = build(Path(scratch))
+        load_script("example_support").normalize_timestamps(built, FROZEN_INSTANT)
+        shutil.rmtree(COMMITTED, ignore_errors=True)
+        shutil.copytree(built, COMMITTED / CONNECTION)
 
 
 def _fixture() -> dict[str, MockTable]:

@@ -27,6 +27,32 @@ REGISTER: tuple[ClaimState, ...] = (
         "once; a surface serving the files verbatim serves them as the manifest_annotations file.",
     ),
     ClaimState(
+        "authored_heading",
+        "Nests a heading written inside the connection notes or a table's description below the "
+        "surface's own section heading, so it never opens a section of the reply; a surface "
+        "serving the text verbatim serves the heading unchanged.",
+    ),
+    ClaimState(
+        "code_span_documented_column",
+        "Never flags a coded column as undocumented where the table's description, the connection "
+        "notes or another column's note names it in a code span, while still flagging a coded "
+        "column no prose names; a structured surface carries no meanings_documented: false for "
+        "it, and a surface serving the files verbatim serves the prose naming it.",
+    ),
+    ClaimState(
+        "measured_empty_join",
+        "Marks a join whose measurement compared ten or more referencing values and found none in "
+        "the target as no match wherever it lists the join, on both tables; a structured surface "
+        "carries no_match, and a surface serving the files verbatim serves observed.containment: "
+        "0 with its answerable_count.",
+    ),
+    ClaimState(
+        "outranking_spelling_group",
+        "Ranks a value stored in several spellings by the spellings' joint count wherever it "
+        "orders a list by count, never by one spelling's; a surface serving the files verbatim "
+        "serves each spelling's count and spelling_of.",
+    ),
+    ClaimState(
         "human_authored_edge",
         "Lists the edge a human added in relationships.annotations.yaml on both tables it joins, "
         "tagged annotated - never declared, never dropped; a surface serving the files verbatim "

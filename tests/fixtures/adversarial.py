@@ -75,10 +75,26 @@ DECLARED_MISSING_TABLE = "public.dropped_statistics"
 OUTSIDE_PRINT_TABLE = "public.herbarium"
 OUTSIDE_PRINT_SENTINEL = "SENTINEL-OUTSIDE-THE-PRINT"
 DECLARED_MISSING_KIND = "statistics"
-# No fixture table declares one - the manifest never lists it, so it stays absent everywhere.
+# DECLARED_MISSING_TABLE declares none - its manifest entry never lists it.
 NEVER_DECLARED_KIND = "description"
 
 DELIMITER_TABLE = "public.curation_event"
+DOCUMENTED_TABLE = "public.curation_event"
+DOCUMENTED_COLUMN = "condition"
+UNDOCUMENTED_COLUMN = "remark"
+DESCRIPTION = (
+    "One row per curation pass over a herbarium sheet; `condition` is the state the sheet was "
+    "found in.\n"
+)
+SPELLING_GROUP_TABLE = "public.curation_event"
+SPELLING_GROUP_COLUMN = "rank"
+SPELLING_GROUP = ("Junior", "junior")
+OUTRANKED_VALUE = "senior"
+EMPTY_JOIN_TABLE = "public.batch"
+EMPTY_JOIN_COLUMN = "id"
+EMPTY_JOIN_TARGET = "public.cultivar"
+EMPTY_JOIN_TARGET_COLUMN = "id"
+EMPTY_JOIN_COMPARED = 40
 DELIMITER_COLUMN = "condition"
 DELIMITER_VALUE = "fair|poor"
 LINE_BREAK_VALUE = "sound\nbut small"
@@ -103,13 +119,28 @@ HUMAN_EDGE_NOTE = "the curation state a reading was taken under"
 REJECTED_FIELD_TABLE = "public.curation_event"
 REJECTED_FIELD_COLUMN = "id"
 REJECTED_FIELD_NOTE = "issued per import, so it identifies no event on its own"
-# A value note on a value the sampled `id` list does not carry (SPEC 2.7.1).
+# A value note on a listed value past the five a repeating sampled list shows (SPEC 2.7.1).
 UNSHOWN_NOTE_TABLE = "public.batch"
-UNSHOWN_NOTE_COLUMN = "id"
-UNSHOWN_NOTE_VALUE = "00000000-0000-7000-8000-000000000042"
-UNSHOWN_NOTE = "the placeholder an import writes before its event exists"
+UNSHOWN_NOTE_COLUMN = "cohort"
+COHORTS = (
+    ("north", 900),
+    ("south", 800),
+    ("east", 700),
+    ("west", 600),
+    ("upland", 500),
+    ("lowland", 400),
+    ("coastal", 300),
+)
+UNSHOWN_NOTE_VALUE = "lowland"
+UNSHOWN_NOTE = "sown below the frost line, so its germination dates run early"
+ROWLESS_NOTE_TABLE = "public.batch"
+ROWLESS_NOTE_COLUMN = "id"
+ROWLESS_NOTE_VALUE = "00000000-0000-7000-8000-000000000042"
+ROWLESS_NOTE = "the placeholder an import writes before its event exists"
 # `manifest.annotations.yaml`'s notes (SPEC 2.7.3), which a reader of any one table must meet.
 CONNECTION_NOTE = "condition codes are the curation states the herbarium assigns at intake"
+CONNECTION_NOTE_HEADING = "Intake"
+CONNECTION_NOTES = f"## {CONNECTION_NOTE_HEADING}\n\n{CONNECTION_NOTE}"
 UNREADABLE_PROFILED_TABLE = "public.wide_lookup"
 # A column the catalog spells otherwise than its lowercase key (SPEC 2.2.4).
 SPELLED_TABLE = "public.wide_lookup"
@@ -364,7 +395,7 @@ def _fixture_tables() -> dict[str, MockTable]:
 
     batch = mock_table(
         "public.batch",
-        columns(("id", "uuid")),
+        columns(("id", "uuid"), ("cohort", "text")),
         {
             "id": ColumnStats(
                 sql_type="uuid",
@@ -383,9 +414,26 @@ def _fixture_tables() -> dict[str, MockTable]:
                 length=_UUID_LENGTH,
                 inferred=Inferred(candidate_key=True),
             ),
+            "cohort": ColumnStats(
+                sql_type="text",
+                nullable=False,
+                null_count=0,
+                null_rate=0.0,
+                cardinality=120,
+                cardinality_ratio=0.003,
+                cardinality_method="exact",
+                values=tuple(ValueCount(value=value, count=count) for value, count in COHORTS),
+                values_coverage=0.105,
+                distribution="long_tail",
+                empty_count=0,
+                length=Length(min=4, max=7, avg=5.0, p95=7.0),
+            ),
         },
-        ddl="CREATE TABLE public.batch (id uuid PRIMARY KEY);\n",
-        samples={"id": [f"00000000-0000-7000-8000-{i:012d}" for i in range(5)]},
+        ddl="CREATE TABLE public.batch (id uuid PRIMARY KEY, cohort text);\n",
+        samples={
+            "id": [f"00000000-0000-7000-8000-{i:012d}" for i in range(5)],
+            "cohort": [value for value, _ in COHORTS],
+        },
         row_count=APPROXIMATE_ROW_COUNT,
         row_count_method="approximate",
     )
@@ -461,7 +509,7 @@ def _fixture_tables() -> dict[str, MockTable]:
 
     curation_event = mock_table(
         "public.curation_event",
-        columns(("id", "uuid"), ("condition", "text"), ("remark", "text")),
+        columns(("id", "uuid"), ("condition", "text"), ("remark", "text"), ("rank", "text")),
         {
             "id": ColumnStats(
                 sql_type="uuid",
@@ -515,12 +563,31 @@ def _fixture_tables() -> dict[str, MockTable]:
                 empty_count=34,
                 length=Length(min=0, max=93, avg=32.01, p95=93.0),
             ),
+            "rank": ColumnStats(
+                sql_type="text",
+                nullable=False,
+                null_count=0,
+                null_rate=0.0,
+                cardinality=3,
+                cardinality_ratio=0.03,
+                cardinality_method="exact",
+                values=(
+                    ValueCount(value=OUTRANKED_VALUE, count=45),
+                    ValueCount(value=SPELLING_GROUP[0], count=35),
+                    ValueCount(value=SPELLING_GROUP[1], count=20),
+                ),
+                values_coverage=1.0,
+                distribution="imbalanced",
+                empty_count=0,
+                length=Length(min=6, max=6, avg=6.0, p95=6.0),
+            ),
         },
         ddl="CREATE TABLE public.curation_event (id uuid PRIMARY KEY, condition text, "
-        "remark text);\n",
+        "remark text, rank text);\n",
         samples={
             "condition": [DELIMITER_VALUE, LINE_BREAK_VALUE, GRAMMAR_VALUE],
             "remark": list(SPELLING_VALUES),
+            "rank": [OUTRANKED_VALUE, *SPELLING_GROUP],
         },
         row_count=100,
     )
@@ -682,6 +749,39 @@ def _inject_reader_only_states(print_root: Path) -> None:
     )
     path.write_text(yaml.safe_dump(manifest))
     _inject_several_edges(print_root / "public" / "gauge")
+    _inject_an_empty_join(print_root)
+
+
+def _inject_an_empty_join(print_root: Path) -> None:
+    observed = {
+        "fanout_avg": 0.0,
+        "fanout_max": 0,
+        "target_coverage": 0.0,
+        "containment": 0.0,
+        "answerable_count": EMPTY_JOIN_COMPARED,
+    }
+    sides = (
+        (
+            EMPTY_JOIN_TABLE,
+            "refers_to",
+            {"target_table": EMPTY_JOIN_TARGET, "target_column": [EMPTY_JOIN_TARGET_COLUMN]},
+        ),
+        (
+            EMPTY_JOIN_TARGET,
+            "referenced_by",
+            {"referencer_table": EMPTY_JOIN_TABLE, "referencer_column": [EMPTY_JOIN_COLUMN]},
+        ),
+    )
+
+    for table, side, other in sides:
+        column = EMPTY_JOIN_COLUMN if side == "refers_to" else EMPTY_JOIN_TARGET_COLUMN
+        path = print_root / Path(*table.split(".")) / "relationships.yaml"
+        relationships = yaml.safe_load(path.read_text())
+        relationships[side] = [
+            *(relationships.get(side) or []),
+            {"column": [column], **other, "detection": "inferred", "observed": observed},
+        ]
+        path.write_text(yaml.safe_dump(relationships, sort_keys=False))
 
 
 def _inject_several_edges(table_dir: Path) -> None:
@@ -747,6 +847,10 @@ def _write_rejected_field(print_root: Path) -> None:
     )
 
 
+def _write_description(print_root: Path) -> None:
+    (print_root / Path(*DOCUMENTED_TABLE.split(".")) / "description.md").write_text(DESCRIPTION)
+
+
 def _write_unshown_value_note(print_root: Path) -> None:
     table_dir = print_root / Path(*UNSHOWN_NOTE_TABLE.split("."))
     (table_dir / "statistics.annotations.yaml").write_text(
@@ -754,6 +858,9 @@ def _write_unshown_value_note(print_root: Path) -> None:
             {
                 "format_version": 1,
                 "columns": {
+                    ROWLESS_NOTE_COLUMN: {
+                        "values": [{"value": ROWLESS_NOTE_VALUE, "note": ROWLESS_NOTE}],
+                    },
                     UNSHOWN_NOTE_COLUMN: {
                         "values": [{"value": UNSHOWN_NOTE_VALUE, "note": UNSHOWN_NOTE}],
                     },
@@ -815,6 +922,7 @@ def build(project_dir: Path) -> AdversarialPrint:
             assert first.exit_code == 3, first.output
             _write_rejected_field(project_dir / "prints" / CONN_NAME)
             _write_unshown_value_note(project_dir / "prints" / CONN_NAME)
+            _write_description(project_dir / "prints" / CONN_NAME)
 
             second = runner.invoke(main, ["generate", "--no-tui"])
             assert second.exit_code == 0, second.output
@@ -824,7 +932,7 @@ def build(project_dir: Path) -> AdversarialPrint:
     print_root = project_dir / "prints" / CONN_NAME
     _inject_incomplete_grain_search(print_root)
     (print_root / MANIFEST_ANNOTATIONS_FILENAME).write_text(
-        yaml.safe_dump({"format_version": 1, "notes": CONNECTION_NOTE}),
+        yaml.safe_dump({"format_version": 1, "notes": CONNECTION_NOTES}),
     )
 
     errors = conformance_errors(print_root)

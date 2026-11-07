@@ -37,6 +37,11 @@ class TestTheCommittedPrintIsWhatTheProducerWrites:
 
         assert normalize_print_tree(COMMITTED) == normalize_print_tree(fresh)
 
+    def test_the_fixture_directory_holds_the_connection_root_alone(self) -> None:
+        entries = sorted(p.name for p in unmeasured_print.COMMITTED.iterdir())
+
+        assert entries == [unmeasured_print.CONNECTION]
+
     def test_it_validates_through_both_conformance_layers(self) -> None:
         """`validate_print` runs the JSON Schemas and the semantic checks over one tree."""
 

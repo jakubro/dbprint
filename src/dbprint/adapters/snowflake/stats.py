@@ -658,8 +658,7 @@ def _fetch_value_list(
     """
 
     cn = identity.source_column(col.name)
-    # Snowflake's catalog omits a timestamp's or time's precision, which defaults to nanoseconds,
-    # so each groups on its rendering (SPEC 2.2.4).
+    # A timestamp or time groups on its SPEC 2.2.4 rendering, which reads the fraction per value.
     select_expr = cn
 
     if is_binary_type(col.classified_type):

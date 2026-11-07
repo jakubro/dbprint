@@ -550,6 +550,11 @@ class SnowflakeDialectShim:
                 (name, ordinal, self._column_type(name, data_type), *rest)
                 for name, ordinal, data_type, *rest in self._con.fetchall()
             ]
+        elif flat.startswith("describe table"):
+            self._rows = [
+                (name, self._declared_type(name, data_type), *rest)
+                for name, data_type, *rest in self._con.fetchall()
+            ]
 
         return self
 
@@ -576,6 +581,11 @@ class SnowflakeDialectShim:
             return "MAP"
         else:
             return data_type
+
+    def _declared_type(self, name: str, data_type: str) -> str:
+        """The type `DESCRIBE TABLE` reports: `COLUMNS`' spelling, but a structured map in full."""
+
+        return data_type if data_type.startswith("MAP(") else self._column_type(name, data_type)
 
     def _retyped(self, rows: list[tuple[Any, ...]], params: Any) -> list[tuple[Any, ...]]:
         if len(rows) == 1 and len(rows[0]) == 1 and params:

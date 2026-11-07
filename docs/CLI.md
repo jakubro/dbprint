@@ -405,9 +405,9 @@ Complete `--help` for every command, captured verbatim. This file is generated f
   • dbprint context arboretum.seedbank.accession: one table, full Markdown
   • dbprint context '*.public.*': every public table (pattern)
   • dbprint context --all --no-ddl: every table, skip DDL
-  • dbprint context accession --budget 4000: cap output near 4000 tokens
-  • dbprint context accession --purpose query: DDL, join paths, definitions and value lists, for
-    writing SQL against the table
+  • dbprint context arboretum.seedbank.accession --budget 4000: cap output near 4000 tokens
+  • dbprint context arboretum.seedbank.accession --purpose query: DDL, join paths, definitions and
+    value lists, for writing SQL against the table
 
 ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
 │ --project               TEXT             Exact project locator: a directory whose direct child   │

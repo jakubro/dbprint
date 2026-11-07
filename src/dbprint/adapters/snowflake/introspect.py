@@ -11,7 +11,6 @@ import re
 from collections.abc import Sequence
 from typing import Any, cast
 
-from dbprint.spec.classification import map_types
 from dbprint.spec.fqn import join as join_fqn
 from .connection import DIALECT, Cursor, exec_query
 from ..base import (
@@ -97,6 +96,7 @@ _SHOW_TABLES_CLUSTER_BY = 6
 
 # Snowflake's clustering-key form: `LINEAR(expr[, expr...])`.
 _CLUSTER_BY_RE = re.compile(r"^LINEAR\((.*)\)$", re.IGNORECASE)
+_COLLATE_SUFFIX_RE = re.compile(r"\s+COLLATE\s+'(?:[^']|'')*'\s*$", re.IGNORECASE)
 # A bare identifier, optionally quoted or cast (`LOGGED_AT::DATE`) - the base column filtered on.
 _BASE_COLUMN_RE = re.compile(r'^"?([A-Za-z_][A-Za-z0-9_$]*)"?(?:::.*)?$')
 
@@ -199,17 +199,16 @@ def columns(cursor: Cursor, identity: Identity) -> list[ColumnMeta]:
         identity.parts,
     ).fetchall()
 
-    maps = _map_types(cursor, identity) if any(row[2] == "MAP" for row in rows) else {}
+    declared = _declared_types(cursor, identity)
 
     return [
         column_meta(
             col_name,
-            sql_type=data_type,
+            sql_type=declared.get(col_name, data_type),
             nullable=(is_nullable == "YES"),
             default=col_default,
             ordinal=int(ordinal),
             collation=collation_name,
-            classify_as=maps.get(col_name),
         )
         for col_name, ordinal, data_type, is_nullable, col_default, collation_name in rows
     ]
@@ -522,8 +521,12 @@ def _like(name: str) -> str:
     return name.replace("'", "''")
 
 
-def _map_types(cursor: Cursor, identity: Identity) -> dict[str, str]:
-    # `COLUMNS` reports a structured map as bare `MAP`; `DESCRIBE TABLE` names its key and value.
-    rows = exec_query(cursor, f"DESCRIBE TABLE {identity.quoted()}").fetchall()
+def _declared_types(cursor: Cursor, identity: Identity) -> dict[str, str]:
+    # COLUMNS.DATA_TYPE drops precision, scale and length; DESCRIBE's type keeps them, plus COLLATE.
+    # Event tables are documented only under DESCRIBE EVENT TABLE; DESCRIBE TABLE may fail on one.
+    try:
+        rows = exec_query(cursor, f"DESCRIBE TABLE {identity.quoted()}").fetchall()
+    except QueryFailed:
+        return {}
 
-    return {str(row[0]): str(row[1]) for row in rows if map_types(str(row[1])) is not None}
+    return {str(row[0]): _COLLATE_SUFFIX_RE.sub("", str(row[1])) for row in rows}

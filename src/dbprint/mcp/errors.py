@@ -96,24 +96,20 @@ def unserved_connection(connection: str, served: list[str]) -> McpError:
     )
 
 
-def malformed_pattern(pattern: str) -> McpError:
-    """The caller supplied a table pattern fnmatch cannot compile."""
-
-    return McpError(-32602, f"pattern {pattern!r} is malformed fnmatch.")
-
-
 def invalid_argument(detail: str) -> McpError:
     """A call whose arguments do not match the tool's own advertised `inputSchema`."""
 
     return McpError(-32602, detail)
 
 
-def no_default_connection(configured: list[str]) -> McpError:
-    """No connection was named and the config does not imply one."""
+def no_default_connection(names: list[str], *, served: bool) -> McpError:
+    """No connection was named and none is implied; `served` says which set `names` is."""
+
+    label = "Served" if served else "Configured"
 
     return McpError(
         -32602,
-        f"no default connection; pass connection explicitly. Configured: {sorted(configured)}",
+        f"no default connection; pass connection explicitly. {label}: {sorted(names)}",
     )
 
 
@@ -215,18 +211,6 @@ def unknown_tool(name: str, available: list[str]) -> McpError:
     )
 
 
-def invalid_enum_argument(field: str, value: object, allowed: list[str]) -> McpError:
-    """An argument's value is outside its tool's own advertised `inputSchema` enum."""
-
-    return McpError(-32602, f"{field} {value!r} must be one of {allowed}.")
-
-
-def invalid_minimum_argument(field: str, value: object, minimum: int) -> McpError:
-    """An argument's value is below its tool's own advertised `inputSchema` minimum."""
-
-    return McpError(-32602, f"{field} {value!r} must be an integer >= {minimum}.")
-
-
 def malformed_cursor(cursor: str) -> McpError:
     """The caller passed a cursor no reply issued."""
 
@@ -284,11 +268,11 @@ def stale_page_version(uri: str) -> McpError:
 
 
 def unknown_section(document: str, section: str, available: list[str]) -> McpError:
-    """The caller named a section number no heading in the document carries."""
+    """The caller named a section no heading carries; `available` is listed in the order given."""
 
     return McpError(
         -32602,
-        f"section {section!r} not found in {document}. Available: {sorted(available)}",
+        f"section {section!r} not found in {document}. Available: {available}",
     )
 
 

@@ -100,7 +100,7 @@ VENDOR_SUPPORT: dict[str, frozenset[Vendor]] = {
     "db_collation(": frozenset({"redshift"}),
     # Databricks' DESCRIBE-based fallback path (no INFORMATION_SCHEMA equivalent outside
     # Unity Catalog); `describe detail` also runs on the Unity Catalog path.
-    "describe table": frozenset({"databricks"}),
+    "describe table": frozenset({"databricks", "snowflake"}),
     "describe detail": frozenset({"databricks"}),
     # Aggregates and functions.
     "count_if(": frozenset({"snowflake", "duckdb"}),

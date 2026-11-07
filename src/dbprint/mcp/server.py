@@ -152,10 +152,10 @@ def build_server(state: ServedConnections) -> Server:
 
         return CallToolResult(content=[TextContent(type="text", text=text)], is_error=False)
 
-    server = Server(
+    server = _LiveInstructionsServer(
+        state,
         SERVER_NAME,
         version=DBPRINT_VERSION,
-        instructions=instructions(state),
         on_list_resources=list_resources,
         on_list_resource_templates=list_resource_templates,
         on_read_resource=read_resource,
@@ -236,6 +236,21 @@ def serve_http(state: ServedConnections, host: str, port: int) -> None:
 
     server = build_server(state)
     anyio.run(run_http, server, host, port)
+
+
+class _LiveInstructionsServer(Server):
+    def __init__(self, state: ServedConnections, *args: Any, **kwargs: Any) -> None:
+        self._state = state
+        super().__init__(*args, **kwargs)
+
+    @property
+    def instructions(self) -> str:
+        return instructions(self._state)
+
+    @instructions.setter
+    def instructions(self, value: str | None) -> None:
+        # The base `__init__` assigns the attribute; the property is the only source.
+        del value
 
 
 class _SseEndpoint:

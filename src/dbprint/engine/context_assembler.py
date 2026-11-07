@@ -60,7 +60,7 @@ from .notes_synthesis import Rendered
 from .relationship_graph import incoming_key, with_human_edges, withhold_rejected
 from .table_readings import grain_reading
 from .token_budget import Section, make_section, select, tokens_of, truncation_marker
-from .value_list import grouped_values, noted_values, value_key, value_notes
+from .value_list import count_of, grouped_values, noted_values, value_key, value_notes
 from .yaml_dumper import spell_inline, spell_literal, spell_value
 
 
@@ -75,6 +75,37 @@ NAME_ONLY_LISTED = 5  # name-only incoming joins listed one by one before they f
 
 NO_MATCH_MIN_COMPARED = 10  # values a measured-empty join compares before it reads `no match`
 
+SAMPLE_RESCALING = (
+    "a row count - nulls, a value's count, a true/false split - MAY be multiplied by "
+    "row_count / rows_scanned, and a distinct count, ratio, bound, percentile, sum or mean never is"
+)
+FIELD_NOTES = {
+    "sample": (
+        "the statistics describe rows_scanned of row_count rows, a random sample: "
+        f"{SAMPLE_RESCALING}"
+    ),
+    "filter": (
+        "the statistics describe rows_scanned of row_count rows, which a predicate chose: nothing "
+        "rescales to the table"
+    ),
+    "scanned": (
+        "the statistics describe rows_scanned of row_count rows, not the table: nothing rescales "
+        "to it"
+    ),
+    "unmeasured": (
+        "each field an unmeasured list names was tried and not measured: its value is unknown, "
+        "never zero or none"
+    ),
+    "disabled": (
+        "configuration switched off each measurement the disabled list names, so every field it "
+        "produces is unknown, not none"
+    ),
+    "sensitivity": (
+        "a column carrying no inferred.sensitivity was not detected, which is not a finding that "
+        "it is safe to publish"
+    ),
+}
+
 _DETECTION_RANK = {"declared": 0, "inferred": 1, "measured": 2, "annotated": 3}
 _NOT_A_JOIN_TARGET = "not a join target, no declared-unique column"
 _MEANINGS_UNDOCUMENTED = "meanings: not documented here"
@@ -82,6 +113,61 @@ _CODED_CLASSIFICATIONS = frozenset({"categorical", "text"})
 _FREQUENCY_CLASSIFICATIONS = frozenset({"numeric", "temporal"})
 _FREQUENT_STATEMENT = "frequent values, not a domain"
 _CODE_SPAN_RE = re.compile(r"`([^`\n]+)`")
+_LINE_BREAK_RE = re.compile(r"\r\n|[\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")
+_QUOTE_PREFIX_RE = re.compile(r"^(?: {0,3}>[ \t]?)*")
+_QUOTE_MARKER_RE = re.compile(r"^ {0,3}>[ \t]?")
+_CONTAINER_CHARACTERS = " \t>*+-0123456789.)"
+_LIST_MARKER_RE = re.compile(
+    r"^ {0,3}(?:[-*+]|(\d{1,9})[.)])(?:[ \t]{1,4}(?![ \t])|[ \t](?=[ \t]{4})|[ \t]*$)",
+)
+_ATX_HEADING_RE = re.compile(r"^( {0,3})(#{1,6})(?:[ \t]+(.*))?$")
+_ATX_CLOSING_RE = re.compile(r"(?:^|[ \t]+)#+[ \t]*$")
+_SETEXT_UNDERLINE_RE = re.compile(r"^ {0,3}(=+|-+)[ \t]*$")
+_THEMATIC_BREAK_RE = re.compile(r"^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$")
+_FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,})[^`]*$|^ {0,3}(~{3,}).*$")
+_FENCE_CLOSE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
+_INDENTED_CODE_RE = re.compile(r"^(?: {4}| {0,3}\t)")
+_LINK_REFERENCE_RE = re.compile(r"^\[(?:[^\]\\]|\\.)+\]:")
+_LINK_DEFINITION_RE = re.compile(
+    r"""^ {0,3}\[(?:[^\]\\]|\\.)+\]:[ \t]*\S+(?:[ \t]+(?:"[^"]*"|'[^']*'|\([^)]*\)))?[ \t]*$""",
+)
+_BLANK_RE = re.compile(r"^[ \t]*$")
+_HTML_BLOCK_TAGS = (
+    "address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|"
+    "dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|"
+    "header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|"
+    "param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul"
+)
+_HTML_ATTRIBUTE = (
+    r"(?:[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*"
+    r"""(?:[ \t]*=[ \t]*(?:[^ \t"'=<>`]+|'[^']*'|"[^"]*"))?)"""
+)
+# CommonMark's seven HTML block kinds: start, end, and whether the start interrupts a paragraph.
+_HTML_BLOCKS = (
+    (
+        re.compile(r"^ {0,3}<(?:script|pre|style|textarea)(?:[ \t>]|$)", re.IGNORECASE),
+        re.compile(r"</(?:script|pre|style|textarea)>", re.IGNORECASE),
+        True,
+    ),
+    (re.compile(r"^ {0,3}<!--"), re.compile(r"-->"), True),
+    (re.compile(r"^ {0,3}<\?"), re.compile(r"\?>"), True),
+    (re.compile(r"^ {0,3}<![A-Za-z]"), re.compile(r">"), True),
+    (re.compile(r"^ {0,3}<!\[CDATA\["), re.compile(r"\]\]>"), True),
+    (
+        re.compile(rf"^ {{0,3}}</?(?:{_HTML_BLOCK_TAGS})(?:[ \t]|/?>|$)", re.IGNORECASE),
+        _BLANK_RE,
+        True,
+    ),
+    (
+        re.compile(
+            rf"^ {{0,3}}(?:<[A-Za-z][A-Za-z0-9-]*{_HTML_ATTRIBUTE}*[ \t]*/?>"
+            r"|</[A-Za-z][A-Za-z0-9-]*[ \t]*>)[ \t]*$",
+        ),
+        _BLANK_RE,
+        False,
+    ),
+)
+_AUTHORED_HEADING_LEVEL = 3
 
 # Under `query`, the render order and the order a budget keeps sections in; the header is pinned.
 _QUERY_SECTION_ORDER = ("legend", "ddl", "connection_notes", "values", "dictionary", "joins")
@@ -133,6 +219,7 @@ class TableArtifacts:
     corrupted: dict[str, str]
     profile_override: dict[str, Any] | None
     last_run_failed: bool = False
+    profiled_at: str | None = None
     # Each referencer column's distinct count, keyed (referencer_table, column), for SPEC 2.3.10.
     incoming_cardinalities: dict[tuple[Any, str], int] = field(default_factory=dict)
     # SPEC 2.7.3's notes, set on a single-table render only; a multi-table one carries them once.
@@ -392,6 +479,25 @@ def fk_target_map(
     return out
 
 
+def no_match(entry: dict[str, Any]) -> bool:
+    """Whether the edge measured empty: `containment` 0 over `NO_MATCH_MIN_COMPARED`+ values."""
+
+    observed = entry.get("observed")
+
+    if not isinstance(observed, dict):
+        return False
+
+    compared = observed.get("answerable_count")
+
+    return (
+        _is_number(observed.get("containment"))
+        and observed["containment"] == 0
+        and isinstance(compared, int)
+        and not isinstance(compared, bool)
+        and compared >= NO_MATCH_MIN_COMPARED
+    )
+
+
 def _assemble_markdown(
     artifacts: list[TableArtifacts],
     options: AssemblyOptions,
@@ -408,6 +514,7 @@ def _assemble_markdown(
     multi_table = len(artifacts) > 1
     header = ""
     header_tokens = 0
+    header_terms: set[str] = set()
 
     if (multi_table or multi_connection) and connection_name:
         table_word = "table" if len(artifacts) == 1 else "tables"
@@ -417,7 +524,8 @@ def _assemble_markdown(
             notes, notes_reason = load_connection_notes(print_root, read)
 
             if notes and options.include_annotations:
-                header += "\n\n" + notes
+                header += "\n\n## Connection notes\n\n" + _quoted_block(_nested_headings(notes))
+                header_terms.add("quoted")
 
             if notes_reason is not None:
                 header += "\n\n" + _corrupted_summary({"manifest_annotations": notes_reason})
@@ -437,7 +545,7 @@ def _assemble_markdown(
 
     # One legend serves the whole document, so its room comes off the top like the header's.
     if shared_legend and options.budget is not None:
-        offered = frozenset().union(
+        offered = frozenset(header_terms).union(
             *(
                 s.terms
                 for a in artifacts
@@ -464,7 +572,7 @@ def _assemble_markdown(
 
     fragments: list[str] = []
     truncated: list[str] = []
-    terms: set[str] = set()
+    terms = set(header_terms)
     included = 0
 
     for a in artifacts:
@@ -587,16 +695,16 @@ def _profile_sections(
     )
 
     if options.include_annotations and a.connection_notes:
-        sections.append(make_section("connection_notes", _markdown_connection_notes(a)))
+        sections.append(_section("connection_notes", _markdown_connection_notes(a)))
 
     if options.include_ddl:
         sections.append(make_section("ddl", _markdown_ddl(a)))
 
     if options.include_description and a.description:
-        sections.append(make_section("description", _markdown_description(a)))
+        sections.append(_section("description", _markdown_description(a)))
 
     if options.include_annotations and a.annotations and _has_rendered_annotations(a.annotations):
-        sections.append(make_section("annotations", _markdown_annotations(a)))
+        sections.append(_section("annotations", _markdown_annotations(a)))
 
     if options.include_stats and a.statistics:
         if block_value(a.statistics, "catalog_only") is True:
@@ -645,7 +753,7 @@ def _query_sections(
         ("ddl", [Rendered(_markdown_ddl(a))] if options.include_ddl else []),
         (
             "connection_notes",
-            [Rendered(_markdown_connection_notes(a))]
+            _markdown_connection_notes(a)
             if options.include_annotations and a.connection_notes
             else [],
         ),
@@ -665,7 +773,7 @@ def _query_markdown_header(a: TableArtifacts, adapter: str | None) -> list[Rende
 
     lines = _identity_lines(a, adapter, "query")
 
-    if scoped := _scope_summary(a.statistics or {}):
+    if (scoped := _scope_summary(a.statistics or {})).text:
         lines.append(scoped)
 
     if external := external_line(a.statistics or {}):
@@ -775,7 +883,7 @@ def _name_only(edge: dict[str, Any]) -> bool:
         and _single_column(edge) is not None
         and len(edge.get("referencer_column") or []) == 1
         and not measured
-        and not _no_match(edge)
+        and not no_match(edge)
     )
 
 
@@ -820,7 +928,7 @@ def _endpoint(
 def _note_fact(entry: dict[str, Any]) -> list[Rendered]:
     note = entry.get("note")
 
-    return [Rendered(f"note: {' '.join(note.split())}")] if isinstance(note, str) else []
+    return [_quoted(f"note: {_spelled_note(note)}")] if isinstance(note, str) else []
 
 
 def _referencing_columns(a: TableArtifacts) -> set[str]:
@@ -902,7 +1010,7 @@ def _nulls_fact(share: str) -> Rendered:
 
 
 def _detection_terms(entry: dict[str, Any]) -> frozenset[str]:
-    matched = frozenset({"no_match"}) if _no_match(entry) else frozenset()
+    matched = frozenset({"no_match"}) if no_match(entry) else frozenset()
 
     if edge_detection(entry) == "annotated":
         return frozenset({"annotated"}) | matched
@@ -913,24 +1021,9 @@ def _detection_terms(entry: dict[str, Any]) -> frozenset[str]:
 
 
 def _how_found(entry: dict[str, Any]) -> str:
-    return f"{edge_detection(entry)}, no match" if _no_match(entry) else edge_detection(entry)
+    suffix = notes_synthesis.NO_MATCH_SUFFIX if no_match(entry) else ""
 
-
-def _no_match(entry: dict[str, Any]) -> bool:
-    observed = entry.get("observed")
-
-    if not isinstance(observed, dict):
-        return False
-
-    compared = observed.get("answerable_count")
-
-    return (
-        _is_number(observed.get("containment"))
-        and observed["containment"] == 0
-        and isinstance(compared, int)
-        and not isinstance(compared, bool)
-        and compared >= NO_MATCH_MIN_COMPARED
-    )
+    return f"{edge_detection(entry)}{suffix}"
 
 
 def _edges(a: TableArtifacts) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -1001,7 +1094,7 @@ def _markdown_data_dictionary(a: TableArtifacts, options: AssemblyOptions) -> li
     lines = [Rendered("## Data dictionary")]
 
     if description:
-        lines += [Rendered(""), *(Rendered(line) for line in description.rstrip().split("\n"))]
+        lines += [Rendered(""), *_quoted_lines(_nested_headings(description.rstrip()))]
 
     if notes:
         lines += [Rendered(""), *notes]
@@ -1017,7 +1110,7 @@ def _dictionary_lines(
 ) -> list[Rendered]:
     lines = []
     note = entry.get("note")
-    own = [Rendered(" ".join(note.split()))] if isinstance(note, str) and note.strip() else []
+    own = [_quoted(_spelled_note(note))] if isinstance(note, str) and note.strip() else []
     own += [_value_note_fact(noted) for noted in unshown]
 
     if own:
@@ -1025,12 +1118,12 @@ def _dictionary_lines(
         lines.append(Rendered(f"- {name}: {facts.text}", facts.terms))
 
     for source in inherited:
-        facts = [" ".join(source["note"].split())] if source.get("note") else []
+        facts = [_spelled_note(source["note"])] if source.get("note") else []
         facts += [
-            f"{spell_literal(v['value'])} = {' '.join(v['note'].split())}"
+            f"{spell_literal(v['value'])} = {_spelled_note(v['note'])}"
             for v in source.get("values", [])
         ]
-        lines.append(Rendered(f"- {name} (from {source['source']}): {'; '.join(facts)}"))
+        lines.append(_quoted(f"- {name} (from {source['source']}): {'; '.join(facts)}"))
 
     return lines
 
@@ -1107,11 +1200,11 @@ def _shown_entries(col: Any, scope: ScanScope | None, row_count: Any) -> list[di
 def _value_note_fact(noted: _ValueNote) -> Rendered:
     if noted.absent:
         return Rendered(
-            f"{spell_literal(noted.value)} (not in the rows read) = {noted.note}",
-            frozenset({"not_in_rows_read"}),
+            f"{spell_literal(noted.value)} (not in the rows read) = {spell_literal(noted.note)}",
+            frozenset({"not_in_rows_read", "quoted"}),
         )
 
-    return Rendered(f"{spell_literal(noted.value)} = {noted.note}")
+    return _quoted(f"{spell_literal(noted.value)} = {spell_literal(noted.note)}")
 
 
 def _markdown_column_values(
@@ -1217,7 +1310,7 @@ def _covered_values(col: Any) -> tuple[list[dict[str, Any]], float] | None:
 
     listed = [e for e in entries if isinstance(e, dict)]
 
-    totals = [sum(_count_of(e) for e in (c, *m)) for c, m in grouped_values(listed)]
+    totals = [sum(count_of(e) for e in (c, *m)) for c, m in grouped_values(listed)]
 
     if coverage < 1.0 and all(total <= 1 for total in totals):
         return None
@@ -1252,10 +1345,10 @@ def _frequent_values(
         return None
 
     floor = max(QUERY_FREQUENT_SHARE, 2 / cardinality) if cardinality else QUERY_FREQUENT_SHARE
-    shown = [e for e in entries if isinstance(e, dict) and _count_of(e) / population >= floor]
+    shown = [e for e in entries if isinstance(e, dict) and count_of(e) / population >= floor]
     shown = shown[:QUERY_SAMPLE_LIMIT]
 
-    return (shown, sum(_count_of(e) for e in shown) / population) if shown else None
+    return (shown, sum(count_of(e) for e in shown) / population) if shown else None
 
 
 def _shown_values(
@@ -1276,18 +1369,10 @@ def _shown_values(
 
     groups = grouped_values(entries)[:QUERY_SAMPLE_LIMIT]
     shown = [entry for canonical, members in groups for entry in (canonical, *members)]
-    listed = sum(_count_of(e) for e in entries)
-    kept = sum(_count_of(e) for e in shown)
+    listed = sum(count_of(e) for e in entries)
+    kept = sum(count_of(e) for e in shown)
 
     return shown, coverage * kept / listed if listed else coverage
-
-
-def _count_of(entry: dict[str, Any]) -> int:
-    """An entry's count; 0 where the artifact carries no integer."""
-
-    count = entry.get("count")
-
-    return count if isinstance(count, int) and not isinstance(count, bool) else 0
 
 
 def _is_number(value: Any) -> bool:
@@ -1368,7 +1453,7 @@ def _values_cell(
     """One column's listed values; a redacted column publishes its counts and no literal."""
 
     redaction = column_value(col, "redacted")
-    counts = [entry.get("count") for entry in entries if isinstance(entry, dict)]
+    counts = [count_of(entry) for entry in entries if isinstance(entry, dict)]
 
     if isinstance(redaction, str) and redaction:
         withheld = ", ".join(f"withheld ({c})" for c in counts)
@@ -1382,12 +1467,12 @@ def _values_cell(
     for entry, members in grouped_values(entries):
         value = entry.get("value")
         counted = [entry, *members]
-        total = sum(e.get("count") or 0 for e in counted)
+        total = sum(count_of(e) for e in counted)
         cell = f"{_escape_cell(spell_literal(value))} ({total})"
 
         if members:
             spellings = ", ".join(
-                f"{_escape_cell(spell_literal(e.get('value')))} ({e.get('count')})"
+                f"{_escape_cell(spell_literal(e.get('value')))} ({count_of(e)})"
                 + _inline_note(notes.get(value_key(e.get("value"))) if e is not entry else None)
                 for e in counted
             )
@@ -1395,11 +1480,213 @@ def _values_cell(
 
         cells.append(cell + _inline_note(notes.get(value_key(value))))
 
-    return Rendered(", ".join(cells))
+    noted = any(value_key(e.get("value")) in notes for e in entries if isinstance(e, dict))
+
+    return Rendered(", ".join(cells), frozenset({"quoted"}) if noted else frozenset())
 
 
 def _inline_note(note: str | None) -> str:
     return f" = {_escape_cell(spell_literal(note))}" if note else ""
+
+
+def _quoted(text: str) -> Rendered:
+    return Rendered(text, frozenset({"quoted"}))
+
+
+def _quoted_lines(text: str) -> list[Rendered]:
+    return [
+        _quoted(f"> {_expanded_lead(line)}" if line else ">") for line in text.splitlines() or [""]
+    ]
+
+
+def _quoted_block(text: str) -> str:
+    return "\n".join(line.text for line in _quoted_lines(text))
+
+
+def _spelled_note(note: str) -> str:
+    return spell_literal(" ".join(note.split()))
+
+
+def _nested_headings(text: str) -> str:
+    lines = _LINE_BREAK_RE.split(text)
+    headings = _heading_lines(lines)
+
+    if not headings:
+        return text
+
+    shift = _AUTHORED_HEADING_LEVEL - min(h.level for h in headings.values())
+    out: list[str] = []
+    index = 0
+
+    while index < len(lines):
+        if (h := headings.get(index)) is not None:
+            # A title ending in a `#` run would lose it as the ATX closing sequence.
+            title = f"{h.title} #" if _ATX_CLOSING_RE.search(h.title) else h.title
+            out.append(f"{h.prefix}{'#' * min(6, h.level + shift)} {title}".rstrip())
+            index = h.last + 1
+        else:
+            out.append(lines[index])
+            index += 1
+
+    return "\n".join(out)
+
+
+@dataclass(frozen=True)
+class _Heading:
+    level: int
+    title: str
+    prefix: str
+    last: int
+
+
+@dataclass
+class _Paragraph:
+    first: int
+    level: tuple[int, int, bool]
+    prefix: str
+    parts: list[str]
+
+
+def _heading_lines(lines: list[str]) -> dict[int, _Heading]:
+    out: dict[int, _Heading] = {}
+    paragraph: _Paragraph | None = None
+    items: list[int] = []
+    fence: str | None = None
+    html: re.Pattern[str] | None = None
+    block = (0, 0, 0)
+    empty_item = False
+    definition: tuple[int, int, bool] | None = None
+
+    for index, raw in enumerate(lines):
+        line = _expanded_lead(raw)
+        raw_blank = not line.strip()
+
+        if raw_blank and empty_item:
+            items.pop()
+
+        empty_item = False
+        indent = len(line) - len(line.lstrip(" "))
+        nested = len(items) if raw_blank else sum(1 for column in items if column <= indent)
+        after_items = line[items[nested - 1] if nested else 0 :]
+        after_quote = _QUOTE_PREFIX_RE.sub("", after_items, count=1)
+        depth = after_items[: len(after_items) - len(after_quote)].count(">")
+        lead, content = line[: len(line) - len(after_quote)], after_quote
+
+        if fence is not None or html is not None:
+            held = (
+                None
+                if nested < block[0]
+                else _quote_stripped(line[items[block[0] - 1] if block[0] else 0 :], block[1])
+            )
+
+            if held is not None and block[2] and held.strip():
+                held = held[block[2] :] if not held[: block[2]].strip() else None
+
+            if held is None:
+                fence = html = None
+            elif fence is not None:
+                closed = _FENCE_CLOSE_RE.match(held)
+
+                if closed and closed[1][0] == fence[0] and len(closed[1]) >= len(fence):
+                    fence = None
+
+                continue
+            else:
+                if html is not None and html.search(held):
+                    html = None
+
+                continue
+
+        blank = not content.strip()
+        marker = None if blank else _LIST_MARKER_RE.match(content)
+        body = content[marker.end() :] if marker else content
+        prefix = lead + (content[: marker.end()] if marker else "")
+        plain = (nested, depth, False)
+        level = (
+            (nested + 1, depth, False) if marker and not depth else (nested, depth, bool(marker))
+        )
+        thematic = bool(_THEMATIC_BREAK_RE.match(content) or _THEMATIC_BREAK_RE.match(body))
+        continued = False
+        after_definition, definition = definition, None
+
+        if (
+            paragraph is not None
+            and paragraph.level == plain
+            and (underline := _SETEXT_UNDERLINE_RE.match(content))
+            and not _LINK_REFERENCE_RE.match(paragraph.parts[0])
+        ):
+            title = " ".join(paragraph.parts)
+            level_of = 1 if underline[1][0] == "=" else 2
+            out[paragraph.first] = _Heading(level_of, title, paragraph.prefix, index)
+            paragraph, marker = None, None
+        elif blank:
+            paragraph = None
+        elif (
+            marker is not None
+            and plain in {paragraph.level if paragraph else None, after_definition}
+            and ((marker[1] is not None and int(marker[1]) != 1) or not body.strip())
+        ):
+            if paragraph is None:
+                definition = plain
+            else:
+                paragraph.parts.append(content.strip())
+
+            continued = True
+        elif (found := _html_block(body, interrupting=paragraph is not None)) is not None:
+            html = None if found is not _BLANK_RE and found.search(body) else found
+            block, paragraph = (level[0], depth, marker.end() if marker and depth else 0), None
+        elif opened := _FENCE_OPEN_RE.match(body):
+            fence = opened[1] or opened[2]
+            block, paragraph = (level[0], depth, marker.end() if marker and depth else 0), None
+        elif atx := _ATX_HEADING_RE.match(body):
+            title = _ATX_CLOSING_RE.sub("", atx[3] or "").strip()
+            out[index] = _Heading(len(atx[2]), title, prefix + atx[1], index)
+            paragraph = None
+        elif thematic:
+            paragraph = None
+        elif paragraph is not None and marker is None and depth <= paragraph.level[1]:
+            paragraph.parts.append(body.strip())
+            continued = True
+        elif _INDENTED_CODE_RE.match(body):
+            paragraph = None
+        elif _LINK_DEFINITION_RE.match(body):
+            paragraph, definition = None, plain
+        else:
+            paragraph = _Paragraph(index, level, prefix, [body.strip()]) if body.strip() else None
+
+        if not raw_blank and not continued:
+            del items[nested:]
+
+            if marker is not None and not depth and not thematic:
+                empty_item = not body.strip()
+                items.append(len(prefix.rstrip()) + 1 if empty_item else len(prefix))
+
+    return out
+
+
+def _expanded_lead(line: str) -> str:
+    # A tab's width depends on its column, which a `> ` prefix or a rewritten heading would move.
+    lead_end = len(line) - len(line.lstrip(_CONTAINER_CHARACTERS))
+
+    return line[:lead_end].expandtabs(4) + line[lead_end:]
+
+
+def _quote_stripped(text: str, depth: int) -> str | None:
+    for _ in range(depth):
+        if (stripped := _QUOTE_MARKER_RE.sub("", text, count=1)) == text:
+            return None
+
+        text = stripped
+
+    return text
+
+
+def _html_block(body: str, *, interrupting: bool) -> re.Pattern[str] | None:
+    for start, end, interrupts in _HTML_BLOCKS:
+        if start.match(body) and (interrupts or not interrupting):
+            return end
+
+    return None
 
 
 def _escape_cell(text: str) -> str:
@@ -1436,6 +1723,9 @@ def _identity_lines(a: TableArtifacts, adapter: str | None, purpose: Purpose) ->
 
     if adapter:
         lines.append(f"Adapter: {adapter}")
+
+    if a.profiled_at is not None:
+        lines.append(f"Profiled: {a.profiled_at}")
 
     if a.missing:
         lines.append(_missing_summary(a.missing))
@@ -1639,7 +1929,9 @@ def _grain_summary(
         for key in reading.keys
     }
 
-    return Rendered(f"Grain: {rendered}", grain | {d for d in detections if d in TERMS})
+    quoted = {"quoted"} if any(key.get("note") for key in reading.keys) else set()
+
+    return Rendered(f"Grain: {rendered}", grain | quoted | {d for d in detections if d in TERMS})
 
 
 def _timeline_summary(statistics: dict[str, Any]) -> Rendered:
@@ -1760,23 +2052,29 @@ def _provenance_block(manifest: dict[str, Any], connection_name: str) -> str:
     return "## Provenance\n\n" + "\n".join(lines) if lines else ""
 
 
-def _markdown_connection_notes(a: TableArtifacts) -> str:
-    return f"## Connection notes\n\n{a.connection_notes}"
+def _markdown_connection_notes(a: TableArtifacts) -> list[Rendered]:
+    assert a.connection_notes is not None
+
+    notes = _nested_headings(a.connection_notes)
+
+    return [Rendered("## Connection notes"), Rendered(""), *_quoted_lines(notes)]
 
 
 def _markdown_ddl(a: TableArtifacts) -> str:
     return "## DDL\n\n```sql\n" + a.ddl.rstrip() + "\n```"
 
 
-def _markdown_description(a: TableArtifacts) -> str:
+def _markdown_description(a: TableArtifacts) -> list[Rendered]:
     assert a.description is not None
 
-    return "## Description\n\n" + a.description.rstrip()
+    description = _nested_headings(a.description.rstrip())
+
+    return [Rendered("## Description"), Rendered(""), *_quoted_lines(description)]
 
 
-def _markdown_annotations(a: TableArtifacts) -> str:
+def _markdown_annotations(a: TableArtifacts) -> list[Rendered]:
     assert a.annotations is not None
-    lines = ["## Annotations"]
+    lines = [Rendered("## Annotations")]
 
     for name, entry in a.annotations.items():
         if not _annotation_entry_has_content(entry):
@@ -1786,9 +2084,9 @@ def _markdown_annotations(a: TableArtifacts) -> str:
 
         # A colon promises text that is not coming - a note-less header names the column and stops.
         if isinstance(note, str) and note.strip():
-            lines.append(f"- **{name}**: {note.strip()}")
+            lines.append(_quoted(f"- **{name}**: {spell_literal(note.strip())}"))
         else:
-            lines.append(f"- **{name}**")
+            lines.append(Rendered(f"- **{name}**"))
 
         claims = entry.get("claims")
 
@@ -1797,7 +2095,7 @@ def _markdown_annotations(a: TableArtifacts) -> str:
             rendered = ", ".join(
                 f"{stat}: {spell_inline(predicate)}" for stat, predicate in claims.items()
             )
-            lines.append(f"  - claims: {rendered}")
+            lines.append(Rendered(f"  - claims: {rendered}"))
 
         values = entry.get("values")
 
@@ -1811,9 +2109,9 @@ def _markdown_annotations(a: TableArtifacts) -> str:
                 if isinstance(value_note, str) and value_note.strip():
                     value = value_entry.get("value")
                     spelled = spell_value(value)
-                    lines.append(f"  - {spelled}: {value_note.strip()}")
+                    lines.append(_quoted(f"  - {spelled}: {spell_literal(value_note.strip())}"))
 
-    return "\n".join(lines)
+    return lines
 
 
 def _annotation_entry_has_content(entry: dict[str, Any]) -> bool:
@@ -2185,7 +2483,7 @@ def _markdown_relationships(a: TableArtifacts) -> list[Rendered]:
 def _note_line(entry: dict[str, Any]) -> list[Rendered]:
     note = entry.get("note")
 
-    return [Rendered(f"  note: {' '.join(note.split())}")] if isinstance(note, str) else []
+    return [_quoted(f"  note: {_spelled_note(note)}")] if isinstance(note, str) else []
 
 
 def _own_cardinality(a: TableArtifacts, columns: Any) -> int | None:
@@ -2628,6 +2926,7 @@ def _load_table_artifacts(
         corrupted=corrupted,
         profile_override=table_profile if isinstance(table_profile, dict) else None,
         last_run_failed=fqn in failed_tables(manifest),
+        profiled_at=None if (stamp := entry.get("profiled_at")) is None else str(stamp),
         incoming_cardinalities=_incoming_cardinalities(manifest, print_root, relationships, read),
         inherited=inherited,
         spellings=spellings,
@@ -2999,6 +3298,9 @@ def _structured_parts(
     if a.row_count is not None:
         header["row_count"] = a.row_count
 
+    if a.profiled_at is not None:
+        header["profiled_at"] = a.profiled_at
+
     if a.last_run_failed:
         header["_unprofiled"] = unprofiled_message(a.fqn)
 
@@ -3015,6 +3317,9 @@ def _structured_parts(
 
     # The counts below describe the scanned set; the header survives any budget drop (SPEC 2.2.8).
     header.update(reply_scope(scope_of(a.statistics)))
+
+    if (scope := scope_of(a.statistics)) is not None:
+        header["notes"] = {"scope": FIELD_NOTES[_scope_kind(scope)]}
 
     if options.purpose == "query":
         return header, _query_candidates(a, options)
@@ -3043,6 +3348,9 @@ def _structured_parts(
     if options.include_relationships and a.relationship_annotations:
         candidates.append(("relationship_annotations", a.relationship_annotations))
 
+    if notes := _statistics_notes(dict(candidates).get("statistics")):
+        header["notes"] = {**header.get("notes", {}), **notes}
+
     return header, candidates
 
 
@@ -3058,6 +3366,12 @@ def _payload_from(
     included_names = {s.name for s in selection.included}
 
     payload = dict(header)
+
+    if "statistics" not in included_names and "notes" in payload:
+        payload["notes"] = {k: v for k, v in payload["notes"].items() if k not in _STATISTICS_NOTES}
+
+        if not payload["notes"]:
+            del payload["notes"]
 
     for name, value in candidates:
         if name in included_names:
@@ -3181,7 +3495,7 @@ def _edge_fields(entry: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]
     edge = {key: entry[key] for key in keys if key in entry}
     edge["detection"] = edge_detection(entry)
 
-    if _no_match(entry):
+    if no_match(entry):
         edge["no_match"] = True
 
     return edge
@@ -3227,7 +3541,7 @@ def _structured_values(a: TableArtifacts, *, notes: bool) -> dict[str, Any]:
 
         if isinstance(redaction, str) and redaction:
             block["redacted"] = redaction
-            block["counts"] = [e.get("count") for e in shown]
+            block["counts"] = [count_of(e) for e in shown]
         else:
             block["entries"] = _structured_entries(shown, annotations.get(name) if notes else None)
 
@@ -3250,7 +3564,7 @@ def _structured_entries(entries: list[Any], annotation: dict[str, Any] | None) -
         if not isinstance(entry, dict):
             continue
 
-        item = {"value": entry.get("value"), "count": entry.get("count")}
+        item = {"value": entry.get("value"), "count": count_of(entry)}
         note = notes.get(value_key(entry.get("value")))
 
         if note:
@@ -3281,6 +3595,36 @@ def _stripped_statistics(statistics: dict[str, Any]) -> dict[str, Any]:
     }
 
     return {**statistics, "columns": stripped_columns}
+
+
+_STATISTICS_NOTES = ("unmeasured", "disabled", "sensitivity")
+
+
+def _scope_kind(scope: ScanScope) -> str:
+    if scope.sample is not None:
+        return "sample"
+    elif scope.filter is not None and scope.filter.strip():
+        return "filter"
+    else:
+        return "scanned"
+
+
+def _statistics_notes(statistics: dict[str, Any] | None) -> dict[str, str]:
+    if statistics is None:
+        return {}
+
+    columns = statistics.get("columns")
+    columns = (
+        [c for c in columns.values() if isinstance(c, dict)] if isinstance(columns, dict) else []
+    )
+    held = {
+        "unmeasured": bool(block_value(statistics, "unmeasured"))
+        or any(column_value(c, "unmeasured") for c in columns),
+        "disabled": bool(disabled_of(statistics)),
+        "sensitivity": any(not column_value(c, "inferred.sensitivity") for c in columns),
+    }
+
+    return {key: FIELD_NOTES[key] for key in _STATISTICS_NOTES if held[key]}
 
 
 def _measure_for_budget(value: Any) -> str:

@@ -95,6 +95,8 @@ Setting `read.tables.materialize: false` on a `sample`-mode table is refused the
 
 ## Column types
 
+A column's `sql_type` is its declared type as `DESCRIBE TABLE` spells it — `NUMBER(38,0)`, `VARCHAR(64)`, `TIMESTAMP_NTZ(9)` — the spelling the table's `ddl.sql` carries, so an integer column reads as one and a two-decimal amount does not. A table `DESCRIBE TABLE` refuses keeps the catalog's bare spelling for every column (`NUMBER`, `TEXT`), so its integer and decimal columns spell alike. A column's collation is published as its own `collation`, never inside `sql_type`.
+
 | Type | Profiled as | What to know |
 |---|---|---|
 | `ARRAY` | `composite` | It declares no element type: the elements take the one scalar type they share, or `VARIANT` when they mix |
@@ -111,7 +113,7 @@ An external table is listed with `external: true` (SPEC 2.2.20) and, unless a ma
 
 ## Namespaces
 
-`database` is optional. Omitted, the session has no current database; the connection reads every database `SHOW DATABASES` lists for the role — which needs no extra grant and no warehouse — less `SNOWFLAKE`, and reads each through its own `"<database>".INFORMATION_SCHEMA`. A configured name is matched to the spelling Snowflake stores. With no database, an unqualified name in `dbprint check --online` SQL assertions has nothing to resolve against. The grants below are per database, and a database the role cannot read is skipped with a warning. View dependencies are read per database holding a selected object; one whose dependency read fails is named in a warning and its views omit `depends_on` for that run.
+`database` is optional. Omitted, the session has no current database; the connection reads every database `SHOW DATABASES` lists for the role — which needs no extra grant and no warehouse — less `SNOWFLAKE`, and reads each through its own `"<database>".INFORMATION_SCHEMA`. A configured name is matched to the spelling Snowflake stores. With no database, an unqualified name in `dbprint check --online` SQL assertions has nothing to resolve against. The grants above are per database, and a database the role cannot read is skipped with a warning. View dependencies are read per database holding a selected object; one whose dependency read fails is named in a warning and its views omit `depends_on` for that run.
 
 ## The row-count estimate
 

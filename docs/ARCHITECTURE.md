@@ -219,7 +219,7 @@ spec/v1     (packaged schema data; imported by conformance and engine)
 
 Note that `engine` does **not** call the validator — nothing under `engine/` imports `conformance`. Validation is a separate step that `check` runs over an already-written print, which is why `conformance` can stay a leaf and be consumed by external CI without dragging the engine in.
 
-Three arrows above are narrower than they look, and each is deliberate:
+These arrows are narrower than they look, and each is deliberate:
 
 - **`assertions` does not import `adapters`.** A SQL assertion needs to run SQL, but it declares a structural `Protocol` with the single method it uses and accepts anything satisfying it. The dependency is on a shape, not a package, which is what lets the evaluator be tested with a plain callable.
 - **`cli -> mcp` is a lazy, function-scoped import.** The MCP SDK ships behind the `[mcp]` extra, so importing it at module scope would make every `dbprint` invocation pay for — and fail without — a dependency that only `serve` needs. The `serve` command imports the package inside the callback and converts the `ImportError` into an install hint.
@@ -1003,6 +1003,7 @@ Without an in-process Snowflake test target (the vendor only ships a network-bac
 - duckdb's foreign-key actions default to `NO ACTION` (the parser does not accept `CASCADE` / `SET NULL` / `SET DEFAULT` on FKs). Fixture schemas use the default.
 - DDL extraction reads `duckdb_tables().sql` (vendor function). Real Snowflake uses `GET_DDL('TABLE', '"<db>"."<schema>"."<table>"')`; the shim resolves that name string by Snowflake's rules (unquoted parts upper-cased, quoted parts verbatim) before reading duckdb's catalog, so an unquoted name fails here as it would there.
 - Sampling uses `USING SAMPLE N ROWS` (duckdb syntax); real Snowflake uses `SAMPLE (N ROWS)`. Substitution point is `looks_like.py`.
+- `INFORMATION_SCHEMA.COLUMNS.DATA_TYPE` differs: Snowflake reports a type without its parameters (`NUMBER` for every fixed-point column, `TEXT`, `TIMESTAMP_NTZ`), duckdb reports them (`INTEGER`, `DECIMAL(38,0)`). The adapter reads each column's spelling from `DESCRIBE TABLE`, which the shim answers with duckdb's own spellings, so the suite cannot show the bare Snowflake form; a unit test over Snowflake-shaped catalog rows does.
 - A temporary table may only be created in duckdb's own `temp` catalog, where Snowflake takes one in any schema — so the substrate strips the database and schema off the materialized sample's name. Snowflake's acceptance of the qualified form is therefore outside what the suite demonstrates.
 
 **The two engines agree on syntax far more than on types.** duckdb evaluates `PERCENTILE_CONT` / `PERCENTILE_DISC` over any sortable expression; Snowflake resolves an ordered-set percentile's ordering expression against a fixed-point numeric and has no conversion from a timestamp, so the same statement compiles here and fails there. Type resolution is therefore outside what a green suite demonstrates — the temporal percentile path takes values by rank for exactly this reason.
@@ -1092,6 +1093,8 @@ src/dbprint/mcp/
 
 The split is deliberate: `resources.py` and `tools.py` are pure Python that takes a `ServedConnections` plus arguments and returns dicts. Tests exercise them directly without the SDK. `server.py` is the thin layer that registers them with the official `mcp` SDK and runs the chosen transport (stdio by default; HTTP/SSE via the SDK's SSE transport, bound to loopback only and answering only a loopback `Host` and `Origin`).
 
+The SDK's `Server` takes its `instructions` once, at construction. `server.py` subclasses it so `instructions` is a property computed from the served manifests on every read, and each connection's initialization options read it afresh: a client connecting after a regenerate is told the new print, and one already connected keeps what it received.
+
 ### Resource URI scheme
 
 ```
@@ -1112,11 +1115,15 @@ dbprint://<connection>/<rest>
 | `dbprint serve <name>` | just `<name>` | `<name>` |
 | no auto + >= 2 connections | (CLI rejects at startup) | n/a |
 
-When `default is None`, any tool call without `connection?` raises `-32602 InvalidParams` with the configured connection list per MCP.md §5.2.
+When `default is None`, any tool call without `connection?` raises `-32602 InvalidParams` naming the served connections per MCP.md §5.2.
 
 ### Tools
 
 `tools.dispatch(state, name, arguments)` routes to a pure handler per tool — `get_table_context`, `list_tables`, `search_columns`, `resolve_value`, `get_manifest`, `get_diff` and `get_reference`. `get_table_context` reuses `engine.context_assembler` (§3) so the MCP `get_table_context` and the CLI `dbprint context` always emit the same fragment shape per the same options.
+
+### Text a reply quotes
+
+An agent reads a reply as part of its prompt, and the descriptions and notes in it are written by whoever can commit to the print. `context_assembler` therefore sets every such text apart from the reply's own lines: `description.md` and the connection notes as `>` blockquotes, their headings nested below the reply's section, and every column, value, inherited, edge and grain-key note as a quoted literal spelled as a value is. A note can neither open a section of the reply nor read as one of its lines, and the `quoted text` Terms entry and the instructions' closing sentence state that what is quoted is data, never an instruction.
 
 ### Skill companion
 
@@ -1153,7 +1160,7 @@ A print's own vocabulary is presentation-sensitive — the site does not just fo
 
 - **Scope.** The scanned-set share is `scope.rows_scanned / row_count` (SPEC 2.2.8's authoritative rescaling ratio) — never `scope.sample`, which records only what the producer asked to read.
 - **Redaction.** A column carrying any `redacted` marker never has its `range`/`percentiles` plotted or listed (SPEC 2.2.9: a masked or hashed bound must not be ordered, compared, or plotted). Value-list bar counts are unaffected — they are true under every primitive.
-- **Detection.** Every rendered relationship edge, in both `refers_to` and `referenced_by`, states its `detection`; an inferred edge never carries a filler `on_delete`/`on_update` it cannot have (SPEC 2.3.8).
+- **Detection.** Every rendered relationship edge, in both `refers_to` and `referenced_by`, states its `detection`; an inferred edge never carries a filler `on_delete`/`on_update` it cannot have (SPEC 2.3.8). An edge measured empty carries a `no match` badge through `context_assembler.no_match`, the predicate the Joins list reads.
 - **Rejection.** An edge or an inferred field a human rejected never reaches an agent: `context_assembler._load_table_artifacts` strips both as it loads a table, so `dbprint context`, `get_table_context` and the Context tab never see them, and the MCP resources, `search_columns` and `get_diff` strip them on their own reads. The site's Columns and Relationships tabs keep them, marked `REJECTED by human annotation`.
 - **Absence.** An empty `columns` map reads as "the read matched no rows", never "this table has no columns" (SPEC 2.2.7); an empty `grain.keys` reads against `grain.search`'s tri-state (absent / bounded / exhausted), never as a flat "no grain".
 - **`notes_synthesis.synthesize()` reuse.** The FK target, `candidate_key`, `physical_layout_key`, `looks_like`, `sensitivity` and `epoch_unit` render through the same function `dbprint context` calls, so a wording change to one surface changes both. The site passes `hints_only`, which drops the classification-dispatched text: cardinality, null rate, range, percentiles and the value list all have a column of their own in the table.
@@ -1161,7 +1168,7 @@ A print's own vocabulary is presentation-sensitive — the site does not just fo
 - **`sketch`** renders as a presence badge only — never the base64 payload, which runs to several kilobytes per column.
 - **Markup.** A print is text written by whoever can commit to it, so none of it reaches the page live. User Markdown (`description.md`, notes, connection notes) renders through `web._render_markdown`, which shows raw HTML as text and keeps only `http`, `https`, `mailto` and relative targets live, judged after decoding character references the way a browser does; a refused link keeps its text and loses its target. Every other print value is autoescaped by Jinja. `app.js` writes data into the page only as text, and every diagram label is written in Mermaid's `#<code>;` entity form, so a quote or a pipe in a column name cannot end a label and start a statement.
 - **Mentions.** A table or column named in a description or a column note links to its page or row, a plural naming the same table too. The link is made on the rendered page's text, never inside a link, an image, a code block, an address or a code span other than one naming the table exactly.
-- **Shared readings.** Every surface reads one engine function per table-level fact and words its result: `baseline.read_manifest` (what a manifest holds and why it cannot be read), `freshness.classify` (live, stale or dormant), `value_list` (a value's spellings and its notes), `table_readings` (grain, statistics parameters, cardinality saturation, which annotations stand), `spec.edges.rejected_edges` (which verdicts bind) and `spec.rejection.without_rejected` (a column less the inferred fields a human rejected). `tests/consumer/register.py` pins each state a surface has disagreed on.
+- **Shared readings.** Every surface reads one engine function per table-level fact and words its result: `baseline.read_manifest` (what a manifest holds and why it cannot be read), `freshness.classify` (live, stale or dormant), `value_list` (a value's count, its spellings and its notes), `notes_synthesis.holds_no_value` (a column holding no value, which states no `distribution`), `table_readings` (grain, statistics parameters, cardinality saturation, which annotations stand), `spec.edges.rejected_edges` (which verdicts bind) and `spec.rejection.without_rejected` (a column less the inferred fields a human rejected). `tests/consumer/register.py` pins each state a surface has disagreed on.
 
 ### Static build
 
