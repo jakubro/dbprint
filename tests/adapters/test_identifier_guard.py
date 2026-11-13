@@ -16,8 +16,15 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 import dbprint.adapters as adapters_package
-from dbprint.adapters import ClickhouseAdapter, DuckdbAdapter, SnowflakeAdapter, identifiers
-from dbprint.adapters.base import materialized_name, seed_from_fqn
+from dbprint.adapters import (
+    ClickhouseAdapter,
+    DuckdbAdapter,
+    PostgresAdapter,
+    RedshiftAdapter,
+    SnowflakeAdapter,
+    identifiers,
+)
+from dbprint.adapters.base import Adapter, materialized_name, seed_from_fqn
 from dbprint.adapters.dialect import Dialect
 from dbprint.adapters.identifiers import IdentifierRejected
 from dbprint.cli.adapter_registry import ADAPTERS
@@ -25,7 +32,7 @@ from dbprint.config import TablesConfig
 from dbprint.config.project import ConnectionConfig
 from dbprint.conformance.layout import PATH_SEGMENT_RE as VALIDATOR_PATH_SEGMENT_RE
 from dbprint.engine import EXIT_PARTIAL, Engine
-from tests.adapters.conftest import SnowflakeDialectShim, _adapter_factory_for
+from tests.adapters.conftest import SnowflakeDialectShim
 from tests.conftest import pg_connect
 
 
@@ -257,17 +264,25 @@ def test_a_case_colliding_column_pair_is_refused_through_the_real_adapter(
         "INSERT INTO seedbank.plot VALUES (1, 'open', NULL), (2, 'open', 'kept')",
     ]
 
+    adapter: Adapter
+
     if vendor == "postgres":
         creds = request.getfixturevalue("postgres_test_db")
         with pg_connect(creds) as conn:
             for statement in statements:
                 conn.execute(cast(LiteralString, statement))
+
+        adapter = PostgresAdapter(creds)
     else:
         shim = request.getfixturevalue("redshift_postgres_connection")
         for statement in statements:
             shim.execute(statement)
 
-    adapter = _adapter_factory_for(request, vendor)()
+        adapter = RedshiftAdapter(
+            {"host": "redshift", "database": "seedbank", "user": "test", "password": "test"},
+            cursor_factory=lambda _p: shim,
+        )
+
     conn = ConnectionConfig(
         name="garden",
         adapter=cast(Any, vendor),

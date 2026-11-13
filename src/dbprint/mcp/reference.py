@@ -42,6 +42,11 @@ _FENCE_RE = re.compile(r"^```")
 # citation copied out of `dbprint check --format json` is usable as `section` unedited.
 _CITATION_PREFIX_RE = re.compile(r"^(?:\S+\s+)?§\s*")
 
+# The reading guide's own citation form; nothing cites the assertion DSL as `ASSERTIONS <n>`.
+_SPEC_CITATION_RE = re.compile(r"^SPEC\s+")
+_CITED_DOCUMENT_RE = re.compile(r"^(\S+?)(?:\.md)?\s+§")
+_CITED_AS: dict[ReferenceDocument, str] = {"spec": "SPEC", "assertions": "ASSERTIONS"}
+
 
 @dataclass(frozen=True)
 class _Heading:
@@ -72,8 +77,17 @@ def heading_tree(document: ReferenceDocument) -> str:
 def section(document: ReferenceDocument, number: str) -> str | None:
     """The heading numbered `number` and its own body, then a list of its direct subsections.
 
-    `number` is bare (`"6.1"`) or a verbatim `spec_ref` citation; `None` when no heading has it.
+    `number` is bare (`"6.1"`), a verbatim `spec_ref` citation, or for spec the guide's `SPEC 6.1`;
+    `None` when no heading has it or the citation names the other document.
     """
+
+    cited = _CITED_DOCUMENT_RE.match(number)
+
+    if cited is not None and cited.group(1) in set(_CITED_AS.values()) - {_CITED_AS[document]}:
+        return None
+
+    if document == "spec":
+        number = _SPEC_CITATION_RE.sub("", number)
 
     return section_of(_read(document), number)
 

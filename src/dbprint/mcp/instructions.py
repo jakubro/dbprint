@@ -34,8 +34,9 @@ _ROUTING = (
     "- Which tables exist, their row counts, whether their statistics are "
     "stale: list_tables with detail: true.\n"
     "- What changed since the previous print: get_diff.\n"
-    "- What a field or a finding's spec_ref means: get_reference; how to read "
-    "json/yaml fields: get_reference document: guide.\n"
+    "- What a field means, or a section cited as SPEC 2.2.4 in the reading guide or as a "
+    "dbprint check finding's spec_ref (§2.2.4): get_reference; how to read json/yaml fields: "
+    "get_reference document: guide.\n"
     "- The print's raw table index: get_manifest."
 )
 

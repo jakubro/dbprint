@@ -4,14 +4,17 @@ profile (SPEC 2.5), over one print holding a never-profiled and a carried failed
 
 from __future__ import annotations
 
+import html
 import json
 import os
+import re
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from click.testing import CliRunner
+import yaml
+from click.testing import CliRunner, Result
 
 from dbprint.adapters import MockAdapter, MockTable
 from dbprint.cli.main import main
@@ -22,6 +25,7 @@ from dbprint.mcp import resources as mcp_resources
 from dbprint.mcp.errors import McpError
 from tests._curator import conn_config, curator_fixture
 from tests._failing import Failing
+from tests._regenerate import assert_leaves_regenerating_to_the_maintainer
 
 
 NEVER = "public.extra"
@@ -67,15 +71,19 @@ class _Both(Failing):
 
 
 def _cli(project: Path, *args: str) -> tuple[int, str]:
+    result = _run(project, *args)
+
+    return result.exit_code, result.output
+
+
+def _run(project: Path, *args: str) -> Result:
     old = Path.cwd()
     os.chdir(project)
 
     try:
-        result = CliRunner().invoke(main, list(args))
+        return CliRunner().invoke(main, list(args))
     finally:
         os.chdir(old)
-
-    return result.exit_code, result.output
 
 
 def _state(project: Path) -> ServedConnections:
@@ -92,10 +100,25 @@ def _mcp_error(call: Callable[[], object]) -> str:
 
 
 def test_offline_check_fails_the_run_naming_both(project: Path) -> None:
-    code, output = _cli(project, "check", "--format", "json")
+    result = _run(project, "check", "--format", "json")
+    causes = {entry["subject"]: entry["cause"] for entry in json.loads(result.stdout)[0]["not_run"]}
 
-    assert code == 5
-    assert NEVER in output and CARRIED in output
+    assert result.exit_code == 5
+    assert NEVER in result.output and CARRIED in result.output
+    assert set(causes) == {NEVER, CARRIED}
+
+    for cause in causes.values():
+        assert_leaves_regenerating_to_the_maintainer(cause)
+
+
+def test_check_names_an_unprofiled_table_as_context_refuses_it(project: Path) -> None:
+    check = _run(project, "check", "--format", "json")
+    context = _run(project, "context", NEVER)
+    cause = next(
+        e["cause"] for e in json.loads(check.stdout)[0]["not_run"] if e["subject"] == NEVER
+    )
+
+    assert cause in context.output
 
 
 def test_list_names_both(project: Path) -> None:
@@ -111,14 +134,16 @@ def test_context_refuses_the_never_profiled_one_by_its_cause(project: Path) -> N
     assert code != 0
     assert PHRASE in output
     assert "Did you mean" not in output
+    assert_leaves_regenerating_to_the_maintainer(output)
 
 
 @pytest.mark.parametrize("fmt", ["md", "json", "yaml"])
 def test_context_serves_the_carried_one_with_the_phrase(project: Path, fmt: str) -> None:
-    code, output = _cli(project, "context", CARRIED, "--format", fmt)
+    result = _run(project, "context", CARRIED, "--format", fmt)
 
-    assert code == 0
-    assert PHRASE in output
+    assert result.exit_code == 0
+    assert PHRASE in result.output
+    assert_leaves_regenerating_to_the_maintainer(_unprofiled_note(result.stdout, fmt))
 
 
 @pytest.mark.parametrize("selection", [("public.*",), ("--all",)], ids=["glob", "all"])
@@ -127,9 +152,12 @@ def test_context_over_many_tables_names_the_never_profiled_one(
     selection: tuple[str, ...],
 ) -> None:
     code, output = _cli(project, "context", *selection)
+    note = next(line for line in output.splitlines() if "not profiled by the last run" in line)
 
     assert code == 0
-    assert NEVER in output
+    assert NEVER in note
+    assert CARRIED not in note
+    assert_leaves_regenerating_to_the_maintainer(note)
 
 
 def test_mcp_get_manifest_filters_the_list_by_its_pattern(project: Path) -> None:
@@ -160,13 +188,19 @@ def test_an_mcp_tool_refuses_the_never_profiled_one_by_its_cause(
     tool: str,
     arguments: dict[str, str],
 ) -> None:
-    assert PHRASE in _mcp_error(lambda: dispatch(_state(project), tool, arguments))
+    refusal = _mcp_error(lambda: dispatch(_state(project), tool, arguments))
+
+    assert PHRASE in refusal
+    assert_leaves_regenerating_to_the_maintainer(refusal)
 
 
 def test_an_mcp_resource_refuses_the_never_profiled_one_by_its_cause(project: Path) -> None:
     uri = "dbprint://primary/public/extra/statistics"
 
-    assert PHRASE in _mcp_error(lambda: mcp_resources.read(_state(project), uri))
+    refusal = _mcp_error(lambda: mcp_resources.read(_state(project), uri))
+
+    assert PHRASE in refusal
+    assert_leaves_regenerating_to_the_maintainer(refusal)
 
 
 def test_the_mcp_context_of_the_carried_one_carries_the_phrase(project: Path) -> None:
@@ -174,6 +208,7 @@ def test_the_mcp_context_of_the_carried_one_carries_the_phrase(project: Path) ->
 
     assert isinstance(reply, str)
     assert PHRASE in reply
+    assert_leaves_regenerating_to_the_maintainer(_unprofiled_note(reply, "md"))
 
 
 def test_the_docs_site_names_both(project: Path) -> None:
@@ -183,5 +218,18 @@ def test_the_docs_site_names_both(project: Path) -> None:
     index = client.get("/").data.decode()
     page = client.get(f"/t/primary/{CARRIED}").data.decode()
 
+    listing = re.search(r"Not profiled by the last run.*?</p>", index, re.DOTALL)
+    notice = re.search(r'<div class="notice">(.*?)</div>', page, re.DOTALL)
+
     assert NEVER in index and CARRIED in index
     assert PHRASE in page
+    assert listing is not None and notice is not None
+    assert_leaves_regenerating_to_the_maintainer(" ".join(html.unescape(listing.group(0)).split()))
+    assert_leaves_regenerating_to_the_maintainer(html.unescape(notice.group(1)))
+
+
+def _unprofiled_note(reply: str, fmt: str) -> str:
+    if fmt == "md":
+        return next(line for line in reply.splitlines() if line.startswith("Unprofiled:"))
+
+    return (json.loads(reply) if fmt == "json" else yaml.safe_load(reply))["_unprofiled"]

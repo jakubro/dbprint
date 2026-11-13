@@ -80,6 +80,12 @@ _KIND_MIME = {
     "relationships_annotations": "application/yaml",
 }
 
+_CONTINUATION = {
+    "application/yaml": ("# next_page: ", ""),
+    "text/markdown": ("<!-- next_page: ", " -->"),
+    "application/sql": ("-- next_page: ", ""),
+}
+
 # Connection-grain resources with no `fqn` - the URI form `dbprint://<connection>/<kind>`.
 _CONNECTION_LEVEL_KINDS = frozenset({"manifest", "diff", "reading", "manifest_annotations"})
 _CONNECTION_LEVEL_FILE = {
@@ -93,6 +99,36 @@ _CONNECTION_LEVEL_FILE = {
 # not: `manifest.missing-artifact` (SPEC 2.5) applies to these kinds exactly as to any other.
 _OPTIONAL_ARTIFACT_KINDS = frozenset(
     {"description", "statistics_annotations", "relationships_annotations"},
+)
+
+_REFERENCE_DESCRIPTION = "The {title}, whole. get_reference returns one section by number"
+
+_CONNECTION_KIND_DESCRIPTION = {
+    "manifest": (
+        "Index of the tables in connection {connection}'s print. list_tables with detail: true "
+        "projects it per table with a freshness verdict; get_manifest returns it filtered by "
+        "pattern"
+    ),
+    "diff": (
+        "What changed between the last two prints of connection {connection}, without events "
+        "about a join or an inferred field a person rejected. get_diff returns it filtered by "
+        "table or kind"
+    ),
+    "reading": (
+        "This print's reading guide - vocabulary, traps and reading order for its fields - as "
+        "written by the dbprint version that took the print. Read it before interpreting a field "
+        "no tool description explains; get_reference document: guide returns the installed "
+        "dbprint version's copy one section at a time"
+    ),
+    "manifest_annotations": (
+        "Notes people wrote on the whole database; get_table_context carries them on every "
+        "table it reads"
+    ),
+}
+
+_TEMPLATE_PAGING = (
+    "The bare URI is page 1; every page but the last ends with a next_page line, in the file's "
+    "own comment syntax, naming the next page's URI with its page and version"
 )
 
 _TABLE_KIND_DESCRIPTION = {
@@ -155,7 +191,7 @@ class ResourceEntry:
 
 @dataclass(frozen=True)
 class ReadResult:
-    """One page of a resource: its text, mimeType, and where it sits among the file's pages."""
+    """One page of a resource: its text, `next_page` line included, mimeType, and page position."""
 
     content: str
     mime_type: str
@@ -177,18 +213,49 @@ class ListPage:
     next_cursor: str | None
 
 
-TEMPLATES: tuple[tuple[str, str, str], ...] = (
-    ("dbprint:///reference/{document}{?page,version}", "reference document", _REFERENCE_MIME),
-    *(
-        (
-            f"dbprint://{{connection}}/{kind}{{?page,version}}",
-            f"connection {kind}",
-            _KIND_MIME[kind],
-        )
-        for kind in ("manifest", "diff", "reading", "manifest_annotations")
+@dataclass(frozen=True)
+class TemplateEntry:
+    """One row of `resources/templates/list`."""
+
+    uri_template: str
+    name: str
+    description: str
+    mime_type: str
+
+
+TEMPLATES: tuple[TemplateEntry, ...] = (
+    TemplateEntry(
+        uri_template="dbprint:///reference/{document}{?page,version}",
+        name="reference document",
+        description=(
+            _REFERENCE_DESCRIPTION.format(title=" or the ".join(_REFERENCE_DOCUMENTS.values()))
+            + f". {{document}} is {' or '.join(_REFERENCE_DOCUMENTS)}. {_TEMPLATE_PAGING}"
+        ),
+        mime_type=_REFERENCE_MIME,
     ),
     *(
-        (f"dbprint://{{connection}}/{{table}}/{kind}{{?page,version}}", f"table {kind}", mime)
+        TemplateEntry(
+            uri_template=f"dbprint://{{connection}}/{kind}{{?page,version}}",
+            name=f"connection {kind}",
+            description=(
+                f"{description.format(connection='{connection}')}. {{connection}} is a connection "
+                f"this server serves. {_TEMPLATE_PAGING}"
+            ),
+            mime_type=_KIND_MIME[kind],
+        )
+        for kind, description in _CONNECTION_KIND_DESCRIPTION.items()
+    ),
+    *(
+        TemplateEntry(
+            uri_template=f"dbprint://{{connection}}/{{table}}/{kind}{{?page,version}}",
+            name=f"table {kind}",
+            description=(
+                f"{_TABLE_KIND_DESCRIPTION[kind]}. {{connection}} is a connection this server "
+                f"serves, {{table}} the table's dotted name as list_tables returns it. "
+                f"{_TEMPLATE_PAGING}"
+            ),
+            mime_type=mime,
+        )
         for kind, mime in _KIND_MIME.items()
         if kind in ARTIFACT_FILENAMES
     ),
@@ -270,7 +337,7 @@ def enumerate_for(state: ServedConnections) -> list[ResourceEntry]:
         ResourceEntry(
             uri=f"dbprint:///reference/{document}",
             name=f"{document} reference",
-            description=f"The {title}, whole. get_reference returns one section by number",
+            description=_REFERENCE_DESCRIPTION.format(title=title),
             mime_type=_REFERENCE_MIME,
         )
         for document, title in _REFERENCE_DOCUMENTS.items()
@@ -284,11 +351,19 @@ def enumerate_for(state: ServedConnections) -> list[ResourceEntry]:
 
 
 def read(state: ServedConnections, uri: str) -> ReadResult:
-    """The page of a resource `uri` names; the bare URI is page 1 (MCP.md 3.4)."""
+    """The page of a resource `uri` names; the bare URI is page 1 (MCP.md 3.4).
+
+    Every page but the last ends in the `next_page` line naming the next page's URI.
+    """
 
     bare, page, version = _page_query(uri)
     whole = _read_whole(state, bare)
-    pages = paging.line_pages(whole.content, width=paging.escaped_width)
+    opening, closing = _CONTINUATION[whole.mime_type]
+    pages = paging.marked_line_pages(
+        whole.content,
+        lambda n: f"\n{opening}{bare}?page={n}&version={whole.version}{closing}",
+        width=paging.escaped_width,
+    )
 
     if not (page.isascii() and page.isdecimal()) or not 1 <= int(page) <= len(pages):
         raise errors.page_out_of_range(uri, len(pages))
@@ -470,30 +545,19 @@ def _enumerate_connection(conn: ConnectionConfig, read: ArtifactReader) -> list[
         ResourceEntry(
             uri=f"dbprint://{conn.name}/manifest",
             name=f"{conn.name} manifest",
-            description=(
-                f"Index of the tables in connection {conn.name}'s print. list_tables with "
-                f"detail: true projects it per table with a freshness verdict; get_manifest "
-                f"returns it filtered by pattern"
-            ),
+            description=_CONNECTION_KIND_DESCRIPTION["manifest"].format(connection=conn.name),
             mime_type=_KIND_MIME["manifest"],
         ),
         ResourceEntry(
             uri=f"dbprint://{conn.name}/diff",
             name=f"{conn.name} diff",
-            description=(
-                f"What changed between the last two prints of connection {conn.name}, without "
-                f"events about a join or an inferred field a person rejected. get_diff returns it "
-                f"filtered by table or kind"
-            ),
+            description=_CONNECTION_KIND_DESCRIPTION["diff"].format(connection=conn.name),
             mime_type=_KIND_MIME["diff"],
         ),
         ResourceEntry(
             uri=f"dbprint://{conn.name}/reading",
             name=f"{conn.name} reading guide",
-            description=(
-                "How to read this print's fields - vocabulary, traps and reading order. Read "
-                "it before interpreting a field no tool description explains"
-            ),
+            description=_CONNECTION_KIND_DESCRIPTION["reading"],
             mime_type=_KIND_MIME["reading"],
         ),
     ]
@@ -505,10 +569,7 @@ def _enumerate_connection(conn: ConnectionConfig, read: ArtifactReader) -> list[
             ResourceEntry(
                 uri=f"dbprint://{conn.name}/manifest_annotations",
                 name=f"{conn.name} connection notes",
-                description=(
-                    "Notes people wrote on the whole database; get_table_context carries "
-                    "them on every table it reads"
-                ),
+                description=_CONNECTION_KIND_DESCRIPTION["manifest_annotations"],
                 mime_type=_KIND_MIME["manifest_annotations"],
             ),
         )

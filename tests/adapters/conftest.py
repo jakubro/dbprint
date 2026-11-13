@@ -279,8 +279,20 @@ def armed() -> Iterator[Callable[[], None]]:
 
 
 def _adapter_factory_for(request: pytest.FixtureRequest, kind: str) -> Callable[[], Adapter]:
-    """Build the connected-adapter factory for one backend name."""
+    """Build the connected-adapter factory for one backend name; each adapter closes at teardown."""
 
+    build = _unclosed_factory_for(request, kind)
+
+    def connected() -> Adapter:
+        adapter = build()
+        request.addfinalizer(adapter.close)
+
+        return adapter
+
+    return connected
+
+
+def _unclosed_factory_for(request: pytest.FixtureRequest, kind: str) -> Callable[[], Adapter]:
     if kind == "mock":
 
         def build_mock() -> Adapter:
@@ -2153,7 +2165,12 @@ def databricks_spark_session() -> Iterator[Any]:
 
     import shutil
 
-    from tests._provisioning import SPARK_IVY_CACHE_PATH, delta_jars_cached, ensure_java
+    from tests._provisioning import (
+        SPARK_IVY_CACHE_PATH,
+        delta_jars_cached,
+        delta_resolution,
+        ensure_java,
+    )
 
     try:
         ensure_java()
@@ -2171,7 +2188,7 @@ def databricks_spark_session() -> Iterator[Any]:
     with _substrates.registered(root, name, "spark-warehouse", path=str(warehouse_dir)):
         try:
             # Spark's default warehouse would litter the repo tree every run. The Ivy cache stays
-            # a fixed shared path, warmed once by `just install`.
+            # a fixed shared path, so a run's workers resolve Delta's jars once between them.
             warehouse_dir.mkdir()
             SPARK_IVY_CACHE_PATH.mkdir(parents=True, exist_ok=True)
 
@@ -2192,7 +2209,8 @@ def databricks_spark_session() -> Iterator[Any]:
             )
 
             try:
-                spark = configure_spark_with_delta_pip(builder).getOrCreate()
+                with delta_resolution():
+                    spark = configure_spark_with_delta_pip(builder).getOrCreate()
             except PySparkRuntimeError as exc:
                 if not delta_jars_cached():
                     pytest.skip(f"Delta's jars are not cached and could not be resolved: {exc}")
@@ -2394,7 +2412,8 @@ class BigqueryEmulatorCursor:
             with urllib.request.urlopen(request, timeout=30) as response:
                 payload = json.loads(response.read())
         except urllib.error.HTTPError as exc:
-            payload = json.loads(exc.read())
+            with exc:
+                payload = json.loads(exc.read())
 
         if "error" in payload:
             raise RuntimeError(f"{rendered!r}: {payload['error']}")
@@ -2588,7 +2607,9 @@ def _emulator_ready(base_url: str) -> bool:
     try:
         with urllib.request.urlopen(f"{base_url}/bigquery/v2/projects/x/datasets", timeout=2):
             return True
-    except urllib.error.HTTPError:
+    except urllib.error.HTTPError as exc:
+        exc.close()
+
         return True
     except (urllib.error.URLError, OSError):
         return False
@@ -2712,6 +2733,8 @@ def bigquery_test_dataset(
         try:
             with urllib.request.urlopen(delete_request, timeout=10):
                 pass
+        except urllib.error.HTTPError as exc:
+            exc.close()
         except urllib.error.URLError:
             pass
 

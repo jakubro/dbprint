@@ -4,7 +4,11 @@
 
 from __future__ import annotations
 
+import random
+
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from dbprint.adapters.base import ColumnMeta, ForeignKeyMeta, TableType, UniqueKeyMeta
 from dbprint.engine.inference import (
@@ -15,6 +19,11 @@ from dbprint.engine.inference import (
     infer_value_derived_edges,
 )
 from dbprint.spec.sketch import K as SKETCH_K
+from dbprint.spec.sketch import (
+    answerable_count,
+    answerable_subset_containment,
+    estimate_intersection,
+)
 
 
 def _col(name: str, sql_type: str = "uuid") -> ColumnMeta:
@@ -813,6 +822,79 @@ class TestValueDerivedEdges:
 
         assert infer_value_derived_edges([left], [right], frozenset()) == {}
         assert infer_value_derived_edges([right], [left], frozenset()) == {}
+
+
+class TestEveryPairTheFloorsQualifyIsProposed:
+    """Pairs are skipped unmeasured; the proposals are still every pair SPEC 2.3.10 qualifies."""
+
+    @given(
+        st.integers(min_value=0, max_value=2**32),
+        st.lists(
+            st.sampled_from([60, 399, 400, 401, 900, 1023, 1024, 1025, 1500, 3000]),
+            min_size=2,
+            max_size=8,
+        ),
+    )
+    def test_the_proposals_are_the_pairs_the_floors_admit(
+        self,
+        seed: int,
+        sizes: list[int],
+    ) -> None:
+        rng = random.Random(seed)
+        universe = [rng.randrange(2**64) for _ in range(5000)]
+        candidates: list[SketchCandidate] = []
+
+        for index, size in enumerate(sizes):
+            if candidates and rng.random() < 0.6:
+                donor = rng.choice(candidates).sketch
+                kept = rng.choice([1.0, 0.99, 0.96, 0.95, 0.94, 0.5])
+                drawn = rng.sample(donor, int(len(donor) * kept))
+                drawn += rng.sample(universe, max(0, size - len(drawn)))
+            else:
+                drawn = rng.sample(universe, size)
+
+            distinct = sorted(set(drawn))
+            candidates.append(
+                _candidate(
+                    f"public.t{index}",
+                    f"c{index}_id",
+                    tuple(distinct[:SKETCH_K]),
+                    cardinality=len(distinct) + rng.choice([0, 0, 7, 300]),
+                ),
+            )
+
+        out = infer_value_derived_edges(candidates, candidates, frozenset())
+        proposed = {
+            (fqn, fk.column[0], fk.target_table, fk.target_column[0])
+            for fqn, edges in out.items()
+            for fk in edges
+        }
+
+        assert proposed == {
+            (child.fqn, child.column, parent.fqn, parent.column)
+            for child in candidates
+            for parent in candidates
+            if child is not parent and _floors_met(child, parent)
+        }
+
+
+def _floors_met(child: SketchCandidate, parent: SketchCandidate) -> bool:
+    """SPEC 2.3.11 floor 3 over SPEC 2.3.10's estimators, for one pair."""
+
+    if child.cardinality >= parent.cardinality:
+        return False
+
+    if len(child.sketch) < SKETCH_K and len(parent.sketch) < SKETCH_K:
+        exact = answerable_subset_containment(child.sketch, parent.sketch)
+
+        return exact is not None and exact[0] == 1.0  # noqa: RUF069 - an exact ratio of counts
+
+    estimated = estimate_intersection(child.sketch, parent.sketch) / child.cardinality
+
+    return (
+        answerable_count(child.sketch, parent.sketch) >= 400
+        and min(1.0, round(estimated, 6)) >= 0.95
+    )
 
 
 class TestAMeasuredChildIsAReferenceNotAKey:

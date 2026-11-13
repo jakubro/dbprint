@@ -7,6 +7,7 @@ import signal
 import sqlite3
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -160,17 +161,20 @@ class TestTheFileIsOnlyRead:
 
         assert not (tmp_path / "absent.sqlite").exists()
 
-    def test_a_library_without_json_built_in_is_refused(
+    def test_a_library_without_json_built_in_is_refused_before_the_file_opens(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         path = _file(tmp_path / "plot.sqlite", "CREATE TABLE plot (id INTEGER)")
         monkeypatch.setattr(sqlite3, "sqlite_version_info", (3, 37, 2))
-        adapter = SqliteAdapter({"database": str(path)})
+        opened: list[object] = []
+        adapter = SqliteAdapter({"database": str(path)}, cursor_factory=opened.append)
 
         with pytest.raises(SqliteConnectionError, match=r"older than 3\.38\.0"):
             adapter.connect()
+
+        assert opened == []
 
 
 class TestTheCatalog:
@@ -746,3 +750,49 @@ class TestAStatementEnds:
         finally:
             signal.signal(signal.SIGINT, previous)
             adapter.close()
+
+
+class TestTheDrawsCountATableOncePerSession:
+    """Every column's `looks_like` draw reuses the table's count and its kind lookup."""
+
+    def test_a_session_counts_and_looks_up_the_table_once(self) -> None:
+        connection = _memory(
+            "CREATE TABLE plot (id INTEGER PRIMARY KEY, label TEXT, bed INTEGER)",
+            f"{_SERIES} INSERT INTO plot SELECT gen.value, 'p' || (gen.value % 9), gen.value % 5 "
+            "FROM gen",
+        )
+        statements: list[str] = []
+        adapter = SqliteAdapter(
+            {"database": ":memory:"},
+            cursor_factory=lambda _p: _Recording(connection.cursor(), statements),
+        )
+        adapter.connect()
+        adapter.list_tables(include=["*"], exclude=[])
+        statements.clear()
+
+        try:
+            adapter.estimate_row_count("main.plot")
+
+            for column in ("id", "label", "bed"):
+                adapter.sample_values("main.plot", column, 10)
+        finally:
+            adapter.close()
+
+        flattened = [" ".join(s.split()) for s in statements]
+
+        assert flattened.count('SELECT COUNT(1) FROM "main"."plot" src') == 1
+        assert sum("PRAGMA_TABLE_LIST()" in s for s in flattened) == 1
+
+
+class _Recording:
+    def __init__(self, cursor: sqlite3.Cursor, statements: list[str]) -> None:
+        self._cursor = cursor
+        self._statements = statements
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._cursor, name)
+
+    def execute(self, sql: str, params: Any = None) -> object:
+        self._statements.append(sql)
+
+        return self._cursor.execute(sql) if params is None else self._cursor.execute(sql, params)

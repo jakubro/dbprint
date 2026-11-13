@@ -7,6 +7,7 @@ internal-error shape, hiding a handler that forgot to map its own errors.
 
 from __future__ import annotations
 
+import gc
 import http.client
 import itertools
 import json
@@ -32,15 +33,19 @@ from mcp.types import (
     CLIENT_INFO_META_KEY,
     LATEST_PROTOCOL_VERSION,
     PROTOCOL_VERSION_META_KEY,
+    SERVER_INFO_META_KEY,
     CallToolResult,
     TextContent,
 )
 
 from dbprint.config import ConnectionConfig
+from dbprint.config.project import load_project_at
 from dbprint.mcp import ServedConnections, build_server, paging
 from dbprint.mcp import tools as tools_module
 from dbprint.mcp.instructions import instructions
 from dbprint.mcp.server import run_http
+from dbprint.mcp.state import build
+from tests._scripts import REPO_ROOT
 from .conftest import StdioServer
 
 
@@ -239,6 +244,19 @@ def _stdio_list_resource_uris(server: StdioServer) -> list[str]:
     return anyio.run(_run)
 
 
+def _stdio_server_info(server: StdioServer) -> dict[str, Any]:
+    async def _run() -> dict[str, Any]:
+        async with (
+            stdio_client(_stdio_params(server)) as (read, write),
+            ClientSession(read, write) as session,
+        ):
+            initialized = await session.initialize()
+
+            return initialized.server_info.model_dump(by_alias=True, mode="json", exclude_none=True)
+
+    return anyio.run(_run)
+
+
 def _add_plain_view(server: StdioServer, fqn: str = "public.a_view") -> None:
     """Add a plain-view manifest entry (DDL only, no statistics/relationships) for a test."""
 
@@ -259,10 +277,28 @@ def _add_plain_view(server: StdioServer, fqn: str = "public.a_view") -> None:
     manifest_path.write_text(yaml.safe_dump(manifest))
 
 
-class TestBuildServer:
-    def test_server_advertises_dbprint_name(self, primary_conn: ConnectionConfig) -> None:
-        server = build_server(_state_for(primary_conn))
-        assert server.name == "dbprint"
+class TestTheServerIntroducesItselfAsItsRegistryListingDoes:
+    @pytest.mark.parametrize("version", ["2025-11-25", LATEST_PROTOCOL_VERSION])
+    def test_server_info_carries_the_listing_title_description_and_website(
+        self,
+        stdio_server: StdioServer,
+        version: str,
+    ) -> None:
+        registry = json.loads((REPO_ROOT / "server.json").read_text(encoding="utf-8"))
+
+        if version == LATEST_PROTOCOL_VERSION:
+            with _raw_stdio(stdio_server, version) as call:
+                sent = json.loads(call("tools/list", {}))["_meta"][SERVER_INFO_META_KEY]
+        else:
+            sent = _stdio_server_info(stdio_server)
+
+        assert sent == {
+            "name": "dbprint",
+            "version": registry["version"],
+            "title": registry["title"],
+            "description": registry["description"],
+            "websiteUrl": registry["websiteUrl"],
+        }
 
 
 class TestAnArgumentFaultReachesTheWireAsAFault:
@@ -506,7 +542,7 @@ class TestPagingReachesTheWire:
     @pytest.mark.parametrize(
         ("method", "key", "fields"),
         [
-            ("tools/list", "tools", {"name", "description", "inputSchema", "annotations"}),
+            ("tools/list", "tools", {"name", "title", "description", "inputSchema", "annotations"}),
             ("resources/list", "resources", {"uri", "name", "description", "mimeType"}),
         ],
     )
@@ -561,6 +597,22 @@ class TestPagingReachesTheWire:
 
         assert anyio.run(_run) == (7, None)
 
+    def test_the_tool_list_measures_the_tools_it_sends(self, stdio_server: StdioServer) -> None:
+        measured: list[dict[str, Any]] = []
+
+        def spy(reply: dict[str, Any]) -> str:
+            measured.append(reply)
+
+            return paging.compact(reply)
+
+        tools_module.list_page(None, spy)
+        whole = next(reply for reply in measured if len(reply["tools"]) == 7)
+
+        with _raw_stdio(stdio_server, "2025-11-25") as call:
+            sent = json.loads(call("tools/list", {}))
+
+        assert whole["tools"] == sent["tools"]
+
     def test_the_templates_advertise_the_page_form(self, primary_conn: ConnectionConfig) -> None:
         async def _run() -> list[str]:
             async with Client(build_server(_state_for(primary_conn))) as client:
@@ -573,6 +625,46 @@ class TestPagingReachesTheWire:
         assert "dbprint://{connection}/{table}/statistics{?page,version}" in templates
         assert "dbprint:///reference/{document}{?page,version}" in templates
         assert all(t.endswith("{?page,version}") for t in templates)
+
+    def test_every_template_says_what_it_reads_and_how_to_page(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        async def _run() -> dict[str, str]:
+            async with Client(build_server(_state_for(primary_conn))) as client:
+                listed = await client.list_resource_templates()
+
+                return {t.uri_template: t.description or "" for t in listed.resource_templates}
+
+        templates = anyio.run(_run)
+
+        assert len(templates) == 11
+        assert [t for t, described in templates.items() if "next_page" not in described] == []
+        assert [
+            t
+            for t, described in templates.items()
+            if "{table}" in t and "list_tables" not in described
+        ] == []
+
+    def test_a_resource_page_and_its_line_fit_the_bound_as_stdio_sends_it(
+        self,
+        stdio_server: StdioServer,
+    ) -> None:
+        table = stdio_server.project_dir / "prints" / stdio_server.conn_name / "arboretum"
+        path = table / "seedbank" / "vault" / "ddl.sql"
+        path.write_text(
+            path.read_text() + "".join(f'-- "{i}" \\ caf\u00e9 \u4e2d\n' for i in range(3_000)),
+        )
+        uri = f"dbprint://{stdio_server.conn_name}/arboretum.seedbank.vault/ddl"
+
+        with _raw_stdio(stdio_server, "2025-11-25") as call:
+            sent = call("resources/read", {"uri": uri})
+
+        quote = sent.index('"text":"') + len('"text":')
+        text, end = json.JSONDecoder().raw_decode(sent, quote)
+
+        assert text.rpartition("\n")[2].startswith(f"-- next_page: {uri}?page=2&version=")
+        assert end - quote - len('""') <= 20_000
 
 
 class TestHandshakeAdvertisesInstructions:
@@ -689,6 +781,29 @@ class TestTheInstructionsRouteAndLeaveReadingToTheReplies:
 
         assert "how to read json/yaml fields: get_reference document: guide" in text
 
+    def test_the_routing_names_where_a_citation_comes_from(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        text = " ".join(instructions(_state_for(primary_conn)).split())
+
+        assert "SPEC 2.2.4" in text
+        assert "dbprint check" in text
+
+    def test_the_agents_guide_quotes_the_instructions_verbatim(self) -> None:
+        guide = (REPO_ROOT / "docs/guide/agents.md").read_text(encoding="utf-8")
+        section = guide.split("### What every agent reads on connect\n", 1)[1]
+        quoted = [
+            line for line in section.split("\n\n### ", 1)[0].splitlines() if line.startswith(">")
+        ]
+        project = load_project_at(REPO_ROOT / "docs/format/v1/examples/production")
+
+        assert "\n".join(
+            line.removeprefix(">").removeprefix(" ") for line in quoted
+        ) == instructions(
+            build(project, None),
+        )
+
     def test_no_reading_rule_is_restated(self, primary_conn: ConnectionConfig) -> None:
         text = instructions(_state_for(primary_conn))
 
@@ -739,6 +854,25 @@ class TestToolDescriptionsReachTheWire:
     ) -> None:
         assert self._descriptions(primary_conn) == {
             t.name: t.description for t in tools_module.TOOL_DEFINITIONS
+        }
+
+
+class TestToolTitlesReachTheWire:
+    def test_every_tool_carries_its_title(self, primary_conn: ConnectionConfig) -> None:
+        async def _run() -> dict[str, str | None]:
+            async with Client(build_server(_state_for(primary_conn))) as client:
+                listed = await client.list_tools()
+
+                return {t.name: t.title for t in listed.tools}
+
+        assert anyio.run(_run) == {
+            "get_table_context": "Table context",
+            "list_tables": "List tables",
+            "search_columns": "Search columns",
+            "resolve_value": "Resolve a filter value",
+            "get_manifest": "Raw table index",
+            "get_diff": "Changes since the last print",
+            "get_reference": "Spec and reading guide",
         }
 
 
@@ -1082,7 +1216,35 @@ class TestRealTransportErrorPaths:
         assert "arboretum.seedbank.vault" in payload.get("unreadable_tables", [])
 
 
+@pytest.fixture
+def sse_sessions_collected() -> Generator[None]:
+    """Collect garbage at teardown, while the test's own warning filters still apply."""
+
+    yield
+    gc.collect()
+
+
+# The MCP SDK closes an SSE session's streams only when its client disconnects.
+# A server stopped with a session open leaves two, collected under this filter at teardown.
+@pytest.mark.filterwarnings(
+    "ignore:Exception ignored in. <function MemoryObject:pytest.PytestUnraisableExceptionWarning",
+)
+@pytest.mark.usefixtures("sse_sessions_collected")
 class TestHttpTransport:
+    def test_a_port_in_use_ends_in_uvicorns_startup_failure(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        with socket.socket() as taken:
+            taken.bind(("127.0.0.1", 0))
+            taken.listen()
+            port = taken.getsockname()[1]
+
+            with pytest.raises(SystemExit) as exited:
+                anyio.run(run_http, build_server(_state_for(primary_conn)), "127.0.0.1", port)
+
+        assert exited.value.code == 3
+
     def test_a_disconnecting_sse_client_logs_no_error(
         self,
         primary_conn: ConnectionConfig,
@@ -1121,6 +1283,12 @@ class TestHttpTransport:
         assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
 
 
+# The MCP SDK closes an SSE session's streams only when its client disconnects.
+# A server stopped with a session open leaves two, collected under this filter at teardown.
+@pytest.mark.filterwarnings(
+    "ignore:Exception ignored in. <function MemoryObject:pytest.PytestUnraisableExceptionWarning",
+)
+@pytest.mark.usefixtures("sse_sessions_collected")
 class TestHttpTransportAnswersOnlyLoopback:
     """A page that rebinds its own name to 127.0.0.1 reaches nothing (MCP.md 6.2)."""
 

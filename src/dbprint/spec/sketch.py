@@ -213,17 +213,27 @@ def contains_value(encoded: str, value: object, kind: SketchKind) -> bool | None
 _HASH_SPACE = 2**64  # sketch values are unsigned 64-bit hashes
 
 
-def _theta(child_sketch: Sequence[int], parent_sketch: Sequence[int]) -> int:
-    """The tighter of the two sketches' own retained thresholds (SPEC 2.2.14/2.3.10).
+def retained_threshold(sketch: Sequence[int]) -> int:
+    """The bound below which `sketch` holds every hash of its column (SPEC 2.2.14/2.3.10).
 
     A sketch retaining fewer than `k` values is exact, so its horizon is the whole hash space
     rather than its own maximum.
     """
 
-    theta_child = max(child_sketch) if len(child_sketch) >= K else _HASH_SPACE
-    theta_parent = max(parent_sketch) if len(parent_sketch) >= K else _HASH_SPACE
+    return max(sketch) if len(sketch) >= K else _HASH_SPACE
 
-    return min(theta_child, theta_parent)
+
+def scaled_intersection(common: int, theta: int) -> int:
+    """`estimate_intersection`'s estimate from `common` shared hashes below `theta`."""
+
+    if theta >= _HASH_SPACE:
+        return common
+
+    return round(common * _HASH_SPACE / theta)
+
+
+def _theta(child_sketch: Sequence[int], parent_sketch: Sequence[int]) -> int:
+    return min(retained_threshold(child_sketch), retained_threshold(parent_sketch))
 
 
 def estimate_intersection(child_sketch: Sequence[int], parent_sketch: Sequence[int]) -> int:
@@ -232,10 +242,7 @@ def estimate_intersection(child_sketch: Sequence[int], parent_sketch: Sequence[i
     theta = _theta(child_sketch, parent_sketch)
     common = sum(1 for h in set(child_sketch) & set(parent_sketch) if h < theta)
 
-    if theta >= _HASH_SPACE:
-        return common
-
-    return round(common * _HASH_SPACE / theta)
+    return scaled_intersection(common, theta)
 
 
 def answerable_count(child_sketch: Sequence[int], parent_sketch: Sequence[int]) -> int:
@@ -262,7 +269,7 @@ def answerable_subset_containment(
     None when no child hash falls below the threshold - zero evidence, not zero overlap.
     """
 
-    theta_parent = max(parent_sketch) if len(parent_sketch) >= K else _HASH_SPACE
+    theta_parent = retained_threshold(parent_sketch)
     parent_set = set(parent_sketch)
     answerable = [h for h in child_sketch if h < theta_parent]
 

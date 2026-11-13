@@ -215,6 +215,7 @@ class _CancellableCursor:
     def __init__(self, connection: Any) -> None:
         self._connection = connection
         self._cursor = connection.cursor()
+        self.row_counts: dict[str, int] = {}
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._cursor, name)

@@ -50,8 +50,10 @@ just example-vocabulary  # regenerate the vocabulary example the same way
 just demo        # regenerate the landing page's terminal recording; golden-tested
 just site        # build the documentation site: npm ci, astro build, then a dead-link check
 just preview     # serve docs/ with live reload
-just install     # uv sync --extra dev --extra mcp --extra docs
+just install     # uv sync --extra dev --extra mcp --extra docs, then resolve Delta's jars for the Spark suite
 ```
+
+- **No gate prints a warning, and a warning fails the step that prints it.** pytest runs with `filterwarnings = ["error", ...]`, so a warning fails the test that raises it; `install`, `lint` and `site` pass their output through `scripts/warning_lines.py`, which fails on a warning line, as the release workflow's `uv build` does; `npm run build` runs the site's own `scripts/build.mjs`, which does the same for `astro build`, the Pages workflow included. A warning dbprint cannot remove at its cause is dropped by name with the reason it cannot — an `ignore` in `filterwarnings` or in one test's `filterwarnings` mark, an entry in either script's `KNOWN`, Vite's chunk-size limit sized to Mermaid's own chunks — so any other warning from the same tool still fails.
 
 - **Python 3.13+.** Linting and formatting: `ruff` (line length 100, isort enabled). Type checking: `ty`. Tests: `pytest`.
 - **No upper bound on the lint/type-check toolchain.** `ruff` and `ty` track their latest release deliberately — `ruff.toml` enables `default + extend-select`, never an enumerated rule list, so a version bump adopts whatever the new default is rather than freezing the set this project started with. A rule that turns out not to fit gets a stated per-site suppression (see §1 Error handling), never a config-level opt-out that silently re-narrows the set.
@@ -226,6 +228,7 @@ Each package's runtime role is documented in [ARCHITECTURE.md](ARCHITECTURE.md);
 - ✅ A run's writes go through its stage and commit together ([ARCHITECTURE.md §4](ARCHITECTURE.md)): the unit of all-or-nothing is the run's commit, and a caught table failure still isolates to that table. Never overwrite user-authored `description.md` or `statistics.annotations.yaml`.
 - ✅ **Every number a renderer shows goes through `spell_number` or `spell_percent`** (`spec/value_text.py`): no format spec, `round()`, `%`-formatting or Jinja `round`/`format` filter in a renderer outside layout geometry; `tests/engine/test_number_spelling_sweep.py` fails one.
 - ✅ **Artifact YAML targets YAML v1.2's core schema**, not PyYAML's own (1.1-based) default resolver: `yaml_dumper.py`'s `str` representer quotes a scalar whenever a 1.2 parser would retype it (null/bool/int/float), covering the exponent-form float production 1.1 misses. A new driver type is handled where the value is read — `render_text` in the adapter's `rendering.py` for a string-like column, `spec.rounding.measured_value` for every other published cell — never by a new dumper representer. The dumper refuses `set`, `bytes` and any unrecognised type with `UnrepresentableValue` rather than writing a `!!set`/`!!binary` tag.
+- ✅ **No reader mutates what it loads.** A `PrintReader` (`engine/baseline.py`) parses each file once and hands every caller the same document — every table of one context assembly, and every page `docs build` renders from one load of the print — so a change made to one reaches all the rest. Copy a document before changing it ([ARCHITECTURE.md §11](ARCHITECTURE.md)).
 - 🚫 The engine knows the on-disk layout but not Click — it returns typed results, it does not render.
 
 ### `assertions` — the check DSL

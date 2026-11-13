@@ -6,12 +6,18 @@ import copy
 import json
 import re
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 import pytest
 import yaml
 
-from dbprint.engine import AssemblyOptions, assemble_context, assemble_structured_context
+from dbprint.engine import (
+    AssemblyOptions,
+    assemble_context,
+    assemble_structured_context,
+    context_assembler,
+)
+from dbprint.engine.baseline import read_manifest
 from dbprint.engine.context_assembler import (
     Purpose,
     TableArtifacts,
@@ -5817,3 +5823,32 @@ class TestAnAuthoredHeadingNestsBelowTheReplysSection:
         assert "> ### Units" in lines
         assert "> ### collector" in lines
         assert not {"## Units", "# collector"} & set(lines)
+
+
+class TestTablesRenderedInWorkerProcesses:
+    @pytest.mark.parametrize("purpose", ["profile", "query"])
+    def test_the_joined_fragments_match_one_process(
+        self,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        purpose: str,
+    ) -> None:
+        root = committed_print / "production"
+        manifest = read_manifest(root).manifest
+        assert manifest is not None
+        tables = sorted(manifest["tables"])
+        options = AssemblyOptions(purpose=cast(Purpose, purpose))
+        monkeypatch.setattr(context_assembler, "_PARALLEL_MIN_TABLES", 2)
+
+        alone = assemble_context(manifest, root, tables, options, connection_name="production")
+        shared = assemble_context(
+            manifest,
+            root,
+            tables,
+            options,
+            connection_name="production",
+            workers=2,
+        )
+
+        assert len(tables) > 2
+        assert shared == alone

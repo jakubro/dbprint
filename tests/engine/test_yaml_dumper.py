@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import datetime
 import decimal
+import importlib
 import unicodedata
 import uuid
+from collections.abc import Generator
+from contextlib import contextmanager
 
 import pytest
 import yaml
 from hypothesis import example, given
 from hypothesis import strategies as st
 
-from dbprint.engine.yaml_dumper import dump_yaml, spell_inline, spell_value
+from dbprint.engine import yaml_dumper
+from dbprint.engine.yaml_dumper import ArtifactDumper, dump_yaml, spell_inline, spell_value
+from dbprint.spec import artifact_yaml
+from dbprint.spec.artifact_yaml import ExactLoader
 from dbprint.spec.rounding import UnrepresentableValue
 
 
@@ -322,7 +328,74 @@ class TestDumpYamlProperties:
     def test_a_dumped_payload_loads_back_to_itself(self, payload: dict[str, object]) -> None:
         assert yaml.safe_load(dump_yaml(payload)) == payload
 
+    @given(
+        st.dictionaries(
+            st.text(),
+            _VALUES | st.decimals(allow_nan=False, allow_infinity=False),
+            max_size=6,
+        ),
+    )
+    @example({"mean": 2.0, "sum": decimal.Decimal("10000000000000000.00"), "p": -0.0})
+    @example({"max": decimal.Decimal("123456789012345678901234567890.123456789012345678901")})
+    def test_a_dump_read_back_exactly_dumps_the_same_text(self, payload: dict[str, object]) -> None:
+        text = dump_yaml(payload)
+
+        assert dump_yaml(artifact_yaml.load(text, loader=ExactLoader)) == text
+
     @given(st.sets(st.integers(), max_size=3) | st.binary(max_size=8))
     def test_a_set_or_bytes_value_is_refused(self, value: object) -> None:
         with pytest.raises(UnrepresentableValue):
             dump_yaml({"values": value})
+
+
+class TestEitherEmitterWritesTheSameBytes:
+    """libyaml spells some strings and keys unlike PyYAML's emitter; `dump_yaml` never shows it."""
+
+    @given(
+        st.dictionaries(
+            st.text(st.characters(codec="utf-8")),
+            _VALUES | st.decimals(allow_nan=False, allow_infinity=False),
+            max_size=6,
+        ),
+    )
+    @example({"note": "word " * 30 + "\x07"})
+    @example({"note": "a line\nand the next one, long enough to be folded past the width " * 2})
+    @example({"v": "\U0001f600", "w": "\u2028", "x": "\ufeff"})
+    @example({"": 1})
+    @example({"\ud800": 1, "v": "\udc80"})
+    @example({"k" * 125: 1, "\u00e9" * 65: 2})
+    def test_a_payload_is_written_as_the_pure_python_emitter_writes_it(
+        self,
+        payload: dict[str, object],
+    ) -> None:
+        assert dump_yaml(payload) == _pure_python(payload)
+
+    def test_without_libyaml_the_same_bytes_are_written(self) -> None:
+        payload = {"columns": {"rank": {"values": [{"value": "seed tray", "count": 3}]}}}
+        expected = dump_yaml(payload)
+
+        with _libyaml_removed():
+            assert yaml_dumper.dump_yaml(payload) == expected
+
+
+def _pure_python(payload: object) -> str:
+    return yaml.dump(
+        payload,
+        Dumper=ArtifactDumper,
+        default_flow_style=False,
+        sort_keys=False,
+        allow_unicode=True,
+    )
+
+
+@contextmanager
+def _libyaml_removed() -> Generator[None]:
+    c_dumper = yaml.CSafeDumper
+    del yaml.CSafeDumper
+    importlib.reload(yaml_dumper)
+
+    try:
+        yield
+    finally:
+        yaml.CSafeDumper = c_dumper
+        importlib.reload(yaml_dumper)

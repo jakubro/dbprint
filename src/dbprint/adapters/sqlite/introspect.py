@@ -9,6 +9,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import Any, cast
 
 from dbprint.spec.classification import (
@@ -35,6 +36,7 @@ from ..base import (
     TableMeta,
     TableType,
     UniqueKeyMeta,
+    session_row_count,
 )
 from ..errors import QueryFailed
 from ..identifiers import (
@@ -378,16 +380,7 @@ def comments(cursor: Cursor, identity: Identity) -> CommentsMeta:
 def row_count_estimate(cursor: Cursor, identity: Identity) -> int:
     """Exact row count, counted once per session; -1 for a view, never queried (SPEC 2.2.15)."""
 
-    if _kind(cursor, identity) == "view":
-        return -1
-
-    counted: dict[str, int] = getattr(cursor, "row_counts", {})
-
-    if identity.fqn not in counted:
-        query = f"SELECT COUNT(1) FROM {identity.quoted()} src"
-        counted[identity.fqn] = int(exec_query(cursor, query).fetchone()[0])
-
-    return counted[identity.fqn]
+    return session_row_count(cursor, identity.fqn, partial(_row_count, cursor, identity))
 
 
 def affinity(declared: str) -> str:
@@ -670,6 +663,13 @@ def _kind(cursor: Cursor, identity: Identity) -> str:
     ).fetchone()
 
     return str(row[0]) if row else "table"
+
+
+def _row_count(cursor: Cursor, identity: Identity) -> int:
+    if _kind(cursor, identity) == "view":
+        return -1
+
+    return int(exec_query(cursor, f"SELECT COUNT(1) FROM {identity.quoted()} src").fetchone()[0])
 
 
 def _primary_key(cursor: Cursor, schema: str, table: str) -> list[str]:

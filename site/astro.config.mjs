@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
 
+import { unified } from "@astrojs/markdown-remark";
 import starlight from "@astrojs/starlight";
 import { defineConfig } from "astro/config";
 import mermaid from "astro-mermaid";
@@ -107,12 +108,16 @@ export default defineConfig({
   base: BASE,
   trailingSlash: "always",
   markdown: {
-    smartypants: false,
-    remarkPlugins: [
-      dropLeadingHeading,
-      [rewriteMarkdownLinks, { docsRoot: DOCS_ROOT, base: BASE, repository: REPOSITORY, ref: REF }],
-    ],
+    processor: unified({
+      smartypants: false,
+      remarkPlugins: [
+        dropLeadingHeading,
+        [rewriteMarkdownLinks, { docsRoot: DOCS_ROOT, base: BASE, repository: REPOSITORY, ref: REF }],
+      ],
+    }),
   },
+  // Mermaid's lazily loaded layout engines are one chunk each, the largest about 1.46 MB.
+  vite: { build: { chunkSizeWarningLimit: 1500 } },
   integrations: [
     // Claims fenced mermaid blocks before Starlight's renderer sees them, so it must stay first.
     // Mermaid 12's 120 px default wraps labels again past the line breaks their authors wrote.

@@ -6,10 +6,13 @@ Reads the on-disk artifacts, assembles a per-table fragment in the requested for
 
 from __future__ import annotations
 
+import copy
 import json
 import math
+import multiprocessing
 import re
 from collections.abc import Callable
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -46,6 +49,7 @@ from dbprint.spec.value_text import spell_number, spell_percent
 from . import context_terms, notes_synthesis, table_readings
 from .baseline import (
     ArtifactReader,
+    PrintReader,
     contained,
     disabled_feature_message,
     failed_tables,
@@ -74,6 +78,9 @@ QUERY_FREQUENT_SHARE = 0.01  # least share of non-null rows a numeric/temporal v
 NAME_ONLY_LISTED = 5  # name-only incoming joins listed one by one before they fold into counts
 
 NO_MATCH_MIN_COMPARED = 10  # values a measured-empty join compares before it reads `no match`
+# Below this many tables a worker process's start costs more than the tables it would render.
+_PARALLEL_MIN_TABLES = 100
+_TABLES_PER_PROCESS = 64
 
 SAMPLE_RESCALING = (
     "a row count - nulls, a value's count, a true/false split - MAY be multiplied by "
@@ -282,12 +289,34 @@ def assemble(
     connection_name: str | None = None,
     multi_connection: bool = False,
     read: ArtifactReader = read_artifact,
+    workers: int = 1,
 ) -> AssemblyResult:
-    """Assemble the requested table fragments; `tables` is the caller's resolved FQN order."""
+    """Assemble the requested table fragments; `tables` is the caller's resolved FQN order.
+
+    With `workers` above 1, a Markdown selection of many tables under no budget renders in up to
+    that many processes, each reading the print from disk itself.
+    """
 
     if not tables:
         return AssemblyResult(text="", tables_included=0)
 
+    if (
+        workers > 1
+        and options.format == "md"
+        and options.budget is None
+        and len(tables) >= _PARALLEL_MIN_TABLES
+    ):
+        return _assemble_markdown_in_processes(
+            manifest,
+            print_root,
+            tables,
+            options,
+            connection_name,
+            multi_connection,
+            workers,
+        )
+
+    read = _reader(read)
     loaded = [_load_table_artifacts(manifest, print_root, fqn, read) for fqn in tables]
 
     if len(loaded) == 1:
@@ -321,8 +350,9 @@ def assemble_payloads(
     if not tables:
         return PayloadResult(payloads=[], tables_included=0, truncated=())
 
-    loaded = [_load_table_artifacts(manifest, print_root, fqn, read_artifact) for fqn in tables]
-    header = _connection_keys(print_root, options, read_artifact)
+    read = PrintReader()
+    loaded = [_load_table_artifacts(manifest, print_root, fqn, read) for fqn in tables]
+    header = _connection_keys(print_root, options, read)
     payloads, included, truncated = _budgeted_structured_payloads(loaded, options, header)
 
     return PayloadResult(
@@ -345,6 +375,7 @@ def ranked_sections(
     Each carries its lines' term keys; the caller builds the legend (`context_terms.legend`).
     """
 
+    read = _reader(read)
     a = _load_table_artifacts(manifest, print_root, table, read)
     _attach_connection_notes(a, print_root, read)
     adapter = manifest.get("adapter")
@@ -363,6 +394,7 @@ def structured_sections(
 ) -> tuple[dict[str, Any], list[tuple[str, Any]]]:
     """One table's structured identity fields and its sections, none dropped, in budget order."""
 
+    read = _reader(read)
     a = _load_table_artifacts(manifest, print_root, table, read)
     _attach_connection_notes(a, print_root, read)
 
@@ -377,7 +409,7 @@ def spelling_files(
 ) -> tuple[Path, ...]:
     """The other tables' statistics files `table`'s context reads for its column spellings."""
 
-    return _load_table_artifacts(manifest, print_root, table, read).spelling_files
+    return _load_table_artifacts(manifest, print_root, table, _reader(read)).spelling_files
 
 
 def open_questions(
@@ -388,8 +420,9 @@ def open_questions(
 ) -> list[OpenQuestion]:
     """What `table`'s print cannot answer and the print-root-relative file each is answered in."""
 
+    read = _reader(read)
     a = _load_table_artifacts(manifest, print_root, table, read)
-    entry = walkable_tables(manifest).get(table) or {}
+    entry = _entries(manifest, read).get(table) or {}
     directory = table_directory(print_root, table, entry).relative_to(print_root).as_posix()
     columns_file = f"{directory}/{STATISTICS_ANNOTATIONS_FILENAME}"
     out: list[OpenQuestion] = []
@@ -479,6 +512,17 @@ def fk_target_map(
     return out
 
 
+def neighbour_weight(print_root: Path, fqn: str, entry: dict[str, Any]) -> int:
+    """Sort key for loading `fqn`: its relationships file size; the file names the tables read."""
+
+    name = declared_artifacts(entry).get("relationships")
+
+    try:
+        return (table_directory(print_root, fqn, entry) / name).stat().st_size if name else 0
+    except OSError:
+        return 0
+
+
 def no_match(entry: dict[str, Any]) -> bool:
     """Whether the edge measured empty: `containment` 0 over `NO_MATCH_MIN_COMPARED`+ values."""
 
@@ -511,14 +555,136 @@ def _assemble_markdown(
     notes ride that header over several tables and their own section over one.
     """
 
-    multi_table = len(artifacts) > 1
+    frame = _markdown_frame(
+        len(artifacts),
+        options,
+        connection_name,
+        print_root,
+        manifest,
+        multi_connection,
+        read,
+    )
+    header_tokens = max(HEADER_TOKEN_OVERHEAD, len(frame.header) // 4) if frame.header else 0
+    legend_tokens = 0
+
+    # One legend serves the whole document, so its room comes off the top like the header's.
+    if frame.shared_legend and options.budget is not None:
+        offered = frozenset(frame.header_terms).union(
+            *(
+                s.terms
+                for a in artifacts
+                for s in _sections(a, options, frame.connection_profile, frame.adapter)
+            ),
+        )
+        legend_tokens = tokens_of(context_terms.legend(offered))
+
+    per_table_budget: int | None = None
+
+    if options.budget is not None:
+        remaining = max(0, options.budget - header_tokens - legend_tokens)
+        per_table_budget = remaining // len(artifacts)
+
+        if per_table_budget == 0:
+            # Budget cannot cover any table; emit the header (when present) only.
+            text = frame.header + "\n" if frame.header else ""
+
+            return AssemblyResult(
+                text=text,
+                tables_included=0,
+                truncated=tuple(a.fqn for a in artifacts),
+            )
+
+    renders = [
+        (
+            a.fqn,
+            _render_table_markdown(
+                a,
+                options,
+                per_table_budget,
+                frame.connection_profile,
+                frame.adapter,
+                with_legend=not frame.shared_legend,
+            ),
+        )
+        for a in artifacts
+    ]
+
+    return _joined_markdown(frame, renders, multi_connection)
+
+
+def _assemble_markdown_in_processes(
+    manifest: dict[str, Any],
+    print_root: Path,
+    tables: list[str],
+    options: AssemblyOptions,
+    connection_name: str | None,
+    multi_connection: bool,
+    workers: int,
+) -> AssemblyResult:
+    """`_assemble_markdown` with no budget, each table loaded and rendered in a worker process.
+
+    Workers read the print from disk through readers of their own.
+    """
+
+    read = PrintReader()
+    frame = _markdown_frame(
+        len(tables),
+        options,
+        connection_name,
+        print_root,
+        manifest,
+        multi_connection,
+        read,
+    )
+    settings = (options, frame.connection_profile, frame.adapter, not frame.shared_legend)
+    processes = min(workers, math.ceil(len(tables) / _TABLES_PER_PROCESS))
+
+    with ProcessPoolExecutor(
+        processes,
+        mp_context=multiprocessing.get_context("spawn"),
+        initializer=_start_render_worker,
+        initargs=(manifest, print_root, settings),
+    ) as pool:
+        # Heaviest tables first, so none left to the end of the queue stretches the run's tail.
+        entries = _entries(manifest, read)
+        heaviest_first = sorted(
+            tables,
+            key=lambda fqn: -neighbour_weight(print_root, fqn, entries.get(fqn) or {}),
+        )
+        rendered = {fqn: pool.submit(_render_in_worker, fqn) for fqn in heaviest_first}
+        renders = [(fqn, rendered[fqn].result()) for fqn in tables]
+
+    return _joined_markdown(frame, renders, multi_connection)
+
+
+@dataclass(frozen=True)
+class _MarkdownFrame:
+    """What a Markdown reply carries around its tables: the header and their render settings."""
+
+    header: str
+    header_terms: frozenset[str]
+    connection_profile: dict[str, Any]
+    adapter: str | None
+    multi_table: bool
+    shared_legend: bool
+
+
+def _markdown_frame(
+    count: int,
+    options: AssemblyOptions,
+    connection_name: str | None,
+    print_root: Path,
+    manifest: dict[str, Any],
+    multi_connection: bool,
+    read: ArtifactReader,
+) -> _MarkdownFrame:
+    multi_table = count > 1
     header = ""
-    header_tokens = 0
     header_terms: set[str] = set()
 
     if (multi_table or multi_connection) and connection_name:
-        table_word = "table" if len(artifacts) == 1 else "tables"
-        header = f"# Context for connection {connection_name} ({len(artifacts)} {table_word})"
+        table_word = "table" if count == 1 else "tables"
+        header = f"# Context for connection {connection_name} ({count} {table_word})"
 
         if multi_table:
             notes, notes_reason = load_connection_notes(print_root, read)
@@ -535,56 +701,29 @@ def _assemble_markdown(
         if provenance:
             header += "\n\n" + provenance
 
-        header_tokens = max(HEADER_TOKEN_OVERHEAD, len(header) // 4)
-
-    connection_profile = table_readings.connection_profile(manifest)
     adapter = manifest.get("adapter")
-    adapter = adapter if isinstance(adapter, str) and adapter else None
-    shared_legend = multi_table or multi_connection
-    legend_tokens = 0
 
-    # One legend serves the whole document, so its room comes off the top like the header's.
-    if shared_legend and options.budget is not None:
-        offered = frozenset(header_terms).union(
-            *(
-                s.terms
-                for a in artifacts
-                for s in _sections(a, options, connection_profile, adapter)
-            ),
-        )
-        legend_tokens = tokens_of(context_terms.legend(offered))
+    return _MarkdownFrame(
+        header=header,
+        header_terms=frozenset(header_terms),
+        connection_profile=table_readings.connection_profile(manifest),
+        adapter=adapter if isinstance(adapter, str) and adapter else None,
+        multi_table=multi_table,
+        shared_legend=multi_table or multi_connection,
+    )
 
-    per_table_budget: int | None = None
 
-    if options.budget is not None:
-        remaining = max(0, options.budget - header_tokens - legend_tokens)
-        per_table_budget = remaining // len(artifacts)
-
-        if per_table_budget == 0:
-            # Budget cannot cover any table; emit the header (when present) only.
-            text = header + "\n" if header else ""
-
-            return AssemblyResult(
-                text=text,
-                tables_included=0,
-                truncated=tuple(a.fqn for a in artifacts),
-            )
-
+def _joined_markdown(
+    frame: _MarkdownFrame,
+    renders: list[tuple[str, _TableRender]],
+    multi_connection: bool,
+) -> AssemblyResult:
     fragments: list[str] = []
     truncated: list[str] = []
-    terms = set(header_terms)
+    terms = set(frame.header_terms)
     included = 0
 
-    for a in artifacts:
-        rendered = _render_table_markdown(
-            a,
-            options,
-            per_table_budget,
-            connection_profile,
-            adapter,
-            with_legend=not shared_legend,
-        )
-
+    for fqn, rendered in renders:
         if rendered.text:
             fragments.append(rendered.text)
 
@@ -596,19 +735,51 @@ def _assemble_markdown(
             included += 1
 
             if rendered.truncated:
-                truncated.append(a.fqn)
+                truncated.append(fqn)
         else:
-            truncated.append(a.fqn)
+            truncated.append(fqn)
 
     body = "\n\n---\n\n".join(fragments)
-    legend = context_terms.legend(terms) if multi_table and not multi_connection else ""
-    text = "".join(f"{part}\n\n" for part in (header, legend) if part) + body
+    legend = context_terms.legend(terms) if frame.multi_table and not multi_connection else ""
+    text = "".join(f"{part}\n\n" for part in (frame.header, legend) if part) + body
 
     return AssemblyResult(
         text=text,
         tables_included=included,
         truncated=tuple(truncated),
         terms=frozenset(terms),
+    )
+
+
+# A worker process's print and render settings, set once by `_start_render_worker`.
+_RENDER_WORKER: dict[str, Any] = {}
+
+
+def _start_render_worker(
+    manifest: dict[str, Any],
+    print_root: Path,
+    settings: tuple[AssemblyOptions, dict[str, Any], str | None, bool],
+) -> None:
+    _RENDER_WORKER.update(manifest=manifest, print_root=print_root, settings=settings)
+    _RENDER_WORKER["read"] = PrintReader()
+
+
+def _render_in_worker(fqn: str) -> _TableRender:
+    options, connection_profile, adapter, with_legend = _RENDER_WORKER["settings"]
+    a = _load_table_artifacts(
+        _RENDER_WORKER["manifest"],
+        _RENDER_WORKER["print_root"],
+        fqn,
+        _RENDER_WORKER["read"],
+    )
+
+    return _render_table_markdown(
+        a,
+        options,
+        None,
+        connection_profile,
+        adapter,
+        with_legend=with_legend,
     )
 
 
@@ -2659,14 +2830,15 @@ def load_annotations(
     kind: str,
     read: ArtifactReader,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    """`_load_artifact`, withholding a body that fails admission (SPEC 2.7) with its reason."""
+    """`_load_artifact`, withholding a body that fails admission (SPEC 2.7) with its reason.
 
-    data, reason = _load_artifact(path, read)
+    Each call returns a mapping of its own, so a reply never holds one object in two places.
+    """
 
-    if data is not None and (problem := authored.malformation(kind, data)) is not None:
-        return None, f"does not match its schema (SPEC 2.7): {problem}"
+    read = _reader(read)
+    data, reason = read.once(("annotations", path, kind), lambda: _admission(path, kind, read))
 
-    return authored.admitted(kind, data) if data is not None else None, reason
+    return (authored.iso_dates(data) if data is not None else None), reason
 
 
 def load_connection_notes(
@@ -2677,6 +2849,12 @@ def load_connection_notes(
     `(None, None)` covers absent and empty alike; a non-`None` reason is present but unreadable.
     """
 
+    read = _reader(read)
+
+    return read.once(("connection_notes", print_root), lambda: _connection_notes(print_root, read))
+
+
+def _connection_notes(print_root: Path, read: PrintReader) -> tuple[str | None, str | None]:
     path = print_root / MANIFEST_ANNOTATIONS_FILENAME
 
     if path.is_file() and not contained(print_root, path):
@@ -2799,11 +2977,11 @@ def _load_table_artifacts(
     manifest: dict[str, Any],
     print_root: Path,
     fqn: str,
-    read: ArtifactReader,
+    read: PrintReader,
 ) -> TableArtifacts:
     """Read every available per-table artifact off disk; tolerate missing optional pieces."""
 
-    entry = walkable_tables(manifest).get(fqn) or {}
+    entry = _entries(manifest, read).get(fqn) or {}
     table_path = table_directory(print_root, fqn, entry)
     artifacts = declared_artifacts(entry)
 
@@ -2966,13 +3144,13 @@ def _inherited_notes(
     print_root: Path,
     statistics: dict[str, Any] | None,
     lineage: dict[str, Any],
-    read: ArtifactReader,
+    read: PrintReader,
 ) -> dict[str, list[dict[str, Any]]]:
     """Each column's `derived_from` sources that carry a note or value notes, one step deep; a
     source's value notes are withheld where it or the column is redacted (SPEC 2.7.1).
     """
 
-    entries = walkable_tables(manifest)
+    entries = _entries(manifest, read)
     own = (statistics or {}).get("columns")
     own = own if isinstance(own, dict) else {}
     parsed: dict[str, tuple[dict[str, dict[str, Any]], dict[str, Any]]] = {}
@@ -3070,11 +3248,11 @@ def _column_spellings(
     fqn: str,
     statistics: dict[str, Any] | None,
     named: dict[str, set[str]],
-    read: ArtifactReader,
+    read: PrintReader,
 ) -> tuple[dict[str, dict[str, str]], tuple[Path, ...]]:
     """Every own column and each `named` other one `physical_name` spells otherwise (SPEC 2.2.4)."""
 
-    entries = walkable_tables(manifest)
+    entries = _entries(manifest, read)
     out = {fqn: own} if (own := _spelled(statistics)) else {}
     consulted: list[Path] = []
 
@@ -3148,14 +3326,14 @@ def _incoming_cardinalities(
     manifest: dict[str, Any],
     print_root: Path,
     relationships: dict[str, Any] | None,
-    read: ArtifactReader,
+    read: PrintReader,
 ) -> dict[tuple[Any, str], int]:
     """The referencing column's distinct count behind each compared incoming edge.
 
     A referencer missing or unreadable leaves its edges out.
     """
 
-    entries = walkable_tables(manifest)
+    entries = _entries(manifest, read)
     out: dict[tuple[Any, str], int] = {}
     parsed: dict[str, dict[str, Any] | None] = {}
 
@@ -3196,7 +3374,8 @@ def incoming_rejections(
     Also the annotation files read - only the referencer authors a rejection (SPEC 2.7.2).
     """
 
-    entries = walkable_tables(manifest)
+    read = _reader(read)
+    entries = _entries(manifest, read)
     referencers = {
         edge.get("referencer_table")
         for edge in (relationships or {}).get("referenced_by") or []
@@ -3240,22 +3419,36 @@ def authored_relationship_annotations(
     Every table's: a human-authored edge leaves no `referenced_by` row naming whose file to read.
     """
 
-    out: dict[str, list[dict[str, Any]] | None] = {}
-    consulted: list[Path] = []
-
-    for table, entry in sorted(walkable_tables(manifest).items()):
-        name = declared_artifacts(entry).get("relationships_annotations")
-
-        if name is None:
-            continue
-
-        path = table_directory(print_root, table, entry) / name
-        consulted.append(path)
-        out[table] = _relationship_annotation_entries(
+    read = _reader(read)
+    files = read.once(
+        ("relationships_annotations_files", print_root),
+        lambda: _relationships_annotations_files(manifest, print_root, read),
+        owner=manifest,
+    )
+    out = {
+        table: _relationship_annotation_entries(
             load_annotations(path, "relationships_annotations", read)[0],
         )
+        for table, path in files
+    }
 
-    return out, tuple(consulted)
+    return out, tuple(path for _, path in files)
+
+
+def _relationships_annotations_files(
+    manifest: dict[str, Any],
+    print_root: Path,
+    read: PrintReader,
+) -> tuple[tuple[str, Path], ...]:
+    files: list[tuple[str, Path]] = []
+
+    for table, entry in sorted(_entries(manifest, read).items()):
+        name = declared_artifacts(entry).get("relationships_annotations")
+
+        if name is not None:
+            files.append((table, table_directory(print_root, table, entry) / name))
+
+    return tuple(files)
 
 
 def assemble_structured(
@@ -3271,6 +3464,7 @@ def assemble_structured(
     so `budget_tokens` and `--budget` mean the same thing regardless of caller.
     """
 
+    read = _reader(read)
     a = _load_table_artifacts(manifest, print_root, table, read)
     _attach_connection_notes(a, print_root, read)
 
@@ -3285,8 +3479,10 @@ def _budgeted_structured_payload(
     """One table's structured payload under a budget; the identity fields never drop."""
 
     header, candidates = _structured_parts(a, options)
+    payload = _payload_from(header, candidates, budget)
 
-    return _payload_from(header, candidates, budget)
+    # PyYAML writes an object two tables share as an anchor, so each YAML payload gets its own.
+    return copy.deepcopy(payload) if options.format == "yaml" else payload
 
 
 def _structured_parts(
@@ -3693,3 +3889,24 @@ def _by_edge_key(relationships: dict[str, Any] | None) -> dict[tuple[Any, ...], 
     return {
         edge_key(e): e for e in (relationships or {}).get("refers_to") or [] if isinstance(e, dict)
     }
+
+
+def _reader(read: ArtifactReader) -> PrintReader:
+    return read if isinstance(read, PrintReader) else PrintReader(read)
+
+
+def _entries(manifest: dict[str, Any], read: PrintReader) -> dict[str, dict[str, Any]]:
+    return read.once("walkable_tables", lambda: walkable_tables(manifest), owner=manifest)
+
+
+def _admission(
+    path: Path,
+    kind: str,
+    read: ArtifactReader,
+) -> tuple[dict[str, Any] | None, str | None]:
+    data, reason = _load_artifact(path, read)
+
+    if data is not None and (problem := authored.malformation(kind, data)) is not None:
+        return None, f"does not match its schema (SPEC 2.7): {problem}"
+
+    return data, reason

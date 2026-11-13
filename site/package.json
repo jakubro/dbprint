@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "prebuild": "node scripts/copy-schemas.mjs",
-    "build": "astro build",
+    "build": "node scripts/build.mjs",
     "postbuild": "node scripts/check-links.mjs",
     "dev": "astro dev",
     "preview": "astro preview"

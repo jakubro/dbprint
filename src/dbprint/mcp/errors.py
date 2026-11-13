@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from dbprint.engine.baseline import ManifestRead, unprofiled_message
+from dbprint.engine.baseline import REGENERATE_NOTE, ManifestRead, unprofiled_message
 
 
 JsonRpcCode = Literal[
@@ -136,7 +136,8 @@ def manifest_references_missing_file(artifact: str, path: str) -> McpError:
 
     return McpError(
         -32603,
-        f"manifest references {artifact} but file is absent at {path}. Re-run dbprint generate.",
+        f"manifest references {artifact} but file is absent at {path}, so the print is "
+        f"incomplete. dbprint generate writes it; {REGENERATE_NOTE}.",
     )
 
 
@@ -145,7 +146,8 @@ def no_diff_available(path: str) -> McpError:
 
     return McpError(
         -32603,
-        f"no diff available at {path}. Run `dbprint diff` or `dbprint generate` first.",
+        f"no diff available at {path}. Every dbprint generate run writes diff.yaml; "
+        f"{REGENERATE_NOTE}.",
     )
 
 
@@ -154,7 +156,8 @@ def no_reading_guide_available(path: str) -> McpError:
 
     return McpError(
         -32603,
-        f"no reading guide available at {path}. Run `dbprint generate` first.",
+        f"no reading guide available at {path}. Every dbprint generate run writes reading.md; "
+        f"{REGENERATE_NOTE}.",
     )
 
 
@@ -252,8 +255,9 @@ def missing_page_version(uri: str) -> McpError:
 
     return McpError(
         -32602,
-        f"{uri!r} asks for a page past the first without `version`. Pass the `version` the "
-        "first page's `_meta` reported, as `?page=<n>&version=<v>`.",
+        f"{uri!r} asks for a page past the first without `version`. Read the URI the `next_page` "
+        "line ending the page before names, which carries `page` and `version`, or pass the "
+        "`version` the first page's `_meta` reported, as `?page=<n>&version=<v>`.",
     )
 
 

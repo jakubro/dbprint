@@ -258,6 +258,11 @@ fail_under = 80
 testpaths = ["tests"]
 pythonpath = ["src"]
 cache_dir = "/tmp/.pytest_cache-dbprint"
+filterwarnings = [
+  "error",
+  # PySpark 4.2 does not yet fully support pandas 3, which chdb and databricks-sql-connector pull in.
+  "ignore:PySpark does not yet fully support pandas:FutureWarning",
+]
 
 # `just mutate PACKAGE` runs mutmut in a /tmp copy of the tree and appends that package's
 # `only_mutate` and `pytest_add_cli_args_test_selection`, so this table must stay last.

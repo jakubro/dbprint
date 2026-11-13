@@ -26,7 +26,6 @@ from mcp.types import (
     TextContent,
     TextResourceContents,
     Tool,
-    ToolAnnotations,
 )
 from mcp.types import Resource as McpResource
 
@@ -37,6 +36,12 @@ from .state import ServedConnections
 
 
 SERVER_NAME = "dbprint"
+SERVER_TITLE = "dbprint"
+SERVER_DESCRIPTION = (
+    "A database's schema, value lists and joins, from a snapshot in your repo - no database "
+    "connection."
+)
+SERVER_WEBSITE = "https://jakubro.github.io/dbprint/"
 
 
 def build_server(state: ServedConnections) -> Server:
@@ -76,8 +81,13 @@ def build_server(state: ServedConnections) -> Server:
     ) -> ListResourceTemplatesResult:
         return ListResourceTemplatesResult(
             resource_templates=[
-                ResourceTemplate(uri_template=template, name=name, mime_type=mime)
-                for template, name, mime in resources.TEMPLATES
+                ResourceTemplate(
+                    uri_template=t.uri_template,
+                    name=t.name,
+                    description=t.description,
+                    mime_type=t.mime_type,
+                )
+                for t in resources.TEMPLATES
             ],
         )
 
@@ -115,15 +125,7 @@ def build_server(state: ServedConnections) -> Server:
             raise SdkMcpError(exc.code, exc.detail) from exc
 
         return ListToolsResult(
-            tools=[
-                Tool(
-                    name=t.name,
-                    description=t.description,
-                    input_schema=t.input_schema,
-                    annotations=ToolAnnotations.model_validate(t.annotations.wire()),
-                )
-                for t in definitions
-            ],
+            tools=[Tool.model_validate(t.wire()) for t in definitions],
             next_cursor=next_cursor,
         )
 
@@ -156,6 +158,9 @@ def build_server(state: ServedConnections) -> Server:
         state,
         SERVER_NAME,
         version=DBPRINT_VERSION,
+        title=SERVER_TITLE,
+        description=SERVER_DESCRIPTION,
+        website_url=SERVER_WEBSITE,
         on_list_resources=list_resources,
         on_list_resource_templates=list_resource_templates,
         on_read_resource=read_resource,
@@ -172,6 +177,9 @@ def initialization_options(server: Server) -> InitializationOptions:
     return InitializationOptions(
         server_name=SERVER_NAME,
         server_version=DBPRINT_VERSION,
+        title=server.title,
+        description=server.description,
+        website_url=server.website_url,
         capabilities=server.get_capabilities(
             notification_options=NotificationOptions(
                 prompts_changed=False,
@@ -221,7 +229,14 @@ async def run_http(server: Server, host: str, port: int) -> None:
     import uvicorn
 
     config = uvicorn.Config(app, host=host, port=port, log_level="warning")
-    await uvicorn.Server(config).serve()
+    http = uvicorn.Server(config)
+
+    try:
+        await http.serve()
+    finally:
+        # A cancelled serve skips the shutdown that closes these; uvicorn sets them only once bound.
+        for listener in getattr(http, "servers", ()):
+            listener.close()
 
 
 def serve_stdio(state: ServedConnections) -> None:

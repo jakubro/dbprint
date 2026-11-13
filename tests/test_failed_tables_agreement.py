@@ -19,6 +19,7 @@ _CONSUMERS = (
     _SRC / "engine" / "thresholds.py",
 )
 _CONSULTS = frozenset({"failed_tables", "_absent_table"})
+_WALKS = frozenset({"walkable_tables", "_entries"})
 
 _NEEDS_NO_FAILURES = {
     ("cli/commands/check.py", "_judged_entries"): "judges the freshness of present entries",
@@ -26,8 +27,12 @@ _NEEDS_NO_FAILURES = {
     ("cli/commands/check.py", "_summary_view"): "renders issues keyed by present tables",
     ("cli/commands/check.py", "_tables_with_errors"): "maps issues onto present tables",
     ("cli/commands/config.py", "_printed_external"): "reads one present table's files",
-    ("engine/context_assembler.py", "authored_relationship_annotations"): (
+    ("engine/context_assembler.py", "_relationships_annotations_files"): (
         "reads present tables' annotation files"
+    ),
+    ("engine/context_assembler.py", "_entries"): "keeps the walk its callers, swept here, list",
+    ("engine/context_assembler.py", "_assemble_markdown_in_processes"): (
+        "orders present tables by size; each worker's load consults the failed ones"
     ),
     ("engine/context_assembler.py", "incoming_rejections"): "reads present referencers' files",
     ("engine/context_assembler.py", "_incoming_cardinalities"): "reads present referencers' files",
@@ -83,7 +88,7 @@ def _functions(tree: ast.AST) -> list[ast.FunctionDef]:
 
 def _reads_tables(function: ast.FunctionDef) -> bool:
     for node in ast.walk(function):
-        if isinstance(node, ast.Call) and _callee(node) == "walkable_tables":
+        if isinstance(node, ast.Call) and _callee(node) in _WALKS:
             return True
 
         if (

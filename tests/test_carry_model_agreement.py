@@ -16,7 +16,7 @@ _ENGINE = Path(dbprint.__file__).parent / "engine"
 _RUN_PATH = ("orchestrator.py", "manifest_builder.py", "diff.py")
 
 # Parse the statistics text the run itself just dumped, not a committed file.
-_OWN_OUTPUT_READERS = frozenset({"_reread_statistics", "_rewrite_statistics"})
+_OWN_OUTPUT_READERS = frozenset({"_reread_statistics"})
 _YAML_PARSES = frozenset({"safe_load", "safe_load_all", "load", "load_all"})
 
 

@@ -83,7 +83,9 @@ def _tree(root: Path) -> dict[str, bytes]:
 
 
 def _interrupted(work: Path, env: dict[str, str], command: list[str]) -> tuple[int, str]:
-    proc = subprocess.Popen(
+    lines: list[str] = []
+
+    with subprocess.Popen(
         [_dbprint(), *command, "--no-tui"],
         cwd=work,
         env=env,
@@ -91,19 +93,18 @@ def _interrupted(work: Path, env: dict[str, str], command: list[str]) -> tuple[i
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
-    )
-    lines: list[str] = []
+    ) as proc:
+        assert proc.stderr is not None
 
-    assert proc.stderr is not None
+        for line in proc.stderr:
+            lines.append(line)
 
-    for line in proc.stderr:
-        lines.append(line)
+            if line.rstrip("\n").split("\t")[1:3] == [BIG, "start"]:
+                time.sleep(2)
+                os.killpg(proc.pid, signal.SIGINT)
+                break
 
-        if line.rstrip("\n").split("\t")[1:3] == [BIG, "start"]:
-            time.sleep(2)
-            os.killpg(proc.pid, signal.SIGINT)
-            break
+        lines.extend(proc.stderr)
+        code = proc.wait(timeout=300)
 
-    lines.extend(proc.stderr)
-
-    return proc.wait(timeout=300), "".join(lines)
+    return code, "".join(lines)

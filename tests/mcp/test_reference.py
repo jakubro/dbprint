@@ -300,6 +300,34 @@ class TestAgainstRealPackagedContent:
         for citation in cited:
             assert reference.section("assertions", citation) is not None, citation
 
+    def test_every_spec_citation_in_the_packaged_guide_resolves_verbatim(self) -> None:
+        import re
+
+        from dbprint.engine.reading_guide import READING_GUIDE_TEXT
+
+        cited = {m.rstrip(".") for m in re.findall(r"SPEC [0-9][0-9.]*", READING_GUIDE_TEXT)}
+
+        assert cited, "no SPEC citations found - the scan itself is broken"
+
+        for citation in cited:
+            assert reference.section("spec", citation) is not None, citation
+
+    @pytest.mark.parametrize(
+        ("document", "own", "other"),
+        [
+            ("spec", "SPEC.md §2.2.4", "ASSERTIONS.md §1.2"),
+            ("assertions", "ASSERTIONS.md §1.2", "SPEC.md §1.2"),
+        ],
+    )
+    def test_a_citation_naming_the_other_document_matches_no_section(
+        self,
+        document: reference.ReferenceDocument,
+        own: str,
+        other: str,
+    ) -> None:
+        assert reference.section(document, own) is not None
+        assert reference.section(document, other) is None
+
 
 class TestThePackagedGuide:
     """The installed guide, read with no print: `get_reference` serves this copy."""

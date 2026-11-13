@@ -4,6 +4,8 @@ identifier resolves case-insensitively, so `physical_name` is carried for the re
 
 from __future__ import annotations
 
+from functools import partial
+
 from dbprint.spec.fqn import join as join_fqn
 from .connection import DIALECT, Cursor, exec_query
 from ..base import (
@@ -14,6 +16,7 @@ from ..base import (
     PhysicalLayout,
     TableMeta,
     UniqueKeyMeta,
+    session_row_count,
 )
 from ..identifiers import Identity, column_meta, fold, select_tables, table_meta, unquote
 
@@ -328,13 +331,16 @@ def comments(cursor: Cursor, identity: Identity) -> CommentsMeta:
 
 
 def row_count_estimate(cursor: Cursor, identity: Identity) -> int:
-    """The table's exact row count; -1 for a view or an unknown table, which is never queried
-    (SPEC 2.2.15).
+    """Exact row count, read once per session; -1 for a view or an unknown table (SPEC 2.2.15).
 
     `estimated_size` keeps counting deleted rows until a whole row group empties, while a
     `COUNT(1)` is answered from row-group counts and deletion markers, reading no column data.
     """
 
+    return session_row_count(cursor, identity.fqn, partial(_row_count, cursor, identity))
+
+
+def _row_count(cursor: Cursor, identity: Identity) -> int:
     database, schema, table = identity.parts
     row = exec_query(
         cursor,

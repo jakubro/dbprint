@@ -12,6 +12,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -133,6 +134,7 @@ _LIVE_SERVER_MARK = "live_server"
 # Where a worker finds the process that owns the run's shared servers - xdist's controller, or
 # the only process of a run without it.
 _RUN_OWNER_ENV = "DBPRINT_TEST_RUN_OWNER"
+
 
 # Set on the re-exec, so the sandboxed process does not sandbox itself again.
 _SANDBOX_MARKER = "DBPRINT_TEST_SANDBOXED"
@@ -763,7 +765,7 @@ def _start_mariadb() -> dict[str, str]:
     handle = {"path": str(data_dir), "port": str(port)}
     marker = _substrates.register(root, name, "mariadb", _run_owner(), **handle)
     # Held so a readiness wait that expires before the pid file exists can still kill the server.
-    server: subprocess.Popen[bytes] | None = None
+    server: int | None = None
 
     try:
         data_dir.mkdir(parents=True, exist_ok=True)
@@ -784,7 +786,9 @@ def _start_mariadb() -> dict[str, str]:
             )
 
             # Outlives the worker that starts it; the run's owner stops it through the pid file.
-            server = subprocess.Popen(
+            # Spawned without a Popen, which warns when collected while its child still runs.
+            server = os.posix_spawn(
+                mariadbd,
                 [
                     str(mariadbd),
                     "--no-defaults",
@@ -801,11 +805,13 @@ def _start_mariadb() -> dict[str, str]:
                     f"--pid-file={data_dir / 'mariadb.pid'}",
                     f"--log-error={data_dir / 'mariadb.err'}",
                 ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
                 # A daylight-saving SYSTEM zone, as a default install on such a host runs.
-                env={**os.environ, "TZ": "America/New_York"},
+                {**os.environ, "TZ": "America/New_York"},
+                file_actions=[
+                    (os.POSIX_SPAWN_OPEN, 1, os.devnull, os.O_WRONLY, 0),
+                    (os.POSIX_SPAWN_OPEN, 2, os.devnull, os.O_WRONLY, 0),
+                ],
+                setpgroup=0,
             )
 
             _wait_for_mysql("127.0.0.1", port, timeout=30.0)
@@ -814,7 +820,8 @@ def _start_mariadb() -> dict[str, str]:
         message = _substrates.start_failure("mariadb", said, root, port)
 
         if server is not None:
-            server.kill()
+            os.kill(server, signal.SIGKILL)
+            os.waitpid(server, 0)
 
         _STOPPERS["mariadb"](handle, _run_owner())
         marker.unlink(missing_ok=True)

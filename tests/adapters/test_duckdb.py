@@ -451,3 +451,53 @@ class TestDistinctCountsAreExactAtAnySize:
             adapter.close()
 
         assert (stats["rank"].cardinality, stats["rank"].cardinality_method) == (93, "exact")
+
+
+class TestTheDrawsCountATableOncePerSession:
+    """Every column's `looks_like` draw reuses the table's count; the next session counts again."""
+
+    def test_each_session_counts_the_table_once(self, tmp_path: Path) -> None:
+        path = str(tmp_path / "garden.duckdb")
+        seeded = duckdb.connect(path)
+        seeded.execute(
+            "CREATE TABLE field_log AS SELECT i AS id, 'bed ' || (i % 40) AS label, i % 7 AS plot "
+            "FROM range(5000) r(i)",
+        )
+        seeded.close()
+        statements: list[str] = []
+        adapter = DuckdbAdapter(
+            {"database": path},
+            cursor_factory=lambda _p: _Recording(duckdb.connect(path), statements),
+        )
+
+        for _session in range(2):
+            adapter.connect()
+            adapter.list_tables(include=["*"], exclude=[])
+            adapter.estimate_row_count("garden.main.field_log")
+
+            for column in ("id", "label", "plot"):
+                adapter.sample_values("garden.main.field_log", column, 10)
+
+            adapter.close()
+
+        counted = 'SELECT COUNT(1) FROM "garden"."main"."field_log" src'
+
+        assert [" ".join(s.split()) for s in statements].count(counted) == 2
+
+
+class _Recording:
+    def __init__(self, connection: duckdb.DuckDBPyConnection, statements: list[str]) -> None:
+        self._connection = connection
+        self._statements = statements
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._connection, name)
+
+    def execute(self, sql: str, params: object = None) -> object:
+        self._statements.append(sql)
+
+        return (
+            self._connection.execute(sql)
+            if params is None
+            else self._connection.execute(sql, params)
+        )

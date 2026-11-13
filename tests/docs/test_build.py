@@ -239,3 +239,29 @@ class TestABuiltSiteDependsOnThePrintAlone:
         }
 
         assert one == two
+
+
+class TestPagesRenderedInWorkerProcesses:
+    def test_worker_processes_write_the_bytes_one_process_writes(
+        self,
+        rich_conn: ConnectionConfig,
+        second_conn: ConnectionConfig,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(build, "_PARALLEL_MIN_PAGES", 1)
+
+        alone = build.build_site([rich_conn, second_conn], tmp_path / "alone", workers=1)
+        shared = build.build_site([rich_conn, second_conn], tmp_path / "shared", workers=2)
+
+        assert (shared.pages_written, shared.failed_routes) == (6, ())
+        assert (alone.pages_written, alone.failed_routes) == (6, ())
+        assert _tree(tmp_path / "shared") == _tree(tmp_path / "alone")
+
+
+def _tree(root: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }

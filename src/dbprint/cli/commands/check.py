@@ -47,7 +47,7 @@ from dbprint.engine import (
     thresholds,
     worst_exit,
 )
-from dbprint.engine.baseline import failed_tables, read_manifest
+from dbprint.engine.baseline import failed_tables, read_manifest, unprofiled_message
 from dbprint.engine.carried import CommittedPrint, redaction_mismatches
 from dbprint.engine.freshness import evaluate
 from dbprint.engine.result import DiffResult
@@ -69,11 +69,6 @@ from ..rendering.check_tty import render_human
 from ..rendering.errors import emit_error
 from ..rendering.progress import ConnectionSummary, ProgressRenderer
 from ..run_log import close_run_log, log_run_header, log_run_summary, open_run_log
-
-
-_UNPROFILED_CAUSE = (
-    "the last generate run could not profile this table; run dbprint generate to see the cause"
-)
 
 
 @click.command(name="check")
@@ -328,7 +323,7 @@ def _check_one(
     resolved = thresholds.resolve(conn_config, manifest)
     refused = _not_run_from(resolved, exit_moving=override is None)
     unprofiled = tuple(
-        NotRun(subject=fqn, cause=_UNPROFILED_CAUSE, severity="error")
+        NotRun(subject=fqn, cause=unprofiled_message(fqn), severity="error")
         for fqn in failed_tables(manifest)
         if fqn not in {entry.subject for entry in refused}
     )

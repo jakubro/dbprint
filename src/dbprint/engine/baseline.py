@@ -6,10 +6,10 @@ A malformed artifact degrades to absent - the smallest unit holding the defect d
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Hashable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 import yaml
 
@@ -25,6 +25,13 @@ from dbprint.spec.artifacts import (
 
 # Parses one artifact file, raising OSError or `yaml.YAMLError` as `read_artifact` does.
 ArtifactReader = Callable[[Path], Any]
+
+REGENERATE_NOTE = (
+    "rerunning dbprint generate queries the database and is for whoever maintains the print"
+)
+UNPROFILED_CAUSE_NOTE = f"the cause is in that run's output, and {REGENERATE_NOTE}"
+
+_T = TypeVar("_T")
 
 _UNMEASURED_BLOCK_MESSAGE = {
     "physical_layout": 'this run did not measure it, so whether a key is declared is unknown, not "none".',
@@ -51,6 +58,36 @@ def read_artifact(path: Path) -> Any:
     """Parse one artifact file afresh."""
 
     return artifact_yaml.load(path.read_text(encoding="utf-8"))
+
+
+class PrintReader:
+    """An `ArtifactReader` that parses each file once and keeps what `once` computes from it.
+
+    Every caller shares what it returns, so none mutates it. A parse that raises is not kept:
+    the next read of that file parses it again.
+    """
+
+    def __init__(self, read: ArtifactReader = read_artifact) -> None:
+        self._read = read
+        self._parsed: dict[Path, Any] = {}
+        self._kept: dict[Hashable, tuple[object, Any]] = {}
+
+    def __call__(self, path: Path) -> Any:
+        if path not in self._parsed:
+            self._parsed[path] = self._read(path)
+
+        return self._parsed[path]
+
+    def once(self, key: Hashable, compute: Callable[[], _T], *, owner: object = None) -> _T:
+        """`compute()`, kept under `key` while each call passes the same `owner` it came from."""
+
+        held = self._kept.get(key)
+
+        if held is None or held[0] is not owner:
+            held = (owner, compute())
+            self._kept[key] = held
+
+        return held[1]
 
 
 ManifestState = Literal["absent", "unparseable", "malformed", "ok"]
@@ -211,7 +248,7 @@ def disabled_feature_message(name: str) -> str:
 def unprofiled_message(fqn: str) -> str:
     """How every surface names a table the last run could not profile."""
 
-    return f"the last generate run could not profile {fqn!r}; run dbprint generate to see the cause"
+    return f"the last generate run could not profile {fqn!r}; {UNPROFILED_CAUSE_NOTE}"
 
 
 def table_directory(print_root: Path, fqn: str, entry: dict[str, Any]) -> Path:

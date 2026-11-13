@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+from functools import partial
 from typing import Any, cast
 
 from dbprint.spec.fqn import join as join_fqn
@@ -25,6 +26,7 @@ from ..base import (
     TableMeta,
     TableType,
     UniqueKeyMeta,
+    session_row_count,
 )
 from ..errors import QueryFailed
 from ..identifiers import (
@@ -472,8 +474,12 @@ def view_dependencies(cursor: Cursor, databases: Sequence[str]) -> dict[str, tup
 
 
 def row_count_estimate(cursor: Cursor, identity: Identity) -> int:
-    """Catalog row count for the table, never a scan; -1 when the catalog has no entry."""
+    """Catalog row count, read once per session, never by a scan; -1 without a catalog entry."""
 
+    return session_row_count(cursor, identity.fqn, partial(_row_count, cursor, identity))
+
+
+def _row_count(cursor: Cursor, identity: Identity) -> int:
     row = exec_query(
         cursor,
         f"""

@@ -1,6 +1,6 @@
 {
   "name": "dbprint",
-  "version": "0.20.0",
+  "version": "0.21.0",
   "description": "A database's schema, value lists and joins, from a snapshot in your repo - no database connection. The MCP server that serves the snapshot, run with uvx, and the skills that read and annotate it.",
   "author": {
     "name": "Jakub Roman"
@@ -26,7 +26,7 @@
       "command": "uvx",
       "args": [
         "--with",
-        "dbprint[mcp]==0.20.0",
+        "dbprint[mcp]==0.21.0",
         "dbprint",
         "serve",
         "--project",

@@ -74,6 +74,15 @@ class Connection(FactoryConnection):
     def _open_failure(self, exc: Exception) -> str:
         return f"could not open sqlite database {self.params.database!r}: {exc}"
 
+    def open(self) -> None:
+        if sqlite3.sqlite_version_info < MIN_VERSION:
+            raise SqliteConnectionError(
+                f"sqlite {sqlite3.sqlite_version} is older than 3.38.0, "
+                "the first release with JSON functions built in",
+            )
+
+        super().open()
+
     def close(self) -> None:
         connection = getattr(self._cursor, "connection", None)
         super().close()
@@ -85,12 +94,6 @@ class Connection(FactoryConnection):
                 pass
 
     def _opened(self, cursor: Any, /) -> Any:
-        if sqlite3.sqlite_version_info < MIN_VERSION:
-            raise SqliteConnectionError(
-                f"sqlite {sqlite3.sqlite_version} is older than 3.38.0, "
-                "the first release with JSON functions built in",
-            )
-
         return _GuardedCursor(cursor, self.params.statement_timeout)
 
 

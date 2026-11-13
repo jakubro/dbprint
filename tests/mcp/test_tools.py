@@ -40,6 +40,14 @@ def _narrow_the_seeded_read(conn: ConnectionConfig, rows_scanned: int) -> None:
     path.write_text(yaml.safe_dump(statistics))
 
 
+def _nest_vault_scope(conn: ConnectionConfig) -> None:
+    path = conn.output / conn.name / "arboretum" / "seedbank" / "vault" / "statistics.yaml"
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    at = next(n for n, line in enumerate(lines) if line.startswith("row_count:")) + 1
+    scope = "scope:\n  rows_scanned: 3\n  filter: kept = true\n  note:\n  - one\n  - two\n"
+    path.write_text("".join([*lines[:at], scope, *lines[at:]]), encoding="utf-8")
+
+
 def _dict_result(state: ServedConnections, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """Dict-returning `dispatch`; md/yaml `get_table_context` is the only string (MCP.md 4.1)."""
 
@@ -912,6 +920,24 @@ class TestGetTableContext:
         assert all(isinstance(page, str) for page in yaml_pages)
         assert _mcp_pages.merged(yaml_pages) == _mcp_pages.merged(json_pages)
 
+    def test_a_nested_value_in_the_tables_scope_is_written_out_under_both_scopes(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        _nest_vault_scope(primary_conn)
+        state = _state_for(primary_conn)
+        result = dispatch(
+            state,
+            "get_table_context",
+            {"table": "arboretum.seedbank.vault", "format": "yaml"},
+        )
+
+        assert isinstance(result, str)
+        assert re.search(r"[&*]id\d{3}", result) is None
+        reply = yaml.safe_load(result)
+        assert reply["scope"]["note"] == ["one", "two"]
+        assert reply["statistics"]["scope"]["note"] == ["one", "two"]
+
     def test_json_format_respects_include_flags(self, primary_conn: ConnectionConfig) -> None:
         state = _state_for(primary_conn)
         result = _dict_result(
@@ -1165,6 +1191,137 @@ def _detail(conn: ConnectionConfig) -> dict[str, dict[str, Any]]:
     result = _dict_result(_state_for(conn), "list_tables", {"detail": True})
 
     return {entry["table"]: entry for entry in result["tables"]}
+
+
+class TestAPatternMatchingNothingNamesTheWholeNameRule:
+    @staticmethod
+    def _rewrite_tables(conn: ConnectionConfig, tables: dict[str, Any]) -> None:
+        path = conn.output / conn.name / "manifest.yaml"
+        manifest = yaml.safe_load(path.read_text())
+        manifest["tables"] = tables
+        path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+
+    @pytest.mark.parametrize("tool", ["list_tables", "get_manifest"])
+    def test_the_pattern_descriptions_match_the_whole_dotted_name(self, tool: str) -> None:
+        definition = next(t for t in TOOL_DEFINITIONS if t.name == tool)
+        described = definition.input_schema["properties"]["pattern"]["description"]
+
+        for phrase in ("whole dotted name", "'*.sales.*'", "'sales.*'", "'*orders*'"):
+            assert phrase in described, phrase
+
+    @pytest.mark.parametrize("tool", ["list_tables", "get_manifest"])
+    def test_a_schema_shaped_pattern_names_the_rule_and_a_name_from_the_print(
+        self,
+        primary_conn: ConnectionConfig,
+        tool: str,
+    ) -> None:
+        reply = _dict_result(_state_for(primary_conn), tool, {"pattern": "seedbank.*"})
+
+        assert not reply["tables"]
+        assert reply["total"] == 0
+        assert "whole dotted name" in reply["notes"]["pattern"]
+        assert "'arboretum.fixture.shape_probe'" in reply["notes"]["pattern"]
+
+    def test_both_tools_carry_the_same_note(self, primary_conn: ConnectionConfig) -> None:
+        state = _state_for(primary_conn)
+        listed = _dict_result(state, "list_tables", {"pattern": "seedbank.*"})
+        manifest = _dict_result(state, "get_manifest", {"pattern": "seedbank.*"})
+
+        assert listed["notes"]["pattern"] == manifest["notes"]["pattern"]
+
+    @pytest.mark.parametrize("tool", ["list_tables", "get_manifest"])
+    @pytest.mark.parametrize("arguments", [{}, {"pattern": "*.seedbank.*"}], ids=["none", "match"])
+    def test_a_matching_or_absent_pattern_carries_no_pattern_note(
+        self,
+        primary_conn: ConnectionConfig,
+        tool: str,
+        arguments: dict[str, Any],
+    ) -> None:
+        reply = _dict_result(_state_for(primary_conn), tool, arguments)
+
+        assert "pattern" not in reply.get("notes", {})
+        assert tool == "list_tables" or "notes" not in reply
+        assert reply["total"] == (9 if arguments else 10)
+
+    def test_a_detailed_listing_keeps_freshness_beside_the_pattern_note(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        reply = _dict_result(
+            _state_for(primary_conn),
+            "list_tables",
+            {"pattern": "seedbank.*", "detail": True},
+        )
+
+        assert set(reply["notes"]) == {"freshness", "pattern"}
+
+    @pytest.mark.parametrize("tool", ["list_tables", "get_manifest"])
+    def test_a_pattern_matching_only_a_failed_table_carries_no_note(
+        self,
+        primary_conn: ConnectionConfig,
+        tool: str,
+    ) -> None:
+        path = primary_conn.output / primary_conn.name / "manifest.yaml"
+        manifest = yaml.safe_load(path.read_text())
+        manifest["failed_tables"] = ["arboretum.seedbank.herbarium"]
+        path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+        reply = _dict_result(_state_for(primary_conn), tool, {"pattern": "*herbarium"})
+
+        assert reply["total"] == 0
+        assert reply["failed_tables"] == ["arboretum.seedbank.herbarium"]
+        assert "notes" not in reply
+
+    @pytest.mark.parametrize("tool", ["list_tables", "get_manifest"])
+    @pytest.mark.parametrize("pattern", ["seedbank.*", "*"])
+    def test_an_empty_print_states_the_rule_and_names_no_table(
+        self,
+        primary_conn: ConnectionConfig,
+        tool: str,
+        pattern: str,
+    ) -> None:
+        self._rewrite_tables(primary_conn, {})
+        note = _dict_result(_state_for(primary_conn), tool, {"pattern": pattern})["notes"][
+            "pattern"
+        ]
+
+        assert "whole dotted name" in note
+        assert "arboretum" not in note
+        assert "None" not in note
+
+    def test_a_print_with_no_manifest_states_the_rule_and_names_no_table(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        (primary_conn.output / primary_conn.name / "manifest.yaml").unlink()
+        reply = _dict_result(_state_for(primary_conn), "list_tables", {"pattern": "seedbank.*"})
+
+        assert "whole dotted name" in reply["notes"]["pattern"]
+        assert "None" not in reply["notes"]["pattern"]
+
+    def test_the_example_is_the_first_name_in_fqn_order_not_the_files(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        path = primary_conn.output / primary_conn.name / "manifest.yaml"
+        tables = yaml.safe_load(path.read_text())["tables"]
+        self._rewrite_tables(
+            primary_conn,
+            {fqn: tables[fqn] for fqn in sorted(tables, reverse=True)},
+        )
+        reply = _dict_result(_state_for(primary_conn), "list_tables", {"pattern": "seedbank.*"})
+
+        assert reply["notes"]["pattern"].endswith("'arboretum.fixture.shape_probe'")
+
+    def test_a_name_holding_a_quote_is_spelled_as_a_literal(
+        self,
+        primary_conn: ConnectionConfig,
+    ) -> None:
+        path = primary_conn.output / primary_conn.name / "manifest.yaml"
+        entry = yaml.safe_load(path.read_text())["tables"]["arboretum.seedbank.vault"]
+        self._rewrite_tables(primary_conn, {"arboretum.seedbank.curator's_note": entry})
+        reply = _dict_result(_state_for(primary_conn), "list_tables", {"pattern": "seedbank.*"})
+
+        assert reply["notes"]["pattern"].endswith("'arboretum.seedbank.curator''s_note'")
 
 
 class TestListTablesFreshness:
@@ -1911,6 +2068,18 @@ class TestGetDiff:
 
 
 class TestToolDefinitions:
+    @pytest.mark.parametrize("field", ["description", "section"])
+    def test_get_reference_names_where_a_citation_comes_from(self, field: str) -> None:
+        definition = next(t for t in TOOL_DEFINITIONS if t.name == "get_reference")
+        text = (
+            definition.description
+            if field == "description"
+            else definition.input_schema["properties"]["section"]["description"]
+        )
+
+        assert "SPEC 2.2.4" in text
+        assert "dbprint check" in text
+
     def test_tool_names_match_definitions(self) -> None:
 
         assert tuple(t.name for t in TOOL_DEFINITIONS) == TOOL_NAMES
@@ -2054,6 +2223,26 @@ class TestGetReference:
             {"document": "spec", "section": "§1"},
         )
         assert "Body." in section
+
+    def test_a_spec_citation_resolves_for_the_spec_alone(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from dbprint.mcp import reference as reference_module
+
+        monkeypatch.setattr(reference_module, "_read", lambda document: "## 1. One\n\nBody.\n")
+        arguments = {"section": "SPEC 1"}
+
+        assert "Body." in dispatch(
+            self._EMPTY_STATE,
+            "get_reference",
+            {**arguments, "document": "spec"},
+        )
+
+        with pytest.raises(McpError) as excinfo:
+            dispatch(self._EMPTY_STATE, "get_reference", {**arguments, "document": "assertions"})
+
+        assert excinfo.value.detail.endswith("Available: ['1']")
 
     def test_empty_string_section_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Distinct from omitting `section`, which means the heading tree: `""` is malformed."""
@@ -2528,6 +2717,18 @@ class TestAnUnwalkableManifestEntry:
 
         with pytest.raises(McpError):
             dispatch(_state_for(primary_conn), "get_table_context", {"table": broken})
+
+    @pytest.mark.parametrize("tool", ["list_tables", "get_manifest"])
+    def test_the_example_name_is_never_the_unwalkable_entry(
+        self,
+        primary_conn: ConnectionConfig,
+        tool: str,
+    ) -> None:
+        broken, _ = self._corrupt_one(primary_conn)
+        note = _dict_result(_state_for(primary_conn), tool, {"pattern": "seedbank.*"})["notes"]
+
+        assert "'arboretum.seedbank.accession'" in note["pattern"]
+        assert broken not in note["pattern"]
 
 
 class TestAnnotationsWithoutReadableStatistics:

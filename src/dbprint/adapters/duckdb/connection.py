@@ -112,6 +112,7 @@ class _InterruptibleCursor:
         self._seconds = seconds
         self._lock = threading.Lock()
         self._in_flight: object | None = None
+        self.row_counts: dict[str, int] = {}
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._cursor, name)

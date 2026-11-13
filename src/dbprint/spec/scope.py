@@ -5,6 +5,7 @@ A scoped file describes the rows scanned, not the table. Pure: no I/O.
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -152,7 +153,7 @@ def reply_scope(scope: ScanScope | None) -> dict[str, Any]:
     if scope is None:
         return {}
 
-    reply: dict[str, Any] = {"scope": scope.block}
+    reply: dict[str, Any] = {"scope": copy.deepcopy(scope.block)}
 
     if scope.row_count is not None:
         reply["row_count"] = scope.row_count

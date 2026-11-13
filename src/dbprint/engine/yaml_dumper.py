@@ -26,6 +26,22 @@ class ArtifactDumper(yaml.SafeDumper):
     """SafeDumper subclass carrying the artifact representer set."""
 
 
+class _LibyamlDumper(getattr(yaml, "CSafeDumper", yaml.SafeDumper)):
+    def represent_mapping(self, tag: str, mapping: Any, flow_style: bool | None = None) -> Any:
+        for key in mapping:
+            if not (
+                isinstance(key, str)
+                and 0 < len(key.encode("utf-8", "surrogatepass")) <= _LIBYAML_KEY_BYTES
+            ):
+                raise _SpelledDifferently
+
+        return super().represent_mapping(tag, mapping, flow_style)
+
+
+class _SpelledDifferently(Exception):
+    pass
+
+
 def _represent_uuid(dumper: yaml.SafeDumper, data: Any) -> yaml.ScalarNode:
     return dumper.represent_scalar("tag:yaml.org,2002:str", scalar_text(data))
 
@@ -106,33 +122,49 @@ def _refuse(dumper: yaml.SafeDumper, data: Any) -> yaml.Node:
     raise UnrepresentableValue(data)
 
 
-def _register_representers() -> None:
-    ArtifactDumper.add_representer(uuid.UUID, _represent_uuid)
-    ArtifactDumper.add_representer(decimal.Decimal, _represent_decimal)
-    ArtifactDumper.add_representer(float, _represent_float)
-    ArtifactDumper.add_representer(str, _represent_str)
-    ArtifactDumper.add_representer(datetime.datetime, _represent_datetime)
-    ArtifactDumper.add_representer(datetime.date, _represent_datetime)
-    ArtifactDumper.add_representer(datetime.time, _represent_datetime)
-    ArtifactDumper.add_representer(datetime.timedelta, _represent_timedelta)
+# libyaml quotes or folds control characters, U+2028/9, U+FEFF/FFFE/FFFF and anything past U+FFFF
+# unlike PyYAML; PyYAML writes a 123+ character or empty key as `? key`, libyaml one past 128 bytes.
+_LIBYAML_SPELLED_RE = re.compile(r"[\x20-\x7e\xa0-\u2027\u202a-\ud7ff\ue000-\ufefe\uff00-\ufffd]*")
+_LIBYAML_KEY_BYTES = 100
 
-    for refused in (bytes, bytearray, memoryview, set, frozenset, None):
-        ArtifactDumper.add_representer(refused, _refuse)
+
+def _represent_libyaml_str(dumper: yaml.SafeDumper, data: str) -> yaml.ScalarNode:
+    if not _LIBYAML_SPELLED_RE.fullmatch(data):
+        raise _SpelledDifferently
+
+    return _represent_str(dumper, data)
+
+
+def _register_representers() -> None:
+    for dumper in (ArtifactDumper, _LibyamlDumper):
+        dumper.add_representer(uuid.UUID, _represent_uuid)
+        dumper.add_representer(decimal.Decimal, _represent_decimal)
+        dumper.add_representer(float, _represent_float)
+        dumper.add_representer(datetime.datetime, _represent_datetime)
+        dumper.add_representer(datetime.date, _represent_datetime)
+        dumper.add_representer(datetime.time, _represent_datetime)
+        dumper.add_representer(datetime.timedelta, _represent_timedelta)
+
+        for refused in (bytes, bytearray, memoryview, set, frozenset, None):
+            dumper.add_representer(refused, _refuse)
+
+    ArtifactDumper.add_representer(str, _represent_str)
+    _LibyamlDumper.add_representer(str, _represent_libyaml_str)
 
 
 _register_representers()
 
 
 def dump_yaml(payload: Any) -> str:
-    """Dump `payload` to YAML using the dbprint artifact representer set."""
+    """Dump `payload` to YAML using the dbprint artifact representer set.
 
-    return yaml.dump(
-        payload,
-        Dumper=ArtifactDumper,
-        default_flow_style=False,
-        sort_keys=False,
-        allow_unicode=True,
-    )
+    libyaml emits it when it would write the same bytes as PyYAML's own emitter; else that does.
+    """
+
+    try:
+        return _dump(payload, _LibyamlDumper)
+    except _SpelledDifferently:
+        return _dump(payload, ArtifactDumper)
 
 
 def spell_inline(value: Any) -> str:
@@ -246,3 +278,13 @@ def _dump_flow(value: Any) -> str:
 
 def _double_quoted(value: str) -> str:
     return '"' + "".join(_escape(char) for char in value) + '"'
+
+
+def _dump(payload: Any, dumper: type[yaml.SafeDumper]) -> str:
+    return yaml.dump(
+        payload,
+        Dumper=dumper,
+        default_flow_style=False,
+        sort_keys=False,
+        allow_unicode=True,
+    )

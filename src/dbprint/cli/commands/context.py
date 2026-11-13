@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, cast
@@ -209,6 +210,7 @@ def context_command(
                 options=options,
                 connection_name=conn_config.name,
                 multi_connection=multi_connection,
+                workers=os.process_cpu_count() or 1,
             )
             included, chunk = result.tables_included, result.text
             terms |= result.terms

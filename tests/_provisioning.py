@@ -15,6 +15,7 @@ import os
 import shutil
 import subprocess
 import sys
+import warnings
 from collections.abc import Generator
 from contextlib import contextmanager
 from glob import glob
@@ -27,6 +28,10 @@ INSTALL_LOCK_PATH = Path("/tmp/dbprint--provisioning.lock")
 # One fixed path, shared by `warm_delta_ivy_cache()` and every xdist worker's Databricks fixture -
 # a per-process tempdir would make each worker re-resolve Delta's Maven jars from scratch.
 SPARK_IVY_CACHE_PATH = Path("/tmp/dbprint--spark-ivy-cache")
+
+# Inside the cache, so a cache removed or moved aside reads as unresolved again.
+_DELTA_RESOLVED_MARKER = SPARK_IVY_CACHE_PATH / "dbprint-resolved"
+_DELTA_RESOLUTION_LOCK_PATH = Path("/tmp/dbprint--spark-ivy-cache.lock")
 
 
 def in_container() -> bool:
@@ -132,6 +137,35 @@ def delta_jars_cached() -> bool:
     return any((SPARK_IVY_CACHE_PATH / "jars").glob("io.delta_delta-spark_*.jar"))
 
 
+def delta_jars_resolved() -> bool:
+    """Whether a resolution of Delta's jars into the shared Ivy cache has run to completion.
+
+    A cached `delta-spark` jar is not enough: resolutions racing on one cache leave it beside missing
+    dependencies.
+    """
+
+    return _DELTA_RESOLVED_MARKER.exists()
+
+
+@contextmanager
+def delta_resolution() -> Generator[None]:
+    """Run a Spark start resolving Delta's jars, holding other workers off a cache not yet resolved.
+
+    A resolved cache passes straight through, keeping warm starts parallel; only a clean exit marks
+    it resolved.
+    """
+
+    if not delta_jars_resolved():
+        with _install_lock(_DELTA_RESOLUTION_LOCK_PATH):
+            if not delta_jars_resolved():
+                yield  # noqa: RUF075 - a start that raised must leave the cache unresolved
+                _DELTA_RESOLVED_MARKER.touch()
+
+                return
+
+    yield
+
+
 def warm_delta_ivy_cache() -> int:
     """Resolve and cache Delta Lake's Maven/Ivy jars once, returning the process exit code.
 
@@ -146,6 +180,9 @@ def warm_delta_ivy_cache() -> int:
 
         return 0
 
+    # The notice pyproject.toml's filterwarnings ignores under pytest, for the reason given there.
+    warnings.filterwarnings("ignore", "PySpark does not yet fully support pandas", FutureWarning)
+
     from delta import configure_spark_with_delta_pip
     from pyspark.sql import SparkSession
 
@@ -158,7 +195,8 @@ def warm_delta_ivy_cache() -> int:
     )
 
     try:
-        spark = configure_spark_with_delta_pip(builder).getOrCreate()
+        with delta_resolution():
+            spark = configure_spark_with_delta_pip(builder).getOrCreate()
     except Exception as exc:  # noqa: BLE001 - any resolution failure is the one thing to report
         print(f"warm_delta_ivy_cache: could not resolve Delta's Maven jars: {exc}", file=sys.stderr)
 
@@ -189,7 +227,7 @@ def _locate(binary: str, candidate_globs: tuple[str, ...]) -> Path | None:
 
 
 @contextmanager
-def _install_lock() -> Generator[None]:
+def _install_lock(path: Path = INSTALL_LOCK_PATH) -> Generator[None]:
     """Hold an exclusive file lock for the duration of an install.
 
     pytest-xdist fans fixtures out across processes, and apt fails outright on a held
@@ -197,9 +235,9 @@ def _install_lock() -> Generator[None]:
     setup. The caller re-locates inside the lock and skips apt if a peer already installed.
     """
 
-    INSTALL_LOCK_PATH.touch(exist_ok=True)
+    path.touch(exist_ok=True)
 
-    with INSTALL_LOCK_PATH.open("r+", encoding="utf-8") as lock_file:
+    with path.open("r+", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
 
         try:

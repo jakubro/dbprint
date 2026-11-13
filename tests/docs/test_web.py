@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import html
 import re
 import shutil
@@ -322,10 +323,9 @@ class TestRoutes:
     def test_vendored_mermaid_is_served_same_origin(self, rich_conn: ConnectionConfig) -> None:
         client = web.create_app([rich_conn]).test_client()
 
-        response = client.get("/static/vendor/mermaid.min.js")
-
-        assert response.status_code == 200
-        assert b'version:"12.2.0"' in response.data
+        with client.get("/static/vendor/mermaid.min.js") as response:
+            assert response.status_code == 200
+            assert b'version:"12.2.0"' in response.data
 
     def test_no_cdn_reference_anywhere_in_a_rendered_page(
         self,
@@ -733,6 +733,13 @@ class TestAnnotationsWithoutReadableStatistics:
 
 
 class TestServe:
+    # waitress leaves its socket and wake-up pipe open when its bind fails; collected here, not later.
+    @pytest.mark.filterwarnings(
+        "ignore:Exception ignored in. <socket.socket:pytest.PytestUnraisableExceptionWarning",
+    )
+    @pytest.mark.filterwarnings(
+        "ignore:Exception ignored in. <function file_wrapper:pytest.PytestUnraisableExceptionWarning",
+    )
     def test_a_port_in_use_raises_before_announcing(self, reference_conn: ConnectionConfig) -> None:
         from dbprint.docs import serve
 
@@ -749,6 +756,8 @@ class TestServe:
                     taken.getsockname()[1],
                     lambda: announced.append(True),
                 )
+
+        gc.collect()
 
         assert announced == []
 
@@ -1065,3 +1074,21 @@ class TestMentions:
 
         assert ("https://seedbank.example/cultivar-register", "the cultivar register") in links
         assert ("/t/primary/seedbank.cultivar", "cultivar") in links
+
+
+class TestAServedPageReadsThePrintPerRequest:
+    def test_an_annotation_edited_between_two_requests_shows_in_the_second(
+        self,
+        rich_conn: ConnectionConfig,
+    ) -> None:
+        client = web.create_app([rich_conn]).test_client()
+        annotations = rich_conn.print_root / "seedbank/batch/statistics.annotations.yaml"
+        before = client.get("/t/primary/seedbank.batch").data.decode()
+        edited = yaml.safe_load(annotations.read_text(encoding="utf-8"))
+        edited["columns"]["cultivar_id"]["note"] = "Rewritten between two requests."
+        annotations.write_text(yaml.safe_dump(edited, sort_keys=False), encoding="utf-8")
+
+        after = client.get("/t/primary/seedbank.batch").data.decode()
+
+        assert "Rewritten between two requests." not in before
+        assert "Rewritten between two requests." in after

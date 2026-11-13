@@ -282,6 +282,27 @@ def line_pages(
     return pages
 
 
+def marked_line_pages(
+    text: str,
+    marker: Callable[[int], str],
+    *,
+    bound: int = PAGE_CHARACTERS,
+    width: Callable[[str], int] = len,
+) -> list[str]:
+    """`line_pages` with every page but the last ending in `marker(n)`, n the next page's number.
+
+    Every page fits `bound` as `width` measures it, marker included; a text within it is one page.
+    """
+
+    if width(text) <= bound:
+        return [text]
+
+    # No cut yields more pages than the text has characters, so no real page number is wider.
+    pages = line_pages(text, bound - width(marker(len(text))), width)
+
+    return [*(page + marker(n + 1) for n, page in enumerate(pages[:-1], start=1)), pages[-1]]
+
+
 def entry(unit: Any) -> tuple[Any, Any]:
     """A unit as `(key, value)`, a `Part` standing in its item's place."""
 

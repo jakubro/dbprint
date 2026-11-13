@@ -4,6 +4,7 @@ Neither issues a query - naming is pure, and containment reads statistics alread
 
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -15,9 +16,9 @@ from dbprint.spec.sketch import (
     K as SKETCH_K,
 )
 from dbprint.spec.sketch import (
-    answerable_count,
-    answerable_subset_containment,
-    estimate_intersection,
+    SketchKind,
+    retained_threshold,
+    scaled_intersection,
     sketch_kind,
 )
 
@@ -116,6 +117,7 @@ def infer_value_derived_edges(
     """
 
     proposals: dict[str, list[tuple[str, str, str, ForeignKeyMeta]]] = {}
+    ranked = _parents_by_kind(parents)
 
     for child in children:
         child_kind = sketch_kind(child.sql_type)
@@ -126,11 +128,15 @@ def infer_value_derived_edges(
         if (child.fqn, child.column) in asserted:
             continue
 
-        for parent in parents:
-            if parent.fqn == child.fqn and parent.column == child.column:
-                continue
+        candidates, cardinalities = ranked.get(child_kind, ((), ()))
+        # SPEC 2.3.11: the parent's cardinality MUST be the larger, so only the tail can qualify.
+        larger = candidates[bisect_right(cardinalities, child.cardinality) :]
+        sketched = _Sketched.of(child) if larger else None
 
-            if sketch_kind(parent.sql_type) != child_kind:
+        for prepared in larger:
+            parent = prepared.candidate
+
+            if parent.fqn == child.fqn and parent.column == child.column:
                 continue
 
             # Any small integer falls inside a gapless 1..N sequence, so only a reference's name
@@ -141,7 +147,7 @@ def infer_value_derived_edges(
             if (child.fqn, child.column, parent.fqn, parent.column) in existing:
                 continue
 
-            if _measure_containment(child, parent) is None:
+            if sketched is None or not _contained(sketched, prepared):
                 continue
 
             proposals.setdefault(child.fqn, []).append(
@@ -178,38 +184,71 @@ def _may_refer(child: SketchCandidate, kind: str) -> bool:
     return not child.candidate_key or child.column.endswith(_FK_SUFFIX)
 
 
-def _measure_containment(child: SketchCandidate, parent: SketchCandidate) -> float | None:
-    """SPEC 2.3's floor 3, or None where the measurement cannot carry the claim."""
+@dataclass(frozen=True)
+class _Sketched:
+    """One candidate's sketch as every pair reads it, derived once rather than once per pair."""
 
-    # SPEC 2.3.11: the parent's cardinality MUST be the larger - equal makes neither larger and
-    # licenses the edge in both directions, each end naming the other as parent.
-    if child.cardinality >= parent.cardinality:
-        return None
+    candidate: SketchCandidate
+    hashes: frozenset[int]
+    ordered: tuple[int, ...]
+    distinct: tuple[int, ...]
+    threshold: int
 
-    both_exhaustive = len(child.sketch) < SKETCH_K and len(parent.sketch) < SKETCH_K
+    @classmethod
+    def of(cls, candidate: SketchCandidate) -> _Sketched:
+        ordered = tuple(sorted(candidate.sketch))
 
-    if both_exhaustive:
-        result = answerable_subset_containment(child.sketch, parent.sketch)
+        return cls(
+            candidate=candidate,
+            hashes=frozenset(ordered),
+            ordered=ordered,
+            distinct=tuple(sorted(set(ordered))),
+            threshold=retained_threshold(ordered),
+        )
 
-        if result is None:
-            return None
 
-        ratio, _count = result
-        containment = min(1.0, round(ratio, 6))
+def _parents_by_kind(
+    parents: Sequence[SketchCandidate],
+) -> dict[SketchKind, tuple[tuple[_Sketched, ...], tuple[int, ...]]]:
+    """Each canonical kind's parents ascending by cardinality, with their cardinalities."""
 
-        return containment if containment == 1.0 else None  # noqa: RUF069 - clamped and rounded; only an exact 1.0 qualifies
+    by_kind: dict[SketchKind, list[_Sketched]] = {}
 
-    if not child.cardinality:
-        return None
+    for parent in parents:
+        if (kind := sketch_kind(parent.sql_type)) is not None:
+            by_kind.setdefault(kind, []).append(_Sketched.of(parent))
 
-    intersection = estimate_intersection(child.sketch, parent.sketch)
-    containment = min(1.0, round(intersection / child.cardinality, 6))
-    count = answerable_count(child.sketch, parent.sketch)
+    ranked = {}
 
-    if count >= _VALUE_DERIVED_MIN_ANSWERABLE and containment >= _VALUE_DERIVED_MIN_CONTAINMENT:
-        return containment
+    for kind, sketched in by_kind.items():
+        ordered = sorted(sketched, key=lambda s: s.candidate.cardinality)
+        ranked[kind] = (tuple(ordered), tuple(s.candidate.cardinality for s in ordered))
 
-    return None
+    return ranked
+
+
+def _contained(child: _Sketched, parent: _Sketched) -> bool:
+    """SPEC 2.3.11's floor 3 for a parent of the larger cardinality (SPEC 2.3.10's arithmetic)."""
+
+    if len(child.ordered) < SKETCH_K and len(parent.ordered) < SKETCH_K:
+        # Both exhaustive: containment is exact, and only 1.0 - every child hash - qualifies.
+        return bool(child.ordered) and child.hashes <= parent.hashes
+
+    if not child.candidate.cardinality:
+        return False
+
+    theta = min(child.threshold, parent.threshold)
+
+    if bisect_left(child.ordered, theta) < _VALUE_DERIVED_MIN_ANSWERABLE:
+        return False
+
+    common = len(parent.hashes.intersection(child.distinct[: bisect_left(child.distinct, theta)]))
+    intersection = scaled_intersection(common, theta)
+
+    return (
+        min(1.0, round(intersection / child.candidate.cardinality, 6))
+        >= _VALUE_DERIVED_MIN_CONTAINMENT
+    )
 
 
 def infer_foreign_keys(

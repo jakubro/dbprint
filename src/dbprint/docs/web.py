@@ -1,7 +1,7 @@
 """The docs site's Flask app: routes, template filters, app factory.
 
-The only module in this package that imports Flask. Every request re-reads the print from
-disk, so a page reflects the latest `generate`.
+The only module in this package that imports Flask. A served request re-reads the print from
+disk, so a page reflects the latest `generate`; a static build reads it once for every page.
 """
 
 from __future__ import annotations
@@ -42,16 +42,26 @@ _LINK_PATTERNS = (
 )
 
 
-def create_app(connections: list[ConnectionConfig], *, static: bool = False) -> Flask:
+def create_app(
+    connections: list[ConnectionConfig],
+    *,
+    static: bool = False,
+    prints: list[catalogue.PrintConnection] | None = None,
+    workers: int = 1,
+) -> Flask:
     """Build the docs Flask app over `connections` - the CLI's already-resolved set.
 
     `static` renders for a built site, which states no time relative to the moment it was built.
+    `prints` serves every request from one loaded set rather than re-reading it per request;
+    `workers` lets a schema page's context render in that many processes.
     """
 
     app = Flask(__name__)
     app.jinja_env.undefined = ChainableUndefined  # absent keys render blank
     cast(dict[str, Any], app.jinja_env.globals)["static_site"] = static
     app.config["DOCS_CONNECTIONS"] = list(connections)
+    app.config["DOCS_PRINTS"] = prints
+    app.config["DOCS_WORKERS"] = workers
 
     _register_filters(app)
     _register_routes(app)
@@ -65,7 +75,7 @@ def _register_routes(app: Flask) -> None:
     def index() -> str:
         """Render every connection's table list."""
 
-        conns = catalogue.load_connections(app.config["DOCS_CONNECTIONS"])
+        conns = _prints(app)
 
         return render_template(
             "index.html",
@@ -77,9 +87,11 @@ def _register_routes(app: Flask) -> None:
     def schema(conn: str, schema: str) -> str:
         """Render every table in one schema and their intra-schema relationships."""
 
-        conns = catalogue.load_connections(app.config["DOCS_CONNECTIONS"])
+        conns = _prints(app)
         found = catalogue.find_connection(conns, conn)
-        detail = view.build_schema_view(found, schema) if found else None
+        detail = (
+            view.build_schema_view(found, schema, app.config["DOCS_WORKERS"]) if found else None
+        )
 
         if detail is None:
             abort(404)
@@ -96,7 +108,7 @@ def _register_routes(app: Flask) -> None:
     def table(conn: str, table: str) -> str:
         """Render one table's artifacts."""
 
-        conns = catalogue.load_connections(app.config["DOCS_CONNECTIONS"])
+        conns = _prints(app)
         found = catalogue.find_connection(conns, conn)
 
         if found is None:
@@ -110,6 +122,12 @@ def _register_routes(app: Flask) -> None:
         page = view.build_table_view(found, artifacts)
 
         return render_template("table.html", conn=conn, **_sidebar_context(conns), **page)
+
+
+def _prints(app: Flask) -> list[catalogue.PrintConnection]:
+    held = app.config["DOCS_PRINTS"]
+
+    return catalogue.load_connections(app.config["DOCS_CONNECTIONS"]) if held is None else held
 
 
 def _sidebar_context(connections: list[catalogue.PrintConnection]) -> dict[str, Any]:

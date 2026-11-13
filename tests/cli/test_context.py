@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 import shutil
@@ -42,6 +43,14 @@ def _write_project(tmp_path: Path) -> None:
 
 def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
+
+
+def _nest_vault_scope(committed_print: Path) -> None:
+    path = committed_print / "production/arboretum/seedbank/vault/statistics.yaml"
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    at = next(n for n, line in enumerate(lines) if line.startswith("row_count:")) + 1
+    scope = "scope:\n  rows_scanned: 3\n  filter: kept = true\n  note:\n  - one\n  - two\n"
+    path.write_text("".join([*lines[:at], scope, *lines[at:]]), encoding="utf-8")
 
 
 class TestSelection:
@@ -674,3 +683,97 @@ class TestSeveralConnections:
         assert payload["connection_notes"]
         assert len(payload["tables"]) > 1
         assert all("connection_notes" not in t for t in payload["tables"])
+
+
+class TestNothingIsKeptAcrossRuns:
+    def test_an_annotation_edited_between_two_runs_shows_in_the_second(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _write_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        annotations = (
+            committed_print / "production/arboretum/seedbank/accession/statistics.annotations.yaml"
+        )
+        before = CliRunner().invoke(main, ["context", "--all"])
+        edited = yaml.safe_load(annotations.read_text(encoding="utf-8"))
+        edited["columns"]["taxon_id"]["note"] = "Rewritten between the two runs."
+        annotations.write_text(yaml.safe_dump(edited, sort_keys=False), encoding="utf-8")
+
+        after = CliRunner().invoke(main, ["context", "--all"])
+
+        assert (before.exit_code, after.exit_code) == (0, 0)
+        assert "Rewritten between the two runs." not in before.output
+        assert "Rewritten between the two runs." in after.output
+
+
+class TestAYamlReplyRepeatsNoObject:
+    @pytest.mark.parametrize("purpose", ["profile", "query"])
+    def test_no_value_is_written_as_an_anchor_and_its_alias(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        purpose: str,
+    ) -> None:
+        """A table's own annotation file and the edges it adds are separate values in the reply."""
+
+        _write_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        result = CliRunner().invoke(
+            main,
+            ["context", "--all", "--format", "yaml", "--purpose", purpose],
+        )
+
+        assert result.exit_code == 0
+        assert re.search(r"[&*]id\d{3}", result.output) is None
+
+    @pytest.mark.parametrize("purpose", ["profile", "query"])
+    def test_two_manifest_entries_naming_one_directory_are_each_written_out(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        purpose: str,
+    ) -> None:
+        manifest_path = committed_print / "production" / "manifest.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+        tables = manifest["tables"]
+        entry = copy.deepcopy(tables["arboretum.seedbank.accession"])
+        tables["arboretum.seedbank.accession_copy"] = entry
+        manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
+        _write_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        result = CliRunner().invoke(
+            main,
+            ["context", "--all", "--format", "yaml", "--purpose", purpose],
+        )
+
+        assert result.exit_code == 0
+        assert re.search(r"[&*]id\d{3}", result.output) is None
+
+    @pytest.mark.parametrize("selection", ["arboretum.seedbank.vault", "--all"])
+    def test_a_nested_value_in_a_tables_scope_is_written_out_under_both_scopes(
+        self,
+        tmp_path: Path,
+        committed_print: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        selection: str,
+    ) -> None:
+        _nest_vault_scope(committed_print)
+        _write_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        result = CliRunner().invoke(main, ["context", selection, "--format", "yaml"])
+        reply = yaml.safe_load(result.output)
+        tables = reply.get("tables", [reply])
+        vault = next(t for t in tables if t["table"] == "arboretum.seedbank.vault")
+
+        assert result.exit_code == 0
+        assert re.search(r"[&*]id\d{3}", result.output) is None
+        assert vault["scope"]["note"] == ["one", "two"]
+        assert vault["statistics"]["scope"]["note"] == ["one", "two"]

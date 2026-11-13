@@ -6,10 +6,14 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 CONTAINER := `if [ -f /run/.containerenv ] || [ -f /.dockerenv ]; then echo 'true'; else echo 'false'; fi`
 # Container-local venv path (avoids corrupting host .venv)
 CONTAINER_VENV := "/tmp" / justfile_directory() / ".venv"
-# UV env prefix: routes uv to container venv when in container; empty otherwise (uses .venv/ in cwd)
-UV_ENV := if CONTAINER == "true" { f"UV_PROJECT_ENVIRONMENT='{{ CONTAINER_VENV }}' VIRTUAL_ENV=" } else { "VIRTUAL_ENV=" }
+# UV env prefix: routes uv to container venv, copying from a cache on another filesystem; empty otherwise
+UV_ENV := if CONTAINER == "true" { f"UV_PROJECT_ENVIRONMENT='{{ CONTAINER_VENV }}' UV_LINK_MODE=copy VIRTUAL_ENV=" } else { "VIRTUAL_ENV=" }
 # UV runner: auto-selects container venv
 UV_RUN := UV_ENV + " uv run --extra dev --extra mcp --extra docs"
+# Passes a step's output through, failing the step on a warning line
+WARNINGS := UV_RUN + " python " + justfile_directory() / "scripts/warning_lines.py"
+# ruff warns on every format run while COM812 is selected; the formatter applies no lint rule either way
+RUFF_FORMAT := UV_RUN + " ruff format --config \"lint.ignore = ['COM812']\""
 # Python runner: auto-selects container venv
 PYTHON := UV_RUN + " python -m"
 # Test runner wrapper: time and total resident memory caps, each with a backstop, and a per-process limit
@@ -32,7 +36,8 @@ check: lint test-cov
 # Install all dependencies and warm Delta's Maven/Ivy jar cache (see tests/_provisioning.py)
 install:
     {{ UV_ENV }} uv sync --extra dev --extra mcp --extra docs 2>&1 | tee /tmp/dbprint--install.log
-    {{ UV_RUN }} python -m tests._provisioning 2>&1 | tee -a /tmp/dbprint--install.log
+    {{ WARNINGS }} < /tmp/dbprint--install.log > /dev/null
+    {{ UV_RUN }} python -m tests._provisioning 2>&1 | {{ WARNINGS }} | tee -a /tmp/dbprint--install.log
 
 # Run tests; ARGS narrows (pytest falls back to testpaths when given no path)
 # `-rfEs`, not `-rs`: `-r` replaces pytest's default `fE`, so failures and errors must be restated.
@@ -51,15 +56,15 @@ test-fast *ARGS:
 # Lint all code
 lint:
     rm -f /tmp/dbprint--lint.log
-    {{ UV_RUN }} ruff format --check 2>&1 | tee -a /tmp/dbprint--lint.log
-    {{ UV_RUN }} ruff check 2>&1 | tee -a /tmp/dbprint--lint.log
-    PYTHONPATH= {{ UV_RUN }} ty check 2>&1 | tee -a /tmp/dbprint--lint.log
-    {{ UV_RUN }} deptry src 2>&1 | tee -a /tmp/dbprint--lint.log
-    PYTHONPATH=src {{ UV_RUN }} lint-imports --no-logo --cache-dir /tmp/.import-linter-dbprint 2>&1 | tee -a /tmp/dbprint--lint.log
-    {{ JSCPD }} --fail-on-new-clones --reporters json,sarif,silent 2>&1 | tee -a /tmp/dbprint--lint.log \
+    {{ RUFF_FORMAT }} --check 2>&1 | {{ WARNINGS }} | tee -a /tmp/dbprint--lint.log
+    {{ UV_RUN }} ruff check 2>&1 | {{ WARNINGS }} | tee -a /tmp/dbprint--lint.log
+    PYTHONPATH= {{ UV_RUN }} ty check 2>&1 | {{ WARNINGS }} | tee -a /tmp/dbprint--lint.log
+    {{ UV_RUN }} deptry src 2>&1 | {{ WARNINGS }} | tee -a /tmp/dbprint--lint.log
+    PYTHONPATH=src {{ UV_RUN }} lint-imports --no-logo --cache-dir /tmp/.import-linter-dbprint 2>&1 | {{ WARNINGS }} | tee -a /tmp/dbprint--lint.log
+    {{ JSCPD }} --fail-on-new-clones --reporters json,sarif,silent 2>&1 | {{ WARNINGS }} | tee -a /tmp/dbprint--lint.log \
         || { {{ UV_RUN }} python scripts/new_clones.py /tmp/dbprint--jscpd/jscpd-report.json \
         | tee -a /tmp/dbprint--lint.log; exit 1; }
-    just clone-reasons 2>&1 | tee -a /tmp/dbprint--lint.log
+    just clone-reasons 2>&1 | {{ WARNINGS }} | tee -a /tmp/dbprint--lint.log
 
 # Mutation-test one package (spec, assertions, conformance), or one module of it, against its tests in a /tmp copy
 mutate PACKAGE MODULE="*":
@@ -87,7 +92,7 @@ fix:
     rm -f /tmp/dbprint--fix.log
     for _ in 1 2 3 4 5; do \
         {{ UV_RUN }} ruff check --fix 2>&1 | tee -a /tmp/dbprint--fix.log; \
-        {{ UV_RUN }} ruff format 2>&1 | tee -a /tmp/dbprint--fix.log; \
+        {{ RUFF_FORMAT }} 2>&1 | tee -a /tmp/dbprint--fix.log; \
         {{ UV_RUN }} ruff check --quiet 2>/dev/null && break; \
     done
     PYTHONPATH= {{ UV_RUN }} ty check --fix 2>&1 | tee -a /tmp/dbprint--fix.log
@@ -116,8 +121,8 @@ demo:
 
 # Build the documentation site (Astro + Starlight over docs/); its own job, not part of check
 site:
-    cd site && npm ci 2>&1 | tee /tmp/dbprint--site.log
-    cd site && npm run build 2>&1 | tee -a /tmp/dbprint--site.log
+    cd site && npm ci 2>&1 | {{ WARNINGS }} | tee /tmp/dbprint--site.log
+    cd site && npm run build 2>&1 | {{ WARNINGS }} | tee -a /tmp/dbprint--site.log
 
 # Serve docs/ with live reload at the configured base; HOST=0.0.0.0 to reach it from outside
 preview HOST="127.0.0.1" PORT="4321":

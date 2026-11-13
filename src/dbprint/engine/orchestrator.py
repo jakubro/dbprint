@@ -66,7 +66,6 @@ from dbprint.spec.absence import (
     emits,
     sample_verdicts,
 )
-from dbprint.spec.artifact_yaml import ExactLoader
 from dbprint.spec.artifacts import (
     DDL_FILENAME,
     DESCRIPTION_FILENAME,
@@ -868,6 +867,8 @@ class Engine:
 
                 if lineage_source is not None:
                     self._write_lineage(per_table_meta, carry, lineage_source, stage)
+
+                _write_extended_statistics(per_table_meta)
         finally:
             # Every extracted table's materialized sample outlives extraction for
             # `_write_normalized_cardinalities` to read, so it is released here regardless.
@@ -1264,7 +1265,7 @@ class Engine:
             # unwritten; the columns above are the catalog's.
             catalog_layout = self._catalog_layout(tbl)
             catalog_fk_source_columns = frozenset(c for fk in relationships for c in fk.column)
-            catalog_statistics_yaml = _serialize_catalog_only_statistics(
+            catalog_statistics = _catalog_only_statistics_document(
                 tbl.fqn,
                 tbl.type,
                 generated_at,
@@ -1276,6 +1277,7 @@ class Engine:
                 physical_layout=catalog_layout,
                 disabled=settings.profile.disabled(),
             )
+            catalog_statistics_yaml = _dump_yaml(catalog_statistics)
 
             return _PerTableContext(
                 fqn=tbl.fqn,
@@ -1288,6 +1290,7 @@ class Engine:
                 ddl=ddl,
                 statistics_yaml=catalog_statistics_yaml,
                 statistics_payload=_reread_statistics(catalog_statistics_yaml),
+                statistics_document=catalog_statistics,
                 profiled_at=generated_at,
                 row_count=None,
                 row_count_estimate=row_count_estimate,
@@ -1539,7 +1542,7 @@ class Engine:
             )
 
         _stamp_values_coverage_method(tbl.fqn, counts.rows_scanned, enriched)
-        statistics_yaml = _serialize_statistics(
+        statistics = _statistics_document(
             tbl.fqn,
             tbl.type,
             generated_at,
@@ -1570,6 +1573,7 @@ class Engine:
             external=tbl.external,
             disabled=settings.profile.disabled(),
         )
+        statistics_yaml = _dump_yaml(statistics)
 
         return _PerTableContext(
             fqn=tbl.fqn,
@@ -1582,6 +1586,7 @@ class Engine:
             ddl=ddl,
             statistics_yaml=statistics_yaml,
             statistics_payload=_reread_statistics(statistics_yaml),
+            statistics_document=statistics,
             profiled_at=generated_at,
             row_count=counts.row_count,
             row_count_estimate=row_count_estimate,
@@ -2737,7 +2742,7 @@ class Engine:
         )
 
         if added:
-            _rewrite_statistics(ctx, added)
+            _extend_statistics(ctx, added)
 
         return failures
 
@@ -2960,7 +2965,7 @@ class Engine:
             if ctx.statistics_yaml is None or not (traced := reading.tables.get(fqn)):
                 continue
 
-            _rewrite_statistics(
+            _extend_statistics(
                 ctx,
                 {
                     name: {"derived_from": _derived_from(sources)}
@@ -3055,7 +3060,7 @@ class Engine:
             added[column] = {"normalized_cardinality": normalized}
 
         if added:
-            _rewrite_statistics(ctx, added)
+            _extend_statistics(ctx, added)
 
     def _write_manifest_artifacts(
         self,
@@ -3179,8 +3184,9 @@ class _PerTableContext:
     """Everything extracted for one table, carried from extraction to write.
 
     `statistics_payload` is `statistics_yaml` loaded back, so redaction, the field matrix and
-    numeric rendering are already applied; a view's is catalog-only. `unique_keys` holds every
-    declared group, single- and multi-column, and is empty on a view.
+    numeric rendering are already applied; a view's is catalog-only. `statistics_document` is what
+    `statistics_yaml` is dumped from, its decimals exact. `unique_keys` holds every declared group,
+    single- and multi-column, and is empty on a view.
     """
 
     fqn: str
@@ -3221,6 +3227,8 @@ class _PerTableContext:
     physical_layout_known: bool = True
     merging_known: bool = True
     grain_known: bool = True
+    statistics_document: dict[str, Any] | None = None
+    statistics_yaml_stale: bool = False
 
 
 def _join_key_candidates(
@@ -4157,7 +4165,7 @@ def _table_scope(settings: TableSettings, *, count_exactly: bool = False) -> Tab
     return scope if scope.narrows else None
 
 
-def _serialize_statistics(
+def _statistics_document(
     fqn: str,
     table_type: str,
     profiled_at: str,
@@ -4177,7 +4185,7 @@ def _serialize_statistics(
     merging: TableMerging | None = None,
     external: bool = False,
     disabled: tuple[str, ...] = (),
-) -> str:
+) -> dict[str, Any]:
     columns_payload: dict[str, Any] = {}
     narrows = scope is not None and scope.narrows
     # Only a key with a recovered base column can be flagged; an expression key has none.
@@ -4346,7 +4354,7 @@ def _serialize_statistics(
 
     payload["columns"] = columns_payload
 
-    return _dump_yaml(payload)
+    return payload
 
 
 def _physical_layout_block(layout: PhysicalLayout) -> dict[str, Any]:
@@ -4368,7 +4376,7 @@ def _masked_comments(comments: CommentsMeta) -> CommentsMeta:
     )
 
 
-def _serialize_catalog_only_statistics(
+def _catalog_only_statistics_document(
     fqn: str,
     table_type: str,
     profiled_at: str,
@@ -4380,7 +4388,7 @@ def _serialize_catalog_only_statistics(
     external: bool = False,
     physical_layout: PhysicalLayout | None = None,
     disabled: tuple[str, ...] = (),
-) -> str:
+) -> dict[str, Any]:
     """The statistics artifact for an object nothing was queried for (SPEC 2.2.15).
 
     Every field a catalog/DDL read already supplies and nothing else; `classify()` runs with
@@ -4439,7 +4447,7 @@ def _serialize_catalog_only_statistics(
 
     payload["columns"] = columns_payload
 
-    return _dump_yaml(payload)
+    return payload
 
 
 def _drop_forbidden_fields(
@@ -5729,22 +5737,28 @@ def _derived_from(sources: Sequence[SourceColumn]) -> list[dict[str, str]]:
     return [{"table": source.table, "column": source.column} for source in sources]
 
 
-def _rewrite_statistics(ctx: _PerTableContext, added: dict[str, dict[str, Any]]) -> None:
-    """Rewrite `statistics.yaml` with post-pass fields, from the written text rather than the
-    float-read comparison copy, which has already lost digits past binary64.
-    """
+def _extend_statistics(ctx: _PerTableContext, added: dict[str, dict[str, Any]]) -> None:
+    """Add post-pass fields to the exact document and its read-back copy, writing no file."""
 
-    assert ctx.statistics_yaml is not None
-    exact = artifact_yaml.load(ctx.statistics_yaml, loader=ExactLoader)
+    assert ctx.statistics_document is not None
+    read_back = _reread_statistics(_dump_yaml(added))
 
     for column, fields in added.items():
-        exact["columns"][column].update(fields)
+        ctx.statistics_document["columns"][column].update(fields)
+        ctx.statistics_payload["columns"][column].update(read_back[column])
 
-    _apply_redaction_rule_to(exact)
-    ctx.statistics_yaml = _dump_yaml(exact)
-    ctx.statistics_payload = _reread_statistics(ctx.statistics_yaml)
-    assert ctx.stage is not None
-    ctx.stage.write(ctx.tbl_dir, {STATISTICS_FILENAME: ctx.statistics_yaml})
+    _apply_redaction_rule_to(ctx.statistics_document)
+    _apply_redaction_rule_to(ctx.statistics_payload)
+    ctx.statistics_yaml_stale = True
+
+
+def _write_extended_statistics(per_table_meta: dict[str, _PerTableContext]) -> None:
+    for ctx in per_table_meta.values():
+        if ctx.statistics_yaml_stale:
+            assert ctx.statistics_document is not None and ctx.stage is not None
+            ctx.statistics_yaml = _dump_yaml(ctx.statistics_document)
+            ctx.stage.write(ctx.tbl_dir, {STATISTICS_FILENAME: ctx.statistics_yaml})
+            ctx.statistics_yaml_stale = False
 
 
 def _reread_statistics(statistics_yaml: str) -> dict[str, Any]:

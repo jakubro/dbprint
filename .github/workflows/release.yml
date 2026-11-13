@@ -21,7 +21,8 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.2
 
       - name: Build the wheel and sdist
-        run: uv build
+        shell: bash
+        run: uv build 2>&1 | uv run --no-project python scripts/warning_lines.py
 
       - name: Fail if the tag and the built version disagree
         run: |

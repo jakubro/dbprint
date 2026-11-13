@@ -9,6 +9,7 @@ from typing import Any
 from dbprint.config import ConnectionConfig
 from dbprint.engine import EXIT_GENERIC, EXIT_OK, worst_exit
 from dbprint.engine.baseline import (
+    UNPROFILED_CAUSE_NOTE,
     failed_tables,
     read_manifest,
     unprofiled_message,
@@ -43,7 +44,7 @@ def resolve_connections(
         if unprofiled := unprofiled_matches(manifest, target, select_all):
             messages.append(
                 f"{conn_config.name}: not profiled by the last run, so not included: "
-                f"{', '.join(unprofiled)} - run dbprint generate to see the cause",
+                f"{', '.join(unprofiled)} - {UNPROFILED_CAUSE_NOTE}",
             )
 
         try:
@@ -99,12 +100,14 @@ def unprofiled_matches(
     target: str | None,
     select_all: bool,
 ) -> list[str]:
-    """The tables the selection names that the last run recorded as failed."""
+    """The tables the selection names that the last run failed and the print does not carry."""
+
+    absent = [fqn for fqn in failed_tables(manifest) if fqn not in (manifest.get("tables") or {})]
 
     if select_all:
-        return list(failed_tables(manifest))
+        return absent
 
     if target is None or not any(ch in target for ch in "*?["):
         return []
 
-    return [fqn for fqn in failed_tables(manifest) if fnmatch.fnmatchcase(fqn, target)]
+    return [fqn for fqn in absent if fnmatch.fnmatchcase(fqn, target)]

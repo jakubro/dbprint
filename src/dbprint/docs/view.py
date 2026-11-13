@@ -10,6 +10,7 @@ import math
 import re
 from collections.abc import Mapping
 from datetime import datetime
+from functools import cache
 from typing import Any
 
 import inflect
@@ -17,8 +18,8 @@ from markdown.util import ETX, STX
 
 from dbprint.engine import AssemblyOptions, assemble_context, notes_synthesis
 from dbprint.engine.baseline import (
+    UNPROFILED_CAUSE_NOTE,
     disabled_feature_message,
-    read_artifact,
     unmeasured_block_message,
 )
 from dbprint.engine.context_assembler import (
@@ -115,16 +116,23 @@ def build_index_view(connections: list[catalogue.PrintConnection]) -> list[dict[
         {
             "name": c.name,
             "manifest": c.manifest,
-            "notes": load_connection_notes(c.root, read_artifact)[0],
+            "notes": load_connection_notes(c.root, c.read)[0],
             "tables": c.tables,
             "failed_tables": c.failed_tables,
+            "unprofiled_cause_note": UNPROFILED_CAUSE_NOTE,
         }
         for c in connections
     ]
 
 
-def build_schema_view(conn: catalogue.PrintConnection, schema: str) -> dict[str, Any] | None:
-    """Every table in one schema plus their intra-schema relationship count."""
+def build_schema_view(
+    conn: catalogue.PrintConnection,
+    schema: str,
+    workers: int = 1,
+) -> dict[str, Any] | None:
+    """Every table in one schema plus their intra-schema relationship count; `workers` as in
+    `context_view`.
+    """
 
     tables = catalogue.tables_in_schema(conn, schema)
 
@@ -140,7 +148,11 @@ def build_schema_view(conn: catalogue.PrintConnection, schema: str) -> dict[str,
             if r.get("target_table") in tables:
                 n_edges += 1
 
-    return {"tables": tables, "n_edges": n_edges, "context": context_view(conn, sorted(tables))}
+    return {
+        "tables": tables,
+        "n_edges": n_edges,
+        "context": context_view(conn, sorted(tables), workers),
+    }
 
 
 def build_table_view(
@@ -216,7 +228,7 @@ def build_table_view(
         "entry": artifacts.entry,
         "context": context_view(conn, [artifacts.fqn]),
         "adapter": conn.manifest.get("adapter"),
-        "has_connection_notes": load_connection_notes(conn.root, read_artifact)[0] is not None,
+        "has_connection_notes": load_connection_notes(conn.root, conn.read)[0] is not None,
         "unprofiled_notice": catalogue.unprofiled_note(conn, artifacts.fqn),
         "missing_artifacts_notice": missing_artifacts_notice(artifacts.missing),
         "corrupted_artifacts_notice": corrupted_artifacts_notice(artifacts.corrupted),
@@ -269,8 +281,15 @@ def build_table_view(
     }
 
 
-def context_view(conn: catalogue.PrintConnection, tables: list[str]) -> dict[str, str]:
-    """Per purpose, the Markdown `dbprint context` prints for `tables` with no other flag."""
+def context_view(
+    conn: catalogue.PrintConnection,
+    tables: list[str],
+    workers: int = 1,
+) -> dict[str, str]:
+    """Per purpose, the Markdown `dbprint context` prints for `tables` with no other flag.
+
+    `workers` above 1 lets a large selection render in that many processes.
+    """
 
     return {
         purpose: assemble_context(
@@ -279,6 +298,8 @@ def context_view(conn: catalogue.PrintConnection, tables: list[str]) -> dict[str
             tables,
             AssemblyOptions(purpose=purpose),
             connection_name=conn.name,
+            read=conn.read,
+            workers=workers,
         ).text.rstrip()
         + "\n"
         for purpose in ("profile", "query")
@@ -1034,6 +1055,7 @@ def _plural_aliases(targets: dict[str, str]) -> dict[str, str]:
     return aliased
 
 
+@cache
 def _plural_variants(name: str) -> list[str]:
     """The other-number form of `name` - singular if it is a recognized plural, else plural.
 
@@ -1052,13 +1074,17 @@ def _plural_variants(name: str) -> list[str]:
 
 
 def _authored(conn: catalogue.PrintConnection) -> dict[str, list[Any] | None]:
-    return {
-        fqn: (catalogue.load_artifact(conn, fqn, "relationships_annotations") or {}).get(
-            "refers_to",
-        )
-        for fqn, entry in conn.tables.items()
-        if "relationships_annotations" in declared_artifacts(entry)
-    }
+    return conn.read.once(
+        ("authored_refers_to", conn.root),
+        lambda: {
+            fqn: (catalogue.load_artifact(conn, fqn, "relationships_annotations") or {}).get(
+                "refers_to",
+            )
+            for fqn, entry in conn.tables.items()
+            if "relationships_annotations" in declared_artifacts(entry)
+        },
+        owner=conn.tables,
+    )
 
 
 def _incoming_rejection(

@@ -10,7 +10,14 @@ from pathlib import Path
 import pytest
 import yaml
 
-from dbprint.engine.baseline import contained, escaping_links, generate_refusal, read_manifest
+from dbprint.engine.baseline import (
+    PrintReader,
+    contained,
+    escaping_links,
+    generate_refusal,
+    read_artifact,
+    read_manifest,
+)
 from dbprint.engine.carried import CommittedPrint
 from dbprint.engine.diff import (
     GrainKeyState,
@@ -697,3 +704,40 @@ class TestLinksOutOfThePrint:
 
         assert read.state == "malformed"
         assert read.reason == "it resolves outside the connection root"
+
+
+class TestPrintReader:
+    def test_a_file_is_parsed_once_however_often_it_is_read(self, tmp_path: Path) -> None:
+        path = tmp_path / "statistics.yaml"
+        path.write_text("row_count: 3\n", encoding="utf-8")
+        parsed: list[Path] = []
+
+        def counting(read_path: Path) -> object:
+            parsed.append(read_path)
+
+            return read_artifact(read_path)
+
+        read = PrintReader(counting)
+
+        assert read(path) is read(path)
+        assert parsed == [path]
+
+    def test_a_parse_that_fails_is_tried_again(self, tmp_path: Path) -> None:
+        path = tmp_path / "statistics.yaml"
+        path.write_text("row_count: [\n", encoding="utf-8")
+        read = PrintReader()
+
+        with pytest.raises(yaml.YAMLError):
+            read(path)
+
+        path.write_text("row_count: 3\n", encoding="utf-8")
+
+        assert read(path) == {"row_count": 3}
+
+    def test_a_kept_reading_is_worked_out_again_for_another_owner(self) -> None:
+        read = PrintReader()
+        first, second = {"tables": {}}, {"tables": {}}
+
+        assert read.once("walk", lambda: 1, owner=first) == 1
+        assert read.once("walk", lambda: 2, owner=first) == 1
+        assert read.once("walk", lambda: 3, owner=second) == 3

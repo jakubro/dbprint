@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,7 @@ import yaml
 from dbprint.config import ConnectionConfig
 from dbprint.mcp import McpError, ServedConnections, enumerate_for, list_page, parse_uri, read
 from dbprint.mcp import resources as resources_module
-from dbprint.mcp.resources import ReferenceRef, ResourceRef
+from dbprint.mcp.resources import ReadResult, ReferenceRef, ResourceRef
 
 
 class TestParseUri:
@@ -642,6 +643,13 @@ class TestAWronglyShapedManifestIsAnErrorNotACrash:
         assert not any("seedbank.herbarium" in uri for uri in uris)
 
 
+def test_the_reading_resource_names_the_installed_guide(primary_conn: ConnectionConfig) -> None:
+    state = ServedConnections(served={primary_conn.name: primary_conn}, default=primary_conn.name)
+    guide = next(e for e in enumerate_for(state) if e.uri == "dbprint://production/reading")
+
+    assert "get_reference document: guide" in guide.description
+
+
 def test_every_per_table_resource_names_the_tool_that_reads_it_interpreted(
     primary_conn: ConnectionConfig,
 ) -> None:
@@ -955,7 +963,7 @@ class TestPagedReads:
 
         assert first.pages > 1
         assert all(len(page.content) <= 20_000 for page in [first, *rest])
-        assert "".join(page.content for page in [first, *rest]) == path.read_text()
+        assert _less_lines(uri, [first, *rest], "# next_page: ") == path.read_text()
 
     def test_a_line_longer_than_a_page_splits_and_still_rebuilds(
         self,
@@ -974,7 +982,7 @@ class TestPagedReads:
         ]
 
         assert first.pages >= 3
-        assert "".join(page.content for page in pages) == path.read_text()
+        assert _less_lines(uri, pages, "-- next_page: ") == path.read_text()
 
     def test_every_page_fits_once_escaped_for_the_wire(
         self,
@@ -993,7 +1001,7 @@ class TestPagedReads:
         ]
 
         assert all(len(json.dumps(page.content)) - 2 <= 20_000 for page in pages)
-        assert "".join(page.content for page in pages) == path.read_text()
+        assert _less_lines(uri, pages, "-- next_page: ") == path.read_text()
 
     def test_a_file_rewritten_during_the_read_is_read_again(
         self,
@@ -1060,7 +1068,9 @@ class TestPagedReads:
         with pytest.raises(McpError) as caught:
             read(state, "dbprint://production/arboretum.seedbank.taxon/statistics?page=2")
 
+        assert caught.value.code == -32602
         assert "version" in caught.value.detail
+        assert "next_page" in caught.value.detail
 
     def test_an_unknown_query_key_is_a_malformed_uri(self, primary_conn: ConnectionConfig) -> None:
         state = ServedConnections(served={"production": primary_conn}, default="production")
@@ -1069,6 +1079,102 @@ class TestPagedReads:
             read(state, "dbprint://production/arboretum.seedbank.vault/ddl?offset=2")
 
         assert "does not match" in caught.value.detail
+
+    @pytest.mark.parametrize(
+        ("kind", "line"),
+        [
+            ("yaml", r"\n# next_page: (\S+)\Z"),
+            ("markdown", r"\n<!-- next_page: (\S+) -->\Z"),
+            ("sql", r"\n-- next_page: (\S+)\Z"),
+        ],
+    )
+    def test_following_each_next_page_line_reaches_every_page(
+        self,
+        primary_conn: ConnectionConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        kind: str,
+        line: str,
+    ) -> None:
+        table = primary_conn.output / primary_conn.name / "arboretum" / "seedbank"
+
+        if kind == "yaml":
+            uri = "dbprint://production/arboretum.seedbank.taxon/statistics"
+            source = self._wide_statistics(primary_conn).read_text()
+        elif kind == "markdown":
+            from dbprint.mcp import reference as reference_module
+
+            uri = "dbprint:///reference/spec"
+            source = "".join(f"Line {i} of a long reference.\n" for i in range(3_000))
+            monkeypatch.setattr(reference_module, "_read", lambda document: source)
+        else:
+            uri = "dbprint://production/arboretum.seedbank.vault/ddl"
+            path = table / "vault" / "ddl.sql"
+            source = path.read_text() + "".join(f"-- padding {i:05d}\n" for i in range(3_000))
+            path.write_text(source)
+
+        state = ServedConnections(served={"production": primary_conn}, default="production")
+        pages = [read(state, uri)]
+
+        while (found := re.search(line, pages[-1].content)) is not None:
+            pages.append(read(state, found.group(1)))
+
+        assert pages[0].pages > 1
+        assert [page.page for page in pages] == list(range(1, pages[0].pages + 1))
+        assert "".join(re.sub(line, "", page.content) for page in pages) == source
+
+    @pytest.mark.parametrize(("width", "pages"), [(19_950, 1), (20_000, 1), (20_001, 2)])
+    def test_a_text_within_the_bound_whole_is_one_page_with_no_line(
+        self,
+        primary_conn: ConnectionConfig,
+        width: int,
+        pages: int,
+    ) -> None:
+        path = (
+            primary_conn.output / primary_conn.name / "arboretum" / "seedbank" / "vault" / "ddl.sql"
+        )
+        base = path.read_text() + '-- "quoted" \\ caf\u00e9\n'
+        filler = width - (len(json.dumps(base, ensure_ascii=False)) - 2) - len("-- \\n")
+        text = base + "-- " + "x" * filler + "\n"
+        path.write_text(text)
+        state = ServedConnections(served={"production": primary_conn}, default="production")
+        uri = "dbprint://production/arboretum.seedbank.vault/ddl"
+        first = read(state, uri)
+        served = [first] + [
+            read(state, f"{uri}?page={n}&version={first.version}")
+            for n in range(2, first.pages + 1)
+        ]
+
+        assert len(json.dumps(text, ensure_ascii=False)) - 2 == width
+        assert first.pages == pages
+        assert all(
+            len(json.dumps(page.content, ensure_ascii=False)) - 2 <= 20_000 for page in served
+        )
+        assert _less_lines(uri, served, "-- next_page: ") == text
+
+    @pytest.mark.parametrize(
+        ("spelled", "named"),
+        [
+            (
+                "dbprint://production/arboretum.seedbank.taxon/statistics?page=1",
+                "dbprint://production/arboretum.seedbank.taxon/statistics",
+            ),
+            (
+                "dbprint://production/arboretum/seedbank/taxon/statistics",
+                "dbprint://production/arboretum/seedbank/taxon/statistics",
+            ),
+        ],
+    )
+    def test_the_line_names_the_uri_as_the_caller_spelled_it(
+        self,
+        primary_conn: ConnectionConfig,
+        spelled: str,
+        named: str,
+    ) -> None:
+        self._wide_statistics(primary_conn)
+        state = ServedConnections(served={"production": primary_conn}, default="production")
+        first = read(state, spelled)
+
+        assert first.content.endswith(f"\n# next_page: {named}?page=2&version={first.version}")
 
 
 class TestPagedEnumeration:
@@ -1179,3 +1285,16 @@ class TestAConnectionRootFileLinkedOutOfThePrint:
 
         assert excinfo.value.code == -32603
         assert "it resolves outside the connection root" in excinfo.value.detail
+
+
+def _less_lines(uri: str, pages: list[ReadResult], opening: str) -> str:
+    lines = [
+        f"\n{opening}{uri}?page={n}&version={pages[0].version}" for n in range(2, len(pages) + 1)
+    ]
+
+    assert all(page.content.endswith(line) for page, line in zip(pages, lines, strict=False))
+    assert opening not in pages[-1].content
+
+    return "".join(
+        page.content.removesuffix(line) for page, line in zip(pages, [*lines, ""], strict=True)
+    )

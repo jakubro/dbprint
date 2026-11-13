@@ -263,6 +263,20 @@ def row_count_or_none(estimate: float) -> int | None:
     return None if estimate < 0 else int(estimate)
 
 
+def session_row_count(cursor: Any, fqn: str, count: Callable[[], int]) -> int:
+    """`count()` for table `fqn`, read once for the session whose cursor keeps `row_counts`."""
+
+    counted: dict[str, int] | None = getattr(cursor, "row_counts", None)
+
+    if counted is None:
+        return count()
+
+    if fqn not in counted:
+        counted[fqn] = count()
+
+    return counted[fqn]
+
+
 def temporal_block_unmeasured(sql_type: str) -> tuple[str, ...]:
     """The REQUIRED fields one failed temporal block costs a column (SPEC 2.2.4).
 

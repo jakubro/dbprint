@@ -536,7 +536,7 @@ class _SkipsOne(MockAdapter):
 def _redshift_stand_ins(
     cluster: PostgresCluster,
     tables: dict[str, str],
-) -> Iterator[tuple[str, psycopg.Connection]]:
+) -> list[tuple[str, psycopg.Connection]]:
     admin = cluster
     out = []
 
@@ -554,7 +554,7 @@ def _redshift_stand_ins(
         )
         out.append((name, conn))
 
-    return iter(out)
+    return out
 
 
 def _table() -> MockTable:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import fnmatch
 import importlib.resources
 import json
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -40,6 +40,7 @@ from dbprint.engine.context_assembler import (
 from dbprint.engine.freshness import classify
 from dbprint.engine.table_readings import live_annotations
 from dbprint.engine.value_list import value_notes
+from dbprint.engine.yaml_dumper import spell_literal
 from dbprint.spec import authored
 from dbprint.spec.absence import Absence, column_value, disabled_of, read_column_field
 from dbprint.spec.artifacts import (
@@ -66,6 +67,12 @@ _CURSOR_PROPERTY: dict[str, Any] = {
     "type": "string",
     "minLength": 1,
     "description": "`next_cursor` from this call's previous page; omit for the first page",
+}
+
+_TABLE_PROPERTY: dict[str, Any] = {
+    "type": "string",
+    "minLength": 1,
+    "description": "Dotted fully-qualified table name, as list_tables and search_columns return it",
 }
 
 # The three relationship events carry `source_table`/`target_table` where every other event
@@ -112,6 +119,10 @@ _FIELD_NOTES = {
         "table was not compared"
     ),
     "_corrupted": "names each print file of the table that would not parse; its content is absent",
+    "pattern": (
+        "pattern matched no table: the glob is matched against each table's whole dotted name, "
+        "every part of it"
+    ),
 }
 
 _DIFF_KINDS: list[str] = json.loads(
@@ -155,9 +166,21 @@ class ToolDef:
     """Static tool definition advertised in tools/list."""
 
     name: str
+    title: str
     description: str
     input_schema: dict[str, Any]
     annotations: ToolHints
+
+    def wire(self) -> dict[str, Any]:
+        """Return the tool as `tools/list` carries it."""
+
+        return {
+            "name": self.name,
+            "title": self.title,
+            "description": self.description,
+            "inputSchema": self.input_schema,
+            "annotations": self.annotations.wire(),
+        }
 
 
 # Closed-world even under a remote --project: the locator is resolved before the server starts.
@@ -168,6 +191,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
     ToolDef(
         annotations=_READ_ONLY,
         name="get_table_context",
+        title="Table context",
         description=(
             "Read one table. Before writing SQL against it, call with `purpose: query`: DDL, the "
             "value lists a predicate is written from with their counts and coverage, each nullable "
@@ -181,14 +205,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "table": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": (
-                        "Dotted fully-qualified table name, as list_tables and "
-                        "search_columns return it"
-                    ),
-                },
+                "table": _TABLE_PROPERTY,
                 "connection": {
                     "type": "string",
                     "description": (
@@ -261,6 +278,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
     ToolDef(
         annotations=_READ_ONLY,
         name="list_tables",
+        title="List tables",
         description=(
             "List a connection's tables, optionally narrowed by an fnmatch pattern over the dotted "
             "names: which tables exist and whether they are stale. `detail: true` adds each table's type, row_count, columns, profiled_at and a "
@@ -284,7 +302,10 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                     "type": "string",
                     "minLength": 1,
                     "description": (
-                        "fnmatch glob over dotted table names, e.g. 'sales.*'; defaults to '*'"
+                        "fnmatch glob matched against each table's whole dotted name, every part "
+                        "of it: '*.sales.*' for every table in schema sales where names are "
+                        "db.schema.table, 'sales.*' for every table in database sales where they "
+                        "are db.table, '*orders*' for any name containing orders; defaults to '*'"
                     ),
                 },
                 "detail": {
@@ -292,8 +313,8 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                     "default": False,
                     "description": (
                         "Project each entry's type/row_count/columns/profiled_at from "
-                        "the print's index plus its freshness verdict; false returns bare FQN "
-                        "strings, unchanged"
+                        "the print's index plus its freshness verdict; false returns the bare "
+                        "dotted names"
                     ),
                 },
                 "cursor": _CURSOR_PROPERTY,
@@ -303,6 +324,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
     ToolDef(
         annotations=_READ_ONLY,
         name="search_columns",
+        title="Search columns",
         description=(
             "Find columns across every table by name glob, by words in their notes (`text`), or by "
             "what they hold - `looks_like: email`, `sensitivity: contact`, classification, sql_type, "
@@ -387,6 +409,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
     ToolDef(
         annotations=_READ_ONLY,
         name="resolve_value",
+        title="Resolve a filter value",
         description=(
             "Check how a phrase, code or spelling is stored in one column before writing it into a "
             "filter, when get_table_context does not list the column's values in full. `match` says "
@@ -399,11 +422,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "table": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": "Fully-qualified table name",
-                },
+                "table": _TABLE_PROPERTY,
                 "column": {
                     "type": "string",
                     "minLength": 1,
@@ -441,6 +460,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
     ToolDef(
         annotations=_READ_ONLY,
         name="get_manifest",
+        title="Raw table index",
         description=(
             "Return the print's raw index for a connection: its tables and the files each has. For "
             "table names, row counts and staleness, list_tables with `detail: true` is shorter. The "
@@ -462,8 +482,10 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                     "type": "string",
                     "minLength": 1,
                     "description": (
-                        "fnmatch glob over the FQN keys of `tables`, the same spelling "
-                        "`list_tables` takes; filters that map and `failed_tables` only"
+                        "fnmatch glob over the FQN keys of `tables`, matched against the whole "
+                        "dotted name as list_tables matches it: '*.sales.*' where names are "
+                        "db.schema.table, 'sales.*' where they are db.table, '*orders*' for any "
+                        "name containing orders; filters that map and `failed_tables` only"
                     ),
                 },
                 "cursor": _CURSOR_PROPERTY,
@@ -473,6 +495,7 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
     ToolDef(
         annotations=_READ_ONLY,
         name="get_diff",
+        title="Changes since the last print",
         description=(
             "Answer what changed between the database's last two prints: `summary` counts each kind "
             "of change and `changes` names each one - tables and columns added, removed or retyped, "
@@ -513,10 +536,12 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
     ToolDef(
         annotations=_READ_ONLY,
         name="get_reference",
+        title="Spec and reading guide",
         description=(
             "Look up the format specification or the assertion DSL by section number, or the reading "
-            "guide by heading: what a print's field means, or what a finding's spec_ref (e.g. "
-            "'§2.2.4') refers to. Omit section for the heading tree; a section lists its direct "
+            "guide by heading: what a print's field means, or what a citation refers to: 'SPEC "
+            "2.2.4' in the reading guide's text, or a dbprint check finding's spec_ref ('§2.2.4'). "
+            "Omit section for the heading tree; a section lists its direct "
             "subsections. Needs no connection; what a table holds is get_table_context's answer. Paged "
             "like get_table_context's md."
         ),
@@ -537,10 +562,10 @@ TOOL_DEFINITIONS: tuple[ToolDef, ...] = (
                     "minLength": 1,
                     "description": (
                         "A section number in the document's own scheme (e.g. '3', '2.2.4'), or "
-                        "a spec_ref citation copied verbatim from a finding ('§2.2.4', "
-                        "'ASSERTIONS.md §1.4') - any heading depth. Omit for the table of "
-                        "contents. For guide, a heading's text (e.g. 'Vocabulary'), matched "
-                        "case-insensitively."
+                        "a citation copied verbatim: the reading guide's 'SPEC 2.2.4' (spec "
+                        "only), or a dbprint check finding's spec_ref ('§2.2.4', 'ASSERTIONS.md "
+                        "§1.4') - any heading depth. Omit for the table of contents. For guide, "
+                        "a heading's text (e.g. 'Vocabulary'), matched case-insensitively."
                     ),
                 },
                 "cursor": _CURSOR_PROPERTY,
@@ -560,15 +585,7 @@ def list_page(
     def render(units: Sequence[Any], first: bool, next_cursor: str | None) -> dict[str, Any]:
         del first
         reply: dict[str, Any] = {
-            "tools": [
-                {
-                    "name": d.name,
-                    "description": d.description,
-                    "inputSchema": d.input_schema,
-                    "annotations": d.annotations.wire(),
-                }
-                for _, d in (paging.entry(unit) for unit in units)
-            ],
+            "tools": [d.wire() for _, d in (paging.entry(unit) for unit in units)],
         }
 
         if next_cursor is not None:
@@ -841,13 +858,19 @@ def _tool_list_tables(state: ServedConnections, arguments: dict[str, Any]) -> di
         return _paged(reply, total=len(matched), next_cursor=next_cursor)
 
     call = paging.Call("list_tables", arguments, (conn.print_root / MANIFEST_FILENAME,))
-    head = {"failed_tables": failed} if failed else {}
+    head: dict[str, Any] = {"failed_tables": failed} if failed else {}
 
     if detail:
         values = [value for _, value in items]
         head |= _notes(
             ["freshness", *(["threshold_error"] if _any_carry(values, "threshold_error") else [])],
         )
+
+    if arguments.get("pattern") is not None and not matched and not failed:
+        head["notes"] = {
+            **head.get("notes", {}),
+            "pattern": _pattern_note(entries, failed_tables(manifest)),
+        }
 
     return _page(call, items, render, arguments, head=head)
 
@@ -1344,6 +1367,9 @@ def _tool_get_manifest(state: ServedConnections, arguments: dict[str, Any]) -> d
     )
     head = {**header, **({"failed_tables": failed} if failed else {})}
 
+    if pattern is not None and not matched and not failed:
+        head["notes"] = {"pattern": _pattern_note(tables, failed_tables(manifest))}
+
     return _page(call, matched, render, arguments, head=head)
 
 
@@ -1478,6 +1504,18 @@ def _paged(reply: dict[str, Any], *, total: int, next_cursor: str | None) -> dic
 
 def _notes(fields: list[str]) -> dict[str, Any]:
     return {"notes": {field: _FIELD_NOTES[field] for field in fields}} if fields else {}
+
+
+def _pattern_note(tables: Iterable[str], failed: Iterable[str]) -> str:
+    example = min(tables, default=None)
+
+    if example is None:
+        example = min(failed, default=None)
+
+    if example is None:
+        return _FIELD_NOTES["pattern"]
+
+    return f"{_FIELD_NOTES['pattern']}; this print's names look like {spell_literal(example)}"
 
 
 def _any_carry(entries: Sequence[Any], key: str) -> bool:

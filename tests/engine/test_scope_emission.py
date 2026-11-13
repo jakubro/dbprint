@@ -27,9 +27,10 @@ from dbprint.conformance.statistics import check
 from dbprint.engine import Engine
 from dbprint.engine.orchestrator import (
     _EnrichedColumnStats,
-    _serialize_statistics,
+    _statistics_document,
     _table_scope,
 )
+from dbprint.engine.yaml_dumper import dump_yaml
 from tests._engine_run import artifact
 from tests._prints import connection_config, quarter_scanned_table
 
@@ -66,13 +67,15 @@ def _emit(
     )
 
     return yaml.safe_load(
-        _serialize_statistics(
-            "public.t",
-            "table",
-            "2026-07-31T13:00:00Z",
-            counts,
-            _enriched(),
-            scope,
+        dump_yaml(
+            _statistics_document(
+                "public.t",
+                "table",
+                "2026-07-31T13:00:00Z",
+                counts,
+                _enriched(),
+                scope,
+            ),
         ),
     )
 

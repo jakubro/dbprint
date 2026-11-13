@@ -1808,3 +1808,50 @@ class TestTheDeclaredColumnType:
 
         assert is_integer_type(published["accession_id"])
         assert not is_integer_type(published["viability_pct"])
+
+
+class TestTheRowCountIsReadOncePerSession:
+    """Phase A and every column's `looks_like` draw share one catalog read of the table's size.
+
+    Through the connector cursor the session really opens, which is where the read is kept.
+    """
+
+    def test_a_profile_reads_the_catalog_row_count_once(
+        self,
+        fresh_duckdb: duckdb.DuckDBPyConnection,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from dbprint.config import StatisticsConfig
+
+        _seed_wide(fresh_duckdb)
+        recorder = _RecordingShim(fresh_duckdb)
+        monkeypatch.setattr(importlib, "import_module", lambda _name: _Connector(recorder))
+        adapter = SnowflakeAdapter(SNOWFLAKE_CREDS)
+        adapter.connect()
+        fqn = "memory.seedbank.curation_event"
+
+        try:
+            adapter.list_tables(include=["*"], exclude=[])
+            columns = adapter.introspect_columns(fqn)
+            adapter.compute_base_statistics(fqn, columns, StatisticsConfig())
+
+            for column in columns:
+                adapter.sample_values(fqn, column.name, 5)
+        finally:
+            adapter.close()
+
+        assert sum("tbl.row_count" in s for s in recorder.statements) == 1
+
+
+class _Connector:
+    def __init__(self, cursor: _RecordingShim) -> None:
+        self._cursor = cursor
+
+    def connect(self, **_kwargs: object) -> _Connector:
+        return self
+
+    def cursor(self) -> _RecordingShim:
+        return self._cursor
+
+    def close(self) -> None:
+        return None

@@ -271,7 +271,7 @@ claude plugin marketplace add jakubro/dbprint
 claude plugin install dbprint@dbprint
 ```
 
-To serve a print kept elsewhere, set the plugin's `project` option to the directory holding `.dbprint.yaml`, that file itself, or a [git address](#reading-a-remote-project) — in `/plugin configure dbprint@dbprint`, or from a shell:
+To serve a print kept elsewhere, set the plugin's `project` option to the directory holding `.dbprint.yaml`, that file itself, or a [git address](#reading-a-remote-project) — under the plugin's **Configure options** on the **Installed** tab of `/plugin`, or from a shell:
 
 ```sh
 echo '{"project": "/srv/analytics"}' | claude plugin configure dbprint@dbprint --values-stdin

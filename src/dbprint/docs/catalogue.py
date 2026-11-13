@@ -5,7 +5,7 @@ Pure I/O and parsing - no presentation logic.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -14,13 +14,14 @@ import yaml
 
 from dbprint.config import ConnectionConfig
 from dbprint.engine.baseline import (
+    PrintReader,
     failed_tables,
     missing_artifacts,
     read_manifest,
     table_directory,
     unprofiled_message,
 )
-from dbprint.spec import artifact_yaml, authored
+from dbprint.spec import authored
 from dbprint.spec.artifacts import declared_artifacts, walkable_tables
 from dbprint.spec.fqn import join as join_fqn
 from dbprint.spec.fqn import split as split_fqn
@@ -28,13 +29,17 @@ from dbprint.spec.fqn import split as split_fqn
 
 @dataclass(frozen=True)
 class PrintConnection:
-    """One connection's committed print: its manifest and the tables a reader can walk."""
+    """One connection's committed print: its manifest and the tables a reader can walk.
+
+    `read` parses each of its files once, for as long as this load is used.
+    """
 
     name: str
     root: Path
     manifest: dict[str, Any]
     tables: dict[str, dict[str, Any]]
     failed_tables: tuple[str, ...] = ()
+    read: PrintReader = field(default_factory=PrintReader, compare=False)
 
 
 @dataclass(frozen=True)
@@ -64,13 +69,17 @@ class PrefixTree:
 
 
 def load_connections(connections: list[ConnectionConfig]) -> list[PrintConnection]:
-    """Load every connection that has a readable manifest on disk, in the order given."""
+    """Load every connection that has a readable manifest on disk, in the order given.
+
+    The loaded set reads each file once however many pages it serves; a later load reads afresh.
+    """
 
     loaded = []
+    read = PrintReader()
 
     for conn in connections:
         root = conn.print_root
-        manifest = read_manifest(root).manifest
+        manifest = read_manifest(root, read).manifest
 
         if manifest is None:
             continue
@@ -82,6 +91,7 @@ def load_connections(connections: list[ConnectionConfig]) -> list[PrintConnectio
                 manifest=manifest,
                 tables=walkable_tables(manifest),
                 failed_tables=failed_tables(manifest),
+                read=read,
             ),
         )
 
@@ -110,16 +120,18 @@ def load_table(conn: PrintConnection, fqn: str) -> TableArtifacts | None:
         fqn=fqn,
         entry=entry,
         ddl=_read_text(table_dir, artifacts, "ddl"),
-        statistics=_read_yaml(table_dir, artifacts, "statistics", corrupted),
-        relationships=_read_yaml(table_dir, artifacts, "relationships", corrupted),
+        statistics=_read_yaml(conn.read, table_dir, artifacts, "statistics", corrupted),
+        relationships=_read_yaml(conn.read, table_dir, artifacts, "relationships", corrupted),
         description=_read_text(table_dir, artifacts, "description"),
         statistics_annotations=_read_yaml(
+            conn.read,
             table_dir,
             artifacts,
             "statistics_annotations",
             corrupted,
         ),
         relationships_annotations=_read_yaml(
+            conn.read,
             table_dir,
             artifacts,
             "relationships_annotations",
@@ -141,7 +153,7 @@ def load_artifact(conn: PrintConnection, fqn: str, kind: str) -> dict[str, Any] 
     table_dir = table_directory(conn.root, fqn, entry)
     artifacts = declared_artifacts(entry)
 
-    return _read_yaml(table_dir, artifacts, kind)
+    return _read_yaml(conn.read, table_dir, artifacts, kind)
 
 
 def schema_key(table_name: str) -> str:
@@ -208,24 +220,18 @@ def prefix_tree(names: list[str], prefix_len: int = 0) -> PrefixTree:
     )
 
 
-def _read_yaml_status(path: Path) -> tuple[dict[str, Any] | None, bool]:
+def _read_yaml_status(read: PrintReader, path: Path) -> tuple[dict[str, Any] | None, bool]:
     """`(None, False)` covers absent; `(None, True)` is present but unparseable or not a mapping."""
 
     if not path.is_file():
         return None, False
 
     try:
-        data = artifact_yaml.load(path.read_text(encoding="utf-8"))
+        data = read(path)
     except yaml.YAMLError:
         return None, True
 
     return (data, False) if isinstance(data, dict) else (None, True)
-
-
-def _read_yaml_mapping(path: Path) -> dict[str, Any] | None:
-    """Parse a YAML file as a mapping, or None when absent, unparseable, or not a mapping."""
-
-    return _read_yaml_status(path)[0]
 
 
 def _read_text(table_dir: Path, artifacts: dict[str, str], kind: str) -> str | None:
@@ -240,6 +246,7 @@ def _read_text(table_dir: Path, artifacts: dict[str, str], kind: str) -> str | N
 
 
 def _read_yaml(
+    read: PrintReader,
     table_dir: Path,
     artifacts: dict[str, str],
     kind: str,
@@ -250,10 +257,12 @@ def _read_yaml(
     if filename is None:
         return None
 
-    data, is_corrupted = _read_yaml_status(table_dir / filename)
+    path = table_dir / filename
+    data, is_corrupted = _read_yaml_status(read, path)
 
     if kind in authored.AUTHORED_KINDS and data is not None:
-        data = authored.admitted(kind, data)
+        parsed = data
+        data = read.once(("admitted", path, kind), lambda: authored.admitted(kind, parsed))
         is_corrupted = data is None
 
     if is_corrupted and corrupted is not None:

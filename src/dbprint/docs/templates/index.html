@@ -39,7 +39,7 @@
   {% if c.failed_tables %}
     <p class="muted">Not profiled by the last run ({{ c.failed_tables|length }}):
       {% for fqn in c.failed_tables %}<code>{{ fqn }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
-      - they exist; run <code>dbprint generate</code> to see why.</p>
+      - they exist; {{ c.unprofiled_cause_note }}.</p>
   {% endif %}
 {% endfor %}
 

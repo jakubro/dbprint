@@ -8,18 +8,18 @@
     "source": "github"
   },
   "websiteUrl": "https://jakubro.github.io/dbprint/",
-  "version": "0.20.0",
+  "version": "0.21.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "dbprint",
-      "version": "0.20.0",
+      "version": "0.21.0",
       "runtimeHint": "uvx",
       "runtimeArguments": [
         {
           "type": "named",
           "name": "--with",
-          "value": "dbprint[mcp]==0.20.0",
+          "value": "dbprint[mcp]==0.21.0",
           "description": "Install the MCP extra the serve command needs"
         }
       ],
